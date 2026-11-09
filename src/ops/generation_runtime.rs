@@ -134,6 +134,16 @@ pub trait TextRuntime: Send {
     /// Maximum context (prompt + generated) the runtime's KV cache holds.
     /// Used by the server to reject requests that would overflow.
     fn context_length(&self) -> usize;
+    /// Reject invalid input before an HTTP response starts streaming. This
+    /// must not run model inference; adapters may account for media expansion.
+    fn validate_request(
+        &self,
+        _token_ids: &[u32],
+        _images: &[Vec<u8>],
+        _max_new_tokens: usize,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// Generate from `request.token_ids`, streaming decoded chunks to `sink`.
     fn generate(
         &mut self,

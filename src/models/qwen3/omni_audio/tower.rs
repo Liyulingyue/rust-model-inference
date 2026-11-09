@@ -21,11 +21,12 @@
 use std::sync::Arc;
 
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::qwen3::asr::audio_processor::{compute_log_mel, LogMel, SAMPLE_RATE};
-use crate::models::qwen3::asr::mel_encoder::{
-    add_residual, apply_gelu_erf, full_attention_into, layer_norm_rows, LayerNormWeights,
-};
+use crate::models::qwen3::asr::mel_encoder::add_residual;
 use crate::ops::activation::gelu_erf;
+use crate::ops::audio::frontend::{compute_log_mel, LogMel, SAMPLE_RATE};
+use crate::ops::audio::transformer::{
+    apply_gelu_erf, full_attention_into, layer_norm_rows, LayerNormWeights,
+};
 use crate::ops::bf16_to_f32;
 use crate::ops::f16_to_f32;
 

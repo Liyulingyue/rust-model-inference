@@ -30,10 +30,29 @@ const TEXT_IN: usize = 2_048;
 /// Qwen2.5-Omni `<|AUDIO|>` placeholder token id; the audio tower's output
 /// gets substituted for this token's position in the embedding sequence.
 const AUDIO_PLACEHOLDER_TOKEN: u32 = 151_646;
+/// `F.layer_norm` default epsilon used by AuK's per-layer text fusion.
+const FUSION_LAYER_NORM_EPS: f32 = 1e-5;
+
+/// ELMo-style text layer fusion (AuK `cfm_edit.CFMEdit`).
+///
+/// The DiT does not consume the LLM's last hidden state. It averages the
+/// outputs of *every* transformer layer after applying a per-layer LayerNorm,
+/// weighting them by `softmax(layer_weights)` and scaling by `layer_scale`:
+///
+/// ```python
+/// stacked = torch.stack([F.layer_norm(h, [d]) for h in hidden_states[1:]])
+/// hidden = (stacked * F.softmax(layer_weights)).sum(0) * layer_scale
+/// ```
+struct LayerFusion {
+    /// `softmax(layer_weights)`, one entry per transformer layer.
+    weights: Vec<f32>,
+    scale: f32,
+}
 
 pub(crate) struct AukTextEncoder {
     model: Qwen3Model,
     pool: Arc<ComputePool>,
+    fusion: Option<LayerFusion>,
 }
 
 impl AukTextEncoder {
@@ -55,7 +74,112 @@ impl AukTextEncoder {
             source
         };
         let model = Qwen3Model::from_source(source, tokenizer, Arc::clone(&pool))?;
-        Ok(Self { model, pool })
+        Ok(Self {
+            model,
+            pool,
+            fusion: None,
+        })
+    }
+
+    /// Enable ELMo-style layer fusion using the DiT's `layer_weights` (softmax
+    /// logits, one per transformer layer) and `layer_scale` scalar.
+    ///
+    /// AuK checkpoints train these parameters; ignoring them (taking only the
+    /// last layer) produces garbage conditioning. The weights live in the
+    /// diffusion GGUF, not the text-encoder GGUF, so the pipeline wires them in
+    /// after loading.
+    pub(crate) fn set_layer_fusion(
+        &mut self,
+        layer_weights: &[f32],
+        layer_scale: f32,
+    ) -> Result<(), String> {
+        let n_layer = self.model.config().n_layer;
+        if layer_weights.len() != n_layer {
+            return Err(format!(
+                "AuK layer_weights has {} entries but the text encoder has {} layers",
+                layer_weights.len(),
+                n_layer
+            ));
+        }
+        if !layer_scale.is_finite() || !layer_weights.iter().all(|w| w.is_finite()) {
+            return Err("AuK layer fusion parameters contain non-finite values".into());
+        }
+        // Numerically stable softmax.
+        let max = layer_weights
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut weights: Vec<f32> = layer_weights.iter().map(|w| (w - max).exp()).collect();
+        let sum: f32 = weights.iter().sum();
+        if !(sum.is_finite() && sum > 0.0) {
+            return Err("AuK layer_weights softmax is degenerate".into());
+        }
+        for w in &mut weights {
+            *w /= sum;
+        }
+        self.fusion = Some(LayerFusion {
+            weights,
+            scale: layer_scale,
+        });
+        Ok(())
+    }
+
+    /// Tokenize + run the trunk, applying layer fusion when enabled.
+    ///
+    /// `replacements` maps token positions to audio-tower embeddings that
+    /// overwrite the token embedding before the forward pass (CFMEdit).
+    fn encode_ids(
+        &self,
+        ids: &[u32],
+        replacements: &[(usize, &[f32])],
+    ) -> Result<Vec<f32>, String> {
+        let positions = qwen_text_positions(ids.len());
+        let Some(fusion) = self.fusion.as_ref() else {
+            return if replacements.is_empty() {
+                trunk_text_encode(&self.model, ids, &positions)
+            } else {
+                trunk_text_encode_with_audio(&self.model, ids, &positions, replacements)
+            };
+        };
+
+        let n_layer = fusion.weights.len();
+        let layers: Vec<usize> = (1..=n_layer).collect();
+        let key_mask = vec![true; ids.len()];
+        let collected = self.model.text_encode_hidden_layers_with_audio(
+            ids,
+            &positions,
+            &key_mask,
+            replacements,
+            &layers,
+        )?;
+        let n_tokens = ids.len();
+        if collected.len() != n_tokens * n_layer * TEXT_IN {
+            return Err(format!(
+                "AukTextEncoder layer collection produced {} values, expected {}",
+                collected.len(),
+                n_tokens * n_layer * TEXT_IN
+            ));
+        }
+
+        // `collected` is token-major: [token][layer][hidden]. Per-layer
+        // LayerNorm, then the softmax-weighted sum, then `layer_scale`.
+        let mut fused = vec![0.0_f32; n_tokens * TEXT_IN];
+        let mut normed = vec![0.0_f32; TEXT_IN];
+        for token in 0..n_tokens {
+            let dst = &mut fused[token * TEXT_IN..(token + 1) * TEXT_IN];
+            for (layer, &weight) in fusion.weights.iter().enumerate() {
+                let src_off = (token * n_layer + layer) * TEXT_IN;
+                let src = &collected[src_off..src_off + TEXT_IN];
+                layer_norm_into(src, &mut normed, FUSION_LAYER_NORM_EPS);
+                for (acc, v) in dst.iter_mut().zip(&normed) {
+                    *acc += weight * v;
+                }
+            }
+            for v in dst.iter_mut() {
+                *v *= fusion.scale;
+            }
+        }
+        Ok(fused)
     }
 
     /// Encode `prompt` to per-token hidden states of width `TEXT_IN = 2048`.
@@ -75,8 +199,7 @@ impl AukTextEncoder {
         if ids.is_empty() {
             return Err("AuK prompt produced no tokens".into());
         }
-        let positions = qwen_text_positions(ids.len());
-        let hidden = trunk_text_encode(&self.model, &ids, &positions)?;
+        let hidden = self.encode_ids(&ids, &[])?;
         if hidden.len() % TEXT_IN != 0 {
             return Err(format!(
                 "AukTextEncoder produced malformed hidden: len {} not divisible by TEXT_IN={}",
@@ -196,8 +319,7 @@ impl AukTextEncoder {
             ));
         }
 
-        let positions = qwen_text_positions(ids.len());
-        let hidden = trunk_text_encode_with_audio(&self.model, &ids, &positions, &replacements)?;
+        let hidden = self.encode_ids(&ids, &replacements)?;
         if hidden.len() % TEXT_IN != 0 {
             return Err(format!(
                 "AukTextEncoder CFMEdit produced malformed hidden: len {} not divisible by TEXT_IN={}",
@@ -214,6 +336,29 @@ impl AukTextEncoder {
     /// Number of tokens in the last encoded sequence.
     pub(crate) fn last_token_count(&self, hidden: &[f32]) -> usize {
         hidden.len() / TEXT_IN
+    }
+}
+
+/// LayerNorm without affine parameters, matching `F.layer_norm(h, [d])`.
+fn layer_norm_into(src: &[f32], dst: &mut [f32], eps: f32) {
+    let len = src.len().min(dst.len());
+    if len == 0 {
+        return;
+    }
+    let mut sum = 0.0_f32;
+    for v in &src[..len] {
+        sum += *v;
+    }
+    let mean = sum / len as f32;
+    let mut var_sum = 0.0_f32;
+    for v in &src[..len] {
+        let d = *v - mean;
+        var_sum += d * d;
+    }
+    let variance = var_sum / len as f32;
+    let inv_std = 1.0 / (variance + eps).sqrt();
+    for i in 0..len {
+        dst[i] = (src[i] - mean) * inv_std;
     }
 }
 

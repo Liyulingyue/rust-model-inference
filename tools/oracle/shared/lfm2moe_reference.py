@@ -110,7 +110,7 @@ def main():
     ids = [1, 6423, 708, 3493, 856, 779, 5706, 803, 4481, 540, 708, 64015, 708]
 
     rust = {}
-    for line in open(rust_stderr):
+    for line in open(rust_stderr, encoding="utf-8", errors="replace"):
         m = line.strip()
         if m.startswith("RUST_LOGITS step="):
             head, rest = m.split(" top10:")

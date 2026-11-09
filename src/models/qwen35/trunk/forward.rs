@@ -20,8 +20,8 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::edge0::forward::{forward_edge0_moe_token, normalize_recurrent_qk};
 use crate::models::edge0::weights::Edge0MoeWeights;
 use crate::ops::{
-    dot_f32, rope_mrope, rope_neox_inplace, sigmoid_inplace, silu_approx_inplace, silu_inplace,
-    silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
+    dot_f32, rope_mrope, rope_mrope_interleaved, rope_neox_inplace, sigmoid_inplace,
+    silu_approx_inplace, silu_inplace, silu_mul_approx_inplace, silu_mul_inplace, softmax_inplace,
 };
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
@@ -291,17 +291,28 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 {
                     self.forward_recurrent_layer(
                         il,
+                        il,
                         normed_input,
                         n_tokens,
                         scratch,
                         pool,
                         edge0,
+                        false,
                         trace_layer(il),
                     )?
                 }
                 #[cfg(not(feature = "parity-trace"))]
                 {
-                    self.forward_recurrent_layer(il, normed_input, n_tokens, scratch, pool, edge0)?
+                    self.forward_recurrent_layer(
+                        il,
+                        il,
+                        normed_input,
+                        n_tokens,
+                        scratch,
+                        pool,
+                        edge0,
+                        false,
+                    )?
                 }
             } else {
                 let normed_input = unsafe { std::slice::from_raw_parts(normed_ptr, normed_len) };
@@ -309,19 +320,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 {
                     self.forward_dense_attn_layer(
                         il,
-                        normed_input,
-                        n_tokens,
-                        kv_cache,
-                        scratch,
-                        pool,
-                        mrope_positions,
-                        base_position,
-                        trace_layer(il),
-                    )
-                }
-                #[cfg(not(feature = "parity-trace"))]
-                {
-                    self.forward_dense_attn_layer(
                         il,
                         normed_input,
                         n_tokens,
@@ -330,6 +328,23 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         pool,
                         mrope_positions,
                         base_position,
+                        false,
+                        trace_layer(il),
+                    )
+                }
+                #[cfg(not(feature = "parity-trace"))]
+                {
+                    self.forward_dense_attn_layer(
+                        il,
+                        il,
+                        normed_input,
+                        n_tokens,
+                        kv_cache,
+                        scratch,
+                        pool,
+                        mrope_positions,
+                        base_position,
+                        false,
                     )
                 }
             };
@@ -519,9 +534,10 @@ impl<'a> super::weights::HybridTrunk<'a> {
         Ok(result)
     }
 
-    pub(super) fn forward_dense_attn_layer(
+    pub(crate) fn forward_dense_attn_layer(
         &self,
         il: usize,
+        cache_slot: usize,
         input: &[f32],
         n_tokens: usize,
         kv_cache: &mut KvCache,
@@ -529,6 +545,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         mrope_positions: &[[usize; 4]],
         base_position: Option<usize>,
+        interleaved_mrope: bool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -662,21 +679,38 @@ impl<'a> super::weights::HybridTrunk<'a> {
             ));
         }
 
-        let kv_pos =
-            base_position.unwrap_or_else(|| kv_cache_pos(kv_cache, il, k_dim, cfg.n_layer_impl()));
+        let kv_pos = base_position
+            .unwrap_or_else(|| kv_cache_pos(kv_cache, cache_slot, k_dim, cfg.n_layer_impl()));
         let sections = cfg.rope_dimension_sections;
         let use_mrope = sections[0] > 0 && sections[1] > 0;
+        let apply_mrope = |head: &mut [f32], positions| {
+            if interleaved_mrope {
+                rope_mrope_interleaved(
+                    head,
+                    positions,
+                    sections,
+                    cfg.rope_dimension_count,
+                    cfg.rope_freq_base,
+                    cfg.rope_dimension_count,
+                );
+            } else {
+                rope_mrope(
+                    head,
+                    positions,
+                    sections,
+                    cfg.rope_dimension_count,
+                    cfg.rope_freq_base,
+                );
+            }
+        };
         for t in 0..n_tokens {
             let positions = mrope_positions[t];
             for h in 0..n_head {
                 let q_off = t * q_dim + h * n_embd_head * 2;
                 if use_mrope {
-                    rope_mrope(
+                    apply_mrope(
                         &mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count],
                         positions,
-                        sections,
-                        cfg.rope_dimension_count,
-                        cfg.rope_freq_base,
                     );
                 } else {
                     rope_neox_inplace(
@@ -690,12 +724,9 @@ impl<'a> super::weights::HybridTrunk<'a> {
             for h in 0..n_head_kv {
                 let k_off = t * k_dim + h * n_embd_head;
                 if use_mrope {
-                    rope_mrope(
+                    apply_mrope(
                         &mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count],
                         positions,
-                        sections,
-                        cfg.rope_dimension_count,
-                        cfg.rope_freq_base,
                     );
                 } else {
                     rope_neox_inplace(
@@ -733,7 +764,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
 
         kv_cache_store(
             kv_cache,
-            il,
+            cache_slot,
             cfg.n_layer_impl(),
             n_head_kv,
             n_embd_head,
@@ -761,7 +792,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 let n_attend = kv_pos + t + 1;
                 let n_padded = n_attend.div_ceil(256) * 256;
                 for s in 0..n_attend {
-                    let k_off = il * k_len + s * k_dim + kv_h * n_embd_head;
+                    let k_off = cache_slot * k_len + s * k_dim + kv_h * n_embd_head;
                     let dot = dot_f32(
                         &scratch.q_buf[q_off..q_off + n_embd_head],
                         &k_cache[k_off..k_off + n_embd_head],
@@ -776,7 +807,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 // ggml's row. Otherwise changing the generation limit changes
                 // the SIMD reduction order and therefore the prompt logits.
                 let v_capacity = v_len / (n_head_kv * n_embd_head);
-                let v_layer_base = il * v_len + kv_h * (n_embd_head * v_capacity);
+                let v_layer_base = cache_slot * v_len + kv_h * (n_embd_head * v_capacity);
                 scratch.attention_value_buf[n_attend..n_padded].fill(0.0);
                 for d in 0..n_embd_head {
                     let v_col_start = v_layer_base + d * v_capacity;
@@ -865,14 +896,16 @@ impl<'a> super::weights::HybridTrunk<'a> {
         result
     }
 
-    fn forward_recurrent_layer(
+    pub(crate) fn forward_recurrent_layer(
         &self,
         il: usize,
+        cache_slot: usize,
         input: &[f32],
         n_tokens: usize,
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
         edge0: bool,
+        repeat_interleave: bool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Result<Vec<f32>, String> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -976,7 +1009,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         let t_matmul = t0.elapsed().as_secs_f64();
 
         let tc0 = std::time::Instant::now();
-        let conv_state = &mut scratch.conv_states[il];
+        let conv_state = &mut scratch.conv_states[cache_slot];
         #[cfg(feature = "parity-trace")]
         let mut conv_raw = if trace_layer {
             vec![0.0f32; n_tokens * conv_dim]
@@ -1118,7 +1151,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         } else {
             1.0 / (head_k_dim as f32).sqrt()
         };
-        let ssm_state = &mut scratch.ssm_states[il];
+        let ssm_state = &mut scratch.ssm_states[cache_slot];
         for t in 0..n_tokens {
             #[cfg(feature = "parity-trace")]
             if trace_layer {
@@ -1137,7 +1170,12 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 let gate_val = scratch.alpha_buf[t * num_v_heads + v_h];
                 let beta_val = scratch.beta_buf[t * num_v_heads + v_h];
                 let state_off = v_h * head_v_dim * head_v_dim;
-                let k_h = v_h % num_k_heads;
+                // GGUF interleaves value heads; native HF weights repeat each key head.
+                let k_h = if repeat_interleave {
+                    v_h / (num_v_heads / num_k_heads)
+                } else {
+                    v_h % num_k_heads
+                };
                 let decay = gate_val.exp();
                 crate::ops::ssm_state_decay(
                     &mut ssm_state[state_off..state_off + head_v_dim * head_v_dim],
@@ -1277,7 +1315,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         Ok(result)
     }
 
-    fn forward_ffn_parallel(
+    pub(crate) fn forward_ffn_parallel(
         &self,
         layer: &Qwen35LayerWeights,
         hidden: &[f32],
@@ -1378,14 +1416,14 @@ pub fn run_forward_logits_qwen35_with_batch(
         return Err("Qwen3.5 prompt must contain at least one token".into());
     }
     let t0 = std::time::Instant::now();
-    let mut model = Qwen35Model::from_source(source)
+    let mut model = crate::models::hybrid::HybridTextModel::from_source(source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
-    let n_ctx = model.config.n_ctx.min(max_context);
+    let n_ctx = model.trunk().config.n_ctx.min(max_context);
     let pool = ComputePool::new(n_threads_arg);
     let (positions, _next) =
         crate::models::qwen35::build_qwen35_positions(prompt_tokens, None, &[])
             .map_err(|e| format!("Failed to build Qwen3.5 positions: {e}"))?;
-    let mut session = super::session::Qwen35Session::new_with_prefill_batch_size(
+    let mut session = super::session::HybridSession::new_with_prefill_batch_size(
         &mut model,
         n_ctx.min(prompt_tokens.len() + 1),
         prefill_batch_size,

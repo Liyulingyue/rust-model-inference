@@ -5,7 +5,7 @@ from tools.converter.timestral.convert_timestral import CONFIG, tensor_contracts
 
 class ContractTest(unittest.TestCase):
     def test_exact_209m_contract(self):
-        config = json.loads(CONFIG.read_text())
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
         shapes = tensor_contracts(config)
         self.assertEqual(sum(__import__('math').prod(s) for s in shapes.values()), 209312256)
         self.assertEqual(shapes['transformer.layers.3.attns.1.wQKV.weight'], (2304, 768))

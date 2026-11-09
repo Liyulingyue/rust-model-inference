@@ -6,7 +6,7 @@
 //! hidden dependencies.
 
 pub use crate::core::tensor::load_f32_tensor;
-use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
+use crate::core::tensor::{GGMLType, TensorSource};
 
 pub fn optional_usize(source: &dyn TensorSource, key: &str) -> Result<Option<usize>, String> {
     let Some(value) = source.metadata(key) else {
@@ -200,28 +200,19 @@ pub fn static_tensor(
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
+/// Borrow a tensor's bytes after checking its shape, type and payload.
+///
+/// The check itself lives in [`crate::core::tensor::typed_tensor_bytes`];
+/// this stays as the qwen3 entry point. The payload is measured by the
+/// shared check, which follows the type's block layout rather than the
+/// element count.
 pub fn checked_tensor<'a>(
     source: &'a dyn TensorSource,
     name: &str,
     dims: &[u64],
     ggml_type: GGMLType,
 ) -> Result<&'a [u8], String> {
-    let info: &TensorInfo = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims || info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, ggml_type
-        ));
-    }
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    // The payload is measured by the shared check, which follows the type's
-    // block layout rather than the element count.
-    crate::core::tensor::require_tensor_data(source, name)?;
-    Ok(bytes)
+    crate::core::tensor::typed_tensor_bytes(source, name, dims, ggml_type)
 }
 
 pub fn checked_product(name: &str, left: usize, right: usize) -> Result<usize, String> {

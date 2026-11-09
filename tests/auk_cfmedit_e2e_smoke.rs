@@ -92,6 +92,9 @@ fn cfmedit_end_to_end_synthetic_reference_audio() {
         seed: 42,
         guidance_scale: 2.0,
         instruct: None,
+        // The AuK-Base recipe: the upstream default sway, no pinned grid.
+        sway_sampling_coef: Some(-1.0),
+        time_grid: None,
     };
     let audio = pipeline
         .generate_audio_with_reference_wav("Hi", &samples, &options)

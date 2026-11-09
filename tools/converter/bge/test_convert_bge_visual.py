@@ -134,7 +134,7 @@ def clip_files(root: Path):
 def decoder_visual_files(root: Path, screenshot: bool):
     kind = "qwen2" if screenshot else "mistral"
     _decoder_files(root, model_type=kind, hidden=256)
-    text = json.loads((root / "config.json").read_text())
+    text = json.loads((root / "config.json").read_text(encoding="utf-8"))
     text["max_position_embeddings"] = 4096
     chars = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
     byte_chars = chars.copy()
@@ -261,7 +261,7 @@ def visualized_files(root: Path):
     text = root / "text"
     _bert_files(text)
     store = TensorStore(text)
-    config = json.loads((text / "config.json").read_text())
+    config = json.loads((text / "config.json").read_text(encoding="utf-8"))
     config.update(
         hidden_size=32,
         intermediate_size=64,
@@ -630,7 +630,7 @@ class BgeVisualConverterTest(unittest.TestCase):
                 self.assertEqual(meta["general.architecture"], "bge-vl-clip")
                 self.assertEqual(
                     json.loads(meta["bge.tokenizer_json"]),
-                    json.loads((model / "tokenizer.json").read_text()),
+                    json.loads((model / "tokenizer.json").read_text(encoding="utf-8")),
                 )
                 self.assertEqual(set(tensors), set(clip_shapes(config)))
                 self.assertEqual(

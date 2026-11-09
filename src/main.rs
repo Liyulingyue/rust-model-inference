@@ -15,7 +15,7 @@ const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [
 
 PiVo-1.4M: --tts --model pivo-F32.gguf --prompt TEXT --out speech.wav [--voice Pi|Vo] [--speed 0.5..2] [--pronunciations JSON] | English, 16 kHz mono; bundled vocoder, no --mmproj; CPU/Auto; HTTP /v1/audio/speech; see tools/oracle/pivo/README.md
 
-AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
+AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--auk-sway α (default -1.0, sway-warped time grid)] [--auk-flash (pin the AuK-Flash recipe: 4 steps, cfg 0, official time grid)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
     Astronex,
@@ -65,7 +65,8 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
         | "qwen2"
         | "sensevoice-small"
         | "paraformer"
-        | "audio8_asr_infinite" => Ok(AudioRoute::Asr),
+        | "audio8_asr_infinite"
+        | "hy_v3" => Ok(AudioRoute::Asr),
         "qwen2vl" | "qwen3vlmoe" => Ok(AudioRoute::Multimodal),
         "gemma4" => Ok(AudioRoute::Gemma4),
         _ => Err(format!(
@@ -76,14 +77,14 @@ fn dispatch_audio_arch(arch: &str) -> Result<AudioRoute, String> {
 
 fn validate_audio_route(route: AudioRoute, has_image: bool) -> Result<(), String> {
     if route == AudioRoute::Asr && has_image {
-        return Err("Qwen3-ASR --audio cannot be used with --image".into());
+        return Err("ASR --audio cannot be used with --image".into());
     }
     Ok(())
 }
 
 fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Result<(), String> {
     if route == AudioRoute::Asr && temperature.is_some_and(|value| value != 0.0) {
-        return Err("Qwen3-ASR requires greedy decoding; --temp must be 0".into());
+        return Err("ASR requires greedy decoding; --temp must be 0".into());
     }
     Ok(())
 }
@@ -91,13 +92,18 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out");
+        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <base-directory> --system-one-request <request.json|-> [--adapter <vela3-package>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
     // own --host/--port pre-parser and reuses the shared CLI parser for the rest.
     if args.iter().any(|arg| arg == "--serve")
-        && !args.iter().any(|arg| arg == "--timestral-request")
+        && !args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--timestral-request" | "--system-one-request" | "--adapter"
+            )
+        })
     {
         app::server::run_server();
         return;
@@ -106,8 +112,11 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    // Reject mixed forecast/task modes before any early media route can run.
-    if options.timestral_request.is_some() {
+    // Reject mixed JSON/task modes before any early media route can run.
+    if options.timestral_request.is_some()
+        || options.system_one_request.is_some()
+        || options.adapter.is_some()
+    {
         app::run_or_exit(app::validate_cli_options(&options));
     }
     app::run_or_exit(options.validate_compute_mode());
@@ -123,6 +132,11 @@ fn main() {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    if options.system_one_request.is_some() {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::system_one::run_cli(&options, n_threads));
+        return;
+    }
     if options.wevisone_request.is_some() {
         app::run_or_exit(app::validate_cli_options(&options));
         app::init_rayon_global_pool(n_threads);
@@ -418,6 +432,8 @@ fn main() {
             options.instruction.as_deref(),
             options.duration_seconds,
             options.cfg_scale,
+            options.auk_sway,
+            options.auk_flash,
             audio_tower,
         ));
         return;
@@ -470,10 +486,17 @@ fn main() {
                 options.instruction.as_deref(),
                 options.duration_seconds,
                 options.cfg_scale,
+                options.auk_sway,
+                options.auk_flash,
                 audio_tower,
             ));
             return;
         }
+    }
+    // The AuK-only knobs must not be silently ignored on a non-AuK model.
+    if options.auk_flash || options.auk_sway.is_some() {
+        eprintln!("--auk-flash / --auk-sway require an AuK model (--model + --vae)");
+        std::process::exit(2);
     }
     // ERNIE-Image / ERNIE-Image-Turbo dispatch (MUST run before the Z-Image
     // branch below, since both share --model/--text-encoder/--vae; the GGUF
@@ -667,18 +690,33 @@ fn main() {
 
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         let started = std::time::Instant::now();
-        let embedding = match app::run_omni_embedding(
-            source.as_ref(),
-            explicit_mmproj.unwrap_or_else(|| {
-                eprintln!("media embedding requires --mmproj");
-                std::process::exit(1);
-            }),
-            image,
-            video,
-            audio,
-            prompt,
-            options.threads,
-        ) {
+        let result = if app::arch_of(source.as_ref()) == "gemma4-embedding" {
+            if video.is_some() {
+                Err("EmbeddingGemma video embedding is not implemented".into())
+            } else {
+                rust_model_inference::models::embeddinggemma2::compute_media_embedding(
+                    source.clone(),
+                    image,
+                    audio,
+                    prompt,
+                    options.threads,
+                )
+            }
+        } else {
+            app::run_omni_embedding(
+                source.as_ref(),
+                explicit_mmproj.unwrap_or_else(|| {
+                    eprintln!("media embedding requires --mmproj");
+                    std::process::exit(1);
+                }),
+                image,
+                video,
+                audio,
+                prompt,
+                options.threads,
+            )
+        };
+        let embedding = match result {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("Inference error: {error}");
@@ -1061,7 +1099,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,
@@ -1172,7 +1210,7 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
-        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),
                 model_path,
@@ -1273,6 +1311,7 @@ mod tests {
     #[test]
     fn architecture_aware_audio_dispatch_preserves_asr() {
         assert_eq!(dispatch_audio_arch("qwen3vl").unwrap(), AudioRoute::Asr);
+        assert_eq!(dispatch_audio_arch("hy_v3").unwrap(), AudioRoute::Asr);
         assert_eq!(
             dispatch_audio_arch("audio8_asr_infinite").unwrap(),
             AudioRoute::Asr
@@ -1282,14 +1321,14 @@ mod tests {
     }
 
     #[test]
-    fn qwen_asr_audio_route_rejects_images() {
+    fn asr_audio_route_rejects_images() {
         assert!(validate_audio_route(AudioRoute::Asr, true).is_err());
         assert!(validate_audio_route(AudioRoute::Asr, false).is_ok());
         assert!(validate_audio_route(AudioRoute::Gemma4, true).is_ok());
     }
 
     #[test]
-    fn only_qwen_asr_keeps_greedy_audio_validation() {
+    fn only_asr_routes_keep_greedy_audio_validation() {
         assert!(validate_audio_temperature(AudioRoute::Asr, Some(0.1)).is_err());
         assert!(validate_audio_temperature(AudioRoute::Multimodal, Some(0.1)).is_ok());
     }

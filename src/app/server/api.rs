@@ -162,8 +162,7 @@ pub fn routes() -> Router<AppState> {
             "/v1/responses/{id}",
             get(get_response).delete(delete_response),
         )
-        .route("/v1/jev/score", post(jev_score))
-        .route("/v1/jev/grouped", post(jev_grouped))
+        .merge(jev_routes())
         .route("/v1/jev/image", post(jev_image_score))
         .route("/v1/jev/image_grouped", post(jev_image_grouped))
         // 32 MB, not 4 MB: an image-bearing request carries base64, which
@@ -172,6 +171,12 @@ pub fn routes() -> Router<AppState> {
         // audio transcription route already uses (64 MB) within the same
         // order of magnitude.
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+}
+
+pub(super) fn jev_routes() -> Router<AppState> {
+    Router::new()
+        .route("/v1/jev/score", post(jev_score))
+        .route("/v1/jev/grouped", post(jev_grouped))
 }
 
 async fn chat(State(state): State<AppState>, body: Result<Json<Value>, JsonRejection>) -> Response {
@@ -340,6 +345,7 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
     // Resolved at load time; passing this avoids recompiling the template on
     // every request.
     let compiled_chat_template = text.compiled_chat_template.clone();
+    let model = state.model.clone();
     let request = request.clone();
     super::compute_task(state.compute, move || {
         let mut messages = request.messages.clone();
@@ -380,6 +386,13 @@ async fn prompt(state: &AppState, request: &Request) -> Result<PromptResult, (u1
                     request.max_tokens
                 ),
             ));
+        }
+        if let Some(runtime) = model.text_backend().and_then(|text| text.runtime.as_ref()) {
+            runtime
+                .lock()
+                .map_err(|error| (500, error.to_string()))?
+                .validate_request(&ids, &images, request.max_tokens)
+                .map_err(|error| (400, error))?;
         }
         Ok(PromptResult { ids, images })
     })
@@ -706,10 +719,9 @@ fn generate(
 ) -> Result<Generation, String> {
     let (arch, handle) = match state.model.as_ref() {
         Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
-        Backend::WeVisOne(wevisone) => (
-            wevisone.text.arch.as_str(),
-            wevisone.text.runtime.as_ref(),
-        ),
+        Backend::WeVisOne(wevisone) => {
+            (wevisone.text.arch.as_str(), wevisone.text.runtime.as_ref())
+        }
         Backend::UnlimitedOcr(native) => (
             crate::models::unlimited_ocr::MODEL_TYPE,
             Some(&native.runtime),
@@ -1097,6 +1109,65 @@ mod http_tests {
         let response = jev_image_score(State(state), Ok(Json(body))).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+    #[tokio::test]
+    async fn image_preflight_errors_are_400_before_streaming_or_generation() {
+        struct RejectImage;
+        impl crate::ops::generation_runtime::TextRuntime for RejectImage {
+            fn arch(&self) -> &str {
+                "sensenova_loop"
+            }
+            fn context_length(&self) -> usize {
+                1024
+            }
+            fn validate_request(
+                &self,
+                _: &[u32],
+                images: &[Vec<u8>],
+                _: usize,
+            ) -> Result<(), String> {
+                assert_eq!(images.len(), 1);
+                Err("expanded image exceeds context".into())
+            }
+            fn generate(
+                &mut self,
+                _: &GenerationRequest,
+                _: &mut dyn TokenSink,
+            ) -> Result<crate::ops::generation_runtime::GeneratedText, String> {
+                panic!("invalid input must be rejected before generation")
+            }
+        }
+        for stream in [false, true] {
+            let mut state = state();
+            let Backend::Text(text) = Arc::get_mut(&mut state.model).unwrap() else {
+                unreachable!()
+            };
+            text.arch = "sensenova_loop".into();
+            text.runtime = Some(std::sync::Mutex::new(Box::new(RejectImage)));
+            let response = handle(
+                state,
+                Protocol::Chat,
+                Ok(Json(json!({
+                    "model": "local",
+                    "max_tokens": 1,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "image_url", "image_url": {"url": format!(
+                            "data:image/png;base64,{}", fixtures::synthetic_png_b64()
+                        )}}
+                    ]}]
+                }))),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            let value: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["error"]["message"], "expanded image exceeds context");
+        }
+    }
+
     #[tokio::test]
     async fn invalid_json_and_missing_model_have_protocol_error_bodies() {
         let req = axum::http::Request::builder()
@@ -1718,8 +1789,10 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
+        Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::Tts(_) | Backend::Pivo(_) => "tts",
+        Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -2328,9 +2401,7 @@ async fn run_multimodal_text_only(
         Backend::WeVisOne(wevisone) => wevisone.text.mmproj_path.clone(),
         _ => None,
     }
-    .ok_or_else(|| {
-        "/v1/jev/image requires the server to be started with --mmproj".to_string()
-    })?;
+    .ok_or_else(|| "/v1/jev/image requires the server to be started with --mmproj".to_string())?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
@@ -2352,7 +2423,7 @@ async fn run_multimodal_text_only(
         // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) uses the same `minicpmv4_7`
         // projector and the same `run_qwen35_family_multimodal_logits` helper as
         // `qwen35`; only the arch string differs.
-        "qwen35" | "qwen35moe" => {
+        "qwen35" | "qwen35moe" | "sensenova_loop" => {
             let max_context = match state_for_max_ctx(&state) {
                 Ok(v) => v,
                 Err(e) => return Err(e),

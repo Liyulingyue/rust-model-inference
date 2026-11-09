@@ -182,6 +182,7 @@ src/models/{model_name}/
 | 函数 | 当前所在 | 应去 |
 |------|----------|------|
 | `load_f32_tensor`（F32/BF16 norm 加载） | qwen3/trunk/weights.rs:65、llama/trunk/weights.rs、lfm2/trunk/weights.rs、lfm25/trunk/weights.rs | `core::tensor::load_f32_tensor`（§8 Step 1 已抽离） ✅ |
+| `typed_tensor_bytes` / `f32_tensor_bytes` / `optional_f32_tensor_bytes`（校验后借用张量原始字节） | models/gemma4/vision/mod.rs、models/gemma4/asr/mod.rs、models/qwen3/vision/mod.rs、models/qwen35/vision/mod.rs、models/qwen3/asr/mel_encoder.rs、models/qwen3/trunk/util.rs | `core::tensor`（同一组三个 helper）✅ |
 | `static_q8_matrix` / `static_q8_tensor` / `static_tensor` | qwen3/trunk/util.rs:209-240 | `core::loader`（建议抽离 — §9 待迁移） |
 | `expect_supported_embedding` / `is_supported_embedding` | `ops/embedding.rs`（已统一） | — ✅ |
 | `SUPPORTED_EMBEDDING_TYPES` | `ops/embedding.rs`（已统一） | — ✅ |

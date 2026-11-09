@@ -87,8 +87,17 @@ impl ComputePolicy {
     /// The others still run under `--compute vulkan`: the flag asks for a
     /// real device, and a model offloads what it can. This list is where
     /// the caller learns that only part of the graph qualifies.
+    ///
+    /// `nemotron_h` is the dense Nemotron-3 Nano 4B: its Mamba-2 SSM
+    /// layers have device kernels, so all 42 layers run on the device.
+    /// The mixture-of-experts variant (`nemotron_h_moe`, the 30B-A3B) is
+    /// a separate architecture and is not on this list -- its expert
+    /// routing still runs on the host.
     pub fn has_complete_device_path(arch: &str) -> bool {
-        matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
+        matches!(
+            arch,
+            "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory" | "nemotron_h" | "sensenova_loop"
+        )
     }
 
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
@@ -120,7 +129,12 @@ impl ComputePolicy {
         self.check_build()?;
         if self == Self::Auto {
             #[cfg(feature = "vulkan")]
-            crate::ops::enable_gpu();
+            {
+                crate::ops::enable_gpu();
+                // The device takes about 300 ms to come up, and the model
+                // load that follows takes seconds, so let the two overlap.
+                crate::ops::warm_vulkan_context();
+            }
             #[cfg(not(feature = "vulkan"))]
             eprintln!("compute requested=Auto backend=Cpu reason=build_without_vulkan");
         } else if self == Self::Vulkan {

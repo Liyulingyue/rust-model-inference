@@ -17,15 +17,15 @@ def floats(path, count):
 
 
 def compare(trace, oracle, log, bound=0.03, teacher_forced=False, graph=False):
-    rows = [json.loads(line) for line in Path(trace).read_text().splitlines()]
+    rows = [json.loads(line) for line in Path(trace).read_text(encoding="utf-8").splitlines()]
     prompts = [r['token_ids'] for r in rows if r['name'].endswith('prompt_ids')]
-    lines = Path(log).read_text().splitlines()
+    lines = Path(log).read_text(encoding="utf-8").splitlines()
     expected_prompts = [json.loads(line.removeprefix('RMI_PROMPT '))
                         for line in lines if line.startswith('RMI_PROMPT ')]
     if len(prompts) != 1 or not prompts[0] or prompts != expected_prompts:
         raise AssertionError('prompt token IDs/count differ')
     greedy = [int(line.split()[1]) for line in lines if line.startswith('RMI_GREEDY ')]
-    index = [line.split('\t') for line in (Path(oracle) / 'index.tsv').read_text().splitlines()]
+    index = [line.split('\t') for line in (Path(oracle) / 'index.tsv').read_text(encoding="utf-8").splitlines()]
     expected = [entry for entry in index if entry[1] == 'result_output']
     actual = [r for r in rows if r['name'] == 'result_output']
     checkpoints = len(prompts[0]) + len(greedy) - 1

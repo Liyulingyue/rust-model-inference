@@ -144,7 +144,7 @@ def _run_rust(
         raise RuntimeError(
             f"Rust failed for {prompt!r}:\n{result.stdout}\n{result.stderr}"
         )
-    records = [json.loads(line) for line in trace.read_text().splitlines()]
+    records = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
     token_records = [
         record for record in records if record.get("name") == "embedding.tokens"
     ]

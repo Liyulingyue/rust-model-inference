@@ -1,4 +1,5 @@
-"""Lossless F32 Timestral-209M export; preserves official tensor names and QKV layout."""
+"""Lossless F32 Timestral export; preserves official tensor names and QKV layout.
+Supports all official sizes (5M, 28M, 123M, 209M)."""
 import argparse
 import hashlib
 import json
@@ -13,8 +14,13 @@ CONFIG = Path(__file__).resolve().parents[3] / 'src/models/timestral/config.json
 
 
 def validate_config(config):
-    if config != json.loads(CONFIG.read_text()):
-        raise ValueError('Only the published Timestral-209M configuration is supported')
+    """Validate that the config has all required Timestral fields."""
+    required = ['d_model', 'num_heads', 'mlp_hidden_dim', 'block_schedule', 'patch_size', 'quantile_knots']
+    for key in required:
+        if key not in config:
+            raise ValueError(f'Missing required config field: {key}')
+    if config['d_model'] % config['num_heads'] != 0:
+        raise ValueError('d_model must be divisible by num_heads')
 
 
 def tensor_contracts(config):
@@ -42,7 +48,7 @@ def tensor_contracts(config):
 def convert(model_dir, output):
     if output.exists():
         raise FileExistsError(output)
-    config = json.loads((model_dir / 'config.json').read_text())
+    config = json.loads((model_dir / 'config.json').read_text(encoding="utf-8"))
     shapes = tensor_contracts(config)
     source = open_safetensors(model_dir / 'model.safetensors')
     if set(source.header) - {'__metadata__'} != set(shapes):
@@ -60,7 +66,7 @@ def convert(model_dir, output):
         raise ValueError('Non-contiguous or overlapping safetensors data')
     writer = GgufWriter(output)
     writer.add_meta('general.architecture', 'timestral')
-    writer.add_meta('general.name', 'Timestral-209M')
+    writer.add_meta('general.name', model_dir.name)
     writer.add_meta('timestral.config', json.dumps(config))
     with source.path.open('rb') as stream:
         writer.add_meta('timestral.source_sha256', hashlib.file_digest(stream, 'sha256').hexdigest())
