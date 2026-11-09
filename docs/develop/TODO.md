@@ -4485,3 +4485,192 @@ TODO-056 的 F16 契约缺口一致 ✓。
 `shaders/glsl/f16_matmul.comp`、`src/ops/kernel/f16/neon.rs`、
 `src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/vision.rs`
 （设备注意力 ✓）、`tests/embeddinggemma_2_device_parity.rs` ✓、TODO-056。
+---
+
+### TODO-061: Nemotron-3 Nano 4B 的 Mamba-2 SSM 层还没上设备
+
+**状态：阶段 2 已完成（2026-11-09）** —— 42 层全部在设备上，`nemotron_h` 已列入
+`ComputePolicy::has_complete_device_path`。下面是这一阶段的记录与踩坑清单；
+30B-A3B（`nemotron_h_moe`）仍是另一条 TODO（TODO-053）。
+
+**阶段 1（2026-11-06）**：GPU 跑 17 个 FFN 层 + 4 个 attention 层；CPU 跑 21 个 SSM 层。
+  两者以 `scratch.hidden` 为唯一真相源：设备段读它、写它，CPU 段原地读写它。
+  42 层按「连续的非 SSM 层段」切分，段与段之间没有多余的同步。
+
+**阶段 2（2026-11-09）**：21 个 Mamba-2 SSM 层也搬上设备，hidden state 不再往返 host。
+  SSM 分支在 token 维必须串行（conv history 与 scan state 都是递归的），所以
+  一层里的顺序是：先对所有行做一次 RMS norm → in_proj matmul（所有行一起）
+  → 逐 token 串行跑 conv/dt/scan/gate/norm → out_proj matmul（所有行一起）
+  → 残差加。
+
+- **新增的 5 个 shader**（`shaders/glsl/nemotron_h_ssm_*.comp`）：
+  `conv`（depthwise causal conv1d + SiLU）、`dt`（softplus + decay）、
+  `scan`（选择性 scan + D skip）、`gate`（`silu(z)*y`）、`norm`（group RMSNorm）。
+  语义与 qwen35 的 SSM **不同**（qwen35 是 recurrent 的 beta/alpha + `state_key` 点积），
+  没有复用它的 shader。
+- **数值**：GPU↔CPU **逐位一致**（`relative_l2` 与 `scaled_max_abs` 全为 0），
+  1 / 2 / 3 token 都过。双 1% 门限只是保守下限，实际达到了逐位一致。
+- **F32 KV cache 是必需的**（阶段 1 的结论仍然成立）：llama.cpp 默认把 KV cache 存 F16，
+  而本模型的参考 harness 用 F32。F16 的舍入在 attention 输出上留下 ~1e-5 的相对误差，
+  会被随后的 Mamba-2 递归（`state = state·exp(dt·A) + B·x·dt`，`|A|` 约 10–30）
+  放大约 4000 倍，最终在 logits 上变成 1% 的相对误差。为此新增了
+  `kv_write_f32` / `attention_scores_f32` / `attention_values_f32_kv` / `softmax_f32`
+  四个 shader，只给本模型用，不改动 llama/qwen3/qwen35 共用的 F16 路径。
+
+**踩过的坑（阶段 1）**：
+
+- 阶段 1 最初让设备段和 CPU 段各自持有一份 hidden，结果第 0 层（SSM 层）读到
+  未初始化的全 0 —— 设备输出在第一次 `forward_layers` 之前就没人写。
+  **教训**：混合路径必须指定唯一真相源，不能各持一份。
+- 误差归因用环境变量 `RMI_NH_CPU_ATTENTION` / `RMI_NH_CPU_FFN` 把某一条分支切回 CPU
+  才发现问题在 attention 上；逐层 dump CPU/GPU 的 hidden 才定位到第一个分叉层
+  （layer 12，第一个 attention 层）。
+
+**踩过的坑（阶段 2）**：
+
+1. **GLSL 的数组输出参数默认是 `in`**。`void f(float x[4], float result[4])` 里的
+   `result` 写回会被丢弃，于是 conv/gate 读到未初始化的值 → NaN。必须写
+   `out float result[4]`。
+2. **GLSL 的字面量**：hex float 没有 `f` 后缀（`0x1p23f` 非法）；double 常量要加
+   `lf` 后缀，否则被舍入成 f32；`half` 是保留字。
+3. **conv ring 的 tap 顺序**：CPU 的 `mamba2_conv_step` 是**先算后左移** history，
+   所以计算时 `history[0]` 是**最老**的 tap（t-3）、`history[2]` 是最新的（t-1）。
+   设备的三角环因此是「tap k 读槽 `(t + k) % 3`」，而不是 `(t - 1 - k) % 3`。
+   写成后者时第 0 个 token 仍然正确（history 全 0），第 2 个 token 起才发散。
+4. **group RMSNorm 必须用 F64 累加**：CPU 的 `sum_sq_f32` 在 aarch64 是 F64 NEON。
+   共享的 `rms_norm.comp` 用 F32 补偿和，和 F64 和会差 1–2 ULP，而 `mean_sq` 正好
+   落在这个粒度上，于是 `rstd` 差 1 ULP、输出差 2 ULP。新写的
+   `nemotron_h_ssm_norm.comp` 用 `double` 累加（F32 平方、F64 求和、最后 narrow
+   到 F32），`mean_sq` 就是两边正确舍入后的同一个值。共享 shader 没有改动。
+5. **glibc 的 `logf` / `expf` 必须精确复刻**：CPU 的 softplus 用的是 `f32::exp` /
+   `f32::ln`（glibc），不是 ggml。仓库的 `host_libm.glsl` 里的 `libm_log` 是
+   **x87 80-bit** 版、`libm_exp` 是**正确舍入**版，两者都与 glibc 不同：
+   `libm_log` 在 softplus 上差 1 ULP，`libm_exp` 大约每 100 个值差 1 ULP。
+   新写的 `nemotron_h_ssm_libm.glsl` 逐条转写 glibc 的
+   `sysdeps/ieee754/flt-32/e_logf.c` 与 `e_expf.c`（ARM optimized-routines 同源）。
+6. **ggml 的 SiLU 用的是 `ggml_v_expf`**，仓库自带的 `exp_approx_neon.glsl`
+   （求值顺序不同）和 `exp_accurate.glsl`（更高阶多项式）都不是它。
+   新写的 `shaders/glsl/exp_ggml.glsl` 精确复刻，且复刻了 ggml ARM 路径的一个
+   关键细节：**fast / overflow 路径是按 4 个 lane 一组选的**
+   （`vaddvq_u32(c) == 0`），所以调用方每个 invocation 处理 4 个通道。
+7. **设备端的 Mamba-2 状态跨 prefill 保留**，必须和 host 的 scratch 对齐。
+   设备 session 记录 `committed_position`，与 scratch 的 `next_position` 不一致时
+   （新的 scratch = 新的序列）清零 conv ring 与 scan state。否则第一个 token 就用
+   上了上一条序列的 history。
+8. **SSM 的中间量必须按行存放**。一开始 conv/dt/scan/gate 共用一个 scratch，
+   于是 3 个 token 时最后一行覆盖了前两行；改成 per-row 后仍然错：scan 读的
+   `dt` / `decay` 必须是**当前行**的槽位，误用整块区域的基址时，第 2 个 token 起
+   用的是第 0 行的 dt —— **单 token 测不出来**，必须用 2~3 token 的 prefill 才能发现。
+9. **`SsmShape` 的尺寸**：conv 宽度是 `d_inner + 2*n_group*d_state`（加法），
+   in_proj 宽度是 `2*d_inner + 2*n_group*d_state + dt_rank`（也是加法）。
+   写成乘法会让 session 创建直接失败。
+
+**性能（GB10，8 线程，`Hello` + 32 token）**：设备路径 prefill 97 t/s、生成 21.4 t/s、
+端到端 **17.8 tok/s**；纯 CPU prefill 31 t/s、生成 26 t/s、端到端 14.7 tok/s。
+阶段 1 的端到端是 5.7 tok/s，所以阶段 2 是 **3.1×**。
+
+- prefill 快 3.1×：多行 matmul 让权重读一次、11 行复用。
+- **逐 token 生成仍略慢于 CPU**（21.4 vs 26 t/s）。原因不在本模型的 SSM 路径，
+  而在共用的 Q8_0 matmul kernel：单 token 走 `q8_matmul_grouped.comp`，它是
+  **标量 int8 乘加**，没有用上 GPU 的 DP4A 单元；多行路径才走
+  `q8_matmul_tiled_dp4a_wide`（`dotPacked4x8EXT`）。**两次实测都说明不能简单
+  地把单 token 切到 tiled kernel**：
+  - 直接用 32 token 的 wide kernel：21.2 → **11.3 t/s**（token tile 固定 32，
+    只有 1 个 token 有效时 `accumulator[32]` 几乎全空，而它按运行时下标访问，
+    于是落在 local memory 里，每次访问都是一次内存往返）。
+  - 另写一个 4 token 的 twin（与 wide kernel 的**每 token 算术完全相同**，
+    只是 tile 更窄）：21.2 → **17.5 t/s**，仍然更慢。
+
+  也就是说单 token 的瓶颈**不是** int8 乘加算力，而是权重读取（约 3.6 GB/token：
+  SSM 的 in/out 投影 1.66 GB、FFN 1.34 GB、attention 0.15 GB、输出投影 0.41 GB）。
+  按 21.4 t/s 折算只有约 80 GB/s，离 GB10 的峰值还远，**但换 kernel 并不能
+  提高它**。要继续优化得先弄清是访存模式（每个 lane 读一行权重，64 条并发
+  流）还是别的什么，这是共用 kernel 的问题，影响面覆盖所有模型，本次没有做。
+
+  **后续**：那个问题后来查清了 —— 是**访存模式**，而且解法（transposed
+  layout）已经实现，见 [TODO-062](#todo-062-q8_0-权重的-transposed-layout共用-kernel影响所有模型)。
+  单 token 生成 21.4 → 28.7 t/s，端到端 17.8 → 24.8 tok/s，逐位一致。
+
+**待办**：
+
+1. 30B-A3B（`nemotron_h_moe`）的 expert routing 还没有设备路径（TODO-053）。
+2. 单 token 的 DP4A Q8_0 matmul（共用 kernel，影响所有模型）→ 见
+   [TODO-062](#todo-062-q8_0-权重的-transposed-layout共用-kernel影响所有模型)。
+3. 更长的上下文与其它显卡/驱动未验收。
+
+**关联**：`src/vulkan/nemotron_h.rs`、`src/models/nemotron_h/trunk/forward.rs`、
+`src/vulkan/ops.rs`（`record_kv_write_rows_f32`、`record_attention_scores_f32_rows`、
+`record_softmax_f32_rows`、`record_attention_values_f32_kv_rows`）、
+`shaders/glsl/nemotron_h_ssm_*.comp`、`shaders/glsl/exp_ggml.glsl`、
+`shaders/glsl/nemotron_h_ssm_libm.glsl`、TODO-053（30B 契约）。
+
+---
+
+### TODO-062: Q8_0 权重的 transposed layout（共用 kernel，影响所有模型）
+
+**状态**：⚠️ 已实现（`RMI_GPU_Q8_TRANSPOSED=1` 开启），默认关闭；逐位一致已验证。
+
+**问题**：单 token 生成慢，瓶颈在**权重访存模式**，不在 int8 算力。
+`q8_matmul_grouped.comp` 给每个 lane 一行权重，一个 warp 于是读 32 个
+「相隔一整行」的扇区，而且每个 4 字节的 payload 读取都跨过 34 字节的 block
+边界，要从两个字里拼出来。`src/vulkan/q8_layout.rs` 里记过实测：
+这个 kernel 在 GB10 上只有 **55-59 GB/s**，而设备读同样的字节能到
+**138-171 GB/s** —— kernel 输给了自己的访存模式，不是输给内存系统。
+
+**做法**：仓库里早就有 transposed layout（把 64 行 tile 的 block 归到一起，
+payload 连续且 4 字节对齐），但**它从来没跑起来过**：
+
+- `Q8_MATMUL_TRANSPOSED` 常量写的是 `OPERATOR_SHADERS.len() - 1`，
+  只有在该 shader 排在表尾时才对。Nemotron 的算子追加到表尾之后，
+  这个常量就跟着表长走，**「转置 matmul」实际跑的是 SSM norm shader**：
+  dispatch 正常完成、什么都不写。已修（见 `8c50c59`），并加了一个
+  「每个 pipeline 常量都必须指向它命名的 shader」的测试，防止再漂移。
+- transposed layout 原来只服务 one-row kernel。tiled kernel 给每个 lane 一列
+  输出、读那一列的 block，64 个 lane 触到的 64 行同样相隔
+  `blocks_per_row * 34` 字节 —— **访存模式是一样的**，所以给 tiled kernel
+  也补了转置版本（`scripts/transposed-tiled-shader.py` 生成，保证两者同步）。
+
+**结果（GB10，8 线程）**：
+
+| 场景 | native layout | transposed layout |
+|---|---|---|
+| one-row Q8_0 matmul（仓库自带 benchmark） | 55-59 GB/s | **138-162 GB/s（2.5-2.7×）** |
+| Nemotron-3 Nano 4B 单 token 生成 | 21.4 t/s | **28.7-29.7 t/s（1.35×）** |
+| Nemotron-3 Nano 4B 11 token prefill | 113 ms | **66 ms（1.7×）** |
+| Nemotron-3 Nano 4B 1211 token prefill | 3.44 s（352 t/s） | **2.66 s（455 t/s，1.29×）** |
+| Nemotron-3 Nano 4B 端到端 | 17.8 tok/s | **24.8-25.3 tok/s（1.4×）** |
+| Spark-X2.5-1.7B-Q8_0 端到端 | 4.5 tok/s | **11.2 tok/s（2.5×）** |
+
+**逐位一致**：Nemotron-3 Nano 4B 的 1/2/3 token prefill 全部
+`relative_l2=0`、`scaled_max_abs=0`；Spark-X2.5 的输出文本逐字相同。
+layout 只是把字节换个位置，kernel 的归约顺序不变。
+
+**代价**：每个 Q8_0 权重在上传时转置一次（240 MB 约 26 ms，9 GB/s），
+设备显存与 native 相同（只多了最后一个 tile 的 padding）。转置后的 buffer
+同时服务 one-row 和 tiled 两条路径，**不需要两份**。
+
+**默认关闭**：地址写错会越界读 device buffer。开启前要在所有架构上跑一遍
+硬件测试。
+
+**待办**：
+
+1. 转置 layout 还没有覆盖 `q8_matmul_cooperative_dp4a`（窄投影的单行路径会
+   退回 transposed 的 one-row kernel，实测没有变慢，但少了一个并行度来源）。
+2. `RUST_GPU_DISPATCH_TRACE` 的日志里还没有区分 native / transposed 的
+   一行 matmul，只能靠 shader 名看。
+3. 在 AVX2 与标量主机上还没有硬件验收（tiled kernel 的三个变体都补了，
+   但只在本机 NEON 路径上跑过）。
+4. **开启 flag 后跑全量 `cargo test --lib`，偶尔会多出 1 个失败，而且每次
+   多出来的那个都不一样**（8 次全量跑里出现过 vocoder / dit / speaker 各一次）。
+   单独跑这三个测试 20 次全过；失败的数值也只差一行（某个 time step 拿到了
+   上一个 time step 的结果）。这三个测试都不走转置路径 —— vocoder / speaker
+   的 conv 走的是 CPU 的 `forward_batched`，dit 的 GPU session 用的是
+   `bind_weight_buffers_mode`（native layout），所以**更像是全量并行跑测试
+   时的既有 flake**，而不是转置 layout 引入的。定位方法：并行的 GPU 测试会
+   共用一个 Vulkan context，怀疑有别的测试把 host 内存写坏了。下次要查就
+   从这里入手（`cargo test --lib -- --test-threads=1` 作为对照）。
+
+**关联**：`src/vulkan/q8_layout.rs`、`src/vulkan/ops.rs`、
+`shaders/glsl/q8_matmul_transposed.comp`、
+`shaders/glsl/q8_matmul_tiled_dp4a*_transposed.comp`、
+`scripts/transposed-tiled-shader.py`、TODO-061（Nemotron 设备路径）。
