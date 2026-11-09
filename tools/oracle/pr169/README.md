@@ -208,7 +208,7 @@ The device and the CPU still differ on the media path as a whole (relative L2
 is not in the attention: the device's F16 matmul rounds the activations to F16
 (ggml parity) while the CPU's F16 kernel converts only the weights and keeps
 the activations in F32, so the CPU path is the more precise of the two. See
-TODO-058.
+TODO-060.
 
 The focused Qwen3.5 run excludes the previously failing
 `qwen35_config_rejects_invalid_tensor_dimensions`. The NEON LayerNorm stride bug
