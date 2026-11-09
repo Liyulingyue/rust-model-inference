@@ -183,7 +183,7 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::argmax_f32;
+    use super::{argmax_f32, argmax_f32_scalar};
 
     fn assert_argmax_matches_scalar(values: &[f32], expected: usize) {
         let got = argmax_f32(values);
@@ -237,6 +237,89 @@ mod tests {
         values[22] = 2.0;
         values[216] = 2.0;
         assert_argmax_matches_scalar(&values, 22);
+    }
+
+    #[test]
+    fn simd_paths_agree_with_the_scalar_reference() {
+        // The SIMD paths keep a per-lane running max, so they are only
+        // trustworthy if they agree with the scalar path on *every* input,
+        // not just on the hand-picked cases above. Drive both of them over
+        // random and adversarial inputs: short lengths (to hit every tail
+        // shape), a small value range (to force many ties), and infinities
+        // and NaN. The generator is a fixed-seed xorshift, so a failure
+        // reproduces exactly.
+        let mut state: u64 = 0x243f_6a88_85a3_08d3;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut check = |values: &[f32]| {
+            assert_eq!(
+                argmax_f32(values),
+                argmax_f32_scalar(values),
+                "argmax disagrees with the scalar reference on {values:?}"
+            );
+        };
+
+        // Random lengths and a small value range, so ties are frequent and
+        // land in different lanes and chunks.
+        for len in 0..=300usize {
+            for _ in 0..40 {
+                let values: Vec<f32> = (0..len).map(|_| (next() % 5) as f32 - 2.0).collect();
+                check(&values);
+            }
+        }
+
+        // Degenerate shapes: one value, all equal, all negative.
+        for len in [1usize, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 64, 1023, 1024] {
+            check(&vec![1.5f32; len]);
+            let values: Vec<f32> = (0..len).map(|i| -((i % 7) as f32) - 0.5).collect();
+            check(&values);
+        }
+
+        // Two positions share the maximum: the earlier one has to win no
+        // matter which lane each of them lands in.
+        for len in [8usize, 33] {
+            for a in 0..len {
+                for b in 0..len {
+                    if a == b {
+                        continue;
+                    }
+                    let mut values = vec![0.0f32; len];
+                    values[a] = 2.0;
+                    values[b] = 2.0;
+                    check(&values);
+                }
+            }
+        }
+        for _ in 0..2000 {
+            let len = 1024usize;
+            let a = (next() % len as u64) as usize;
+            let b = (next() % len as u64) as usize;
+            if a == b {
+                continue;
+            }
+            let mut values = vec![0.0f32; len];
+            values[a] = 2.0;
+            values[b] = 2.0;
+            check(&values);
+        }
+
+        // Infinities and NaN: NaN never compares greater, so it must not
+        // win over a real value.
+        for len in [4usize, 33, 1024] {
+            let mut values = vec![1.0f32; len];
+            values[len / 2] = f32::INFINITY;
+            check(&values);
+            let mut values = vec![1.0f32; len];
+            values[len / 2] = f32::NEG_INFINITY;
+            check(&values);
+            let mut values = vec![1.0f32; len];
+            values[len / 3] = f32::NAN;
+            check(&values);
+        }
     }
 
     #[test]
