@@ -493,13 +493,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
-      详见 [TODO-052](#todo-052-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 - [~] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
       MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
       30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
       trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
-      [TODO-053](#todo-053-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
+      [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
       **B1–B5 已全部完成**：Q5_1 kernel、arch/config、MoE 层、共享专家，以及
       与上游 llama.cpp 的 oracle 对拍（全 52 层 × 6 步逐位一致，最终 logits
@@ -510,13 +510,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       未覆盖 dory。
       另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
-      [TODO-054](#todo-054-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
+      [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
 - [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
   Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
   因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
   pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
   情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
-  详见 [TODO-054 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
+  详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -714,23 +714,6 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
 - [ ] 完善 GGUfRS 导出功能
 - [ ] GGUF 导出支持
-- [x] **PR #169 四组模型适配与真实权重数值对齐**：EmbeddingGemma-2 补齐文本/图像/音频到 768 维 embedding；PhysBrain1.5-2B 修正转换精度、token 类型和 RoPE；Occamy 复用既有 qwen35moe；修复实际 Qwen3.5 视觉入口 NEON LayerNorm 漏算半行的问题。真实 CLI、模型契约、固定 llama.cpp/HF Oracle 的完整输出对照见 [复现记录](../../tools/oracle/pr169/README.md) 和 [哈希/指标](../../tools/oracle/pr169/verification.json)。
-    - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限，不再把音频逐位相同作为本次验收要求。
-    - Occamy 标量参考 8 步 greedy 一致；默认近似路径在候选分数接近时有措辞分叉，已用相同 token 历史验证完整 logits 并保留差异。
-    - 未覆盖：GPU 数值对齐、真实机器人动作执行和性能基准。Qwen3-VL 保留 F32 权重缓存，内存和耗时需另行测量。
-- [ ] **RLCD constrained-decoding 调度器**（harshatheg/Qwen-2.5-1B-RLCD 的 value-token 切片路径）。
-      **不做**：权重（复用 `Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`，已 Verified）。
-      **不做**：转换器（`tools/converter/rlcd/` 不存在意义——RLCD 没有 LoRA/分类头/微调 checkpoint，
-      只有调度逻辑）。
-      **可能要做**：~200 行 Rust 调度器——KV cache broadcast（M 份复制，每 field 一份）+
-      sub-vocab logit mask（`P(field_value | ctx) = softmax(logits[field_token_ids])`）+
-      多 token value 的 tree disambiguation。
-      **当前等价替代**：JEV 字母投票（`docs/develop/jev.md:380-430`，`P(A|ctx)/P(B|ctx)/...`），
-      数学上与 RLCD value-token 切片等价（都是 `softmax` over K tokens），单 token value /
-      instruction-tuned 模型下完全够用。
-      **触发条件**：用户要"原始 value 概率"、或模型无 instruction tuning（旧 base LLaMA/Qwen-1
-      /Qwen-1.5 base 不严格遵循字母指令）、或多 token value 的概率分布本身有意义——三个条件
-      任一成立时再开工。
 - [x] **Intern-Decision-0.8B 适配与真实权重数值对齐** — 转换器写出 `qwen35` arch 与
       `qwen3vl_merger` 投影，0.8B 在 CPU 上文本/图像/CLI/HTTP/JEV 全部跑通；引擎侧无需模型专属代码。
       真实 CLI、模型契约、固定 llama.cpp Oracle 的完整输出对照见
@@ -750,7 +733,7 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
       超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
       脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
-      **TODO-055**。
+      **TODO-053**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
@@ -3668,7 +3651,7 @@ if state.as_ref().is_none_or(|cached| {
 
 ---
 
-### TODO-050: CI 不构建 `--all-targets`，集成测试的编译期断裂没人拦
+### TODO-050: `cargo build --all-targets` 在 main 上就失败，`cargo test`（不带 `--lib`）跑不起来
 
 **原现象**（已修）：
 
@@ -4363,7 +4346,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 - 文本塔（`qwen35moe` / Occamy-1.0）：**完整在设备上** —— trace 显示
   `scope=resident_hybrid_decoder backend=Vulkan`（prefill rows=19、decode rows=1），
   733 个权重张量一次性上传 36.35 GB，之后每 token 41 次 submission；但比 CPU 慢 4 倍
-  （3.8 vs 15.2 t/s）→ 见 TODO-057。
+  （3.8 vs 15.2 t/s）→ 见 TODO-055。
 - 视觉塔（mmproj）：**不上设备** —— `src/models/qwen35/vision/mod.rs` 的
   `matmul_weight_batch` 直接调 `weight.kernel.forward_batched(...)`，而
   `VulkanKernel::forward_batched` 只是转发给内部的 **CPU** kernel。视觉编码两个后端
@@ -4391,7 +4374,7 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 3. 顺带评估收益上限：塔的 attention/softmax/norm 仍在 CPU，只搬 matmul 未必有墙钟收益。
 
 **关联**：`src/models/qwen35/vision/mod.rs`、`src/models/zdt/vision/mod.rs`、
-`src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-057。
+`src/ops/kernel/vulkan.rs`、`src/compute/linear.rs`、TODO-055。
 
 ---
 
@@ -4438,14 +4421,14 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 | Vulkan | 762 ms | **没有任何 `scope=` 行** ✓ |
 
 CLI 接受 `--compute vulkan` 并如实报 `backend=partial mode=embedding` ✓，但耗时与 CPU 一样 ✓ →
-塔的 matmul 直接调 `Weight::forward` ✗，没有 `try_vulkan_rows` 分支 ✗（与 TODO-058 的
+塔的 matmul 直接调 `Weight::forward` ✗，没有 `try_vulkan_rows` 分支 ✗（与 TODO-056 的
 qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧格式都支持 ✓ → 补分支即可 ✓。
 
 **收益预估**：文本路径本来就快（0.8 s ✓ → 收益小 ✓）；媒体路径 50.8 s ✗ → 收益大 ✓，
 但要先做上面的批量化 ✓（否则单线程 + 设备提交开销会互相拖累 ✓）。
 
 **关联**：`src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/mod.rs`
-（`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`、TODO-058。
+（`compute_media_embedding`）、`tests/embeddinggemma_2_vision_smoke.rs`、TODO-056。
 
 ---
 
@@ -4461,7 +4444,7 @@ qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧�
 | CPU kernel vs 上游 HF transformers 参考 | 0.05069 | 0.99873 |
 
 即：**设备的量化 matmul 与 CPU 的量化 matmul 本身就不一致** ✗（0.033 ✓），
-这与 TODO-058 的 F16 契约缺口同类 ✓ —— 设备侧的 Q8_0/BF16 归约（shader 的
+这与 TODO-056 的 F16 契约缺口同类 ✓ —— 设备侧的 Q8_0/BF16 归约（shader 的
 累加顺序/中间精度 ✓）与 CPU kernel 不同 ✓。
 
 **影响**：嵌入模型对向量敏感 ✓ —— 同一提示在 CPU 与 GPU 上会得到不同的 768 维向量 ✓
@@ -4486,7 +4469,7 @@ Gemma4 的单位 scale ✓），两边一致到 1e-5 ✓。
 把激活舍入到 F16（`round_f16_rte` ✓，对齐 ggml ✓），而 CPU 的 F16 kernel ✓
 （`src/ops/kernel/f16/neon.rs` ✓）只把**权重**转成 F32 ✓、激活保持 F32 ✓。
 也就是说**设备侧才是 ggml 语义 ✓，CPU 侧更精确 ✓** —— 差 0.0089 的方向与
-TODO-058 的 F16 契约缺口一致 ✓。
+TODO-056 的 F16 契约缺口一致 ✓。
 
 **待办**：
 
@@ -4501,4 +4484,4 @@ TODO-058 的 F16 契约缺口一致 ✓。
 **关联**：`src/ops/kernel/vulkan.rs`（`try_matmul` ✓）、
 `shaders/glsl/f16_matmul.comp`、`src/ops/kernel/f16/neon.rs`、
 `src/models/embeddinggemma2/text.rs`、`src/models/embeddinggemma2/vision.rs`
-（设备注意力 ✓）、`tests/embeddinggemma_2_device_parity.rs` ✓、TODO-058。
+（设备注意力 ✓）、`tests/embeddinggemma_2_device_parity.rs` ✓、TODO-056。
