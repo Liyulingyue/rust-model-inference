@@ -4306,45 +4306,104 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 
 ### TODO-057: Nemotron-3 Nano 4B 的 Mamba-2 SSM 层还没上设备
 
-**现状**：4B 的 FFN 与 attention 层已在设备上（阶段 1，2026-11-06），
-但 21 个 Mamba-2 SSM 层仍在 CPU 上跑，hidden state 在两者之间往返。
+**状态：阶段 2 已完成（2026-11-09）** —— 42 层全部在设备上，`nemotron_h` 已列入
+`ComputePolicy::has_complete_device_path`。下面是这一阶段的记录与踩坑清单；
+30B-A3B（`nemotron_h_moe`）仍是另一条 TODO（TODO-051）。
 
-- **已完成的阶段 1**：GPU 跑 17 个 FFN 层 + 4 个 attention 层；CPU 跑 21 个 SSM 层。
+**阶段 1（2026-11-06）**：GPU 跑 17 个 FFN 层 + 4 个 attention 层；CPU 跑 21 个 SSM 层。
   两者以 `scratch.hidden` 为唯一真相源：设备段读它、写它，CPU 段原地读写它。
   42 层按「连续的非 SSM 层段」切分，段与段之间没有多余的同步。
+
+**阶段 2（2026-11-09）**：21 个 Mamba-2 SSM 层也搬上设备，hidden state 不再往返 host。
+  SSM 分支在 token 维必须串行（conv history 与 scan state 都是递归的），所以
+  一层里的顺序是：先对所有行做一次 RMS norm → in_proj matmul（所有行一起）
+  → 逐 token 串行跑 conv/dt/scan/gate/norm → out_proj matmul（所有行一起）
+  → 残差加。
+
+- **新增的 5 个 shader**（`shaders/glsl/nemotron_h_ssm_*.comp`）：
+  `conv`（depthwise causal conv1d + SiLU）、`dt`（softplus + decay）、
+  `scan`（选择性 scan + D skip）、`gate`（`silu(z)*y`）、`norm`（group RMSNorm）。
+  语义与 qwen35 的 SSM **不同**（qwen35 是 recurrent 的 beta/alpha + `state_key` 点积），
+  没有复用它的 shader。
 - **数值**：GPU↔CPU **逐位一致**（`relative_l2` 与 `scaled_max_abs` 全为 0），
-  单 token 与 3 token 都过。双 1% 门限是当时定的保守目标，实际达到了逐位一致。
-- **F32 KV cache 是必需的**：llama.cpp 默认把 KV cache 存 F16，而本模型的参考
-  harness 用 F32。F16 的舍入在 attention 输出上留下 ~1e-5 的相对误差，
+  1 / 2 / 3 token 都过。双 1% 门限只是保守下限，实际达到了逐位一致。
+- **F32 KV cache 是必需的**（阶段 1 的结论仍然成立）：llama.cpp 默认把 KV cache 存 F16，
+  而本模型的参考 harness 用 F32。F16 的舍入在 attention 输出上留下 ~1e-5 的相对误差，
   会被随后的 Mamba-2 递归（`state = state·exp(dt·A) + B·x·dt`，`|A|` 约 10–30）
   放大约 4000 倍，最终在 logits 上变成 1% 的相对误差。为此新增了
   `kv_write_f32` / `attention_scores_f32` / `attention_values_f32_kv` / `softmax_f32`
   四个 shader，只给本模型用，不改动 llama/qwen3/qwen35 共用的 F16 路径。
-- **踩过的坑**：阶段 1 最初让设备段和 CPU 段各自持有一份 hidden，
-  结果第 0 层（SSM 层）读到未初始化的全 0 —— 设备输出在第一次 `forward_layers`
-  之前就没人写。**教训**：混合路径必须指定唯一真相源，不能各持一份。
-- **踩过的坑 2**：误差归因用环境变量 `RMI_NH_CPU_ATTENTION` / `RMI_NH_CPU_FFN`
-  把某一条分支切回 CPU 才发现问题在 attention 上；逐层 dump CPU/GPU 的 hidden
-  才定位到第一个分叉层（layer 12，第一个 attention 层）。
+
+**踩过的坑（阶段 1）**：
+
+- 阶段 1 最初让设备段和 CPU 段各自持有一份 hidden，结果第 0 层（SSM 层）读到
+  未初始化的全 0 —— 设备输出在第一次 `forward_layers` 之前就没人写。
+  **教训**：混合路径必须指定唯一真相源，不能各持一份。
+- 误差归因用环境变量 `RMI_NH_CPU_ATTENTION` / `RMI_NH_CPU_FFN` 把某一条分支切回 CPU
+  才发现问题在 attention 上；逐层 dump CPU/GPU 的 hidden 才定位到第一个分叉层
+  （layer 12，第一个 attention 层）。
+
+**踩过的坑（阶段 2）**：
+
+1. **GLSL 的数组输出参数默认是 `in`**。`void f(float x[4], float result[4])` 里的
+   `result` 写回会被丢弃，于是 conv/gate 读到未初始化的值 → NaN。必须写
+   `out float result[4]`。
+2. **GLSL 的字面量**：hex float 没有 `f` 后缀（`0x1p23f` 非法）；double 常量要加
+   `lf` 后缀，否则被舍入成 f32；`half` 是保留字。
+3. **conv ring 的 tap 顺序**：CPU 的 `mamba2_conv_step` 是**先算后左移** history，
+   所以计算时 `history[0]` 是**最老**的 tap（t-3）、`history[2]` 是最新的（t-1）。
+   设备的三角环因此是「tap k 读槽 `(t + k) % 3`」，而不是 `(t - 1 - k) % 3`。
+   写成后者时第 0 个 token 仍然正确（history 全 0），第 2 个 token 起才发散。
+4. **group RMSNorm 必须用 F64 累加**：CPU 的 `sum_sq_f32` 在 aarch64 是 F64 NEON。
+   共享的 `rms_norm.comp` 用 F32 补偿和，和 F64 和会差 1–2 ULP，而 `mean_sq` 正好
+   落在这个粒度上，于是 `rstd` 差 1 ULP、输出差 2 ULP。新写的
+   `nemotron_h_ssm_norm.comp` 用 `double` 累加（F32 平方、F64 求和、最后 narrow
+   到 F32），`mean_sq` 就是两边正确舍入后的同一个值。共享 shader 没有改动。
+5. **glibc 的 `logf` / `expf` 必须精确复刻**：CPU 的 softplus 用的是 `f32::exp` /
+   `f32::ln`（glibc），不是 ggml。仓库的 `host_libm.glsl` 里的 `libm_log` 是
+   **x87 80-bit** 版、`libm_exp` 是**正确舍入**版，两者都与 glibc 不同：
+   `libm_log` 在 softplus 上差 1 ULP，`libm_exp` 大约每 100 个值差 1 ULP。
+   新写的 `nemotron_h_ssm_libm.glsl` 逐条转写 glibc 的
+   `sysdeps/ieee754/flt-32/e_logf.c` 与 `e_expf.c`（ARM optimized-routines 同源）。
+6. **ggml 的 SiLU 用的是 `ggml_v_expf`**，仓库自带的 `exp_approx_neon.glsl`
+   （求值顺序不同）和 `exp_accurate.glsl`（更高阶多项式）都不是它。
+   新写的 `shaders/glsl/exp_ggml.glsl` 精确复刻，且复刻了 ggml ARM 路径的一个
+   关键细节：**fast / overflow 路径是按 4 个 lane 一组选的**
+   （`vaddvq_u32(c) == 0`），所以调用方每个 invocation 处理 4 个通道。
+7. **设备端的 Mamba-2 状态跨 prefill 保留**，必须和 host 的 scratch 对齐。
+   设备 session 记录 `committed_position`，与 scratch 的 `next_position` 不一致时
+   （新的 scratch = 新的序列）清零 conv ring 与 scan state。否则第一个 token 就用
+   上了上一条序列的 history。
+8. **SSM 的中间量必须按行存放**。一开始 conv/dt/scan/gate 共用一个 scratch，
+   于是 3 个 token 时最后一行覆盖了前两行；改成 per-row 后仍然错：scan 读的
+   `dt` / `decay` 必须是**当前行**的槽位，误用整块区域的基址时，第 2 个 token 起
+   用的是第 0 行的 dt —— **单 token 测不出来**，必须用 2~3 token 的 prefill 才能发现。
+9. **`SsmShape` 的尺寸**：conv 宽度是 `d_inner + 2*n_group*d_state`（加法），
+   in_proj 宽度是 `2*d_inner + 2*n_group*d_state + dt_rank`（也是加法）。
+   写成乘法会让 session 创建直接失败。
+
+**性能（GB10，8 线程，`Hello` + 32 token）**：设备路径 prefill 97 t/s、生成 21.4 t/s、
+端到端 **17.8 tok/s**；纯 CPU prefill 31 t/s、生成 26 t/s、端到端 14.7 tok/s。
+阶段 1 的端到端是 5.7 tok/s，所以阶段 2 是 **3.1×**。
+
+- prefill 快 3.1×：多行 matmul 让权重读一次、11 行复用。
+- **逐 token 生成仍略慢于 CPU**（21.4 vs 26 t/s）。原因不在本模型的 SSM 路径，
+  而在共用的 Q8_0 matmul kernel：单 token 走 `q8_matmul_grouped.comp`，它是
+  **标量 int8 乘加**，没有用上 GPU 的 DP4A 单元；多行路径才走
+  `q8_matmul_tiled_dp4a_wide`（`dotPacked4x8EXT`）。实测把单 token 也切到 tiled
+  kernel 反而更慢（21.2 → 11.3 t/s），因为那个 kernel 的 token tile 固定为 32，
+  只有 1 个 token 有效时寄存器压力大到溢出。**要吃到 DP4A 需要一个 token tile
+  很小的 DP4A kernel**，那是共用 kernel 的改动，影响面覆盖所有模型，
+  本次没有做。
 
 **待办**：
 
-1. 写 Mamba-2 的设备 shader：
-   - `nemotron_h_recurrent_conv.comp`：因果 depthwise conv1d（kernel=4），
-     加上 `silu(z)*y` 的 gate 和 group RMSNorm。
-   - `nemotron_h_recurrent_ssm.comp`：分组的 scan
-     `state = state·exp(dt·A) + B·x·dt`、`y = state·C`，
-     其中 `dA = exp(dt_softplus·A_log[h])`，`dt_softplus` 是 softplus。
-   语义与 qwen35 的 SSM **不同**（qwen35 是 recurrent 的 beta/alpha + `state_key` 点积），
-   不能复用它的 shader。
-2. SSM 的状态跨 chunk 保留（`ssm_conv_hist` 与 `ssm_scan_state`），
-   设备侧要有对应的持久区域。
-3. SSM 上设备后，hidden state 就不再需要 host 往返，`forward_layers` 可以一次
-   覆盖全部 42 层，混合路径的复杂度随之下降。
-4. 性能：目前设备段只覆盖 42 层里的 21 层，且每段之间有一次 host 往返。
-   全 SSM 上设备后才有可观的加速比。
+1. 30B-A3B（`nemotron_h_moe`）的 expert routing 还没有设备路径（TODO-051）。
+2. 单 token 的 DP4A Q8_0 matmul（共用 kernel，影响所有模型；见上面的性能小节）。
+3. 更长的上下文与其它显卡/驱动未验收。
 
 **关联**：`src/vulkan/nemotron_h.rs`、`src/models/nemotron_h/trunk/forward.rs`、
 `src/vulkan/ops.rs`（`record_kv_write_rows_f32`、`record_attention_scores_f32_rows`、
 `record_softmax_f32_rows`、`record_attention_values_f32_kv_rows`）、
-`shaders/glsl/nemotron_h_*.comp`（待写）、TODO-051（30B 契约）。
+`shaders/glsl/nemotron_h_ssm_*.comp`、`shaders/glsl/exp_ggml.glsl`、
+`shaders/glsl/nemotron_h_ssm_libm.glsl`、TODO-051（30B 契约）。

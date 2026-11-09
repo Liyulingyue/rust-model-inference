@@ -17,10 +17,21 @@
 //!   attention shader applies a SiLU gate after the value mix.
 //! * **FFN**: Nemotron uses `ReLU(x)^2` (LLM_FFN_RELU_SQR), not SwiGLU.
 //!
-//! Stage 1 of the port keeps the SSM branch on the CPU: the session records
-//! the FFN and attention layers on the device and falls back to the existing
-//! `forward_layer` SSM path for the 21 SSM layers. Stage 2 adds the Mamba-2
-//! conv/scan shaders and moves the whole trunk onto the device.
+//! All 42 layers run on the device. The Mamba-2 branch is the reason
+//! this module is not a copy of `qwen35.rs`: its recurrence is serial in
+//! the token dimension, so an SSM layer is recorded as
+//!
+//! 1. one RMS norm for every row,
+//! 2. the `ssm_in` projection for every row,
+//! 3. the conv1d, the time step, the scan, the z gate and the group norm
+//!    for **one token at a time** (the conv history and the scan state
+//!    belong to the sequence, not to the row),
+//! 4. the `ssm_out` projection for every row,
+//! 5. the residual add.
+//!
+//! The device keeps the Mamba-2 state (the conv history ring and the
+//! scan state) next to the attention KV cache, so both are cleared
+//! together when a new sequence starts.
 
 use crate::models::nemotron_h::trunk::config::NemotronConfig;
 use crate::models::nemotron_h::trunk::forward::NemotronModel;
@@ -51,6 +62,17 @@ struct FfnBindings {
     down: OperatorBindings,
 }
 
+/// Bindings for one Mamba-2 SSM layer.
+#[derive(Clone, Copy)]
+struct SsmBindings {
+    /// The `ssm_in` projection, `Q8_0`.
+    input_projection: OperatorBindings,
+    /// The `ssm_out` projection, `Q8_0`.
+    output_projection: OperatorBindings,
+    /// The group RMSNorm weights, F32.
+    group_norm: OperatorBindings,
+}
+
 enum LayerBindings {
     Attention {
         norm: OperatorBindings,
@@ -60,9 +82,101 @@ enum LayerBindings {
         norm: OperatorBindings,
         ffn: FfnBindings,
     },
-    /// SSM-only layer. Stage 1 runs it on the CPU; stage 2 replaces this
-    /// with device bindings.
-    Ssm,
+    /// SSM-only layer.
+    Ssm {
+        norm: OperatorBindings,
+        ssm: SsmBindings,
+    },
+}
+
+/// Arena regions that belong to one Mamba-2 SSM layer.
+///
+/// The scan state and the conv history are *persistent*: they carry the
+/// recurrence from one token to the next, exactly like the CPU path's
+/// `scratch.ssm_scan_state` and `scratch.ssm_conv_hist`. The F32 weights
+/// never change, so they are written into the arena once when the session
+/// is built.
+#[derive(Clone, Copy)]
+struct SsmArena {
+    /// Persistent scan state, `heads * headdim * d_state` floats.
+    state: ArenaRegion,
+    /// Persistent conv history ring, `3 * conv_cols` floats.
+    history: ArenaRegion,
+    /// Fused conv1d weights, `conv_cols * kernel` floats.
+    conv_weights: ArenaRegion,
+    /// Fused conv1d bias, `conv_cols` floats.
+    conv_bias: ArenaRegion,
+    /// Time step bias, `heads` floats.
+    dt_bias: ArenaRegion,
+    /// `A_log`, `heads` floats.
+    a_log: ArenaRegion,
+    /// D skip, `heads` floats.
+    d: ArenaRegion,
+}
+
+/// The Mamba-2 dimensions of one SSM layer.
+#[derive(Clone, Copy)]
+struct SsmShape {
+    /// `d_inner`, the width of the scan output.
+    inner: usize,
+    /// `n_group`, the number of groups sharing a `B`/`C` pair.
+    groups: usize,
+    /// `d_state`, the width of the state vector.
+    d_state: usize,
+    /// `dt_rank`, which is also the head count.
+    heads: usize,
+    /// `d_inner / heads`.
+    headdim: usize,
+    /// The causal conv1d kernel width.
+    kernel: usize,
+    /// `d_inner + 2 * n_group * d_state`, the fused conv1d width.
+    conv_cols: usize,
+    /// `2 * d_inner + 2 * n_group * d_state + dt_rank`, the in-projection
+    /// width.
+    in_projection: usize,
+    /// `d_inner / n_group`, the group norm width.
+    group_len: usize,
+}
+
+impl SsmShape {
+    fn new(config: &NemotronConfig) -> Result<Self, VulkanError> {
+        let inner = config.ssm_inner_size;
+        let groups = config.ssm_group_count;
+        let d_state = config.ssm_state_size;
+        let heads = config.ssm_time_step_rank;
+        let kernel = config.ssm_conv_kernel;
+        if inner == 0
+            || groups == 0
+            || d_state == 0
+            || heads == 0
+            || kernel < 2
+            || inner % heads != 0
+            || inner % groups != 0
+            || d_state % 16 != 0
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron-H SSM dimensions".into(),
+            ));
+        }
+        // `d_inner + 2 * n_group * d_state`, the fused conv1d width.
+        let conv_cols = inner
+            .checked_add(2 * groups * d_state)
+            .ok_or(VulkanError::OutOfMemory)?;
+        // `2 * d_inner + 2 * n_group * d_state + dt_rank`, the in-projection
+        // width.
+        let in_projection = 2 * inner + 2 * groups * d_state + heads;
+        Ok(Self {
+            inner,
+            groups,
+            d_state,
+            heads,
+            headdim: inner / heads,
+            kernel,
+            conv_cols,
+            in_projection,
+            group_len: inner / groups,
+        })
+    }
 }
 
 /// Arena layout for the Nemotron-3 Nano device session.
@@ -92,6 +206,27 @@ struct NemotronHArenaLayout {
     kv_v: ArenaRegion,
     kv_delta_k: ArenaRegion,
     kv_delta_v: ArenaRegion,
+    /// The Mamba-2 in-projection output, `rows * in_projection` floats.
+    /// The layout is `[z | x | B | C | dt]`, which is what
+    /// `split_mamba2_projection` returns on the CPU.
+    ssm_in_projection: ArenaRegion,
+    /// The post-SiLU conv1d output, `rows * conv_cols` floats, holding
+    /// `[x | B | C]`.
+    ssm_conv: ArenaRegion,
+    /// The softplus time step, `rows * heads` floats.
+    ssm_dt: ArenaRegion,
+    /// The per-head decay, `rows * heads` floats.
+    ssm_decay: ArenaRegion,
+    /// The scan output plus the D skip, `rows * inner` floats.
+    ssm_scan: ArenaRegion,
+    /// The z-gated scan output, `rows * inner` floats.
+    ssm_gated: ArenaRegion,
+    /// The group-normalised scan output, `rows * inner` floats.
+    ssm_normed: ArenaRegion,
+    /// The SSM output projection, `rows * n_embd` floats.
+    ssm_projection: ArenaRegion,
+    /// Per-layer SSM regions, indexed by the SSM layer's slot.
+    ssm_layers: Vec<SsmArena>,
     slots: Vec<Option<usize>>,
     total_size: usize,
 }
@@ -197,6 +332,50 @@ impl NemotronHArenaLayout {
         let kv_v = f32_region(&mut cursor, kv_cache)?;
         let kv_delta_k = f32_region(&mut cursor, kv_delta)?;
         let kv_delta_v = f32_region(&mut cursor, kv_delta)?;
+        // The Mamba-2 scratch is shared by every SSM layer: the layers run
+        // one after another, so only one layer's intermediate values are
+        // live at a time. The scan state and the conv history are the
+        // exception -- they carry the recurrence across tokens, so they
+        // get one region per layer.
+        let ssm = SsmShape::new(config)?;
+        let ssm_in_projection = f32_region(
+            &mut cursor,
+            product("SSM in-projection rows", &[rows, ssm.in_projection])?,
+        )?;
+        let ssm_conv = f32_region(
+            &mut cursor,
+            product("SSM conv rows", &[rows, ssm.conv_cols])?,
+        )?;
+        let ssm_dt = f32_region(&mut cursor, product("SSM dt rows", &[rows, ssm.heads])?)?;
+        let ssm_decay = f32_region(&mut cursor, product("SSM decay rows", &[rows, ssm.heads])?)?;
+        let ssm_scan = f32_region(&mut cursor, product("SSM scan rows", &[rows, ssm.inner])?)?;
+        let ssm_gated = f32_region(&mut cursor, product("SSM gated rows", &[rows, ssm.inner])?)?;
+        let ssm_normed = f32_region(
+            &mut cursor,
+            product("SSM normalised rows", &[rows, ssm.inner])?,
+        )?;
+        let ssm_projection = f32_region(
+            &mut cursor,
+            product("SSM projection rows", &[rows, n_embd])?,
+        )?;
+        let state_elements = product("SSM state", &[ssm.heads, ssm.headdim, ssm.d_state])?;
+        let history_elements = product("SSM conv history", &[3, ssm.conv_cols])?;
+        let conv_weight_elements = product("SSM conv weights", &[ssm.conv_cols, ssm.kernel])?;
+        let mut ssm_layers = Vec::new();
+        for layer in 0..config.n_layer {
+            if config.attention_layers.contains(&layer) || config.ffn_layers.contains(&layer) {
+                continue;
+            }
+            ssm_layers.push(SsmArena {
+                state: f32_region(&mut cursor, state_elements)?,
+                history: f32_region(&mut cursor, history_elements)?,
+                conv_weights: f32_region(&mut cursor, conv_weight_elements)?,
+                conv_bias: f32_region(&mut cursor, ssm.conv_cols)?,
+                dt_bias: f32_region(&mut cursor, ssm.heads)?,
+                a_log: f32_region(&mut cursor, ssm.heads)?,
+                d: f32_region(&mut cursor, ssm.heads)?,
+            });
+        }
         let mut slots = vec![None; config.n_layer];
         for (layer, slot) in slots.iter_mut().enumerate() {
             if config.attention_layers.contains(&layer) {
@@ -231,6 +410,15 @@ impl NemotronHArenaLayout {
             kv_v,
             kv_delta_k,
             kv_delta_v,
+            ssm_in_projection,
+            ssm_conv,
+            ssm_dt,
+            ssm_decay,
+            ssm_scan,
+            ssm_gated,
+            ssm_normed,
+            ssm_projection,
+            ssm_layers,
             slots,
             total_size: cursor,
         })
@@ -246,10 +434,23 @@ pub(crate) struct NemotronHVulkanSession {
     output: OperatorBindings,
     layout: NemotronHArenaLayout,
     config: NemotronConfig,
+    /// The Mamba-2 dimensions shared by every SSM layer.
+    ssm: SsmShape,
+    /// The SSM slot of each layer, `None` for the attention and FFN
+    /// layers.
+    ssm_slots: Vec<Option<usize>>,
     pub(crate) capacity: usize,
     max_rows: usize,
     rope: Vec<f32>,
     logits: Vec<f32>,
+    /// The number of tokens the recurrent state on the device covers.
+    ///
+    /// The Mamba-2 recurrence (the conv history and the scan state) and
+    /// the attention KV cache belong to a *sequence*, not to a call. The
+    /// host keeps the same state in the scratch pad, so the two must
+    /// agree on where the sequence starts: a fresh scratch pad means a
+    /// fresh sequence, and the device state has to be cleared to match.
+    committed_position: usize,
     /// Pipeline for the `ReLU(x)^2` activation, added at construction time.
     relu_square_pipeline: usize,
 }
@@ -262,6 +463,28 @@ fn required_weight<'a>(
     weight.ok_or_else(|| {
         VulkanError::UnsupportedShape(format!("missing Nemotron-H layer {layer} {name} weight"))
     })
+}
+
+/// Fetch one of a layer's F32 SSM weights and check its width.
+///
+/// The SSM weights are tiny next to the projections, so they live in the
+/// arena rather than in their own buffers.
+fn required_ssm_vector<'a>(
+    values: Option<&'a Vec<f32>>,
+    layer: usize,
+    name: &str,
+    expected: usize,
+) -> Result<&'a [f32], VulkanError> {
+    let values = values.ok_or_else(|| {
+        VulkanError::UnsupportedShape(format!("missing Nemotron-H layer {layer} {name} weight"))
+    })?;
+    if values.len() != expected {
+        return Err(VulkanError::UnsupportedShape(format!(
+            "Nemotron-H layer {layer} {name} has {} values, expected {expected}",
+            values.len()
+        )));
+    }
+    Ok(values.as_slice())
 }
 
 fn upload_weight(
@@ -321,6 +544,38 @@ fn check_eligibility(config: &NemotronConfig, model: &NemotronModel) -> Result<(
                     return Err(format!("layer {layer_index} missing FFN weight"));
                 }
             }
+        } else {
+            // Mamba-2 SSM layer.
+            for weight in [&layer.ssm_in, &layer.ssm_out] {
+                if let Some(weight) = weight {
+                    GpuWeightFormat::from_ggml_type(weight.ggml_type)
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    return Err(format!("layer {layer_index} missing SSM weight"));
+                }
+            }
+            let ssm = SsmShape::new(config).map_err(|error| error.to_string())?;
+            for (name, values, expected) in [
+                (
+                    "ssm_conv1d_w",
+                    layer.ssm_conv1d_w.as_ref(),
+                    ssm.conv_cols * ssm.kernel,
+                ),
+                ("ssm_conv1d_b", layer.ssm_conv1d_b.as_ref(), ssm.conv_cols),
+                ("ssm_dt_bias", layer.ssm_dt_bias.as_ref(), ssm.heads),
+                ("ssm_a_log", layer.ssm_a_log.as_ref(), ssm.heads),
+                ("ssm_d", layer.ssm_d.as_ref(), ssm.heads),
+                ("ssm_norm", layer.ssm_norm.as_ref(), ssm.inner),
+            ] {
+                let values =
+                    values.ok_or_else(|| format!("layer {layer_index} missing {name} weight"))?;
+                if values.len() != expected {
+                    return Err(format!(
+                        "layer {layer_index} {name} has {} values, expected {expected}",
+                        values.len()
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -340,6 +595,7 @@ impl NemotronHVulkanSession {
             return Ok(None);
         }
         let config = model.config.clone();
+        let ssm = SsmShape::new(&config)?;
         let layout = NemotronHArenaLayout::new(&config, capacity, max_rows)?;
         let descriptor_capacity = model.layers.iter().try_fold(3usize, |count, _| {
             count.checked_add(6).ok_or(VulkanError::OutOfMemory)
@@ -350,6 +606,8 @@ impl NemotronHVulkanSession {
             ops.add_shader(include_bytes!("../../shaders/bin/relu_square.spv"))?;
         let mut buffers = UploadedBuffers::new(context);
         let mut layers = Vec::with_capacity(config.n_layer);
+        let mut ssm_slots: Vec<Option<usize>> = vec![None; config.n_layer];
+        let mut ssm_slot = 0usize;
 
         for (layer_index, layer) in model.layers.iter().enumerate() {
             let norm_buffer = buffers.upload_f32(&layer.attn_norm)?;
@@ -402,7 +660,84 @@ impl NemotronHVulkanSession {
                     ffn: FfnBindings { up, down },
                 });
             } else {
-                layers.push(LayerBindings::Ssm);
+                // Mamba-2 SSM layer.
+                let ssm_in = required_weight(layer.ssm_in.as_ref(), layer_index, "ssm_in")?;
+                let ssm_out = required_weight(layer.ssm_out.as_ref(), layer_index, "ssm_out")?;
+                let input_projection = bind_weight(
+                    &mut ops,
+                    &mut buffers,
+                    ssm_in,
+                    "Nemotron-H SSM in projection",
+                )?;
+                let output_projection = bind_weight(
+                    &mut ops,
+                    &mut buffers,
+                    ssm_out,
+                    "Nemotron-H SSM out projection",
+                )?;
+                let group_norm_buffer = buffers.upload_f32(required_ssm_vector(
+                    layer.ssm_norm.as_ref(),
+                    layer_index,
+                    "ssm_norm",
+                    ssm.inner,
+                )?)?;
+                let group_norm = ops.bind_buffers(&[group_norm_buffer])?;
+                // The F32 weights live in the arena; the scan state and the
+                // conv history are zeroed here because they are the
+                // recurrence's initial condition.
+                let arena = layout.ssm_layers[ssm_slot];
+                ops.write_f32(
+                    arena.conv_weights,
+                    required_ssm_vector(
+                        layer.ssm_conv1d_w.as_ref(),
+                        layer_index,
+                        "ssm_conv1d_w",
+                        ssm.conv_cols * ssm.kernel,
+                    )?,
+                )?;
+                ops.write_f32(
+                    arena.conv_bias,
+                    required_ssm_vector(
+                        layer.ssm_conv1d_b.as_ref(),
+                        layer_index,
+                        "ssm_conv1d_b",
+                        ssm.conv_cols,
+                    )?,
+                )?;
+                ops.write_f32(
+                    arena.dt_bias,
+                    required_ssm_vector(
+                        layer.ssm_dt_bias.as_ref(),
+                        layer_index,
+                        "ssm_dt_bias",
+                        ssm.heads,
+                    )?,
+                )?;
+                ops.write_f32(
+                    arena.a_log,
+                    required_ssm_vector(
+                        layer.ssm_a_log.as_ref(),
+                        layer_index,
+                        "ssm_a_log",
+                        ssm.heads,
+                    )?,
+                )?;
+                ops.write_f32(
+                    arena.d,
+                    required_ssm_vector(layer.ssm_d.as_ref(), layer_index, "ssm_d", ssm.heads)?,
+                )?;
+                ops.zero_region(arena.state)?;
+                ops.zero_region(arena.history)?;
+                ssm_slots[layer_index] = Some(ssm_slot);
+                ssm_slot += 1;
+                layers.push(LayerBindings::Ssm {
+                    norm,
+                    ssm: SsmBindings {
+                        input_projection,
+                        output_projection,
+                        group_norm,
+                    },
+                });
             }
         }
 
@@ -420,21 +755,24 @@ impl NemotronHVulkanSession {
             output,
             layout,
             config,
+            ssm,
+            ssm_slots,
             capacity,
             max_rows,
             rope: vec![0.0; product("RoPE rows", &[rope_dim, max_rows])?],
             logits: vec![0.0; model.config.vocab_size],
+            committed_position: 0,
             relu_square_pipeline,
         }))
     }
 
     /// Run a contiguous range of device-recorded layers over the given
-    /// hidden-state rows. Stage 1 uses this to process the FFN/attention
-    /// runs between the CPU SSM layers; stage 2 calls it once with the
-    /// whole stack.
+    /// hidden-state rows.
     ///
-    /// The hidden state is written to and read back from the arena, so the
-    /// host can run the SSM layers in between two calls.
+    /// The whole stack is recorded in one call. The hidden state is
+    /// written to and read back from the arena, so the host can run a
+    /// CPU-only branch in between two calls (the `RMI_NH_CPU_*` overrides
+    /// exist for exactly that).
     pub(crate) fn forward_layers(
         &mut self,
         input: &[f32],
@@ -529,13 +867,78 @@ impl NemotronHVulkanSession {
                         rows,
                     )?;
                 }
-                LayerBindings::Ssm => {
-                    // Stage 1: SSM layers run on the CPU. The device path
-                    // cannot proceed without them, so this is a hard error
-                    // for now; stage 2 replaces it with device shaders.
-                    return Err(VulkanError::UnsupportedShape(
-                        "Nemotron-H SSM layers are not yet recorded on the device".into(),
-                    ));
+                LayerBindings::Ssm {
+                    norm,
+                    ssm: ssm_bindings,
+                } => {
+                    // The pre-norm runs for every row at once.
+                    self.ops.record_rms_norm_rows(
+                        &commands,
+                        *norm,
+                        self.layout.x,
+                        self.layout.normed,
+                        n_embd,
+                        config.norm_eps,
+                        rows,
+                        n_embd,
+                        n_embd,
+                    )?;
+                    // The in-projection is a plain matmul, so it runs for
+                    // every row at once. Its output is
+                    // `[z | x | B | C | dt]`.
+                    self.ops.record_weight_matmul_rows(
+                        &commands,
+                        ssm_bindings.input_projection,
+                        self.layout.normed,
+                        self.layout.q8,
+                        self.layout.q8_scales,
+                        self.layout.q4_1_input_sums,
+                        self.layout.q8k,
+                        self.layout.q8k_scales,
+                        &[(
+                            self.layout.ssm_in_projection,
+                            self.ssm.in_projection,
+                            self.ssm.in_projection * 4,
+                        )],
+                        n_embd,
+                        rows,
+                        n_embd,
+                    )?;
+                    // The conv1d, the scan and the group norm carry the
+                    // recurrence, so they run one token at a time: the
+                    // conv history and the scan state belong to the
+                    // sequence, not to the row.
+                    for row in 0..rows {
+                        self.record_ssm_row(
+                            &commands,
+                            layer_index,
+                            ssm_bindings,
+                            row,
+                            base_position + row,
+                        )?;
+                    }
+                    // The output projection is a plain matmul again.
+                    self.ops.record_weight_matmul_rows(
+                        &commands,
+                        ssm_bindings.output_projection,
+                        self.layout.ssm_normed,
+                        self.layout.q8,
+                        self.layout.q8_scales,
+                        self.layout.q4_1_input_sums,
+                        self.layout.q8k,
+                        self.layout.q8k_scales,
+                        &[(self.layout.ssm_projection, n_embd, n_embd * 4)],
+                        self.ssm.inner,
+                        rows,
+                        self.ssm.inner,
+                    )?;
+                    self.ops.record_add_rows(
+                        &commands,
+                        self.layout.x,
+                        self.layout.ssm_projection,
+                        n_embd,
+                        rows,
+                    )?;
                 }
             }
         }
@@ -549,6 +952,42 @@ impl NemotronHVulkanSession {
         let mut hidden = vec![0.0; rows * self.config.n_embd];
         self.ops.read_f32_into(self.layout.x, &mut hidden)?;
         Ok(hidden)
+    }
+
+    /// The number of tokens the device's recurrent state covers.
+    pub(crate) fn committed_position(&self) -> usize {
+        self.committed_position
+    }
+
+    /// Record that the device's recurrent state now covers `position`
+    /// tokens.
+    pub(crate) fn set_committed_position(&mut self, position: usize) {
+        self.committed_position = position;
+    }
+
+    /// Clear the recurrent state: the KV cache, the Mamba-2 conv history
+    /// and the Mamba-2 scan state.
+    ///
+    /// The host's scratch pad carries the same state, and a fresh scratch
+    /// pad means a fresh sequence. Without this the device would carry the
+    /// previous sequence's recurrence into the new one, and the conv
+    /// history alone is enough to move every SSM layer's output.
+    pub(crate) fn reset(&mut self) -> Result<(), VulkanError> {
+        let mut regions = vec![
+            self.layout.kv_k,
+            self.layout.kv_v,
+            self.layout.kv_delta_k,
+            self.layout.kv_delta_v,
+        ];
+        for arena in &self.layout.ssm_layers {
+            regions.push(arena.state);
+            regions.push(arena.history);
+        }
+        for region in regions {
+            self.ops.zero_region(region)?;
+        }
+        self.committed_position = 0;
+        Ok(())
     }
 
     /// The logits produced by the last `finish_logits` call.
@@ -599,6 +1038,138 @@ impl NemotronHVulkanSession {
             ));
         }
         Ok(())
+    }
+
+    /// Record one token of a Mamba-2 SSM layer.
+    ///
+    /// The order follows the CPU path (`src/models/nemotron_h/trunk/forward.rs`):
+    /// the in-projection has already run for every row, and this records the
+    /// conv1d, the time step, the scan, the z gate and the group norm for
+    /// one token.
+    fn record_ssm_row(
+        &self,
+        commands: &TokenCommands<'_>,
+        layer_index: usize,
+        ssm_bindings: &SsmBindings,
+        row: usize,
+        position: usize,
+    ) -> Result<(), VulkanError> {
+        let ssm = self.ssm;
+        let slot = self.ssm_slots[layer_index].ok_or_else(|| {
+            VulkanError::UnsupportedShape("Nemotron-H SSM layer has no arena slot".into())
+        })?;
+        let arena = self.layout.ssm_layers[slot];
+        let row_base = row * ssm.in_projection;
+        let in_projection = self.layout.ssm_in_projection;
+        let conv_output = ArenaRegion {
+            offset: self.layout.ssm_conv.offset + row * ssm.conv_cols * 4,
+            size: ssm.conv_cols * 4,
+        };
+        let dt_output = ArenaRegion {
+            offset: self.layout.ssm_dt.offset + row * ssm.heads * 4,
+            size: ssm.heads * 4,
+        };
+        let decay_output = ArenaRegion {
+            offset: self.layout.ssm_decay.offset + row * ssm.heads * 4,
+            size: ssm.heads * 4,
+        };
+        let scan_output = ArenaRegion {
+            offset: self.layout.ssm_scan.offset + row * ssm.inner * 4,
+            size: ssm.inner * 4,
+        };
+        let gated_output = ArenaRegion {
+            offset: self.layout.ssm_gated.offset + row * ssm.inner * 4,
+            size: ssm.inner * 4,
+        };
+
+        // The in-projection output is `[z | x | B | C | dt]`; the conv1d
+        // reads the contiguous `[x | B | C]` part.
+        let conv_input = ArenaRegion {
+            offset: in_projection.offset + (row_base + ssm.inner) * 4,
+            size: ssm.conv_cols * 4,
+        };
+        self.ops.record_nemotron_h_ssm_conv(
+            commands,
+            conv_input,
+            conv_output,
+            arena.conv_weights,
+            arena.conv_bias,
+            arena.history,
+            ssm.conv_cols,
+            ssm.kernel,
+            position % 3,
+        )?;
+
+        // The time step is the tail of the in-projection output.
+        let dt_input = ArenaRegion {
+            offset: in_projection.offset + (row_base + ssm.inner + ssm.conv_cols) * 4,
+            size: ssm.heads * 4,
+        };
+        self.ops.record_nemotron_h_ssm_dt(
+            commands,
+            dt_input,
+            arena.dt_bias,
+            arena.a_log,
+            dt_output,
+            decay_output,
+            ssm.heads,
+        )?;
+
+        // The scan reads `x`, `B` and `C` out of the conv1d output.
+        let group_width = ssm.groups * ssm.d_state * 4;
+        let x = ArenaRegion {
+            offset: conv_output.offset,
+            size: ssm.inner * 4,
+        };
+        let b = ArenaRegion {
+            offset: conv_output.offset + ssm.inner * 4,
+            size: group_width,
+        };
+        let c = ArenaRegion {
+            offset: conv_output.offset + ssm.inner * 4 + group_width,
+            size: group_width,
+        };
+        self.ops.record_nemotron_h_ssm_scan(
+            commands,
+            arena.state,
+            x,
+            b,
+            c,
+            dt_output,
+            decay_output,
+            arena.d,
+            scan_output,
+            ssm.inner,
+            ssm.heads,
+            ssm.headdim,
+            ssm.d_state,
+            ssm.groups,
+        )?;
+
+        // The z gate reads the first `d_inner` values of the
+        // in-projection row.
+        let z = ArenaRegion {
+            offset: in_projection.offset + row_base * 4,
+            size: ssm.inner * 4,
+        };
+        self.ops
+            .record_nemotron_h_ssm_gate(commands, z, scan_output, gated_output, ssm.inner)?;
+
+        // The group norm writes into this row's slot of the normalised
+        // buffer, which the output projection reads.
+        let normed = ArenaRegion {
+            offset: self.layout.ssm_normed.offset + row * ssm.inner * 4,
+            size: ssm.inner * 4,
+        };
+        self.ops.record_nemotron_h_ssm_norm(
+            commands,
+            ssm_bindings.group_norm,
+            gated_output,
+            normed,
+            ssm.group_len,
+            ssm.groups,
+            self.config.norm_eps,
+        )
     }
 
     fn record_qkv(
@@ -843,4 +1414,360 @@ fn check_device_eligibility(shader_float16: bool) -> Result<(), String> {
     shader_float16
         .then_some(())
         .ok_or_else(|| "selected Vulkan device does not support shaderFloat16".into())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Shader-level parity checks for the Mamba-2 SSM kernels.
+    //!
+    //! The full model test compares the logits, which is a poor debugging
+    //! tool when the difference is one ULP in a SiLU: the recurrence
+    //! amplifies it by four orders of magnitude and the logits are then
+    //! far apart. These tests run each kernel against the CPU
+    //! implementation on the same inputs and compare the bits, so a
+    //! failure names the kernel that moved.
+
+    use super::*;
+    use crate::vulkan::ops::TokenCommands;
+
+    /// A deterministic pseudo-random sequence, so a failure is
+    /// reproducible.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u32(&mut self) -> u32 {
+            // xorshift64*
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32
+        }
+
+        /// A value in `[-scale, scale]`.
+        fn value(&mut self, scale: f32) -> f32 {
+            let raw = self.next_u32() as f32 / (u32::MAX as f32 + 1.0);
+            (raw * 2.0 - 1.0) * scale
+        }
+    }
+
+    struct Harness {
+        ops: Qwen3Ops<'static>,
+        cursor: usize,
+    }
+
+    impl Harness {
+        fn new(context: &'static VulkanContext, bytes: usize) -> Self {
+            let ops = Qwen3Ops::new_device_local_with_size(context, bytes, 8).expect("arena");
+            Self { ops, cursor: 0 }
+        }
+
+        /// Reserve a region of `elements` F32 values.
+        fn region(&mut self, elements: usize) -> ArenaRegion {
+            let offset = (self.cursor + 15) & !15;
+            self.cursor = offset + elements * 4;
+            ArenaRegion {
+                offset,
+                size: elements * 4,
+            }
+        }
+    }
+
+    fn context() -> Option<&'static VulkanContext> {
+        let context = Box::leak(Box::new(
+            crate::vulkan::VulkanContext::new().expect("Vulkan context"),
+        ));
+        Some(context)
+    }
+
+    /// Compare two buffers bit for bit and report the first difference in
+    /// ULPs, so a one-bit rounding difference is distinguishable from a
+    /// structural one.
+    fn assert_bits_match(actual: &[f32], expected: &[f32], label: &str) {
+        assert_eq!(actual.len(), expected.len(), "{label} length");
+        for (index, (&a, &b)) in actual.iter().zip(expected).enumerate() {
+            if a.to_bits() != b.to_bits() {
+                let ulp = (a.to_bits() as i64 - b.to_bits() as i64).abs();
+                let relative = (f64::from(a) - f64::from(b)) / f64::from(b).abs().max(1e-30);
+                panic!(
+                    "{label} element {index} differs: actual={a:e} expected={b:e} \
+                     ulp={ulp} relative={relative:e}"
+                );
+            }
+        }
+    }
+
+    /// The CPU's `mamba2_conv_step`, transcribed.
+    fn cpu_conv_step(
+        weights: &[f32],
+        bias: &[f32],
+        history: &mut [f32],
+        current: &[f32],
+        kernel: usize,
+    ) -> Vec<f32> {
+        let cols = current.len();
+        let mut output = vec![0.0; cols];
+        for c in 0..cols {
+            for k in 0..kernel - 1 {
+                output[c] += weights[c * kernel + k] * history[k * cols + c];
+            }
+            output[c] += weights[c * kernel + kernel - 1] * current[c];
+            output[c] += bias[c];
+        }
+        if kernel > 2 {
+            history.copy_within(cols.., 0);
+        }
+        history[(kernel - 2) * cols..].copy_from_slice(current);
+        output
+    }
+
+    #[test]
+    fn ssm_conv_matches_cpu_bits() {
+        let Some(context) = context() else { return };
+        const COLS: usize = 9728;
+        const KERNEL: usize = 4;
+        let mut harness = Harness::new(context, 4 * 1024 * 1024);
+        let input = harness.region(COLS);
+        let output = harness.region(COLS);
+        let weights = harness.region(COLS * KERNEL);
+        let bias = harness.region(COLS);
+        let history = harness.region(COLS * 3);
+        let mut rng = Rng(0x1234_5678_9abc_def0);
+        let weight_values: Vec<f32> = (0..COLS * KERNEL).map(|_| rng.value(0.5)).collect();
+        let bias_values: Vec<f32> = (0..COLS).map(|_| rng.value(0.5)).collect();
+        harness.ops.write_f32(weights, &weight_values).unwrap();
+        harness.ops.write_f32(bias, &bias_values).unwrap();
+        harness.ops.zero_region(history).unwrap();
+
+        // Three tokens, so the conv history's ring wraps once.
+        let tokens: Vec<Vec<f32>> = (0..3)
+            .map(|_| (0..COLS).map(|_| rng.value(2.0)).collect())
+            .collect();
+        for (token, current) in tokens.iter().enumerate() {
+            harness.ops.write_f32(input, current).unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            harness
+                .ops
+                .record_nemotron_h_ssm_conv(
+                    &commands,
+                    input,
+                    output,
+                    weights,
+                    bias,
+                    history,
+                    COLS,
+                    KERNEL,
+                    token % 3,
+                )
+                .unwrap();
+            commands.submit_and_wait().unwrap();
+
+            // The CPU path keeps a shifting history, so replay it from
+            // the start for every token.
+            let mut history_cpu = vec![0.0; COLS * (KERNEL - 1)];
+            for previous in tokens.iter().take(token) {
+                let _ = cpu_conv_step(
+                    &weight_values,
+                    &bias_values,
+                    &mut history_cpu,
+                    previous,
+                    KERNEL,
+                );
+            }
+            let mut expected = cpu_conv_step(
+                &weight_values,
+                &bias_values,
+                &mut history_cpu,
+                current,
+                KERNEL,
+            );
+            crate::ops::activation::silu_ggml_inplace(&mut expected);
+            let mut actual = vec![0.0; COLS];
+            harness.ops.read_f32_into(output, &mut actual).unwrap();
+            assert_bits_match(&actual, &expected, &format!("SSM conv1d token {token}"));
+        }
+    }
+
+    #[test]
+    fn ssm_dt_matches_cpu_bits() {
+        let Some(context) = context() else { return };
+        const HEADS: usize = 96;
+        let mut harness = Harness::new(context, 64 * 1024);
+        let dt = harness.region(HEADS);
+        let dt_bias = harness.region(HEADS);
+        let a_log = harness.region(HEADS);
+        let out_dt = harness.region(HEADS);
+        let out_decay = harness.region(HEADS);
+        let mut rng = Rng(0x0fed_cba9_8765_4321);
+        let dt_values: Vec<f32> = (0..HEADS).map(|_| rng.value(3.0)).collect();
+        let bias_values: Vec<f32> = (0..HEADS).map(|_| rng.value(1.0)).collect();
+        let a_log_values: Vec<f32> = (0..HEADS).map(|_| -rng.value(20.0)).collect();
+        harness.ops.write_f32(dt, &dt_values).unwrap();
+        harness.ops.write_f32(dt_bias, &bias_values).unwrap();
+        harness.ops.write_f32(a_log, &a_log_values).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        harness
+            .ops
+            .record_nemotron_h_ssm_dt(&commands, dt, dt_bias, a_log, out_dt, out_decay, HEADS)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let mut actual_dt = vec![0.0; HEADS];
+        let mut actual_decay = vec![0.0; HEADS];
+        harness.ops.read_f32_into(out_dt, &mut actual_dt).unwrap();
+        harness
+            .ops
+            .read_f32_into(out_decay, &mut actual_decay)
+            .unwrap();
+        for head in 0..HEADS {
+            let z = dt_values[head] + bias_values[head];
+            let expected_dt = if z > 20.0 { z } else { (1.0 + z.exp()).ln() };
+            let expected_decay = (expected_dt * a_log_values[head]).exp();
+            assert_bits_match(
+                &actual_dt[head..head + 1],
+                &[expected_dt],
+                &format!("SSM dt head {head}"),
+            );
+            assert_bits_match(
+                &actual_decay[head..head + 1],
+                &[expected_decay],
+                &format!("SSM decay head {head}"),
+            );
+        }
+    }
+
+    #[test]
+    fn ssm_scan_matches_cpu_bits() {
+        let Some(context) = context() else { return };
+        const HEADS: usize = 96;
+        const HEADDIM: usize = 80;
+        const D_STATE: usize = 128;
+        const GROUPS: usize = 8;
+        const INNER: usize = HEADS * HEADDIM;
+        let mut harness = Harness::new(context, 16 * 1024 * 1024);
+        let state = harness.region(HEADS * HEADDIM * D_STATE);
+        let x = harness.region(INNER);
+        let b = harness.region(GROUPS * D_STATE);
+        let c = harness.region(GROUPS * D_STATE);
+        let dt = harness.region(HEADS);
+        let decay = harness.region(HEADS);
+        let d = harness.region(HEADS);
+        let output = harness.region(INNER);
+        let mut rng = Rng(0xdead_beef_cafe_0001);
+        let x_values: Vec<f32> = (0..INNER).map(|_| rng.value(2.0)).collect();
+        let b_values: Vec<f32> = (0..GROUPS * D_STATE).map(|_| rng.value(1.0)).collect();
+        let c_values: Vec<f32> = (0..GROUPS * D_STATE).map(|_| rng.value(1.0)).collect();
+        let dt_values: Vec<f32> = (0..HEADS).map(|_| rng.value(0.5)).collect();
+        let decay_values: Vec<f32> = (0..HEADS).map(|_| rng.value(0.5)).collect();
+        let d_values: Vec<f32> = (0..HEADS).map(|_| rng.value(1.0)).collect();
+        let mut state_values: Vec<f32> = (0..HEADS * HEADDIM * D_STATE)
+            .map(|_| rng.value(0.5))
+            .collect();
+        harness.ops.write_f32(x, &x_values).unwrap();
+        harness.ops.write_f32(b, &b_values).unwrap();
+        harness.ops.write_f32(c, &c_values).unwrap();
+        harness.ops.write_f32(dt, &dt_values).unwrap();
+        harness.ops.write_f32(decay, &decay_values).unwrap();
+        harness.ops.write_f32(d, &d_values).unwrap();
+        harness.ops.write_f32(state, &state_values).unwrap();
+
+        let commands = TokenCommands::begin(context).unwrap();
+        harness
+            .ops
+            .record_nemotron_h_ssm_scan(
+                &commands, state, x, b, c, dt, decay, d, output, INNER, HEADS, HEADDIM, D_STATE,
+                GROUPS,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+
+        // The CPU path, transcribed.
+        let heads_per_group = HEADS / GROUPS;
+        let mut expected = vec![0.0; INNER];
+        for head in 0..HEADS {
+            let group = head / heads_per_group;
+            for channel in 0..HEADDIM {
+                let row = head * HEADDIM + channel;
+                let start = row * D_STATE;
+                let mut state_row = state_values[start..start + D_STATE].to_vec();
+                let sumf = crate::models::nemotron_h::trunk::forward::ssm_scan_row(
+                    &mut state_row,
+                    &b_values[group * D_STATE..(group + 1) * D_STATE],
+                    &c_values[group * D_STATE..(group + 1) * D_STATE],
+                    decay_values[head],
+                    x_values[row] * dt_values[head],
+                );
+                expected[row] = sumf + d_values[head] * x_values[row];
+                state_values[start..start + D_STATE].copy_from_slice(&state_row);
+            }
+        }
+        let mut actual = vec![0.0; INNER];
+        harness.ops.read_f32_into(output, &mut actual).unwrap();
+        assert_bits_match(&actual, &expected, "SSM scan");
+    }
+
+    #[test]
+    fn ssm_gate_matches_cpu_bits() {
+        let Some(context) = context() else { return };
+        const INNER: usize = 7680;
+        let mut harness = Harness::new(context, 1024 * 1024);
+        let z = harness.region(INNER);
+        let y = harness.region(INNER);
+        let output = harness.region(INNER);
+        let mut rng = Rng(0x5555_aaaa_3333_7777);
+        let z_values: Vec<f32> = (0..INNER).map(|_| rng.value(3.0)).collect();
+        let y_values: Vec<f32> = (0..INNER).map(|_| rng.value(3.0)).collect();
+        harness.ops.write_f32(z, &z_values).unwrap();
+        harness.ops.write_f32(y, &y_values).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        harness
+            .ops
+            .record_nemotron_h_ssm_gate(&commands, z, y, output, INNER)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let mut expected = z_values.clone();
+        crate::ops::activation::silu_ggml_inplace(&mut expected);
+        for index in 0..INNER {
+            expected[index] *= y_values[index];
+        }
+        let mut actual = vec![0.0; INNER];
+        harness.ops.read_f32_into(output, &mut actual).unwrap();
+        assert_bits_match(&actual, &expected, "SSM gate");
+    }
+
+    #[test]
+    fn ssm_norm_matches_cpu_bits() {
+        let Some(context) = context() else { return };
+        const INNER: usize = 7680;
+        const GROUPS: usize = 8;
+        const GROUP_LEN: usize = INNER / GROUPS;
+        let mut harness = Harness::new(context, 1024 * 1024);
+        let input = harness.region(INNER);
+        let output = harness.region(INNER);
+        let mut rng = Rng(0x7777_2222_9999_0000);
+        let input_values: Vec<f32> = (0..INNER).map(|_| rng.value(3.0)).collect();
+        let norm_values: Vec<f32> = (0..INNER).map(|_| rng.value(1.0)).collect();
+        harness.ops.write_f32(input, &input_values).unwrap();
+        let mut buffers = crate::vulkan::dense::UploadedBuffers::new(context);
+        let weight_buffer = buffers.upload_f32(&norm_values).unwrap();
+        let bindings = harness.ops.bind_buffers(&[weight_buffer]).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        harness
+            .ops
+            .record_nemotron_h_ssm_norm(&commands, bindings, input, output, GROUP_LEN, GROUPS, 1e-5)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let mut expected = input_values.clone();
+        for group in 0..GROUPS {
+            let range = group * GROUP_LEN..(group + 1) * GROUP_LEN;
+            let slice = &mut expected[range.clone()];
+            let mean_sq = (crate::ops::sum_sq_f32(slice) / GROUP_LEN as f64) as f32;
+            let rstd = 1.0 / (mean_sq + 1e-5).sqrt();
+            for (offset, value) in slice.iter_mut().enumerate() {
+                *value = *value * rstd * norm_values[range.start + offset];
+            }
+        }
+        let mut actual = vec![0.0; INNER];
+        harness.ops.read_f32_into(output, &mut actual).unwrap();
+
+        assert_bits_match(&actual, &expected, "SSM group norm");
+    }
 }

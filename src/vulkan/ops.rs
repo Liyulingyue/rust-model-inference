@@ -103,6 +103,20 @@ const ATTENTION_VALUES_F32_KV_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_values_f32_kv.spv");
 /// Softmax that stores F32 probabilities instead of rounding them to F16.
 const SOFTMAX_F32_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax_f32.spv");
+/// Nemotron-3 Nano Mamba-2 depthwise causal conv1d fused with its SiLU.
+const NEMOTRON_H_SSM_CONV_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_conv.spv");
+/// Nemotron-3 Nano Mamba-2 softplus time step and per-head decay.
+const NEMOTRON_H_SSM_DT_SHADER: &[u8] = include_bytes!("../../shaders/bin/nemotron_h_ssm_dt.spv");
+/// Nemotron-3 Nano Mamba-2 selective scan.
+const NEMOTRON_H_SSM_SCAN_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_scan.spv");
+/// Nemotron-3 Nano Mamba-2 z gate.
+const NEMOTRON_H_SSM_GATE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_gate.spv");
+/// Nemotron-3 Nano Mamba-2 group RMSNorm.
+const NEMOTRON_H_SSM_NORM_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_norm.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -129,6 +143,11 @@ const KV_WRITE_F32: usize = 50;
 const ATTENTION_SCORES_F32: usize = 51;
 const ATTENTION_VALUES_F32_KV: usize = 52;
 const SOFTMAX_F32: usize = 53;
+const NEMOTRON_H_SSM_CONV: usize = 54;
+const NEMOTRON_H_SSM_DT: usize = 55;
+const NEMOTRON_H_SSM_SCAN: usize = 56;
+const NEMOTRON_H_SSM_GATE: usize = 57;
+const NEMOTRON_H_SSM_NORM: usize = 58;
 const SILU_MUL: usize = 15;
 const ADD: usize = 16;
 const QWEN35_DENSE_PREPARE: usize = 17;
@@ -301,6 +320,11 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "attention_scores_f32",
     "attention_values_f32_kv",
     "softmax_f32",
+    "nemotron_h_ssm_conv",
+    "nemotron_h_ssm_dt",
+    "nemotron_h_ssm_scan",
+    "nemotron_h_ssm_gate",
+    "nemotron_h_ssm_norm",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -426,7 +450,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 54] = [
+const OPERATOR_SHADERS: [&[u8]; 59] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -481,6 +505,11 @@ const OPERATOR_SHADERS: [&[u8]; 54] = [
     ATTENTION_SCORES_F32_SHADER,
     ATTENTION_VALUES_F32_KV_SHADER,
     SOFTMAX_F32_SHADER,
+    NEMOTRON_H_SSM_CONV_SHADER,
+    NEMOTRON_H_SSM_DT_SHADER,
+    NEMOTRON_H_SSM_SCAN_SHADER,
+    NEMOTRON_H_SSM_GATE_SHADER,
+    NEMOTRON_H_SSM_NORM_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5072,6 +5101,239 @@ impl<'a> Qwen3Ops<'a> {
                 self.pipelines[SOFTMAX_F32],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 depthwise causal conv1d, fused with the SiLU
+    /// that follows it.
+    ///
+    /// `input` is the contiguous `[x | B | C]` part of the in-projection
+    /// output: the in-projection writes `[z | x | B | C | dt]`, and the
+    /// conv1d sees everything but the `z` half, which is the gate.
+    ///
+    /// `slot` selects the conv history's ring slot for this token. The ring
+    /// holds three tokens, so the slot is the token's position modulo
+    /// three; the CPU path shifts the history instead, and the ring keeps
+    /// the same three values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_h_ssm_conv(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weights: ArenaRegion,
+        bias: ArenaRegion,
+        history: ArenaRegion,
+        cols: usize,
+        kernel: usize,
+        slot: usize,
+    ) -> Result<(), VulkanError> {
+        if cols == 0 || kernel == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron-H SSM conv1d shape".into(),
+            ));
+        }
+        let push = [
+            self.f32_word(input, cols, "Nemotron-H SSM conv input")?,
+            self.f32_word(output, cols, "Nemotron-H SSM conv output")?,
+            self.f32_word(weights, cols * kernel, "Nemotron-H SSM conv weights")?,
+            self.f32_word(bias, cols, "Nemotron-H SSM conv bias")?,
+            self.f32_word(history, cols * 3, "Nemotron-H SSM conv history")?,
+            as_u32(cols, "Nemotron-H SSM conv columns")?,
+            as_u32(kernel, "Nemotron-H SSM conv kernel")?,
+            as_u32(slot, "Nemotron-H SSM conv history slot")?,
+        ];
+        // Every invocation owns four channels, because ggml's SiLU picks
+        // the exponential's fast or overflow path per group of four lanes.
+        let [x, y, z] = row_dispatch(cols.div_ceil(256), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_CONV],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 softplus time step and per-head decay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_h_ssm_dt(
+        &self,
+        commands: &TokenCommands<'_>,
+        dt: ArenaRegion,
+        dt_bias: ArenaRegion,
+        a_log: ArenaRegion,
+        out_dt: ArenaRegion,
+        out_decay: ArenaRegion,
+        heads: usize,
+    ) -> Result<(), VulkanError> {
+        if heads == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM needs at least one head".into(),
+            ));
+        }
+        let push = [
+            self.f32_word(dt, heads, "Nemotron-H SSM dt")?,
+            self.f32_word(dt_bias, heads, "Nemotron-H SSM dt bias")?,
+            self.f32_word(a_log, heads, "Nemotron-H SSM A log")?,
+            self.f32_word(out_dt, heads, "Nemotron-H SSM dt output")?,
+            self.f32_word(out_decay, heads, "Nemotron-H SSM decay output")?,
+            as_u32(heads, "Nemotron-H SSM heads")?,
+        ];
+        let [x, y, z] = row_dispatch(heads.div_ceil(64), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_DT],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 selective scan, with the D skip.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_h_ssm_scan(
+        &self,
+        commands: &TokenCommands<'_>,
+        state: ArenaRegion,
+        x: ArenaRegion,
+        b: ArenaRegion,
+        c: ArenaRegion,
+        dt: ArenaRegion,
+        decay: ArenaRegion,
+        d: ArenaRegion,
+        output: ArenaRegion,
+        inner: usize,
+        heads: usize,
+        headdim: usize,
+        d_state: usize,
+        groups: usize,
+    ) -> Result<(), VulkanError> {
+        if heads == 0 || headdim == 0 || d_state == 0 || groups == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron-H SSM scan shape".into(),
+            ));
+        }
+        let rows = heads * headdim;
+        let push = [
+            self.f32_word(state, rows * d_state, "Nemotron-H SSM state")?,
+            self.f32_word(x, inner, "Nemotron-H SSM scan x")?,
+            self.f32_word(b, groups * d_state, "Nemotron-H SSM scan B")?,
+            self.f32_word(c, groups * d_state, "Nemotron-H SSM scan C")?,
+            self.f32_word(dt, heads, "Nemotron-H SSM scan dt")?,
+            self.f32_word(decay, heads, "Nemotron-H SSM scan decay")?,
+            self.f32_word(d, heads, "Nemotron-H SSM scan D")?,
+            self.f32_word(output, inner, "Nemotron-H SSM scan output")?,
+            as_u32(inner, "Nemotron-H SSM inner size")?,
+            as_u32(heads, "Nemotron-H SSM heads")?,
+            as_u32(headdim, "Nemotron-H SSM head dimension")?,
+            as_u32(d_state, "Nemotron-H SSM state size")?,
+            as_u32(groups, "Nemotron-H SSM groups")?,
+        ];
+        // Sixteen lanes cover one state row and a 64-lane group covers four.
+        let [x, y, z] = row_dispatch(rows.div_ceil(4), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_SCAN],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 z gate: `silu(z) * y`.
+    pub(crate) fn record_nemotron_h_ssm_gate(
+        &self,
+        commands: &TokenCommands<'_>,
+        z: ArenaRegion,
+        y: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        if count == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM gate needs a nonzero width".into(),
+            ));
+        }
+        let push = [
+            self.f32_word(z, count, "Nemotron-H SSM gate z")?,
+            self.f32_word(y, count, "Nemotron-H SSM gate y")?,
+            self.f32_word(output, count, "Nemotron-H SSM gate output")?,
+            as_u32(count, "Nemotron-H SSM gate width")?,
+        ];
+        // Every invocation owns four channels, because ggml's SiLU picks
+        // the exponential's fast or overflow path per group of four lanes.
+        let [x, y, z] = row_dispatch(count.div_ceil(256), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_GATE],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 group RMSNorm.
+    ///
+    /// One workgroup per group; `gl_WorkGroupID.x` selects the group. The
+    /// group weights live in the descriptor set rather than in the arena,
+    /// because each group has its own weight slice.
+    pub(crate) fn record_nemotron_h_ssm_norm(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        group_len: usize,
+        groups: usize,
+        eps: f32,
+    ) -> Result<(), VulkanError> {
+        if group_len == 0 || groups == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM norm needs a nonzero group".into(),
+            ));
+        }
+        let total = groups * group_len;
+        // The weight buffer is the descriptor set's second binding; the
+        // first one is the arena.
+        bindings.require(1, f32_bytes(total)?, "SSM norm weight")?;
+        let push = [
+            self.f32_word(input, total, "Nemotron-H SSM norm input")?,
+            0,
+            self.f32_word(output, total, "Nemotron-H SSM norm output")?,
+            as_u32(group_len, "Nemotron-H SSM norm group length")?,
+            as_u32(groups, "Nemotron-H SSM norm groups")?,
+            eps.to_bits(),
+            as_u32(group_len, "Nemotron-H SSM norm input stride")?,
+            as_u32(group_len, "Nemotron-H SSM norm output stride")?,
+        ];
+        let [x, y, z] = row_dispatch(groups, 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_NORM],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
             commands.dispatch(x, y, z);

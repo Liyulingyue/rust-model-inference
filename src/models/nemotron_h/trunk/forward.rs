@@ -359,12 +359,12 @@ impl NemotronModel {
                 scratch.capacity
             ));
         }
-        // Stage 1 of the GPU port: the device records the FFN and
-        // attention layers, but the SSM layers still run on the CPU. The
-        // hidden state round-trips through the host between the two, so a
-        // chunk is split into runs of consecutive device-recorded layers
-        // separated by CPU SSM layers. Stage 2 moves the SSM branch onto
-        // the device and drops the round-trip.
+        // Every layer is recorded on the device, so the chunk runs as one
+        // device submission and the hidden state never leaves the arena.
+        // The layer loop below still splits the stack into runs of
+        // device-recorded layers separated by CPU layers, because the
+        // `RMI_NH_CPU_*` overrides move one branch back to the host for
+        // attribution.
         #[cfg(feature = "vulkan")]
         if self.gpu.is_some() {
             // Take the session out so the layer loop can still call
@@ -386,6 +386,31 @@ impl NemotronModel {
                 );
             }
             let positions: Vec<usize> = (base_position..base_position + n).collect();
+            // The Mamba-2 recurrence and the KV cache live on the device
+            // now, and the host keeps the same state in the scratch pad.
+            // The two have to describe the same sequence:
+            //
+            // * position zero means the host's state is fresh (a new
+            //   scratch pad, or one that was reset), so the device's
+            //   state is stale and has to be cleared. Without this the
+            //   conv history alone moves every SSM layer's output on the
+            //   first token.
+            // * any other position means the host's state carries the
+            //   recurrence of the tokens before it. The device can only
+            //   agree with it if the device already processed exactly
+            //   those tokens; the host's Mamba-2 state cannot be copied
+            //   into the arena, so a mismatch is an error rather than a
+            //   silent divergence.
+            if base_position == 0 {
+                gpu.reset()?;
+            } else if gpu.committed_position() != base_position {
+                return Err(format!(
+                    "Nemotron Vulkan state is at token {} but the host is at token {}; \
+                     the Mamba-2 recurrence cannot be transferred to the device",
+                    gpu.committed_position(),
+                    base_position
+                ));
+            }
             let mut layer_start = 0usize;
             while layer_start < self.config.n_layer {
                 // Find the next run of device-recorded layers.
@@ -417,6 +442,7 @@ impl NemotronModel {
             // path needs the final hidden state back in its arena.
             gpu.write_hidden(&scratch.hidden[..hidden_len])?;
             gpu.finish_logits(n)?;
+            gpu.set_committed_position(base_position + n);
             let logits = gpu.logits().to_vec();
             self.gpu = Some(gpu);
             scratch.next_position += n;
@@ -499,18 +525,19 @@ impl NemotronModel {
 
     /// Whether `layer` runs on the device.
     ///
-    /// The FFN and attention layers have device kernels; the SSM layers
-    /// do not yet (that is stage 2 of the GPU port). The two environment
-    /// overrides exist so a test can attribute a numerical difference to
-    /// one branch: `RMI_NH_CPU_ATTENTION` and `RMI_NH_CPU_FFN` move the
-    /// respective branch back to the host.
+    /// Every layer has a device kernel: the FFN and attention layers use
+    /// the shared projections, and the Mamba-2 SSM layers use the
+    /// conv/scan shaders. The three environment overrides exist so a test
+    /// can attribute a numerical difference to one branch:
+    /// `RMI_NH_CPU_ATTENTION`, `RMI_NH_CPU_FFN` and `RMI_NH_CPU_SSM` move
+    /// the respective branch back to the host.
     fn device_layer(&self, layer: usize) -> bool {
         if self.config.attention_layers.contains(&layer) {
             std::env::var_os("RMI_NH_CPU_ATTENTION").is_none()
         } else if self.config.ffn_layers.contains(&layer) {
             std::env::var_os("RMI_NH_CPU_FFN").is_none()
         } else {
-            false
+            std::env::var_os("RMI_NH_CPU_SSM").is_none()
         }
     }
 

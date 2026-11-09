@@ -63,6 +63,11 @@ shader_names=(
     attention_scores_f32
     attention_values_f32_kv
     softmax_f32
+    nemotron_h_ssm_conv
+    nemotron_h_ssm_dt
+    nemotron_h_ssm_scan
+    nemotron_h_ssm_gate
+    nemotron_h_ssm_norm
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

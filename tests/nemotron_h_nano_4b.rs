@@ -1,14 +1,19 @@
 //! Hardware tests for the Nemotron-3 Nano 4B (`nemotron_h`) trunk.
 //!
-//! Stage 1 of the GPU port keeps the Mamba-2 SSM layers on the CPU and
-//! records the FFN + attention layers on the device. The hidden state
-//! round-trips through the host between the two, so the numerical target
-//! is the same double-1% gate the Dory port uses: `relative_l2 <= 0.01`
-//! and `scaled_max_abs <= 0.01` against the CPU path.
+//! All 42 layers run on the device: the 17 FFN layers, the 4 attention
+//! layers and the 21 Mamba-2 SSM layers. The device path is bit-exact
+//! against the CPU path, so the gate below is a floor rather than the
+//! expected value -- the test prints both numbers so a regression shows
+//! how far it moved.
 //!
-//! The gate is a floor, not the expected value: on the GB10 the device
-//! path comes out bit-exact, and the test prints both numbers so a
-//! regression shows how far it moved.
+//! The gate is the same double-1% gate the Dory port uses:
+//! `relative_l2 <= 0.01` and `scaled_max_abs <= 0.01` against the CPU
+//! path.
+//!
+//! The prefill lengths matter: the Mamba-2 recurrence only starts to
+//! differ from the host's when the scan state is non-zero, so a
+//! single-token prefill cannot see a broken recurrence. The test runs one,
+//! two and three tokens for that reason.
 //!
 //! The GGUF is not checked in; set `RMI_NEMOTRON_Q8_MODEL` to the
 //! `Nemotron-3-Nano-4B-Q8_0.gguf` path.
@@ -114,7 +119,7 @@ fn nemotron_h_nano_4b_vulkan_matches_cpu() {
     assert!(gpu_model.gpu_available());
     let context = rust_model_inference::ops::get_vulkan_context().unwrap();
     let before = context.compute_stats();
-    for tokens in [vec![22177], vec![22177, 1897, 1429]] {
+    for tokens in [vec![22177], vec![22177, 1897], vec![22177, 1897, 1429]] {
         let mut cpu_scratch = NemotronScratch::new(&cpu_model.config, tokens.len());
         let mut gpu_scratch = NemotronScratch::new(&gpu_model.config, tokens.len());
         let expected = cpu_model.prefill(&tokens, &mut cpu_scratch).unwrap();
