@@ -50,7 +50,7 @@ def main():
     args = parser.parse_args()
     if not all(math.isfinite(v) and v >= 0 for v in (args.atol, args.rtol)):
         parser.error("tolerances must be finite and nonnegative")
-    reference, actual = [json.loads(p.read_text()) for p in (args.oracle, args.native)]
+    reference, actual = [json.loads(p.read_text(encoding="utf-8")) for p in (args.oracle, args.native)]
     result = compare(reference.get("response", reference), actual.get("response", actual), args.atol, args.rtol)
     text = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     if args.out:

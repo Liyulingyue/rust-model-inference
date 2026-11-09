@@ -31,7 +31,7 @@ class ComparatorTest(unittest.TestCase):
                 b.add(checkpoint, layer, right if selected else values)
             if passed:
                 compare(a.root / "trace.jsonl", b.root / "trace.jsonl", root / "report.json")
-                self.assertTrue(json.loads((root / "report.json").read_text())["passed"])
+                self.assertTrue(json.loads((root / "report.json").read_text(encoding="utf-8"))["passed"])
             else:
                 with self.assertRaises(AssertionError):
                     compare(a.root / "trace.jsonl", b.root / "trace.jsonl", root / "report.json")

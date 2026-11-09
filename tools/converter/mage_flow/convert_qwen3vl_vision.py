@@ -54,7 +54,7 @@ def _f32(raw: bytes) -> bytes:
 def _shards(root: Path) -> list[Path]:
     index = root / "model.safetensors.index.json"
     if index.is_file():
-        names = sorted(set(json.loads(index.read_text())["weight_map"].values()))
+        names = sorted(set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values()))
         return [root / name for name in names]
     single = root / "model.safetensors"
     if single.is_file():
@@ -134,7 +134,7 @@ def _patch_embeddings(reader: Reader) -> list[tuple[str, tuple[int, int], bytes]
 
 def convert(text_encoder: Path, out_dir: Path) -> Path:
     root = validated_dir(str(text_encoder), must_exist=True)
-    config = json.loads((root / "config.json").read_text())
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     vision = config["vision_config"]
     if vision.get("model_type") != "qwen3_vl":
         raise ValueError(f"expected a Qwen3-VL vision tower, got {vision.get('model_type')}")
@@ -154,7 +154,7 @@ def convert(text_encoder: Path, out_dir: Path) -> Path:
     merged = hidden * merge * merge
 
     reader = Reader(root)
-    preprocessor = json.loads((root / "preprocessor_config.json").read_text())
+    preprocessor = json.loads((root / "preprocessor_config.json").read_text(encoding="utf-8"))
     mean = preprocessor.get("image_mean", [0.5, 0.5, 0.5])
     std = preprocessor.get("image_std", [0.5, 0.5, 0.5])
     size = preprocessor.get("size", {})

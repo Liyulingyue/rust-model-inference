@@ -126,7 +126,7 @@ if __name__ == "__main__":
             output = root / "mmproj.gguf"
             command = build_commands(root, root, root / "text.gguf", output)[1]
             subprocess.run(command, check=True)
-            self.assertEqual(json.loads(output.read_text()), {
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8")), {
                 "base": True,
                 "clip.vision.image_min_pixels": 65536,
                 "clip.vision.image_max_pixels": 16777216,

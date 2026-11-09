@@ -32,7 +32,7 @@ def main():
     from vision_oracle import official_classes, load_module
 
     root = args.root.resolve()
-    snapshot = json.loads(Path(__file__).with_name("snapshots.json").read_text())["vela3-fast-vision"]
+    snapshot = json.loads(Path(__file__).with_name("snapshots.json").read_text(encoding="utf-8"))["vela3-fast-vision"]
     for name, expected in snapshot["source_sha256"].items():
         actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
         if actual != expected:
@@ -51,9 +51,9 @@ def main():
     torch.set_num_threads(args.threads)
     torch.set_grad_enabled(False)
     Config, Model, Processor, core = official_classes(root)
-    cfg = json.loads((root / "config.json").read_text())
-    task_cfg = json.loads((root / "vela3v_config.json").read_text())
-    processor_cfg = json.loads((root / "processor_config.json").read_text())["image_processor"]
+    cfg = json.loads((root / "config.json").read_text(encoding="utf-8"))
+    task_cfg = json.loads((root / "vela3v_config.json").read_text(encoding="utf-8"))
+    processor_cfg = json.loads((root / "processor_config.json").read_text(encoding="utf-8"))["image_processor"]
     for edge in {int(task["edge"]) for task in task_cfg["tasks"].values()}:
         proc = Idefics3Processor(Processor(**processor_cfg), GPT2Tokenizer.from_pretrained(root), image_seq_len=64)
         proc.image_processor.size = {"longest_edge": edge}
@@ -71,7 +71,7 @@ def main():
     public = load_module("vela3_encoder", root / "vela3_encoder.py")
     with patch.object(AutoModel, "from_pretrained", side_effect=load_base):
         model = public.Vela3Encoder.load(root, device="cpu")
-    request = json.loads(args.request.read_text())
+    request = json.loads(args.request.read_text(encoding="utf-8"))
     if args.image:
         request["images"] = [str(path.resolve()) for path in args.image]
     response = model.system_one(request.get("state"), request["questions"], images=request.get("images"))

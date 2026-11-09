@@ -152,7 +152,7 @@ def run(args):
     torch.manual_seed(20261030)
     Config, Model, Processor, C = official_classes(root)
     from transformers.models.idefics3.processing_idefics3 import Idefics3Processor
-    proc = Idefics3Processor(Processor(**json.loads((root / "processor_config.json").read_text())["image_processor"]),
+    proc = Idefics3Processor(Processor(**json.loads((root / "processor_config.json").read_text(encoding="utf-8"))["image_processor"]),
                              GPT2Tokenizer.from_pretrained(root), image_seq_len=64)
     image = synthetic_image()
     image.save(out / "image.png")
@@ -166,9 +166,9 @@ def run(args):
                         "pixels": dump(out, f"preprocess_{edge}", pixels), "mask_sum": int(mask.sum())})
     assembly = assembly_cases(proc, C, image)
 
-    config = json.loads((root / "config.json").read_text())
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     if args.task or args.raw:
-        task_config = json.loads((root / "vela3v_config.json").read_text())
+        task_config = json.loads((root / "vela3v_config.json").read_text(encoding="utf-8"))
         task_name = args.task or "decision"
         task = task_config["tasks"][task_name] if not args.raw else {"edge": 512}
         cfg = Config(**config)
