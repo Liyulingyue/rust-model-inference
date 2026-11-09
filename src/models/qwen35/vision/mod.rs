@@ -517,6 +517,7 @@ pub struct VisionEncoder<'a> {
 }
 
 pub struct VisionPrecomputed<'a> {
+    preserve_f32: bool,
     pub patch_weight: Weight<'a>,
     patch_weight_f16: Option<Vec<u16>>,
     pub patch_weight_1: Option<Weight<'a>>,
@@ -594,8 +595,23 @@ impl<'a> VisionPrecomputed<'a> {
                 )
             })
             .transpose()?;
-        let patch_weight_f16 = f32_weight_as_f16(&patch_weight);
-        let patch_weight_1_f16 = patch_weight_1.as_ref().and_then(f32_weight_as_f16);
+        let preserve_f32 = source
+            .metadata("sensenova_loop.source_config_sha256")
+            .is_some();
+        if preserve_f32
+            && (patch_weight.ggml_type != GGMLType::F32
+                || !patch_weight_1
+                    .as_ref()
+                    .is_some_and(|w| w.ggml_type == GGMLType::F32))
+        {
+            return Err("SenseNova vision requires two F32 temporal patch weights".into());
+        }
+        let patch_weight_f16 = (!preserve_f32)
+            .then(|| f32_weight_as_f16(&patch_weight))
+            .flatten();
+        let patch_weight_1_f16 = (!preserve_f32)
+            .then(|| patch_weight_1.as_ref().and_then(f32_weight_as_f16))
+            .flatten();
         let mut qkv_weights = Vec::with_capacity(config.n_layer);
         let mut qkv_biases = Vec::with_capacity(config.n_layer);
         let mut q_weights = Vec::with_capacity(config.n_layer);
@@ -753,6 +769,7 @@ impl<'a> VisionPrecomputed<'a> {
 
         let merged = n_embd * config.spatial_merge_size * config.spatial_merge_size;
         Ok(Self {
+            preserve_f32,
             patch_weight,
             patch_weight_f16,
             patch_weight_1,
@@ -1260,6 +1277,57 @@ impl<'a> VisionEncoder<'a> {
         let n_patches = n_patches_x * n_patches_y;
 
         if let Some(pc) = self.precomputed.as_ref() {
+            if pc.preserve_f32 {
+                let area = ps * ps;
+                let width = patch_dim * 2;
+                if scratch.patch_weight_packed.is_empty() {
+                    let first = pc.patch_weight.kernel.f32_slice().unwrap();
+                    let second = pc
+                        .patch_weight_1
+                        .as_ref()
+                        .unwrap()
+                        .kernel
+                        .f32_slice()
+                        .unwrap();
+                    for output in 0..n_embd {
+                        for channel in 0..3 {
+                            let start = output * patch_dim + channel * area;
+                            for temporal in [first, second] {
+                                scratch
+                                    .patch_weight_packed
+                                    .extend_from_slice(&temporal[start..start + area]);
+                            }
+                        }
+                    }
+                }
+                scratch.patch_weight_buf.clear();
+                for py in 0..n_patches_y {
+                    for px in 0..n_patches_x {
+                        for channel in 0..3 {
+                            for frame in [frame_a, frame_b] {
+                                for y in 0..ps {
+                                    for x in 0..ps {
+                                        scratch.patch_weight_buf.push(
+                                            frame[((py * ps + y) * img_w + px * ps + x) * 3
+                                                + channel],
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                crate::models::qwen3::vision::matmul_f32_weight(
+                    &self.pool,
+                    &scratch.patch_weight_packed,
+                    &scratch.patch_weight_buf,
+                    &mut scratch.patch_embd[..n_patches * n_embd],
+                    n_patches,
+                    width,
+                    n_embd,
+                );
+                return;
+            }
             if cfg.n_wa_pattern == 8
                 && crate::ops::scalar_mode()
                 && pc.patch_weight.ggml_type == GGMLType::BF16
@@ -2097,6 +2165,10 @@ impl<'a> VisionEncoder<'a> {
                 &scratch.ffn_gate_buf[..n_tokens * cfg.n_ff],
                 &mut scratch.ffn_buf[..n_tokens * cfg.n_ff],
             );
+        } else if self.precomputed.as_ref().is_some_and(|pc| pc.preserve_f32) {
+            for value in &mut scratch.ffn_buf[..n_tokens * cfg.n_ff] {
+                *value = crate::ops::gelu(*value);
+            }
         } else {
             gelu(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
         }
@@ -2250,8 +2322,12 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        for value in &mut mm0_out[..n_projected * merged_embd] {
-            *value = gelu_ggml_f32(*value);
+        if self.precomputed.as_ref().is_some_and(|pc| pc.preserve_f32) {
+            crate::ops::gelu_erf_inplace(&mut mm0_out[..n_projected * merged_embd]);
+        } else {
+            for value in &mut mm0_out[..n_projected * merged_embd] {
+                *value = gelu_ggml_f32(*value);
+            }
         }
 
         if let Some(ref pc) = self.precomputed {
@@ -3392,6 +3468,85 @@ mod tests {
         let mut output = [0.0];
         matmul_patch_weight_batch(&weight, Some(&f16), &[1.0003, 1.0], &mut output);
         assert_eq!(output, [-1.0]);
+    }
+
+    #[test]
+    fn sensenova_vision_preserves_f32_patch_weights_and_merger_activation() {
+        let mut source = MapTensorSource::default();
+        for (name, dims, values) in [
+            (
+                "v.patch_embd.weight",
+                vec![1, 1, 3, 1],
+                vec![1.0003, 2.0003, 0.],
+            ),
+            (
+                "v.patch_embd.weight.1",
+                vec![1, 1, 3, 1],
+                vec![0.1, 0.2, 0.3],
+            ),
+            ("mm.0.weight", vec![1, 1], vec![1.]),
+            ("mm.2.weight", vec![1, 1], vec![1.]),
+        ] {
+            source.tensors.insert(
+                name.into(),
+                TensorInfo {
+                    name: name.into(),
+                    dims,
+                    ggml_type: GGMLType::F32,
+                    offset: 0,
+                },
+            );
+            source.data.insert(
+                name.into(),
+                values.into_iter().flat_map(f32::to_le_bytes).collect(),
+            );
+        }
+        let mut config = test_clip_config(1, 1, 1, 64);
+        config.n_embd = 1;
+        config.n_layer = 0;
+        config.projection_dim = 1;
+        let legacy = VisionPrecomputed::from_source(&source, &config).unwrap();
+        assert!(legacy.patch_weight_f16.is_some());
+        drop(legacy);
+        source.metadata.insert(
+            "sensenova_loop.source_config_sha256".into(),
+            MetaValue::String(crate::models::sensenova_loop::SOURCE_CONFIG_SHA256.into()),
+        );
+        let native = VisionPrecomputed::from_source(&source, &config).unwrap();
+        assert!(native.patch_weight_f16.is_none());
+        let mut output = [0.];
+        matmul_patch_weight_batch(
+            &native.patch_weight,
+            native.patch_weight_f16.as_deref(),
+            &[1.0003, 1., 0.],
+            &mut output,
+        );
+        assert!((output[0] - (1.0003f32 * 1.0003 + 2.0003)).abs() < 1e-6);
+        let encoder = VisionEncoder {
+            config: config.clone(),
+            patch_embd_weight: &[],
+            patch_embd_weight_1: None,
+            position_embd: None,
+            post_ln_weight: None,
+            post_ln_bias: None,
+            patch_bias: None,
+            layers: Vec::new(),
+            mm_0_weight: &[],
+            mm_0_bias: None,
+            mm_2_weight: &[],
+            mm_2_bias: None,
+            precomputed: Some(native),
+            pool: Arc::new(ComputePool::new(1)),
+        };
+        let mut scratch = VisionScratchpad::new(&config);
+        scratch.patch_embd = vec![0.];
+        encoder.patch_embed(&[1.0003, 1., 0.], &[2., 3., 4.], 1, 1, &mut scratch);
+        assert!((scratch.patch_embd[0] - (1.0003f32 * 1.0003 + 2.0003 + 2.)).abs() < 1e-6);
+        scratch.merged = vec![0.8];
+        scratch.projected = vec![0.];
+        encoder.project(1, 1, 1, 1, &mut scratch, &encoder.pool);
+        // PyTorch F32 GELU(0.8, approximate="none"); tanh GELU differs by 8e-5.
+        assert!((scratch.projected[0] - 0.6305157).abs() < 1e-6);
     }
 
     #[test]

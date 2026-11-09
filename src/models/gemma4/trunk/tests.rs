@@ -1,4 +1,7 @@
 use super::config::{CONTEXT, EPS};
+use super::forward::prefill_matmul_rows;
+use super::session::Gemma4PrefillLinear;
+use super::weights::load_weight_any;
 use super::{
     assemble_input_rows, attend, kv_source_layer, load_weight, matmul, require_f32_kv, softcap,
     Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, PER_LAYER, VOCAB,
@@ -7,7 +10,7 @@ use crate::core::scratchpad::KvFormat;
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::gemma4::Gemma4Config;
-use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::kernel::{Kernel, PreparedRows, QuantizedTensor, Weight};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -37,6 +40,41 @@ impl TensorSource for EmptySource {
 
     fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
         None
+    }
+}
+
+/// A source that holds exactly one tensor, so the loader's own contract
+/// checks (type, payload length) can be exercised directly.
+struct SingleTensorSource {
+    info: TensorInfo,
+    bytes: Vec<u8>,
+}
+
+impl SingleTensorSource {
+    fn new(name: &str, dims: Vec<u64>, ggml_type: GGMLType, bytes: Vec<u8>) -> Self {
+        Self {
+            info: TensorInfo {
+                name: name.to_string(),
+                dims,
+                ggml_type,
+                offset: 0,
+            },
+            bytes,
+        }
+    }
+}
+
+impl TensorSource for SingleTensorSource {
+    fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+        None
+    }
+
+    fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+        (name == self.info.name).then_some(&self.info)
+    }
+
+    fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        (name == self.info.name).then_some(self.bytes.as_slice())
     }
 }
 
@@ -1212,19 +1250,38 @@ fn per_layer_f32_projection_matches_pinned_neon_long_rows() {
 
     // Independent literals from pinned llama.cpp ggml_vec_dot_f32.
     assert_eq!(
-        output.map(f32::to_bits),
+        output
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
         [0xbe74_d6c6, 0x3df2_a865, 0x3ed8_e80e]
     );
 }
 
 #[test]
-fn per_layer_bf16_projection_matches_pinned_scalar_dot_bits() {
-    // Pinned llama.cpp 3173a56471c, Gemma4 text projection, first 16
-    // operands from real rows 0, 1, 2, 3, and 5. Its arm64 BF16 dot rounds
-    // the activation to BF16, forms F32 products, accumulates them in
-    // ggml_float (F64), then casts once. The pinned row-3 and row-5 F32
-    // accumulator words are respectively 0x3daed280 and 0xbdef03c0, so
-    // those rows make an F32-accumulation mutation observable.
+fn per_layer_bf16_projection_uses_the_repository_bf16_kernel() {
+    // The projection runs the repository's own BF16 kernel: the F32
+    // activation stays in F32 and the products accumulate in F32.
+    //
+    // llama.cpp 3173a56471c instead rounds the activation to BF16 and
+    // accumulates the products in ggml_float (F64). That is ggml's
+    // implementation detail rather than a precision optimum, so the
+    // repository deliberately does not copy it (see the
+    // operator-internal-dispatch skill: "do not copy ggml's accumulation
+    // structure just because the reference implementation does it"). The
+    // two differ by about 1e-3 of the summands, which shows up as a large
+    // *relative* difference wherever the sum nearly cancels.
+    //
+    // The fixture is the one llama.cpp's numbers were pinned with (the
+    // first 16 operands of real rows 0, 1, 2, 3 and 5), so the gap stays
+    // checkable: llama.cpp's row-1 result is 0x3be97100 (0.00712406635)
+    // against our 0x3bf2f9a0 (0.00741501153), a 4% relative gap on a sum
+    // that cancels to almost nothing. Row 4 is 0xbdeea163 here against
+    // llama.cpp's 0xbdef03c1, the two bits an F32 accumulator would move.
+    //
+    // An independent F32 dot over the same operands reproduces these
+    // values to about 1e-7 relative, so the projection is exactly the
+    // repository's BF16 kernel over an F32 activation.
     let input = [
         0xbfd0_8482,
         0xbfc2_eb2b,
@@ -1267,90 +1324,101 @@ fn per_layer_bf16_projection_matches_pinned_scalar_dot_bits() {
         ],
     ];
     let rows = weight_rows.len();
-    let weight = weight_rows
+    let weight_bytes = weight_rows
         .into_iter()
         .flatten()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-        &weight,
+        &weight_bytes,
         GGMLType::BF16,
         input.len(),
         rows,
     ));
-    let mut output = [0.0; 5];
-    let mut q8 = vec![0; input.len() * 2];
-    let mut scales = vec![0.0; input.len().div_ceil(32)];
-
-    matmul(
+    // The production path: the projection goes through the prepared rows,
+    // which keeps the activation in F32 for a BF16 weight.
+    let mut output = vec![0.0f32; weight.n_out];
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut linear = Gemma4PrefillLinear::default();
+    let mut prepared = PreparedRows::new(1, input.len());
+    let mut q8 = vec![0u8; input.len() * 2];
+    let mut scales = vec![0.0f32; input.len().div_ceil(32)];
+    prefill_matmul_rows(
         "per_layer_model_proj.weight",
         &weight,
         &input,
         &mut output,
-        &ComputePool::new(3),
+        1,
+        &model,
+        &mut linear,
+        model.pool(),
+        &mut prepared,
         &mut q8,
         &mut scales,
     )
     .unwrap();
 
     assert_eq!(
-        output.map(f32::to_bits),
+        output
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
         [
-            0xbe32_95aa,
-            0x3be9_7100,
-            0xbd1b_8ce0,
-            0x3dae_d27f,
-            0xbdef_03c1
+            0xbe32_7c20,
+            0x3bf2_f9a0,
+            0xbd1b_2bbe,
+            0x3dae_d545,
+            0xbdee_a163
         ]
     );
 }
 
 #[test]
-fn per_layer_projection_rejects_non_bf16_weight() {
-    let weight = zero_weight(2, 1);
-    let mut output = [7.0];
-    let mut input_bf16 = [0; 4];
-    let mut scales = [0.0];
-
-    let error = matmul(
-        "per_layer_model_proj.weight",
-        &weight,
-        &[1.0, 2.0],
-        &mut output,
-        &ComputePool::new(1),
-        &mut input_bf16,
-        &mut scales,
-    )
-    .unwrap_err();
-
-    assert!(error.contains("requires BF16"), "{error}");
-    assert_eq!(output, [7.0]);
+fn per_layer_projection_rejects_a_weight_outside_bf16_and_f16() {
+    // The tensor contract lives in the loader: the projection is a BF16 or
+    // F16 tensor, and a GGUF that declares anything else is rejected before
+    // a byte is read. The matmul itself stays type agnostic.
+    let dims = [2u64, 1u64];
+    for kind in [GGMLType::F32, GGMLType::Q8_0] {
+        let source = SingleTensorSource::new(
+            "per_layer_model_proj.weight",
+            dims.to_vec(),
+            kind,
+            vec![0; 8],
+        );
+        let error = load_weight_any(
+            &source,
+            "per_layer_model_proj.weight",
+            &dims,
+            &[GGMLType::BF16, GGMLType::F16],
+        )
+        .err()
+        .expect("the loader rejects the weight");
+        assert!(error.contains("one of"), "{error}");
+    }
 }
 
 #[test]
-fn per_layer_projection_rejects_wrong_bf16_storage_length() {
-    for byte_len in [6, 2] {
-        let bytes = vec![0; byte_len];
-        let weight =
-            Weight::from_quantized(QuantizedTensor::from_bytes(&bytes, GGMLType::BF16, 2, 1));
-        let mut output = [7.0];
-        let mut input_bf16 = [0; 4];
-        let mut scales = [0.0];
-
-        let error = matmul(
+fn per_layer_projection_rejects_a_mismatched_payload_length() {
+    // A BF16 payload whose length does not match the declared shape would
+    // be read past its end, so the loader measures it against the metadata.
+    let dims = [2u64, 1u64];
+    for byte_len in [6usize, 2] {
+        let source = SingleTensorSource::new(
             "per_layer_model_proj.weight",
-            &weight,
-            &[1.0, 2.0],
-            &mut output,
-            &ComputePool::new(1),
-            &mut input_bf16,
-            &mut scales,
+            dims.to_vec(),
+            GGMLType::BF16,
+            vec![0; byte_len],
+        );
+        let error = load_weight_any(
+            &source,
+            "per_layer_model_proj.weight",
+            &dims,
+            &[GGMLType::BF16, GGMLType::F16],
         )
-        .unwrap_err();
-
-        assert!(error.contains("expected 4 bytes"), "{error}");
-        assert!(error.contains(&format!("got {byte_len}")), "{error}");
-        assert_eq!(output, [7.0]);
+        .err()
+        .expect("the loader rejects the weight");
+        assert!(error.contains("Invalid tensor data length"), "{error}");
     }
 }
 

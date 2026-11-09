@@ -648,11 +648,11 @@
     },
     "entry_points": {
       "cli_text_cpu": "'2 + 2 = 4' at --temperature 0; the prompt is 19 tokens",
-      "cli_text_device": "same prompt, --compute vulkan: '2 + 2 equals **4**.' -- the device and the CPU pick different greedy tokens for this checkpoint, which reproduces on origin/main (see TODO-053)",
+      "cli_text_device": "same prompt, --compute vulkan: '2 + 2 equals **4**.' -- the device and the CPU pick different greedy tokens for this checkpoint, which reproduces on origin/main (see TODO-055)",
       "cli_image_cpu": "'blue'",
       "cli_image_device": "'blue'",
       "cli_jev_text": "choice A ('apples') with probability 1.0000",
-      "cli_interactive": "works without --mmproj (the prompt reaches the model); with --mmproj the REPL is silently skipped -- see TODO-054",
+      "cli_interactive": "works without --mmproj (the prompt reaches the model); with --mmproj the REPL is silently skipped -- see TODO-056",
       "http_chat_text": "'2 + 2 equals **4**.' with 19 prompt tokens and 8 completion tokens",
       "http_chat_image": "' blue' with 23 prompt tokens",
       "http_jev_score": "choice A with probability 0.9999444",
@@ -687,7 +687,7 @@
           "decode_s": 0.271207
         }
       },
-      "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-055"
+      "note": "the device wins on prefill and loses 4x on decode: every token routes through 360 single-row expert projections (8 of 256 per layer, 40 layers), which is the same shape as the Mellum dispatch finding in TODO-052; see TODO-057"
     }
   },
   "occamy_upstream_pytorch_2026_11_06": {
@@ -781,7 +781,7 @@
       "text_embedding": "1.0 s for a short prompt",
       "image_media_embedding": "50.8 s for one 64x64 image; user 50.75 s against real 50.97 s, so one core",
       "cause": "the text tower holds a ComputePool but forward_inputs never dispatches through it",
-      "tracked": "TODO-057"
+      "tracked": "TODO-059"
     },
     "device_path_2026_11_06": {
       "status": "the text tower holds Weight now, so the device takes the matmuls it can",
@@ -790,7 +790,7 @@
       "cpu_vs_device_cosine": 0.999484855,
       "cpu_vs_upstream_pytorch_relative_l2": 0.05068708529977508,
       "note": "the device and the CPU kernels disagree by 0.033, and the kernel path itself differs from the old F32 dequant path by 0.051; the oracle bounds were recalibrated for the kernel path (cosine 0.9985, relative L2 0.06, multimodal 0.021)",
-      "tracked": "TODO-058",
+      "tracked": "TODO-060",
       "text_tower_speed": "the media path's text forward went from about 48.7 s to about 2.5 s (batching plus the pool)"
     },
     "device_attention_2026_11_06": {
