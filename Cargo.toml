@@ -111,12 +111,39 @@ path = "examples/vk_ops_check.rs"
 required-features = ["vulkan"]
 
 [[example]]
+name = "astronex_gpu_determinism"
+path = "examples/astronex_gpu_determinism.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "astronex_text_determinism"
+path = "examples/astronex_text_determinism.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "mage_vae_conv_probe"
+path = "examples/mage_vae_conv_probe.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "spv_compile_probe"
+path = "examples/spv_compile_probe.rs"
+required-features = ["vulkan"]
+
+[[example]]
 name = "dit_cost_model"
 path = "examples/dit_cost_model.rs"
 
 [[example]]
 name = "gpu_ceiling"
 path = "examples/gpu_ceiling.rs"
+required-features = ["vulkan"]
+
+# Not crate-level gated, but it calls `ops::get_vulkan_context`, which only
+# exists in a Vulkan build.
+[[example]]
+name = "vk_mem_info"
+path = "examples/vk_mem_info.rs"
 required-features = ["vulkan"]
 
 [[example]]
@@ -127,3 +154,9 @@ required-features = ["vulkan"]
 [[example]]
 name = "test_openjev_nli"
 path = "examples/test_openjev_nli.rs"
+
+# Uses `parity_trace`, which only exists with the feature on.
+[[test]]
+name = "nemotron3_nano_moe"
+path = "tests/nemotron3_nano_moe.rs"
+required-features = ["parity-trace"]
