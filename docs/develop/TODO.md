@@ -3599,7 +3599,7 @@ if state.as_ref().is_none_or(|cached| {
 
 ### TODO-050: `cargo build --all-targets` 在 main 上就失败，`cargo test`（不带 `--lib`）跑不起来
 
-**现象**：
+**原现象**（已修）：
 
 ```
 error[E0063]: missing fields `sway_sampling_coef` and `time_grid` in initializer of `AukOptions`
@@ -3607,23 +3607,33 @@ error: could not compile `rust-model-inference` (test "auk_flash_smoke") due to 
 ```
 
 `cargo build --all-targets` 退出码 101 → **不带 `--lib` 的 `cargo test` 会先在编译期
-失败**，整套集成测试（`tests/*.rs`）跑不到。CI 因此不受影响：`.github/workflows/ci.yml`
-只 `cargo check --features vulkan --lib/--bin/--examples` 加几个点名的
-`cargo test --test <name>`，**从不构建 `--all-targets`**。
+失败**，整套集成测试（`tests/*.rs`）跑不到。
 
-**归属**：`tests/auk_flash_smoke.rs` 与 `AukOptions` 的字段变更不同步，出自 AuK 那条线，
-与 ZDTaichu5.0 分支无关（该分支只碰 ZDT / qwen3 vision / app 接线，见
-`git diff --stat origin/main..HEAD`）。
+**已修（AukOptions 那条）**：`tests/auk_*` 的构造补回了 recipe（AuK-Base 用
+`sway_sampling_coef: Some(-1.0)`，AuK-Flash 用 `time_grid: Some(FLASH_TIME_GRID)`）。
 
-**待办**：
+**复发**（2026-11-09）：AukOptions 修好后，`--all-targets` 又被**新落地的目标**打断 ——
+5 个 example 与 1 个集成测试用了 feature-gated 的 API，却没声明 `required-features`：
 
-1. 给 `AukOptions` 的构造补上 `sway_sampling_coef` / `time_grid`（或用 `..Default::default()`），
-   让 `--all-targets` 恢复可编译。
-2. CI 加一条 `cargo build --locked --all-targets`（或 `cargo test --locked --no-run`），
-   否则这类编译期断裂还会再发生 —— 参见 TODO-026（CI 根本不跑测试）。
+```
+error[E0433]: cannot find `parity_trace` in `rust_model_inference`          (test "nemotron3_nano_moe")
+error[E0601]: `main` function not found in crate `astronex_text_determinism`
+error[E0432]: unresolved import `rust_model_inference::ops::get_vulkan_context`  (example "vk_mem_info")
+```
+
+**已修（本 PR）**：`Cargo.toml` 给这 6 个目标补上 `required-features`
+（5 个 example 要 `vulkan` —— 其中 4 个文件顶部虽有 `#![cfg(feature = "vulkan")]`，
+但那样整个 crate 会被 cfg 空、`main` 消失，反而报 E0601；`nemotron3_nano_moe`
+要 `parity-trace`，它在不带 cfg 门的地方调 `parity_trace::token_ids`）。
+`.github/workflows/ci.yml` 的 Vulkan job 加了两条
+`cargo check --locked --all-targets`（默认特性 + 全特性各一条），这类断裂从此当场变红。
+
+**仍待办**：`AukOptions` 的 recipe 字段没有默认值，容易漏填 —— 考虑给
+`sway_sampling_coef` / `time_grid` 一个与 pipeline 默认一致的 `Default`，
+或改成构造期必填的 builder。
 
 **关联**：`tests/auk_flash_smoke.rs`、`src/models/auk*` 的 `AukOptions`、
-`.github/workflows/ci.yml`。
+`Cargo.toml` 的 `[[example]]`/`[[test]]`、`.github/workflows/ci.yml`。
 ### TODO-049: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
 
 Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
