@@ -4,14 +4,10 @@ use super::weights::{kv_source_layer, Gemma4Model};
 use crate::core::prefill::prefill_chunks;
 use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::kernel::{Kernel, PreparedRows, Weight};
+use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
     dot_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace, rms_unit_inplace, softmax_inplace,
 };
-
-/// Tensor name of the Gemma4 per-layer model projection. It has its own
-/// weight contract: llama.cpp runs it as a plain BF16 matmul.
-const PER_LAYER_MODEL_PROJ: &str = "per_layer_model_proj.weight";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gemma4InputRow {
@@ -152,6 +148,14 @@ impl Gemma4Session<'_> {
                 .per_layer_model_proj
                 .as_ref()
                 .expect("per-layer projection enabled but tensor missing");
+            // The projection runs the repository's own BF16 kernel: the F32
+            // activation stays in F32 and the products accumulate in F32.
+            // llama.cpp instead rounds the activation to BF16 and accumulates
+            // in F64, which is ggml's implementation detail rather than a
+            // precision optimum, so the repository does not copy it (see the
+            // operator-internal-dispatch skill). The two differ by about 1e-3
+            // of the summands; `tests.rs` pins our values and records the
+            // llama.cpp ones next to them.
             prefill_matmul_rows(
                 "per_layer_model_proj.weight",
                 pm,
@@ -767,7 +771,7 @@ fn try_linear_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prefill_matmul_rows(
+pub(super) fn prefill_matmul_rows(
     name: &str,
     weight: &Weight<'_>,
     input: &[f32],
@@ -789,17 +793,6 @@ fn prefill_matmul_rows(
     #[cfg(feature = "vulkan")]
     let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
     if weight.ggml_type == GGMLType::F32 {
-        for (input, output) in input
-            .chunks_exact(weight.n_in)
-            .zip(output.chunks_exact_mut(weight.n_out))
-        {
-            matmul(name, weight, input, output, pool, q8, scales)?;
-        }
-        return Ok(());
-    }
-    if name == PER_LAYER_MODEL_PROJ {
-        // The per-layer projection carries its own BF16 contract, so it must
-        // not go through the generic prepared path.
         for (input, output) in input
             .chunks_exact(weight.n_in)
             .zip(output.chunks_exact_mut(weight.n_out))
@@ -964,45 +957,6 @@ pub(super) fn matmul(
             weight.n_in,
             weight.n_out
         ));
-    }
-    if name == PER_LAYER_MODEL_PROJ {
-        // llama.cpp runs the per-layer projection as a plain BF16 matmul:
-        // ggml_mul_mat rounds the F32 activation to BF16 first, the F32
-        // products accumulate in F64, and the sum is cast once. The generic
-        // BF16 kernel would keep the F32 activation and accumulate in F32,
-        // which drifts from llama.cpp in the low bits. Keep that contract
-        // here so the per-layer path and the tied-output path cannot drift
-        // apart, and so a malformed GGUF is rejected instead of computing
-        // noise.
-        if weight.ggml_type != GGMLType::BF16 {
-            return Err(format!(
-                "Invalid {name}: requires BF16, found {:?}",
-                weight.ggml_type
-            ));
-        }
-        let bytes = weight
-            .kernel
-            .bf16_bytes()
-            .ok_or_else(|| format!("Invalid {name}: missing BF16 weights"))?;
-        let expected = weight
-            .n_in
-            .checked_mul(weight.n_out)
-            .and_then(|count| count.checked_mul(2))
-            .ok_or_else(|| format!("Invalid {name} storage length overflow"))?;
-        if bytes.len() != expected {
-            return Err(format!(
-                "Invalid {name} BF16 storage length: expected {expected} bytes, got {}",
-                bytes.len()
-            ));
-        }
-        let mut rounded = vec![0u8; weight.n_in * 2];
-        for (chunk, value) in rounded.chunks_exact_mut(2).zip(input) {
-            chunk.copy_from_slice(&crate::ops::f32_to_bf16(*value).to_le_bytes());
-        }
-        for (result, row) in output.iter_mut().zip(bytes.chunks_exact(weight.n_in * 2)) {
-            *result = crate::ops::kernel::bf16::scalar::dot_bf16(row, &rounded);
-        }
-        return Ok(());
     }
     if weight.ggml_type == GGMLType::F32 {
         let values = weight
