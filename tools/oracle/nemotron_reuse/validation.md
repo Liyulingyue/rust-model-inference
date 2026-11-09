@@ -143,4 +143,41 @@ The paired speech cases suppress **0 of 9624** official frames. Their enabled/di
 These results support negligible PESQ/STOI differences **on these three speakers and stationary-noise pairs**. They do not demonstrate general perceptual equivalence, independent strict-waveform parity, CUDA parity, other codecs/rates/noise types or listening quality. The original synthetic failures remain visible and the model stays **Experimental / Draft**.
 
 
-Remote numerical validation was not completed: the supplied identity initially authenticated, and an isolated workspace/environment was prepared, but subsequent connections were closed by the server before SSH key exchange. The provided Linux host has no recorded successful RE-USE inference or quality run. The measured results in this update are macOS/arm64; CI evidence is recorded separately.
+## Linux/x86_64 follow-up — 2026-11-09
+
+The replacement host completed native inference and independent official-reference measurements. Host: Linux 6.8.0-79-generic, glibc 2.39, AMD EPYC 9334; 128 visible CPUs with a shared 16-core cgroup quota and 55 GiB memory limit. Native source snapshot `bfa8564e33a716ed2dc0b08d8f0ef4942adbc503` was checked against all 1,567 tracked file hashes. [Environment and binary hashes](environment_linux.json) pin this run.
+
+The installed Rust 1.94.1 cannot compile main's `if let` guard in `src/prompt/jinja_compat.rs`. Rust 1.98.1 was installed inside this workspace's ignored `target/rustup`; Cargo cache, Python dependencies and build output also remained workspace-local. No source change or compiler bootstrap flag was used to bypass that error. The normal `release-fast` CLI/server build succeeded without `parity-trace`.
+
+Confirmed Linux checks:
+
+- RE-USE model tests: **5 passed / 0 failed / 1 ignored**, including config/weight contracts, WAV validation, the strict suppression boundary and FFT roundtrips.
+- `cargo check --offline --locked --all-targets`: passed. Enhancement CLI integration: **2 passed**; existing System One integration: **6 passed**.
+- Ordinary-build real-weight official-spectral test: **1 passed**, all 13 chunk/channel groups; worst waveform max absolute error `5.35906e-6`, worst RMSE `1.36356e-6`. This remains conditional on identical frontend features.
+- Deterministic paired-speech fixture check: **1 passed**, including PCM16 length, repeatability and requested SNR.
+- Independent waveform measurements: **11 cases × CPU/Auto**; output metadata/frame counts and CPU/Auto WAV byte identity passed. The reference generated its own FFT features and official CPU network outputs on this host.
+- HTTP CPU/Auto: mixed-case MIME and HTTP/CLI byte equality passed; malformed WAV, rate/channel/length/MIME errors returned 400; unsupported routes returned 404; size cap returned 413; concurrency returned 200/429. [Raw HTTP results](http_results_linux.json).
+
+The unchanged strict waveform gate still does **not** pass. The original chunked fixture has relative RMSE **40.12%** on Linux, versus **42.07%** on the earlier Mac run. Different host FFT/rounding results do not eliminate the raw-phase branch sensitivity. [All 22 ordinary-build records](waveform_results_linux.json):
+
+| Case | max_abs | RMSE | Relative RMSE |
+|---|---:|---:|---:|
+| noisy_8000 | 0.009835502 | 0.002588931 | 24.24% |
+| noisy_16000 | 0.01295383 | 0.002604313 | 29.08% |
+| noisy_22050 | 0.006664528 | 0.001799992 | 36.36% |
+| noisy_24000 | 0.001728377 | 0.00044908 | 9.26% |
+| noisy_32000 | 0.004643316 | 0.001025582 | 26.93% |
+| noisy_44100 | 0.001583444 | 0.0003998744 | 12.11% |
+| noisy_48000 | 0.001028402 | 0.0002295246 | 7.73% |
+| silence_8000 | 3.292406e-05 | 1.748602e-05 | 0.25% |
+| speech_44100 | 0.0001646769 | 3.16727e-05 | 2.19% |
+| stereo_16000 | 0.01295383 | 0.001899572 | 23.95% |
+| chunked_8000 | 0.06798412 | 0.003266162 | 40.12% |
+
+Linux paired-speech quality: **12/12 cases** passed the unchanged absolute delta limits (PESQ `0.05`, STOI `0.005`); CPU/Auto WAV bytes matched for every case. Maximum native-minus-official absolute deltas were **PESQ `0.000941038`** and **STOI `0.0000354976`**. Independent speech waveform relative RMSE was **0.1207%–0.3196%**. All per-case scores, input/source/binary/script hashes, versions and timings are in [quality_results_linux.json](quality_results_linux.json). Suppression triggered **0/9624** official frames, so its enabled/disabled ablation outputs and quality scores were identical for these pairs.
+
+The official CPU path uses Python 3.12.3 / Torch 2.9.1+gitff65f5b. The same `quality.py` recipe ran as six independent speaker/rate groups via repeated `--case` switches, two SNR cases per group, with one Torch thread and four native CLI threads per process. Group reports were combined only after asserting identical metadata/binary hashes, exact 12-case coverage and both modes' fixed quality limits. These jobs shared the cgroup with other work; recorded timings are validation timings, not isolated performance benchmarks. Neither the bounded speech-quality result nor passing same-feature checks removes the independent synthetic-waveform failure.
+
+Cross-host fixture audit: source OGG hashes, NumPy 2.5.4, SciPy 1.17.0, SoundFile 0.13.1 and libsndfile 1.2.2 match, but platform-dependent OGG decode rounding changes a few PCM16 samples after pairing. Across all 12 pairs, clean WAVs differ at **60/432,000** samples and noisy WAVs at **75/432,000**, with maximum difference **1/32768** in either set. Decoded OGG crops already differ by at most `1.78813934e-7`; supplying those remote decoded crops to the local pairing code reproduces all 24 remote PCM payloads exactly. Each host records its own clean/input hashes and compares native/oracle against the same local PCM. Cross-host PCM bit identity is not an acceptance gate for this lossy decode path.
+
+These Linux checks do not establish GPU, CUDA-driver, quantized/other-dtype, sustained-load or general perceptual equivalence. No full Linux library baseline comparison was run in this follow-up; the macOS full-suite comparison and prior CI evidence above remain separate.
