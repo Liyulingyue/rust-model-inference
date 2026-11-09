@@ -531,6 +531,11 @@ impl NemotronModel {
     /// can attribute a numerical difference to one branch:
     /// `RMI_NH_CPU_ATTENTION`, `RMI_NH_CPU_FFN` and `RMI_NH_CPU_SSM` move
     /// the respective branch back to the host.
+    ///
+    /// An override is meant for a whole run. The Mamba-2 recurrence lives
+    /// on the host when the SSM branch runs there and on the device when
+    /// it does not, and the two states cannot be exchanged, so switching
+    /// an override in the middle of a sequence leaves them out of step.
     fn device_layer(&self, layer: usize) -> bool {
         if self.config.attention_layers.contains(&layer) {
             std::env::var_os("RMI_NH_CPU_ATTENTION").is_none()
