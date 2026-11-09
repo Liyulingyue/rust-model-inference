@@ -3612,7 +3612,7 @@ error: could not compile `rust-model-inference` (test "auk_flash_smoke") due to 
 **已修（AukOptions 那条）**：`tests/auk_*` 的构造补回了 recipe（AuK-Base 用
 `sway_sampling_coef: Some(-1.0)`，AuK-Flash 用 `time_grid: Some(FLASH_TIME_GRID)`）。
 
-**复发**（2026-11-09）：AukOptions 修好后，`--all-targets` 又被**新落地的目标**打断 ——
+**复发**（2026-11-09，PR #217 修）：AukOptions 修好后，`--all-targets` 又被**新落地的目标**打断 ——
 5 个 example 与 1 个集成测试用了 feature-gated 的 API，却没声明 `required-features`：
 
 ```
@@ -3621,7 +3621,7 @@ error[E0601]: `main` function not found in crate `astronex_text_determinism`
 error[E0432]: unresolved import `rust_model_inference::ops::get_vulkan_context`  (example "vk_mem_info")
 ```
 
-**已修（本 PR）**：`Cargo.toml` 给这 6 个目标补上 `required-features`
+**已修（PR #217）**：`Cargo.toml` 给这 6 个目标补上 `required-features`
 （5 个 example 要 `vulkan` —— 其中 4 个文件顶部虽有 `#![cfg(feature = "vulkan")]`，
 但那样整个 crate 会被 cfg 空、`main` 消失，反而报 E0601；`nemotron3_nano_moe`
 要 `parity-trace`，它在不带 cfg 门的地方调 `parity_trace::token_ids`）。
