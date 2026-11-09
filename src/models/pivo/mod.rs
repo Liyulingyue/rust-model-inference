@@ -10,9 +10,60 @@ use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 pub const SAMPLE_RATE: u32 = 16000;
+/// The `general.architecture` value the PiVo converter writes.
+pub const ARCHITECTURE: &str = "pivo";
 const CONTRACT: &str = include_str!("contract.json");
+
+/// The weight storage a PiVo GGUF carries.
+///
+/// PiVo always computes in F32. The quantized export changes how the
+/// weights are stored and how large the file is, not the arithmetic, so the
+/// file size is the only thing it buys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightFormat {
+    F32,
+    Q8_0,
+}
+
+impl WeightFormat {
+    /// The `pivo.format` metadata value that names this storage.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "pivo-f32-v1",
+            Self::Q8_0 => "pivo-q8_0-v1",
+        }
+    }
+
+    fn from_metadata(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            Some("pivo-f32-v1") => Ok(Self::F32),
+            Some("pivo-q8_0-v1") => Ok(Self::Q8_0),
+            other => Err(format!(
+                "Unsupported PiVo format {other:?}; expected pivo-f32-v1 or pivo-q8_0-v1"
+            )),
+        }
+    }
+}
+
+/// Whether a path holds a PiVo model.
+///
+/// The app layer asks this before it decides which TTS pipeline to run, so
+/// it lives next to the contract it checks against.
+pub fn matches_model(path: &Path) -> bool {
+    path.is_file()
+        && crate::format::ggufrs::open_model_source(path, crate::format::ggufrs::ComponentRole::Llm)
+            .ok()
+            .is_some_and(|source| {
+                source
+                    .metadata("general.architecture")
+                    .and_then(|value| value.to_string_val())
+                    .as_deref()
+                    == Some(ARCHITECTURE)
+            })
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +108,74 @@ struct Tensor {
 pub struct Model {
     weights: HashMap<String, Tensor>,
     frontend: text::Frontend,
+    /// How the GGUF stored the weights. The arithmetic is F32 either way.
+    pub format: WeightFormat,
+}
+
+/// Reads one contract tensor and returns its F32 values.
+///
+/// A quantized export is dequantized once here, so the compute path stays
+/// F32 whatever the file stores. Norms, biases and per-channel statistics
+/// stay F32 in the file: they are one-dimensional, small and precision
+/// sensitive, and the Q8_0 block size does not divide them.
+fn load_tensor(source: &dyn TensorSource, name: &str, shape: &[usize]) -> Result<Vec<f32>, String> {
+    let dims: Vec<u64> = shape.iter().rev().map(|&n| n as u64).collect();
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing PiVo tensor: {name}"))?;
+    if info.dims != dims {
+        return Err(format!(
+            "Invalid PiVo tensor {name}: expected shape {dims:?}"
+        ));
+    }
+    let count = shape.iter().product::<usize>();
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing PiVo data: {name}"))?;
+    let data = match info.ggml_type {
+        GGMLType::F32 => {
+            if bytes.len() != count * 4 {
+                return Err(format!("Invalid PiVo tensor length: {name}"));
+            }
+            bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect()
+        }
+        GGMLType::Q8_0 => {
+            if shape.len() < 2 {
+                return Err(format!(
+                    "PiVo tensor {name} is one-dimensional; norms, biases and \
+                     per-channel statistics must stay F32"
+                ));
+            }
+            // GGML quantizes a row at a time, and a Q8_0 block holds 32
+            // values, so the row length — the fastest varying dimension —
+            // has to be a whole number of blocks. The converter applies the
+            // same rule in `quantizable` in
+            // `tools/converter/pivo/convert_pivo.py`.
+            let row = shape[shape.len() - 1];
+            if row % 32 != 0 {
+                return Err(format!(
+                    "PiVo tensor {name} has a row length of {row}, which is not \
+                     a multiple of the Q8_0 block size 32"
+                ));
+            }
+            if bytes.len() != count / 32 * crate::ops::quant::BLOCK_Q80_SIZE {
+                return Err(format!("Invalid PiVo tensor length: {name}"));
+            }
+            crate::ops::quant::dequant_q80_weight(bytes, count, 1)
+        }
+        other => {
+            return Err(format!(
+                "Unsupported PiVo tensor type for {name}: {other:?}; expected F32 or Q8_0"
+            ))
+        }
+    };
+    if data.iter().any(|value| !value.is_finite()) {
+        return Err(format!("Non-finite PiVo tensor: {name}"));
+    }
+    Ok(data)
 }
 
 impl Model {
@@ -65,11 +184,10 @@ impl Model {
             return Err("PiVo has no Vulkan path; use --compute cpu or auto".into());
         }
         let meta = |key| source.metadata(key).and_then(MetaValue::to_string_val);
-        if meta("general.architecture") != Some("pivo")
-            || meta("pivo.format") != Some("pivo-f32-v1")
-        {
-            return Err("Expected pivo architecture with pivo-f32-v1 format".into());
+        if meta("general.architecture").as_deref() != Some(ARCHITECTURE) {
+            return Err("Expected the pivo architecture".into());
         }
+        let format = WeightFormat::from_metadata(meta("pivo.format").as_deref())?;
         let contract: serde_json::Value = serde_json::from_str(CONTRACT).unwrap();
         let config: serde_json::Value =
             serde_json::from_str(meta("pivo.config").ok_or("Missing pivo.config")?)
@@ -80,33 +198,16 @@ impl Model {
         let mut weights = HashMap::new();
         for (name, shape) in contract["tensors"].as_object().unwrap() {
             let shape: Vec<usize> = serde_json::from_value(shape.clone()).unwrap();
-            let dims: Vec<u64> = shape.iter().rev().map(|&n| n as u64).collect();
-            let info = source
-                .tensor_info(name)
-                .ok_or_else(|| format!("Missing PiVo tensor: {name}"))?;
-            if info.dims != dims || info.ggml_type != GGMLType::F32 {
-                return Err(format!(
-                    "Invalid PiVo tensor {name}: expected shape {dims:?} F32"
-                ));
-            }
-            let bytes = source
-                .tensor_slice(name)
-                .ok_or_else(|| format!("Missing PiVo data: {name}"))?;
-            if bytes.len() != shape.iter().product::<usize>() * 4 {
-                return Err(format!("Invalid PiVo tensor length: {name}"));
-            }
-            let data: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
-            if data.iter().any(|v| !v.is_finite()) {
-                return Err(format!("Non-finite PiVo tensor: {name}"));
-            }
+            let data = load_tensor(source, name, &shape)?;
             weights.insert(name.clone(), Tensor { shape, data });
         }
         let frontend = text::Frontend::new(meta("pivo.lexicon").ok_or("Missing pivo.lexicon")?)?;
         compute.trace("pivo", crate::compute::UsedBackend::Cpu, 1);
-        Ok(Self { weights, frontend })
+        Ok(Self {
+            weights,
+            frontend,
+            format,
+        })
     }
 
     pub fn synthesize(&self, request: &SpeechRequest) -> Result<Vec<f32>, SynthesisError> {

@@ -16,12 +16,25 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub(crate) fn is_pivo_model(path: &Path) -> bool {
-    crate::format::ggufrs::open_model_source(path, ComponentRole::Llm).is_ok_and(|s| {
-        s.metadata("general.architecture")
-            .and_then(|v| v.to_string_val())
-            == Some("pivo")
-    })
+/// The warning for a PiVo file whose weights are stored quantized.
+///
+/// PiVo computes in F32 either way, so the quantized export only changes
+/// the file size. The audio it produces is not usable: the FARGAN feedback
+/// loop turns the 1/127 weight grid into a carrier phase drift, and the
+/// frame durations and pitch periods stop matching the official graph. The
+/// measurement is in tools/oracle/pivo/validation.md.
+pub(crate) fn pivo_format_notice(
+    format: crate::models::pivo::WeightFormat,
+) -> Option<&'static str> {
+    match format {
+        crate::models::pivo::WeightFormat::F32 => None,
+        crate::models::pivo::WeightFormat::Q8_0 => Some(
+            "PiVo: this file stores the weights in Q8_0; the audio it produces is \
+             not usable, because the FARGAN feedback loop turns the 1/127 weight \
+             grid into a carrier phase drift. Use the F32 export; see \
+             tools/oracle/pivo/validation.md",
+        ),
+    }
 }
 
 pub(crate) fn pivo_request(
@@ -163,11 +176,15 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
             1,
         )?;
         eprintln!(
-            "PiVo: voice={} samples={} elapsed={:.3}s",
+            "PiVo: format={} voice={} samples={} elapsed={:.3}s",
+            model.format.name(),
             request.voice,
             waveform.len(),
             started.elapsed().as_secs_f64()
         );
+        if let Some(notice) = pivo_format_notice(model.format) {
+            eprintln!("{notice}");
+        }
         return Ok(());
     }
     let mmproj_path = options

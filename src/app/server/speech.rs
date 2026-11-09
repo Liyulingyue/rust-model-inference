@@ -8,6 +8,14 @@ use axum::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// The PiVo backend: the model plus the CLI defaults the HTTP requests
+/// inherit.
+pub(super) struct PivoBackend {
+    pub(super) model: Arc<crate::models::pivo::Model>,
+    pub(super) defaults: crate::models::pivo::SpeechRequest,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

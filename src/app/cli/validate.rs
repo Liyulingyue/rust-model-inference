@@ -4,7 +4,7 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
-    if !options.tts && crate::app::tts::is_pivo_model(&options.model) {
+    if !options.tts && crate::models::pivo::matches_model(&options.model) {
         return Err("PiVo requires --tts; it is an English speech synthesis model".into());
     }
     if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
@@ -276,7 +276,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         if options.model.as_os_str().is_empty() {
             return Err("--tts requires --model".into());
         }
-        if !crate::app::tts::is_pivo_model(&options.model)
+        if !crate::models::pivo::matches_model(&options.model)
             && options
                 .mmproj
                 .as_deref()

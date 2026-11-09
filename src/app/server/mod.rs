@@ -89,7 +89,7 @@ enum Backend {
     Tts(TtsBackend),
     /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
     /// text frontend, the acoustic decoder and the bundled vocoder.
-    Pivo(PivoBackend),
+    Pivo(speech::PivoBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -296,11 +296,6 @@ struct TtsBackend {
     language: &'static str,
     temperature: f32,
     max_tokens: usize,
-}
-
-struct PivoBackend {
-    model: Arc<crate::models::pivo::Model>,
-    defaults: crate::models::pivo::SpeechRequest,
 }
 
 // =============================================================================
@@ -1153,16 +1148,20 @@ fn build_backend(
         })));
     }
     if options.tts {
-        if crate::app::tts::is_pivo_model(&options.model) {
+        if crate::models::pivo::matches_model(&options.model) {
             let defaults = crate::app::tts::pivo_request(options)?;
             let source =
                 crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
                     .map_err(|e| e.to_string())?;
-            return Ok(Arc::new(Backend::Pivo(PivoBackend {
-                model: Arc::new(crate::models::pivo::Model::from_source(
-                    source.as_ref(),
-                    options.compute_policy(),
-                )?),
+            let model = Arc::new(crate::models::pivo::Model::from_source(
+                source.as_ref(),
+                options.compute_policy(),
+            )?);
+            if let Some(notice) = crate::app::tts::pivo_format_notice(model.format) {
+                eprintln!("{notice}");
+            }
+            return Ok(Arc::new(Backend::Pivo(speech::PivoBackend {
+                model,
                 defaults,
             })));
         }
@@ -1977,7 +1976,7 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() && !crate::app::tts::is_pivo_model(&options.model) {
+        if options.max_tokens.is_none() && !crate::models::pivo::matches_model(&options.model) {
             options.max_tokens = Some(128);
         }
     }

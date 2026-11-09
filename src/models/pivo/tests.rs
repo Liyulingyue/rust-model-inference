@@ -94,6 +94,63 @@ fn loader_rejects_arch_config_missing_component_shape_dtype_length_and_nan() {
 }
 
 #[test]
+fn loader_accepts_q8_0_weight_matrices_and_dequantizes_them() {
+    let mut s = source();
+    let name = "vocoder.step.signal_out.weight";
+    let count = 40 * 128;
+    // One Q8_0 block: an F16 scale followed by 32 int8 values. A scale of
+    // 1.0 is exact in F16, so the dequantized value is the payload value.
+    let payload: Vec<i8> = (0..32).map(|i| i as i8 - 16).collect();
+    let mut block = vec![0x00, 0x3C];
+    block.extend(payload.iter().map(|value| *value as u8));
+    let mut data = Vec::new();
+    for _ in 0..count / 32 {
+        data.extend_from_slice(&block);
+    }
+    s.tensors.get_mut(name).unwrap().0.ggml_type = GGMLType::Q8_0;
+    s.tensors.get_mut(name).unwrap().1 = data;
+    s.meta.insert(
+        "pivo.format".into(),
+        MetaValue::String("pivo-q8_0-v1".into()),
+    );
+    let model = Model::from_source(&s, ComputePolicy::Cpu).unwrap();
+    assert_eq!(model.format, WeightFormat::Q8_0);
+    let tensor = &model.weights[name];
+    assert_eq!(tensor.data.len(), count);
+    for (index, value) in tensor.data.iter().enumerate() {
+        assert_eq!(*value, payload[index % 32] as f32, "element {index}");
+    }
+}
+
+#[test]
+fn loader_rejects_q8_0_where_a_block_does_not_fit() {
+    // A one-dimensional tensor has no block-aligned element count and
+    // holds a norm, a bias or a statistic, so it stays F32.
+    let mut s = source();
+    s.tensors
+        .get_mut("acoustic.feature_mean")
+        .unwrap()
+        .0
+        .ggml_type = GGMLType::Q8_0;
+    s.tensors.get_mut("acoustic.feature_mean").unwrap().1 = vec![0; 34];
+    assert!(Model::from_source(&s, ComputePolicy::Cpu).is_err());
+
+    // 80 elements is not a whole number of 32-value blocks.
+    let mut s = source();
+    let name = "vocoder.step.cond_gain.weight";
+    s.tensors.get_mut(name).unwrap().0.ggml_type = GGMLType::Q8_0;
+    s.tensors.get_mut(name).unwrap().1 = vec![0; 34 * 3];
+    assert!(Model::from_source(&s, ComputePolicy::Cpu).is_err());
+
+    // A truncated payload.
+    let mut s = source();
+    let name = "vocoder.step.signal_out.weight";
+    s.tensors.get_mut(name).unwrap().0.ggml_type = GGMLType::Q8_0;
+    s.tensors.get_mut(name).unwrap().1 = vec![0; 34 * 10];
+    assert!(Model::from_source(&s, ComputePolicy::Cpu).is_err());
+}
+
+#[test]
 fn frontend_normalizes_and_preserves_specials_and_first_pronunciation() {
     let front = text::Frontend::new("hello HH AH0 L OW1\nhello(2) HH EH1 L OW0\nworld W ER1 L D\n")
         .unwrap();
@@ -213,6 +270,111 @@ fn compare(name: &str, actual: &[f32], expected: &[f32], max: f64, rms: f64) {
     );
 }
 
+/// Per-checkpoint error budgets against the official ONNX graph.
+///
+/// The F32 column is the implementation error: the Rust graph and the
+/// official one round differently, so the numbers sit far below the
+/// tolerance the vocoder's feedback loop can amplify. The Q8_0 column adds
+/// the weight quantization loss on top: the export stores every 32-value
+/// block with a single F16 scale, so each weight carries a relative error of
+/// about 1/127 and the vocoder compounds it.
+///
+/// Both columns are measured, not guessed; see
+/// tools/oracle/pivo/validation.md for the runs they come from.
+struct Gates {
+    encoder: (f64, f64),
+    log_durations: (f64, f64),
+    expansion: (f64, f64),
+    decoder: (f64, f64),
+    conditioning: (f64, f64),
+    excitation: (f64, f64),
+    state: (f64, f64),
+    vocoder_pcm: (f64, f64),
+    features: (f64, f64),
+    pcm: (f64, f64),
+}
+
+impl Gates {
+    fn for_format(format: WeightFormat) -> Self {
+        match format {
+            WeightFormat::F32 => Self {
+                encoder: (1e-4, 1e-5),
+                log_durations: (1e-4, 1e-5),
+                expansion: (1e-6, 1e-7),
+                decoder: (1e-4, 1e-5),
+                conditioning: (2e-5, 2e-6),
+                excitation: (2e-5, 2e-6),
+                state: (2e-5, 2e-6),
+                vocoder_pcm: (5e-3, 7.5e-4),
+                features: (1e-4, 1e-5),
+                pcm: (5e-3, 7.5e-4),
+            },
+            // The Q8_0 column is the measured degradation of the quantized
+            // export against the official ONNX graph, with margin. These
+            // are regression guards, not a quality claim: the format is not
+            // usable, and the numbers behind that are in
+            // tools/oracle/pivo/validation.md.
+            WeightFormat::Q8_0 => Self {
+                encoder: (6e-2, 1.2e-2),
+                log_durations: (7e-2, 2.5e-2),
+                expansion: (1e-6, 1e-7),
+                decoder: (3.5e-1, 2.5e-2),
+                conditioning: (1.2e-1, 1.5e-2),
+                excitation: (2.5e-3, 1e-3),
+                state: (3.5e-2, 5e-3),
+                vocoder_pcm: (1.2, 1.2e-1),
+                features: (7e-1, 3.5e-2),
+                pcm: (1.6, 1.6e-1),
+            },
+        }
+    }
+}
+
+/// The measured worst mismatch rate of the discrete contract for the Q8_0
+/// export: 7.14% of the frame durations and 23.23% of the pitch periods
+/// across the eight oracle cases. The bands below hold that measurement
+/// with margin so a further degradation is caught.
+const Q8_0_DURATION_MISMATCH: f64 = 0.10;
+const Q8_0_PERIOD_MISMATCH: f64 = 0.25;
+
+/// The discrete contract: the frame durations and the pitch periods.
+///
+/// The F32 export reproduces both exactly. The Q8_0 export moves every
+/// weight matrix onto the 1/127 grid of its per-block scale, and both
+/// decisions flip: the FARGAN feedback turns a moved weight into a
+/// different frame count and a different period. The mismatch rate is
+/// measured and bounded instead of being asserted away, because the format
+/// is not usable; the numbers behind that statement are in
+/// tools/oracle/pivo/validation.md.
+fn compare_discrete(label: &str, actual: &[usize], expected: &[usize], format: WeightFormat) {
+    match format {
+        WeightFormat::F32 => assert_eq!(actual, expected, "{label}"),
+        WeightFormat::Q8_0 => {
+            assert_eq!(actual.len(), expected.len(), "{label} shape");
+            let mismatched = actual
+                .iter()
+                .zip(expected.iter())
+                .filter(|(actual, expected)| actual != expected)
+                .count();
+            let rate = mismatched as f64 / expected.len().max(1) as f64;
+            println!(
+                "{label} mismatch: {mismatched}/{} ({:.2}%)",
+                expected.len(),
+                rate * 100.0
+            );
+            let band = if label == "durations" {
+                Q8_0_DURATION_MISMATCH
+            } else {
+                Q8_0_PERIOD_MISMATCH
+            };
+            assert!(
+                rate <= band,
+                "{label} mismatch rate {rate} exceeds the measured {band}"
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires pinned PiVo GGUF and official ONNX fixtures; see tools/oracle/pivo"]
 fn official_onnx_checkpoints_and_waveform() {
@@ -224,6 +386,7 @@ fn official_onnx_checkpoints_and_waveform() {
         ComputePolicy::Cpu
     };
     let model = Model::from_source(&source, policy).unwrap();
+    let gates = Gates::for_format(model.format);
     let cases: Vec<serde_json::Value> =
         serde_json::from_slice(&std::fs::read(std::env::var("PIVO_FIXTURES").unwrap()).unwrap())
             .unwrap();
@@ -240,41 +403,49 @@ fn official_onnx_checkpoints_and_waveform() {
             serde_json::from_value::<Vec<usize>>(case["tokens"].clone()).unwrap()
         );
         let (encoded, logs) = model.encode(&front.tokens, usize::from(request.voice == "Vo"));
-        compare("encoded", &encoded, &flatten(&case["encoded"]), 1e-4, 1e-5);
+        compare(
+            "encoded",
+            &encoded,
+            &flatten(&case["encoded"]),
+            gates.encoder.0,
+            gates.encoder.1,
+        );
         compare(
             "log_durations",
             &logs,
             &flatten(&case["log_durations"]),
-            1e-4,
-            1e-5,
+            gates.log_durations.0,
+            gates.log_durations.1,
         );
         let durations = acoustic::durations(&front.tokens, &logs, request.speed).unwrap();
-        assert_eq!(
-            durations,
-            serde_json::from_value::<Vec<usize>>(case["durations"].clone()).unwrap()
-        );
-        let expanded = acoustic::expand(&flatten(&case["encoded"]), &durations);
+        let official_durations: Vec<usize> =
+            serde_json::from_value(case["durations"].clone()).unwrap();
+        compare_discrete("durations", &durations, &official_durations, model.format);
+        // The pipeline stages run on the official frame timing so the shapes
+        // stay comparable when the quantized export changes a frame count.
+        // The frame timing itself is checked above.
+        let expanded = acoustic::expand(&flatten(&case["encoded"]), &official_durations);
         compare(
             "expansion_phase",
             &expanded,
             &flatten(&case["expanded"]),
-            1e-6,
-            1e-7,
+            gates.expansion.0,
+            gates.expansion.1,
         );
         compare(
             "decoder",
             &model.decode(&expanded),
             &flatten(&case["features"]),
-            1e-4,
-            1e-5,
+            gates.decoder.0,
+            gates.decoder.1,
         );
         for record in case["conditioning"].as_array().unwrap() {
             compare(
                 "conditioning",
                 &model.conditioning(&flatten(&record["inputs"]["features"])),
                 &flatten(&record["outputs"][0]),
-                2e-5,
-                2e-6,
+                gates.conditioning.0,
+                gates.conditioning.1,
             );
         }
         for record in case["steps"].as_array().unwrap() {
@@ -293,8 +464,8 @@ fn official_onnx_checkpoints_and_waveform() {
                 "excitation",
                 &model.vocoder_step(&flatten(&input["conditioning"]), period, &mut state),
                 &flatten(&record["outputs"][0]),
-                2e-5,
-                2e-6,
+                gates.excitation.0,
+                gates.excitation.1,
             );
             for (actual, expected) in [
                 &state.memory,
@@ -306,7 +477,13 @@ fn official_onnx_checkpoints_and_waveform() {
             .iter()
             .zip(record["outputs"].as_array().unwrap().iter().skip(1))
             {
-                compare("vocoder_state", actual, &flatten(expected), 2e-5, 2e-6);
+                compare(
+                    "vocoder_state",
+                    actual,
+                    &flatten(expected),
+                    gates.state.0,
+                    gates.state.1,
+                );
             }
         }
         let reference_features = flatten(&case["features"]);
@@ -315,27 +492,43 @@ fn official_onnx_checkpoints_and_waveform() {
             "vocoder_pcm",
             &vocoder_pcm,
             &flatten(&case["pcm"]),
-            5e-3,
-            7.5e-4,
+            gates.vocoder_pcm.0,
+            gates.vocoder_pcm.1,
         );
-        let native_features = model.decode(&acoustic::expand(&encoded, &durations));
+        let native_features = model.decode(&acoustic::expand(&encoded, &official_durations));
         compare(
             "acoustic_features",
             &native_features,
             &reference_features,
-            1e-4,
-            1e-5,
+            gates.features.0,
+            gates.features.1,
         );
         let native_periods: Vec<_> = native_features
             .chunks_exact(20)
             .map(vocoder::period)
             .collect();
-        assert_eq!(
-            native_periods,
-            serde_json::from_value::<Vec<usize>>(case["periods"].clone()).unwrap()
+        let reference_periods =
+            serde_json::from_value::<Vec<usize>>(case["periods"].clone()).unwrap();
+        compare_discrete(
+            "pitch_periods",
+            &native_periods,
+            &reference_periods,
+            model.format,
         );
-        let pcm = model.synthesize(&request).unwrap();
+        // The end-to-end waveform runs on the official frame timing for the
+        // quantized export, because its own frame count can differ; the
+        // F32 export goes through the real entry point.
+        let pcm = match model.format {
+            WeightFormat::F32 => model.synthesize(&request).unwrap(),
+            WeightFormat::Q8_0 => model.vocode(&native_features),
+        };
         // FARGAN feedback amplifies even one-ULP perturbations in the official graph.
-        compare("pcm", &pcm, &flatten(&case["pcm"]), 5e-3, 7.5e-4);
+        compare(
+            "pcm",
+            &pcm,
+            &flatten(&case["pcm"]),
+            gates.pcm.0,
+            gates.pcm.1,
+        );
     }
 }

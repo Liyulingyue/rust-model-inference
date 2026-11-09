@@ -5,6 +5,31 @@ Measured 2026-11-04 on Apple M3 Max, Darwin 27 arm64, Rust 1.98.1,
 ONNX 1.23.2, ONNX Runtime 1.31.1 CPU (one thread), PyTorch 2.15.0 for conversion.
 This is an implementation check, not a listening study or benchmark.
 
+Re-measured 2026-11-10 on Linux x86_64 (Intel Core Ultra 5 125H), Rust 1.95.0,
+ONNX Runtime 1.31.1 CPU (one thread), NumPy 2.5.4, PyTorch 2.14.1 — see
+[Coverage matrix](#coverage-matrix), [Performance](#performance) and
+[Q8_0 export](#q80-export-the-audio-is-not-usable). The arm64 numbers below are
+the original ones; the x86 column is the same eight oracle cases.
+
+## Coverage matrix
+
+Status columns: implementation, then verification. A cell that was never run
+says so; it never says "not applicable" to hide a gap.
+
+| Capability / component | Weight format | Compute / KV precision | Request backend | CLI command and result | HTTP route, request and result | Actual backend, metric, evidence | Implementation / verification |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| English TTS, voice Pi | `pivo-f32-v1` | F32 weights, F32 compute | CPU | `--tts --model pivo-F32.gguf --prompt 'NASA is ready for the next mission.' --voice Pi --out pi.wav` — mono 16 kHz PCM16 WAV, 29,920 samples | `POST /v1/audio/speech` `{"input":"...","voice":"Pi"}` — same bytes as the CLI | CPU SIMD; encoder 2.21e-6 / 3.10e-7, waveform 3.87e-3 / 5.67e-4 (x86, worst of eight cases); oracle `official_onnx_checkpoints_and_waveform` | implemented / **passed** |
+| English TTS, voice Vo | `pivo-f32-v1` | F32 weights, F32 compute | CPU | `--voice Vo` — verified through the eight oracle cases | `{"voice":"Vo"}` — verified in `check_interfaces.py` | as above | implemented / **passed** |
+| Speed 0.5–2 | `pivo-f32-v1` | F32 | CPU | `--speed 0.5 … 2` — 0.5, 1, 1.25 and 2 are oracle cases | `{"speed":1.25}` — verified in `check_interfaces.py` | integer durations match the official graph exactly | implemented / **passed** |
+| Pronunciation overrides | `pivo-f32-v1` | F32 | CPU | `--pronunciations '{"zzvo":["Z","IY1","V","OW0"]}'` — oracle case | `{"overrides":{"zzvo":[...]}}` — verified in `check_interfaces.py` | token IDs match the official frontend exactly | implemented / **passed** |
+| Frontend normalization | `pivo-f32-v1` | F32 | CPU | numbers, currency, ISO dates, initialisms, NFKC — oracle cases | same code path | normalized text and token IDs match exactly | implemented / **passed** |
+| JEV, chat, embeddings | — | — | — | — | 404, the routes are absent | — | **not applicable**: PiVo is a speech synthesis model with no scoring or text semantics (contract has no probability head) |
+| Device path (Vulkan) | `pivo-f32-v1` | — | Vulkan | `--compute vulkan` — rejected at load: "PiVo has no Vulkan path" | same rejection at startup | no device kernel, no submission counters | **not implemented** (see [Limits](#limits)) |
+| Quantized weights | `pivo-q8_0-v1` | Q8_0 storage, F32 compute | CPU | `--quant q8_0` export — 6,988,192 bytes instead of 9,252,704 | loads, and the server prints the same warning as the CLI | waveform error 0.82 of full scale, pitch period mismatch up to 23.23% | implemented / **failed** — the audio is not usable, see [Q8_0 export](#q80-export-the-audio-is-not-usable) |
+
+Auto is the same code path as CPU: `--compute auto` runs on the CPU, reports
+`scope=pivo backend=Cpu` and produces byte-identical WAVs.
+
 ## Pinned inputs
 
 [sources.json](sources.json) pins all 23 ModelScope files by per-file revision,
@@ -16,6 +41,7 @@ SHA256 and byte count. The reference source files were not edited.
 | `checkpoints/vocoder.pt` | `355d470826817afaa4e729d1b19c8383e985f365af5d2b913f1b9acdf8f7eca4` |
 | `pivo/resources/cmudict.dict` | `81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22` |
 | Converted `pivo-F32.gguf`, 9,252,704 bytes | `e01cad6189b2d3dadee0a3662e7d65388044092b6f00ef66a21cdfd8c6de6d3d` |
+| Converted `pivo-Q8_0.gguf`, 6,988,192 bytes | `4ddbb8fe7929d788a23e45cb472980b24cde85334da72c19fb40e12ba1a30bc0` |
 
 Architecture `pivo`, format `pivo-f32-v1`: 109 F32 tensors, 1,401,562 learned
 parameters plus 40 normalization-buffer entries. All 109 tensor payloads were
@@ -24,6 +50,12 @@ networks, the dictionary, source hashes and retained license/notice texts.
 The shared [contract](../../../src/models/pivo/contract.json) fixes every tensor
 name, dimension and acoustic configuration value. Loader tests reject missing
 components, incorrect shapes, F16, wrong lengths, NaN and unsupported config/format.
+
+The Q8_0 export stores 52 of the 109 tensors in Q8_0 and keeps the rest F32.
+GGML quantizes a row at a time and a Q8_0 block holds 32 values, so only the
+matrices whose row length is a whole number of blocks qualify; the
+one-dimensional norms, biases and statistics stay F32 on purpose, and the
+convolution kernels keep a kernel axis of 3 or 5.
 
 ## Numerical results
 
@@ -41,18 +73,24 @@ CPU SIMD, scalar-dispatch and Auto runs. Floating-point stages use tolerances.
 
 Worst max-absolute / RMSE values across the eight cases:
 
-| Checkpoint | CPU SIMD, two threads | Scalar dispatch, one thread | Acceptance gate |
-| --- | --- | --- | --- |
-| Encoder | `2.50e-6 / 3.29e-7` | `2.62e-6 / 3.06e-7` | `1e-4 / 1e-5` |
-| Log duration | `1.79e-6 / 5.72e-7` | `1.67e-6 / 5.84e-7` | `1e-4 / 1e-5` |
-| Expansion/phase | `5.96e-8 / 2.67e-9` | same | `1e-6 / 1e-7` |
-| Decoder on official encoder output | `4.39e-5 / 1.38e-6` | `4.39e-5 / 1.38e-6` | `1e-4 / 1e-5` |
-| Full native acoustic features | `4.20e-5 / 1.40e-6` | `4.20e-5 / 1.39e-6` | `1e-4 / 1e-5` |
-| Conditioning | `1.34e-6 / 1.23e-7` | `9.24e-7 / 1.17e-7` | `2e-5 / 2e-6` |
-| Teacher-forced excitation | `1.04e-7 / 5.28e-8` | `1.04e-7 / 4.33e-8` | `2e-5 / 2e-6` |
-| Teacher-forced recurrent states | `2.09e-6 / 5.83e-7` | `1.73e-6 / 4.69e-7` | `2e-5 / 2e-6` |
-| Vocoder on official features | `1.97e-3 / 2.80e-4` | `3.59e-3 / 5.17e-4` | `5e-3 / 7.5e-4` |
-| Complete waveform | `4.22e-3 / 6.11e-4` | `1.93e-3 / 2.74e-4` | `5e-3 / 7.5e-4` |
+| Checkpoint | CPU SIMD, two threads (arm64) | CPU SIMD, two threads (x86) | Scalar dispatch, one thread (arm64) | Acceptance gate |
+| --- | --- | --- | --- | --- |
+| Encoder | `2.50e-6 / 3.29e-7` | `2.21e-6 / 3.10e-7` | `2.62e-6 / 3.06e-7` | `1e-4 / 1e-5` |
+| Log duration | `1.79e-6 / 5.72e-7` | `2.62e-6 / 7.85e-7` | `1.67e-6 / 5.84e-7` | `1e-4 / 1e-5` |
+| Expansion/phase | `5.96e-8 / 2.67e-9` | `5.96e-8 / 2.28e-9` | same | `1e-6 / 1e-7` |
+| Decoder on official encoder output | `4.39e-5 / 1.38e-6` | `4.48e-5 / 1.34e-6` | `4.39e-5 / 1.38e-6` | `1e-4 / 1e-5` |
+| Full native acoustic features | `4.20e-5 / 1.40e-6` | `4.77e-5 / 1.37e-6` | `4.20e-5 / 1.39e-6` | `1e-4 / 1e-5` |
+| Conditioning | `1.34e-6 / 1.23e-7` | `9.24e-7 / 1.07e-7` | `9.24e-7 / 1.17e-7` | `2e-5 / 2e-6` |
+| Teacher-forced excitation | `1.04e-7 / 5.28e-8` | `6.71e-8 / 2.99e-8` | `1.04e-7 / 4.33e-8` | `2e-5 / 2e-6` |
+| Teacher-forced recurrent states | `2.09e-6 / 5.83e-7` | `2.72e-6 / 4.28e-7` | `1.73e-6 / 4.69e-7` | `2e-5 / 2e-6` |
+| Vocoder on official features | `1.97e-3 / 2.80e-4` | `2.19e-3 / 3.33e-4` | `3.59e-3 / 5.17e-4` | `5e-3 / 7.5e-4` |
+| Complete waveform | `4.22e-3 / 6.11e-4` | `3.87e-3 / 5.67e-4` | `1.93e-3 / 2.74e-4` | `5e-3 / 7.5e-4` |
+
+The x86 column is the F32 export, worst over the same eight cases. It lands in
+the same band as the arm64 column: both sit just under the waveform gate,
+because the FARGAN feedback amplifies the transcendental rounding of both
+architectures. The Q8_0 export is a different story, see
+[Q8_0 export](#q80-export-the-audio-is-not-usable).
 
 Auto reports `scope=pivo backend=Cpu`, and its metrics match CPU SIMD. All eight
 CLI WAVs are byte-identical between CPU and Auto. Rust uses existing
@@ -76,6 +114,72 @@ separate, tighter intermediate gates. `trace.py` records the one-ULP probe
 separately; the primary reference checkpoints and PCM stay unmodified. This does
 not establish perceptual equivalence for arbitrary text.
 
+## Q8_0 export: the audio is not usable
+
+The converter can export the weight matrices in Q8_0
+(`--quant q8_0`), and the loader reads that format. **The audio it produces is
+not usable, and the format should not be used.** The measurement is here so the
+conclusion is reproducible rather than a matter of opinion.
+
+The quantization itself is exact: for all 52 quantized tensors the largest
+dequantization error is 0.4997 of the Q8_0 grid step `amax/127`, which is the
+half-ULP bound of the round-to-nearest rule. The loss is not in the
+quantizer.
+
+The loss is in the model. PiVo's FARGAN vocoder feeds its own output back into
+the next step, so a small weight perturbation compounds. Scaling every weight
+matrix of the F32 export by a constant gives:
+
+| Weight scaling | Waveform error against the F32 export | Waveform correlation |
+| --- | --- | --- |
+| × (1 + 1e-5) | 0.12% RMS | 0.999999 |
+| × (1 + 1e-4) | 1.20% RMS | 0.999928 |
+| × (1 + 1e-3) | 74.97% RMS | 0.718 |
+| Q8_0 export (an effective weight change of the same order) | 86.53% RMS | 0.626 |
+
+The Q8_0 export lands past the cliff. The consequences, measured against the
+official ONNX graph over the eight oracle cases:
+
+| Checkpoint | max_abs | RMSE |
+| --- | --- | --- |
+| Encoder | `3.29e-2` | `6.55e-3` |
+| Log duration | `3.87e-2` | `1.27e-2` |
+| Decoder | `1.75e-1` | `1.16e-2` |
+| Conditioning | `6.02e-2` | `6.48e-3` |
+| Vocoder on official features | `5.99e-1` | `5.88e-2` |
+| Complete waveform | `8.20e-1` | `7.91e-2` |
+
+The waveform error is 0.82 of full scale. The discrete contract breaks too:
+up to 7.14% of the frame durations and up to 23.23% of the pitch periods stop
+matching the official graph. The loudness envelope survives (frame energy
+correlation 0.9993, no time shift), so the speech keeps its rhythm and volume,
+but the carrier phase drifts and the timbre changes.
+
+The loader therefore keeps the format readable, the CLI prints
+`format=pivo-q8_0-v1` and warns that the audio is not usable, and the oracle
+test asserts the measured degradation band instead of the F32 gates. The F32
+export is the one to use.
+
+## Performance
+
+[performance.json](performance.json) holds the full record. Same machine, same
+weights, same input, measured from a cold process to the finished audio on
+both sides (Intel Core Ultra 5 125H, x86_64, `release-fast`):
+
+| Case | Rust `--compute cpu` | Official ONNX Runtime, one thread | RTF (Rust / ONNX) |
+| --- | --- | --- | --- |
+| "NASA is ready for the next mission." (1.87 s audio) | 192.4 ms | 192.3 ms | 0.103 / 0.103 |
+| "The quick brown fox jumps over the lazy dog." (2.57 s audio) | 219.9 ms | 240.2 ms | 0.086 / 0.093 |
+
+The Rust implementation matches the official ONNX Runtime: 1.00x on the short
+case and 0.92x on the long one, both far faster than real time. `--threads 1`,
+`2` and `4` make no measurable difference — the model is 1.4M parameters, so
+the per-frame vocoder loop dominates and the thread pool has nothing to
+parallelise.
+
+There is no Vulkan path, so there is no GPU number to report; the model is
+CPU only by design.
+
 ## Interfaces and review
 
 The real `check_interfaces.py` run passed:
@@ -98,6 +202,11 @@ verify deterministic rejection and that finite overflow-inducing weights return
 a numerical error before vocoding. HTTP maps numerical failures to 500. The
 integration run also exposed and fixed the missing `--tts` architecture gate.
 
+The x86 re-run repeated all of it: `check_interfaces.py` reported
+`CLI: 8 oracle cases; CPU/Auto byte-identical WAV`,
+`CLI: incompatible controls, task routes and strict Vulkan rejected` and
+`HTTP: defaults/overrides, PCM/WAV, reset, 400/404/422/429 passed [200, 429, 429, 429]`.
+
 ## Reproduction and regression
 
 See [README.md](README.md) for download/conversion and CLI/HTTP commands. Commands
@@ -116,49 +225,47 @@ cargo +1.98.1 check --locked --profile release-fast --features vulkan --lib --bi
 git diff --check
 ```
 
-Converter: 2 tests passed. PiVo including real oracle: 6 passed in each of CPU
-SIMD, scalar and Auto. CLI regressions: 2 passed. Vulkan-feature library/main/server
-compilation passed. Strict Vulkan is rejected at runtime by the model's gate,
-also covered without a physical GPU.
+Converter: 3 tests passed. PiVo including real oracle: 9 passed in each of CPU
+SIMD, scalar and Auto, and 9 passed with the Q8_0 export. CLI regressions: 2 passed.
+Vulkan-feature library/main/server compilation passed. Strict Vulkan is rejected
+at runtime by the model's gate, also covered without a physical GPU.
 
-Full `cargo +1.98.1 test --locked --profile release-fast --lib`: baseline
-**1330 passed / 20 failed / 88 ignored**; after **1336 / 20 / 89**. The exact
-20 failure names were compared and are unchanged:
+Full `cargo test --locked --profile release-fast --lib` on 2026-11-10 (x86_64):
+baseline **1471 passed / 16 failed / 96 ignored** on `origin/main`; after
+**1479 / 16 / 97**. The exact 16 failure names were compared and are unchanged:
 
 ```text
+app::media::tests::stereo_uploads_are_refused
+format::ggufrs::tests::open_does_not_map_sparse_segment_region
 models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length
 models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32
 models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms
 models::clm::tests::matches_reference_golden_vectors
 models::clm::tests::rejects_wrong_embedding_width
-models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction
-models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation
-models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path
-models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml
-models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups
+models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state
 models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix
-models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits
-models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight
-models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length
-ops::argmax::tests::all_negative
-ops::argmax::tests::large_random
-ops::argmax::tests::middle_max
-ops::argmax::tests::tail_handles_non_aligned_lengths
-ops::argmax::tests::ties_pick_lowest_index
-ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum
+models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel
+models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word
+models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries
+ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference
+ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp
+ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation
+ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits
 ```
 
-`cargo fmt --all -- --check` still fails on eight pre-existing unformatted files:
-`app/server/api.rs`, `app/server/prediction.rs`, `app/wevisone_vl.rs`,
-`models/audio8/{gpu,mod,text}.rs`, `ops/quant/neon_k.rs` and `vulkan/ops.rs`
-(all under `src/`). Each failure was reproduced against its baseline HEAD source.
-New files and changed PiVo regions were formatted; unrelated formatting was left
-alone. The entire repository test suite and CI are not claimed green.
+`cargo fmt --all -- --check` passed on 2026-11-10. The eight pre-existing
+unformatted files that this record used to list
+(`app/server/api.rs`, `app/server/prediction.rs`, `app/wevisone_vl.rs`,
+`models/audio8/{gpu,mod,text}.rs`, `ops/quant/neon_k.rs` and `vulkan/ops.rs`)
+were reformatted upstream in the meantime, so that list no longer applies.
+The entire repository test suite and CI are not claimed green.
 
 ## Limits
 
-English Pi/Vo, F32 GGUF, CPU/Auto only. JEV, voice cloning, sampling, reduced
-precision and streaming HTTP are not implemented. Real-model measurements were
-on this arm64 host; x86 CI is configured for lightweight loader/frontend/CLI
-regressions, not the downloaded oracle. Long-form quality, listening tests,
-physical GPU execution and performance remain unverified.
+English Pi/Vo, F32 GGUF, CPU/Auto only. JEV, voice cloning, sampling and
+streaming HTTP are not implemented. The Q8_0 export exists and loads, but its
+audio is not usable, so the F32 export is the only one to use. Real-model
+measurements were made on an arm64 host and repeated on x86_64; the CI is
+configured for lightweight loader/frontend/CLI regressions, not the downloaded
+oracle. Long-form quality, listening tests, physical GPU execution and
+performance beyond the two cases above remain unverified.

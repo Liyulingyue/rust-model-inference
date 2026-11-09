@@ -1,4 +1,10 @@
-"""Export the pinned PiVo-1.4M acoustic/vocoder checkpoints losslessly to F32 GGUF."""
+"""Export the pinned PiVo-1.4M acoustic/vocoder checkpoints to a GGUF.
+
+The ``f32`` export is lossless. The ``q8_0`` export stores the weight
+matrices and convolution kernels in Q8_0 and keeps the one-dimensional
+norms, biases and per-channel statistics in F32: PiVo still computes in F32,
+so the quantized export trades a little weight precision for a smaller file.
+"""
 import argparse
 import hashlib
 import json
@@ -7,7 +13,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from tools.converter.utils.gguf import GGML_F32, GgufWriter, gguf_dims
+from tools.converter.utils.gguf import (
+    GGML_F32,
+    GGML_Q8_0,
+    GgufWriter,
+    gguf_dims,
+    quantize_q8_0,
+)
 
 CONTRACT = json.loads((Path(__file__).resolve().parents[3] /
                       'src/models/pivo/contract.json').read_text())
@@ -22,8 +34,29 @@ HASHES = {
     'LICENSES/Opus-BSD-3-Clause.txt': '01e1167d54a096d123cf6dfbbeb19587278845c6481d2d66d545669846079551',
 }
 
+FORMATS = {'f32': 'pivo-f32-v1', 'q8_0': 'pivo-q8_0-v1'}
+Q8_0_BLOCK = 32
 
-def convert(directory, output):
+
+def quantizable(shape, values):
+    """Whether a tensor may be stored in Q8_0.
+
+    GGML quantizes a tensor row by row: the row length is the first
+    dimension, and a Q8_0 block holds 32 values, so the row length has to be
+    a whole number of blocks. Only the weight matrices qualify: the
+    one-dimensional norms, biases and per-channel statistics stay F32
+    because they are small and precision sensitive.
+
+    The loader enforces the same rule in ``load_tensor`` in
+    ``src/models/pivo/mod.rs``; the two have to stay in step, because a
+    file this function accepts but the loader rejects would fail to load.
+    """
+    if len(shape) < 2:
+        return False
+    return shape[-1] % Q8_0_BLOCK == 0
+
+
+def convert(directory, output, quant='f32'):
     if output.exists():
         raise FileExistsError(output)
     for name, expected in HASHES.items():
@@ -46,17 +79,28 @@ def convert(directory, output):
     writer.add_meta('pivo.licenses', '\n\n'.join((directory / name).read_text()
                     for name in HASHES if name not in ('checkpoints/acoustic.pt',
                     'checkpoints/vocoder.pt', 'pivo/resources/cmudict.dict')))
-    writer.add_meta('pivo.format', 'pivo-f32-v1')
+    writer.add_meta('pivo.format', FORMATS[quant])
     writer.add_meta('pivo.config', json.dumps(CONTRACT['config']))
     writer.add_meta('pivo.source_hashes', json.dumps(HASHES))
     writer.add_meta('pivo.lexicon', (directory / 'pivo/resources/cmudict.dict').read_text())
+    quantized = 0
+    payloads = []
     for name, tensor in weights.items():
         if list(tensor.shape) != CONTRACT['tensors'][name] or tensor.dtype != torch.float32:
             raise ValueError(f'Invalid PiVo tensor: {name}')
         array = tensor.detach().contiguous().numpy()
         if not np.isfinite(array).all():
             raise ValueError(f'Non-finite PiVo tensor: {name}')
-        writer.add_tensor(name, GGML_F32, gguf_dims(array.shape), array.astype('<f4').tobytes())
+        if quant == 'q8_0' and quantizable(tensor.shape, array):
+            payloads.append((name, GGML_Q8_0, gguf_dims(array.shape), quantize_q8_0(array)))
+            quantized += 1
+        else:
+            payloads.append((name, GGML_F32, gguf_dims(array.shape),
+                             array.astype('<f4').tobytes()))
+    if quantized:
+        writer.add_meta('pivo.quantized_tensors', quantized)
+    for name, ggml_type, dims, raw in payloads:
+        writer.add_tensor(name, ggml_type, dims, raw)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + '.tmp')
     if temporary.exists():
@@ -75,5 +119,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--quant', choices=sorted(FORMATS), default='f32',
+                        help='weight storage: f32 (lossless) or q8_0 (smaller file)')
     args = parser.parse_args()
-    convert(args.directory, args.output)
+    convert(args.directory, args.output, args.quant)

@@ -23,9 +23,29 @@ One `pivo` GGUF includes 109 F32 tensors (1,401,562 parameters plus 40 feature
 normalization buffer values), the CMU dictionary and all upstream license/notice
 texts. The converter checks original hashes before loading checkpoints, checks
 the exact tensor/config contract, and refuses to overwrite an existing output.
-Only the F32 export is supported; other tensor types and missing components fail
-at load time. No `--mmproj` is used.
+No `--mmproj` is used.
 Retained upstream attribution and licenses are in [licenses/](licenses/).
+
+## Weight storage
+
+| Format | Command | File size | Usable |
+| --- | --- | --- | --- |
+| `pivo-f32-v1` | default | 9,252,704 bytes | yes |
+| `pivo-q8_0-v1` | `--quant q8_0` | 6,988,192 bytes | **no — the audio is not usable** |
+
+PiVo always computes in F32; the quantized export only changes how the weights
+are stored. GGML quantizes a row at a time and a Q8_0 block holds 32 values, so
+only the 52 matrices whose row length is a whole number of blocks are
+quantized; the one-dimensional norms, biases and statistics, and the
+convolution kernels with a kernel axis of 3 or 5, stay F32.
+
+**Do not use the Q8_0 export.** PiVo's FARGAN vocoder feeds its own output
+back into the next step, so the 1/127 weight grid compounds into a carrier phase
+drift: the complete waveform ends up 0.82 of full scale away from the official
+graph, and up to 23.23% of the pitch periods stop matching. The loader reads
+the format, the CLI prints `format=pivo-q8_0-v1` and warns, and the measurement
+is in [validation.md](validation.md#q80-export-the-audio-is-not-usable). The F32
+export is the one to use.
 
 `Pi` and `Vo` are the two built-in voices. Speed must be finite and in `[0.5,2]`.
 The frontend uses NFKC, deterministic normalization and the dictionary's first
@@ -57,6 +77,19 @@ Numerical inference failures return 500.
 CPU and Auto both use existing Rust SIMD operators on the CPU. Strict Vulkan is
 rejected; there is no GPU speedup claim. Every utterance creates independent
 acoustic/vocoder/DSP state.
+
+Same machine, same weights, measured from a cold process to the finished audio
+(Intel Core Ultra 5 125H, x86_64, `release-fast`):
+
+| Case | Rust `--compute cpu` | Official ONNX Runtime, one thread |
+| --- | --- | --- |
+| "NASA is ready for the next mission." (1.87 s audio) | 192.4 ms | 192.3 ms |
+| "The quick brown fox jumps over the lazy dog." (2.57 s audio) | 219.9 ms | 240.2 ms |
+
+RTF is about 0.09–0.10 on both sides. `--threads 1`, `2` and `4` make no
+measurable difference: the model is 1.4M parameters, so the per-frame vocoder
+loop dominates and the thread pool has nothing to parallelise. The full record
+is in [performance.json](performance.json).
 
 ## Numerical oracle
 

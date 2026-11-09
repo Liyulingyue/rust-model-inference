@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools.converter.pivo.convert_pivo import CONTRACT, convert
+from tools.converter.pivo.convert_pivo import CONTRACT, convert, quantizable
 
 
 class ConversionTest(unittest.TestCase):
@@ -25,6 +25,21 @@ class ConversionTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 convert(root, output)
             self.assertEqual(output.read_bytes(), b'preserve me')
+
+    def test_q8_0_covers_the_matrices_whose_rows_are_block_aligned(self):
+        # GGML quantizes a row at a time, so the row length — the fastest
+        # varying dimension — has to be a whole number of 32-value blocks.
+        self.assertTrue(quantizable((96, 96), None))
+        self.assertTrue(quantizable((480, 160), None))
+        self.assertFalse(quantizable((96, 4), None))
+        self.assertFalse(quantizable((1, 80), None))
+        self.assertFalse(quantizable((128, 688), None))
+        # The one-dimensional norms, biases and statistics stay F32.
+        self.assertFalse(quantizable((96,), None))
+        self.assertFalse(quantizable((20,), None))
+        # The convolution kernels keep a kernel axis of 3 or 5.
+        self.assertFalse(quantizable((96, 96, 5), None))
+        self.assertFalse(quantizable((128, 64, 3), None))
 
 
 if __name__ == '__main__':
