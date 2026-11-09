@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use std::sync::OnceLock;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", feature = "vulkan"))]
 use std::sync::atomic::AtomicBool;
 
 #[cfg(target_arch = "x86_64")]
@@ -71,11 +71,38 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 static VULKAN_CONTEXT: OnceLock<Result<VulkanContext, String>> = OnceLock::new();
 
 #[cfg(feature = "vulkan")]
+pub(crate) fn is_shared_vulkan_context(context: &VulkanContext) -> bool {
+    matches!(VULKAN_CONTEXT.get(), Some(Ok(shared)) if std::ptr::eq(shared, context))
+}
+
+#[cfg(feature = "vulkan")]
+static VULKAN_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "vulkan")]
+extern "C" fn shutdown_vulkan() {
+    VULKAN_SHUTTING_DOWN.store(true, Ordering::Release);
+    let cleanup = || {
+        crate::ops::kernel::vulkan::release_shared_runtimes()?;
+        crate::vulkan::matmul_q4k::release_shared_runtime()?;
+        if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
+            context.shutdown()?;
+        }
+        Ok::<_, crate::vulkan::VulkanError>(())
+    };
+    if let Err(error) = cleanup() {
+        log::error!("Vulkan shutdown retained resources: {error}");
+    }
+    // Keep Entry loaded until the driver's own process-exit callbacks finish.
+}
+
+#[cfg(feature = "vulkan")]
 use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
-    if !GPU_ENABLED.load(Ordering::Relaxed) || crate::core::thread_pool::gpu_matmul_disabled() {
+    if !crate::ops::gpu_requested()
+        || crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu
+    {
         return None;
     }
     shared_vulkan_context()
@@ -85,9 +112,30 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
         .ok()
 }
 
+/// Start the device initialization in the background.
+///
+/// Bringing the Vulkan device up costs about 300 ms on the GB10 box -- the
+/// driver loads its compiler and enumerates the device -- and a session
+/// that opens a 12 GB checkpoint has that time to spare. The context is
+/// shared, so whoever needs it first waits for the same initialization.
+#[cfg(feature = "vulkan")]
+pub fn warm_vulkan_context() {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("vulkan-init".into())
+        .spawn(|| {
+            let _ = shared_vulkan_context();
+        });
+}
+
 /// Device initialization is shared; choosing this device belongs to each session.
 #[cfg(feature = "vulkan")]
 pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> {
+    if VULKAN_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return Err("Vulkan is shutting down".into());
+    }
     // Warmup runs INSIDE the init closure: the driver JITs the compute
     // pipeline on first dispatch (seconds on Meteor Lake), and any thread
     // reaching a dispatch before that completes wedges the watchdog. The
@@ -100,6 +148,13 @@ pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> 
                 match unsafe { ctx.warmup() } {
                     Ok(()) => {
                         eprintln!("[GPU] Warmup done in {:.1}s", t0.elapsed().as_secs_f64());
+                        // Rust statics have no Drop; stop driver workers before its finalizers.
+                        extern "C" {
+                            fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
+                        }
+                        if unsafe { atexit(shutdown_vulkan) } != 0 {
+                            return Err("cannot register Vulkan process cleanup".into());
+                        }
                         Ok(ctx)
                     }
                     Err(e) => {
@@ -575,6 +630,101 @@ unsafe fn f32_slice_to_f16_avx2(src: &[f32], dst: &mut [u16]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn legacy_auto_requires_gpu_opt_in_before_initializing() {
+        const CHILD: &str = "RMI_LEGACY_GPU_OPT_IN_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!super::gpu_requested());
+            assert!(super::VULKAN_CONTEXT.get().is_none());
+            let _scope = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+            assert!(super::get_vulkan_context().is_none());
+            assert!(super::VULKAN_CONTEXT.get().is_none());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ops::float::tests::legacy_auto_requires_gpu_opt_in_before_initializing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; checks cleanup in isolated processes"]
+    fn shared_vulkan_context_cleans_up_before_driver_exit() {
+        const CHILD: &str = "RMI_VULKAN_EXIT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            static CONTEXT: std::sync::atomic::AtomicPtr<crate::vulkan::VulkanContext> =
+                std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+            extern "C" fn audit() {
+                let context = CONTEXT.load(std::sync::atomic::Ordering::Relaxed);
+                if context.is_null() {
+                    return;
+                }
+                let context = unsafe { &*context };
+                // This callback was registered before initialization, so cleanup
+                // must precede it just as it must precede the driver's finalizer.
+                if context.compute_stats().live_allocation_bytes != 0
+                    || super::shared_vulkan_context().is_ok()
+                {
+                    std::process::abort();
+                }
+            }
+            extern "C" {
+                fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
+            }
+            assert_eq!(unsafe { atexit(audit) }, 0);
+            let context = super::shared_vulkan_context().unwrap();
+            CONTEXT.store(
+                std::ptr::from_ref(context).cast_mut(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            context.operator_pipelines().unwrap();
+            crate::vulkan::matmul_q4k::matmul_q4_k(
+                context,
+                &[0; 144],
+                &[1.0; 256],
+                1,
+                256,
+                1,
+                &mut [0.0],
+            )
+            .unwrap();
+            assert!(context.compute_stats().live_allocation_bytes > 0);
+            return;
+        }
+        for _ in 0..3 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ops::float::tests::shared_vulkan_context_cleans_up_before_driver_exit",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

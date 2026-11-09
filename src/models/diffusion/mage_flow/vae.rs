@@ -1,7 +1,7 @@
 use super::dit::trace;
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::models::diffusion::dreamx::kernels::{
+use crate::ops::nn::{
     attention_scalar_f32, checked_len, conv2d, group_norm_ncthw, layer_norm_rows, rms_norm_rows,
     AttentionSpec, Linear,
 };

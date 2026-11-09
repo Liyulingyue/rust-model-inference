@@ -1,0 +1,57 @@
+#version 450
+
+// Depthwise FIR resampling for the AuK VAE anti-aliased activation.
+//
+// Layout: input `[rows][input_stride]`, filter `[kernel]`, output `[rows][count]`.
+// Every row is one channel and the filter is shared by all of them.
+//
+// Mode 0 is the trimmed `UpSample1d(ratio=2)`: the transposed convolution is
+// evaluated directly and the centre trim is folded into the index, the
+// `replicate` padding is a clamp and the `ratio` factor is the output scale.
+// Mode 1 is the causal `DownSample1d(ratio=2)`: the left `replicate` padding
+// is a clamp as well.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint filter_word; uint output_word;
+    uint count; uint rows;
+    uint output_stride; uint input_stride;
+    uint kernel; uint pad_left; uint pad; uint stride;
+    uint mode; uint scale_bits;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+
+    float acc = 0.0;
+    if (pc.mode == 1u) {
+        // Trimmed transposed convolution: only the taps that share the
+        // parity of the output position contribute.
+        uint full_pos = index + pc.pad_left;
+        uint base = full_pos % pc.stride;
+        for (uint k = base; k < pc.kernel; k += pc.stride) {
+            int src = int((full_pos - k) / pc.stride) - int(pc.pad);
+            src = clamp(src, 0, int(pc.input_stride) - 1);
+            float value = uintBitsToFloat(
+                arena.data[pc.input_word + row * pc.input_stride + uint(src)]);
+            acc += uintBitsToFloat(arena.data[pc.filter_word + k]) * value;
+        }
+    } else {
+        for (uint k = 0u; k < pc.kernel; k++) {
+            int src = int(index) * int(pc.stride) + int(k) - int(pc.pad_left);
+            src = clamp(src, 0, int(pc.input_stride) - 1);
+            float value = uintBitsToFloat(
+                arena.data[pc.input_word + row * pc.input_stride + uint(src)]);
+            acc += uintBitsToFloat(arena.data[pc.filter_word + k]) * value;
+        }
+    }
+    arena.data[pc.output_word + row * pc.output_stride + index] =
+        floatBitsToUint(acc * uintBitsToFloat(pc.scale_bits));
+}

@@ -305,6 +305,11 @@ impl UploadedBuffers {
         }
     }
 
+    /// The device this session uploads to.
+    pub(crate) fn context(&self) -> &'static VulkanContext {
+        self.context
+    }
+
     pub(crate) fn upload(&mut self, bytes: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let buffer = unsafe { self.context.upload_device_static(bytes)? };
         self.values.push(buffer);
@@ -328,6 +333,21 @@ impl UploadedBuffers {
 
     pub(crate) fn upload_f32(&mut self, values: &[f32]) -> Result<GpuBuffer, VulkanError> {
         self.upload(bytemuck::cast_slice(values))
+    }
+
+    /// Upload a device-local buffer whose contents are produced in place.
+    ///
+    /// The transposed Q8_0 layout is a permutation of the input, so it is
+    /// written straight into the device buffer instead of being staged in
+    /// a second host buffer and copied over.
+    pub(crate) fn upload_filled(
+        &mut self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
+        let buffer = unsafe { self.context.upload_static_filled(size, fill)? };
+        self.values.push(buffer);
+        Ok(buffer)
     }
 
     /// Upload a half-precision matrix in the transposed layout the device

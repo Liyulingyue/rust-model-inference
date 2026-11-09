@@ -124,14 +124,24 @@ void main() {
         }
         barrier();
 
-        // The row starts even, so its halves come in pairs: one load and one
-        // native conversion per two weights.
+        // The transposed recorder marks F16 storage with q8_stride=2;
+        // ordinary matmul and convolution retain row-major weights.
+        bool transposed = pc.group_count != CONV_GROUP && pc.q8_stride == 2u;
         uint row_base = read_column * pc.elements_per_row + chunk;
         uint index = 0u;
         for (; index + 1u < elements; index += 2u) {
-            vec2 pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
-            if ((row_base & 1u) != 0u) {
-                pair = vec2(pair.y, unpackHalf2x16(weight_word(slot, ((row_base + index) >> 1u) + 1u)).x);
+            vec2 pair;
+            if (transposed) {
+                uint first = (chunk + index) * output_rows + read_column;
+                uint second = first + output_rows;
+                pair = vec2(
+                    unpackHalf2x16(weight_word(slot, first >> 1u))[first & 1u],
+                    unpackHalf2x16(weight_word(slot, second >> 1u))[second & 1u]);
+            } else {
+                pair = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u));
+                if ((row_base & 1u) != 0u) {
+                    pair = vec2(pair.y, unpackHalf2x16(weight_word(slot, ((row_base + index) >> 1u) + 1u)).x);
+                }
             }
             // Unroll tokens so the compiler can keep each accumulator in a register.
             [[unroll]] for (uint t = 0u; t < TOKENS; t++) {
@@ -143,7 +153,9 @@ void main() {
             }
         }
         if (index < elements) {
-            float odd = unpackHalf2x16(weight_word(slot, (row_base + index) >> 1u))[(row_base + index) & 1u];
+            uint elem = transposed
+                ? (chunk + index) * output_rows + read_column : row_base + index;
+            float odd = unpackHalf2x16(weight_word(slot, elem >> 1u))[elem & 1u];
             for (uint t = 0u; t < live; t++) {
                 float value = unpackHalf2x16(
                     input_stage[t * (CHUNK_ELEMENTS / 2u) + index / 2u]

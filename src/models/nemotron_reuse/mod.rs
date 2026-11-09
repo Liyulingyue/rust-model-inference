@@ -186,7 +186,7 @@ impl Model {
     }
 
     pub fn enhance_wav(&self, bytes: &[u8]) -> Result<Vec<u8>, String> {
-        let audio = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(bytes)
+        let audio = crate::ops::audio::frontend::decode_pcm16_wav_any(bytes)
             .map_err(|e| format!("RE-USE WAV: {e:?}"))?;
         let output = self.enhance(&audio.samples, audio.sample_rate, audio.channels)?;
         crate::format::wav::encode_wav_pcm16_channels(&output, audio.sample_rate, audio.channels)
@@ -269,13 +269,23 @@ impl Model {
         let (mag, phase, t, f) = signal::stft(samples, rate)?;
         trace("reuse.stft.mag", &[t, f], &mag);
         trace("reuse.stft.phase", &[t, f], &phase);
-        let (mag, phase) = self.forward(&mag, &phase, t, f);
+        let (mut mag, phase) = self.forward(&mag, &phase, t, f);
         if mag.iter().chain(&phase).any(|v| !v.is_finite()) {
             return Err("RE-USE produced non-finite spectrum".into());
         }
+        suppress_sweep_frames(&mut mag, f);
         let output = signal::istft(&mag, &phase, t, f, samples.len(), rate)?;
         trace("reuse.waveform", &[output.len()], &output);
         Ok(output)
+    }
+}
+
+// Published inference.py/inference_chunk.py remove sweep artifacts before ISTFT.
+fn suppress_sweep_frames(mag: &mut [f32], bins: usize) {
+    for frame in mag.chunks_exact_mut(bins) {
+        if frame.iter().filter(|&&v| v <= 0.0).count() * 2 > bins {
+            frame.fill(0.0);
+        }
     }
 }
 

@@ -89,7 +89,7 @@ fn audio_validation_happens_before_inference() {
 
 #[test]
 fn sampling_rate_scaling_and_fft_roundtrip_preserve_signal() {
-    use crate::models::qwen3::asr::audio_processor::RealFft;
+    use crate::ops::audio::frontend::RealFft;
     assert_eq!(signal::parameters(22050).unwrap(), (882, 110));
     for rate in [8000, 16000, 22050, 44100, 48000] {
         let (n, hop) = signal::parameters(rate).unwrap();
@@ -149,7 +149,8 @@ fn official_spectral_inference_matches_with_numerical_tolerances() {
             let t = part[0]["shape"][0].as_u64().unwrap() as usize;
             let f = part[0]["shape"][1].as_u64().unwrap() as usize;
             let expected = read(&part[35]);
-            let (mag, phase) = model.forward(&mag, &phase, t, f);
+            let (mut mag, phase) = model.forward(&mag, &phase, t, f);
+            suppress_sweep_frames(&mut mag, f);
             let actual = signal::istft(
                 &mag,
                 &phase,
@@ -175,4 +176,12 @@ fn official_spectral_inference_matches_with_numerical_tolerances() {
             assert!(max <= 5e-4 && rmse <= 5e-5, "{}", case["name"]);
         }
     }
+}
+
+#[test]
+fn official_sweep_suppression_requires_more_than_half_the_bins() {
+    let mut mag = [0.0, -1.0, 0.1, 0.2, 0.0, -1.0, -0.5, 0.2];
+    suppress_sweep_frames(&mut mag, 4);
+    assert_eq!(&mag[..4], &[0.0, -1.0, 0.1, 0.2]);
+    assert_eq!(&mag[4..], &[0.0; 4]);
 }

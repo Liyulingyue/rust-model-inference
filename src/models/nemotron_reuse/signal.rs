@@ -1,4 +1,4 @@
-use crate::models::qwen3::asr::audio_processor::RealFft;
+use crate::ops::audio::frontend::RealFft;
 
 pub(super) fn parameters(rate: u32) -> Result<(usize, usize), String> {
     if !(8_000..=48_000).contains(&rate) {
@@ -71,13 +71,8 @@ pub(super) fn istft(
     let mut norm = vec![0.0; output.len()];
     for ti in 0..t {
         let row = &mag[ti * f..(ti + 1) * f];
-        let suppress = row.iter().filter(|&&v| v <= 0.0).count() * 2 > f;
         for fi in 0..f {
-            let amplitude = if suppress {
-                0.0
-            } else {
-                row[fi].max(0.0).exp_m1()
-            };
+            let amplitude = row[fi].max(0.0).exp_m1();
             let (sin, cos) = phase[ti * f + fi].sin_cos();
             bins[fi] = [amplitude * cos, amplitude * sin];
         }

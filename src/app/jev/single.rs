@@ -14,7 +14,14 @@ use std::time::Instant;
 /// as `qwen35` and its text tower loads through the same `Qwen35Model`, so it
 /// needs no separate scorer. It was missing here while the plain multimodal
 /// gate already accepted it, which left 35B-A3B able to chat but not score.
-const IMAGE_JEV_ARCHES: [&str; 5] = ["qwen35", "qwen35moe", "qwen3", "qwen3vl", "qwen3vlmoe"];
+const IMAGE_JEV_ARCHES: [&str; 6] = [
+    "sensenova_loop",
+    "qwen35",
+    "qwen35moe",
+    "qwen3",
+    "qwen3vl",
+    "qwen3vlmoe",
+];
 
 pub fn image_supported_arch(arch: &str) -> bool {
     IMAGE_JEV_ARCHES.contains(&arch)
@@ -95,7 +102,7 @@ fn run_jev_decision_data_with_image(
         // a `Qwen35Model` with `moe` set, so `run_forward_logits_qwen35_with_batch`
         // and the `minicpmv4_7` projector path are identical. Only the arch
         // string differs.
-        "qwen35" | "qwen35moe" => qwen35::run_jev_decision_qwen35(
+        "qwen35" | "qwen35moe" | "sensenova_loop" => qwen35::run_jev_decision_qwen35(
             source.clone(),
             context,
             &prepared,
@@ -181,7 +188,7 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
-        "nemotron_h" => nemotron_h::run_jev_decision_nemotron_h(
+        "nemotron_h" | "nemotron_h_moe" => nemotron_h::run_jev_decision_nemotron_h(
             source.clone(),
             context,
             &prepared,

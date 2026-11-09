@@ -19,12 +19,12 @@ use crate::models::qwen3::vision::{
     VisionScratchpad as VisionScratchpad3vl,
 };
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen35::build_qwen35_positions;
 use crate::models::qwen35::trunk::HybridSession;
 use crate::models::qwen35::vision::{
     qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
     VisionScratchpad as VisionScratchpad35,
 };
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::io::{self, Write};
 use std::path::Path;
@@ -131,6 +131,15 @@ pub fn run_qwen3_family_multimodal(
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
         };
         let (mean, std) = match family {
             crate::app::media::ProjectorFamily::Qwen3VlMerger => {
@@ -155,6 +164,15 @@ pub fn run_qwen3_family_multimodal(
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         };
         let normalized = frames
@@ -247,6 +265,15 @@ pub fn run_qwen3_family_multimodal(
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         }
     }
@@ -769,6 +796,18 @@ pub fn run_qwen3_family_multimodal_logits(
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
             }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
+        };
+        let norm_stats = match family {
+            _ => ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
         };
         let pairs = frame_pairs(frames.len());
         let mut normalized = Vec::with_capacity(frames.len());
@@ -777,8 +816,8 @@ pub fn run_qwen3_family_multimodal_logits(
                 frame,
                 grid_w,
                 grid_h,
-                &[0.5, 0.5, 0.5],
-                &[0.5, 0.5, 0.5],
+                &norm_stats.0,
+                &norm_stats.1,
             )?);
         }
         match family {
@@ -859,6 +898,15 @@ pub fn run_qwen3_family_multimodal_logits(
             }
             crate::app::media::ProjectorFamily::MiniCpmV47 => {
                 return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
             }
         }
     }
@@ -978,8 +1026,6 @@ pub fn run_qwen35_family_multimodal_logits(
         qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
         VisionScratchpad as VisionScratchpad35,
     };
-    use crate::models::qwen35::{Qwen35Model, Qwen35Session};
-
     if audio_path.is_some() {
         return Err(format!(
             "Only gemma4 architecture is supported for multimodal audio, got: qwen35"
@@ -1005,56 +1051,24 @@ pub fn run_qwen35_family_multimodal_logits(
         return Err("qwen35 multimodal requires --image or --video".into());
     };
     let is_video = video_path.is_some();
-
-    let (first_w, first_h) = {
-        let first = frames.first().ok_or("media produced no frames")?;
-        (first.width() as usize, first.height() as usize)
-    };
-    let mut encoder = VisionEncoder35::from_source(
-        mmproj.as_ref(),
-        std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
-            n_threads_arg.max(1),
-        )),
-    )
-    .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
-    encoder.precompute();
-    if is_video {
-        encoder.config.image_min_pixels = encoder.config.video_min_pixels;
-        encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    if arch == crate::models::sensenova_loop::ARCH {
+        crate::app::media::validate_mmproj_capabilities(
+            arch,
+            mmproj.as_ref(),
+            if is_video {
+                crate::app::media::MediaKind::Video
+            } else {
+                crate::app::media::MediaKind::Image
+            },
+        )?;
     }
-    let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
-    let mut scratch = VisionScratchpad35::new(&encoder.config);
-    let pairs = frame_pairs(frames.len());
-    let mut vis_embeddings: Vec<f32> = Vec::new();
-    for (a, b) in pairs {
-        let normalized_a = crate::app::media::normalize_resized_image(
-            &frames[a],
-            grid.image_width(),
-            grid.image_height(),
-            &[0.5, 0.5, 0.5],
-            &[0.5, 0.5, 0.5],
-        )?;
-        let normalized_b = crate::app::media::normalize_resized_image(
-            &frames[b],
-            grid.image_width(),
-            grid.image_height(),
-            &[0.5, 0.5, 0.5],
-            &[0.5, 0.5, 0.5],
-        )?;
-        encoder.encode_pair(
-            &normalized_a,
-            &normalized_b,
-            grid.image_width(),
-            grid.image_height(),
-            &mut scratch,
-            &pool,
-        )?;
-        vis_embeddings.extend_from_slice(&scratch.projected);
-    }
-    let n_vis_tokens = grid.token_count();
 
-    let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
-        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     // Video and image use different pad tokens, so all three ids follow the
     // media kind. Hardcoding `image_pad` here made the Jinja path expand
     // looking for a token the template never emitted (it emits `video_pad` for
@@ -1064,6 +1078,77 @@ pub fn run_qwen35_family_multimodal_logits(
     } else {
         crate::app::media::MediaKind::Image
     };
+    // The projector family picks the encoder, not the tower: the RADIO
+    // projector (ZDTaichu5.0-9B) and the Qwen2.5-Omni projector are both
+    // driven from a qwen35 tower.
+    let family =
+        crate::app::media::validate_mmproj_capabilities("qwen35", mmproj.as_ref(), media_kind)?;
+    let (grid, vis_embeddings) = if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
+        let mut embeddings: Vec<f32> = Vec::new();
+        let mut grid = None;
+        for frame in &frames {
+            let (frame_grid, projected) = crate::app::text::vision::encode_nemotron_v2_vl_image(
+                mmproj.as_ref(),
+                frame,
+                n_threads_arg,
+            )?;
+            embeddings.extend_from_slice(&projected);
+            grid = Some(frame_grid);
+        }
+        (grid.ok_or("media produced no frames")?, embeddings)
+    } else {
+        let (first_w, first_h) = {
+            let first = frames.first().ok_or("media produced no frames")?;
+            (first.width() as usize, first.height() as usize)
+        };
+        let mut encoder = VisionEncoder35::from_source(
+            mmproj.as_ref(),
+            std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                n_threads_arg.max(1),
+            )),
+        )
+        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+        encoder.precompute();
+        if is_video {
+            encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+            encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+        }
+        let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+        let mut scratch = VisionScratchpad35::new(&encoder.config);
+        let pairs = frame_pairs(frames.len());
+        let mut vis_embeddings: Vec<f32> = Vec::new();
+        for (a, b) in pairs {
+            let normalized_a = crate::app::media::normalize_resized_image(
+                &frames[a],
+                grid.image_width(),
+                grid.image_height(),
+                &[0.5, 0.5, 0.5],
+                &[0.5, 0.5, 0.5],
+            )?;
+            let normalized_b = crate::app::media::normalize_resized_image(
+                &frames[b],
+                grid.image_width(),
+                grid.image_height(),
+                &[0.5, 0.5, 0.5],
+                &[0.5, 0.5, 0.5],
+            )?;
+            encoder.encode_pair(
+                &normalized_a,
+                &normalized_b,
+                grid.image_width(),
+                grid.image_height(),
+                &mut scratch,
+                &pool,
+            )?;
+            vis_embeddings.extend_from_slice(&scratch.projected);
+        }
+        (grid, vis_embeddings)
+    };
+    drop(vision_cpu);
+    let n_vis_tokens = grid.token_count();
+
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
     let image_token_id = tokenizer
         .special_token_id(pad_name)
@@ -1141,21 +1226,21 @@ pub fn run_qwen35_family_multimodal_logits(
         .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
         .collect::<Result<_, _>>()?;
 
-    let mut llm = Qwen35Model::from_source(llm_source)
+    let mut llm = HybridTextModel::from_source(llm_source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
     let max_seq = (prompt_tokens.len() + 1)
-        .min(llm.config.n_ctx)
+        .min(llm.trunk().config.n_ctx)
         .min(max_context);
     let prompt_embd = inject_vision_embeddings(
-        &llm,
+        llm.trunk(),
         &prompt_tokens,
         Some(image_token_id_i32),
         &vis_embeddings,
         n_vis_tokens,
-        llm.config.n_embd,
+        llm.trunk().config.n_embd,
     )?;
     let t0 = std::time::Instant::now();
-    let mut session = Qwen35Session::new_with_prefill_batch_size(
+    let mut session = HybridSession::new_with_prefill_batch_size(
         &mut llm,
         max_seq,
         prefill_batch_size,
@@ -1273,6 +1358,9 @@ pub(super) fn run_multimodal_with_video_ref(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     validate_gemma4_temperature(arch, temperature)?;
+    if arch == crate::models::sensenova_loop::ARCH && video_path.is_some() {
+        return Err("SenseNova Loop multimodal generation does not support --video".into());
+    }
     if arch == "gemma4" {
         if video_path.is_some() {
             return Err("Gemma4 multimodal generation does not support --video".into());
@@ -1340,7 +1428,12 @@ pub(super) fn run_multimodal_with_video_ref(
     if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
         return Err("Edge0-35B preview contains no vision weights; text input only".into());
     }
-    if arch != "qwen35" && arch != "qwen35moe" && arch != "qwen3vl" && arch != "edge0" {
+    if arch != "qwen35"
+        && arch != "qwen35moe"
+        && arch != "qwen3vl"
+        && arch != "edge0"
+        && arch != "sensenova_loop"
+    {
         return Err(format!(
             "Only qwen35, qwen35moe, qwen3vl, and edge0 architectures are supported \
              for multimodal, got: {arch}"
@@ -1351,6 +1444,8 @@ pub(super) fn run_multimodal_with_video_ref(
     // MiniCPM-V 4.7 lays its tiles on one 2D canvas, so its M-RoPE positions
     // come from `canvas_positions` instead of the anyres grid builder.
     let mut canvas_positions: Option<Vec<[usize; 4]>> = None;
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     let (image_grid, vis_embeddings_vec) = if let Some(image_path) = image_path {
         let projector_path = mmproj_path.unwrap_or(model_path);
         println!("Loading mmproj {} ...", projector_path.display());
@@ -1459,24 +1554,24 @@ pub(super) fn run_multimodal_with_video_ref(
                 scratch.projected.clone(),
             )
         } else {
-            // The qwen35 branch used to skip `validate_mmproj_capabilities`
-            // entirely, so a `qwen3vl_merger` projector (what LensVLM-9B
-            // ships) was fed to the Omni encoder without anyone recording the
-            // pairing. It happened to work because both encoders merge with
-            // `mm.2` into `projection_dim`, but nothing checked it, so a
-            // genuinely mismatched projector would have been accepted the same
-            // way. Validate here, on the path that actually runs.
-            crate::app::media::validate_mmproj_capabilities(
+            // The projector family decides the encoder, not the tower: both
+            // the Omni and the RADIO projectors are driven from the qwen35
+            // branch here, and the previous version handed a `qwen3vl_merger`
+            // to the Omni encoder purely because the tower was qwen35.
+            let family = crate::app::media::validate_mmproj_capabilities(
                 arch,
                 mmproj_source.as_ref(),
                 crate::app::media::MediaKind::Image,
             )?;
-            if crate::app::media::validate_mmproj_capabilities(
-                arch,
-                mmproj_source.as_ref(),
-                crate::app::media::MediaKind::Image,
-            )? == crate::app::media::ProjectorFamily::MiniCpmV47
-            {
+            if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
+                let frame = crate::app::media::decode_image(image_path)?;
+                let (grid, projected) = crate::app::text::vision::encode_nemotron_v2_vl_image(
+                    mmproj_source.as_ref(),
+                    &frame,
+                    n_threads_arg,
+                )?;
+                (Some(grid), projected)
+            } else if family == crate::app::media::ProjectorFamily::MiniCpmV47 {
                 let (grid, projected, canvas) =
                     encode_minicpmv47_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
                 canvas_positions = Some(canvas);
@@ -1490,6 +1585,7 @@ pub(super) fn run_multimodal_with_video_ref(
     } else {
         (None, Vec::new())
     };
+    drop(vision_cpu);
     let n_vis_tokens = image_grid.map(|g| g.token_count()).unwrap_or(0);
     let vis_embeddings = &vis_embeddings_vec[..];
     if image_grid.is_some() {
@@ -1586,6 +1682,36 @@ pub(super) fn run_multimodal_with_video_ref(
             }
             ids
         }
+        (false, Some(marker)) if arch == crate::models::sensenova_loop::ARCH => {
+            let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+            crate::prompt::jinja::media_conversation_tokens(
+                &tokenizer,
+                template.as_ref(),
+                marker,
+                &[crate::prompt::jinja::MediaPart::image(n_vis_tokens)],
+                prompt,
+                None,
+                false,
+            )?
+            .ok_or("SenseNova image generation requires --jinja")?
+        }
+        (false, None) if arch == crate::models::sensenova_loop::ARCH => {
+            match crate::prompt::jinja::single_turn_tokens(
+                &tokenizer,
+                jinja,
+                &|k| llm_source.metadata(k).cloned(),
+                prompt,
+                false,
+            )? {
+                Some(ids) => ids,
+                None => {
+                    let mut ids = Vec::new();
+                    append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+                    append_qwen_assistant_prefix(&mut ids, &tokenizer, false)?;
+                    ids
+                }
+            }
+        }
         _ => {
             let mut ids = Vec::new();
             append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
@@ -1622,7 +1748,11 @@ pub(super) fn run_multimodal_with_video_ref(
     } else {
         let projection_dim = config.n_embd;
         if vis_embeddings.len() % projection_dim != 0 {
-            return Err("Projected vision embeddings are not row aligned".into());
+            return Err(format!(
+                "Projected vision embeddings are not row aligned: {} values for a \
+                 {projection_dim}-wide tower, so the projector does not match the model",
+                vis_embeddings.len()
+            ));
         }
         vis_embeddings.len() / projection_dim
     };
@@ -1711,7 +1841,9 @@ pub(super) fn run_multimodal_with_video_ref(
     // the session has to be sized by rows, not by tokens.
     let n_prompt = prompt_tokens.len();
     let prompt_rows = prompt_embd.len() / n_embd_row;
-    let max_seq = (prompt_rows + max_tokens).min(config.n_ctx);
+    let max_seq = (prompt_rows + max_tokens)
+        .min(config.n_ctx)
+        .min(max_context);
     let mut all_tokens = prompt_tokens.clone();
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
@@ -1886,4 +2018,50 @@ pub(super) fn run_multimodal_with_video_ref(
         tok_s
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensenova_video_is_rejected_before_loading_media() {
+        struct Source(crate::core::tensor::MetaValue);
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+                (key == "general.architecture").then_some(&self.0)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+        }
+        let source = Source(crate::core::tensor::MetaValue::String(
+            "sensenova_loop".into(),
+        ));
+        let error = run_multimodal_with_video_ref(
+            &source,
+            Path::new("missing-model.gguf"),
+            Some(Path::new("missing-mmproj.gguf")),
+            None,
+            Some(Path::new("missing-video.mp4")),
+            None,
+            "describe",
+            1,
+            0.0,
+            1,
+            1,
+            64,
+            1.0,
+            None,
+            &crate::prompt::jinja::Options::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "SenseNova Loop multimodal generation does not support --video"
+        );
+    }
 }

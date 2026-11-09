@@ -1,8 +1,9 @@
 pub mod api;
 mod audio;
+mod auk;
 mod forecast;
-mod rerank;
 mod prediction;
+mod rerank;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -36,7 +37,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]";
 
 // =============================================================================
 // Backend types
@@ -61,6 +62,19 @@ fn compute_task<T: Send + 'static>(
     })
 }
 
+fn hy_transcription_task<T: Send + 'static>(
+    policy: crate::compute::ComputePolicy,
+    slot: Arc<tokio::sync::Semaphore>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<tokio::task::JoinHandle<T>, tokio::sync::TryAcquireError> {
+    let permit = slot.try_acquire_owned()?;
+    Ok(compute_task(policy, move || {
+        // Request cancellation must not release a still-running translation's slot.
+        let _permit = permit;
+        work()
+    }))
+}
+
 enum Backend {
     Text(TextBackend),
     /// A WeVisOne text model: a Qwen3-VL release with a coordinate
@@ -70,9 +84,14 @@ enum Backend {
     UnlimitedOcr(UnlimitedOcrBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
+    HySimulMt(HySimulMtBackend),
     Audio8(Audio8Backend),
     AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
     Tts(TtsBackend),
+    /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
+    /// and an optional Qwen2.5-Omni text encoder. It serves the audio
+    /// speech routes.
+    Auk(auk::AukBackend),
     Rerank(RerankBackend),
     Clm(ClmBackend),
     Gliner2(Gliner2Backend),
@@ -238,6 +257,16 @@ struct EmbeddingBackend {
 
 struct AsrBackend {
     runtime: Arc<AsrRuntime>,
+}
+
+struct HySimulMtBackend {
+    runtime: Arc<crate::models::hy_simulmt::HySimulMt>,
+    language: String,
+    prompt: Option<String>,
+    max_tokens: usize,
+    max_context: usize,
+    prefill_batch_size: usize,
+    kv_format: KvFormat,
 }
 
 /// Audio8 ASR backend: a single-model Voxtral-Realtime GGUF that bundles the
@@ -620,6 +649,8 @@ async fn transcriptions(
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut language: Option<String> = None;
     let mut prompt: Option<String> = None;
+    let mut response_format: Option<String> = None;
+    let mut temperature: Option<f32> = None;
     loop {
         let field = match multipart.next_field().await {
             Ok(Some(value)) => value,
@@ -672,6 +703,38 @@ async fn transcriptions(
                         .into_response();
                 }
             },
+            "response_format" | "temperature"
+                if matches!(state.model.as_ref(), Backend::HySimulMt(_)) =>
+            {
+                let text = match field.text().await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("multipart error: {error}"),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+                if name == "response_format" {
+                    response_format = Some(text);
+                } else {
+                    match text.parse() {
+                        Ok(value) => temperature = Some(value),
+                        Err(_) => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(ErrorResponse {
+                                    error: "temperature must be a number".into(),
+                                }),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+            }
             _ => {
                 let _ = field.bytes().await;
             }
@@ -689,8 +752,12 @@ async fn transcriptions(
                 .into_response();
         }
     };
-    let _ = prompt;
-    do_transcribe(&state, wav, language).await
+    if matches!(state.model.as_ref(), Backend::HySimulMt(_)) {
+        if let Err(error) = hy_transcription_options(response_format.as_deref(), temperature) {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
+        }
+    }
+    do_transcribe(&state, wav, language, prompt).await
 }
 
 async fn transcriptions_json(
@@ -721,17 +788,36 @@ async fn transcriptions_json(
                 .into_response();
         }
     };
-    do_transcribe(&state, wav, req.language).await
+    if matches!(state.model.as_ref(), Backend::HySimulMt(_)) {
+        if let Err(error) =
+            hy_transcription_options(req.response_format.as_deref(), req.temperature)
+        {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
+        }
+    }
+    do_transcribe(&state, wav, req.language, req.prompt).await
+}
+
+fn hy_transcription_options(
+    response_format: Option<&str>,
+    temperature: Option<f32>,
+) -> Result<(), String> {
+    if response_format.is_some_and(|format| format != "json") {
+        return Err("Hy-SimulMT supports response_format=json only".into());
+    }
+    if temperature.is_some_and(|value| value != 0.0) {
+        return Err("Hy-SimulMT requires greedy decoding (temperature 0)".into());
+    }
+    Ok(())
 }
 
 /// Shared transcription worker: branches on backend type so a single
-/// call site covers Qwen3-VL ASR (`AsrRuntime`) and Voxtral Realtime
-/// (`StreamingTranscriber`). Audio8 ignores `prompt`; the Qwen3 path
-/// accepts it as the decoder prompt context.
+/// call site covers Qwen3-VL ASR, Voxtral Realtime, and Hy-SimulMT.
 async fn do_transcribe(
     state: &AppState,
     wav: Vec<u8>,
     language: Option<String>,
+    prompt: Option<String>,
 ) -> axum::response::Response {
     match state.model.as_ref() {
         Backend::Asr(backend) => {
@@ -763,6 +849,62 @@ async fn do_transcribe(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
                         error: format!("asr worker failed: {error}"),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        Backend::HySimulMt(backend) => {
+            let runtime = backend.runtime.clone();
+            let language = language.unwrap_or_else(|| backend.language.clone());
+            let prompt = prompt.or_else(|| backend.prompt.clone());
+            let max_tokens = backend.max_tokens;
+            let max_context = backend.max_context;
+            let batch = backend.prefill_batch_size;
+            let kv_format = backend.kv_format;
+            let result = match hy_transcription_task(
+                state.compute,
+                state.generation_slot.clone(),
+                move || {
+                    let samples = crate::ops::audio::frontend::decode_pcm16_wav(&wav)
+                        .map_err(|error| format!("Hy-SimulMT WAV: {error:?}"))?;
+                    runtime.translate(
+                        &samples,
+                        &language,
+                        prompt.as_deref(),
+                        max_tokens,
+                        max_context,
+                        batch,
+                        kv_format,
+                    )
+                },
+            ) {
+                Ok(task) => task.await,
+                Err(_) => {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(ErrorResponse {
+                            error: "Hy-SimulMT is processing another audio request".into(),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            match result {
+                Ok(Ok(value)) => (
+                    StatusCode::OK,
+                    Json(TranscriptionResponse { text: value.text }),
+                )
+                    .into_response(),
+                Ok(Err(error)) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Hy-SimulMT worker failed: {error}"),
                     }),
                 )
                     .into_response(),
@@ -981,7 +1123,10 @@ fn synthesize_tts_frames(
 // Backend construction
 // =============================================================================
 
-fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
+fn build_backend(
+    options: &CliOptions,
+    auk_source: Option<Arc<dyn TensorSource>>,
+) -> Result<Arc<Backend>, String> {
     if options.enhance {
         return Ok(Arc::new(Backend::AudioEnhancement(Arc::new(
             crate::models::nemotron_reuse::Model::load(&options.model, options.compute_policy())?,
@@ -1008,13 +1153,16 @@ fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
     if options.tts {
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
+    // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
+    // `run_server` already opened and identified the model.
+    if let Some(source) = auk_source {
+        return Ok(Arc::new(Backend::Auk(auk::build_auk(options, source)?)));
+    }
     if options.audio.is_some() {
-        // ASR disambiguation: Audio8 ships the audio tower in the LLM GGUF
-        // (no `--mmproj`), so the right backend depends on the file's
-        // `general.architecture`. Probed here so a single `--audio` flag
-        // covers both Qwen3-VL ASR and Voxtral Realtime. See
-        // docs/develop/SERVER_BACKEND_SELECTION.md for why this is a probe
-        // rather than a flag.
+        if is_hy_simulmt_gguf(&options.model) {
+            return Ok(Arc::new(Backend::HySimulMt(build_hy_simulmt(options)?)));
+        }
+        // Bundled audio models are selected by their explicit architecture.
         if is_audio8_gguf(&options.model) {
             return Ok(Arc::new(Backend::Audio8(build_audio8(options)?)));
         }
@@ -1490,7 +1638,10 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
                 let context = runtime.context_length();
                 (Some(std::sync::Mutex::new(runtime)), context)
             }
-            Err(error) if options.compute_policy() == crate::compute::ComputePolicy::Vulkan => {
+            Err(error)
+                if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+                    || arch == crate::models::sensenova_loop::ARCH =>
+            {
                 return Err(error)
             }
             Err(error) => {
@@ -1595,6 +1746,46 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
     })
 }
 
+fn is_hy_simulmt_gguf(path: &std::path::Path) -> bool {
+    crate::format::ggufrs::open_model_source(path, ComponentRole::Llm)
+        .ok()
+        .is_some_and(|source| {
+            source
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                == Some("hy_v3")
+        })
+}
+
+fn build_hy_simulmt(options: &CliOptions) -> Result<HySimulMtBackend, String> {
+    if options.mmproj.is_some() {
+        return Err("Hy-SimulMT GGUF already contains the audio encoder; omit --mmproj".into());
+    }
+    if options.temperature.is_some_and(|value| value != 0.0) {
+        return Err("Hy-SimulMT requires greedy decoding (--temp 0)".into());
+    }
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let n_threads = crate::app::resolve_thread_count(options.threads, available);
+    let pool = Arc::new(ComputePool::new(n_threads));
+    let runtime = crate::models::hy_simulmt::HySimulMt::from_source_with_compute(
+        source.clone(),
+        pool,
+        options.compute_policy(),
+    )?;
+    Ok(HySimulMtBackend {
+        runtime: Arc::new(runtime),
+        language: options.language.clone().unwrap_or_else(|| "zh".into()),
+        prompt: options.prompt.clone(),
+        max_tokens: options.max_tokens.unwrap_or(512),
+        max_context: options.effective_max_context(),
+        prefill_batch_size: options.effective_prefill_batch_size()?,
+        kv_format: options.kv_format,
+    })
+}
+
 fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
     if options.mmproj.is_some() {
         return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
@@ -1674,6 +1865,9 @@ fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeSc
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.system_one_request.is_some() || options.adapter.is_some() {
+        return Err("--system-one-request is not supported by rust-model-server".into());
+    }
     if options.yue2 {
         return Err("--yue2 is not supported by rust-model-server".into());
     }
@@ -1772,7 +1966,18 @@ pub fn run_server() {
             options.max_tokens = Some(128);
         }
     }
-    if let Err(error) = validate_cli_options(&options) {
+    // The AuK DiT needs its own VAE GGUF, so the architecture of the
+    // `--model` file identifies the invocation. The diff-model validators
+    // (Z-Image and friends) want `--out` and would reject the AuK
+    // invocation, so they are skipped for it, exactly like the main binary
+    // does.
+    let auk_source = auk::probe_invocation(&options);
+    if auk_source.is_some() {
+        if let Err(error) = auk::validate_server_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if let Err(error) = validate_cli_options(&options) {
         eprintln!("{error}");
         std::process::exit(2);
     }
@@ -1798,7 +2003,7 @@ pub fn run_server() {
         options.threads,
         available,
     ));
-    let backend = match build_backend(&options) {
+    let backend = match build_backend(&options, auk_source) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("Failed to build model backend: {error}");
@@ -1817,9 +2022,11 @@ pub fn run_server() {
         Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
+        Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::AudioEnhancement(_) => "audio-enhancement",
         Backend::Tts(_) => "tts",
+        Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -1853,7 +2060,7 @@ pub fn run_server() {
             "/v1/embeddings",
             post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
-        Backend::Asr(_) | Backend::Audio8(_) => router
+        Backend::Asr(_) | Backend::Audio8(_) | Backend::HySimulMt(_) => router
             .route(
                 "/v1/audio/transcriptions",
                 post(transcriptions).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
@@ -1864,6 +2071,9 @@ pub fn run_server() {
             "/v1/audio/enhancements",
             post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
+        Backend::Auk(_) => router
+            .route("/v1/audio/speech", post(auk::speech))
+            .route("/v1/audio/generations", post(auk::generations)),
         Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
         // CLM scores by cosine, so only the single-question route applies.
         // Grouped does a per-group softmax that has no cosine analogue,
@@ -1974,6 +2184,119 @@ mod server_mode_tests {
             model: PathBuf::from(model),
             ..CliOptions::default()
         }
+    }
+
+    #[tokio::test]
+    async fn hy_translation_slot_outlives_a_cancelled_request_until_worker_finishes() {
+        use crate::compute::ComputePolicy;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::sync::{oneshot, Semaphore, TryAcquireError};
+
+        let slot = Arc::new(Semaphore::new(1));
+        let (started, ready) = oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let request_slot = slot.clone();
+        let request = tokio::spawn(async move {
+            super::hy_transcription_task(ComputePolicy::Cpu, request_slot, move || {
+                let _ = started.send(());
+                let _ = blocked.recv();
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            super::hy_transcription_task(ComputePolicy::Cpu, slot.clone(), || ()),
+            Err(TryAcquireError::NoPermits)
+        ));
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            super::hy_transcription_task(ComputePolicy::Cpu, slot.clone(), || ()),
+            Err(TryAcquireError::NoPermits)
+        ));
+
+        release.send(()).unwrap();
+        let permit = tokio::time::timeout(Duration::from_secs(5), slot.clone().acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        let next = super::hy_transcription_task(ComputePolicy::Cpu, slot, || 42).unwrap();
+        assert_eq!(next.await.unwrap(), 42);
+    }
+
+    #[test]
+    fn hy_transcription_rejects_formats_and_non_greedy_options_it_cannot_honor() {
+        assert!(super::hy_transcription_options(None, None).is_ok());
+        assert!(super::hy_transcription_options(Some("json"), Some(0.0)).is_ok());
+        for format in ["text", "srt", "vtt", "verbose_json", ""] {
+            assert!(super::hy_transcription_options(Some(format), None).is_err());
+        }
+        for temperature in [0.5, f32::NAN, f32::INFINITY] {
+            assert!(super::hy_transcription_options(None, Some(temperature)).is_err());
+        }
+    }
+
+    fn hy_arch_gguf(name: &str) -> PathBuf {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend(1u64.to_le_bytes());
+        let key = "general.architecture";
+        bytes.extend((key.len() as u64).to_le_bytes());
+        bytes.extend(key.bytes());
+        bytes.extend(8u32.to_le_bytes());
+        bytes.extend(5u64.to_le_bytes());
+        bytes.extend(b"hy_v3");
+        bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+        let path =
+            std::env::temp_dir().join(format!("rmi-hy-server-{name}-{}.gguf", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn hy_audio_auto_selects_the_bundled_backend_before_qwen_asr() {
+        let path = hy_arch_gguf("auto");
+        let options = CliOptions {
+            model: path.clone(),
+            audio: Some("unused.wav".into()),
+            mmproj: Some("external.gguf".into()),
+            compute: Some(crate::compute::ComputePolicy::Auto),
+            ..CliOptions::default()
+        };
+        let result = super::build_backend(&options, None);
+        std::fs::remove_file(path).unwrap();
+        let error = result
+            .err()
+            .expect("a bundled model must reject an external audio tower");
+        assert!(error.contains("Hy-SimulMT"), "wrong backend: {error}");
+        assert!(error.contains("omit --mmproj"), "{error}");
+    }
+
+    #[test]
+    fn hy_audio_rejects_full_device_vulkan_before_loading() {
+        let path = hy_arch_gguf("vulkan");
+        let options = CliOptions {
+            audio: Some("unused.wav".into()),
+            compute: Some(crate::compute::ComputePolicy::Vulkan),
+            ..options_with(path.to_str().unwrap())
+        };
+        let result = super::build_backend(&options, None);
+        std::fs::remove_file(path).unwrap();
+        let error = result.err().expect("unsupported compute mode");
+        let expected = if cfg!(feature = "vulkan") {
+            "Hy-SimulMT uses hybrid linear offload"
+        } else {
+            "--features vulkan"
+        };
+        assert!(error.contains(expected), "{error}");
     }
 
     #[test]

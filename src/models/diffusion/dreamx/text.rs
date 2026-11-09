@@ -3,12 +3,12 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
-use super::kernels::{
+use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
+use crate::ops::nn::{
     attention_online_with_bias, gelu_inplace, load_float_values, rms_norm_rows, AttentionSpec,
     Linear,
 };
-use crate::core::tensor::TensorSource;
-use crate::core::thread_pool::ComputePool;
 
 const TEXT_CONTEXT: usize = 512;
 const TEXT_DIM: usize = 4096;

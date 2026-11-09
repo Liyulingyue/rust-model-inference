@@ -38,11 +38,13 @@ void main() {
         }
         if (valid_row) {
             uint offset = row * pc.blocks_per_row * 144u + block * 144u;
-            // Read the 16-byte header (words 0-3) once.
-            uint h0 = weight_word(slot, offset);
-            uint h1 = weight_word(slot, offset + 1u);
-            uint h2 = weight_word(slot, offset + 2u);
-            uint h3 = weight_word(slot, offset + 3u);
+            // Read the 16-byte header (words 0-3) once. `offset` is a byte
+            // offset; divide by 4 to get the word index.
+            uint base_word = offset >> 2u;
+            uint h0 = weight_word(slot, base_word);
+            uint h1 = weight_word(slot, base_word + 1u);
+            uint h2 = weight_word(slot, base_word + 2u);
+            uint h3 = weight_word(slot, base_word + 3u);
             precise float q4_scale = f16_decode(h0 & 0xffffu);
             precise float q4_min = f16_decode(h0 >> 16u);
             // Extract bytes from the pre-loaded header words.
@@ -80,7 +82,7 @@ void main() {
             for (uint group = 0u; group < 8u; ++group) {
                 uint pair = group >> 1u;
                 uint nibble_shift = (group & 1u) * 4u;
-                uint base_word = offset + 4u + pair * 8u; // word offset for this pair
+                uint base_word = (offset >> 2u) + 4u + pair * 8u; // word index for this pair
                 uint gs = group_scale[group];
                 uint gm = group_minimum[group];
                 for (uint w = 0u; w < 8u; ++w) {

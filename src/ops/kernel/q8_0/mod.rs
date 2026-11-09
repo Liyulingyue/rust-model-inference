@@ -8,6 +8,7 @@
 use super::Kernel;
 pub mod avx2;
 pub mod dispatch;
+pub mod ggml;
 pub mod neon;
 pub mod parallel;
 pub mod scalar;
@@ -65,6 +66,44 @@ impl<'a> Kernel for Q8Kernel<'a> {
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
         crate::ops::embedding::embedding_lookup_q8_0(self.weight, token_id, n_embd, out);
+    }
+
+    /// ggml-parity path for callers that need bit-exact agreement with
+    /// `ggml_vec_dot_q8_0_q8_0`. Uses the same `ith`/`nth` row partition as
+    /// the production parallel entry so the threading behaviour is
+    /// unchanged; only the per-row arithmetic differs.
+    fn forward_prepared_ggml(
+        &self,
+        _input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        let (my_start, my_end) = if nth <= 1 || n_out == 0 {
+            (0, n_out)
+        } else {
+            let per_thread = (n_out + nth - 1) / nth;
+            let start = ith * per_thread;
+            let end = (start + per_thread).min(n_out);
+            (start, end)
+        };
+        if my_start >= my_end {
+            return;
+        }
+        ggml::matmul_q8_0_vs_q8_0_ggml(
+            self.weight,
+            input_q8,
+            input_scales,
+            &mut output[my_start..my_end],
+            n_in,
+            my_start,
+            my_end,
+        );
     }
 }
 
