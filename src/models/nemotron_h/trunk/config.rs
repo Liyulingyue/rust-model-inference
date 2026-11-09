@@ -2,6 +2,37 @@
 
 use crate::core::tensor::{MetaValue, TensorSource};
 
+/// Mixture-of-experts parameters.
+///
+/// Only the `nemotron_h_moe` architecture (Nemotron-3-Nano 30B-A3B)
+/// carries these; the dense `nemotron_h` (4B) has `moe: None`.
+#[derive(Debug, Clone)]
+pub struct NemotronMoeConfig {
+    /// Total number of routed experts (128 for the 30B).
+    pub n_expert: usize,
+    /// How many experts each token activates (6 for the 30B).
+    pub n_expert_used: usize,
+    /// Number of expert groups. The 30B uses a single group, i.e. no
+    /// grouped routing.
+    pub n_expert_group: usize,
+    /// How many groups each token activates (1 for the 30B).
+    pub n_group_used: usize,
+    /// Expert FFN width (1856 for the 30B).
+    pub n_ff_exp: usize,
+    /// Shared-expert FFN width (3712 for the 30B).
+    pub n_ff_shexp: usize,
+    /// Number of shared experts (1 for the 30B).
+    pub n_expert_shared: usize,
+    /// Whether the router weights are normalized before scaling.
+    pub expert_weights_norm: bool,
+    /// Scale applied to the router weights after normalization (2.5 for
+    /// the 30B).
+    pub expert_weights_scale: f32,
+    /// Latent projection width for the MoE branch, when the model has
+    /// one. The 30B does not, so the expert dimension equals `n_embd`.
+    pub moe_latent_size: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NemotronConfig {
     pub architecture: String,
@@ -24,6 +55,8 @@ pub struct NemotronConfig {
     pub ssm_group_count: usize,
     pub ssm_inner_size: usize,
     pub ssm_time_step_rank: usize,
+    /// MoE parameters; `None` for the dense architecture.
+    pub moe: Option<NemotronMoeConfig>,
 }
 
 impl NemotronConfig {
@@ -37,6 +70,24 @@ impl NemotronConfig {
     pub fn ssm_headdim(&self) -> usize {
         self.ssm_inner_size / self.ssm_n_head()
     }
+    /// Whether this model routes through a mixture of experts.
+    pub fn is_moe(&self) -> bool {
+        self.moe.is_some()
+    }
+    /// Whether the architecture string denotes the MoE variant. Used
+    /// while the config is being built, before `moe` is populated.
+    pub fn is_moe_architecture(&self) -> bool {
+        self.architecture == "nemotron_h_moe"
+    }
+    /// The dimension the MoE branch operates in. With a latent
+    /// projection the experts consume `moe_latent_size`, otherwise they
+    /// consume the hidden size directly.
+    pub fn moe_dim(&self) -> usize {
+        match &self.moe {
+            Some(moe) => moe.moe_latent_size.unwrap_or(self.n_embd),
+            None => self.n_embd,
+        }
+    }
 }
 
 impl NemotronConfig {
@@ -45,11 +96,17 @@ impl NemotronConfig {
             .metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
             .unwrap_or_default();
-        if architecture != "nemotron_h" {
+        // `nemotron_h` is the dense 4B, `nemotron_h_moe` the 30B-A3B
+        // mixture-of-experts variant. Both share the hybrid
+        // Mamba-Transformer trunk; the MoE one adds the expert layers.
+        if architecture != "nemotron_h" && architecture != "nemotron_h_moe" {
             return Err(format!(
                 "Unsupported architecture for NemotronConfig: {architecture}"
             ));
         }
+        // GGUF namespaces every architecture-specific metadata key under
+        // the architecture name, so the key prefix follows the arch.
+        let prefix = architecture.clone();
         let get_usize = |key: &str| -> Result<usize, String> {
             let v = source
                 .metadata(key)
@@ -79,7 +136,15 @@ impl NemotronConfig {
                 .map(|v| v as f32)
                 .unwrap_or(default))
         };
-        let vocab_size = match get_usize("nemotron_h.vocab_size") {
+        let get_bool = |key: &str| -> Option<bool> {
+            match source.metadata(key) {
+                Some(MetaValue::Bool(value)) => Some(*value),
+                _ => None,
+            }
+        };
+        // Every architecture-specific key is `<arch>.<name>`.
+        let key = |name: &str| format!("{prefix}.{name}");
+        let vocab_size = match get_usize(&key("vocab_size")) {
             Ok(v) => v,
             Err(_) => source
                 .metadata("tokenizer.ggml.tokens")
@@ -87,9 +152,9 @@ impl NemotronConfig {
                 .map(Vec::len)
                 .unwrap_or(0),
         };
-        let n_layer = get_usize("nemotron_h.block_count")?;
-        let ff_lengths = layer_values("nemotron_h.feed_forward_length")?;
-        let kv_heads = layer_values("nemotron_h.attention.head_count_kv")?;
+        let n_layer = get_usize(&key("block_count"))?;
+        let ff_lengths = layer_values(&key("feed_forward_length"))?;
+        let kv_heads = layer_values(&key("attention.head_count_kv"))?;
         if ff_lengths.len() != n_layer || kv_heads.len() != n_layer {
             return Err("Nemotron layer metadata length does not match block_count".into());
         }
@@ -121,26 +186,63 @@ impl NemotronConfig {
         }
         let config = Self {
             architecture: architecture.to_string(),
-            n_embd: get_usize("nemotron_h.embedding_length")?,
+            n_embd: get_usize(&key("embedding_length"))?,
             n_layer,
-            n_head: get_usize("nemotron_h.attention.head_count")?,
+            n_head: get_usize(&key("attention.head_count"))?,
             n_head_kv,
             attention_layers,
             ffn_layers,
-            n_embd_head_k: get_usize("nemotron_h.attention.key_length")?,
-            n_embd_head_v: get_usize("nemotron_h.attention.value_length")?,
+            n_embd_head_k: get_usize(&key("attention.key_length"))?,
+            n_embd_head_v: get_usize(&key("attention.value_length"))?,
             n_ff,
-            n_ctx: get_usize("nemotron_h.context_length")?,
+            n_ctx: get_usize(&key("context_length"))?,
             vocab_size,
-            rope_freq_base: get_f32("nemotron_h.rope.freq_base", 1_000_000.0)?,
-            rope_dim: get_usize("nemotron_h.rope.dimension_count")?,
-            norm_eps: get_f32("nemotron_h.attention.layer_norm_rms_epsilon", 1e-5)?,
-            ssm_conv_kernel: get_usize("nemotron_h.ssm.conv_kernel")?,
-            ssm_state_size: get_usize("nemotron_h.ssm.state_size")?,
-            ssm_group_count: get_usize("nemotron_h.ssm.group_count")?,
-            ssm_inner_size: get_usize("nemotron_h.ssm.inner_size")?,
-            ssm_time_step_rank: get_usize("nemotron_h.ssm.time_step_rank")?,
+            rope_freq_base: get_f32(&key("rope.freq_base"), 1_000_000.0)?,
+            rope_dim: get_usize(&key("rope.dimension_count"))?,
+            norm_eps: get_f32(&key("attention.layer_norm_rms_epsilon"), 1e-5)?,
+            ssm_conv_kernel: get_usize(&key("ssm.conv_kernel"))?,
+            ssm_state_size: get_usize(&key("ssm.state_size"))?,
+            ssm_group_count: get_usize(&key("ssm.group_count"))?,
+            ssm_inner_size: get_usize(&key("ssm.inner_size"))?,
+            ssm_time_step_rank: get_usize(&key("ssm.time_step_rank"))?,
+            moe: None,
         };
+        // The MoE variant adds the expert metadata. The dense variant
+        // has none of these keys, so `moe` stays `None` there.
+        let moe = if config.is_moe_architecture() {
+            let moe = NemotronMoeConfig {
+                n_expert: get_usize(&key("expert_count"))?,
+                n_expert_used: get_usize(&key("expert_used_count"))?,
+                n_expert_group: get_usize(&key("expert_group_count"))?,
+                n_group_used: get_usize(&key("expert_group_used_count"))?,
+                n_ff_exp: get_usize(&key("expert_feed_forward_length"))?,
+                n_ff_shexp: get_usize(&key("expert_shared_feed_forward_length"))?,
+                n_expert_shared: get_usize(&key("expert_shared_count"))?,
+                expert_weights_norm: get_bool(&key("expert_weights_norm")).unwrap_or(false),
+                expert_weights_scale: get_f32(&key("expert_weights_scale"), 1.0)?,
+                // The 30B has no latent projection, so the expert
+                // dimension is the hidden size. The key is absent there.
+                moe_latent_size: source
+                    .metadata(&key("moe_latent_size"))
+                    .and_then(MetaValue::to_u64)
+                    .and_then(|value| usize::try_from(value).ok()),
+            };
+            if moe.n_expert == 0
+                || moe.n_expert_used == 0
+                || moe.n_expert_used > moe.n_expert
+                || moe.n_expert_group == 0
+                || moe.n_group_used == 0
+                || moe.n_group_used > moe.n_expert_group
+                || moe.n_ff_exp == 0
+                || moe.n_ff_shexp == 0
+            {
+                return Err("Unsupported Nemotron MoE dimensions".into());
+            }
+            Some(moe)
+        } else {
+            None
+        };
+        let config = Self { moe, ..config };
         if config.n_head == 0
             || config.n_head % config.n_head_kv != 0
             || config.ssm_conv_kernel < 2

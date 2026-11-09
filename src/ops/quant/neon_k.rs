@@ -1,5 +1,4 @@
-//! ARM NEON dot-product kernels for IQ4_NL × Q8_K, Q4_K × Q8_K and
-//! Q5_K × Q8_K.
+//! ARM NEON dot-product kernels for IQ4_NL, Q4_K, Q5_K and Q6_K × Q8_K.
 
 #![cfg(target_arch = "aarch64")]
 
@@ -121,7 +120,19 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let min_sum_hi = vaddvq_s32(min_prod2);
         let min_sum_lo2 = vaddvq_s32(min_prod3);
         let min_sum_hi2 = vaddvq_s32(min_prod4);
-        let min_correction = -dmin * (min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2) as f32;
+        let min_sum = min_sum_lo + min_sum_hi + min_sum_lo2 + min_sum_hi2;
+        // ggml accumulates the two terms into the running total as two
+        // separate operations, in this order:
+        //
+        //     sumf -= dmin * vaddvq_s32(prod);
+        //     ...
+        //     sumf += d * (sumi1 + sumi2);
+        //
+        // Folding them into one `total += main + min` is algebraically
+        // the same but rounds differently, and a one-ULP difference in
+        // the SSM branch's out projection is enough to change the
+        // quantized output.
+        total -= dmin * min_sum as f32;
 
         // --- Main dot product: 8 groups of 32 values ---
         let q4_ptr = q4k_data.as_ptr().add(boff + 16);
@@ -170,9 +181,8 @@ pub(crate) unsafe fn vec_dot_q4k_q8k_neon(q4k_data: &[u8], q8k: &[BlockQ8K]) -> 
         let group_hi = vld1q_s32(group_sums.as_ptr().add(4)); // i32x4
         let prod_lo = vmulq_s32(scales_i32_lo, group_lo);
         let prod_hi = vmulq_s32(scales_i32_hi, group_hi);
-        let main_sum = d * (vaddvq_s32(prod_lo) + vaddvq_s32(prod_hi)) as f32;
-
-        total += main_sum + min_correction;
+        let main_sum = vaddvq_s32(prod_lo) + vaddvq_s32(prod_hi);
+        total += d * main_sum as f32;
     }
 
     total
@@ -494,7 +504,6 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon_bits(q6k_data: &[u8], q8k: &[BlockQ8K]
     sumf
 }
 
-
 /// Fast NEON dotprod kernel for Q6_K × Q8_K.
 ///
 /// Mathematically equivalent to [`vec_dot_q6k_q8k_neon_bits`] but uses
@@ -554,14 +563,28 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> 
                     let back = vnegq_s8(vreinterpretq_s8_u8(vdupq_n_u8($shift)));
                     let high0 = vshlq_n_u8(vandq_u8(vshlq_u8(qh0, back), high_mask), 4);
                     let high1 = vshlq_n_u8(vandq_u8(vshlq_u8(qh1, back), high_mask), 4);
-                    let weight0 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32)));
-                    let weight1 = vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32)));
+                    let weight0 =
+                        vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib0, high0), vdupq_n_u8(32)));
+                    let weight1 =
+                        vreinterpretq_s8_u8(vsubq_u8(vorrq_u8(nib1, high1), vdupq_n_u8(32)));
                     let dot0 = vdotq_s32(zero32, weight0, vld1q_s8(act_chunk.add($g * 32)));
                     let dot1 = vdotq_s32(zero32, weight1, vld1q_s8(act_chunk.add($g * 32 + 16)));
                     if $g % 2 == 0 {
-                        acc_even = vaddq_s32(acc_even, vaddq_s32(vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)), vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8))));
+                        acc_even = vaddq_s32(
+                            acc_even,
+                            vaddq_s32(
+                                vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)),
+                                vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8)),
+                            ),
+                        );
                     } else {
-                        acc_odd = vaddq_s32(acc_odd, vaddq_s32(vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)), vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8))));
+                        acc_odd = vaddq_s32(
+                            acc_odd,
+                            vaddq_s32(
+                                vmulq_n_s32(dot0, i32::from(scales[base + $g * 2] as i8)),
+                                vmulq_n_s32(dot1, i32::from(scales[base + $g * 2 + 1] as i8)),
+                            ),
+                        );
                     }
                 }};
             }
@@ -576,16 +599,64 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon(q6k_data: &[u8], q8k: &[BlockQ8K]) -> 
     vaddvq_f32(sums)
 }
 
-
 #[cfg(test)]
 mod tests {
 
-
     use super::*;
     use crate::ops::quant::{
-        vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_scalar, BlockQ8K,
-        BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE,
+        vec_dot_q4k_q8k_scalar, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k, vec_dot_q6k_q8k_scalar,
+        BlockQ8K, BLOCK_Q4K_SIZE, BLOCK_Q5K_SIZE, BLOCK_Q6K_SIZE,
     };
+
+    #[test]
+    fn q6k_neon_matches_scalar_signed_scales_and_block_boundaries() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let mut activations = Vec::new();
+        for seed in 0..9usize {
+            let mut block = vec![0u8; BLOCK_Q6K_SIZE];
+            for (index, value) in block[..208].iter_mut().enumerate() {
+                *value = (index * 131 + seed * 53) as u8;
+            }
+            block[208..]
+                .copy_from_slice(&crate::ops::f32_to_f16(0.125 + seed as f32 * 0.25).to_le_bytes());
+            bytes.extend(block);
+            let qs = std::array::from_fn(|index| (index * 193 + seed * 29) as u8 as i8);
+            let bsums = std::array::from_fn(|group| {
+                qs[group * 16..group * 16 + 16]
+                    .iter()
+                    .map(|&v| v as i16)
+                    .sum()
+            });
+            activations.push(BlockQ8K {
+                d: 0.03125,
+                qs,
+                bsums,
+            });
+        }
+        for blocks in [0, 1, 2, 9] {
+            let input = &activations[..blocks];
+            for length in [blocks * BLOCK_Q6K_SIZE, blocks * BLOCK_Q6K_SIZE + 1] {
+                let length = length.min(bytes.len());
+                let weights = &bytes[..length];
+                let expected = vec_dot_q6k_q8k_scalar(weights, input);
+                let neon = unsafe { vec_dot_q6k_q8k_neon(weights, input) };
+                let dispatched = vec_dot_q6k_q8k(weights, input);
+                let tolerance = 2e-5 * expected.abs().max(1.0);
+                assert!(
+                    (neon - expected).abs() <= tolerance,
+                    "blocks={blocks}: {neon} != {expected}"
+                );
+                assert!((dispatched - expected).abs() <= tolerance);
+            }
+        }
+        let weights = &bytes[..bytes.len() - 1];
+        let expected = vec_dot_q6k_q8k_scalar(weights, &activations);
+        let actual = unsafe { vec_dot_q6k_q8k_neon(weights, &activations) };
+        assert!((actual - expected).abs() <= 2e-5 * expected.abs().max(1.0));
+    }
 
     /// Deterministic Q4_K block fixture: random-ish but reproducible
     /// weights with known scales/mins, so a NEON vs scalar mismatch
@@ -864,9 +935,6 @@ mod tests {
         } else {
             diff
         };
-        assert!(
-            rel < 3e-3,
-            "dotprod={neon} scalar={scalar} rel={rel}"
-        );
+        assert!(rel < 3e-3, "dotprod={neon} scalar={scalar} rel={rel}");
     }
 }

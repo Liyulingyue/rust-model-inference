@@ -263,7 +263,7 @@ fn build_jev_token_ids_for_arch(
         }
         // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) shares this arm: same ChatML
         // message tokens, same assistant prefix, same `qwen35` grouped scorer.
-        "qwen35" | "qwen35moe" => {
+        "qwen35" | "qwen35moe" | "sensenova_loop" => {
             let mut token_ids = Vec::new();
             append_qwen_message_tokens(
                 &mut token_ids,
@@ -463,7 +463,7 @@ fn build_jev_token_ids_for_arch(
             }
             Ok(token_ids)
         }
-        "nemotron_h" => {
+        "nemotron_h" | "nemotron_h_moe" => {
             let prompt = format!("{system}\n\n{payload}\n\nAnswer:");
             Ok(tokenizer.encode(
                 &prompt,
@@ -623,7 +623,7 @@ pub fn run_jev_grouped_decision_data(
             jinja.clone(),
             max_context,
         )?,
-        "qwen35" | "qwen35moe" => qwen35::run_jev_grouped_qwen35(
+        "qwen35" | "qwen35moe" | "sensenova_loop" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
             context,
             &prepared,
@@ -687,7 +687,7 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
-        "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
+        "nemotron_h" | "nemotron_h_moe" => nemotron_h::run_jev_grouped_nemotron_h(
             source.clone(),
             context,
             &prepared,

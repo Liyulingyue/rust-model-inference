@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use super::kernels::{checked_len, dot_bf16_f32, load_float_values};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::ops::nn::{checked_len, dot_bf16_f32, load_float_values};
 
 const PREFIX: &str = "dreamx.audio_vae";
 pub const SAMPLE_RATE: usize = 48_000;

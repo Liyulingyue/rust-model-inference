@@ -1,10 +1,8 @@
 //! Mage-VL-Cowork: the released Mage-ViT and an explicitly registered Qwen3 trunk.
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::models::diffusion::dreamx::kernels::{
-    attention_on_cpu, layer_norm_rows, load_float_values, AttentionSpec, Linear,
-};
 use crate::models::qwen3::{qwen_text_positions, Qwen3Model};
 use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::nn::{attention_on_cpu, layer_norm_rows, load_float_values, AttentionSpec, Linear};
 use crate::ComputePool;
 
 pub const ARCH: &str = "mage_vl";

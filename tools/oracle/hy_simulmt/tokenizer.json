@@ -1,0 +1,302 @@
+[
+  {
+    "text": "",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "Hello, world!",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "Hello, world!",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "Hello, world!",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "你好，世界！",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "你好，世界！",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "你好，世界！",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "汉语翻译 日本語 한국어 العربية",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "汉语翻译 日本語 한국어 العربية",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "汉语翻译 日本語 한국어 العربية",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "one  two\tthree\r\nfour\n\n",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "one  two\tthree\r\nfour\n\n",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "one  two\tthree\r\nfour\n\n",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "123456789 0.125 ２０２６",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "123456789 0.125 ２０２６",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "123456789 0.125 ２０２６",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "café é🙂👩‍💻",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "café é🙂👩‍💻",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "café é🙂👩‍💻",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_begin▁of▁sentence｜><｜reasoning_mode｜>reasoning_effort:no_think<｜hy_User｜>请完成下面的同声传译任务，将陆续收到的语音翻译成中文。请结合上下文边听边译，输出能够确定的译文，不必等待整句结束。",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "<｜hy_begin▁of▁sentence｜><｜reasoning_mode｜>reasoning_effort:no_think<｜hy_User｜>请完成下面的同声传译任务，将陆续收到的语音翻译成中文。请结合上下文边听边译，输出能够确定的译文，不必等待整句结束。",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_begin▁of▁sentence｜><｜reasoning_mode｜>reasoning_effort:no_think<｜hy_User｜>请完成下面的同声传译任务，将陆续收到的语音翻译成中文。请结合上下文边听边译，输出能够确定的译文，不必等待整句结束。",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_Assistant｜><think></think>",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "<｜hy_Assistant｜><think></think>",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_Assistant｜><think></think>",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_place▁holder▁no▁6｜><｜hy_place▁holder▁no▁5｜><｜hy_place▁holder▁no▁8｜>",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "<｜hy_place▁holder▁no▁6｜><｜hy_place▁holder▁no▁5｜><｜hy_place▁holder▁no▁8｜>",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_place▁holder▁no▁6｜><｜hy_place▁holder▁no▁5｜><｜hy_place▁holder▁no▁8｜>",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_EOT｜><eos:6124c78e>",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "<｜hy_EOT｜><eos:6124c78e>",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_EOT｜><eos:6124c78e>",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_place▁holder▁no▁790｜><｜hy_place▁holder▁no▁791｜>",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "<｜hy_place▁holder▁no▁790｜><｜hy_place▁holder▁no▁791｜>",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "<｜hy_place▁holder▁no▁790｜><｜hy_place▁holder▁no▁791｜>",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "6124c78e abc1234",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "6124c78e abc1234",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "6124c78e abc1234",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "hello世界かなworld カタカナ中文",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "hello世界かなworld カタカナ中文",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "hello世界かなworld カタカナ中文",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "a中文かなb é !hello  two",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "a中文かなb é !hello  two",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "a中文かなb é !hello  two",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "We're I'M !hello /world !!hello",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "We're I'M !hello /world !!hello",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "We're I'M !hello /world !!hello",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "«café» é中文a عربى",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "«café» é中文a عربى",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "«café» é中文a عربى",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "a  b\t\t!hello\r\n\r\n c",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "a  b\t\t!hello\r\n\r\n c",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "a  b\t\t!hello\r\n\r\n c",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "1234567890123456789 ۱۲۳۴۵۶۷８９",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "1234567890123456789 ۱۲۳۴۵۶۷８９",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "1234567890123456789 ۱۲۳۴۵۶۷８９",
+    "add_special": true,
+    "parse_special": true
+  },
+  {
+    "text": "︱｜hy_EOT｜<not_a_special>",
+    "add_special": false,
+    "parse_special": false
+  },
+  {
+    "text": "︱｜hy_EOT｜<not_a_special>",
+    "add_special": false,
+    "parse_special": true
+  },
+  {
+    "text": "︱｜hy_EOT｜<not_a_special>",
+    "add_special": true,
+    "parse_special": true
+  }
+]

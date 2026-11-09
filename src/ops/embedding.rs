@@ -9,6 +9,7 @@ pub const SUPPORTED_EMBEDDING_TYPES: &[GGMLType] = &[
     GGMLType::Q8_0,
     GGMLType::Q4_0,
     GGMLType::Q4K,
+    GGMLType::Q5_0,
     GGMLType::Q6K,
     GGMLType::Q5K,
     GGMLType::IQ4_NL,
@@ -41,6 +42,7 @@ pub fn embedding_lookup(
         GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
         GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
         GGMLType::Q4K => embedding_lookup_q4_k(weight, token_id, n_embd, out),
+        GGMLType::Q5_0 => embedding_lookup_q5_0(weight, token_id, n_embd, out),
         GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
         GGMLType::Q5K => embedding_lookup_q5_k(weight, token_id, n_embd, out),
         GGMLType::BF16 => embedding_lookup_bf16(weight, token_id, n_embd, out),
@@ -107,6 +109,19 @@ pub fn embedding_lookup_q4_k(weight: &[u8], token_id: u32, n_embd: usize, out: &
     let row_bytes = n_embd / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
     let row_start = token_id as usize * row_bytes;
     crate::ops::quant::dequantize_row_q4_k(
+        &weight[row_start..row_start + row_bytes],
+        &mut out[..n_embd],
+    );
+}
+
+/// Q5_0 embedding row lookup.
+///
+/// The 30B's `token_embd.weight` is Q5_0, so this is on the critical path
+/// rather than a fallback: every token of every prompt goes through it.
+pub fn embedding_lookup_q5_0(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let row_bytes = n_embd / 32 * 22;
+    let row_start = token_id as usize * row_bytes;
+    crate::ops::quant::dequantize_row_q5_0(
         &weight[row_start..row_start + row_bytes],
         &mut out[..n_embd],
     );

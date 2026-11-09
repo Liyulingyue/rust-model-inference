@@ -1,9 +1,13 @@
 use rust_model_inference::{GGUFLoader, TensorSource};
 
 fn main() {
-    let loader = GGUFLoader::from_file(
-        "/home/liyulingyue/Codes/rust-model-inference/models/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q8_0.gguf",
-    )
+    let loader = GGUFLoader::from_file(&std::path::PathBuf::from(
+        std::env::var_os("LFM2_GGUF").unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("models/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q8_0.gguf")
+                .into_os_string()
+        }),
+    ))
     .unwrap();
 
     println!("\n==== blk.0.attn_norm.weight ====");

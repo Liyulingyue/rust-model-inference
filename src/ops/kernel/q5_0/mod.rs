@@ -9,7 +9,7 @@
 //! Module structure mirrors q4_0:
 //! - `scalar.rs` — scalar fallback (`matmul_q5_0_scalar_range`).
 //! - `avx2.rs`   — AVX2 + `_mm256_maddubs_epi16` fast path (x86_64).
-//! - `neon.rs`   — ARMv8.4-A dot-product fast path (aarch64).
+//! - `neon.rs`   — ARMv8.2-A dot-product fast path (aarch64).
 
 use super::Kernel;
 // SIMD paths are optional: the scalar baseline covers every GGUF Q5_0
@@ -25,6 +25,57 @@ pub mod neon;
 pub mod scalar;
 
 pub use scalar::matmul_q5_0_scalar_range;
+
+/// True when the ARM NEON kernel can run: it needs the `dotprod`
+/// extension, which is not part of the base aarch64 ISA. The check is a
+/// runtime one because the extension is optional on the host CPU.
+#[cfg(target_arch = "aarch64")]
+fn has_neon_dotprod() -> bool {
+    crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod")
+}
+
+/// Dispatch a Q5_0 x Q8_0 matmul over the rows `[ith, nth)` to the best
+/// available kernel.
+fn matmul_q5_0_range(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    ith: usize,
+    nth: usize,
+) {
+    #[cfg(target_arch = "aarch64")]
+    if has_neon_dotprod() {
+        // SAFETY: the kernel only reads `weight` and `input_q8` within the
+        // declared bounds and writes the disjoint row range
+        // `[my_start, my_end)` that it computes from `ith`/`nth`.
+        unsafe {
+            neon::matmul_q5_0_neon_range(
+                weight,
+                input_q8,
+                input_scales,
+                output,
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
+        }
+        return;
+    }
+    matmul_q5_0_scalar_range(
+        weight,
+        input_q8,
+        input_scales,
+        output,
+        n_in,
+        n_out,
+        ith,
+        nth,
+    );
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Q5_0Kernel<'a> {
@@ -60,7 +111,7 @@ impl<'a> Kernel for Q5_0Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        matmul_q5_0_scalar_range(
+        matmul_q5_0_range(
             self.weight,
             input_q8,
             input_scales,
@@ -94,7 +145,7 @@ impl<'a> Kernel for Q5_0Kernel<'a> {
         nth: usize,
     ) {
         let _ = input_f32;
-        matmul_q5_0_scalar_range(
+        matmul_q5_0_range(
             self.weight,
             input_q8,
             input_scales,
@@ -107,12 +158,9 @@ impl<'a> Kernel for Q5_0Kernel<'a> {
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
-        // Q5_0 embedding lookup is not yet wired through `embedding.rs`.
-        // Q5_0 in this repo only appears as a `ffn_down.weight` slice inside
-        // GLM-4-9B-0414 Q4_K_M (partial layers); the embedding/output tensors
-        // remain Q6_K. Punt on this code path rather than guessing.
-        let _ = (token_id, n_embd, out);
-        unimplemented!("Q5_0 embedding_lookup is not implemented");
+        // The 30B's `token_embd.weight` is Q5_0, so this path is on the
+        // critical path rather than a fallback.
+        crate::ops::embedding::embedding_lookup_q5_0(self.weight, token_id, n_embd, out);
     }
 }
 

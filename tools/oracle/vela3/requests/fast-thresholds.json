@@ -1,0 +1,68 @@
+{
+  "state": "Alice works at Acme.",
+  "questions": {
+    "fullwidth": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "０.５"
+    },
+    "arabic": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "٠.٥"
+    },
+    "mathematical": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "𝟘.𝟝"
+    },
+    "underscores": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "0_0.5"
+    },
+    "exponent": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "1_0e-2"
+    },
+    "true": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": true
+    },
+    "false": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": false
+    },
+    "huge": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "1e300"
+    },
+    "invalid_underscore": {
+      "type": "span",
+      "criteria": {
+        "person": "A person name"
+      },
+      "threshold": "0__5"
+    }
+  }
+}

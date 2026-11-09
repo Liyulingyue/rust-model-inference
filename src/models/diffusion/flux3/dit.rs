@@ -7,10 +7,8 @@ use crate::core::{
     thread_pool::ComputePool,
 };
 use crate::models::diffusion::common::{require_finite, require_tensor};
-use crate::models::diffusion::dreamx::kernels::{
-    attention_scalar, layer_norm_rows, load_float_values, AttentionSpec,
-};
 use crate::ops::kernel::Weight;
+use crate::ops::nn::{attention_scalar, layer_norm_rows, load_float_values, AttentionSpec};
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 const HEADS: usize = 24;

@@ -58,7 +58,12 @@ pub(super) async fn prediction(
         );
     };
     let text = &backend.text;
-    if text.source.metadata("wevisone_vl.source_revision").is_none() || text.mmproj.is_none() {
+    if text
+        .source
+        .metadata("wevisone_vl.source_revision")
+        .is_none()
+        || text.mmproj.is_none()
+    {
         return error(
             StatusCode::BAD_REQUEST,
             "WeVisOne text and vision components required".into(),

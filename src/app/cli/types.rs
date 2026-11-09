@@ -103,6 +103,11 @@ pub struct CliOptions {
     pub allow_memory_overcommit: bool,
     pub temperature: Option<f32>,
     pub cfg_scale: Option<f32>,
+    /// Sway sampling coefficient for the AuK flow-matching time grid.
+    /// `None` (the default) uses the official `-1.0` warp.
+    pub auk_sway: Option<f32>,
+    /// Pin the AuK-Flash distilled recipe: 4 steps, CFG off.
+    pub auk_flash: bool,
     pub top_k: Option<usize>,
     pub top_p: Option<f32>,
     pub threads: usize,
@@ -142,6 +147,10 @@ pub struct CliOptions {
     pub wevisone_request: Option<PathBuf>,
     pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
+    pub system_one_request: Option<PathBuf>,
+    /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
+    /// weights; the d3 variants need both.
+    pub adapter: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,

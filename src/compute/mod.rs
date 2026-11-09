@@ -88,7 +88,10 @@ impl ComputePolicy {
     /// real device, and a model offloads what it can. This list is where
     /// the caller learns that only part of the graph qualifies.
     pub fn has_complete_device_path(arch: &str) -> bool {
-        matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
+        matches!(
+            arch,
+            "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory" | "sensenova_loop"
+        )
     }
 
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
@@ -125,7 +128,12 @@ impl ComputePolicy {
         self.check_build()?;
         if self == Self::Auto {
             #[cfg(feature = "vulkan")]
-            crate::ops::enable_gpu();
+            {
+                crate::ops::enable_gpu();
+                // The device takes about 300 ms to come up, and the model
+                // load that follows takes seconds, so let the two overlap.
+                crate::ops::warm_vulkan_context();
+            }
             #[cfg(not(feature = "vulkan"))]
             eprintln!("compute requested=Auto backend=Cpu reason=build_without_vulkan");
         } else if self == Self::Vulkan {

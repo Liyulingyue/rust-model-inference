@@ -61,6 +61,11 @@ pub enum QTensorOwned {
         n_cols: usize,
         n_rows: usize,
     },
+    Q5_1 {
+        data: Vec<u8>,
+        n_cols: usize,
+        n_rows: usize,
+    },
     Q5_K {
         data: Vec<u8>,
         n_cols: usize,
@@ -92,6 +97,7 @@ impl QTensorOwned {
             | Self::Q8_0 { n_cols, .. }
             | Self::Q4_K { n_cols, .. }
             | Self::Q5_0 { n_cols, .. }
+            | Self::Q5_1 { n_cols, .. }
             | Self::Q5_K { n_cols, .. }
             | Self::Q6_K { n_cols, .. } => *n_cols,
         }
@@ -111,6 +117,7 @@ impl QTensorOwned {
             | Self::Q8_0 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
             | Self::Q5_0 { n_rows, .. }
+            | Self::Q5_1 { n_rows, .. }
             | Self::Q5_K { n_rows, .. }
             | Self::Q6_K { n_rows, .. } => *n_rows,
         }
@@ -125,6 +132,7 @@ impl QTensorOwned {
             Self::Q8_0 { .. } => GGMLType::Q8_0,
             Self::Q4_K { .. } => GGMLType::Q4K,
             Self::Q5_0 { .. } => GGMLType::Q5_0,
+            Self::Q5_1 { .. } => GGMLType::Q5_1,
             Self::Q5_K { .. } => GGMLType::Q5K,
             Self::Q6_K { .. } => GGMLType::Q6K,
         }
@@ -170,6 +178,11 @@ impl QTensorOwned {
                 n_rows,
             },
             GGMLType::Q5_0 => Self::Q5_0 {
+                data: data.to_vec(),
+                n_cols,
+                n_rows,
+            },
+            GGMLType::Q5_1 => Self::Q5_1 {
                 data: data.to_vec(),
                 n_cols,
                 n_rows,
@@ -230,6 +243,15 @@ impl QTensorOwned {
                 n_cols,
                 n_rows,
             } => Self::Q5_0 {
+                data: data.to_vec(),
+                n_cols,
+                n_rows,
+            },
+            QuantizedTensor::Q5_1 {
+                data,
+                n_cols,
+                n_rows,
+            } => Self::Q5_1 {
                 data: data.to_vec(),
                 n_cols,
                 n_rows,
@@ -355,7 +377,7 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         // Same SIMD dispatch as `QuantizedTensor<'a>` (which routes through
         // `clone_to_kernel`). The data is `.as_slice()` from a Vec, identical
         // SIMD function as borrowed bytes.
-        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_0, q5_k, q6_k};
+        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_0, q5_1, q5_k, q6_k};
         match self {
             Self::F32 { data, n_cols, .. } => {
                 Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prequantized(
@@ -407,6 +429,10 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
                 let kernel = q5_0::Q5_0Kernel::new(data.as_slice(), n_in, n_out);
                 kernel.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
             }
+            Self::Q5_1 { data, .. } => {
+                let kernel = q5_1::Q5_1Kernel::new(data.as_slice(), n_in, n_out);
+                kernel.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+            }
         }
     }
 
@@ -422,7 +448,7 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
         ith: usize,
         nth: usize,
     ) {
-        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_0, q5_k, q6_k};
+        use crate::ops::kernel::{bf16, f16, f32, q4_k, q5_0, q5_1, q5_k, q6_k};
         match self {
             Self::F32 { data, n_cols, .. } => {
                 Box::new(f32::F32Kernel::new(data.clone(), *n_cols, 1)).forward_prepared(
@@ -495,6 +521,20 @@ impl crate::ops::kernel::Kernel for QTensorOwned {
             }
             Self::Q6_K { data, .. } => {
                 Box::new(q6_k::Q6_KKernel::new(data.as_slice(), n_in, n_out)).forward_prepared(
+                    input_f32,
+                    input_q8,
+                    input_scales,
+                    q8_k,
+                    output,
+                    n_in,
+                    n_out,
+                    ith,
+                    nth,
+                );
+            }
+            Self::Q5_1 { data, .. } => {
+                let kernel = q5_1::Q5_1Kernel::new(data.as_slice(), n_in, n_out);
+                kernel.forward_prepared(
                     input_f32,
                     input_q8,
                     input_scales,
@@ -637,6 +677,9 @@ impl QTensorOwned {
             }
             Self::Q5_0 { .. } => {
                 panic!("Q5_0 matmul_into_with_q8k is unsupported (Q5_0 uses the Q8-prequantized path); see forward_prequantized")
+            }
+            Self::Q5_1 { .. } => {
+                panic!("Q5_1 matmul_into_with_q8k is unsupported (Q5_1 uses the Q8-prequantized path); see forward_prequantized")
             }
         }
     }
@@ -878,6 +921,9 @@ impl QTensorOwned {
                 // match contract.
                 panic!("QTensorOwned::Q5_0 should be exercised via Kernel::forward_prequantized, not matmul_into_pooled")
             }
+            Self::Q5_1 { .. } => {
+                panic!("QTensorOwned::Q5_1 should be exercised via Kernel::forward_prequantized, not matmul_into_pooled")
+            }
         }
     }
 
@@ -886,7 +932,7 @@ impl QTensorOwned {
     pub fn dequant_to_f32(self) -> Self {
         use crate::ops::quant::{
             dequant_q5k_weight, dequant_q6k_weight, dequant_q80_weight, dequantize_row_q4_k,
-            BLOCK_Q4K_SIZE, QK_K,
+            dequantize_row_q5_1, BLOCK_Q4K_SIZE, QK_K,
         };
         let (n_cols, n_rows) = (self.n_in(), self.n_rows());
         match &self {
@@ -936,6 +982,22 @@ impl QTensorOwned {
             }
             Self::Q5_0 { .. } => {
                 panic!("QTensorOwned::dequant_to_f32 for Q5_0 is not yet wired; see q5_0::scalar::matmul_q5_0_scalar_range")
+            }
+            Self::Q5_1 { data, .. } => {
+                // Q5_1 blocks are 24 bytes and hold 32 elements.
+                let mut out = vec![0.0f32; n_cols * n_rows];
+                let bpr = n_cols / 32;
+                for row in 0..n_rows {
+                    dequantize_row_q5_1(
+                        &data[row * bpr * 24..],
+                        &mut out[row * n_cols..row * n_cols + n_cols],
+                    );
+                }
+                Self::F32 {
+                    data: out,
+                    n_cols,
+                    n_rows,
+                }
             }
             Self::Q6_K { data, .. } => {
                 let dequant = dequant_q6k_weight(data, n_cols, n_rows);
