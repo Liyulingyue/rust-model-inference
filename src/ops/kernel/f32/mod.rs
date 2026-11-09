@@ -15,6 +15,7 @@
 //! `matmul_f32_vs_f32_simd` core across BF16/F16/F32.
 
 use super::Kernel;
+use std::borrow::Cow;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
@@ -27,23 +28,47 @@ pub mod neon_q8;
 pub mod scalar;
 
 #[derive(Debug, Clone)]
-pub struct F32Kernel {
-    weight: Vec<f32>,
+pub struct F32Kernel<'a> {
+    weight: Cow<'a, [f32]>,
     n_in: usize,
     n_out: usize,
 }
 
-impl F32Kernel {
+impl<'a> F32Kernel<'a> {
     pub fn new(weight: Vec<f32>, n_in: usize, n_out: usize) -> Self {
         Self {
-            weight,
+            weight: Cow::Owned(weight),
             n_in,
             n_out,
         }
     }
+
+    pub fn from_le_bytes(bytes: &'a [u8], n_in: usize, n_out: usize) -> Option<Self> {
+        if bytes.len() != n_in.checked_mul(n_out)?.checked_mul(4)? {
+            return None;
+        }
+        let weight = if cfg!(target_endian = "little") {
+            bytemuck::try_cast_slice(bytes).ok().map(Cow::Borrowed)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            Cow::Owned(
+                bytes
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect(),
+            )
+        });
+        Some(Self {
+            weight,
+            n_in,
+            n_out,
+        })
+    }
 }
 
-impl Kernel for F32Kernel {
+impl Kernel for F32Kernel<'_> {
     fn f32_slice(&self) -> Option<&[f32]> {
         Some(&self.weight)
     }
@@ -318,6 +343,35 @@ mod tests {
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [140.0, 320.0]);
+    }
+
+    #[test]
+    fn borrowed_f32_preserves_owned_kernel_bits_without_copying() {
+        let values: Vec<f32> = (0..64).map(|i| (i as f32 - 23.) / 7.).collect();
+        let le_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = if cfg!(target_endian = "little") {
+            bytemuck::cast_slice(&values)
+        } else {
+            &le_bytes
+        };
+        let borrowed = F32Kernel::from_le_bytes(bytes, 16, 4).unwrap();
+        if cfg!(target_endian = "little") {
+            assert_eq!(borrowed.f32_slice().unwrap().as_ptr(), values.as_ptr());
+        }
+        let owned = F32Kernel::new(values.clone(), 16, 4);
+        let input = vec![0.3; 32];
+        let (mut actual, mut expected) = (vec![0.; 8], vec![0.; 8]);
+        borrowed.forward_batched(&input, &mut actual, 16, 4);
+        owned.forward_batched(&input, &mut expected, 16, 4);
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert!(F32Kernel::from_le_bytes(&bytes[..bytes.len() - 1], 16, 4).is_none());
+        let mut unaligned = vec![0];
+        unaligned.extend_from_slice(bytes);
+        let fallback = F32Kernel::from_le_bytes(&unaligned[1..], 16, 4).unwrap();
+        assert_eq!(fallback.f32_slice().unwrap(), values);
     }
 
     #[test]

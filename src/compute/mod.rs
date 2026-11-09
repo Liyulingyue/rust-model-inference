@@ -96,7 +96,13 @@ impl ComputePolicy {
     pub fn has_complete_device_path(arch: &str) -> bool {
         matches!(
             arch,
-            "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory" | "nemotron_h"
+            "llama"
+                | "qwen3"
+                | "qwen35"
+                | "qwen35moe"
+                | "dory"
+                | "nemotron_h"
+                | "sensenova_loop"
         )
     }
 

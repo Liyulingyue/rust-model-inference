@@ -55,6 +55,7 @@ shader_names=(
     attention_online
     attention_online_wide
     conv3d_tiled
+    sensenova_mhc
     conv1d_tiled
     auk_fir
     auk_snake

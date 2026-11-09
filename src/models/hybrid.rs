@@ -1,4 +1,4 @@
-//! Explicit runtime dispatch for the two hybrid text architectures.
+//! Explicit runtime dispatch for hybrid text architectures.
 
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::TensorSource;
@@ -11,6 +11,7 @@ use crate::models::qwen35::{Qwen35Model, Qwen35Scratchpad};
 pub enum HybridTextModel<'a> {
     Qwen35(Qwen35Model<'a>),
     Edge0(Edge0Model<'a>),
+    SenseNova(crate::models::sensenova_loop::SenseNovaLoopModel<'a>),
 }
 
 impl<'a> HybridTextModel<'a> {
@@ -20,6 +21,9 @@ impl<'a> HybridTextModel<'a> {
             .and_then(|value| value.to_string_val())
         {
             Some("qwen35" | "qwen35moe") => Ok(Self::Qwen35(Qwen35Model::from_source(source)?)),
+            Some("sensenova_loop") => Ok(Self::SenseNova(
+                crate::models::sensenova_loop::SenseNovaLoopModel::from_source(source)?,
+            )),
             Some("edge0") => Ok(Self::Edge0(Edge0Model::from_source(source)?)),
             arch => Err(format!("Unsupported hybrid architecture: {arch:?}")),
         }
@@ -29,6 +33,7 @@ impl<'a> HybridTextModel<'a> {
         match self {
             Self::Qwen35(model) => model,
             Self::Edge0(model) => &model.trunk,
+            Self::SenseNova(model) => &model.trunk,
         }
     }
 }
@@ -51,6 +56,9 @@ impl<'m> HybridTrunkModel<'m> for HybridTextModel<'m> {
             Self::Qwen35(model) => {
                 model.forward_at(n_tokens, base_position, kv_cache, scratch, pool, positions)
             }
+            Self::SenseNova(model) => {
+                model.forward_at(n_tokens, base_position, kv_cache, scratch, pool, positions)
+            }
             Self::Edge0(model) => {
                 model.forward_at(n_tokens, base_position, kv_cache, scratch, pool, positions)
             }
@@ -59,7 +67,15 @@ impl<'m> HybridTrunkModel<'m> for HybridTextModel<'m> {
 
     #[cfg(feature = "vulkan")]
     fn supports_vulkan(&self) -> bool {
-        matches!(self, Self::Qwen35(_))
+        matches!(self, Self::Qwen35(_) | Self::SenseNova(_))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn stream_routing(&self) -> Option<crate::models::sensenova_loop::StreamRouting<'_, 'm>> {
+        match self {
+            Self::SenseNova(model) => model.stream_routing(),
+            _ => None,
+        }
     }
 }
 

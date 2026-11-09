@@ -219,7 +219,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ObservedKernel<'a> {
-        inner: F32Kernel,
+        inner: F32Kernel<'static>,
         workers: &'a AtomicUsize,
     }
 
