@@ -57,12 +57,27 @@ HTTP supports text/image turns, function schemas and tool-result history;
 `enable_thinking:false` selects the official closed empty-think prefix.
 The server returns tool calls; it does not execute them.
 
+This checkpoint is a computer-use policy. In the current ordinary-chat probes,
+both BF16 and Q4_K repeatedly emitted thinking text and exhausted a 512-token
+budget; the red/blue fixture's blue square was described as a rectangle.
+Do not treat numerical parity as a general chat-quality pass. For agent use,
+provide the pinned model card's hybrid system prompt and declare its functions
+in the HTTP `tools` field with `tool_choice:"auto"`. A system prompt naming
+functions alone does not enable API tool calls.
+In one synthetic Save-button request per BF16/Q4_K format, the responses
+describe a click but actually return `computer_use {"action":"screenshot"}`;
+neither completes the save task. Full responses and timing scope are in
+[real-weight-results.json](real-weight-results.json).
+
 `--compute auto` selects shared Vulkan linear projections when a device is
 available and the projection reaches the shared output-size threshold; otherwise
 it uses CPU kernels. `--compute vulkan` requires the text and vision projections
 to execute on a real device and returns device errors without silently retrying
 them on CPU. This is a mixed path: Mage-ViT RoPE/attention, text attention/KV,
-norms, activations and output-head projection remain on CPU. Both F16/F32 KV
+norms and activations remain on CPU. The output head retains the shared
+prepared-kernel dispatcher and can also offload through its legacy Vulkan
+wrapper; it is outside the explicit projection executor's strict guarantee.
+Both F16/F32 KV
 are supported. `RMI_COMPUTE_TRACE=1` reports linear backend and device counters.
 The complete-device whitelist intentionally does not include `mage_vl`.
 CLI generation requires `--prompt`; interactive mode,
@@ -123,13 +138,16 @@ Pillow bicubic is reused for resizing: the released torchvision Fast processor
 can differ by 1–2 uint8 levels. That lossy case has a separate pixel/relative
 activation gate and a strict final-logit gate; it is not claimed bitwise equal.
 See [validation.md](validation.md) for measured evidence and limits.
-The original full-weight evidence below covers BF16/F32 CPU only. The replacement
-AMD host downloaded and verified the pinned release and exported BF16/Q8_0, but
-disconnected before full-weight checks completed. Its RADV device loss also
-reproduces on unmodified main. New compressed formats and mixed Vulkan still
-need completed full-weight CLI/HTTP/JEV and Oracle runs. Local hardware checks are recorded
-separately in [MAGE_VL.md](../../../docs/develop/MAGE_VL.md) and do not establish
-model quality or full-model performance.
+The current EPYC/RADV host completed BF16/Q8_0/Q4_K exports entirely remotely.
+BF16 CPU production logits pass all four fixtures with F32/F16 KV, and BF16
+mixed GPU logits pass text/square probes with actual device submissions.
+Q8_0/Q4_K remain **experimental**: eight greedy choices agree in every fixture,
+but independent same-weight F32-activation logit gates fail. Quantized image
+CPU/GPU gates also fail; text-only CPU/GPU logits agree. The gates were not
+widened. See [real-weight-results.json](real-weight-results.json),
+[validation.md](validation.md) and the per-format
+[coverage matrix](../../../docs/develop/MAGE_VL.md). The earlier port-31599
+device-loss/disconnection attempt is retained as history, not a current blocker.
 
 On a hardware Vulkan weight host, build the same binaries with `--features vulkan`,
 run `smoke.py ... --vulkan` and `review_regression.py ... --compute vulkan`, then
@@ -158,14 +176,20 @@ done
 Repeat with Q4_K. The upstream GGUF package decodes all 399 exported text tensors
 into the unchanged official F32 model; it does not call this converter's encoder
 or Rust kernels. Named quantized-logit gates are max_abs `<0.5`, RMSE `<0.05`,
-cosine `>0.9999`, with F32 KV. They allow native activation quantization and are
-declared before completing these remote runs; they are **not measured passes**.
+cosine `>0.9999`, with F32 KV. These gates were declared before the remote runs
+and **failed for both Q8_0 and Q4_K**; activation quantization is not sufficient
+evidence to waive a failed gate. An additional upstream Q8 activation diagnostic
+reduced the error but did not pass, so the numerical root cause remains unresolved.
 Eight logit artifacts are required per fixture. If greedy tokens diverge, only
 logits with a common input prefix are compared, including the first divergent
 choice; the report states that reduced coverage. This checks implementation
 error for the same weights, not the quality loss from BF16 to Q4/Q8.
 Oracle `timing.json` records CPU diagnostic timings including checkpoint hooks;
-it is not a benchmark against a clean production binary.
+it is not a benchmark against a clean production binary. The native probe also
+records `parity_trace_build`, compute policy, KV format and prefill/decode time.
+Its prefill timer covers the text session and excludes image encoding, model
+loading and diagnostic hidden capture. Use the ordinary HTTP timings in
+[performance.json](performance.json) for request-level performance.
 
 Text JEV single/multi/block scoring checks the configured context cap before KV
 allocation; HTTP rejects that limit violation with 400. An explicit projector

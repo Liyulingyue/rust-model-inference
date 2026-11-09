@@ -169,6 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kv_format,
         KvLifecycle::Ephemeral,
     )?;
+    let started = std::time::Instant::now();
     let (mut logits, _) = session.forward_logits(
         Qwen3Input {
             token_ids: &tokens,
@@ -178,6 +179,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         32,
     )?;
+    let prefill_seconds = started.elapsed().as_secs_f64();
+    let mut decode_seconds = 0.0;
     let mut generated = Vec::new();
     for step in 0..steps {
         save(out.join(format!("logits{step}.f32")), &logits)?;
@@ -190,6 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generated.push(token);
         if step + 1 < steps {
             let position = tokens.len() + step;
+            let started = std::time::Instant::now();
             (logits, _) = session.forward_logits(
                 Qwen3Input {
                     token_ids: &[token],
@@ -199,9 +203,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 1,
             )?;
+            decode_seconds += started.elapsed().as_secs_f64();
         }
     }
     std::fs::write(out.join("greedy.json"), serde_json::to_vec(&generated)?)?;
+    std::fs::write(
+        out.join("timing.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "threads": 8,
+            "input_tokens": tokens.len(),
+            "prefill_seconds": prefill_seconds,
+            "decode_seconds": decode_seconds,
+            "decode_steps": steps.saturating_sub(1),
+            "parity_trace_build": cfg!(feature = "parity-trace"),
+            "compute": args.get(6).map(String::as_str).unwrap_or("cpu"),
+            "kv": args.get(5).map(String::as_str).unwrap_or("f32"),
+        }))?,
+    )?;
     println!("tokens={} greedy={generated:?}", tokens.len());
     Ok(())
 }

@@ -3,9 +3,11 @@
 Current status: the 2026-11-09 changes add compressed text exports and mixed
 Vulkan projection offload. The CPU-only/strict-Vulkan-rejection statements
 below describe the **2026-11-03 implementation**, and are superseded by the
-[current coverage matrix](../../../docs/develop/MAGE_VL.md). Full-weight
-verification of those new paths is pending because the remote host is shut
-down. No weights were downloaded to the Mac.
+[current coverage matrix](../../../docs/develop/MAGE_VL.md). The replacement
+port-32276 host completed real-weight tests: BF16 passes the recorded CPU and
+mixed-GPU numerical gates; Q8_0/Q4_K independent Oracle and image CPU/GPU
+gates fail. Those formats remain experimental. No weights were downloaded to
+the Mac. See the completed replacement-host section below for current results.
 
 Validated on 2026-11-03 (Asia/Shanghai), on the requested SSH host. All source
 weights, exports and activation artifacts stayed on that host. ModelScope
@@ -311,3 +313,153 @@ compares only common-prefix logits after a greedy divergence. Its declared
 F32-KV gates are max_abs `<0.5`, RMSE `<0.05`, cosine `>0.9999`; these gates have
 not yet been established as passing on this model. Two comparator regressions
 cover prefix divergence/missing artifacts and rejection of excessive error.
+
+## Completed replacement-host runs (2026-11-09, port 32276)
+
+The next instance is reachable and its RADV GPU executes the Mage tests without
+reproducing the previous instance's device loss. This supersedes the interrupted
+attempt's **current-blocker** status; the port-31599 observations above remain
+historical facts. Hardware: EPYC 9334, 16-CPU cgroup quota, 59,055,800,320-byte
+container RAM limit, RADV NAVI31/gfx1100 with 49,136 MiB GPU memory. Other tasks
+share the instance. Builds use existing Rust 1.94.1, `release-fast`, Vulkan,
+eight inference threads, and no `RMI_SCALAR` or `RMI_PARITY_TRACE` override.
+
+Source is `dfb150398` plus timing-only changes to `mage_vl_oracle`. Both source
+shards passed the pinned SHA256 checks. BF16, Q8_0 and Q4_K exports completed
+on the remote filesystem. BF16 and Q8_0 `check_export` each pass all **696**
+shape/type/payload checks. All three F32 projector files have SHA256
+`0f9e19c2803570cb1d6672781679931e4788b240fe4b0e66474bd8b91dbf8009`.
+The independent GGUF decoder checks all 399 Q4_K text shapes and finite values;
+a full deterministic Q4_K re-encoding was not rerun. No weights or F32 trace
+arrays were downloaded to the Mac.
+
+### Numerical evidence and failed gates
+
+- Official BF16 widened-to-F32 Oracle: no missing/unexpected/mismatched weights.
+  The diagnostic native runs pass **132 checkpoints each** for F32/F16 KV.
+  Worst F32-KV final-logit max_abs/RMSE are **0.00269055/0.00096573** (resize's
+  existing separate gate); F16 KV: **0.01340723/0.00478817**.
+- A separately built **non-parity-trace** production probe passes all **64**
+  logit comparisons (four fixtures × eight steps × two KV formats), with the
+  original BF16/F16/resize gates and identical greedy IDs. Diagnostic hidden
+  captures remain CPU F32 and are not evidence of device hidden execution.
+- Full-weight BF16 CPU↔Auto/Vulkan: text and square with F32 KV, plus square
+  with F16 KV. All six runs submit Vulkan work, retain eight greedy IDs and
+  pass max_abs `<0.03`, RMSE `<0.005`, cosine `>0.99999`. F32-KV worst
+  max_abs/RMSE: **0.00011564/0.00003732**. F16-KV worst:
+  **0.01382494/0.00381627**. The BF16 bound accommodates cache sensitivity;
+  it is separate from the tighter CPU↔official-Oracle gates above.
+- Q8_0/Q4_K text-only CPU↔Auto/Vulkan logits are numerically identical over
+  eight steps. All quantized square runs retain the eight greedy IDs, but
+  **fail** the previously declared `<0.5` max_abs, `<0.05` RMSE, `>0.9999`
+  cosine gates. Q8_0 image worst max_abs/RMSE/cosine:
+  **0.49679983/0.17498699/0.99913106**. Q4_K:
+  **1.35604859/0.55691394/0.97540338**. F16 quantized runs compare to CPU F32
+  KV and therefore include both cache and backend error. All 18 device probes
+  completed with actual Vulkan trace evidence; only **10/18** pass their
+  numerical gates. Successful execution is not a numerical pass.
+- Independent same-weight Oracle uses upstream `gguf==0.18.0` to decode all
+  399 text tensors into the official F32 model. Four fixtures × eight steps
+  agree in greedy IDs for each format. Both formats **fail** the original
+  quantized-logit gates: Q8_0 worst max_abs/RMSE/minimum cosine are
+  **0.46366143/0.15020036/0.99558480**; Q4_K:
+  **1.13677478/0.43955483/0.98222714**. This compares F32 HF activations with
+  native quantized activations; it does not measure BF16→quantized task quality.
+
+A separate one-step diagnostic quantized inputs to all 253 HF text linears
+using upstream Q8_0 quantize/dequantize. Text RMSE fell from **0.15020** to
+**0.11148**, but still failed. This does not establish activation quantization
+as the sole cause: SIMD rounding/reduction differ and quantizer boundaries can
+amplify small upstream errors. No shared numerical kernel was changed to force
+bitwise agreement, and no gate was widened. Quantized formats and their image
+GPU paths therefore remain **experimental**, with unresolved numerical gaps.
+Per-fixture values, contracts and statuses are committed in
+[real-weight-results.json](real-weight-results.json).
+For context, a separate descriptive softmax-probability comparison has maximum
+total variation **0.034261** for Q8_0 and **0.104831** for Q4_K over these same
+32 steps per format. Some logit error is a common offset, but centered RMSE
+still reaches **0.077197/0.233500**. These numbers neither replace the failed
+gates nor establish broad task quality.
+
+Both real-GPU synthetic tests pass on this instance: quantized text prefill and
+decode across F32/BF16/Q8_0/Q4_K × F32/F16 KV × Auto/Vulkan, and seven vision
+projections with max_abs **0**. These constructed fixtures do not override the
+full-model image failures above. Attempting to compile untouched main
+`532d051a0` on Rust 1.94.1 stops at its experimental if-let guard in
+`src/prompt/jinja_compat.rs:260` (E0658). No baseline GPU pass is claimed from
+that build; the earlier M3 baseline and unchanged failure-list comparison remain
+the available shared-code regression evidence.
+
+Raw remote evidence is under `target/mage-remote-32276/`; large traces remain
+under `artifacts/mage_vl/`. Examples of the completed numerical commands:
+
+```sh
+.venv/bin/python tools/oracle/mage_vl/compare.py artifacts/mage_vl/reference artifacts/mage_vl/diagnostic-f32
+.venv/bin/python tools/oracle/mage_vl/compare.py artifacts/mage_vl/reference artifacts/mage_vl/diagnostic-f16 --kv-format f16
+# The following intentionally returns failure; do not widen gates to make it green.
+.venv/bin/python tools/oracle/mage_vl/compare.py artifacts/mage_vl/reference-q8_0 artifacts/mage_vl/production-q8_0-f32 --quantized-logits
+target/mage-remote-32276/mage_vl_oracle.production models/Mage-VL-Cowork-bf16/Mage-VL-Cowork-bf16.gguf models/Mage-VL-Cowork-bf16/mmproj-Mage-VL-Cowork-F32.gguf artifacts/mage_vl/reference/square artifacts/mage_vl/production-bf16-f32-vulkan/square f32 vulkan
+```
+
+Self-review corrected an earlier documentation error: the output head is **not
+always CPU**. `prefill.rs::matmul_rows` calls `PreparedRows::matmul`, which can
+use the weight's legacy Vulkan wrapper under Auto/Vulkan. Device logs show
+`scope=linear backend=Vulkan` after the explicitly registered block projections.
+The head is outside `LinearExecutor`'s strict guarantee and can fall back through
+its existing dispatcher. This correction changes no kernels or measured runs.
+
+The **BF16** current-instance integration runs pass the original **29-check
+CLI/HTTP/JEV smoke** with hardware Vulkan and the **40-assertion CPU review
+regression** (context limits, expanded usage, three protocols and streams).
+Q8_0 and Q4_K smoke runs each fail at CPU/Auto image-output equality, before
+later strict-Vulkan/HTTP/JEV checks. For the smoke prompt, Q8_0 begins
+“I’m continuing from the previous step,” on CPU and “I’m continuing from the
+earlier step where” on Auto. These are generated-text differences, not just
+log differences. Later independently executed request/JEV results are recorded
+separately; they must not be counted as those two smoke runs passing.
+
+### Standalone interface and effect evidence
+
+The standalone JEV matrix passes **16 text/image CLI↔HTTP checks**: BF16 under
+CPU/Auto, and Q8_0/Q4_K under CPU/Auto/Vulkan. Each maximum probability
+difference is **0**, against `<1e-6`. BF16 strict-Vulkan text/image JEV is
+already covered by its passing smoke. These establish consistency between
+interfaces under the same policy, not accuracy across policies or formats.
+Four separate Q8_0/Q4_K strict-Vulkan CLI text/image generation requests exit
+zero and report `scope=host_linear backend=Vulkan`. Ordinary non-trace HTTP
+generation completes for all nine format/policy combinations in
+[performance.json](performance.json). Quantized image CPU/Auto answers still
+differ, so these completed requests do not supersede the failed smoke.
+
+Ordinary BF16 and Q4_K CPU chat samples (arithmetic and a red/blue square image,
+temperature zero, 512-token cap) all exhaust the cap with repeated thinking.
+Both image answers identify the blue square as a rectangle. Text HTTP content
+can be empty at the shorter 128-token cap because reasoning is filtered. This
+checkpoint is a computer-use policy; these ordinary prompts do not establish
+its performance in the official agent harness.
+
+A separate synthetic 384×256 note-editor screenshot asks to save the note.
+The Save button occupies pixels `[260,190,362,238]`. Requests use the pinned
+model card's hybrid system prompt, explicitly declare `computer_use`/`bash`
+in HTTP `tools`, select `tool_choice:"auto"`, CPU/F32 KV, context 4096,
+temperature zero and a 512-token cap. Each format has one valid request:
+
+| Format | Prompt / completion tokens | Request seconds | Actual returned tool call |
+|---|---:|---:|---|
+| BF16 | 1964 / 164 | 256.732 | `computer_use {"action":"screenshot"}` |
+| Q4_K | 1964 / 169 | 257.944 | `computer_use {"action":"screenshot"}` |
+
+Both describe the Save button and say to click it in their text, but neither
+returns a click or coordinates. **The save task is not completed.** No tool
+action was executed. These shared-host observations were not isolated timing
+benchmarks, and no OSWorld success rate or localization pass is claimed. An
+initial fixture omitted API tools and received the expected “tool call while
+tools are disabled” error; the table contains only the corrected requests.
+The small JEV, strict-CLI and complete GUI responses are preserved in
+[real-weight-results.json](real-weight-results.json); weights and large traces
+remain on the remote host.
+
+Between weight formats, Q8_0 matches BF16's eight greedy choices in all four
+Oracle fixtures. Q4_K changes the third text choice and the first image choice.
+Agreement with the **same Q4_K weights** in HF does not mean agreement with
+BF16 or preserved task quality. All native IDs are in the results JSON.

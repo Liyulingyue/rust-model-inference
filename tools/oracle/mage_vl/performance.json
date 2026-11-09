@@ -1,70 +1,474 @@
 {
   "date": "2026-11-09",
-  "status": "partial adaptation; full-weight validation pending",
+  "status": "BF16 CPU/mixed-device probes pass; compressed formats experimental with failed accuracy gates",
   "host": {
-    "cpu_gpu": "Apple M3 Max",
-    "os": "macOS 27.2",
+    "cpu": "AMD EPYC 9334",
+    "cpu_quota": 16,
+    "native_threads": 8,
+    "gpu": "AMD Radeon Graphics / RADV NAVI31 / gfx1100",
+    "gpu_memory_mib": 49136,
+    "container_memory_bytes": 59055800320,
     "profile": "release-fast",
-    "cpu_threads": 2
+    "shared_instance": true
   },
-  "full_model": {
-    "cpu": null,
-    "vulkan": null,
-    "reference": null,
-    "reason": "Replacement remote host disconnected before complete parity, interface or timing results were recovered; AMD RADV device loss reproduced on unmodified main."
+  "http": {
+    "scope": "fresh requests to an already started server; includes prefill, image encoding and generation; excludes process/model startup; completion count includes reasoning, not just visible text",
+    "input_text": "What is 2 + 2? Answer briefly.",
+    "input_image": "128x128 white background with a red square and a blue square",
+    "parameters": {
+      "max_tokens": 128,
+      "temperature": 0,
+      "enable_thinking": false,
+      "kv": "f32",
+      "max_context": 1024,
+      "prefill_batch_size": 32
+    },
+    "samples": "two per kind for CPU, one per kind for Auto/Vulkan; capped 128-token samples, not formal benchmarks",
+    "records": {
+      "bf16/cpu": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 12.082030151039362,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 10.594246033146073
+        },
+        {
+          "kind": "text",
+          "sample": 1,
+          "wall_seconds": 12.19105819799006,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 10.499498724491641
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 14.704058598726988,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 8.705079562936568
+        },
+        {
+          "kind": "image",
+          "sample": 1,
+          "wall_seconds": 14.312045818194747,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 8.943515247643703
+        }
+      ],
+      "bf16/auto": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 36.83327873982489,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 3.4751182729112786
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 36.83617977052927,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 3.4748445902201346
+        }
+      ],
+      "bf16/vulkan": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 86.65117252804339,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 1.47718716626223
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 84.8142998162657,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 1.5091794694678613
+        }
+      ],
+      "q8_0/cpu": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 9.694651439785957,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 13.203156482212426
+        },
+        {
+          "kind": "text",
+          "sample": 1,
+          "wall_seconds": 9.95468109473586,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 12.858272282342398
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 12.46446835808456,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 10.269190495957103
+        },
+        {
+          "kind": "image",
+          "sample": 1,
+          "wall_seconds": 12.173530595377088,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 10.514616034941264
+        }
+      ],
+      "q8_0/auto": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 72.46328952722251,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 1.7664116663088256
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 75.88618688285351,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 1.686736483381294
+        }
+      ],
+      "q8_0/vulkan": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 87.5274037886411,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 1.4623991396921938
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 90.83677972480655,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 1.409120847169845
+        }
+      ],
+      "q4_k/cpu": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 7.454177353531122,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 17.171579629691138
+        },
+        {
+          "kind": "text",
+          "sample": 1,
+          "wall_seconds": 7.317523416131735,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 17.49225697287412
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 9.472440715879202,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 13.512884782211007
+        },
+        {
+          "kind": "image",
+          "sample": 1,
+          "wall_seconds": 9.479094557464123,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 13.50339942533952
+        }
+      ],
+      "q4_k/auto": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 72.1976477690041,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 1.7729109459290855
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 89.84774691425264,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 1.42463227399746
+        }
+      ],
+      "q4_k/vulkan": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 79.64295911602676,
+          "usage": {
+            "prompt_tokens": 23,
+            "completion_tokens": 128,
+            "total_tokens": 151
+          },
+          "output_tokens_per_wall_second": 1.607172830099456
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 98.95903187431395,
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 128,
+            "total_tokens": 168
+          },
+          "output_tokens_per_wall_second": 1.2934645537212859
+        }
+      ]
+    }
   },
-  "synthetic_vision": {
-    "fixture": "one block, real widths, 4x4 patch grid, F32 constructed weights, seven projections with bias",
-    "wall_ms": {
-      "cpu": 121.572958,
-      "vulkan": 411.796667,
-      "auto": 331.221542
-    },
-    "samples_per_policy": 1,
-    "includes": "fresh executor, uploads, execution and readback",
-    "device_submissions": {
-      "vulkan": 7,
-      "auto": 7
-    },
-    "max_abs": {
-      "vulkan": 0.0,
-      "auto": 0.0
-    },
-    "max_abs_gate": 0.002,
-    "reference": null,
-    "reference_reason": "No independent PyTorch/llama.cpp timing; CPU is the native same-weight comparison.",
-    "interpretation": "Diagnostic only, not full-model throughput. Small batches and uploads dominate; slower than CPU here."
+  "cli_cpu": {
+    "scope": "whole process wall time, including loading/preprocessing; two samples each, cap 128",
+    "records": {
+      "bf16": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 14.971132930368185
+        },
+        {
+          "kind": "text",
+          "sample": 1,
+          "wall_seconds": 12.7501000482589
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 14.973117928951979
+        },
+        {
+          "kind": "image",
+          "sample": 1,
+          "wall_seconds": 15.274384902790189
+        }
+      ],
+      "q8_0": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 10.172689320519567
+        },
+        {
+          "kind": "text",
+          "sample": 1,
+          "wall_seconds": 10.897579677402973
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 12.07287291623652
+        },
+        {
+          "kind": "image",
+          "sample": 1,
+          "wall_seconds": 12.032723201438785
+        }
+      ],
+      "q4_k": [
+        {
+          "kind": "text",
+          "sample": 0,
+          "wall_seconds": 7.68776104785502
+        },
+        {
+          "kind": "text",
+          "sample": 1,
+          "wall_seconds": 7.536196827888489
+        },
+        {
+          "kind": "image",
+          "sample": 0,
+          "wall_seconds": 9.696872709318995
+        },
+        {
+          "kind": "image",
+          "sample": 1,
+          "wall_seconds": 9.778517397120595
+        }
+      ]
+    }
   },
-  "synthetic_text": {
-    "fixture": "one 256-wide block, eight logits, prefill 3 in chunks of 2, decode 1+1",
-    "max_abs_by_weight_kv_policy": {
-      "F32/F32/Vulkan": 8.046627e-06,
-      "F32/F32/Auto": 8.046627e-06,
-      "F32/F16/Vulkan": 3.0994415e-06,
-      "F32/F16/Auto": 3.0994415e-06,
-      "BF16/F32/Vulkan": 9.536743e-06,
-      "BF16/F32/Auto": 9.536743e-06,
-      "BF16/F16/Vulkan": 6.198883e-06,
-      "BF16/F16/Auto": 6.198883e-06,
-      "Q8_0/F32/Vulkan": 0,
-      "Q8_0/F32/Auto": 0,
-      "Q8_0/F16/Vulkan": 0,
-      "Q8_0/F16/Auto": 0,
-      "Q4K/F32/Vulkan": 0,
-      "Q4K/F32/Auto": 0,
-      "Q4K/F16/Vulkan": 0,
-      "Q4K/F16/Auto": 0
+  "reference_cpu_diagnostic": {
+    "scope": "official pinned BF16 widened to F32, eager CPU attention, F32 activations/KV; checkpoint hooks in prefill; seven decode steps; single diagnostic sample with F32-storage Torch versus BF16-storage native kernels, not a controlled benchmark",
+    "timing": {
+      "threads": 8,
+      "prefill_seconds": 31.038424069061875,
+      "decode_seconds": 16.664910381659865,
+      "decode_steps": 7,
+      "text": "This is a straightforward arithmetic question, and"
     },
-    "gate": "abs(error) <= 0.002 + 0.002 * abs(cpu)",
-    "interpretation": "Same synthetic weight CPU/device comparison; not quantization quality versus BF16."
+    "native_cpu_bf16": {
+      "threads": 8,
+      "input_tokens": 21,
+      "prefill_seconds": 0.908630153,
+      "decode_seconds": 0.6765049769999999,
+      "decode_steps": 7,
+      "parity_trace_build": false,
+      "compute": "cpu",
+      "kv": "f32"
+    }
   },
+  "interpretation": "The mixed path is slower than CPU here. Each session uploads block weights, synchronizes projections and reads intermediates back for CPU attention/RoPE/postops. The shared legacy output-head dispatcher can also offload. This is not a resident decoder or evidence of GPU acceleration. Shared host load and small sample counts limit comparisons.",
+  "numerical_results": "real-weight-results.json",
   "environment": {
-    "RUST_GPU_MIN_OUTPUTS": "0",
     "RMI_SCALAR": null,
-    "RMI_PARITY_TRACE": null
+    "RMI_PARITY_TRACE": null,
+    "RMI_COMPUTE_TRACE": null,
+    "RUST_GPU_MIN_OUTPUTS": "unset; production shared threshold"
   },
-  "evidence": "target/mage-review-20261109/{mage-text-vulkan,mage-vision-vulkan}.log",
-  "remote_attempt": {
+  "raw_evidence": "remote target/mage-remote-32276/; only small JSON/logs copied to Mac",
+  "historical_local": {
+    "host": {
+      "cpu_gpu": "Apple M3 Max",
+      "os": "macOS 27.2",
+      "profile": "release-fast",
+      "cpu_threads": 2
+    },
+    "synthetic_vision": {
+      "fixture": "one block, real widths, 4x4 patch grid, F32 constructed weights, seven projections with bias",
+      "wall_ms": {
+        "cpu": 121.572958,
+        "vulkan": 411.796667,
+        "auto": 331.221542
+      },
+      "samples_per_policy": 1,
+      "includes": "fresh executor, uploads, execution and readback",
+      "device_submissions": {
+        "vulkan": 7,
+        "auto": 7
+      },
+      "max_abs": {
+        "vulkan": 0.0,
+        "auto": 0.0
+      },
+      "max_abs_gate": 0.002,
+      "reference": null,
+      "reference_reason": "No independent PyTorch/llama.cpp timing; CPU is the native same-weight comparison.",
+      "interpretation": "Diagnostic only, not full-model throughput. Small batches and uploads dominate; slower than CPU here."
+    },
+    "synthetic_text": {
+      "fixture": "one 256-wide block, eight logits, prefill 3 in chunks of 2, decode 1+1",
+      "max_abs_by_weight_kv_policy": {
+        "F32/F32/Vulkan": 8.046627e-06,
+        "F32/F32/Auto": 8.046627e-06,
+        "F32/F16/Vulkan": 3.0994415e-06,
+        "F32/F16/Auto": 3.0994415e-06,
+        "BF16/F32/Vulkan": 9.536743e-06,
+        "BF16/F32/Auto": 9.536743e-06,
+        "BF16/F16/Vulkan": 6.198883e-06,
+        "BF16/F16/Auto": 6.198883e-06,
+        "Q8_0/F32/Vulkan": 0,
+        "Q8_0/F32/Auto": 0,
+        "Q8_0/F16/Vulkan": 0,
+        "Q8_0/F16/Auto": 0,
+        "Q4K/F32/Vulkan": 0,
+        "Q4K/F32/Auto": 0,
+        "Q4K/F16/Vulkan": 0,
+        "Q4K/F16/Auto": 0
+      },
+      "gate": "abs(error) <= 0.002 + 0.002 * abs(cpu)",
+      "interpretation": "Same synthetic weight CPU/device comparison; not quantization quality versus BF16."
+    },
+    "environment": {
+      "RUST_GPU_MIN_OUTPUTS": "0",
+      "RMI_SCALAR": null,
+      "RMI_PARITY_TRACE": null
+    },
+    "evidence": "target/mage-review-20261109/{mage-text-vulkan,mage-vision-vulkan}.log"
+  },
+  "historical_interrupted_remote": {
     "date": "2026-11-09",
     "host": {
       "cpu": "AMD EPYC 9334",
