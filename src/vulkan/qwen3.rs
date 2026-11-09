@@ -394,7 +394,9 @@ mod tests {
             (
                 "weight format",
                 EligibilityFacts {
-                    weight_formats: vec![GGMLType::Q5_0],
+                    // Q5_0 and Q5_1 have device kernels since the 30B-A3B
+                    // adaptation; Q2_K is still host-only.
+                    weight_formats: vec![GGMLType::Q2K],
                     ..eligible_facts()
                 },
             ),
