@@ -4048,9 +4048,11 @@ Q5_1 dequant / matmul kernel 已落地（`src/ops/kernel/q5_1/`），逐位对�
 - **附带修复**：`gemma4` 的权重白名单早就列了 `GGMLType::Q5_1`，但
   `QuantizedTensor::from_bytes` 没有 `Q5_1` 分支 → 遇到 Q5_1 权重会 panic。
   这次补上后那处静默变成可用。
-- **未做（有意）**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的白名单里
-  没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，
-  而不是静默算错。30B 的 GPU 支持留到 arch 适配那一步再决定是否补。
+- **设备路径**：Q5_1 起初没有 Vulkan 路径（GPU 模式会明确报「weight format has no
+  Vulkan kernel」，而不是静默算错）。**2026-11-09 已补上**：`shaders/glsl/q5_1_matmul.comp`
+  与 `q5_0_matmul.comp` 两个设备 kernel（Q4_1 的设备 kernel 带 `m` 项，正好是 Q5_1
+  的模板；Q4_0 是 Q5_0 的模板），与 CPU kernel 的数值在 2e-3 / 3e-3 的门限内一致，
+  且比 CPU 快 2-3×。
 
 **未验证的部分**：以上只证明 Q5_1 的**块语义**正确。真实 30B 权重上的
 MoE 前向（sigmoid 路由 + squared ReLU + 共享专家）还没跑过 —— 那属于 B2/B3。
@@ -4142,11 +4144,14 @@ ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think �
 **还没做的**：
 
 - **Vulkan 路径**（30B 的主要缺口）—— 分两层：
-  1. **Q5_0 与 Q5_1 的设备 kernel**（共用能力，别的模型也会用到）。仓库现有的
-     设备格式只有 Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K / F16 / BF16 / F32，
-     而 30B 的 `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 都是 **Q5_0**，
-     共享专家的 `ffn_up_shexp` 是 **Q5_1** —— 换量化档躲不掉。Q4_1 的设备 kernel
-     带 `m` 项，正好是 Q5_1 的模板；Q4_0 是 Q5_0 的模板。
+  1. ~~**Q5_0 与 Q5_1 的设备 kernel**~~ ✅ **已完成（2026-11-09）**。仓库原有的设备
+     格式只有 Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K / F16 / BF16 / F32，而 30B 的
+     `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 都是 **Q5_0**，共享专家的
+     `ffn_up_shexp` 是 **Q5_1** —— 换量化档躲不掉。现在两个格式都有设备 kernel
+     （`shaders/glsl/q5_0_matmul.comp`、`shaders/glsl/q5_1_matmul.comp`），与 CPU
+     kernel 的数值在门限内一致，且比 CPU 快 2-3×。**顺带修掉一个真 bug**：
+     `matmul_rows_push` 只给 Q4_1 填了「每块激活和」那个 push constant，
+     Q5_1 的 `m` 项因此读到 arena 的偏移 0（垃圾），数值差 17%。
   2. **MoE 层的设备分支** —— 路由器（sigmoid + top-6 + 归一化 + scale）、逐 token
      的 6 个专家投影、共享专家，以及把 3D 专家张量按专家切片绑定。
      注意专家权重合计约 26 GB（Q5_0 + Q8_0，23 层 × 128 专家），显存要算得过来。

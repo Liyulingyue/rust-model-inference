@@ -16,6 +16,8 @@ shader_names=(
     q4_1_matmul
     q4_k_matmul
     q4_k_matmul_cooperative
+    q5_0_matmul
+    q5_1_matmul
     q5_k_matmul
     q5_k_matmul_cooperative
     q6_k_matmul

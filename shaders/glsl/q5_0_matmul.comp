@@ -1,0 +1,108 @@
+#version 450
+
+// Q5_0 grouped matmul: one output row per lane group, the Q8 activations
+// come from the arena.
+//
+// The block layout is ggml's `block_q5_0`: a 2-byte F16 scale `d`, a 4-byte
+// high-bit table `qh` and 16 bytes of nibbles `qs`. The 5-th bit of element
+// `j` lives in `qh` bit `j` and the 5-th bit of element `j + 16` in `qh`
+// bit `j + 16`, so a block holds 32 unsigned 5-bit levels.
+//
+// The value of an element is `d * (level - 16)`: Q5_0 is a *signed* 5-bit
+// level with a constant offset of 16, which is why the integer dot product
+// below subtracts `16 * sum(y)` from the raw dot. (Q5_1 is the opposite: an
+// unsigned level with a per-block minimum in `m`.)
+//
+// The arithmetic follows `src/ops/kernel/q5_0/scalar.rs`, so the device and
+// the host agree on the value.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint q8_word;
+    uint scales_word;
+    uint n_in;
+    uint blocks_per_row;
+    uint output0_word;
+    uint rows0;
+    uint output0_stride;
+    uint output1_word;
+    uint rows1;
+    uint output1_stride;
+    uint output2_word;
+    uint rows2;
+    uint output2_stride;
+    uint group_count;
+    uint input_sum_word;
+    uint input_stride;
+    uint q8_stride;
+    uint scales_stride;
+    uint input_sum_stride;
+    uint q8k_stride;
+    uint q8k_scales_stride;
+    uint token_rows;
+} pc;
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int exponent = int((bits >> 10u) & 0x1fu);
+    uint mantissa = bits & 0x3ffu;
+    float value = exponent == 0 ? float(mantissa) * exp2(-24.0)
+                                : (exponent == 31 ? 0.0
+                                                 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15)));
+    return sign == 0u ? value : -value;
+}
+
+uint weight_word(uint slot, uint index) {
+    return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]);
+}
+
+uint weight_byte(uint slot, uint index) {
+    return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu;
+}
+
+int q8(uint index) {
+    uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu;
+    return value >= 128u ? int(value) - 256 : int(value);
+}
+
+void main() {
+    uint token_row = gl_WorkGroupID.z / pc.group_count;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    if (slot >= pc.group_count || row >= rows) return;
+
+    precise float sum = 0.0;
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        uint offset = row * pc.blocks_per_row * 22u + block * 22u;
+        precise float d = f16_decode(weight_byte(slot, offset) | (weight_byte(slot, offset + 1u) << 8u));
+        uint qh = weight_byte(slot, offset + 2u)
+                | (weight_byte(slot, offset + 3u) << 8u)
+                | (weight_byte(slot, offset + 4u) << 16u)
+                | (weight_byte(slot, offset + 5u) << 24u);
+        int dot = 0;
+        int const_offset = 0;
+        for (uint l = 0u; l < 16u; ++l) {
+            uint packed = weight_byte(slot, offset + 6u + l);
+            int y0 = q8(block * 32u + l);
+            int y1 = q8(block * 32u + 16u + l);
+            // The 5-th bit of the low nibble is `qh` bit `l`, the one of the
+            // high nibble is `qh` bit `l + 16`.
+            int lo = int(packed & 15u) | (int((qh >> l) & 1u) << 4);
+            int hi = int(packed >> 4u) | (int((qh >> (l + 16u)) & 1u) << 4);
+            dot += lo * y0 + hi * y1;
+            const_offset += y0 + y1;
+        }
+        precise float scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
+        sum += d * scale * float(dot - 16 * const_offset);
+    }
+
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    arena.data[output_word + token_row * output_stride + row] = floatBitsToUint(sum);
+}

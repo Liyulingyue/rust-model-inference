@@ -359,13 +359,30 @@ kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活
 
 分两层，都还没做：
 
-1. **Q5_0 与 Q5_1 的设备 kernel**（共用能力）。30B 的 `attn_q/k/v`、`ssm_in`、
-   `ffn_up_exps`、`token_embd` 是 **Q5_0**，共享专家的 `ffn_up_shexp` 是 **Q5_1**，
-   换量化档躲不掉。仓库的设备格式表里没有这两个。Q4_1 的设备 kernel 带 `m` 项，
-   正好是 Q5_1 的模板；Q4_0 是 Q5_0 的模板。
-2. **MoE 层的设备分支**：路由器、逐 token 的 6 个专家投影、共享专家、3D 专家
-   张量按专家切片绑定。专家权重合计约 26 GB（Q5_0 + Q8_0，23 层 × 128 专家），
-   显存要算得过来。
+1. ~~**Q5_0 与 Q5_1 的设备 kernel**~~ ✅ **已完成（2026-11-09）**。30B 的
+   `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 是 **Q5_0**，共享专家的
+   `ffn_up_shexp` 是 **Q5_1**，换量化档躲不掉；两个格式现在都有设备 kernel
+   （见 §3·5）。
+2. **MoE 层的设备分支**（还没做）。要落的有五块：
+
+   | 部件 | 做法 | 参照 |
+   |---|---|---|
+   | 路由器 | `ffn_gate_inp`（F32 2688×128）在设备上出 128 个 logit，读回 host 做 sigmoid + top-6 + 归一化 + scale | `src/vulkan/qwen35/moe.rs` 的 host routing（每层读回一次，不是每 token 一次） |
+   | 专家投影 | 每个 token 的 6 个专家各自 `up_exps[e]`（Q5_0 2688×1856）与 `down_exps[e]`（Q8_0 1856×2688），激活是 `relu(x)^2` | 4B 的 `relu_square` pipeline 已有 |
+   | 共享专家 | `ffn_up_shexp`（Q5_1 2688×3712）+ `ffn_down_shexp`（Q8_0），**没有门控、不乘权重** | 与 qwen35 的共享专家语义不同，不能复用 |
+   | 3D 张量绑定 | 每层 128 个专家各绑一段 range（`bind_weight_ranges`） | qwen35 的 `MoeBindings` |
+   | 归约 | 加权求和 + 共享专家直加 | qwen35 的 `record_moe_reduce` |
+
+   三个要算清的约束：
+
+   - **显存**：专家权重约 26 GB（23 层 × 128 专家 × (Q5_0 2688×1856 + Q8_0 1856×2688)），
+     再加注意力/SSM/共享专家，整个模型约 24.5 GB，与 host 侧的 mmap 同一份数据的
+     两份拷贝。GB10 的 128 GB 统一内存放得下，但要先确认 arena 与 staging 的峰值。
+   - **descriptor set 数量**：4B 的 session 按 `3 + 6 × n_layer` 分配；30B 每层多
+     128 个专家 × 2 个矩阵，描述符池要重新算（qwen35 是每专家一个 set）。
+   - **host routing 的同步**：每层一次读回 = 每 token 23 次读回，decode 时是同步
+     瓶颈；qwen35 用 `moe_experts_per_submission()` 限制每次提交的专家数，
+     30B 要照着量一次。
 
 **数值契约**：CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32 累加结构；
 设备上的 int8 dot + F32 scale 累加与之**不逐位相同**，设备路径要按仓库既有惯例
@@ -423,9 +440,12 @@ ggml 一致：ggml 的 `block_q8_1.s` 存的就是 `d * sum(qs)`（已乘激活 
 256 项查表展开（`table_b2b_0` 的 `(b) << 4` 语义），level 落在 0..31 可以直接
 当 int8 交给 `UDOT`。`tests_neon.rs` 断言 NEON 与 scalar **逐位相等**。
 
-**有意没做**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的 GPU 白名单里
-没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，而不是
-静默算错。30B 的 GPU 支持留到 B2/B3 决定架构时一并评估。
+**设备路径（2026-11-09 补上）**：Q5_1 起初没有 Vulkan 路径（GPU 模式会明确报
+「weight format has no Vulkan kernel」，而不是静默算错）。现在有
+`shaders/glsl/q5_1_matmul.comp` 与 `shaders/glsl/q5_0_matmul.comp` 两个设备
+kernel：Q4_1 的设备 kernel 带 `m` 项，正好是 Q5_1 的模板；Q4_0 是 Q5_0 的模板。
+两者与 CPU kernel 的数值在门限内一致（Q5_0 max_rel 6.5e-6，Q5_1 max_rel 3.1e-5），
+且比 CPU 快 2-3×。
 
 ## 4. 怎么复现这份契约
 
