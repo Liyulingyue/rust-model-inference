@@ -154,3 +154,9 @@ required-features = ["vulkan"]
 [[example]]
 name = "test_openjev_nli"
 path = "examples/test_openjev_nli.rs"
+
+# Uses `parity_trace`, which only exists with the feature on.
+[[test]]
+name = "nemotron3_nano_moe"
+path = "tests/nemotron3_nano_moe.rs"
+required-features = ["parity-trace"]

@@ -24,6 +24,7 @@ layout(push_constant) uniform PC {
     uint rows;
     uint reduction_lanes;
     uint exp_mode;
+    uint repeat_interleave;
 } pc;
 
 shared float output_values[128];
@@ -41,7 +42,8 @@ void main() {
     uint value_head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
     if (value_head >= pc.v_heads) return;
     uint lane = gl_LocalInvocationID.x;
-    uint key_head = value_head % pc.k_heads;
+    uint key_head = pc.repeat_interleave != 0u
+        ? value_head / (pc.v_heads / pc.k_heads) : value_head % pc.k_heads;
 
     uint state_head = pc.state_word + (pc.layer * pc.v_heads + value_head) * pc.head_dim * pc.head_dim;
     // Existing head_dim <= 128 bounds two state rows per lane.

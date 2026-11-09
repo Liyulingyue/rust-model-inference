@@ -468,6 +468,7 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
 
     model.forward_dense_attn_layer(
         0,
+        0,
         &[1.0, 0.0, 0.0, 1.0],
         2,
         &mut kv_cache,
@@ -475,6 +476,7 @@ fn qwen35_dense_attention_softmax_uses_ggml_padded_row() {
         &pool,
         &[[0; 4]; 2],
         None,
+        false,
         #[cfg(feature = "parity-trace")]
         false,
     );
@@ -505,6 +507,7 @@ fn qwen35_dense_attention_value_uses_ggml_padded_reduction() {
 
         let output = model.forward_dense_attn_layer(
             0,
+            0,
             &input,
             n_tokens,
             &mut kv_cache,
@@ -512,6 +515,7 @@ fn qwen35_dense_attention_value_uses_ggml_padded_reduction() {
             &pool,
             &vec![[0; 4]; n_tokens],
             None,
+            false,
             #[cfg(feature = "parity-trace")]
             false,
         );
@@ -814,6 +818,78 @@ fn tiny_recurrent_session_model() -> Qwen35Model<'static> {
     layer.ssm_norm = Some(vec![1.0; 2]);
     layer.ssm_out = Some(weight(2, 4));
     model
+}
+
+#[test]
+fn hf_gdn_heads_repeat_in_pairs_and_visit_caches_are_independent() {
+    let mut model = tiny_recurrent_session_model();
+    model.config.n_layer = 2;
+    model.config.is_recurrent = vec![true; 2];
+    model.config.ssm_n_group = 2;
+    model.config.ssm_dt_rank = 4;
+    model.config.ssm_d_inner = 8;
+    let layer = &mut model.layers[0];
+    let weight = |n_out| f32_test_weight(vec![0.05; 4 * n_out], 4, n_out);
+    let mut qkv = vec![0.; 16 * 4];
+    // Orthogonal Q/K heads, identical V heads make the replication order observable.
+    for row in [0, 4] {
+        qkv[row * 4] = 0.1;
+    }
+    for row in [3, 7] {
+        qkv[row * 4] = 0.2;
+    }
+    for row in 8..16 {
+        qkv[row * 4] = 0.1;
+    }
+    layer.wqkv = Some(f32_test_weight(qkv, 4, 16));
+    layer.wqkv_gate = Some(weight(8));
+    layer.ssm_beta = Some(weight(4));
+    layer.ssm_alpha = Some(weight(4));
+    layer.ssm_conv1d = Some(vec![0.5; 32]);
+    layer.ssm_dt = Some(vec![0.1; 4]);
+    layer.ssm_a = Some(vec![-0.25; 4]);
+    layer.ssm_out = Some(f32_test_weight(vec![0.05; 8 * 4], 8, 4));
+    let pool = ComputePool::new(1);
+    for hf_order in [false, true] {
+        let mut scratch = Qwen35Scratchpad::new(&model.config, 1);
+        let mut run = |slot, scratch: &mut Qwen35Scratchpad| {
+            model
+                .forward_recurrent_layer(
+                    0,
+                    slot,
+                    &[1., 2., 3., 4.],
+                    1,
+                    scratch,
+                    &pool,
+                    false,
+                    hf_order,
+                    #[cfg(feature = "parity-trace")]
+                    false,
+                )
+                .unwrap();
+        };
+        run(0, &mut scratch);
+        let first = scratch.ssm_states[0].clone();
+        assert!(scratch.ssm_states[1].iter().all(|&v| v == 0.));
+        let heads: Vec<_> = first.chunks_exact(4).collect();
+        if hf_order {
+            assert_eq!(heads[0], heads[1]);
+            assert_eq!(heads[2], heads[3]);
+            assert_ne!(heads[0], heads[2]);
+        } else {
+            assert_eq!(heads[0], heads[2]);
+            assert_eq!(heads[1], heads[3]);
+            assert_ne!(heads[0], heads[1]);
+        }
+        run(1, &mut scratch);
+        assert_eq!(scratch.ssm_states[0], first);
+        assert_eq!(scratch.ssm_states[1], first);
+        let conv = scratch.conv_states[1].clone();
+        run(0, &mut scratch);
+        assert_eq!(scratch.ssm_states[1], first);
+        assert_eq!(scratch.conv_states[1], conv);
+        assert_ne!(scratch.ssm_states[0], first);
+    }
 }
 
 fn tiny_mixed_session_model() -> Qwen35Model<'static> {

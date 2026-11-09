@@ -1,0 +1,102 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer Bias { float data[]; } bias;
+layout(push_constant) uniform PC {
+    uint mode;
+    uint width;
+    uint streams;
+    uint iterations;
+    uint fixed_identity;
+    float pre_scale;
+    uint rows;
+    uint branch_word;
+    uint residual_word;
+    uint logits_word;
+    uint post_word;
+    uint mix_word;
+} pc;
+
+shared float pre[4];
+shared float post[4];
+shared float mix_values[16];
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    uint lane = gl_LocalInvocationID.x;
+    uint s = pc.streams;
+    uint branch = pc.branch_word + row * pc.width;
+    uint residual = pc.residual_word + row * s * pc.width;
+    uint post_base = pc.post_word + row * s;
+    uint mix_base = pc.mix_word + row * s * s;
+    if (lane == 0u && pc.mode == 1u) {
+        uint logits = pc.logits_word + row * (2u * s + (pc.fixed_identity != 0u ? 0u : s * s));
+        for (uint i = 0u; i < s; i++) {
+            precise float pre_logit = uintBitsToFloat(arena.data[logits + i]) + bias.data[i];
+            precise float post_logit = uintBitsToFloat(arena.data[logits + s + i]) + bias.data[s + i];
+            pre[i] = 1.0 / (1.0 + exp(-pre_logit));
+            post[i] = 2.0 / (1.0 + exp(-post_logit));
+            arena.data[post_base + i] = floatBitsToUint(post[i]);
+        }
+        for (uint i = 0u; i < s * s; i++) {
+            mix_values[i] = pc.fixed_identity != 0u ? (i / s == i % s ? 1.0 : 0.0)
+                : uintBitsToFloat(arena.data[logits + 2u * s + i]) + bias.data[2u * s + i];
+        }
+        if (pc.fixed_identity == 0u) {
+            for (uint iteration = 0u; iteration < pc.iterations; iteration++) {
+                for (uint axis = 0u; axis < 2u; axis++) {
+                    for (uint i = 0u; i < s; i++) {
+                        float maximum = uintBitsToFloat(0xff800000u);
+                        for (uint j = 0u; j < s; j++) {
+                            uint at = axis == 0u ? i * s + j : j * s + i;
+                            maximum = max(maximum, mix_values[at]);
+                        }
+                        precise float sum = 0.0;
+                        for (uint j = 0u; j < s; j++) {
+                            uint at = axis == 0u ? i * s + j : j * s + i;
+                            sum += exp(mix_values[at] - maximum);
+                        }
+                        precise float norm = maximum + log(sum);
+                        for (uint j = 0u; j < s; j++) {
+                            uint at = axis == 0u ? i * s + j : j * s + i;
+                            mix_values[at] -= norm;
+                        }
+                    }
+                }
+            }
+            for (uint i = 0u; i < s * s; i++) mix_values[i] = exp(mix_values[i]);
+        }
+        for (uint i = 0u; i < s * s; i++) arena.data[mix_base + i] = floatBitsToUint(mix_values[i]);
+    }
+    if (lane == 0u && pc.mode == 2u) {
+        for (uint i = 0u; i < s; i++) post[i] = uintBitsToFloat(arena.data[post_base + i]);
+        for (uint i = 0u; i < s * s; i++) mix_values[i] = uintBitsToFloat(arena.data[mix_base + i]);
+    }
+    barrier();
+    for (uint k = lane; k < pc.width; k += 64u) {
+        if (pc.mode == 0u) {
+            float value = uintBitsToFloat(arena.data[branch + k]);
+            for (uint i = 0u; i < s; i++) arena.data[residual + i * pc.width + k] = floatBitsToUint(value);
+        } else if (pc.mode == 1u) {
+            precise float value = 0.0;
+            for (uint i = 0u; i < s; i++) value += pre[i] * uintBitsToFloat(arena.data[residual + i * pc.width + k]);
+            arena.data[branch + k] = floatBitsToUint(value * pc.pre_scale);
+        } else if (pc.mode == 2u) {
+            // Each lane owns a coordinate and reads every stream before overwriting any.
+            float previous[4];
+            for (uint j = 0u; j < s; j++) previous[j] = uintBitsToFloat(arena.data[residual + j * pc.width + k]);
+            float branch_value = uintBitsToFloat(arena.data[branch + k]);
+            for (uint i = 0u; i < s; i++) {
+                precise float value = 0.0;
+                for (uint j = 0u; j < s; j++) value += mix_values[i * s + j] * previous[j];
+                precise float merged = value + post[i] * branch_value;
+                arena.data[residual + i * pc.width + k] = floatBitsToUint(merged);
+            }
+        } else {
+            precise float value = 0.0;
+            for (uint i = 0u; i < s; i++) value += uintBitsToFloat(arena.data[residual + i * pc.width + k]);
+            arena.data[branch + k] = floatBitsToUint(value / float(s));
+        }
+    }
+}
