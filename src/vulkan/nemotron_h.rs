@@ -974,6 +974,15 @@ impl NemotronHVulkanSession {
         self.committed_position
     }
 
+    /// The number of rows the arena's row buffers hold.
+    ///
+    /// A call that passes more rows than this would write past the
+    /// arena, so the host has to know the limit before it hands a
+    /// prompt to the device.
+    pub(crate) fn max_rows(&self) -> usize {
+        self.max_rows
+    }
+
     /// Record that the device's recurrent state now covers `position`
     /// tokens.
     pub(crate) fn set_committed_position(&mut self, position: usize) {

@@ -181,6 +181,12 @@ pub fn build_text_runtime(
         )?)
     } else if arch == "dory" {
         Box::new(crate::models::dory::DoryTextRuntime::new(options)?)
+    } else if matches!(arch, "nemotron_h" | "nemotron_h_moe") {
+        // The 4B and the 30B-A3B share the trunk, the tokenizer and the
+        // forward; only the layer mix differs.
+        Box::new(crate::models::nemotron_h::trunk::NemotronTextRuntime::new(
+            options,
+        )?)
     } else {
         return Err(format!("No TextRuntime adapter for architecture {arch}"));
     };

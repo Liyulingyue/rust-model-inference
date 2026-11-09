@@ -114,7 +114,13 @@ out        = moe_out + shexp            # 共享专家没有 sigmoid 门
 1. **权重取未加偏置的 probs**，偏置只用来排序（DeepSeek-V3 风格）。
 2. **共享专家没有门控**，也没有乘 `weights`；`moe_out + shexp` 是唯一的加法。
 
-## 1·5. 提示构造：`nemotron_h` / `nemotron_h_moe` 也有 CLI↔HTTP 分叉
+## 1·5. 提示构造：`nemotron_h` / `nemotron_h_moe` 也有 CLI↔HTTP 分叉 ✅ 已修（2026-11-09）
+
+> **状态**：CLI↔HTTP 的分叉已修。两条入口现在都走
+> `prompt::build_nemotron_chat_prompt`（渲染成 ChatML 文本，再用
+> `add_special: true` 编码一次），于是 BOS 与 think 块都和 CLI 一致；
+> `tests/cli_http_agreement.rs` 锁住 4B 与 30B 的逐 token 一致。
+> 下面保留实现前的记录。
 
 这不是 MoE 特有的问题，是这一族模型的共同问题，适配 30B 之前就该修。
 
@@ -334,6 +340,36 @@ kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活
   `V×softmax` 都在 padded key 数上跑。Rust 侧用 `n_kv = (position+1).div_ceil(16)*16`
   复刻（16 对齐就够，因为 dot 的分组边界是 16）。
 - oracle harness 用 `RMI_NEMOTRON_KV=f32`，即 KV cache 是 F32。
+
+### B6. 入口层（CLI / HTTP / JEV）✅ 已完成（2026-11-09）
+
+- `src/models/nemotron_h/trunk/runtime.rs`：`nemotron_h`（4B）与 `nemotron_h_moe`
+  （30B）共用一个 `TextRuntime` 适配器，`/v1/chat/completions` 从 501 变成可用。
+- 设备路径在 HTTP 侧也接上了（4B）：适配器在启动时建一次设备会话（权重要上传到
+  设备，所以不能每请求重建），提示超过 arena 行数的那次请求回退 CPU。
+- **提示分叉已修**：CLI 用 `prompt::legacy::format_chat`（ChatML、`add_special:
+  true`、无 think 块），HTTP 用 qwen 的 ChatML builder（**无 BOS**、**多一个空
+  think 块**）—— 同一条消息 CLI 15 token、HTTP 19 token。两族现在都走
+  `prompt::build_nemotron_chat_prompt`，`tests/cli_http_agreement.rs` 锁住两条
+  入口逐 token 一致。
+- JEV 的单次与分组判定本来就按 arch 分派，两个入口都覆盖，实测概率完全相同
+  （单次 A 0.0307 / B 0.9693；分组 A 0.0640 / B 0.9360）。
+
+### B7. Vulkan 设备路径 ❌ 未实现（主要缺口）
+
+分两层，都还没做：
+
+1. **Q5_0 与 Q5_1 的设备 kernel**（共用能力）。30B 的 `attn_q/k/v`、`ssm_in`、
+   `ffn_up_exps`、`token_embd` 是 **Q5_0**，共享专家的 `ffn_up_shexp` 是 **Q5_1**，
+   换量化档躲不掉。仓库的设备格式表里没有这两个。Q4_1 的设备 kernel 带 `m` 项，
+   正好是 Q5_1 的模板；Q4_0 是 Q5_0 的模板。
+2. **MoE 层的设备分支**：路由器、逐 token 的 6 个专家投影、共享专家、3D 专家
+   张量按专家切片绑定。专家权重合计约 26 GB（Q5_0 + Q8_0，23 层 × 128 专家），
+   显存要算得过来。
+
+**数值契约**：CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32 累加结构；
+设备上的 int8 dot + F32 scale 累加与之**不逐位相同**，设备路径要按仓库既有惯例
+用误差门限验收，不能声称逐位一致。
 
 ## 3. 估算
 

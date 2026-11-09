@@ -47,6 +47,12 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // LFM3 has its own Jinja input template and the same plain-text
         // output parser. Neither architecture has a tool-call or vision path.
         "dory" | "lfm3" => Ok(false),
+        // Nemotron-3 Nano is ChatML too, but it has its own renderer: the
+        // CLI encodes the built-in ChatML text with `add_special: true` and
+        // without the empty think block, so the qwen renderer would give
+        // the server a different prompt than the CLI. See
+        // `build_nemotron_chat_prompt`.
+        "nemotron_h" | "nemotron_h_moe" => Ok(false),
         "qwen35" | "qwen35moe" | "sensenova_loop" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -290,6 +296,45 @@ pub fn build_prompt(
         arch,
         "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" | "mistral3"
     );
+    // Nemotron-3 Nano (4B and the 30B-A3B MoE) is ChatML, but it has to be
+    // rendered the way the CLI renders it: the CLI encodes the built-in
+    // ChatML text with `add_special: true` (so the prompt carries the BOS
+    // the GGUF's pre-tokenizer asks for) and without the empty think block
+    // the qwen builder appends. Routing it through `build_qwen_chat_prompt`
+    // gave the server a different prompt than the CLI -- 19 tokens against
+    // 15 for the same message -- and therefore a different answer.
+    let nemotron_family = matches!(arch, "nemotron_h" | "nemotron_h_moe");
+    if nemotron_family {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for the Nemotron-3 Nano family".into());
+        }
+        if messages.iter().any(|message| !message.images.is_empty()) {
+            return Err("Image input is unsupported for the Nemotron-3 Nano family".into());
+        }
+        let last_user = messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .ok_or_else(|| "Nemotron chat needs a user message".to_string())?;
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        let ids = crate::prompt::build_nemotron_chat_prompt(&tokenizer, &turns)?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
+        return Ok((ids, images));
+    }
     if llama_family {
         if !tools.is_empty() {
             return Err("Function tools are unsupported for llama-family architectures".into());

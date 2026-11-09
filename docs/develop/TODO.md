@@ -4127,13 +4127,33 @@ Q4_K 出投影的 Q8_K 激活量化放大了约 7000× —— 一个 1-ULP 的�
    values matter」。所以 oracle 与 Rust 两侧都必须在
    `-march=armv8.2-a+dotprod` 下编译，且**不能开 i8mm**。
 
+**进展：入口层已补齐（2026-11-09）** —— `nemotron_h` 与 `nemotron_h_moe` 现在
+共用一个 `TextRuntime` 适配器（`src/models/nemotron_h/trunk/runtime.rs`），
+HTTP `/v1/chat/completions` 从 501 变成可用；JEV 的单次与分组判定本来就按 arch
+分派，两个入口都覆盖。
+
+**顺带修掉一个族内的提示分叉**：CLI 走 `prompt::legacy::format_chat`（ChatML，
+`add_special: true`，无 think 块），HTTP 走 qwen 的 ChatML builder（**没有 BOS**，
+**多一个空 think 块**）—— 同一条消息 CLI 15 token、HTTP 19 token，贪心解码给出
+不同文本。现在两族都走 `prompt::build_nemotron_chat_prompt`：把对话轮次渲染成
+ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think 块都和 CLI
+一致。`tests/cli_http_agreement.rs` 现在锁住 4B 与 30B 的两条入口逐 token 一致。
+
 **还没做的**：
 
-- **HTTP 服务端** —— `nemotron_h`（4B）本来就没有 `TextRuntime` 适配器，
-  `/v1/chat/completions` 对它返回 501；30B 与 4B 一致。JEV 路径按 arch 分派，
-  已覆盖 `nemotron_h_moe`。
-- **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）；Q5_0/Q8_0 的
-  ggml-exact 路径也只覆盖 CPU。
+- **Vulkan 路径**（30B 的主要缺口）—— 分两层：
+  1. **Q5_0 与 Q5_1 的设备 kernel**（共用能力，别的模型也会用到）。仓库现有的
+     设备格式只有 Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K / F16 / BF16 / F32，
+     而 30B 的 `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 都是 **Q5_0**，
+     共享专家的 `ffn_up_shexp` 是 **Q5_1** —— 换量化档躲不掉。Q4_1 的设备 kernel
+     带 `m` 项，正好是 Q5_1 的模板；Q4_0 是 Q5_0 的模板。
+  2. **MoE 层的设备分支** —— 路由器（sigmoid + top-6 + 归一化 + scale）、逐 token
+     的 6 个专家投影、共享专家，以及把 3D 专家张量按专家切片绑定。
+     注意专家权重合计约 26 GB（Q5_0 + Q8_0，23 层 × 128 专家），显存要算得过来。
+- **其余量化档** —— IQ4_XS / Q4_0 两档未下载验证（张量类型分布见 B1 一节）。
+- **设备路径的数值契约** —— CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32
+  累加结构；设备上的 int8 dot + F32 scale 累加与之**不逐位相同**，设备路径要按
+  仓库既有惯例用误差门限验收（如 Dory 的双 1% 门限），不能声称逐位一致。
 
 ### TODO-054: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 
