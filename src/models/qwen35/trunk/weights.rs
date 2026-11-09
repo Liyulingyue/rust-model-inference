@@ -187,6 +187,7 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
     };
 
     match ti.ggml_type {
+        GGMLType::F32 => Weight::from_f32_bytes(data, n_cols, n_rows),
         GGMLType::I32 => match load_affine(source, name, None) {
             Ok(weight) => Some(weight),
             Err(error) => {
@@ -194,8 +195,7 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
                 None
             }
         },
-        GGMLType::F32
-        | GGMLType::F16
+        GGMLType::F16
         | GGMLType::BF16
         | GGMLType::Q8_0
         | GGMLType::Q4_0
