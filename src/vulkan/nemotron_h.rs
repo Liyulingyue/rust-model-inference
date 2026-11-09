@@ -38,8 +38,8 @@ use crate::models::nemotron_h::trunk::forward::NemotronModel;
 use crate::ops::kernel::Weight;
 use crate::vulkan::dense::UploadedBuffers;
 use crate::vulkan::ops::{
-    row_dispatch, ArenaRegion, GpuMatmulSpec, GpuWeightFormat, OperatorBindings, Qwen3Ops,
-    TokenCommands,
+    row_dispatch, ArenaRegion, GpuMatmulSpec, GpuWeightFormat, GpuWeightLayout, OperatorBindings,
+    Qwen3Ops, TokenCommands,
 };
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
@@ -491,7 +491,7 @@ fn upload_weight(
     buffers: &mut UploadedBuffers,
     weight: &Weight<'_>,
     label: &str,
-) -> Result<(GpuBuffer, GpuMatmulSpec), VulkanError> {
+) -> Result<(GpuBuffer, GpuMatmulSpec, GpuWeightLayout), VulkanError> {
     let format = GpuMatmulSpec::prepared(weight)?;
     let bytes = weight.kernel.weight_bytes().ok_or_else(|| {
         VulkanError::UnsupportedShape(format!(
@@ -499,7 +499,21 @@ fn upload_weight(
             weight.ggml_type
         ))
     })?;
-    Ok((buffers.upload(bytes)?, format))
+    // The Q8_0 weights go into the layout the device kernels read. That is
+    // ggml's own layout unless the transposed layout is turned on, and the
+    // decision is the shared one, so this path and the generic weight
+    // storage agree on it.
+    let layout = format.format.device_layout(buffers.context());
+    let buffer = if layout == GpuWeightLayout::Transposed {
+        let (n_in, n_out) = (weight.n_in, weight.n_out);
+        let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
+        buffers.upload_filled(size, |packed| {
+            crate::vulkan::q8_layout::transpose_q8_0_weight_into(packed, bytes, n_in, n_out);
+        })?
+    } else {
+        buffers.upload(bytes)?
+    };
+    Ok((buffer, format, layout))
 }
 
 fn bind_weight(
@@ -508,11 +522,12 @@ fn bind_weight(
     weight: &Weight<'_>,
     label: &str,
 ) -> Result<OperatorBindings, VulkanError> {
-    let (buffer, format) = upload_weight(buffers, weight, label)?;
-    ops.bind_weight_buffers_mode(
+    let (buffer, format, layout) = upload_weight(buffers, weight, label)?;
+    ops.bind_weight_buffers_mode_layout(
         std::slice::from_ref(&buffer),
         std::slice::from_ref(&format.format),
         format.mode,
+        layout,
     )
 }
 

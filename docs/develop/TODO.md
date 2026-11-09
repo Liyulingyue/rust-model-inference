@@ -4404,10 +4404,15 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
   提高它**。要继续优化得先弄清是访存模式（每个 lane 读一行权重，64 条并发
   流）还是别的什么，这是共用 kernel 的问题，影响面覆盖所有模型，本次没有做。
 
+  **后续**：那个问题后来查清了 —— 是**访存模式**，而且解法（transposed
+  layout）已经实现，见 [TODO-058](#todo-058-q8_0-权重的-transposed-layout共用-kernel影响所有模型)。
+  单 token 生成 21.4 → 28.7 t/s，端到端 17.8 → 24.8 tok/s，逐位一致。
+
 **待办**：
 
 1. 30B-A3B（`nemotron_h_moe`）的 expert routing 还没有设备路径（TODO-051）。
-2. 单 token 的 DP4A Q8_0 matmul（共用 kernel，影响所有模型；见上面的性能小节）。
+2. 单 token 的 DP4A Q8_0 matmul（共用 kernel，影响所有模型）→ 见
+   [TODO-058](#todo-058-q8_0-权重的-transposed-layout共用-kernel影响所有模型)。
 3. 更长的上下文与其它显卡/驱动未验收。
 
 **关联**：`src/vulkan/nemotron_h.rs`、`src/models/nemotron_h/trunk/forward.rs`、
@@ -4415,3 +4420,74 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 `record_softmax_f32_rows`、`record_attention_values_f32_kv_rows`）、
 `shaders/glsl/nemotron_h_ssm_*.comp`、`shaders/glsl/exp_ggml.glsl`、
 `shaders/glsl/nemotron_h_ssm_libm.glsl`、TODO-051（30B 契约）。
+
+---
+
+### TODO-058: Q8_0 权重的 transposed layout（共用 kernel，影响所有模型）
+
+**状态**：⚠️ 已实现（`RMI_GPU_Q8_TRANSPOSED=1` 开启），默认关闭；逐位一致已验证。
+
+**问题**：单 token 生成慢，瓶颈在**权重访存模式**，不在 int8 算力。
+`q8_matmul_grouped.comp` 给每个 lane 一行权重，一个 warp 于是读 32 个
+「相隔一整行」的扇区，而且每个 4 字节的 payload 读取都跨过 34 字节的 block
+边界，要从两个字里拼出来。`src/vulkan/q8_layout.rs` 里记过实测：
+这个 kernel 在 GB10 上只有 **55-59 GB/s**，而设备读同样的字节能到
+**138-171 GB/s** —— kernel 输给了自己的访存模式，不是输给内存系统。
+
+**做法**：仓库里早就有 transposed layout（把 64 行 tile 的 block 归到一起，
+payload 连续且 4 字节对齐），但**它从来没跑起来过**：
+
+- `Q8_MATMUL_TRANSPOSED` 常量写的是 `OPERATOR_SHADERS.len() - 1`，
+  只有在该 shader 排在表尾时才对。Nemotron 的算子追加到表尾之后，
+  这个常量就跟着表长走，**「转置 matmul」实际跑的是 SSM norm shader**：
+  dispatch 正常完成、什么都不写。已修（见 `8c50c59`），并加了一个
+  「每个 pipeline 常量都必须指向它命名的 shader」的测试，防止再漂移。
+- transposed layout 原来只服务 one-row kernel。tiled kernel 给每个 lane 一列
+  输出、读那一列的 block，64 个 lane 触到的 64 行同样相隔
+  `blocks_per_row * 34` 字节 —— **访存模式是一样的**，所以给 tiled kernel
+  也补了转置版本（`scripts/transposed-tiled-shader.py` 生成，保证两者同步）。
+
+**结果（GB10，8 线程）**：
+
+| 场景 | native layout | transposed layout |
+|---|---|---|
+| one-row Q8_0 matmul（仓库自带 benchmark） | 55-59 GB/s | **138-162 GB/s（2.5-2.7×）** |
+| Nemotron-3 Nano 4B 单 token 生成 | 21.4 t/s | **28.7-29.7 t/s（1.35×）** |
+| Nemotron-3 Nano 4B 11 token prefill | 113 ms | **66 ms（1.7×）** |
+| Nemotron-3 Nano 4B 1211 token prefill | 3.44 s（352 t/s） | **2.66 s（455 t/s，1.29×）** |
+| Nemotron-3 Nano 4B 端到端 | 17.8 tok/s | **24.8-25.3 tok/s（1.4×）** |
+| Spark-X2.5-1.7B-Q8_0 端到端 | 4.5 tok/s | **11.2 tok/s（2.5×）** |
+
+**逐位一致**：Nemotron-3 Nano 4B 的 1/2/3 token prefill 全部
+`relative_l2=0`、`scaled_max_abs=0`；Spark-X2.5 的输出文本逐字相同。
+layout 只是把字节换个位置，kernel 的归约顺序不变。
+
+**代价**：每个 Q8_0 权重在上传时转置一次（240 MB 约 26 ms，9 GB/s），
+设备显存与 native 相同（只多了最后一个 tile 的 padding）。转置后的 buffer
+同时服务 one-row 和 tiled 两条路径，**不需要两份**。
+
+**默认关闭**：地址写错会越界读 device buffer。开启前要在所有架构上跑一遍
+硬件测试。
+
+**待办**：
+
+1. 转置 layout 还没有覆盖 `q8_matmul_cooperative_dp4a`（窄投影的单行路径会
+   退回 transposed 的 one-row kernel，实测没有变慢，但少了一个并行度来源）。
+2. `RUST_GPU_DISPATCH_TRACE` 的日志里还没有区分 native / transposed 的
+   一行 matmul，只能靠 shader 名看。
+3. 在 AVX2 与标量主机上还没有硬件验收（tiled kernel 的三个变体都补了，
+   但只在本机 NEON 路径上跑过）。
+4. **开启 flag 后跑全量 `cargo test --lib`，偶尔会多出 1 个失败，而且每次
+   多出来的那个都不一样**（8 次全量跑里出现过 vocoder / dit / speaker 各一次）。
+   单独跑这三个测试 20 次全过；失败的数值也只差一行（某个 time step 拿到了
+   上一个 time step 的结果）。这三个测试都不走转置路径 —— vocoder / speaker
+   的 conv 走的是 CPU 的 `forward_batched`，dit 的 GPU session 用的是
+   `bind_weight_buffers_mode`（native layout），所以**更像是全量并行跑测试
+   时的既有 flake**，而不是转置 layout 引入的。定位方法：并行的 GPU 测试会
+   共用一个 Vulkan context，怀疑有别的测试把 host 内存写坏了。下次要查就
+   从这里入手（`cargo test --lib -- --test-threads=1` 作为对照）。
+
+**关联**：`src/vulkan/q8_layout.rs`、`src/vulkan/ops.rs`、
+`shaders/glsl/q8_matmul_transposed.comp`、
+`shaders/glsl/q8_matmul_tiled_dp4a*_transposed.comp`、
+`scripts/transposed-tiled-shader.py`、TODO-057（Nemotron 设备路径）。

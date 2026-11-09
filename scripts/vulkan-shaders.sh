@@ -45,6 +45,9 @@ shader_names=(
     q8_matmul_tiled_dp4a
     q8_matmul_tiled_dp4a_wide
     q8_matmul_tiled_dp4a_wide_add
+    q8_matmul_tiled_dp4a_transposed
+    q8_matmul_tiled_dp4a_wide_transposed
+    q8_matmul_tiled_dp4a_wide_add_transposed
     f16_matmul_tiled
     attention_scores_tiled
     float_matmul_tiled
