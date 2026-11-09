@@ -865,7 +865,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         result
     }
 
-    fn forward_recurrent_layer(
+    pub(crate) fn forward_recurrent_layer(
         &self,
         il: usize,
         input: &[f32],
@@ -1277,7 +1277,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         Ok(result)
     }
 
-    fn forward_ffn_parallel(
+    pub(crate) fn forward_ffn_parallel(
         &self,
         layer: &Qwen35LayerWeights,
         hidden: &[f32],

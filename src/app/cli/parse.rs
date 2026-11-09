@@ -69,6 +69,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.system_one_request =
                     Some(required_path_value(args, &mut i, "--system-one-request")?);
             }
+            "--decision-request" => {
+                options.decision_request =
+                    Some(required_path_value(args, &mut i, "--decision-request")?);
+            }
+            "--decision-thinker" => {
+                options.decision_thinker =
+                    Some(required_path_value(args, &mut i, "--decision-thinker")?);
+            }
             "--adapter" => {
                 options.adapter = Some(required_path_value(args, &mut i, "--adapter")?);
             }
@@ -690,6 +698,25 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             }
         }
         i += 1;
+    }
+    options.supplied_flags = parsed_flags
+        .iter()
+        .map(|index| args[*index].clone())
+        .collect();
+    if options.decision_request.is_some() {
+        crate::app::decision::validate_options(&options)?;
+        for mut index in parsed_flags.iter().copied() {
+            match args[index].as_str() {
+                "--model" => {
+                    required_path_value(args, &mut index, "--model")?;
+                }
+                "--threads" | "--max-context" => {
+                    let flag = args[index].clone();
+                    required_usize_value(args, &mut index, &flag)?;
+                }
+                _ => {}
+            }
+        }
     }
     if options.system_one_request.is_some() {
         for mut index in parsed_flags {
