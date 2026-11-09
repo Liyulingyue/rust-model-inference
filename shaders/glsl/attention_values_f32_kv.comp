@@ -1,0 +1,67 @@
+#version 450
+
+// Attention values in F32.
+//
+// `attention_values_f32.comp` reduces the probabilities in F32 but still
+// rounds both the probability and the cached value to F16 on the way in.
+// With an F32 KV cache the value is already F32, and the probability is the
+// CPU path's F32 softmax output, so both roundings only add error.
+//
+// The push constant block is identical to `attention_values_f32.comp`.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint scores_word;
+    uint cache_v_word;
+    uint output_word;
+    uint layer;
+    uint sequence_length;
+    uint capacity;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+    uint base_position;
+    uint rows;
+    /// Nonzero when every token is visible; see `softmax.comp`.
+    uint full_attention;
+    uint reduction_mode;
+} pc;
+
+void add_pair(inout float high, inout float low, float value) {
+    precise float sum = high + value;
+    precise float value_virtual = sum - high;
+    precise float error = (high - (sum - value_virtual)) + (value - value_virtual) + low;
+    high = sum + error;
+    low = error - (high - sum);
+}
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint visible = pc.full_attention != 0u ? pc.sequence_length : pc.base_position + row + 1u;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    uint total = pc.q_heads * pc.head_dim;
+    if (index >= total) return;
+    uint head = index / pc.head_dim;
+    uint dimension = index - head * pc.head_dim;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    precise float sum = 0.0;
+    precise float correction = 0.0;
+    for (uint token = 0u; token < visible; token++) {
+        float score = uintBitsToFloat(arena.data[
+            pc.scores_word + (row * pc.q_heads + head) * pc.sequence_length + token]);
+        uint value_index = pc.cache_v_word
+            + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
+            + kv_head * pc.head_dim + dimension;
+        float value = uintBitsToFloat(arena.data[value_index]);
+        // Keep the product out of `add_pair` as a named `precise` temporary:
+        // passing the expression inline lets glslang contract it into an FMA
+        // inside the pair, which moves the result.
+        precise float product = score * value;
+        add_pair(sum, correction, product);
+    }
+    arena.data[pc.output_word + row * total + index] = floatBitsToUint(sum + correction);
+}

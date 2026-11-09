@@ -50,7 +50,7 @@ fn q8_rejects_missing_attention_projection() {
 #[test]
 fn q8_single_token_forward_is_finite() {
     let Some(source) = model_source() else { return };
-    let model = NemotronModel::from_source(source, 1).unwrap();
+    let mut model = NemotronModel::from_source(source, 1).unwrap();
     let mut scratch = NemotronScratch::new(&model.config, 2);
     let logits = model.prefill(&[1], &mut scratch).unwrap();
     assert_eq!(logits.len(), model.config.vocab_size);
@@ -61,7 +61,7 @@ fn q8_single_token_forward_is_finite() {
 #[test]
 fn q8_chunked_and_incremental_logits_match() {
     let Some(source) = model_source() else { return };
-    let model = NemotronModel::from_source(source, 1).unwrap();
+    let mut model = NemotronModel::from_source(source, 1).unwrap();
     let mut chunked = NemotronScratch::new(&model.config, 2);
     let mut incremental = NemotronScratch::new(&model.config, 2);
     let expected = model.prefill(&[1, 2], &mut chunked).unwrap();
@@ -107,7 +107,7 @@ fn q8_hello_greedy_matches_scalar_llama_cpp() {
         },
     );
     assert_eq!(ids, [1, 22177]);
-    let model = NemotronModel::from_source(source, 1).unwrap();
+    let mut model = NemotronModel::from_source(source, 1).unwrap();
     let mut scratch = NemotronScratch::new(&model.config, ids.len() + 3);
     let mut logits = model.prefill(&ids, &mut scratch).unwrap();
     let hash = logits.iter().fold(14695981039346656037u64, |hash, value| {

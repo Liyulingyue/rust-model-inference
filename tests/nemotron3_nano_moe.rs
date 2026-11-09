@@ -116,7 +116,7 @@ fn nemotron3_nano_30b_reference_trace() {
         .unwrap();
     assert!((1..=32).contains(&batch));
 
-    let model = NemotronModel::from_source(source, threads).expect("load 30B");
+    let mut model = NemotronModel::from_source(source, threads).expect("load 30B");
     let mut scratch = NemotronScratch::new(&model.config, prompt.len() + count);
     #[cfg(feature = "parity-trace")]
     let batches: Vec<u32> = prompt
@@ -212,7 +212,7 @@ fn nemotron3_nano_4b_reference_trace() {
         .unwrap();
     assert!((1..=32).contains(&batch));
 
-    let model = NemotronModel::from_source(source, threads).expect("load 4B");
+    let mut model = NemotronModel::from_source(source, threads).expect("load 4B");
     let mut scratch = NemotronScratch::new(&model.config, prompt.len() + count);
     #[cfg(feature = "parity-trace")]
     let batches: Vec<u32> = prompt
