@@ -285,3 +285,29 @@ Current checks:
 Full-weight CLI/HTTP/JEV, per-format independent quantization Oracle, full-model
 performance, long-context and broad task quality were **not rerun**. The model
 therefore remains partially adapted, with these validation gaps explicit.
+
+### Replacement-host attempt
+
+On the replacement EPYC 9334 / 48 GiB RADV NAVI31 host (SSH port 31599), the
+Vulkan CLI/server/Oracle `release-fast` build completed. Both source shards
+passed the pinned SHA256 checks; BF16 and Q8_0 exports completed remotely.
+Q4_K conversion and four-fixture official/independent quantized Oracle runs
+were started but not confirmed complete before every SSH session disconnected.
+Weights were never staged on the Mac. No fresh full-model parity, interface,
+quality or performance pass is claimed from this interrupted attempt.
+
+Both Mage synthetic hardware tests returned Vulkan device loss. An untouched
+archive of main `532d051a0` reproduced RADV hard recovery in the existing
+`linear_gpu_group_preserves_mixed_formats_across_batches` test, which received
+CPU fallback backends instead of Vulkan. The vision test also failed with the
+LLVM RADV compiler. Current AMD GPU parity and speed remain blocked.
+The cause of the later SSH disconnection is unknown.
+
+The probe now accepts CPU/Auto/Vulkan explicitly; hidden-language captures stay
+CPU diagnostics. An optional upstream `gguf==0.18.0` decoder loads all 399
+exported text tensors into the official F32 model for a separate same-weight
+Oracle. Quantized-logit comparison requires eight artifacts per fixture and
+compares only common-prefix logits after a greedy divergence. Its declared
+F32-KV gates are max_abs `<0.5`, RMSE `<0.05`, cosine `>0.9999`; these gates have
+not yet been established as passing on this model. Two comparator regressions
+cover prefix divergence/missing artifacts and rejection of excessive error.

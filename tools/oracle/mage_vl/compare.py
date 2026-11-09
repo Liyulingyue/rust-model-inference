@@ -14,12 +14,45 @@ def metrics(a, b):
             'cosine':float(a@b/(np.linalg.norm(a)*np.linalg.norm(b)))}
 
 
+def compare_quantized_logits(reference, native):
+    provenance = json.loads((reference/'weights.json').read_text())
+    assert provenance['decoder'] == 'upstream gguf.quants.dequantize'
+    report = {}
+    for case in ['text', 'square', 'wide', 'resize']:
+        ref, actual = reference/case, native/case
+        expected_ids = json.loads((ref/'greedy.json').read_text())
+        actual_ids = json.loads((actual/'greedy.json').read_text())
+        assert len(expected_ids) == len(actual_ids) == 8, case
+        # Require complete artifacts even when a different greedy prefix limits comparison.
+        for root in [ref, actual]:
+            assert all((root/f'logits{i}.f32').is_file() for i in range(8)), str(root)
+        checks = []
+        for step in range(8):
+            result = metrics(np.fromfile(actual/f'logits{step}.f32', dtype='<f4'),
+                             np.fromfile(ref/f'logits{step}.f32', dtype='<f4'))
+            # Native quantized kernels also quantize activations; HF keeps them F32.
+            assert result['max_abs'] < 0.5 and result['rmse'] < 0.05 and result['cosine'] > 0.9999, (case, step, result)
+            checks.append(result)
+            if expected_ids[step] != actual_ids[step]:
+                break
+        report[case] = {'generated_equal': expected_ids == actual_ids,
+                        'same_prefix_logit_steps': len(checks), 'total_steps': 8,
+                        'checks': checks}
+    return report
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('reference', type=Path)
     p.add_argument('native', type=Path)
     p.add_argument('--kv-format', choices=['f32','f16'], default='f32')
+    p.add_argument('--quantized-logits', action='store_true',
+                   help='Compare against the independent same-weight F32-activation Oracle')
     a = p.parse_args()
+    if a.quantized_logits:
+        assert a.kv_format == 'f32', 'quantized logit gates require F32 KV'
+        print(json.dumps(compare_quantized_logits(a.reference, a.native), indent=2))
+        return
     report = {}
     for case in ['text','square','wide','resize']:
         ref,native = a.reference/case,a.native/case

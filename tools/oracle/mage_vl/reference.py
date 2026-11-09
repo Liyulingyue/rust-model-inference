@@ -1,8 +1,9 @@
-"""Pinned, unmodified Transformers/ModelScope Oracle; run on the weight host."""
+"""Pinned Transformers Oracle, optionally using independently decoded GGUF weights."""
 import argparse
 import hashlib
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 from PIL import Image
@@ -20,12 +21,34 @@ def save(path, value):
     value.astype('<f4').tofile(path)
 
 
+def load_text_gguf(model, path):
+    """Independently decode exported weights with upstream gguf, keeping HF kernels."""
+    import gguf
+
+    contract = json.loads((path.parent/'source-tensors.json').read_text())
+    parameters = {'model.'+name: value for name, value in model.model.language_model.named_parameters()}
+    parameters['lm_head.weight'] = model.lm_head.weight
+    tensors = {tensor.name: tensor for tensor in gguf.GGUFReader(path).tensors}
+    assert len(parameters) == len(tensors) == 399
+    assert {contract[name]['gguf_name'] for name in parameters} == tensors.keys()
+    with torch.no_grad():
+        for name, parameter in parameters.items():
+            tensor = tensors[contract[name]['gguf_name']]
+            assert tuple(reversed(tensor.shape)) == tuple(parameter.shape), name
+            values = gguf.quants.dequantize(tensor.data, tensor.tensor_type)
+            assert values.size == parameter.numel() and np.isfinite(values).all(), name
+            parameter.copy_(torch.from_numpy(values.copy().reshape(tuple(parameter.shape))))
+    return {'path': str(path.resolve()), 'bytes': path.stat().st_size,
+            'tensors': len(tensors), 'decoder': 'upstream gguf.quants.dequantize'}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('model', type=Path)
     p.add_argument('out', type=Path)
     p.add_argument('--steps', type=int, default=8)
     p.add_argument('--templates-only', action='store_true')
+    p.add_argument('--text-gguf', type=Path, help='Independent same-weight quantized Oracle')
     a = p.parse_args()
     assert hashlib.sha256((a.model/'modeling_llava_onevision2.py').read_bytes()).hexdigest() == SOURCE_SHA
     torch.set_num_threads(8)
@@ -60,6 +83,8 @@ def main():
     assert not any(loading.get(k) for k in ['missing_keys', 'unexpected_keys', 'mismatched_keys', 'error_msgs']), loading
     model.eval()
     (a.out/'loading.json').write_text(json.dumps(loading, indent=2))
+    weights = load_text_gguf(model, a.text_gguf) if a.text_gguf else {'source': 'pinned BF16 widened to F32'}
+    (a.out/'weights.json').write_text(json.dumps(weights, indent=2))
     for name, size, thinking in [('text', None, True), ('square', (64,64), False),
                                   ('wide', (96,64), False), ('resize', (83,57), False)]:
         out = a.out/name
@@ -103,10 +128,13 @@ def main():
         hooks.append(model.model.language_model.norm.register_forward_hook(
             lambda m,args,result: save(out/'norm.f32', result[:,-1,:])))
         with torch.inference_mode():
+            start = time.perf_counter()
             output = model(**inputs, use_cache=True, logits_to_keep=1)
+            prefill_seconds = time.perf_counter() - start
             for hook in hooks:
                 hook.remove()
             generated = []
+            decode_seconds = 0.0
             length = inputs['input_ids'].shape[1]
             for step in range(a.steps):
                 logits = output.logits[0,-1]
@@ -114,12 +142,17 @@ def main():
                 token = int(logits.argmax())
                 generated.append(token)
                 if step+1 < a.steps:
+                    start = time.perf_counter()
                     output = model(input_ids=torch.tensor([[token]]),
                         position_ids=torch.tensor([[length+step]]),
                         attention_mask=torch.ones(1,length+step+1,dtype=torch.long),
                         cache_position=torch.tensor([length+step]),
                         past_key_values=output.past_key_values, use_cache=True, logits_to_keep=1)
+                    decode_seconds += time.perf_counter() - start
         (out/'greedy.json').write_text(json.dumps(generated))
+        (out/'timing.json').write_text(json.dumps({'threads': 8, 'prefill_seconds': prefill_seconds,
+            'decode_seconds': decode_seconds, 'decode_steps': max(a.steps-1, 0),
+            'text': processor.tokenizer.decode(generated)}, indent=2))
         print(name, generated, processor.tokenizer.decode(generated), flush=True)
 
 

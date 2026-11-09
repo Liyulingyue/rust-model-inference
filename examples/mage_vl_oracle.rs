@@ -15,9 +15,9 @@ fn save(path: impl AsRef<Path>, values: &[f32]) -> Result<(), Box<dyn std::error
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
-    if !(5..=6).contains(&args.len()) {
+    if !(5..=7).contains(&args.len()) {
         return Err(
-            "usage: mage_vl_oracle TEXT.gguf VISION.gguf CASE_DIR OUT_DIR [f32|f16]".into(),
+            "usage: mage_vl_oracle TEXT.gguf VISION.gguf CASE_DIR OUT_DIR [f32|f16] [cpu|auto|vulkan]".into(),
         );
     }
     let kv_format = match args.get(5).map(String::as_str).unwrap_or("f32") {
@@ -25,6 +25,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "f16" => core::scratchpad::KvFormat::F16,
         _ => return Err("expected f32 or f16 KV".into()),
     };
+    let policy = match args.get(6).map(String::as_str).unwrap_or("cpu") {
+        "cpu" => compute::ComputePolicy::Cpu,
+        "auto" => compute::ComputePolicy::Auto,
+        "vulkan" => compute::ComputePolicy::Vulkan,
+        _ => return Err("expected cpu, auto or vulkan compute".into()),
+    };
+    let _scope = policy.configure_cli()?;
     let root = Path::new(&args[3]);
     let out = Path::new(&args[4]);
     std::fs::create_dir_all(out)?;
@@ -119,6 +126,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let steps = case["steps"].as_u64().unwrap() as usize;
     #[cfg(feature = "parity-trace")]
     {
+        // Hidden capture is a CPU diagnostic; the logits below exercise the requested policy.
+        let _diagnostic = compute::ComputePolicy::Cpu.enter_legacy_scope();
         let trace = out.join("layers.jsonl");
         if trace.exists() {
             std::fs::remove_file(&trace)?;

@@ -16,10 +16,35 @@ host KV formats work. Text attention/KV, the output head, Mage-ViT per-lane
 RoPE/attention, normalization and activations still run on CPU. Consequently
 `mage_vl` is intentionally absent from the complete-device whitelist.
 
-No model weights were downloaded to the Mac. The original remote weight host
-has been shut down, so full-model quantization quality, new CLI/HTTP/JEV runs
-and full-model performance remain **unverified**. The 2026-11-03 BF16/F32 CPU
+No model weights were downloaded to the Mac. The replacement remote host
+downloaded and verified the pinned release, then exported BF16 and Q8_0.
+Q4_K conversion and full-weight Oracle checks were interrupted when SSH closed
+all sessions. Full-model quantization quality, new CLI/HTTP/JEV runs and
+full-model performance remain **unverified**. The 2026-11-03 BF16/F32 CPU
 results are historical evidence, not a rerun of the current merged branch.
+
+## Replacement AMD host attempt
+
+The host at SSH port 31599 has EPYC 9334, a 16-CPU cgroup quota, about 55 GiB
+container memory and a 48 GiB AMD Radeon GPU (`RADV NAVI31`, gfx1100).
+The non-traced Vulkan CLI/server/Oracle `release-fast` build completed.
+The downloaded shards passed the pinned sizes and SHA256 values. BF16/Q8_0
+export commands completed; independent accuracy checks did not complete.
+
+Both Mage device tests failed with `context is lost` / Vulkan device loss.
+The existing `linear_gpu_group_preserves_mixed_formats_across_batches` test
+also failed on **unmodified main `532d051a0`**, returning CPU backends after
+RADV hard recovery. Switching RADV to its LLVM compiler did not fix the
+Mage vision failure. This is a baseline hardware/driver blocker, not evidence
+of a successful AMD path; strict Vulkan correctly returned the device error.
+The physical GPU has therefore not passed parity or performance validation.
+
+All SSH sessions then closed and new connections were actively closed by the
+endpoint. The cause of that disconnection is unknown; do not attribute it to
+the shader failure or infer that interrupted processes finished successfully.
+Remote logs are under `target/mage-remote-20261109/`. No complete inference
+timing or native output was recovered, so this attempt adds no throughput or
+quality result. Resume full-weight validation only after the host is reachable.
 
 ## Coverage matrix
 
@@ -114,4 +139,4 @@ For real weights, run the [Oracle entry checks](../../tools/oracle/mage_vl/READM
 on a weight host for each format with CPU, Auto and Vulkan; compare quantized
 outputs with an independent same-format/dequantized Oracle before declaring
 quality validated. Current shared-model regression is limited to synthetic
-tests because the remote assets are unavailable.
+tests because the replacement remote session was interrupted.

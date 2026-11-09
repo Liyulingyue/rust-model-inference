@@ -82,7 +82,7 @@ images) and disable thinking.
 .venv/bin/python tools/oracle/mage_vl/reference.py \
   models/Mage-VL-Cowork artifacts/mage_vl/reference
 cargo build --locked --profile release-fast --features parity-trace \
-  --example mage_vl_oracle --bin rust-model-inference
+  --example mage_vl_oracle
 for case in text square wide resize; do
   target/release-fast/examples/mage_vl_oracle \
     models/Mage-VL-Cowork-GGUF/Mage-VL-Cowork-bf16.gguf \
@@ -108,7 +108,11 @@ done
 Repeat the native checks with the F32 text export; append `f16` to the probe
 command and `--kv-format f16` to `compare.py` to check F16 cache continuation.
 Language diagnostic traces use a
-separate F32 session. The official Oracle uses the original BF16 weights
+separate CPU F32 session. The probe accepts optional `[f32|f16] [cpu|auto|vulkan]`
+arguments; only its vision encoding and logits exercise the selected policy.
+Hidden language checkpoints remain CPU diagnostics. Build production CLI/server
+binaries without `parity-trace`, which changes shared diagnostic rounding.
+The official Oracle uses the original BF16 weights
 widened to F32, CPU attention, explicit raster patch positions and absolute
 1D decode positions. Loading must report no missing/unexpected/mismatched
 weights. No change is made to the downloaded official implementation.
@@ -119,9 +123,11 @@ Pillow bicubic is reused for resizing: the released torchvision Fast processor
 can differ by 1–2 uint8 levels. That lossy case has a separate pixel/relative
 activation gate and a strict final-logit gate; it is not claimed bitwise equal.
 See [validation.md](validation.md) for measured evidence and limits.
-The original full-weight evidence below covers BF16/F32 CPU only. New compressed
-formats and mixed Vulkan need fresh full-weight CLI/HTTP/JEV and Oracle runs;
-the original SSH host is shut down. Local synthetic hardware checks are recorded
+The original full-weight evidence below covers BF16/F32 CPU only. The replacement
+AMD host downloaded and verified the pinned release and exported BF16/Q8_0, but
+disconnected before full-weight checks completed. Its RADV device loss also
+reproduces on unmodified main. New compressed formats and mixed Vulkan still
+need completed full-weight CLI/HTTP/JEV and Oracle runs. Local hardware checks are recorded
 separately in [MAGE_VL.md](../../../docs/develop/MAGE_VL.md) and do not establish
 model quality or full-model performance.
 
@@ -130,6 +136,36 @@ run `smoke.py ... --vulkan` and `review_regression.py ... --compute vulkan`, the
 repeat the entry checks with Auto. Default `smoke.py` is the CPU/no-device check.
 `check_export.py --text-type q8_0|q4_k` checks deterministic re-encoding and
 storage, not an independent numerical quantization Oracle.
+
+For an independent same-weight quantized check, install upstream `gguf==0.18.0`
+in the remote repository venv (or reuse the host's existing package). Run:
+
+```sh
+.venv/bin/python tools/oracle/mage_vl/reference.py \
+  models/Mage-VL-Cowork artifacts/mage_vl/reference-q8_0 \
+  --text-gguf models/Mage-VL-Cowork-q8_0/Mage-VL-Cowork-q8_0.gguf
+cargo build --locked --profile release-fast --features vulkan --example mage_vl_oracle
+for case in text square wide resize; do
+  target/release-fast/examples/mage_vl_oracle \
+    models/Mage-VL-Cowork-q8_0/Mage-VL-Cowork-q8_0.gguf \
+    models/Mage-VL-Cowork-q8_0/mmproj-Mage-VL-Cowork-F32.gguf \
+    artifacts/mage_vl/reference-q8_0/$case artifacts/mage_vl/native-q8_0/$case f32 cpu
+done
+.venv/bin/python tools/oracle/mage_vl/compare.py \
+  artifacts/mage_vl/reference-q8_0 artifacts/mage_vl/native-q8_0 --quantized-logits
+```
+
+Repeat with Q4_K. The upstream GGUF package decodes all 399 exported text tensors
+into the unchanged official F32 model; it does not call this converter's encoder
+or Rust kernels. Named quantized-logit gates are max_abs `<0.5`, RMSE `<0.05`,
+cosine `>0.9999`, with F32 KV. They allow native activation quantization and are
+declared before completing these remote runs; they are **not measured passes**.
+Eight logit artifacts are required per fixture. If greedy tokens diverge, only
+logits with a common input prefix are compared, including the first divergent
+choice; the report states that reduced coverage. This checks implementation
+error for the same weights, not the quality loss from BF16 to Q4/Q8.
+Oracle `timing.json` records CPU diagnostic timings including checkpoint hooks;
+it is not a benchmark against a clean production binary.
 
 Text JEV single/multi/block scoring checks the configured context cap before KV
 allocation; HTTP rejects that limit violation with 400. An explicit projector

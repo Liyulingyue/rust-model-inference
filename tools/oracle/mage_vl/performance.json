@@ -11,7 +11,7 @@
     "cpu": null,
     "vulkan": null,
     "reference": null,
-    "reason": "Original remote weight host is shut down; no weights downloaded to Mac."
+    "reason": "Replacement remote host disconnected before complete parity, interface or timing results were recovered; AMD RADV device loss reproduced on unmodified main."
   },
   "synthetic_vision": {
     "fixture": "one block, real widths, 4x4 patch grid, F32 constructed weights, seven projections with bias",
@@ -63,5 +63,31 @@
     "RMI_SCALAR": null,
     "RMI_PARITY_TRACE": null
   },
-  "evidence": "target/mage-review-20261109/{mage-text-vulkan,mage-vision-vulkan}.log"
+  "evidence": "target/mage-review-20261109/{mage-text-vulkan,mage-vision-vulkan}.log",
+  "remote_attempt": {
+    "date": "2026-11-09",
+    "host": {
+      "cpu": "AMD EPYC 9334",
+      "cpu_quota": 16,
+      "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+      "gpu_arch": "gfx1100",
+      "gpu_memory_mib": 49136,
+      "container_memory_bytes": 59055800320
+    },
+    "source_shards_sha256_verified": true,
+    "completed_exports": [
+      "bf16",
+      "q8_0"
+    ],
+    "q4_k_export": "started; completion unknown",
+    "vulkan_release_fast_cli_server_probe_build": "passed",
+    "mage_text_and_vision_gpu_tests": "device lost",
+    "unmodified_main": "532d051a0",
+    "baseline_gpu_test": "linear_gpu_group_preserves_mixed_formats_across_batches",
+    "baseline_result": "RADV hard recovery; CPU fallback returned where Vulkan was required",
+    "independent_quantized_oracle": "started; no completed comparison recovered",
+    "full_model_timing": null,
+    "disconnect": "all SSH sessions closed; new connections actively closed; cause unknown",
+    "logs": "remote target/mage-remote-20261109/"
+  }
 }
