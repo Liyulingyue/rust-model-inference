@@ -4390,11 +4390,19 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 - **逐 token 生成仍略慢于 CPU**（21.4 vs 26 t/s）。原因不在本模型的 SSM 路径，
   而在共用的 Q8_0 matmul kernel：单 token 走 `q8_matmul_grouped.comp`，它是
   **标量 int8 乘加**，没有用上 GPU 的 DP4A 单元；多行路径才走
-  `q8_matmul_tiled_dp4a_wide`（`dotPacked4x8EXT`）。实测把单 token 也切到 tiled
-  kernel 反而更慢（21.2 → 11.3 t/s），因为那个 kernel 的 token tile 固定为 32，
-  只有 1 个 token 有效时寄存器压力大到溢出。**要吃到 DP4A 需要一个 token tile
-  很小的 DP4A kernel**，那是共用 kernel 的改动，影响面覆盖所有模型，
-  本次没有做。
+  `q8_matmul_tiled_dp4a_wide`（`dotPacked4x8EXT`）。**两次实测都说明不能简单
+  地把单 token 切到 tiled kernel**：
+  - 直接用 32 token 的 wide kernel：21.2 → **11.3 t/s**（token tile 固定 32，
+    只有 1 个 token 有效时 `accumulator[32]` 几乎全空，而它按运行时下标访问，
+    于是落在 local memory 里，每次访问都是一次内存往返）。
+  - 另写一个 4 token 的 twin（与 wide kernel 的**每 token 算术完全相同**，
+    只是 tile 更窄）：21.2 → **17.5 t/s**，仍然更慢。
+
+  也就是说单 token 的瓶颈**不是** int8 乘加算力，而是权重读取（约 3.6 GB/token：
+  SSM 的 in/out 投影 1.66 GB、FFN 1.34 GB、attention 0.15 GB、输出投影 0.41 GB）。
+  按 21.4 t/s 折算只有约 80 GB/s，离 GB10 的峰值还远，**但换 kernel 并不能
+  提高它**。要继续优化得先弄清是访存模式（每个 lane 读一行权重，64 条并发
+  流）还是别的什么，这是共用 kernel 的问题，影响面覆盖所有模型，本次没有做。
 
 **待办**：
 
