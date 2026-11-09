@@ -131,8 +131,16 @@ const RMS_NORM: usize = 9;
 const QK_NORM_ROPE: usize = 10;
 /// Appended after the cooperative Q8 kernel to preserve existing indices.
 const QK_NORM_ROPE_INTERLEAVED: usize = 29;
-/// Appended last so the existing pipeline indices stay valid.
-const Q8_MATMUL_TRANSPOSED: usize = OPERATOR_SHADERS.len() - 1;
+/// The transposed Q8_0 matmul, at its fixed slot in `OPERATOR_SHADERS`.
+///
+/// This index used to be `OPERATOR_SHADERS.len() - 1`, which is only correct
+/// while this shader is the last one in the table. Appending the Nemotron
+/// operators moved it silently: the constant followed the table length and
+/// the "transposed matmul" ended up running the SSM norm shader, so the
+/// transposed layout produced no output at all instead of a wrong one.
+/// `operator_indices_match_shader_modules` now checks every constant
+/// against the module it names, so this cannot drift again.
+const Q8_MATMUL_TRANSPOSED: usize = 49;
 const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
@@ -9716,10 +9724,204 @@ fn silu_probe_uses_the_production_ffn_width() {
 
 #[cfg(test)]
 mod tests {
+    /// Every pipeline constant has to name the shader it selects.
+    ///
+    /// The constants are indices into `OPERATOR_SHADERS`, and the table is
+    /// appended to over time. A constant that tracked the table length
+    /// instead of its own slot moved as soon as a shader was appended: the
+    /// transposed Q8_0 matmul was `OPERATOR_SHADERS.len() - 1`, so adding
+    /// the Nemotron operators made it run the SSM norm shader instead. The
+    /// failure was silent -- the pipeline built, the dispatch ran, and the
+    /// output region was never written -- so the check lives here.
     #[test]
-    fn appended_operator_indices_match_shader_modules() {
+    fn operator_indices_match_shader_modules() {
         use super::*;
-        let operators: [(usize, &str, &[u8]); 7] = [
+        let operators: &[(usize, &str, &[u8])] = &[
+            (
+                QUANTIZE,
+                "quantize_q8_0",
+                QUANTIZE_Q8_0_SHADER,
+            ),
+            (
+                QUANTIZE_K,
+                "quantize_q8_k",
+                QUANTIZE_Q8_K_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED,
+                "q8_matmul_grouped",
+                Q8_MATMUL_GROUPED_SHADER,
+            ),
+            (
+                Q4_0_MATMUL,
+                "q4_0_matmul",
+                Q4_0_MATMUL_SHADER,
+            ),
+            (
+                Q4_1_MATMUL,
+                "q4_1_matmul",
+                Q4_1_MATMUL_SHADER,
+            ),
+            (
+                Q4_K_MATMUL,
+                "q4_k_matmul",
+                Q4_K_MATMUL_SHADER,
+            ),
+            (
+                Q6_K_MATMUL,
+                "q6_k_matmul",
+                Q6_K_MATMUL_SHADER,
+            ),
+            (
+                F16_MATMUL,
+                "f16_matmul",
+                F16_MATMUL_SHADER,
+            ),
+            (
+                BF16_MATMUL,
+                "bf16_matmul",
+                BF16_MATMUL_SHADER,
+            ),
+            (
+                RMS_NORM,
+                "rms_norm",
+                RMS_NORM_SHADER,
+            ),
+            (
+                QK_NORM_ROPE,
+                "qk_norm_rope",
+                QK_NORM_ROPE_SHADER,
+            ),
+            (
+                KV_WRITE,
+                "kv_write",
+                KV_WRITE_SHADER,
+            ),
+            (
+                ATTENTION_SCORES,
+                "attention_scores",
+                ATTENTION_SCORES_SHADER,
+            ),
+            (
+                SOFTMAX,
+                "softmax",
+                SOFTMAX_SHADER,
+            ),
+            (
+                ATTENTION_VALUES,
+                "attention_values",
+                ATTENTION_VALUES_SHADER,
+            ),
+            (
+                SILU_MUL,
+                "silu_mul",
+                SILU_MUL_SHADER,
+            ),
+            (
+                ADD,
+                "add",
+                ADD_SHADER,
+            ),
+            (
+                QWEN35_DENSE_PREPARE,
+                "qwen35_dense_prepare",
+                QWEN35_DENSE_PREPARE_SHADER,
+            ),
+            (
+                QWEN35_ATTENTION,
+                "qwen35_attention",
+                QWEN35_ATTENTION_SHADER,
+            ),
+            (
+                QWEN35_RECURRENT_CONV,
+                "qwen35_recurrent_conv",
+                QWEN35_RECURRENT_CONV_SHADER,
+            ),
+            (
+                QWEN35_RECURRENT_SSM,
+                "qwen35_recurrent_ssm",
+                QWEN35_RECURRENT_SSM_SHADER,
+            ),
+            (
+                Q5_K_MATMUL,
+                "q5_k_matmul",
+                Q5_K_MATMUL_SHADER,
+            ),
+            (
+                F32_MATMUL,
+                "f32_matmul",
+                F32_MATMUL_SHADER,
+            ),
+            (
+                ADALN_MODULATE,
+                "adaln_modulate",
+                ADALN_MODULATE_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED,
+                "q8_matmul_grouped_tiled",
+                Q8_MATMUL_GROUPED_TILED_SHADER,
+            ),
+            (
+                F16_MATMUL_TILED,
+                "f16_matmul_tiled",
+                F16_MATMUL_TILED_SHADER,
+            ),
+            (
+                ATTENTION_SCORES_TILED,
+                "attention_scores_tiled",
+                ATTENTION_SCORES_TILED_SHADER,
+            ),
+            (
+                MLX_AFFINE_MATMUL,
+                "mlx_affine_matmul",
+                MLX_AFFINE_MATMUL_SHADER,
+            ),
+            (
+                Q8_MATMUL_COOPERATIVE,
+                "q8_matmul_cooperative",
+                Q8_MATMUL_COOPERATIVE_SHADER,
+            ),
+            (
+                QK_NORM_ROPE_INTERLEAVED,
+                "qk_norm_rope_interleaved",
+                QK_NORM_ROPE_INTERLEAVED_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_WIDE,
+                "q8_matmul_tiled_dp4a_wide",
+                Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                "q8_matmul_tiled_dp4a_wide_add",
+                Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER,
+            ),
+            (
+                ATTENTION_VALUES_F32,
+                "attention_values_f32",
+                ATTENTION_VALUES_F32_SHADER,
+            ),
+            (
+                FLOAT_MATMUL_TILED,
+                "float_matmul_tiled",
+                FLOAT_MATMUL_TILED_SHADER,
+            ),
+            (
+                ATTENTION_ONLINE,
+                "attention_online",
+                ATTENTION_ONLINE_SHADER,
+            ),
+            (
+                CONV3D_TILED,
+                "conv3d_tiled",
+                CONV3D_TILED_SHADER,
+            ),
+            (
+                ATTENTION_ONLINE_WIDE,
+                "attention_online_wide",
+                ATTENTION_ONLINE_WIDE_SHADER,
+            ),
             (
                 TIMESTRAL,
                 "timestral",
@@ -9730,7 +9932,11 @@ mod tests {
                 "float_matmul_small",
                 include_bytes!("../../shaders/bin/float_matmul_small.spv"),
             ),
-            (MOE_REDUCE, "moe_reduce", MOE_REDUCE_SHADER),
+            (
+                MOE_REDUCE,
+                "moe_reduce",
+                MOE_REDUCE_SHADER,
+            ),
             (
                 Q4_K_MATMUL_COOPERATIVE,
                 "q4_k_matmul_cooperative",
@@ -9751,11 +9957,89 @@ mod tests {
                 "q5_k_matmul_cooperative",
                 Q5_K_MATMUL_COOPERATIVE_SHADER,
             ),
+            (
+                CONV1D_TILED,
+                "conv1d_tiled",
+                CONV1D_TILED_SHADER,
+            ),
+            (
+                AUK_FIR,
+                "auk_fir",
+                AUK_FIR_SHADER,
+            ),
+            (
+                AUK_SNAKE,
+                "auk_snake",
+                AUK_SNAKE_SHADER,
+            ),
+            (
+                AUK_INTERLEAVE,
+                "auk_interleave",
+                AUK_INTERLEAVE_SHADER,
+            ),
+            (
+                AUK_SCALE,
+                "auk_scale",
+                AUK_SCALE_SHADER,
+            ),
+            (
+                Q8_MATMUL_TRANSPOSED,
+                "q8_matmul_transposed",
+                Q8_MATMUL_TRANSPOSED_SHADER,
+            ),
+            (
+                KV_WRITE_F32,
+                "kv_write_f32",
+                KV_WRITE_F32_SHADER,
+            ),
+            (
+                ATTENTION_SCORES_F32,
+                "attention_scores_f32",
+                ATTENTION_SCORES_F32_SHADER,
+            ),
+            (
+                ATTENTION_VALUES_F32_KV,
+                "attention_values_f32_kv",
+                ATTENTION_VALUES_F32_KV_SHADER,
+            ),
+            (
+                SOFTMAX_F32,
+                "softmax_f32",
+                SOFTMAX_F32_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_CONV,
+                "nemotron_h_ssm_conv",
+                NEMOTRON_H_SSM_CONV_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_DT,
+                "nemotron_h_ssm_dt",
+                NEMOTRON_H_SSM_DT_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_SCAN,
+                "nemotron_h_ssm_scan",
+                NEMOTRON_H_SSM_SCAN_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_GATE,
+                "nemotron_h_ssm_gate",
+                NEMOTRON_H_SSM_GATE_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_NORM,
+                "nemotron_h_ssm_norm",
+                NEMOTRON_H_SSM_NORM_SHADER,
+            ),
         ];
         for (index, name, shader) in operators {
-            assert_eq!(OPERATOR_SHADER_NAMES[index], name);
-            assert_eq!(OPERATOR_SHADERS[index], shader);
+            assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
+            assert_eq!(OPERATOR_SHADERS[*index], *shader);
         }
+        // The table has to cover every pipeline, or a new operator could
+        // still land outside the check.
+        assert_eq!(operators.len(), OPERATOR_SHADERS.len());
     }
 
     /// The operator pipelines are compiled once per device. A denoiser step
