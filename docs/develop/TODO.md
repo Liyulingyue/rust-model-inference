@@ -199,6 +199,34 @@ NEON on aarch64; no AVX-512).
       `[9419,0,2500,513,488,3604,3242,30]`；case1 一致 `[109430]`；case2 GPU `40` vs CPU `34`。
       GPU 侧激活走 Q8_0 int8，误差经 mHC 路由放大后 argmax 翻转。**需要 parity trace 逐层
       定位，但当前被上一条死锁阻塞**；先修死锁，再复跑逐层比对。
+- [ ] **F32 权重的字节序防线要从运行时 cfg 变成编译期分支** — `src/ops/kernel/f32/mod.rs` 的
+      `from_le_bytes` 用 `cfg!(target_endian = "little")` 决定是否把 GGUF 字节重解释成 `&[f32]`；
+      而 `bytemuck::try_cast_slice` **只校验长度和对齐、不看字节序**，所以那个 `cfg!` 是**唯一**的
+      字节序防线 —— 被重构误删后，BE 平台会**静默**产出字节序颠倒的浮点数（不崩溃、只是数值全错，
+      且只有 BE 机器能暴露）。建议拆成 `#[cfg(target_endian = "little")]`（借用）与
+      `#[cfg(target_endian = "big")]`（恒拷贝）两份实现，让守卫无法被误删。
+      顺带：目前对齐失败是**静默**落回 `Cow::Owned`（整份 F32 权重进 RAM）。GGUF 规范
+      `general.alignment` 默认 32、我们的写器也保证了，但第三方 GGUF 不保证 → 建议加载期校验张量
+      偏移的 4 字节对齐，不满足就报错（至少告警一次），别偷偷吃掉 35 GB。
+      **数值一致性现状已 OK**：BE 走 owned 时用 `f32::from_le_bytes`，与 LE 位级相同；
+      `borrowed_f32_preserves_owned_kernel_bits_without_copying` 已断言 borrowed 与 owned 的输出
+      逐位相同，且已覆盖未对齐回退分支。
+- [ ] **F32 内核改成"永远借字节"，与 F16/BF16 同构，删掉 `Cow`** — `F32Kernel<'a>` 是全仓唯一
+      带 `Cow` 的权重类型（`Cow<'a, [f32]>`，因为要同时支持"借 GGUF 字节"和"拥有拷贝"），而
+      `F16Weight<'a>`/`BF16Weight<'a>`/`F16Kernel<'a>`/`BF16Kernel<'a>` 全都是 `weight: &'a [u8]`
+      —— **永远只借**。目标：改成 `pub struct F32Kernel<'a> { pub weight: &'a [u8] }`，转换挪进
+      kernel（LE 用 unaligned load reinterpret，AVX2/NEON 原生支持 → 对齐约束一并消失；
+      BE 上 byteswap）。
+      收益：① **内存画像跨平台完全一致**（永远零拷贝，35 GB 级 F32 权重不再有平台差异）；
+      ② `Weight`/`QuantizedTensor` 抽象下 F32 与其它格式同构；③ 没有平台分支泄漏到调用方；
+      ④ `Cow` 可整个删掉。代价：AVX2/NEON 的 F32 matmul 签名要从 `&[f32]` 改成 `&[u8]`
+      （`avx2_q8::matmul_f32_vs_q8_avx2` 等），BE 热循环多一次 byteswap（BE 平台罕见）。
+      **建议先做上一条作为止血，B 单独成 PR**（要动 SIMD kernel 签名，值得独立评审）。
+      另注：main 目前**还没有** `Weight::from_f32_bytes`（F32 仍是 `QuantizedTensor::F32 { data:
+      Vec<f32> }` 的整份拷贝语义），35 GB 级 F32 模型在 main 上会 OOM → 建议把这条零拷贝线
+      （无论最终是 `Cow` 版还是 bytes-only 版）单独拆一个 PR 回 main。
+      另注：**跨平台一致性 ≠ 跨架构一致性** —— AVX2 / NEON / scalar 的浮点累加顺序差异是另一个
+      话题（见上面「两份 F16 shader 改动缺 aarch64 验证」那条）。
 - [x] **共享算子搬迁只搬了一半：兼容 shim 还在，调用方没跟着迁移** — ✅ 已完成（2026-11-05，`hy-simulmt-plus`）。
       两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
       两次「把共享算子搬进 `ops/`」都留下了 1 行转发 shim，调用方仍在走 models 层路径：
