@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -15,14 +16,22 @@ def main():
     p.add_argument('vision')
     p.add_argument('image')
     p.add_argument('out',type=Path)
+    p.add_argument('--vulkan', action='store_true', help='Require hardware Vulkan for CLI/HTTP/JEV')
     a = p.parse_args()
     a.out.mkdir(parents=True,exist_ok=True)
     binary = 'target/release-fast/rust-model-inference'
     base = [binary,'--model',a.model,'--threads','8','--max-context','2048','--prefill-batch-size','32']
+    compute = ['--compute', 'vulkan' if a.vulkan else 'cpu']
+    if a.vulkan:
+        os.environ['RMI_COMPUTE_TRACE'] = '1'
     report = {}
 
     def cli(name,args,ok=True):
-        result = subprocess.run(base+args,capture_output=True,text=True,timeout=900)
+        command = base + args
+        if '--compute' not in args:
+            command += compute
+        assert command.count('--compute') == 1, command
+        result = subprocess.run(command,capture_output=True,text=True,timeout=900)
         (a.out/f'{name}.log').write_text(result.stdout+'\n'+result.stderr)
         assert (result.returncode==0)==ok,(name,result.stdout,result.stderr)
         report[name] = {'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr}
@@ -37,7 +46,9 @@ def main():
     assert image == cli('cli-image-auto',generation+image_args+['--compute','auto'])
     cli('cli-image-f16',generation+image_args+['--kv-cache','f16'])
     assert cpu == cli('cli-mmproj-no-image',generation+['--mmproj',a.vision])
-    cli('strict-vulkan',generation+['--compute','vulkan'],False)
+    cli('strict-vulkan',generation+['--compute','vulkan'],a.vulkan)
+    if a.vulkan:
+        assert 'scope=host_linear backend=Vulkan' in report['strict-vulkan']['stderr']
     cli('missing-vision',generation+['--image',a.image],False)
     cli('mismatched-vision',generation+['--image',a.image,'--mmproj',a.model],False)
     cli('context-before-vision',generation+image_args+['--max-context','2'],False)
@@ -66,7 +77,7 @@ def main():
         return value
 
     with (a.out/'server.log').open('w') as log:
-        server = subprocess.Popen(base+['--mmproj',a.vision,'--serve','--host','127.0.0.1','--port','18083'],stdout=log,stderr=log)
+        server = subprocess.Popen(base+compute+['--mmproj',a.vision,'--serve','--host','127.0.0.1','--port','18083'],stdout=log,stderr=log)
         try:
             for _ in range(120):
                 assert server.poll() is None,'server exited'

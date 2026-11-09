@@ -152,7 +152,10 @@ pub fn build_text_runtime(
     let policy = options.compute;
     policy.check_build()?;
     policy.validate_text_arch(arch)?;
-    if policy == crate::compute::ComputePolicy::Vulkan && options.mmproj.is_some() {
+    if policy == crate::compute::ComputePolicy::Vulkan
+        && crate::compute::ComputePolicy::has_complete_device_path(arch)
+        && options.mmproj.is_some()
+    {
         return Err("full Vulkan runtime supports text input only".into());
     }
     let _scope = policy.enter_legacy_scope();
@@ -207,7 +210,10 @@ impl TextRuntime for ComputeTextRuntime {
         images: &[Vec<u8>],
         max_new_tokens: usize,
     ) -> Result<(), String> {
-        if self.policy == crate::compute::ComputePolicy::Vulkan && !images.is_empty() {
+        if self.policy == crate::compute::ComputePolicy::Vulkan
+            && crate::compute::ComputePolicy::has_complete_device_path(self.inner.arch())
+            && !images.is_empty()
+        {
             return Err("full Vulkan runtime supports text input only".into());
         }
         self.inner
@@ -218,7 +224,10 @@ impl TextRuntime for ComputeTextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
-        if self.policy == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
+        if self.policy == crate::compute::ComputePolicy::Vulkan
+            && crate::compute::ComputePolicy::has_complete_device_path(self.inner.arch())
+            && !request.images.is_empty()
+        {
             return Err("full Vulkan runtime supports text input only".into());
         }
         let _scope = self.policy.enter_legacy_scope();
@@ -467,6 +476,7 @@ impl TextRuntime for Qwen3TextRuntime {
     ) -> Result<GeneratedText, String> {
         let _scope = self.options.compute.enter_legacy_scope();
         if self.options.compute == crate::compute::ComputePolicy::Vulkan
+            && crate::compute::ComputePolicy::has_complete_device_path(&self.arch)
             && !request.images.is_empty()
         {
             return Err("full Vulkan runtime supports text input only".into());
@@ -1139,10 +1149,10 @@ mod tests {
     fn compute_runtime_scope_restores_on_error_and_rejects_images() {
         use super::*;
         use crate::compute::ComputePolicy;
-        struct Probe;
+        struct Probe(&'static str, ComputePolicy);
         impl TextRuntime for Probe {
             fn arch(&self) -> &str {
-                "probe"
+                self.0
             }
             fn context_length(&self) -> usize {
                 4
@@ -1155,13 +1165,13 @@ mod tests {
                 _: &GenerationRequest,
                 _: &mut dyn TokenSink,
             ) -> Result<GeneratedText, String> {
-                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+                assert_eq!(ComputePolicy::legacy(), self.1);
                 Err("probe error".into())
             }
         }
         let _outer = ComputePolicy::Auto.enter_legacy_scope();
         let mut runtime = ComputeTextRuntime {
-            inner: Box::new(Probe),
+            inner: Box::new(Probe("qwen3", ComputePolicy::Cpu)),
             policy: ComputePolicy::Cpu,
         };
         let mut request = GenerationRequest::new(vec![1], 1);
@@ -1183,6 +1193,18 @@ mod tests {
             .generate(&request, &mut sink)
             .unwrap_err()
             .contains("text input only"));
+        runtime.inner = Box::new(Probe("mage_vl", ComputePolicy::Vulkan));
+        assert_eq!(
+            runtime
+                .validate_request(&request.token_ids, &request.images, 1)
+                .unwrap_err(),
+            "probe validation error"
+        );
+        assert_eq!(
+            runtime.generate(&request, &mut sink).unwrap_err(),
+            "probe error"
+        );
+        assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
     }
 
     #[test]

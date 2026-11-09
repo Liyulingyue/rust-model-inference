@@ -1,5 +1,12 @@
 # Mage-VL-Cowork validation
 
+Current status: the 2026-11-09 changes add compressed text exports and mixed
+Vulkan projection offload. The CPU-only/strict-Vulkan-rejection statements
+below describe the **2026-11-03 implementation**, and are superseded by the
+[current coverage matrix](../../../docs/develop/MAGE_VL.md). Full-weight
+verification of those new paths is pending because the remote host is shut
+down. No weights were downloaded to the Mac.
+
 Validated on 2026-11-03 (Asia/Shanghai), on the requested SSH host. All source
 weights, exports and activation artifacts stayed on that host. ModelScope
 downloads streamed directly into remote `.part` files; only code and small
@@ -224,3 +231,57 @@ pass. Raw follow-up evidence: `review-fix-green/`, `review-fix-green.log`,
 numerical-operator/weight-conversion gates and existing failure/shader boundaries
 above still apply; performance and real GPU execution were not rerun for these
 request-validation/accounting fixes. All model weights remain on the remote host.
+
+## Quantization and GPU review follow-up (2026-11-09)
+
+Merged upstream main through `532d051a0`; tested the unchanged merge baseline
+`81551447e`. Text conversion/validation now accepts the existing F32/F16/BF16,
+Q8_0/Q4_0/Q4_K/Q5_K/Q6_K formats, with F32 norms and vision. Reused shared
+quantizers rather than introducing another encoding implementation.
+`check_export.py` can check all formats but re-encoding a quantized payload is
+only a storage check, not an independent quantization-accuracy Oracle.
+
+Text and vision projections now use shared Vulkan linear execution. Auto can
+fall back; strict Vulkan propagates errors. Attention/KV and Mage-ViT's per-lane
+RoPE stay on CPU. The complete-device whitelist remains unchanged. Shared
+Qwen session changes only opt Mage into its existing projection executor;
+Qwen resident defaults are preserved. HTTP image validation permits a mixed
+runtime while retaining text-only checks for complete resident decoders.
+
+On Apple M3 Max hardware Vulkan, both new synthetic device tests pass. The
+text test covers F32/BF16/Q8_0/Q4_K, F32/F16 KV, Auto/Vulkan and prefill plus
+two decode steps; worst max_abs is `9.536743e-6` against the existing
+`0.002 + 0.002 * abs(cpu)` gate. The one-block vision fixture submits seven
+projections under each policy and has max_abs `0` against `<0.002`. No bitwise
+alignment is required for these floating/quantized paths. See the matrix for
+the fixture limits and diagnostic CPU/GPU timings.
+
+The unchanged baseline fails the shared batched-linear hardware test because
+the newly merged Nemotron FP64 shaders cannot compile on M3 Max. The optional
+pipeline capability gate fixes that initialization failure, and calls to the
+unsupported FP64 operators return an explicit error. The same shared test now
+passes all nine supported GPU formats, and both existing Qwen hidden-row and
+capture device tests pass. FP64-capable hardware and old-model real weights
+were not available for regression.
+
+Current checks:
+
+- Python converter/shared quantizer tests: **38 passed, 15 subtests passed**.
+- Full ordinary CPU library baseline: **1510 passed / 13 failed / 96 ignored**;
+  after changes: **1512 passed / 13 failed / 96 ignored**. All 13 failure names
+  match exactly in `target/mage-review-20261109/regression-comparison.json`.
+  Existing failures concern media, missing Breeze/CLM assets, Z-Image/FunASR/
+  softmax NEON parity, and Gemma4 validation; this is not a green full suite.
+- Vulkan-feature Qwen trunk: **12 passed / 3 ignored**; explicitly running its
+  three device tests: **3 passed**. Text runtime tests: **6 passed**.
+- Smoke script command construction: 14 CPU/Vulkan commands checked; the
+  duplicate `--compute` regression found during review is fixed. This is a
+  mocked argument check, not a real CLI/HTTP integration result.
+- Cargo metadata preserves all nine existing binary targets.
+- Vulkan-feature `cargo check` passes for the library, existing CLI/server
+  binaries and `mage_vl_oracle` example. Changed-file rustfmt, Python syntax
+  and `git diff --check` pass.
+
+Full-weight CLI/HTTP/JEV, per-format independent quantization Oracle, full-model
+performance, long-context and broad task quality were **not rerun**. The model
+therefore remains partially adapted, with these validation gaps explicit.

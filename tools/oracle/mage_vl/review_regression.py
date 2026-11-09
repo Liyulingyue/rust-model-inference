@@ -17,10 +17,11 @@ def main():
     p.add_argument('vision')
     p.add_argument('square', type=Path, help='Pinned reference/square directory')
     p.add_argument('out', type=Path)
+    p.add_argument('--compute', choices=['cpu', 'auto', 'vulkan'], default='cpu')
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     base = ['target/release-fast/rust-model-inference', '--model', a.model,
-            '--threads', '8', '--prefill-batch-size', '32']
+            '--threads', '8', '--prefill-batch-size', '32', '--compute', a.compute]
     url = 'http://127.0.0.1:18084'
     report = {}
 

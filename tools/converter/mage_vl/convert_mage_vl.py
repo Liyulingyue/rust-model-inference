@@ -1,6 +1,6 @@
 """Export the pinned Mage-VL-Cowork release as explicit mage_vl text + Mage-ViT GGUFs.
 
-python -m tools.converter.mage_vl.convert_mage_vl MODEL_DIR --out-dir OUT [--text-type bf16|f32]
+python -m tools.converter.mage_vl.convert_mage_vl MODEL_DIR --out-dir OUT [--text-type q8_0]
 """
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ import re
 
 from tools.converter.mage_flow.convert_qwen3vl_vision import Reader
 from tools.converter.utils.gguf import GgufWriter, GGML_F32, GGML_BF16, gguf_dims
+from tools.converter.utils.quantize_gguf import BLOCK_FORMATS, _quantize_one
 from tools.converter.wevisone_vl.convert_wevisone_vl import TEXT_NAMES, _write
 
 REVISION = "287c5fdc8c83e43c4d207d21bc51024a52fdff38"
+TEXT_TYPES = ("f32", *BLOCK_FORMATS)
 SHARDS = {
     "model-00001-of-00002.safetensors": "86424086d1a35e416ae6475248856b517933aaf87b8e2418b63e74ac0f920241",
     "model-00002-of-00002.safetensors": "3ec6ed805a4664b0e39f57615f02e81989fbe08ae95ac96e3be6af309115e048",
@@ -75,9 +77,19 @@ def tokenizer_metadata(tokenizer: dict) -> dict:
             "add_bos_token": False, "add_eos_token": False}
 
 
+def encode_text_tensor(reader: Reader, name: str, text_type: str) -> tuple[int, bytes]:
+    shape = reader.shape(name)
+    if len(shape) == 1 or text_type == "f32":
+        return GGML_F32, reader.f32(name).tobytes()
+    if reader.dtype(name) != "BF16":
+        raise ValueError(f"expected BF16 source: {name}")
+    return _quantize_one(name, reader.raw(name), GGML_BF16, gguf_dims(shape),
+                         text_type, frozenset())
+
+
 def export(root: Path, out: Path, text_type: str) -> tuple[Path, Path]:
-    if text_type not in {"bf16", "f32"}:
-        raise ValueError("Mage-VL export supports bf16 or f32 text only")
+    if text_type not in TEXT_TYPES:
+        raise ValueError(f"unsupported Mage-VL text type {text_type!r}; expected {TEXT_TYPES}")
     config = json.loads((root/"config.json").read_text())
     validate_config(config)
     hashes = {}
@@ -99,6 +111,7 @@ def export(root: Path, out: Path, text_type: str) -> tuple[Path, Path]:
         writer.add_meta("general.name", "Mage-VL-Cowork")
         writer.add_meta("mage_vl.source_revision", REVISION)
         writer.add_meta("mage_vl.source_sha256", json.dumps(hashes, sort_keys=True))
+    text.add_meta("general.file_type", text_type)
     for name, value in {"embedding_length": 2560, "block_count": 36, "feed_forward_length": 9728,
                         "context_length": 262144, "attention.head_count": 32, "attention.head_count_kv": 8,
                         "attention.key_length": 128, "attention.value_length": 128,
@@ -121,12 +134,10 @@ def export(root: Path, out: Path, text_type: str) -> tuple[Path, Path]:
         mapped = name if is_vision else map_text_name(name)
         shape = reader.shape(name)
         contract[name] = {"shape": shape, "dtype": reader.dtype(name), "gguf_name": mapped}
-        if is_vision or text_type == "f32" or len(shape) == 1:
+        if is_vision:
             dtype, raw = GGML_F32, reader.f32(name).tobytes()
         else:
-            if reader.dtype(name) != "BF16":
-                raise ValueError(f"expected BF16 source: {name}")
-            dtype, raw = GGML_BF16, reader.raw(name)
+            dtype, raw = encode_text_tensor(reader, name, text_type)
         writers[idx].add_tensor(mapped, dtype, gguf_dims(shape), raw)
         counts[idx] += 1
     if counts != [399, 297]:
@@ -141,7 +152,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
     p.add_argument("--out-dir", type=Path, required=True)
-    p.add_argument("--text-type", choices=["bf16", "f32"], default="bf16")
+    p.add_argument("--text-type", choices=TEXT_TYPES, default="bf16")
     a = p.parse_args()
     for path in export(a.model, a.out_dir, a.text_type):
         print(path, flush=True)

@@ -101,11 +101,6 @@ impl ComputePolicy {
     }
 
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
-        if self == Self::Vulkan && arch == "mage_vl" {
-            return Err(
-                "Mage-VL-Cowork has no calibrated Vulkan path; use --compute cpu or auto".into(),
-            );
-        }
         if self == Self::Vulkan && !Self::has_complete_device_path(arch) {
             // One line per process: the arch is checked at more than one
             // layer, and the model would otherwise repeat itself.
@@ -244,7 +239,7 @@ mod tests {
             assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
         }
         assert_eq!(ComputePolicy::legacy(), original);
-        for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
+        for arch in ["gemma4", "edge0", "qwen3vl", "mage_vl", "auk", "unknown"] {
             // `--compute vulkan` asks for a real device, not for a
             // particular device path, so an architecture without a
             // complete one is allowed and reported instead.

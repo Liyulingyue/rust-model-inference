@@ -4,6 +4,7 @@ use crate::models::qwen3::{qwen_text_positions, Qwen3Model};
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::nn::{attention_on_cpu, layer_norm_rows, load_float_values, AttentionSpec, Linear};
 use crate::ComputePool;
+use std::sync::Arc;
 
 pub const ARCH: &str = "mage_vl";
 pub const REVISION: &str = "287c5fdc8c83e43c4d207d21bc51024a52fdff38";
@@ -11,6 +12,16 @@ const HIDDEN: usize = 1024;
 const PATCH: usize = 16;
 pub const WIDTH: usize = 2560;
 pub const IMAGE: u32 = 151655;
+const TEXT_TYPES: &[GGMLType] = &[
+    GGMLType::F32,
+    GGMLType::F16,
+    GGMLType::BF16,
+    GGMLType::Q8_0,
+    GGMLType::Q4_0,
+    GGMLType::Q4K,
+    GGMLType::Q5K,
+    GGMLType::Q6K,
+];
 
 pub fn prompt_tokens(
     tokenizer: &crate::BPETokenizer,
@@ -84,7 +95,7 @@ fn require_tensor(
 
 pub(crate) fn validate_text_tensors(s: &dyn TensorSource) -> Result<(), String> {
     for name in ["token_embd.weight", "output.weight"] {
-        require_tensor(s, name, &[2560, 151936], &[GGMLType::F32, GGMLType::BF16])?;
+        require_tensor(s, name, &[2560, 151936], TEXT_TYPES)?;
     }
     require_tensor(s, "output_norm.weight", &[2560], &[GGMLType::F32])?;
     for i in 0..36 {
@@ -104,7 +115,7 @@ pub(crate) fn validate_text_tensors(s: &dyn TensorSource) -> Result<(), String> 
             let types = if dims.len() == 1 {
                 &[GGMLType::F32][..]
             } else {
-                &[GGMLType::F32, GGMLType::BF16][..]
+                TEXT_TYPES
             };
             require_tensor(s, &format!("blk.{i}.{suffix}.weight"), &dims, types)?;
         }
@@ -249,7 +260,7 @@ impl<'a> Vision<'a> {
         patches: &[f32],
         h: usize,
         w: usize,
-        pool: &ComputePool,
+        pool: &Arc<ComputePool>,
     ) -> Result<Vec<f32>, String> {
         if h == 0
             || w == 0
@@ -260,16 +271,39 @@ impl<'a> Vision<'a> {
         {
             return Err("invalid Mage-ViT image patch grid".into());
         }
-        // shortcut: Mage-ViT stays on calibrated CPU kernels; enable device offload after oracle validation.
-        #[cfg(feature = "vulkan")]
-        let _cpu = ComputePool::disable_gpu_matmul_for_scope();
         let n = h * w;
-        let mut x = self.patch.forward(pool, patches, n)?;
+        let policy = crate::compute::ComputePolicy::legacy();
+        let mut executor = if policy == crate::compute::ComputePolicy::Cpu {
+            None
+        } else {
+            let bindings = [&self.patch, &self.fc1, &self.fc2]
+                .into_iter()
+                .chain(
+                    self.blocks
+                        .iter()
+                        .flat_map(|b| [&b.qkv, &b.out, &b.up, &b.down]),
+                )
+                .map(Linear::binding)
+                .collect();
+            Some(
+                crate::compute::linear::LinearExecutor::new(policy, bindings, n, pool.clone())
+                    .map_err(|e| e.to_string())?,
+            )
+        };
+        // shortcut: offload projections; keep Mage's per-lane RoPE and F32 attention on CPU until device kernels exist.
+        let mut project = |linear: &Linear<'a>, input: &[f32], rows| {
+            if let Some(executor) = &mut executor {
+                Linear::forward_group([linear], executor, input, rows).map(|[out]| out)
+            } else {
+                linear.forward(pool, input, rows)
+            }
+        };
+        let mut x = project(&self.patch, patches, n)?;
         trace("patch", &x)?;
         x = self.pre.apply(&x)?;
         trace("pre", &x)?;
         for (i, b) in self.blocks.iter().enumerate() {
-            let qkv = b.qkv.forward(pool, &b.n1.apply(&x)?, n)?;
+            let qkv = project(&b.qkv, &b.n1.apply(&x)?, n)?;
             let (mut q, mut k, mut v) = (
                 Vec::with_capacity(n * HIDDEN),
                 Vec::with_capacity(n * HIDDEN),
@@ -296,16 +330,16 @@ impl<'a> Vision<'a> {
                     scale: 0.125,
                 },
             )?;
-            let out = b.out.forward(pool, &attn, n)?;
+            let out = project(&b.out, &attn, n)?;
             crate::ops::vec_add_into(&out, &mut x);
-            let mut ff = b.up.forward(pool, &b.n2.apply(&x)?, n)?;
+            let mut ff = project(&b.up, &b.n2.apply(&x)?, n)?;
             crate::ops::gelu_erf_inplace(&mut ff);
-            crate::ops::vec_add_into(&b.down.forward(pool, &ff, n)?, &mut x);
+            crate::ops::vec_add_into(&project(&b.down, &ff, n)?, &mut x);
             trace(&format!("vit{i}"), &x)?;
         }
-        let mut merged = self.fc1.forward(pool, &self.norm.apply(&x)?, n / 4)?;
+        let mut merged = project(&self.fc1, &self.norm.apply(&x)?, n / 4)?;
         crate::ops::gelu_erf_inplace(&mut merged);
-        let projected = self.fc2.forward(pool, &merged, n / 4)?;
+        let projected = project(&self.fc2, &merged, n / 4)?;
         trace("projected", &projected)?;
         Ok(projected)
     }
@@ -410,7 +444,7 @@ pub fn image_patches(image: &image::DynamicImage) -> Result<(Vec<f32>, usize, us
 pub fn encode_image(
     s: &dyn TensorSource,
     image: &image::DynamicImage,
-    pool: &ComputePool,
+    pool: &Arc<ComputePool>,
 ) -> Result<Vec<f32>, String> {
     let (patches, h, w) = image_patches(image)?;
     Vision::load(s)?.encode(&patches, h, w, pool)
@@ -459,7 +493,7 @@ pub fn prepare(
     vision: &dyn TensorSource,
     ids: &[u32],
     images: &[image::DynamicImage],
-    pool: &ComputePool,
+    pool: &Arc<ComputePool>,
     capacity: usize,
 ) -> Result<Prepared, String> {
     let total = check_image_budget(ids, images, capacity.min(model.config().n_ctx))?;
@@ -574,6 +608,114 @@ mod tests {
         }
     }
     #[test]
+    fn compressed_matrices_require_aligned_complete_storage() {
+        struct Matrix(TensorInfo, Vec<u8>);
+        impl TensorSource for Matrix {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+                Some(&self.0)
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                Some(&self.1)
+            }
+        }
+        for &ggml_type in TEXT_TYPES {
+            let info = TensorInfo {
+                name: "matrix".into(),
+                dims: vec![256, 2],
+                ggml_type,
+                offset: 0,
+            };
+            let mut source = Matrix(
+                info.clone(),
+                vec![0; info.checked_nbytes().unwrap() as usize],
+            );
+            require_tensor(&source, "matrix", &[256, 2], TEXT_TYPES).unwrap();
+            source.1.pop();
+            assert!(require_tensor(&source, "matrix", &[256, 2], TEXT_TYPES).is_err());
+            source.0.dims[0] = 255;
+            assert!(require_tensor(&source, "matrix", &[256, 2], TEXT_TYPES).is_err());
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires hardware Vulkan; run alone with RUST_GPU_MIN_OUTPUTS=0 and --test-threads=1"]
+    fn mage_vision_projections_submit_and_preserve_cpu_rope_attention() {
+        use crate::compute::ComputePolicy;
+        assert_eq!(crate::ops::kernel::vulkan::min_gpu_matmul_outputs(), 0);
+        let linear = |n_in, n_out| {
+            let mut values = vec![0.0f32; n_in * n_out];
+            for row in 0..n_out {
+                values[row * n_in + row % n_in] = 0.25;
+                values[row * n_in + (row * 13 + 7) % n_in] += 0.125;
+            }
+            Linear::from_weight(
+                Weight::from_quantized(QuantizedTensor::F32 {
+                    data: values,
+                    n_in,
+                    n_out,
+                }),
+                Some((0..n_out).map(|i| (i % 7) as f32 * 0.001).collect()),
+            )
+            .unwrap()
+        };
+        let norm = || Norm {
+            weight: vec![1.0; HIDDEN],
+            bias: vec![0.0; HIDDEN],
+        };
+        let vision = Vision {
+            patch: linear(768, HIDDEN),
+            pre: norm(),
+            norm: norm(),
+            blocks: vec![Block {
+                n1: norm(),
+                n2: norm(),
+                qkv: linear(HIDDEN, HIDDEN * 3),
+                out: linear(HIDDEN, HIDDEN),
+                up: linear(HIDDEN, 4096),
+                down: linear(4096, HIDDEN),
+            }],
+            fc1: linear(4096, 4096),
+            fc2: linear(4096, WIDTH),
+        };
+        let pool = Arc::new(ComputePool::new(2));
+        let patches: Vec<_> = (0..16 * 768)
+            .map(|i| (i % 179) as f32 / 89.0 - 1.0)
+            .collect();
+        let started = std::time::Instant::now();
+        let expected = {
+            let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+            vision.encode(&patches, 4, 4, &pool).unwrap()
+        };
+        eprintln!("Mage synthetic vision Cpu elapsed={:?}", started.elapsed());
+        let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+        for policy in [ComputePolicy::Vulkan, ComputePolicy::Auto] {
+            let _scope = policy.enter_legacy_scope();
+            let before = context.compute_stats();
+            let started = std::time::Instant::now();
+            let actual = vision.encode(&patches, 4, 4, &pool).unwrap();
+            let submissions = context.compute_stats().submissions - before.submissions;
+            assert!(
+                submissions >= 7,
+                "all seven synthetic vision projections must execute"
+            );
+            let max_abs = actual
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_abs < 0.002, "max_abs={max_abs}");
+            eprintln!("Mage synthetic vision {policy:?} submissions={submissions} max_abs={max_abs} elapsed={:?}", started.elapsed());
+        }
+        let before = context.compute_stats();
+        let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+        assert_eq!(vision.encode(&patches, 4, 4, &pool).unwrap(), expected);
+        assert_eq!(context.compute_stats().submissions, before.submissions);
+    }
+    #[test]
     fn mage_dispatch_requires_its_own_metadata_and_ordinary_text_rope() {
         let mut meta = std::collections::HashMap::new();
         meta.insert(
@@ -624,7 +766,7 @@ mod tests {
             .contains("mage_vl.embedding_length"));
     }
     #[test]
-    fn mage_rejects_missing_or_mismatched_projectors_and_strict_vulkan() {
+    fn mage_rejects_missing_or_mismatched_projectors_and_allows_partial_vulkan() {
         let source = Source(std::collections::HashMap::new());
         assert!(validate_components(&source, &source).is_err());
         assert!(Vision::load(&source).is_err());
@@ -633,7 +775,10 @@ mod tests {
             .contains("token_embd.weight"));
         assert!(crate::compute::ComputePolicy::Vulkan
             .validate_text_arch(ARCH)
-            .is_err());
+            .is_ok());
+        assert!(!crate::compute::ComputePolicy::has_complete_device_path(
+            ARCH
+        ));
         assert!(crate::compute::ComputePolicy::Auto
             .validate_text_arch(ARCH)
             .is_ok());

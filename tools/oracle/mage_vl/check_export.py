@@ -4,8 +4,8 @@ import mmap
 from pathlib import Path
 
 from tools.converter.mage_flow.convert_qwen3vl_vision import Reader
-from tools.converter.mage_vl.convert_mage_vl import map_text_name
-from tools.converter.utils.gguf import _read_gguf, GGML_BF16, GGML_F32, gguf_dims
+from tools.converter.mage_vl.convert_mage_vl import TEXT_TYPES, encode_text_tensor, map_text_name
+from tools.converter.utils.gguf import _read_gguf, GGML_F32, gguf_dims
 
 
 def main():
@@ -13,7 +13,7 @@ def main():
     p.add_argument('source',type=Path)
     p.add_argument('text',type=Path)
     p.add_argument('vision',type=Path)
-    p.add_argument('--text-type',choices=['bf16','f32'],required=True)
+    p.add_argument('--text-type',choices=TEXT_TYPES,required=True)
     a = p.parse_args()
     reader = Reader(a.source)
     counts = [0,0]
@@ -25,16 +25,16 @@ def main():
                 if int(vision)!=idx:
                     continue
                 mapped = name if vision else map_text_name(name)
-                widen = vision or a.text_type=='f32' or len(reader.shape(name))==1
-                expected = reader.f32(name).tobytes() if widen else reader.raw(name)
+                expected_type, expected = ((GGML_F32, reader.f32(name).tobytes()) if vision
+                                           else encode_text_tensor(reader, name, a.text_type))
                 dtype,shape,size,offset = tensors[mapped]
                 assert shape==gguf_dims(reader.shape(name)),name
-                assert dtype==(GGML_F32 if widen else GGML_BF16),name
+                assert dtype==expected_type,name
                 assert data[offset:offset+size]==expected,name
                 counts[idx] += 1
             assert len(tensors)==counts[idx]
     assert counts==[399,297],counts
-    print('all 696 tensor shapes/types/payloads match source exactly',a.text_type)
+    print('all 696 tensor shapes/types/payloads match the pinned export',a.text_type)
 
 
 if __name__=='__main__':

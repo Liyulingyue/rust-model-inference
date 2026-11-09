@@ -137,7 +137,10 @@ impl Qwen3Session<'_> {
     ) -> Result<Duration, String> {
         let _scope = self.compute_policy.cpu_scope();
         #[cfg(feature = "vulkan")]
-        if self.compute_policy == crate::compute::ComputePolicy::Vulkan && self.gpu.is_none() {
+        if self.compute_policy == crate::compute::ComputePolicy::Vulkan
+            && self.gpu.is_none()
+            && self.hidden_linear.is_none()
+        {
             return Err("Vulkan session unavailable; create a new session to retry".into());
         }
         let batch_size = checked_prefill_batch_size(Some(batch_size))?;
@@ -190,12 +193,13 @@ impl Qwen3Session<'_> {
         let trace_each_token = false;
         let chunk_size = batch_size;
         let max_rows = chunk_size.min(self.capacity);
-        if self.compute_policy == crate::compute::ComputePolicy::Auto
-            && self
-                .model
-                .source
-                .metadata("wevisone_vl.source_revision")
-                .is_some()
+        if (self.hidden_linear.is_some()
+            || (self.compute_policy == crate::compute::ComputePolicy::Auto
+                && self
+                    .model
+                    .source
+                    .metadata("wevisone_vl.source_revision")
+                    .is_some()))
             && self
                 .hidden_linear
                 .as_ref()

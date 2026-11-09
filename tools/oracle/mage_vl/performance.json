@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-09",
+  "status": "partial adaptation; full-weight validation pending",
+  "host": {
+    "cpu_gpu": "Apple M3 Max",
+    "os": "macOS 27.2",
+    "profile": "release-fast",
+    "cpu_threads": 2
+  },
+  "full_model": {
+    "cpu": null,
+    "vulkan": null,
+    "reference": null,
+    "reason": "Original remote weight host is shut down; no weights downloaded to Mac."
+  },
+  "synthetic_vision": {
+    "fixture": "one block, real widths, 4x4 patch grid, F32 constructed weights, seven projections with bias",
+    "wall_ms": {
+      "cpu": 121.572958,
+      "vulkan": 411.796667,
+      "auto": 331.221542
+    },
+    "samples_per_policy": 1,
+    "includes": "fresh executor, uploads, execution and readback",
+    "device_submissions": {
+      "vulkan": 7,
+      "auto": 7
+    },
+    "max_abs": {
+      "vulkan": 0.0,
+      "auto": 0.0
+    },
+    "max_abs_gate": 0.002,
+    "reference": null,
+    "reference_reason": "No independent PyTorch/llama.cpp timing; CPU is the native same-weight comparison.",
+    "interpretation": "Diagnostic only, not full-model throughput. Small batches and uploads dominate; slower than CPU here."
+  },
+  "synthetic_text": {
+    "fixture": "one 256-wide block, eight logits, prefill 3 in chunks of 2, decode 1+1",
+    "max_abs_by_weight_kv_policy": {
+      "F32/F32/Vulkan": 8.046627e-06,
+      "F32/F32/Auto": 8.046627e-06,
+      "F32/F16/Vulkan": 3.0994415e-06,
+      "F32/F16/Auto": 3.0994415e-06,
+      "BF16/F32/Vulkan": 9.536743e-06,
+      "BF16/F32/Auto": 9.536743e-06,
+      "BF16/F16/Vulkan": 6.198883e-06,
+      "BF16/F16/Auto": 6.198883e-06,
+      "Q8_0/F32/Vulkan": 0,
+      "Q8_0/F32/Auto": 0,
+      "Q8_0/F16/Vulkan": 0,
+      "Q8_0/F16/Auto": 0,
+      "Q4K/F32/Vulkan": 0,
+      "Q4K/F32/Auto": 0,
+      "Q4K/F16/Vulkan": 0,
+      "Q4K/F16/Auto": 0
+    },
+    "gate": "abs(error) <= 0.002 + 0.002 * abs(cpu)",
+    "interpretation": "Same synthetic weight CPU/device comparison; not quantization quality versus BF16."
+  },
+  "environment": {
+    "RUST_GPU_MIN_OUTPUTS": "0",
+    "RMI_SCALAR": null,
+    "RMI_PARITY_TRACE": null
+  },
+  "evidence": "target/mage-review-20261109/{mage-text-vulkan,mage-vision-vulkan}.log"
+}
