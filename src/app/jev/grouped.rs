@@ -463,7 +463,7 @@ fn build_jev_token_ids_for_arch(
             }
             Ok(token_ids)
         }
-        "nemotron_h" => {
+        "nemotron_h" | "nemotron_h_moe" => {
             let prompt = format!("{system}\n\n{payload}\n\nAnswer:");
             Ok(tokenizer.encode(
                 &prompt,
@@ -685,7 +685,7 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
-        "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
+        "nemotron_h" | "nemotron_h_moe" => nemotron_h::run_jev_grouped_nemotron_h(
             source.clone(),
             context,
             &prepared,

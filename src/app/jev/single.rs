@@ -188,7 +188,7 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
-        "nemotron_h" => nemotron_h::run_jev_decision_nemotron_h(
+        "nemotron_h" | "nemotron_h_moe" => nemotron_h::run_jev_decision_nemotron_h(
             source.clone(),
             context,
             &prepared,

@@ -33,6 +33,7 @@ pub mod q4_0;
 pub mod q4_1;
 pub mod q4_k;
 pub mod q5_0;
+pub mod q5_1;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
@@ -385,6 +386,7 @@ impl<'a> Weight<'a> {
             crate::core::tensor::GGMLType::Q4_0
                 | crate::core::tensor::GGMLType::Q4_1
                 | crate::core::tensor::GGMLType::Q5_0
+                | crate::core::tensor::GGMLType::Q5_1
                 | crate::core::tensor::GGMLType::Q8_0
                 | crate::core::tensor::GGMLType::Q1_0
         )
