@@ -16,7 +16,7 @@ The fixed-seed inputs are quantized to exact PCM16 before oracle generation. Cas
 | HTTP limits/isolation | 64 MiB + 1 byte body; two simultaneous requests; chat and four text/image JEV routes | Pass; 413, one 200 + one 429, all unsupported routes 404 |
 | Scalar/SIMD | Existing `dot_f32` dispatch, `RMI_SCALAR=1` versus normal ARM SIMD; noisy 8 kHz and speech 44.1 kHz in diagnostic and ordinary builds | Numerical checks pass; floating-point reductions are not required to match bits |
 | CPU/Auto/Vulkan | Both CPU and Auto identify backend=Cpu; strict Vulkan rejected before loading | Pass; no GPU execution or GPU acceleration claimed |
-| Multiweight/quantization | Published single F32 file only; no tokenizer/mmproj/component | Not applicable; no unprovided format added |
+| Multiweight/quantization | Published single 36.8 MiB F32 file; no tokenizer/mmproj/component | F16/BF16, GGUF and Q8_0/Q4_K are unimplemented; unsupported dtypes fail explicitly. This remains a partial adaptation; follow-up layers are described in README. |
 | Shared FFT | Only additive `RealFft::complex`/`inverse` methods; old transform/power/magnitude bodies and struct layout unchanged; FFT/STFT roundtrip at five rates | Roundtrip max error < 2e-6; existing callers retain their original implementation |
 | Production network + ISTFT | Ignored real-weight Rust test, **without** `parity-trace`; all 13 chunk/channel groups supplied official STFT features | Pass; worst waveform max 3.48222e-6, worst RMSE 9.05722e-7 |
 | Diagnostic network | 36 checkpoints/group, names/shapes/count/finite checks; CPU/Auto all cases, scalar two cases; official unmodified network supplied native STFT features | Pass within the stated component tolerances; conditional on identical frontend features |
@@ -81,4 +81,66 @@ The unchanged baseline failure groups are Breeze dtype/source tests (3), CLM gol
 
 Self-review plus an independent scoped review fixed silent acceptance of incompatible TTS/ASR/JEV payload flags and case-sensitive HTTP MIME matching. Follow-up review found and fixed two validation gaps: ordinary-build checks now reject emitted traces, and HTTP checks clear inherited scalar/trace environment variables. Review of the published graph, chunk schedule and all 40,001 accepted integer-rate shape bounds found no additional structural defect.
 
-Not checked: other hosts/architectures, Vulkan execution, unprovided weight formats, subjective listening, PESQ/STOI or other quality benchmarks, performance/RAM under sustained load, 10-minute or eight-channel real inference. Those limits and the unresolved independent phase sensitivity are not covered by the passing component checks.
+Not checked in the initial 2026-11-04 run: other hosts/architectures, Vulkan execution, unprovided weight formats, subjective listening, PESQ/STOI or other quality benchmarks, performance/RAM under sustained load, 10-minute or eight-channel real inference. Follow-up evidence is below. Those limits and the unresolved independent phase sensitivity are not covered by the passing component checks.
+
+
+## Review fixes and main integration — 2026-11-09
+
+Merged main through `b05ee343997564c48a8b84a18563b9df5a8bcc6f`, including #208's shared audio frontend migration. The additive FFT methods now live in `src/ops/audio/frontend.rs`; all three RE-USE imports use it. The merge preserves AuK, System One and other new main routes. Enhancement and System One validation remain separate blocks.
+
+The enhancement parser now checks an explicit allowed set of parsed switches, using main's existing argument-index tracking. Flag-shaped values do not select a mode, unsupported/default-valued options and unknown future switches fail, and mixed System One/enhancement flags fail in either order. The structural validator still protects direct `CliOptions` callers. No binary target was added or removed (Cargo metadata comparison).
+
+Fresh macOS checks:
+
+- `cargo +1.98.1 check --locked --all-targets`: passed, including the latest main test updates.
+- `cargo +1.98.1 fmt -- --check`: passed.
+- `cargo +1.98.1 check --locked --features vulkan --all-targets`: passed; this checks compilation, not model GPU execution.
+- Main baseline `532d051a`: **1501 passed / 13 failed / 96 ignored**. The `src/` trees of `532d051a` and `b05ee343` are identical; the latter adds only integration-test updates.
+- Merged branch library: **1506 passed / 13 failed / 97 ignored**. Compared failure-name sets: no added or removed failure.
+- Enhancement CLI integration: **2 passed**; existing System One integration: **6 passed**. The existing x86 CI job now runs RE-USE contract/FFT tests and the enhancement CLI integration tests.
+- Normal-build real-weight official-spectral test: **1 passed**; FFT/STFT, malformed input/weights and strict >50% suppression boundary tests passed.
+- Ordinary scalar-mode checks also ran for noisy 8 kHz and speech 44.1 kHz; the same independent-phase limitation remains.
+- Ordinary-build independent waveform recheck: CPU/Auto bytes match for all 11 cases; all 22 WAV files also match the original PR's ordinary-build outputs byte for byte. The original strict-parity failures reproduce, including `chunked_8000` RMSE `0.00345145` / relative `42.07%`.
+- HTTP CPU/Auto recheck: response equals CLI; 400/404/413 and 200/429 concurrency cases passed.
+- Quality fixture generation unit check: **1 passed**, including deterministic PCM16 pairs, duration and requested SNR.
+
+### Published suppression provenance and impact
+
+The pinned official drivers **both** suppress sweep artifacts before ISTFT. `inference.py` SHA256 is `71ccef1b231bd30c85b1cddd85266ef9cdc3216dc85db65e38f89a670ae28236`; `inference_chunk.py` is `df0fd3e983536f1a49440ab61ec7fb5cea2e878c58ea1aee15e182769646db60`. `reference.py` now verifies both and the README download command includes them. The postprocess is absent from the standalone official ISTFT helper, which explains why checking that helper alone misses it.
+
+Rust now applies this as named model postprocessing, with the same strict `> 0.5` test; generic inverse STFT only performs synthesis. With finite F32 log magnitudes, `log_mag <= 0` is equivalent to a zero `expm1(relu(log_mag))` bin. Exactly half the bins does not suppress a frame.
+
+Ablating this on the stored **official** pre-suppression magnitude/phase traces (raw per-group [results](sweep_ablation.json)) from `oracle-pcm` changes 1 of the 802 frames across the two `chunked_8000` chunks. In its first chunk, removing suppression changes max waveform amplitude by `0.0048201382` and RMSE by `0.0002236692`; its second chunk and every other original fixture are unchanged. These are same-spectrum, single-chunk counterfactual errors, before overlap, not a second end-to-end parity result. Quality-pair ablation results are recorded separately below.
+
+### Paired clean/noisy speech quality
+
+Method, fixed clip hashes, dependencies, encoding and reproduction are in [README.md](README.md) and `quality.py`. PESQ/STOI compare each output to its clean target, rather than treating official enhanced audio as clean speech. The official CPU-reference path computes independent frontend features using `selective_scan_ref`; this is not a CUDA-driver validation. Absolute quality-delta limits were set to PESQ `0.05` and STOI `0.005` before running the evaluation; strict waveform thresholds remain unchanged.
+
+
+All **12/12** cases passed the predeclared quality-delta checks. CPU/Auto WAV bytes were identical in all 12 cases. Unrounded per-case values, hashes, versions and timings are in [quality_results.json](quality_results.json).
+
+Maximum native-minus-official absolute differences: **PESQ 0.000920534**, **STOI 0.000050456**. Independent waveform relative RMSE ranged from 0.1110% to 0.3076%.
+
+Each score cell lists **noisy / official CPU reference / native**. PESQ is NB at 8 kHz and WB at 16 kHz; STOI is the standard non-extended version.
+
+| Speaker clip | Rate | Input SNR | PESQ | STOI |
+|---|---:|---:|---|---|
+| 5703-47212-0000 | 8000 | 0 dB | 1.156327 / 1.871443 / 1.870522 | 0.603383 / 0.795782 / 0.795732 |
+| 5703-47212-0000 | 8000 | 10 dB | 1.372032 / 2.767314 / 2.767804 | 0.776135 / 0.898066 / 0.898078 |
+| 5703-47212-0000 | 16000 | 0 dB | 1.029784 / 1.530286 / 1.530437 | 0.670282 / 0.834694 / 0.834691 |
+| 5703-47212-0000 | 16000 | 10 dB | 1.051469 / 2.063978 / 2.064072 | 0.821523 / 0.912565 / 0.912597 |
+| 3436-172162-0000 | 8000 | 0 dB | 1.374700 / 2.638001 / 2.637957 | 0.784454 / 0.892242 / 0.892237 |
+| 3436-172162-0000 | 8000 | 10 dB | 1.705046 / 3.616263 / 3.616065 | 0.918770 / 0.968520 / 0.968515 |
+| 3436-172162-0000 | 16000 | 0 dB | 1.070022 / 1.908485 / 1.907914 | 0.826507 / 0.918169 / 0.918134 |
+| 3436-172162-0000 | 16000 | 10 dB | 1.181918 / 3.160806 / 3.160642 | 0.941002 / 0.982915 / 0.982917 |
+| 198-209-0000 | 8000 | 0 dB | 1.232476 / 2.287085 / 2.287308 | 0.709167 / 0.888483 / 0.888521 |
+| 198-209-0000 | 8000 | 10 dB | 1.508688 / 3.212567 / 3.212857 | 0.860202 / 0.931608 / 0.931624 |
+| 198-209-0000 | 16000 | 0 dB | 1.034591 / 1.621385 / 1.620698 | 0.754241 / 0.913353 / 0.913368 |
+| 198-209-0000 | 16000 | 10 dB | 1.137330 / 2.536164 / 2.535388 | 0.903023 / 0.959836 / 0.959834 |
+
+The paired speech cases suppress **0 of 9624** official frames. Their enabled/disabled ablation waveforms and quality scores are identical; the synthetic chunk fixture above supplies a triggered example with a measurable effect.
+
+These results support negligible PESQ/STOI differences **on these three speakers and stationary-noise pairs**. They do not demonstrate general perceptual equivalence, independent strict-waveform parity, CUDA parity, other codecs/rates/noise types or listening quality. The original synthetic failures remain visible and the model stays **Experimental / Draft**.
+
+
+Remote numerical validation was not completed: the supplied identity initially authenticated, and an isolated workspace/environment was prepared, but subsequent connections were closed by the server before SSH key exchange. The provided Linux host has no recorded successful RE-USE inference or quality run. The measured results in this update are macOS/arm64; CI evidence is recorded separately.

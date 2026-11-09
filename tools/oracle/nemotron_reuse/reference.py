@@ -22,6 +22,8 @@ from safetensors.torch import load_file
 REVISION = 'd66af5dfc20db53a49f885eb32e7e7f1fcb70af2'
 MAMBA = 'd7b1ceb3c367ec9022925e812f507bcf706937c6'
 HASHES = {
+    'inference.py': '71ccef1b231bd30c85b1cddd85266ef9cdc3216dc85db65e38f89a670ae28236',
+    'inference_chunk.py': 'df0fd3e983536f1a49440ab61ec7fb5cea2e878c58ea1aee15e182769646db60',
     'config.json': 'e69986483774f01893d2727503addc49ef201d19e6e1a266b8d4e971e28c478d',
     'model.safetensors': '06badaf4029b297f97f7fe48d62990b48d5482608210df577354e0d4e0ed70e1',
     'models/generator_SEMamba_time_d4.py': 'beebaf2d9ab7b83c101f46246ae7a7a8a2d2f57b6683025d3712c64c1b7d6817',
