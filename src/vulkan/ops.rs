@@ -9930,91 +9930,35 @@ mod tests {
     fn operator_indices_match_shader_modules() {
         use super::*;
         let operators: &[(usize, &str, &[u8])] = &[
-            (
-                QUANTIZE,
-                "quantize_q8_0",
-                QUANTIZE_Q8_0_SHADER,
-            ),
-            (
-                QUANTIZE_K,
-                "quantize_q8_k",
-                QUANTIZE_Q8_K_SHADER,
-            ),
+            (QUANTIZE, "quantize_q8_0", QUANTIZE_Q8_0_SHADER),
+            (QUANTIZE_K, "quantize_q8_k", QUANTIZE_Q8_K_SHADER),
             (
                 Q8_MATMUL_GROUPED,
                 "q8_matmul_grouped",
                 Q8_MATMUL_GROUPED_SHADER,
             ),
-            (
-                Q4_0_MATMUL,
-                "q4_0_matmul",
-                Q4_0_MATMUL_SHADER,
-            ),
-            (
-                Q4_1_MATMUL,
-                "q4_1_matmul",
-                Q4_1_MATMUL_SHADER,
-            ),
-            (
-                Q4_K_MATMUL,
-                "q4_k_matmul",
-                Q4_K_MATMUL_SHADER,
-            ),
-            (
-                Q6_K_MATMUL,
-                "q6_k_matmul",
-                Q6_K_MATMUL_SHADER,
-            ),
-            (
-                F16_MATMUL,
-                "f16_matmul",
-                F16_MATMUL_SHADER,
-            ),
-            (
-                BF16_MATMUL,
-                "bf16_matmul",
-                BF16_MATMUL_SHADER,
-            ),
-            (
-                RMS_NORM,
-                "rms_norm",
-                RMS_NORM_SHADER,
-            ),
-            (
-                QK_NORM_ROPE,
-                "qk_norm_rope",
-                QK_NORM_ROPE_SHADER,
-            ),
-            (
-                KV_WRITE,
-                "kv_write",
-                KV_WRITE_SHADER,
-            ),
+            (Q4_0_MATMUL, "q4_0_matmul", Q4_0_MATMUL_SHADER),
+            (Q4_1_MATMUL, "q4_1_matmul", Q4_1_MATMUL_SHADER),
+            (Q4_K_MATMUL, "q4_k_matmul", Q4_K_MATMUL_SHADER),
+            (Q6_K_MATMUL, "q6_k_matmul", Q6_K_MATMUL_SHADER),
+            (F16_MATMUL, "f16_matmul", F16_MATMUL_SHADER),
+            (BF16_MATMUL, "bf16_matmul", BF16_MATMUL_SHADER),
+            (RMS_NORM, "rms_norm", RMS_NORM_SHADER),
+            (QK_NORM_ROPE, "qk_norm_rope", QK_NORM_ROPE_SHADER),
+            (KV_WRITE, "kv_write", KV_WRITE_SHADER),
             (
                 ATTENTION_SCORES,
                 "attention_scores",
                 ATTENTION_SCORES_SHADER,
             ),
-            (
-                SOFTMAX,
-                "softmax",
-                SOFTMAX_SHADER,
-            ),
+            (SOFTMAX, "softmax", SOFTMAX_SHADER),
             (
                 ATTENTION_VALUES,
                 "attention_values",
                 ATTENTION_VALUES_SHADER,
             ),
-            (
-                SILU_MUL,
-                "silu_mul",
-                SILU_MUL_SHADER,
-            ),
-            (
-                ADD,
-                "add",
-                ADD_SHADER,
-            ),
+            (SILU_MUL, "silu_mul", SILU_MUL_SHADER),
+            (ADD, "add", ADD_SHADER),
             (
                 QWEN35_DENSE_PREPARE,
                 "qwen35_dense_prepare",
@@ -10035,21 +9979,9 @@ mod tests {
                 "qwen35_recurrent_ssm",
                 QWEN35_RECURRENT_SSM_SHADER,
             ),
-            (
-                Q5_K_MATMUL,
-                "q5_k_matmul",
-                Q5_K_MATMUL_SHADER,
-            ),
-            (
-                F32_MATMUL,
-                "f32_matmul",
-                F32_MATMUL_SHADER,
-            ),
-            (
-                ADALN_MODULATE,
-                "adaln_modulate",
-                ADALN_MODULATE_SHADER,
-            ),
+            (Q5_K_MATMUL, "q5_k_matmul", Q5_K_MATMUL_SHADER),
+            (F32_MATMUL, "f32_matmul", F32_MATMUL_SHADER),
+            (ADALN_MODULATE, "adaln_modulate", ADALN_MODULATE_SHADER),
             (
                 Q8_MATMUL_GROUPED_TILED,
                 "q8_matmul_grouped_tiled",
@@ -10105,11 +10037,7 @@ mod tests {
                 "attention_online",
                 ATTENTION_ONLINE_SHADER,
             ),
-            (
-                CONV3D_TILED,
-                "conv3d_tiled",
-                CONV3D_TILED_SHADER,
-            ),
+            (CONV3D_TILED, "conv3d_tiled", CONV3D_TILED_SHADER),
             (
                 ATTENTION_ONLINE_WIDE,
                 "attention_online_wide",
@@ -10125,11 +10053,7 @@ mod tests {
                 "float_matmul_small",
                 include_bytes!("../../shaders/bin/float_matmul_small.spv"),
             ),
-            (
-                MOE_REDUCE,
-                "moe_reduce",
-                MOE_REDUCE_SHADER,
-            ),
+            (MOE_REDUCE, "moe_reduce", MOE_REDUCE_SHADER),
             (
                 Q4_K_MATMUL_COOPERATIVE,
                 "q4_k_matmul_cooperative",
@@ -10151,41 +10075,17 @@ mod tests {
                 Q5_K_MATMUL_COOPERATIVE_SHADER,
             ),
             (SENSENOVA_MHC, "sensenova_mhc", SENSENOVA_MHC_SHADER),
-            (
-                CONV1D_TILED,
-                "conv1d_tiled",
-                CONV1D_TILED_SHADER,
-            ),
-            (
-                AUK_FIR,
-                "auk_fir",
-                AUK_FIR_SHADER,
-            ),
-            (
-                AUK_SNAKE,
-                "auk_snake",
-                AUK_SNAKE_SHADER,
-            ),
-            (
-                AUK_INTERLEAVE,
-                "auk_interleave",
-                AUK_INTERLEAVE_SHADER,
-            ),
-            (
-                AUK_SCALE,
-                "auk_scale",
-                AUK_SCALE_SHADER,
-            ),
+            (CONV1D_TILED, "conv1d_tiled", CONV1D_TILED_SHADER),
+            (AUK_FIR, "auk_fir", AUK_FIR_SHADER),
+            (AUK_SNAKE, "auk_snake", AUK_SNAKE_SHADER),
+            (AUK_INTERLEAVE, "auk_interleave", AUK_INTERLEAVE_SHADER),
+            (AUK_SCALE, "auk_scale", AUK_SCALE_SHADER),
             (
                 Q8_MATMUL_TRANSPOSED,
                 "q8_matmul_transposed",
                 Q8_MATMUL_TRANSPOSED_SHADER,
             ),
-            (
-                KV_WRITE_F32,
-                "kv_write_f32",
-                KV_WRITE_F32_SHADER,
-            ),
+            (KV_WRITE_F32, "kv_write_f32", KV_WRITE_F32_SHADER),
             (
                 ATTENTION_SCORES_F32,
                 "attention_scores_f32",
@@ -10196,11 +10096,7 @@ mod tests {
                 "attention_values_f32_kv",
                 ATTENTION_VALUES_F32_KV_SHADER,
             ),
-            (
-                SOFTMAX_F32,
-                "softmax_f32",
-                SOFTMAX_F32_SHADER,
-            ),
+            (SOFTMAX_F32, "softmax_f32", SOFTMAX_F32_SHADER),
             (
                 NEMOTRON_H_SSM_CONV,
                 "nemotron_h_ssm_conv",
