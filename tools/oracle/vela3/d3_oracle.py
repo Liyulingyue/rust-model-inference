@@ -128,8 +128,8 @@ def synthetic(root, dtype, prefix=False):
 
 def run_trace(args):
     if args.causal and not args.synthetic:
-        config = json.loads((args.model / 'config.json').read_text())
-        vela = json.loads((args.adapter / 'vela3_config.json').read_text())
+        config = json.loads((args.model / 'config.json').read_text(encoding="utf-8"))
+        vela = json.loads((args.adapter / 'vela3_config.json').read_text(encoding="utf-8"))
         tied = config.get('text_config', {}).get('tie_word_embeddings')
         if not isinstance(tied, bool):
             tied = config.get('tie_word_embeddings')
@@ -177,7 +177,7 @@ def _run_trace(args, scope):
         tokenizer = AutoTokenizer.from_pretrained(base, local_files_only=True)
         input_text = args.text
         if args.ids:
-            values = json.loads(Path(args.ids).read_text())
+            values = json.loads(Path(args.ids).read_text(encoding="utf-8"))
             if isinstance(values, dict):
                 values = values['token_ids']
             ids = torch.tensor([values], dtype=torch.long)
@@ -187,7 +187,7 @@ def _run_trace(args, scope):
                                               local_files_only=True).eval()
         model = backbone.language_model
     unexpanded_ids = ids[0].tolist()
-    vela_config = json.loads((vela / 'vela3_config.json').read_text())
+    vela_config = json.loads((vela / 'vela3_config.json').read_text(encoding="utf-8"))
     adapters = load_module((args.adapter if not args.synthetic else Path('models/vela3-lite')).absolute() / 'vela3_adapters.py')
     if args.task_adapter:
         spec = vela_config['adapters'][args.task_adapter]
@@ -270,7 +270,7 @@ def _run_trace(args, scope):
             head = model.embed_tokens.weight
     else:
         head = load_file(base / 'readout.safetensors')['weight'].float()
-        temperature = json.loads((base / 'decision_config.json').read_text()).get('temperature', 1.)
+        temperature = json.loads((base / 'decision_config.json').read_text(encoding="utf-8")).get('temperature', 1.)
     generated = []
     for _ in range(args.generation_steps or 1):
         trace.record(dict(name='vela3.d3.tokens', shape=[ids.numel()], len=ids.numel(), token_ids=ids[0].tolist()))
@@ -320,7 +320,7 @@ def comparison(args):
     import numpy as np
 
     def records(path):
-        rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
         vision_names = {'omni.vision.patch_bias', 'omni.vision.inp_pos_emb', 'omni.vision.layer_out'}
         return [r for r in rows if 'name' in r and (r['name'].startswith('vela3.d3.') or
                 (args.vision_detail and r['name'] in vision_names))]
@@ -402,7 +402,7 @@ def suite(args):
             command += ['--images', str(image)]
         with (args.out / f'{name}-oracle.log').open('w') as log:
             subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
-        metadata = json.loads(oracle.read_text().splitlines()[0])
+        metadata = json.loads(oracle.read_text(encoding="utf-8").splitlines()[0])
         environment = os.environ.copy()
         for variable in ['ADAPTER', 'IMAGES', 'STATE', 'CAUSAL', 'STEPS', 'F32']:
             environment.pop(f'RMI_VELA3_D3_{variable}', None)
@@ -442,7 +442,7 @@ def suite(args):
             min_cosine=min(r['cosine'] for r in report['checks']),
             logits=report['checks'][-1])
         if args.generation_steps is not None:
-            summary['generated_token_ids'] = next(json.loads(line)['token_ids'] for line in native.read_text().splitlines()
+            summary['generated_token_ids'] = next(json.loads(line)['token_ids'] for line in native.read_text(encoding="utf-8").splitlines()
                 if json.loads(line).get('name') == 'vela3.d3.generated_tokens')
         results.append(summary)
         print(json.dumps(summary, allow_nan=False), flush=True)

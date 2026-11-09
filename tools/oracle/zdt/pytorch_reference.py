@@ -152,7 +152,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    config = json.loads((args.hf_dir / "config.json").read_text())
+    config = json.loads((args.hf_dir / "config.json").read_text(encoding="utf-8"))
     weights = load_file(args.hf_dir / "model-5-of-5.safetensors")
     tower = build_radio_model(args.hf_dir, config)
     head = build_projector(config, weights)

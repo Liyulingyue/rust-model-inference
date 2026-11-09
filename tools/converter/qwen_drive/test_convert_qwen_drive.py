@@ -169,7 +169,7 @@ class QwenDriveExportTest(unittest.TestCase):
 
             converter._prepare_vlm_view(model, view)
 
-            config = json.loads((view / "config.json").read_text())
+            config = json.loads((view / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(config["text_config"]["num_hidden_layers"], 32)
             self.assertEqual(config["text_config"]["mtp_num_hidden_layers"], 1)
             self.assertEqual(

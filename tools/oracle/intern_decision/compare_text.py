@@ -17,15 +17,15 @@ def floats(path, count):
 
 
 def compare(trace, oracle, log, bound=0.03, teacher_forced=False):
-    rows = [json.loads(line) for line in Path(trace).read_text().splitlines()]
+    rows = [json.loads(line) for line in Path(trace).read_text(encoding="utf-8").splitlines()]
     prompts = [r['token_ids'] for r in rows if r['name'].endswith('prompt_ids')]
-    lines = Path(log).read_text().splitlines()
+    lines = Path(log).read_text(encoding="utf-8").splitlines()
     expected_prompts = [json.loads(line.removeprefix('RMI_PROMPT '))
                         for line in lines if line.startswith('RMI_PROMPT ')]
     if len(prompts) != 1 or not prompts[0] or prompts != expected_prompts:
         raise AssertionError('prompt token IDs/count differ')
     greedy = [int(line.split()[1]) for line in lines if line.startswith('RMI_GREEDY ')]
-    expected = [line.split('\t') for line in (Path(oracle) / 'index.tsv').read_text().splitlines()]
+    expected = [line.split('\t') for line in (Path(oracle) / 'index.tsv').read_text(encoding="utf-8").splitlines()]
     actual = [r for r in rows if r['name'] == 'result_output']
     if len(greedy) < 2 or len(greedy) != len(expected):
         raise AssertionError('missing multi-step Oracle logits/greedy records')

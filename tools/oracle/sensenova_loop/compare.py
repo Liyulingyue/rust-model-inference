@@ -33,13 +33,13 @@ def metrics(actual, expected):
 
 
 def compare(oracle, native):
-    fixtures = json.loads((oracle / "fixtures.json").read_text())
-    results = json.loads((native / "results.json").read_text())
+    fixtures = json.loads((oracle / "fixtures.json").read_text(encoding="utf-8"))
+    results = json.loads((native / "results.json").read_text(encoding="utf-8"))
     summary = {"tokenizer_exact": True, "generated_exact": True, "checks": []}
     for case, fixture in enumerate(fixtures):
         records = [
             json.loads(line)
-            for line in (native / f"case{case}.jsonl").read_text().splitlines()
+            for line in (native / f"case{case}.jsonl").read_text(encoding="utf-8").splitlines()
         ]
         groups = defaultdict(list)
         logits_at_row = {}

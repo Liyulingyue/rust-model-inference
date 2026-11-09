@@ -66,7 +66,7 @@ class ContractTests(unittest.TestCase):
         config = json.loads(
             (
                 Path(__file__).parents[2] / "oracle/sensenova_loop/config.json"
-            ).read_text()
+            ).read_text(encoding="utf-8")
         )
         validate_config(config)
         for section, key, value in (

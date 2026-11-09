@@ -167,7 +167,7 @@ def read_bytes(path: Path, offset: int, length: int) -> bytes:
 
 
 def tensors(model_dir: Path):
-    index = json.loads((model_dir / "model.safetensors.index.json").read_text())
+    index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
     shard_names = sorted(set(index["weight_map"].values()))
     if len(shard_names) != 4:
         raise ValueError(f"expected four Edge0 shards, got {shard_names}")
@@ -410,7 +410,7 @@ def emit_packed(
 
 
 def add_metadata(writer: GgufWriter, model_dir: Path, mode: str) -> None:
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     text = config["text_config"]
     quant = config["quantization"]
     if (config["model_type"], text["num_hidden_layers"], text["num_experts"],
@@ -451,7 +451,7 @@ def add_metadata(writer: GgufWriter, model_dir: Path, mode: str) -> None:
     }
     for key, value in values.items():
         writer.add_meta(f"edge0.{key}", value)
-    tokenizer = json.loads((model_dir / "tokenizer.json").read_text())
+    tokenizer = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8"))
     vocab = {int(id): token for token, id in tokenizer["model"]["vocab"].items()}
     added = tokenizer["added_tokens"]
     vocab.update({entry["id"]: entry["content"] for entry in added})
@@ -468,7 +468,7 @@ def add_metadata(writer: GgufWriter, model_dir: Path, mode: str) -> None:
     writer.add_meta("tokenizer.ggml.bos_token_id", 248044)
     writer.add_meta("tokenizer.ggml.add_bos_token", False)
     writer.add_meta("tokenizer.ggml.add_eos_token", False)
-    writer.add_meta("tokenizer.chat_template", (model_dir / "chat_template.jinja").read_text())
+    writer.add_meta("tokenizer.chat_template", (model_dir / "chat_template.jinja").read_text(encoding="utf-8"))
 
 
 def convert(model_dir: Path, output: Path, check_only: bool, mode: str = "lossless") -> None:

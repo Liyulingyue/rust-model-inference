@@ -48,7 +48,7 @@ def tensor_contracts(config):
 def convert(model_dir, output):
     if output.exists():
         raise FileExistsError(output)
-    config = json.loads((model_dir / 'config.json').read_text())
+    config = json.loads((model_dir / 'config.json').read_text(encoding="utf-8"))
     shapes = tensor_contracts(config)
     source = open_safetensors(model_dir / 'model.safetensors')
     if set(source.header) - {'__metadata__'} != set(shapes):

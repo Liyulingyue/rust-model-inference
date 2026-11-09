@@ -7,10 +7,10 @@ from pathlib import Path
 
 
 def compare(official: Path, rust: Path) -> None:
-    reference = json.loads(official.read_text())
+    reference = json.loads(official.read_text(encoding="utf-8"))
     if not reference.get("scalar_kernels"):
         raise ValueError("official trace was not produced with --scalar")
-    actual = [json.loads(line) for line in rust.read_text().splitlines()]
+    actual = [json.loads(line) for line in rust.read_text(encoding="utf-8").splitlines()]
     token_record = next((record for record in actual if record["name"] == "gliner.token_ids"), None)
     if token_record is None or token_record["token_ids"] != reference["token_ids"]:
         raise ValueError("token IDs differ")
