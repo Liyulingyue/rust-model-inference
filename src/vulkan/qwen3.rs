@@ -370,9 +370,23 @@ mod tests {
 
     #[test]
     fn unsupported_architecture_stays_on_cpu() {
-        let mut facts = eligible_facts();
-        facts.architecture = "qwen3vl".into();
-        assert!(check_eligibility(&facts).is_err());
+        // qwen3vl and qwen3vlmoe share the dense decoder and are supported;
+        // anything else still stays on the CPU.
+        for architecture in ["qwen2", "llama", "gemma4"] {
+            let mut facts = eligible_facts();
+            facts.architecture = architecture.into();
+            assert!(check_eligibility(&facts).is_err(), "{architecture}");
+        }
+    }
+
+    #[test]
+    fn qwen3vl_architecture_and_deepstack_are_eligible() {
+        for architecture in ["qwen3vl", "qwen3vlmoe"] {
+            let mut facts = eligible_facts();
+            facts.architecture = architecture.into();
+            facts.n_deepstack_layers = 4;
+            assert_eq!(check_eligibility(&facts), Ok(()), "{architecture}");
+        }
     }
 
     #[test]
@@ -386,26 +400,9 @@ mod tests {
                 },
             ),
             (
-                "deepstack",
-                EligibilityFacts {
-                    n_deepstack_layers: 4,
-                    ..eligible_facts()
-                },
-            ),
-            (
                 "qkv bias",
                 EligibilityFacts {
                     has_qkv_bias: true,
-                    ..eligible_facts()
-                },
-            ),
-            (
-                "rope",
-                EligibilityFacts {
-                    rope: Qwen3Rope::Interleaved {
-                        sections: [16, 24, 24, 0],
-                        n_dims: 64,
-                    },
                     ..eligible_facts()
                 },
             ),

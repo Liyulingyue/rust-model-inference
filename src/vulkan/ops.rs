@@ -752,14 +752,16 @@ pub(crate) fn fill_rope_mrope_interleaved(
     let mut theta = positions.map(|value| value as f32);
     for pair in 0..pair_count {
         let sector = pair % section_pairs;
+        // The same selection as `crate::ops::rope_mrope_interleaved`: a sector
+        // that falls outside the h and w sections uses axis 0. Keeping it
+        // identical is what makes the device table match the CPU's angles
+        // bit for bit.
         let axis = if sector % 3 == 1 && sector < 3 * sections[1] as usize {
             1
         } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
             2
-        } else if sector % 3 == 0 && sector < 3 * sections[0] as usize {
-            0
         } else {
-            3
+            0
         };
         let (cosine, sine) = crate::ops::rope_sin_cos(theta[axis]);
         coefficients[pair] = cosine;
