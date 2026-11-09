@@ -3688,7 +3688,7 @@ error[E0432]: unresolved import `rust_model_inference::ops::get_vulkan_context` 
 
 **关联**：`tests/auk_flash_smoke.rs`、`src/models/auk*` 的 `AukOptions`、
 `Cargo.toml` 的 `[[example]]`/`[[test]]`、`.github/workflows/ci.yml`。
-### TODO-049: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
+### TODO-051: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
 
 Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
 **功能上没问题**：`RMI_PARITY_TRACE` 双后端对拍 15466 个检查点**逐位一致**
@@ -3847,7 +3847,7 @@ CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
    （nvidia-smi 采样 79–92%），上面的对比在 GPU 0% 利用率下测得，但仍需在独占时复测。
 
 
-### TODO-050: decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活
+### TODO-052: decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活
 
 #### 现象与账单
 
@@ -3951,7 +3951,7 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 改的时候顺带把接口设计成能同时喂给 CPU 和设备（照 `record_group_matmul` 的形状：一层一次、
 多个权重共用一个 command buffer），以后接设备就只是换个 backend，而不是再改一遍 trunk。
 
-### TODO-051: Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持，先补 Q5_1 kernel
+### TODO-053: Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持，先补 Q5_1 kernel
 
 #### 现象
 
@@ -4135,7 +4135,7 @@ Q4_K 出投影的 Q8_K 激活量化放大了约 7000× —— 一个 1-ULP 的�
 - **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）；Q5_0/Q8_0 的
   ggml-exact 路径也只覆盖 CPU。
 
-### TODO-052: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
+### TODO-054: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 
 两条都是**文档/提示与实测不符**，实现在数值上没错。
 （原标题里的「pixtral 缺强制 BOS」已改为 **F2 强制 BOS 的优先级写反**，
@@ -4232,7 +4232,7 @@ Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示构�
 修法：打印前先问 `has_complete_device_path(arch)`。
 ---
 
-### TODO-053: Occamy-1.0 的 logits 包络不跨主机（step 6 越界），且 CPU 与设备的 greedy 不同
+### TODO-055: Occamy-1.0 的 logits 包络不跨主机（step 6 越界），且 CPU 与设备的 greedy 不同
 
 **现象一：包络越界。** `tools/oracle/pr169` 的 Occamy 默认路径界限是 relative L2 ≤ 0.1，
 记录那次（Apple Silicon）逐步为 0.0848/0.0775/0.0390/0.0426/0.0497/0.0707/0.0617/0.0580
@@ -4267,7 +4267,7 @@ host 之间的近似差异足以翻这一步的 token（记录那次就翻了）
 
 ---
 
-### TODO-054: `--mmproj` + `--interactive` 会静默丢掉交互 REPL，按空提示跑一次
+### TODO-056: `--mmproj` + `--interactive` 会静默丢掉交互 REPL，按空提示跑一次
 
 **现象**：
 
@@ -4304,7 +4304,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 
 ---
 
-### TODO-055: qwen35moe（Occamy-1.0）的设备 decode 比 CPU 慢 4 倍 —— 每 token 320 次专家投影太碎
+### TODO-057: qwen35moe（Occamy-1.0）的设备 decode 比 CPU 慢 4 倍 —— 每 token 320 次专家投影太碎
 
 **实测**（aarch64 + NVIDIA GB10，Q8_0，8 线程，`--temperature 0`）：
 
@@ -4339,7 +4339,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 
 ---
 
-### TODO-056: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径
+### TODO-058: qwen35 的 CLIP 视觉塔（mmproj）没有设备路径
 
 **现状**：文本塔在设备上，视觉塔不在。
 
@@ -4378,7 +4378,7 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 
 ---
 
-### TODO-057: EmbeddingGemma-2 的文本塔 forward 不走线程池 —— 媒体 embedding 比文本慢 50 倍
+### TODO-059: EmbeddingGemma-2 的文本塔 forward 不走线程池 —— 媒体 embedding 比文本慢 50 倍
 
 **实测**（aarch64 + GB10，8 线程可用，`--embedding`，同一个 1.29 GB GGUF）：
 
@@ -4432,7 +4432,7 @@ qwen35 CLIP 塔同一类缺口 ✓）。权重是 Q8_0/BF16/F32 ✓，设备侧�
 
 ---
 
-### TODO-058: EmbeddingGemma-2 的设备路径与 CPU 差 0.033 —— 设备的量化归约契约未对齐
+### TODO-060: EmbeddingGemma-2 的设备路径与 CPU 差 0.033 —— 设备的量化归约契约未对齐
 
 **背景**：EG2 的文本塔已改为持 `Weight`（GGUF 契约 ✓）并批量化 ✓，
 `--compute vulkan` 下设备确实接活 ✓（trace：`backend=Vulkan rows=263` ✓、

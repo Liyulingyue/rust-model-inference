@@ -160,7 +160,7 @@ llama.cpp 的规则是两步（`src/llama-vocab.cpp`）：
 
 仓库原先写成 `bool_meta(add_bos_token)? || forced_add_bos` —— **强制值赢过 GGUF**，
 而且只有 falcon-h1 设过强制值。结果是 30B 少了 `<s>`。已修（见
-[DORY_REVIEW.md](DORY_REVIEW.md) F2 与 [TODO.md](TODO.md) TODO-052 F2）。
+[DORY_REVIEW.md](DORY_REVIEW.md) F2 与 [TODO.md](TODO.md) TODO-054 F2）。
 
 ## 2. 阻塞项（按必须做的顺序）
 
