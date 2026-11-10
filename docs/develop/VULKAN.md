@@ -128,6 +128,23 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 - Q5_K 目前只有合成 kernel 证据，尚未纳入端到端模型验收矩阵；同一组 gate/up 权重格式不一致，
   或 Qwen3.5 存在未录制算子时，Auto 整体回退 CPU，强制 Vulkan 报错。
 
+## 图像与 `--compute`：谁能在 Vulkan 上带图
+
+规则只有一条（`src/app/text/runtime.rs::vulkan_allows_images`）：
+
+| 架构 | `--compute vulkan` + 图像 | 原因 |
+|---|---|---|
+| **完整设备路径**（`has_complete_device_path`：llama/qwen3/qwen35/qwen35moe/dory/nemotron_h/sensenova_loop） | **拒绝**，报 "full Vulkan runtime supports text input only" | 整条 decode 都在设备上，没有视觉塔的位置 |
+| **其余架构**（partial 或没有设备路径） | **放行** | 视觉塔留在 CPU，设备只跑它能跑的部分 |
+
+放行是**有意的架构级规则**，不是逐模型白名单：它与 `ComputePolicy::validate_text_arch`
+决定是否打印 "partial device path" 警告用的是同一个划分，因此新增一个 partial 路径的
+架构时不需要再改图像门禁。
+
+**验证状态**：Qwen3-VL 家族（塔在 CPU、解码器在设备，上游 #224）与 Mage-VL-Cowork
+（混合投影）有实机证据；其余架构是**按规则放行但未逐个验证**。放行不等于该架构的
+图像路径已在设备上验证 —— 详见各模型的 validation。
+
 ## 架构
 
 - **dense chunk 提交**：每层的 RMSNorm、动态 activation 准备、Q/K/V、RoPE、KV 写入、

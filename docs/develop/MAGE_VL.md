@@ -93,6 +93,11 @@ row. Their **full-weight validation** is listed separately for each entry.
 | Vision F32 | auto | Generation/JEV complete; quantized-text answers differ | Generation completes; three-format image JEV CLI↔HTTP passes | Real-weight submissions; quantized-text image logit gates fail |
 | Vision F32 | vulkan | Three-format generation/JEV complete; device traced | BF16 smoke passes; quantized image JEV CLI↔HTTP passes | BF16 logit probes pass; quantized-text image gates fail |
 
+Image requests on `--compute vulkan` are allowed for `mage_vl` by the shared
+arch-based rule (an arch without a complete device path keeps its vision tower
+on the CPU), not by a model exemption; see
+[VULKAN.md](VULKAN.md#图像与-compute谁能在-vulkan-上带图).
+
 IQ exports are outside the existing shared converter's format set. Q4_1 is
 exported by the shared encoder and accepted by the loader, but no full-weight
 run backs it, so it stays unvalidated. Full device execution is not implemented: subsequent Mage/Vulkan work must add
