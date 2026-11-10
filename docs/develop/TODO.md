@@ -4728,3 +4728,48 @@ layout 只是把字节换个位置，kernel 的归约顺序不变。
 `shaders/glsl/q8_matmul_transposed.comp`、
 `shaders/glsl/q8_matmul_tiled_dp4a*_transposed.comp`、
 `scripts/transposed-tiled-shader.py`、TODO-061（Nemotron 设备路径）。
+
+---
+
+### TODO-063: JEV / 多问题永远拿不到「完整设备路径」（所有架构）
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`--compute vulkan` 起 server 时，server 自己会打印
+
+```
+compute requested=Vulkan backend=partial mode=jev
+note=no complete device path for this mode; only the offloadable parts run on the device
+```
+
+（`src/app/server/mod.rs`、`src/app/cli/types.rs`）。JEV 走的
+`run_forward_logits_*` 家族**没有**「把整个模型挂到设备」的入口：
+Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
+（文本生成）一个调用点，JEV 的 scoring 路径不走它；其它架构连
+`attach_gpu` 都没有，只有按投影的 `ComputePolicy` 卸载，所以 JEV 在它们
+身上最多是「部分卸载」，不是完整设备路径。
+
+**实测**（Nemotron-3 Nano 30B-A3B，Q4_K_M，GB10，8 线程）：CLI `--jev`
+两个问题（同一 context）12.3 s；HTTP `/v1/jev/score` 两个问题 42.6 s
+（含冷启动）。两者都是纯 CPU 结果 —— 与 CPU 运行逐位相同，因为根本没有
+上设备。
+
+**为什么不是 30B 独有的问题**：覆盖矩阵的「JEV × GPU」这一格在所有架构上
+都是空的。30B 只是把它显式暴露出来（它的文本路径有完整设备路径，JEV
+没有），因此不能靠补 Nemotron 解决。
+
+**方向**（未定）：
+
+1. JEV 的 scoring 本质是「同一 context + N 个 option 的 logits」，设备
+   session 已经有 `prefill`，缺的是把 JEV 的 `forward_logits` 接到 session
+   上（每个 option 一次短 prefill，或把 option 拼成多行一次算）。
+2. 先要定 KV 复用语义：`docs/develop/jev.md` 里 multi-question 目前是
+   「每个 question 重新 prefill」，接设备后要不要保留这个语义、还是共享
+   KV，会改变数值与耗时。
+3. 验收：JEV 的判定概率在设备路径上按误差界验收（不能要求逐位，理由同
+   `NEMOTRON3_NANO_30B_MOE.md` §B7.2），并加一条「top-1 option 与 CPU
+   相同」的功能门限。
+
+**关联**：`src/app/jev/`、`src/models/*/trunk/forward.rs` 的
+`run_forward_logits_*`、`src/models/nemotron_h/trunk/runtime.rs`、
+`docs/develop/jev.md`、TODO-053（30B 适配）。

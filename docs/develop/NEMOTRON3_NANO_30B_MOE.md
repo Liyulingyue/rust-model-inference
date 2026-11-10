@@ -13,6 +13,11 @@ CLI / HTTP / JEV 三个入口都可用，**Vulkan 设备路径也已落地**（2
 不同，Mamba-2 递归把这一层差异放大，实测 logits 相对 L2 1.9%–5.8%
 （见 §B7），因此设备路径按仓库惯例用**误差门限**验收，不声称逐位一致。
 
+**状态口径（2026-11-10）**：按 `SUPPORTED_MODELS.md` 的四档定义，CPU 路径是
+`Verified`（真实 GGUF + llama.cpp Oracle 逐位），Vulkan 设备路径是
+`Experimental`（有入口、能跑，但只有误差界；22 个量化档里 21 个未实测）。
+分层交付时用过的「部分适配」不是仓库的状态词，已不再使用。
+
 ## 1. 契约（从 `unsloth/Nemotron-3-Nano-30B-A3B-GGUF` 头部读出）
 
 ### 1.1 Metadata
