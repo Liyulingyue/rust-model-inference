@@ -244,6 +244,29 @@ Q8_0 is about four times faster than F32; the 4-bit exports are slower than
 Q8_0 because their dequantization costs more and their vision weights stay
 F32.
 
+### Device path on this host
+
+The same Q8_0 export was run on an NVIDIA L20 (46 GiB, driver-reported int8
+dot product and shader f16 support), pinned to card 1 with `RMI_VK_DEVICE=1`,
+with `--compute vulkan` and with `--compute auto`. Both compute modes print
+`backend=partial arch=thx02`: the eligible projections and the verified
+attention run on the device, while the gated-delta scan, the norms, the small
+projections and the shared attention fallback stay on the CPU. A strict
+`--compute vulkan` request that submits no device operator is rejected, and
+these requests submitted 5 to 7.
+
+| Request | CPU | GPU (Vulkan) | Decision agreement | Largest probability drift |
+|---|---:|---:|---|---:|
+| 0 | 9.91 s | 10.95 s | same labels | 0.00326311 |
+| 1 | 5.97 s | 6.83 s | same labels | 0.00016376 |
+| 2 | 4.86 s | 6.70 s | same labels | 0.00010793 |
+
+`--compute auto` and `--compute vulkan` produce identical output. The device
+counters show 41 MiB of peak device allocation for a 4.87 GB checkpoint, so
+the offloadable share of this graph is small, and on this host the device path
+is 10% to 38% slower than the CPU path for the same decisions. A full-device
+path remains the L2 item below; this run does not change that.
+
 The Q4_1 export additionally exposed a shared-kernel gap: the Q4_1 kernel had
 no `embedding_lookup`, so a GGUF with a Q4_1 `token_embd` panicked with
 "embedding_lookup not implemented for this kernel type" while every other
