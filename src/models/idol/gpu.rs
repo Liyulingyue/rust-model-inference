@@ -127,14 +127,70 @@ pub(super) fn attention(
 ) -> Option<Vec<f32>> {
     #[cfg(feature = "vulkan")]
     {
-        use crate::vulkan::ops::AttentionRuntime;
-        use std::sync::{Mutex, OnceLock};
         if !enabled() || width == 0 || heads == 0 || width % heads != 0 {
             return None;
         }
-        let context = crate::ops::get_vulkan_context()?;
-        static RUNTIME: OnceLock<Mutex<Option<AttentionRuntime>>> = OnceLock::new();
-        let mut state = RUNTIME.get_or_init(Mutex::default).lock().ok()?;
+        if q.len() % width != 0 || k.len() % width != 0 {
+            return None;
+        }
+        let spec = crate::ops::nn::AttentionSpec {
+            query_tokens: q.len() / width,
+            key_tokens: k.len() / width,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: width / heads,
+            causal: false,
+            scale: ((width / heads) as f32).sqrt().recip(),
+        };
+        // The device has been seen to return the numbers of an earlier call
+        // (TODO-044), so the result is checked against the CPU kernel before
+        // it is used, and a call that does not agree is retried.
+        //
+        // The CPU reference of every query token costs as much as the
+        // attention itself, and Idol attends over thousands of tokens, so
+        // the check runs on a sample of rows instead of on all of them.
+        let rows = sample_rows(spec.query_tokens);
+        return attention_on_device(q, k, v, spec, &rows);
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (q, k, v, width, heads);
+        None
+    }
+}
+
+/// The rows the device attention is checked against.
+///
+/// The rows are spread over the whole token range, because a device that
+/// returns the numbers of an earlier call differs in every row and a device
+/// that damages one token differs in that token.
+fn sample_rows(tokens: usize) -> Vec<usize> {
+    const SAMPLE: usize = 8;
+    if tokens <= SAMPLE {
+        return (0..tokens).collect();
+    }
+    (0..SAMPLE)
+        .map(|step| step * (tokens - 1) / (SAMPLE - 1))
+        .collect()
+}
+
+/// The device attention with the sampled CPU cross-check and the retry.
+#[cfg(feature = "vulkan")]
+fn attention_on_device(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    spec: crate::ops::nn::AttentionSpec,
+    rows: &[usize],
+) -> Option<Vec<f32>> {
+    use crate::vulkan::ops::AttentionRuntime;
+    use std::sync::{Mutex, OnceLock};
+    let context = crate::ops::get_vulkan_context()?;
+    static RUNTIME: OnceLock<Mutex<Option<AttentionRuntime>>> = OnceLock::new();
+    let mut state = RUNTIME.get_or_init(Mutex::default).lock().ok()?;
+    let mut output = vec![0.; q.len()];
+    let mut attempts = 0;
+    loop {
         let result = (|| {
             if state
                 .as_ref()
@@ -147,45 +203,39 @@ pub(super) fn attention(
                     (old.0.max(q.len()), old.1.max(k.len())),
                 )?);
             }
-            let mut output = vec![0.; q.len()];
-            state.as_mut().unwrap().forward(
-                q,
-                k,
-                v,
-                &mut output,
-                crate::ops::nn::AttentionSpec {
-                    query_tokens: q.len() / width,
-                    key_tokens: k.len() / width,
-                    query_heads: heads,
-                    key_value_heads: heads,
-                    head_dim: width / heads,
-                    causal: false,
-                    scale: ((width / heads) as f32).sqrt().recip(),
-                },
-            )?;
-            if output.iter().any(|v| !v.is_finite()) {
-                return Err(crate::vulkan::VulkanError::InitFailed(
-                    "non-finite Idol attention".into(),
-                ));
-            }
-            Ok(output)
+            state.as_mut().unwrap().forward(q, k, v, &mut output, spec)
         })();
-        return match result {
-            Ok(output) => Some(output),
+        match result {
+            Ok(()) if output.iter().all(|v| v.is_finite()) => {
+                if crate::ops::nn::attention_matches_cpu_sampled(q, k, v, &output, spec, rows) {
+                    return Some(output);
+                }
+                // The device disagrees with the CPU kernel, so the call is
+                // retried: a retry usually returns the right numbers.
+            }
+            Ok(()) => {
+                eprintln!(
+                    "compute arch=idol scope=attention backend=Cpu reason=non-finite Idol attention"
+                );
+                crate::vulkan::mark_gpu_broken("non-finite Idol attention");
+                *state = None;
+                return None;
+            }
             Err(error) => {
                 eprintln!("compute arch=idol scope=attention backend=Cpu reason={error}");
                 if !matches!(error, crate::vulkan::VulkanError::UnsupportedShape(_)) {
                     crate::vulkan::mark_gpu_broken(&error.to_string());
                 }
                 *state = None;
-                None
+                return None;
             }
-        };
-    }
-    #[cfg(not(feature = "vulkan"))]
-    {
-        let _ = (q, k, v, width, heads);
-        None
+        }
+        attempts += 1;
+        if attempts >= 3 {
+            crate::vulkan::mark_gpu_broken("Idol attention disagrees with the CPU kernel");
+            *state = None;
+            return None;
+        }
     }
 }
 

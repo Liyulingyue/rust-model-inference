@@ -63,6 +63,21 @@ pub(super) fn round_bf16_checked(x: &mut [f32], name: &str) -> Result<(), String
     round_bf16(x);
     finite(x, name)
 }
+/// Rounds activations to the reduced precision and rejects an overflow.
+///
+/// A value that the reduced precision cannot hold becomes an infinity on
+/// rounding, and an infinity in an activation is not caught by a later
+/// check on the same tensor: it is absorbed by the next reduction. The
+/// rounding is therefore checked where it happens.
+pub(super) fn round_f16_checked(x: &mut [f32], name: &str) -> Result<(), String> {
+    round_f16(x);
+    finite(x, name)
+}
+/// Rounds activations to the reduced precision and rejects an overflow.
+pub(super) fn round_bf16_activation(x: &mut [f32], name: &str) -> Result<(), String> {
+    round_bf16(x);
+    finite(x, name)
+}
 pub(super) struct Linear {
     pub input: usize,
     pub output: usize,
@@ -193,5 +208,22 @@ mod tests {
         let mut ordinary = [1.0001];
         round_bf16_checked(&mut ordinary, "VAE variance").unwrap();
         assert_eq!(ordinary, [1.]);
+    }
+    #[test]
+    fn activation_overflow_is_rejected_where_the_rounding_happens() {
+        // The reduced precision cannot hold this value, and the rounding
+        // turns it into an infinity, which the next reduction would absorb.
+        let mut activation = [70_000.];
+        assert!(round_f16_checked(&mut activation, "FP16 activation").is_err());
+        let mut ordinary = [1.0001];
+        round_f16_checked(&mut ordinary, "FP16 activation").unwrap();
+        assert_eq!(ordinary, [1.]);
+        // BF16 keeps the exponent range of F32, so a large finite value
+        // survives the rounding; only an infinity is rejected.
+        let mut large = [1.0e30];
+        round_bf16_activation(&mut large, "BF16 activation").unwrap();
+        assert!(large[0].is_finite());
+        let mut infinite = [f32::INFINITY];
+        assert!(round_bf16_activation(&mut infinite, "BF16 activation").is_err());
     }
 }

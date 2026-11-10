@@ -910,6 +910,85 @@ pub(crate) fn attention_is_on_cpu() -> bool {
     ATTENTION_ON_CPU.with(|flag| flag.get())
 }
 
+/// Whether a device attention agrees with the CPU kernel on sampled rows.
+///
+/// This is the check for attentions whose key set is too large for a full
+/// CPU reference: the reference of every query token costs as much as the
+/// attention itself, so a model with thousands of tokens cannot afford it on
+/// every layer. The rows are sampled instead, which keeps the cost
+/// proportional to the sample and still catches a device that returned the
+/// numbers of an earlier call, because such a result differs in every row.
+///
+/// The sampled rows are the ones the caller lists in `rows`; a row is a whole
+/// token, every head of it included.
+pub(crate) fn attention_matches_cpu_sampled(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    output: &[f32],
+    spec: AttentionSpec,
+    rows: &[usize],
+) -> bool {
+    if spec.query_heads == 0 || spec.head_dim == 0 || spec.query_tokens == 0 {
+        return true;
+    }
+    let width = spec.head_dim * spec.query_heads;
+    if width == 0 || output.len() % width != 0 || query.len() % width != 0 {
+        return true;
+    }
+    let tokens = output.len() / width;
+    if tokens != spec.query_tokens {
+        return true;
+    }
+    let scale = output
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()))
+        .max(1.0e-6);
+    // The healthy difference between the two summation orders is around 1e-6
+    // of the scale, and a broken result is off by 1e-2 of it or more, so a
+    // limit of 1e-4 tells the two apart with room on both sides.
+    let limit = 1.0e-4 * scale;
+    for &token in rows {
+        if token >= tokens {
+            return true;
+        }
+        // The CPU reference of one row is a full attention over the keys, so
+        // the row is taken out of the query set and put back with the same
+        // token count.
+        let mut row_spec = spec;
+        row_spec.query_tokens = 1;
+        let Ok(reference) = attention_on_cpu(
+            &query[token * width..(token + 1) * width],
+            key,
+            value,
+            row_spec,
+        ) else {
+            return true;
+        };
+        if reference.len() != width {
+            return true;
+        }
+        for head in 0..spec.query_heads {
+            let base = head * spec.head_dim;
+            for step in 0..GPU_ATTENTION_CHECK_ELEMENTS {
+                let index = base + (step * 1_030_003 + head * 8_177) % spec.head_dim;
+                if (output[token * width + index] - reference[index]).abs() > limit {
+                    return false;
+                }
+            }
+            // A run of wrong dimensions is missed by the spread sampling
+            // above, so a consecutive block is looked at as well.
+            for step in 0..GPU_ATTENTION_CHECK_BLOCK {
+                let index = base + (step + head * 31) % spec.head_dim;
+                if (output[token * width + index] - reference[index]).abs() > limit {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Whether a device attention agrees with the CPU kernel.
 ///
 /// The two summation orders differ, so a healthy attention differs from the
@@ -1908,6 +1987,82 @@ fn transpose_input_index(
 #[cfg(test)]
 mod tests {
     use super::projection_matches_cpu;
+
+    /// The sampled check has to accept a healthy attention and to reject one
+    /// that returned the numbers of an earlier call.
+    #[test]
+    fn the_sampled_attention_check_catches_a_stale_result() {
+        let tokens = 12usize;
+        let heads = 2usize;
+        let dim = 8usize;
+        let width = heads * dim;
+        let query: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 23) as f32 * 0.05).sin())
+            .collect();
+        let key: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 19) as f32 * 0.05).cos())
+            .collect();
+        let value = key.clone();
+        let spec = AttentionSpec {
+            query_tokens: tokens,
+            key_tokens: tokens,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let healthy = attention_on_cpu(&query, &key, &value, spec).unwrap();
+        let rows = vec![0usize, 5, 11];
+        assert!(attention_matches_cpu_sampled(
+            &query, &key, &value, &healthy, spec, &rows
+        ));
+        // A result from an earlier call differs in every row, so the sampled
+        // rows catch it.
+        let mut stale = healthy.clone();
+        for value in stale.iter_mut() {
+            *value += 1.0;
+        }
+        assert!(!attention_matches_cpu_sampled(
+            &query, &key, &value, &stale, spec, &rows
+        ));
+    }
+
+    /// A row that the device got wrong has to be found by the sampled check,
+    /// even when the other rows are right.
+    #[test]
+    fn the_sampled_attention_check_catches_a_damaged_row() {
+        let tokens = 8usize;
+        let heads = 1usize;
+        let dim = 16usize;
+        let width = heads * dim;
+        let query: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 13) as f32 * 0.05).sin())
+            .collect();
+        let key: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 11) as f32 * 0.05).cos())
+            .collect();
+        let value = key.clone();
+        let spec = AttentionSpec {
+            query_tokens: tokens,
+            key_tokens: tokens,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let mut damaged = attention_on_cpu(&query, &key, &value, spec).unwrap();
+        damaged[3 * width] += 0.5;
+        assert!(!attention_matches_cpu_sampled(
+            &query,
+            &key,
+            &value,
+            &damaged,
+            spec,
+            &[3usize]
+        ));
+    }
 
     fn bf16(value: f32) -> [u8; 2] {
         ((value.to_bits() >> 16) as u16).to_le_bytes()

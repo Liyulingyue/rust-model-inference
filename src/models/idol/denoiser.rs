@@ -1,5 +1,5 @@
 //! Idol's joint latent/image/camera flow transformer, matching upstream 4702a7f.
-use super::common::{finite, norm, round_f16, tensor, trace, Linear};
+use super::common::{finite, norm, round_f16, round_f16_checked, tensor, trace, Linear};
 use crate::core::tensor::TensorSource;
 use rayon::prelude::*;
 
@@ -23,11 +23,11 @@ fn checkpoint(name: &str, x: &[f32], width: usize) -> Result<(), String> {
 
 fn linear_half(linear: &Linear, x: &[f32]) -> Result<Vec<f32>, String> {
     let mut h = linear.forward(x)?;
-    round_f16(&mut h);
+    round_f16_checked(&mut h, "FP16 denoiser linear output")?;
     Ok(h)
 }
 
-fn norm_half(x: &[f32], width: usize, affine: Option<&AffineNorm>) -> Vec<f32> {
+fn norm_half(x: &[f32], width: usize, affine: Option<&AffineNorm>) -> Result<Vec<f32>, String> {
     let mut h = norm(
         x,
         width,
@@ -35,8 +35,8 @@ fn norm_half(x: &[f32], width: usize, affine: Option<&AffineNorm>) -> Vec<f32> {
         affine.map(|n| n.bias.as_slice()),
         1e-6,
     );
-    round_f16(&mut h);
-    h
+    round_f16_checked(&mut h, "FP16 denoiser normalization")?;
+    Ok(h)
 }
 
 struct AffineNorm {
@@ -149,7 +149,7 @@ fn attention(qkv: &[f32], width: usize, heads: usize) -> Result<Vec<f32>, String
             v.extend_from_slice(&row[2 * width..]);
         }
         if let Some(mut output) = super::gpu::attention(&q, &k, &v, width, heads) {
-            round_f16(&mut output);
+            round_f16_checked(&mut output, "FP16 denoiser attention")?;
             return Ok(output);
         }
     }
@@ -158,6 +158,9 @@ fn attention(qkv: &[f32], width: usize, heads: usize) -> Result<Vec<f32>, String
     let head_dim = width / heads;
     let scale = (head_dim as f32).sqrt().recip();
     let mut out = vec![0.; tokens * width];
+    // The rounding happens inside the workers, so an overflow is collected
+    // instead of returned from there.
+    let overflow = std::sync::atomic::AtomicBool::new(false);
     out.par_chunks_mut(width).enumerate().for_each_init(
         || vec![0.; tokens],
         |scores, (row, output)| {
@@ -183,8 +186,14 @@ fn attention(qkv: &[f32], width: usize, heads: usize) -> Result<Vec<f32>, String
                 );
             }
             round_f16(output);
+            if output.iter().any(|value| !value.is_finite()) {
+                overflow.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         },
     );
+    if overflow.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("FP16 denoiser attention overflowed".into());
+    }
     Ok(out)
 }
 
@@ -338,7 +347,7 @@ impl Block {
         if let Some(m) = &modulation {
             checkpoint(&format!("{label}.modulation"), m, self.width)?;
         }
-        let mut h = norm_half(&x, self.width, self.norm1.as_ref());
+        let mut h = norm_half(&x, self.width, self.norm1.as_ref())?;
         checkpoint(&format!("{label}.norm1"), &h, self.width)?;
         if let Some(m) = &modulation {
             modulate_half(&mut h, &m[..self.width], &m[self.width..2 * self.width]);
@@ -355,7 +364,7 @@ impl Block {
                 .map(|m| &m[2 * self.width..3 * self.width]),
         );
         checkpoint(&format!("{label}.attn_residual"), &x, self.width)?;
-        let mut h = norm_half(&x, self.width, self.norm2.as_ref());
+        let mut h = norm_half(&x, self.width, self.norm2.as_ref())?;
         checkpoint(&format!("{label}.norm2"), &h, self.width)?;
         if let Some(m) = &modulation {
             modulate_half(
@@ -368,7 +377,7 @@ impl Block {
         let mut h = linear_half(&self.up, &h)?;
         checkpoint(&format!("{label}.mlp_up"), &h, 4 * self.width)?;
         crate::ops::gelu_inplace(&mut h);
-        round_f16(&mut h);
+        round_f16_checked(&mut h, "FP16 denoiser feed-forward")?;
         checkpoint(&format!("{label}.mlp_gelu"), &h, 4 * self.width)?;
         let h = linear_half(&self.down, &h)?;
         checkpoint(&format!("{label}.mlp_down"), &h, self.width)?;
@@ -557,7 +566,7 @@ impl Denoiser {
     ) -> Result<(Vec<f32>, Vec<f32>), String> {
         let latent_rows = validate_inputs(latent, camera, t, feature1, feature2, fixture)?;
         let mut h_x = self.input.forward(latent)?;
-        round_f16(&mut h_x);
+        round_f16_checked(&mut h_x, "FP16 denoiser input")?;
         checkpoint("idol.denoiser.input", &h_x, self.width)?;
         let mut h_cond = self.cond1.forward(feature1)?;
         let h_cond2 = self.cond2.forward(feature2)?;
@@ -583,7 +592,7 @@ impl Denoiser {
         let mut ada_input = time.clone();
         crate::ops::silu_inplace(&mut ada_input);
         let mut modulation = self.ada.forward(&ada_input)?;
-        round_f16(&mut modulation);
+        round_f16_checked(&mut modulation, "FP16 denoiser modulation")?;
         checkpoint("idol.denoiser.modulation", &modulation, self.width)?;
         for (h, &position) in h_x.iter_mut().zip(&self.positions) {
             *h = half(*h + position);
@@ -613,7 +622,7 @@ impl Denoiser {
             }
             checkpoint(&format!("idol.denoiser.camera.{i}"), &h_cam, self.width)?;
         }
-        round_f16(&mut h_cam);
+        round_f16_checked(&mut h_cam, "FP16 denoiser camera")?;
         h_x.extend_from_slice(&h_cond);
         h_x.extend_from_slice(&h_cam);
         drop(h_cond);

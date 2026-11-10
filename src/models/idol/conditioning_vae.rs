@@ -1,5 +1,7 @@
 //! FLUX.2's encoder only; raw Diffusers names, BF16 module boundaries, no decoder allocation.
-use super::super::common::{finite, round_bf16, round_bf16_checked, tensor, trace, Linear};
+use super::super::common::{
+    finite, round_bf16_activation, round_bf16_checked, tensor, trace, Linear,
+};
 use super::{attention, validate_rgb};
 use crate::core::tensor::TensorSource;
 use rayon::prelude::*;
@@ -111,10 +113,13 @@ impl GroupNorm {
         round_bf16_checked(&mut bias, "BF16 VAE normalization bias")?;
         Ok(Self { weight, bias })
     }
-    fn forward(&self, x: &[f32]) -> Vec<f32> {
+    fn forward(&self, x: &[f32]) -> Result<Vec<f32>, String> {
         let channels = self.weight.len();
         let group = channels / 32;
         let spatial = x.len() / channels;
+        if channels == 0 || group == 0 || spatial == 0 || x.len() % channels != 0 {
+            return Err("Invalid Idol VAE normalization shape".into());
+        }
         let stats: Vec<_> = (0..32)
             .into_par_iter()
             .map(|g| {
@@ -125,9 +130,16 @@ impl GroupNorm {
                 let mean = (crate::ops::sum_f32(&values) / values.len() as f64) as f32;
                 let variance =
                     (crate::ops::sum_sq_centered_f32(&values, mean) / values.len() as f64) as f32;
-                (mean, (variance + 1e-6).sqrt().recip())
+                // A variance that overflowed to infinity would turn into a
+                // zero reciprocal here, and the group would be normalized to
+                // nothing without a word about it. The overflow is reported
+                // instead.
+                if !mean.is_finite() || !variance.is_finite() {
+                    return Err("Idol VAE normalization statistics overflowed".to_string());
+                }
+                Ok((mean, (variance + 1e-6).sqrt().recip()))
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         let mut out = vec![0.; x.len()];
         out.par_chunks_mut(channels)
             .zip(x.par_chunks(channels))
@@ -137,13 +149,14 @@ impl GroupNorm {
                     row[c] = b((input[c] - mean) * inv * self.weight[c] + self.bias[c]);
                 }
             });
-        out
+        finite(&out, "VAE normalization")?;
+        Ok(out)
     }
 }
-fn silu(mut x: Vec<f32>) -> Vec<f32> {
+fn silu(mut x: Vec<f32>) -> Result<Vec<f32>, String> {
     crate::ops::silu_inplace(&mut x);
-    round_bf16(&mut x);
-    x
+    round_bf16_activation(&mut x, "BF16 VAE activation")?;
+    Ok(x)
 }
 fn add(mut branch: Vec<f32>, residual: &[f32]) -> Vec<f32> {
     branch
@@ -180,8 +193,12 @@ impl Residual {
         })
     }
     fn forward(&self, x: &[f32], side: usize) -> Result<Vec<f32>, String> {
-        let a = self.conv1.forward(&silu(self.norm1.forward(x)), side, 1)?;
-        let a = self.conv2.forward(&silu(self.norm2.forward(&a)), side, 1)?;
+        let a = self
+            .conv1
+            .forward(&silu(self.norm1.forward(x)?)?, side, 1)?;
+        let a = self
+            .conv2
+            .forward(&silu(self.norm2.forward(&a)?)?, side, 1)?;
         let residual = if let Some(c) = &self.shortcut {
             c.forward(x, side, 1)?
         } else {
@@ -214,17 +231,17 @@ impl MidAttention {
         })
     }
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>, String> {
-        let a = self.norm.forward(x);
+        let a = self.norm.forward(x)?;
         let mut q = self.q.forward(&a)?;
         let mut k = self.k.forward(&a)?;
         let mut v = self.v.forward(&a)?;
-        round_bf16(&mut q);
-        round_bf16(&mut k);
-        round_bf16(&mut v);
+        round_bf16_activation(&mut q, "BF16 VAE attention query")?;
+        round_bf16_activation(&mut k, "BF16 VAE attention key")?;
+        round_bf16_activation(&mut v, "BF16 VAE attention value")?;
         let mut a = attention(&q, &k, &v, 512, 1)?;
-        round_bf16(&mut a);
+        round_bf16_activation(&mut a, "BF16 VAE attention output")?;
         let mut a = self.o.forward(&a)?;
-        round_bf16(&mut a);
+        round_bf16_activation(&mut a, "BF16 VAE attention projection")?;
         Ok(add(a, x))
     }
 }
@@ -327,7 +344,7 @@ impl Encoder {
         a = self.mid2.forward(&a, current)?;
         a = self
             .conv_out
-            .forward(&silu(self.norm.forward(&a)), current, 1)?;
+            .forward(&silu(self.norm.forward(&a)?)?, current, 1)?;
         a = self.quant.forward(&a, current, 1)?;
         trace("idol.vae.moments_nhwc", &[1, current, current, 64], &a);
         let tokens = posterior_tokens(&a, current, noise, &self.mean, &self.std)?;
@@ -387,5 +404,35 @@ mod tests {
         let noisy =
             posterior_tokens(&vec![0.; 256], 2, &vec![1.; 128], &[0.; 128], &[1.; 128]).unwrap();
         assert!(noisy[640..].iter().all(|&v| v == 1.));
+    }
+    #[test]
+    fn a_variance_that_overflows_is_reported_instead_of_normalizing_to_nothing() {
+        // The square of the difference is taken in F32, so a group that
+        // holds both a large positive and a large negative value overflows,
+        // and the reciprocal of an infinite variance is zero, so the group
+        // would be normalized to nothing without a word about it.
+        let norm = GroupNorm {
+            weight: vec![1.; 64],
+            bias: vec![0.; 64],
+        };
+        // Two rows of 64 channels: channel 0 and channel 1 belong to the
+        // same group, and their values are far apart.
+        let mut values = vec![0.0f32; 128];
+        values[0] = 1.0e30;
+        values[1] = -1.0e30;
+        let error = norm.forward(&values).unwrap_err();
+        assert!(error.contains("overflowed"), "{error}");
+    }
+    #[test]
+    fn an_ordinary_group_is_normalized_and_reported_as_finite() {
+        let norm = GroupNorm {
+            weight: vec![1.; 32],
+            bias: vec![0.; 32],
+        };
+        let out = norm.forward(&vec![1.; 32]).unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
+        // A constant group has no variance, so the normalization keeps the
+        // value at the bias.
+        assert!(out.iter().all(|v| v.abs() < 1e-3));
     }
 }

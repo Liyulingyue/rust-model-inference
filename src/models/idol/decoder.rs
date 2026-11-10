@@ -1,5 +1,5 @@
 //! Idol octree and Gaussian decoders; tensors use token-major, natural PyTorch order.
-use super::common::{finite, norm, round_f16, tensor, trace, Linear};
+use super::common::{finite, norm, round_f16_checked, tensor, trace, Linear};
 use crate::core::tensor::TensorSource;
 use rand::Rng;
 use rayon::prelude::*;
@@ -13,7 +13,7 @@ fn half(x: f32) -> f32 {
 }
 fn half_linear(linear: &Linear, x: &[f32]) -> Result<Vec<f32>, String> {
     let mut y = linear.forward(x)?;
-    round_f16(&mut y);
+    round_f16_checked(&mut y, "FP16 decoder linear output")?;
     Ok(y)
 }
 fn load_half(s: &dyn TensorSource, p: &str, input: usize, output: usize) -> Result<Linear, String> {
@@ -21,10 +21,15 @@ fn load_half(s: &dyn TensorSource, p: &str, input: usize, output: usize) -> Resu
     linear.to_f16()?;
     Ok(linear)
 }
-fn normalized(x: &[f32], width: usize, weight: Option<&[f32]>, bias: Option<&[f32]>) -> Vec<f32> {
+fn normalized(
+    x: &[f32],
+    width: usize,
+    weight: Option<&[f32]>,
+    bias: Option<&[f32]>,
+) -> Result<Vec<f32>, String> {
     let mut y = norm(x, width, weight, bias, LN_EPS);
-    round_f16(&mut y);
-    y
+    round_f16_checked(&mut y, "FP16 decoder normalization")?;
+    Ok(y)
 }
 fn add_half(x: &mut [f32], y: &[f32], gate: Option<&[f32]>) {
     for (i, (a, &b)) in x.iter_mut().zip(y).enumerate() {
@@ -117,7 +122,7 @@ impl Attention {
         finite(&q, "decoder attention queries")?;
         finite(&k, "decoder attention keys")?;
         if let Some(mut attended) = super::gpu::attention(&q, &k, &v, c, self.heads) {
-            round_f16(&mut attended);
+            round_f16_checked(&mut attended, "FP16 decoder attention")?;
             return half_linear(&self.out, &attended);
         }
         super::gpu::check_failure()?;
@@ -154,7 +159,7 @@ impl Attention {
                     }
                 },
             );
-        round_f16(&mut attended);
+        round_f16_checked(&mut attended, "FP16 decoder attention")?;
         half_linear(&self.out, &attended)
     }
 }
@@ -173,7 +178,7 @@ impl FeedForward {
     fn forward(&self, x: &[f32]) -> Result<Vec<f32>, String> {
         let mut h = half_linear(&self.up, x)?;
         crate::ops::gelu_inplace(&mut h);
-        round_f16(&mut h);
+        round_f16_checked(&mut h, "FP16 decoder feed-forward")?;
         half_linear(&self.down, &h)
     }
 }
@@ -217,16 +222,16 @@ impl Block {
     ) -> Result<(), String> {
         let c = self.cross.channels;
         if let Some(attention) = &self.self_attention {
-            let h = attention.forward(&normalized(x, c, None, None), None)?;
+            let h = attention.forward(&normalized(x, c, None, None)?, None)?;
             add_half(x, &h, None);
         }
-        let mut h = normalized(x, c, self.norm_weight.as_deref(), self.norm_bias.as_deref());
+        let mut h = normalized(x, c, self.norm_weight.as_deref(), self.norm_bias.as_deref())?;
         if let Some(m) = modulation {
             modulate(&mut h, &m[..c], &m[c..2 * c]);
         }
         h = self.cross.forward(&h, Some(ctx))?;
         add_half(x, &h, modulation.map(|m| &m[2 * c..3 * c]));
-        let mut h = normalized(x, c, None, None);
+        let mut h = normalized(x, c, None, None)?;
         if let Some(m) = modulation {
             modulate(&mut h, &m[3 * c..4 * c], &m[4 * c..5 * c]);
         }
@@ -302,7 +307,7 @@ impl QueryDecoder {
             }
         }
         let mut h = self.input_layer.forward(&h)?;
-        round_f16(&mut h);
+        round_f16_checked(&mut h, "FP16 decoder embedding")?;
         Ok(h)
     }
     fn forward(
@@ -320,8 +325,7 @@ impl QueryDecoder {
             &h,
         );
         let mut ctx = latent.to_vec();
-        round_f16(&mut ctx);
-        finite(&ctx, "FP16 decoder context")?;
+        round_f16_checked(&mut ctx, "FP16 decoder context")?;
         for (i, block) in self.blocks.iter().enumerate() {
             block.forward(&mut h, &ctx, modulation)?;
             trace(
@@ -407,8 +411,7 @@ impl Decoder {
             *v = crate::ops::silu(*v);
         }
         let mut modulation = self.modulation.forward(&h)?;
-        round_f16(&mut modulation);
-        finite(&modulation, "octree modulation")?;
+        round_f16_checked(&mut modulation, "octree modulation")?;
         trace(
             "idol.octree.modulation",
             &[1, modulation.len()],
