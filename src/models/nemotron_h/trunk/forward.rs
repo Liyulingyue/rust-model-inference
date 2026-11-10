@@ -461,6 +461,15 @@ impl NemotronModel {
                     scratch.hidden[..hidden_len].copy_from_slice(&device_hidden);
                 }
                 // Run the CPU layers one at a time.
+                //
+                // The CPU scope keeps the host's matmuls on the host: the
+                // shared Q4_K offload would otherwise send them to the
+                // device, and the device's Q4_K kernel is not bit-exact
+                // with the host's. A branch that runs on the host has to
+                // reproduce the host's arithmetic, otherwise the
+                // `RMI_NH_CPU_*` overrides cannot attribute a numerical
+                // difference to the branch that moved.
+                let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
                 while layer_end < self.config.n_layer && !self.device_layer(layer_end) {
                     let lw = &self.layers[layer_end];
                     self.forward_layer(layer_end, lw, n, base_position, scratch)?;

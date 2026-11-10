@@ -4143,7 +4143,7 @@ ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think �
 
 **还没做的**：
 
-- **Vulkan 路径**（30B 的主要缺口）—— 分两层：
+- ~~**Vulkan 路径**~~ ✅ **已完成（2026-11-10，阶段 3）**。分两层：
   1. ~~**Q5_0 与 Q5_1 的设备 kernel**~~ ✅ **已完成（2026-11-09）**。仓库原有的设备
      格式只有 Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K / F16 / BF16 / F32，而 30B 的
      `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 都是 **Q5_0**，共享专家的
@@ -4152,13 +4152,28 @@ ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think �
      kernel 的数值在门限内一致，且比 CPU 快 2-3×。**顺带修掉一个真 bug**：
      `matmul_rows_push` 只给 Q4_1 填了「每块激活和」那个 push constant，
      Q5_1 的 `m` 项因此读到 arena 的偏移 0（垃圾），数值差 17%。
-  2. **MoE 层的设备分支** —— 路由器（sigmoid + top-6 + 归一化 + scale）、逐 token
-     的 6 个专家投影、共享专家，以及把 3D 专家张量按专家切片绑定。
-     注意专家权重合计约 26 GB（Q5_0 + Q8_0，23 层 × 128 专家），显存要算得过来。
+  2. ~~**MoE 层的设备分支**~~ ✅ **已完成（2026-11-10）**：新 shader
+     `nemotron_moe_route`（sigmoid + 偏置排序 + top-6 + 归一化 + scale）与
+     `nemotron_moe_reduce`（加权求和 + 共享专家直加 + 残差）；专家投影复用
+     `relu_square` 与 Q5_0 / Q8_0 kernel。**路由留在设备上**：选中的专家 id
+     写进 arena，专家 kernel 自己读 id 并把权重偏移一个专家矩阵，因此一层
+     不产生同步点（3D 张量整体绑定，一个 MoE 层只占一个 descriptor set）。
+     整模 52 层（23 SSM / 23 MoE / 6 attention）全部在设备上。
+     `nemotron_h_moe` 已列入 `ComputePolicy::has_complete_device_path`。
+  - **数值门限是 8%，不是 1%**：设备 kernel 的求和顺序与 host 的 NEON kernel
+    不同（Q5_0 的 `ssm_in` 投影 `max_rel = 3.791e-3`），Mamba-2 的递归把它沿
+    52 层放大，实测 logits 相对 L2 **4.28% / 4.23% / 1.79%**（1 / 2 / 3 token
+    的 prefill，三个分支归因表里的最大值是 5.51%）。另有一条更硬的功能门限：
+    **top-1 token 必须与 CPU 相同**。全部层留在 host、只让最终归一化 +
+    输出投影上设备时，差异是 **0**（设备这两步与 CPU 逐位一致）。细节见
+    [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B7。
+  - **踩坑（已修）**：设备 session 在场时，`ops::kernel::q4_k` 会把 **host 上的
+    Q4_K matmul 也 offload 到设备**。30B 的 `ssm_out` / `attn_output` 都是
+    Q4_K，于是「在 host 上跑的层」与纯 CPU 运行不等价（一个投影差 1e-7，
+    经递归放大后最后一层 hidden state 差 18%）。设备路径里跑在 host 上的层
+    现在被锁进 `ComputePolicy::Cpu` scope，`RMI_NH_CPU_*` 三个归因开关才
+    能说明差异来自真正搬上设备的那个分支。
 - **其余量化档** —— IQ4_XS / Q4_0 两档未下载验证（张量类型分布见 B1 一节）。
-- **设备路径的数值契约** —— CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32
-  累加结构；设备上的 int8 dot + F32 scale 累加与之**不逐位相同**，设备路径要按
-  仓库既有惯例用误差门限验收（如 Dory 的双 1% 门限），不能声称逐位一致。
 
 ### TODO-054: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 

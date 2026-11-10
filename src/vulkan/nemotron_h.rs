@@ -38,8 +38,8 @@ use crate::models::nemotron_h::trunk::forward::NemotronModel;
 use crate::ops::kernel::Weight;
 use crate::vulkan::dense::UploadedBuffers;
 use crate::vulkan::ops::{
-    row_dispatch, ArenaRegion, GpuMatmulSpec, GpuWeightFormat, GpuWeightLayout, OperatorBindings,
-    Qwen3Ops, TokenCommands,
+    row_dispatch, ArenaRegion, ExpertSelection, GpuMatmulSpec, GpuWeightFormat, GpuWeightLayout,
+    OperatorBindings, Qwen3Ops, TokenCommands,
 };
 use crate::vulkan::{GpuBuffer, VulkanContext, VulkanError};
 
@@ -60,6 +60,30 @@ struct AttentionBindings {
 struct FfnBindings {
     up: OperatorBindings,
     down: OperatorBindings,
+}
+
+/// Bindings for one mixture-of-experts layer.
+///
+/// The 30B-A3B's FFN layers are routed-expert layers: the dense
+/// `ffn_up`/`ffn_down` weights are absent, and the layer holds 128
+/// routed experts plus one shared expert instead.
+#[derive(Clone, Copy)]
+struct MoeBindings {
+    /// The router, `ffn_gate_inp`: F32 `[n_embd, n_expert]`.
+    router: OperatorBindings,
+    /// The routed expert up projections, `ffn_up_exps`.
+    ///
+    /// The whole 3-D tensor lives in one buffer: the kernel reads the
+    /// expert the routing chose and offsets the weight by one expert
+    /// matrix, so a layer needs one descriptor set instead of one per
+    /// expert.
+    up_exps: OperatorBindings,
+    /// The routed expert down projections, `ffn_down_exps`.
+    down_exps: OperatorBindings,
+    /// The shared expert up projection, `ffn_up_shexp`.
+    up_shexp: OperatorBindings,
+    /// The shared expert down projection, `ffn_down_shexp`.
+    down_shexp: OperatorBindings,
 }
 
 /// Bindings for one Mamba-2 SSM layer.
@@ -86,6 +110,11 @@ enum LayerBindings {
     Ssm {
         norm: OperatorBindings,
         ssm: SsmBindings,
+    },
+    /// A mixture-of-experts layer (the 30B-A3B).
+    Moe {
+        norm: OperatorBindings,
+        moe: MoeBindings,
     },
 }
 
@@ -227,6 +256,31 @@ struct NemotronHArenaLayout {
     ssm_projection: ArenaRegion,
     /// Per-layer SSM regions, indexed by the SSM layer's slot.
     ssm_layers: Vec<SsmArena>,
+    /// The router logits, `rows * n_expert` floats.
+    router_logits: ArenaRegion,
+    /// The sigmoid probabilities of the router, `rows * n_expert` floats.
+    router_probs: ArenaRegion,
+    /// The ranking scores, `probs + exp_probs_b.bias`, `rows * n_expert`
+    /// floats.
+    router_selection: ArenaRegion,
+    /// The chosen expert ids, `rows * n_expert_used` words.
+    expert_ids: ArenaRegion,
+    /// The routing weights of the chosen experts, `rows * n_expert_used`
+    /// floats.
+    expert_weights: ArenaRegion,
+    /// The routed expert up projections, `rows * n_expert_used * n_ff_exp`
+    /// floats. The layout is `[row][slot][n_ff_exp]`.
+    expert_up: ArenaRegion,
+    /// The routed expert down projections, `rows * n_expert_used * n_embd`
+    /// floats. The layout is `[row][slot][n_embd]`.
+    expert_down: ArenaRegion,
+    /// The shared expert up projection, `rows * n_ff_shexp` floats.
+    shared_up: ArenaRegion,
+    /// The shared expert down projection, `rows * n_embd` floats.
+    shared_down: ArenaRegion,
+    /// The per-layer router selection bias, `exp_probs_b.bias`: one
+    /// region of `n_expert` floats per MoE layer.
+    moe_bias: Vec<ArenaRegion>,
     slots: Vec<Option<usize>>,
     total_size: usize,
 }
@@ -286,7 +340,15 @@ impl NemotronHArenaLayout {
                 "invalid Nemotron-H Vulkan arena dimensions".into(),
             ));
         }
-        let quant_len = n_embd.max(n_ff).max(n_attn_q).max(n_attn_v_kv);
+        // The Q8 activation buffer has to hold the widest quantized
+        // input of the model: the projections, and for the 30B the shared
+        // expert (3712) and the expert down projection (1856).
+        let quant_len = n_embd
+            .max(n_ff)
+            .max(n_attn_q)
+            .max(n_attn_v_kv)
+            .max(config.moe.as_ref().map_or(0, |moe| moe.n_ff_exp))
+            .max(config.moe.as_ref().map_or(0, |moe| moe.n_ff_shexp));
         let kv_cache = product(
             "KV cache",
             &[config.attention_layers.len(), capacity, n_attn_kv],
@@ -308,6 +370,26 @@ impl NemotronHArenaLayout {
         let ffn_up = row_region(n_ff)?;
         let ffn_down = row_region(n_embd)?;
         let rope = row_region(config.rope_dim)?;
+        // The mixture-of-experts scratch. The dense architecture has none
+        // of it, so the regions stay empty there.
+        let (n_expert, n_expert_used, n_ff_exp, n_ff_shexp) =
+            config.moe.as_ref().map_or((0, 0, 0, 0), |moe| {
+                (
+                    moe.n_expert,
+                    moe.n_expert_used,
+                    moe.n_ff_exp,
+                    moe.n_ff_shexp,
+                )
+            });
+        let router_logits = row_region(n_expert)?;
+        let router_probs = row_region(n_expert)?;
+        let router_selection = row_region(n_expert)?;
+        let expert_ids = row_region(n_expert_used)?;
+        let expert_weights = row_region(n_expert_used)?;
+        let expert_up = row_region(product("expert up", &[n_expert_used, n_ff_exp])?)?;
+        let expert_down = row_region(product("expert down", &[n_expert_used, n_embd])?)?;
+        let shared_up = row_region(n_ff_shexp)?;
+        let shared_down = row_region(n_embd)?;
         let scores = f32_region(
             &mut cursor,
             product("attention scores", &[rows, n_head, capacity])?,
@@ -388,6 +470,15 @@ impl NemotronHArenaLayout {
                 );
             }
         }
+        // The router selection bias is a per-layer constant, so it gets a
+        // region of its own per MoE layer.
+        let mut moe_bias = Vec::new();
+        for layer in 0..config.n_layer {
+            if !config.moe.is_some() || !config.ffn_layers.contains(&layer) {
+                continue;
+            }
+            moe_bias.push(f32_region(&mut cursor, n_expert)?);
+        }
         Ok(Self {
             x,
             normed,
@@ -419,6 +510,16 @@ impl NemotronHArenaLayout {
             ssm_normed,
             ssm_projection,
             ssm_layers,
+            router_logits,
+            router_probs,
+            router_selection,
+            expert_ids,
+            expert_weights,
+            expert_up,
+            expert_down,
+            shared_up,
+            shared_down,
+            moe_bias,
             slots,
             total_size: cursor,
         })
@@ -439,6 +540,9 @@ pub(crate) struct NemotronHVulkanSession {
     /// The SSM slot of each layer, `None` for the attention and FFN
     /// layers.
     ssm_slots: Vec<Option<usize>>,
+    /// The mixture-of-experts slot of each layer, `None` for the layers
+    /// that are not routed-expert layers.
+    moe_slots: Vec<Option<usize>>,
     pub(crate) capacity: usize,
     max_rows: usize,
     rope: Vec<f32>,
@@ -531,10 +635,45 @@ fn bind_weight(
     )
 }
 
-fn check_eligibility(config: &NemotronConfig, model: &NemotronModel) -> Result<(), String> {
-    if config.moe.is_some() {
-        return Err("MoE variant is not supported by the dense Vulkan path".into());
+/// Bind a whole 3-D expert tensor as a single buffer.
+///
+/// ggml stores the expert axis last and contiguous, so one expert is one
+/// matrix after the other. The kernel reads the expert the routing chose
+/// and offsets the weight by one expert matrix, which keeps the layer at
+/// one descriptor set instead of one per expert.
+fn bind_expert_tensor(
+    ops: &mut Qwen3Ops<'_>,
+    buffers: &mut UploadedBuffers,
+    bytes: &[u8],
+    ggml_type: crate::core::tensor::GGMLType,
+) -> Result<OperatorBindings, VulkanError> {
+    let format = GpuWeightFormat::from_ggml_type(ggml_type)?;
+    let buffer = buffers.upload(bytes)?;
+    let size = u64::try_from(bytes.len()).map_err(|_| VulkanError::OutOfMemory)?;
+    ops.bind_weight_ranges(&[(buffer, 0, size)], &[format])
+}
+
+/// Whether a weight format has a device kernel that can read the expert
+/// the routing chose.
+///
+/// The mixture-of-experts layers keep all the experts of one matrix in a
+/// single buffer and let the kernel offset the weight by the selected
+/// expert, so the format has to support that addressing.
+fn check_expert_format(value: crate::core::tensor::GGMLType, label: &str) -> Result<(), String> {
+    let format = GpuWeightFormat::from_ggml_type(value).map_err(|error| error.to_string())?;
+    if !matches!(
+        format,
+        GpuWeightFormat::Q8_0
+            | GpuWeightFormat::Q5_0
+            | GpuWeightFormat::Q5_1
+            | GpuWeightFormat::F32
+    ) {
+        return Err(format!("{label}: {value:?} has no device expert kernel"));
     }
+    Ok(())
+}
+
+fn check_eligibility(config: &NemotronConfig, model: &NemotronModel) -> Result<(), String> {
     if model.layers.len() != config.n_layer {
         return Err("layer count mismatch".into());
     }
@@ -551,12 +690,39 @@ fn check_eligibility(config: &NemotronConfig, model: &NemotronModel) -> Result<(
                 }
             }
         } else if is_ffn {
-            for weight in [&layer.w_up, &layer.w_down] {
-                if let Some(weight) = weight {
+            if let Some(moe) = &layer.moe {
+                // The routed experts and the shared expert. The router
+                // itself is F32, which the device matmul takes as it is.
+                check_expert_format(moe.up_type, "MoE expert up")?;
+                check_expert_format(moe.down_type, "MoE expert down")?;
+                let moe_cfg = config.moe.as_ref().ok_or_else(|| {
+                    format!("layer {layer_index} has MoE weights but no MoE config")
+                })?;
+                if moe.n_expert != moe_cfg.n_expert
+                    || moe.n_ff_exp != moe_cfg.n_ff_exp
+                    || moe.n_embd != config.n_embd
+                {
+                    return Err(format!("layer {layer_index} MoE dimensions disagree"));
+                }
+                for (name, weight) in [
+                    ("router", &moe.gate_inp),
+                    ("shared expert up", &moe.up_shexp),
+                    ("shared expert down", &moe.down_shexp),
+                ] {
                     GpuWeightFormat::from_ggml_type(weight.ggml_type)
-                        .map_err(|error| error.to_string())?;
-                } else {
-                    return Err(format!("layer {layer_index} missing FFN weight"));
+                        .map_err(|error| format!("layer {layer_index} {name}: {error}"))?;
+                }
+                if moe.exp_probs_b.len() != moe_cfg.n_expert {
+                    return Err(format!("layer {layer_index} has a short selection bias"));
+                }
+            } else {
+                for weight in [&layer.w_up, &layer.w_down] {
+                    if let Some(weight) = weight {
+                        GpuWeightFormat::from_ggml_type(weight.ggml_type)
+                            .map_err(|error| error.to_string())?;
+                    } else {
+                        return Err(format!("layer {layer_index} missing FFN weight"));
+                    }
                 }
             }
         } else {
@@ -623,6 +789,8 @@ impl NemotronHVulkanSession {
         let mut layers = Vec::with_capacity(config.n_layer);
         let mut ssm_slots: Vec<Option<usize>> = vec![None; config.n_layer];
         let mut ssm_slot = 0usize;
+        let mut moe_slots: Vec<Option<usize>> = vec![None; config.n_layer];
+        let mut moe_slot = 0usize;
 
         for (layer_index, layer) in model.layers.iter().enumerate() {
             let norm_buffer = buffers.upload_f32(&layer.attn_norm)?;
@@ -666,6 +834,61 @@ impl NemotronHVulkanSession {
                     },
                 });
             } else if is_ffn {
+                if let Some(moe_weights) = layer.moe.as_ref() {
+                    // A routed-expert layer: the dense up/down weights are
+                    // absent and the experts take their place.
+                    let router = bind_weight(
+                        &mut ops,
+                        &mut buffers,
+                        &moe_weights.gate_inp,
+                        "Nemotron-H MoE router",
+                    )?;
+                    let up_exps = bind_expert_tensor(
+                        &mut ops,
+                        &mut buffers,
+                        moe_weights.up_exps,
+                        moe_weights.up_type,
+                    )?;
+                    let down_exps = bind_expert_tensor(
+                        &mut ops,
+                        &mut buffers,
+                        moe_weights.down_exps,
+                        moe_weights.down_type,
+                    )?;
+                    let up_shexp = bind_weight(
+                        &mut ops,
+                        &mut buffers,
+                        &moe_weights.up_shexp,
+                        "Nemotron-H shared expert up",
+                    )?;
+                    let down_shexp = bind_weight(
+                        &mut ops,
+                        &mut buffers,
+                        &moe_weights.down_shexp,
+                        "Nemotron-H shared expert down",
+                    )?;
+                    // The selection bias is a per-layer constant, so it
+                    // lives in the arena and is written once.
+                    let bias = layout.moe_bias.get(moe_slot).copied().ok_or_else(|| {
+                        VulkanError::UnsupportedShape(
+                            "Nemotron-H MoE layer without a bias region".into(),
+                        )
+                    })?;
+                    ops.write_f32(bias, &moe_weights.exp_probs_b)?;
+                    moe_slots[layer_index] = Some(moe_slot);
+                    moe_slot += 1;
+                    layers.push(LayerBindings::Moe {
+                        norm,
+                        moe: MoeBindings {
+                            router,
+                            up_exps,
+                            down_exps,
+                            up_shexp,
+                            down_shexp,
+                        },
+                    });
+                    continue;
+                }
                 let w_up = required_weight(layer.w_up.as_ref(), layer_index, "ffn_up")?;
                 let w_down = required_weight(layer.w_down.as_ref(), layer_index, "ffn_down")?;
                 let up = bind_weight(&mut ops, &mut buffers, w_up, "Nemotron-H FFN up")?;
@@ -772,6 +995,7 @@ impl NemotronHVulkanSession {
             config,
             ssm,
             ssm_slots,
+            moe_slots,
             capacity,
             max_rows,
             rope: vec![0.0; product("RoPE rows", &[rope_dim, max_rows])?],
@@ -881,6 +1105,22 @@ impl NemotronHVulkanSession {
                         n_embd,
                         rows,
                     )?;
+                }
+                LayerBindings::Moe { norm, moe } => {
+                    self.ops.record_rms_norm_rows(
+                        &commands,
+                        *norm,
+                        self.layout.x,
+                        self.layout.normed,
+                        n_embd,
+                        config.norm_eps,
+                        rows,
+                        n_embd,
+                        n_embd,
+                    )?;
+                    // The reduction adds the routed experts and the shared
+                    // expert to the residual on its own.
+                    self.record_moe(&commands, moe, layer_index, rows)?;
                 }
                 LayerBindings::Ssm {
                     norm,
@@ -1392,6 +1632,203 @@ impl NemotronHVulkanSession {
             rows,
             n_ff,
         )
+    }
+
+    /// Record one mixture-of-experts layer.
+    ///
+    /// The layer follows the reference (`src/models/nemotron-h.cpp::
+    /// build_ffn_layer`):
+    ///
+    /// ```text
+    /// logits    = ffn_gate_inp @ cur                 # [n_expert]
+    /// probs     = sigmoid(logits)
+    /// selection = probs + exp_probs_b.bias           # the bias ranks only
+    /// chosen    = topk(selection, n_expert_used)
+    /// weights   = probs[chosen] / max(sum, 2^-14) * scale
+    /// up        = relu(ffn_up_exps[chosen] @ cur) ** 2
+    /// down      = ffn_down_exps[chosen] @ up
+    /// out       = sum_i weights[i] * down_i
+    ///            + ffn_down_shexp @ relu(ffn_up_shexp @ cur) ** 2
+    /// ```
+    ///
+    /// The routing stays on the device: the chosen ids are written into
+    /// the arena and the expert kernels read them from there, so a layer
+    /// does not synchronise with the host. The shared expert has no gate
+    /// and no weight, so the reducer adds it as it is.
+    fn record_moe(
+        &self,
+        commands: &TokenCommands<'_>,
+        moe: &MoeBindings,
+        layer_index: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let config = &self.config;
+        let moe_cfg = config.moe.as_ref().ok_or_else(|| {
+            VulkanError::UnsupportedShape("Nemotron-H MoE layer without MoE metadata".into())
+        })?;
+        let n_embd = config.n_embd;
+        let n_expert = moe_cfg.n_expert;
+        let used = moe_cfg.n_expert_used;
+        let n_ff_exp = moe_cfg.n_ff_exp;
+        let n_ff_shexp = moe_cfg.n_ff_shexp;
+
+        // The router: `ffn_gate_inp`, F32 [n_embd, n_expert].
+        self.record_weights(
+            commands,
+            moe.router,
+            self.layout.normed,
+            &[(self.layout.router_logits, n_expert)],
+            n_embd,
+            rows,
+        )?;
+
+        // The routing, entirely on the device.
+        let slot = self.moe_slots[layer_index].ok_or_else(|| {
+            VulkanError::UnsupportedShape("Nemotron-H MoE layer has no arena slot".into())
+        })?;
+        self.ops.record_nemotron_moe_route(
+            commands,
+            self.layout.router_logits,
+            self.layout.router_probs,
+            self.layout.router_selection,
+            self.layout.expert_ids,
+            self.layout.expert_weights,
+            self.layout.moe_bias[slot],
+            n_expert,
+            used,
+            moe_cfg.expert_weights_scale,
+            moe_cfg.expert_weights_norm,
+            rows,
+        )?;
+
+        // The routed experts. One dispatch per slot, each covering every
+        // row: the kernel reads the expert the routing chose for that row
+        // and offsets the weight by one expert matrix.
+        for expert_slot in 0..used {
+            let output = self.layout.expert_up.shifted(expert_slot * n_ff_exp * 4);
+            self.ops.record_selected_weight_matmul_rows(
+                commands,
+                moe.up_exps,
+                self.layout.normed,
+                self.layout.q8,
+                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
+                &[(output, n_ff_exp, used * n_ff_exp * 4)],
+                n_embd,
+                rows,
+                n_embd,
+                Some(ExpertSelection {
+                    ids: self.layout.expert_ids,
+                    count: n_expert,
+                    used,
+                    slot: expert_slot,
+                }),
+            )?;
+        }
+        // ReLU(x)^2 on the expert up projections. The buffer is laid out
+        // as [row][slot][n_ff_exp], so one row of the activation is the
+        // whole slot block of a token.
+        self.record_relu_square(
+            commands,
+            self.layout.expert_up,
+            used * n_ff_exp,
+            rows,
+            used * n_ff_exp,
+        )?;
+
+        // The expert down projections read the activations of their own
+        // slot, so the input region starts at that slot's offset and the
+        // row stride stays the width of a whole row.
+        for expert_slot in 0..used {
+            let input = self.layout.expert_up.shifted(expert_slot * n_ff_exp * 4);
+            let output = self.layout.expert_down.shifted(expert_slot * n_embd * 4);
+            self.ops.record_selected_weight_matmul_rows(
+                commands,
+                moe.down_exps,
+                input,
+                self.layout.q8,
+                self.layout.q8_scales,
+                self.layout.q4_1_input_sums,
+                self.layout.q8k,
+                self.layout.q8k_scales,
+                &[(output, n_embd, used * n_embd * 4)],
+                n_ff_exp,
+                rows,
+                used * n_ff_exp,
+                Some(ExpertSelection {
+                    ids: self.layout.expert_ids,
+                    count: n_expert,
+                    used,
+                    slot: expert_slot,
+                }),
+            )?;
+        }
+
+        // The shared expert: no gate, no weight.
+        self.record_weights(
+            commands,
+            moe.up_shexp,
+            self.layout.normed,
+            &[(self.layout.shared_up, n_ff_shexp)],
+            n_embd,
+            rows,
+        )?;
+        self.record_relu_square(
+            commands,
+            self.layout.shared_up,
+            n_ff_shexp,
+            rows,
+            n_ff_shexp,
+        )?;
+        self.record_weights(
+            commands,
+            moe.down_shexp,
+            self.layout.shared_up,
+            &[(self.layout.shared_down, n_embd)],
+            n_ff_shexp,
+            rows,
+        )?;
+
+        // The reduction: the weighted sum of the routed experts plus the
+        // shared expert, added to the residual.
+        self.ops.record_nemotron_moe_reduce(
+            commands,
+            self.layout.x,
+            self.layout.expert_down,
+            self.layout.expert_weights,
+            self.layout.shared_down,
+            n_embd,
+            used,
+            rows,
+            true,
+        )
+    }
+
+    /// Record the `ReLU(x)^2` activation over a region.
+    ///
+    /// llama.cpp builds the Nemotron-H FFN as `LLM_FFN_RELU_SQR`
+    /// (`src/models/nemotron-h.cpp`): the projection is followed by
+    /// `max(x, 0)^2`. The shader squares the clamped value, so the result
+    /// is `max(x, 0)^2`.
+    fn record_relu_square(
+        &self,
+        commands: &TokenCommands<'_>,
+        region: ArenaRegion,
+        width: usize,
+        rows: usize,
+        row_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            Self::word(region),
+            width as u32,
+            rows as u32,
+            row_stride as u32,
+        ];
+        let [x, y, z] = row_dispatch(width.div_ceil(64), rows, &self.context.limits)?;
+        self.ops
+            .record_custom(commands, self.relu_square_pipeline, None, &push, [x, y, z])
     }
 
     fn record_weights(

@@ -1,7 +1,7 @@
 #version 450
 
-// Q5_0 grouped matmul: one output row per lane group, the Q8 activations
-// come from the arena.
+// Q5_0 grouped matmul: one output row per lane, the Q8 activations come
+// from the arena.
 //
 // The block layout is ggml's `block_q5_0`: a 2-byte F16 scale `d`, a 4-byte
 // high-bit table `qh` and 16 bytes of nibbles `qs`. The 5-th bit of element
@@ -15,6 +15,13 @@
 //
 // The arithmetic follows `src/ops/kernel/q5_0/scalar.rs`, so the device and
 // the host agree on the value.
+//
+// The expert words extend the ordinary path: a mixture-of-experts layer
+// keeps all the experts of one matrix in a single buffer and selects the
+// expert per token on the device. The selected id is read from the arena
+// (the same region the routing shader writes) and shifts the weight offset
+// by one expert matrix. A stack without experts keeps `expert_count` at
+// zero, so the offset stays where it was.
 
 layout(local_size_x = 64) in;
 
@@ -45,6 +52,10 @@ layout(push_constant) uniform PC {
     uint q8k_stride;
     uint q8k_scales_stride;
     uint token_rows;
+    uint expert_count;
+    uint expert_ids_word;
+    uint expert_used;
+    uint expert_slot;
 } pc;
 
 float f16_decode(uint bits) {
@@ -61,6 +72,8 @@ uint weight_word(uint slot, uint index) {
     return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]);
 }
 
+// One byte at an arbitrary byte offset. The 22-byte block is not four-byte
+// aligned, so the byte is picked out of the word that holds it.
 uint weight_byte(uint slot, uint index) {
     return (weight_word(slot, index >> 2u) >> ((index & 3u) * 8u)) & 0xffu;
 }
@@ -77,9 +90,19 @@ void main() {
     uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
     if (slot >= pc.group_count || row >= rows) return;
 
+    uint row_bytes = pc.blocks_per_row * 22u;
+    // The expert index is folded into a temporary and added unconditionally:
+    // adding a constant inside the branch trips the GB10 shader compiler.
+    uint expert_index = 0u;
+    if (pc.expert_count != 0u) {
+        uint expert = arena.data[pc.expert_ids_word + token_row * pc.expert_used + pc.expert_slot];
+        expert_index = min(expert, pc.expert_count - 1u);
+    }
+    uint row_offset = row * row_bytes + expert_index * (rows * row_bytes);
+
     precise float sum = 0.0;
     for (uint block = 0u; block < pc.blocks_per_row; ++block) {
-        uint offset = row * pc.blocks_per_row * 22u + block * 22u;
+        uint offset = row_offset + block * 22u;
         precise float d = f16_decode(weight_byte(slot, offset) | (weight_byte(slot, offset + 1u) << 8u));
         uint qh = weight_byte(slot, offset + 2u)
                 | (weight_byte(slot, offset + 3u) << 8u)

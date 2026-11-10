@@ -5,12 +5,13 @@
 
 ## 一句话结论
 
-`nemotron_h_moe`（30B-A3B）**当前仓库完全不支持**：arch 不在白名单、config 前缀
-不同、MoE 层分支不存在、并且它需要的 **Q5_1 量化格式在本仓库没有 dequant kernel**。
-但基座（Mamba-2 SSM + attention 混合 trunk）已经在 `src/models/nemotron_h/trunk/`
-里跑通了，MoE 的 3D 专家张量、路由归一化、共享专家这三块在 `src/models/qwen35/trunk/moe.rs`
-里已经有一份**语义几乎同构**的实现 —— 所以这是一次「扩一个 arch + 换一套路由语义」
-的增量适配，不是从零做。
+`nemotron_h_moe`（30B-A3B）**已适配**：CPU 路径与上游 llama.cpp 逐位一致，
+CLI / HTTP / JEV 三个入口都可用，**Vulkan 设备路径也已落地**（2026-11-10，
+阶段 3）。设备路径的 52 层（23 SSM / 23 MoE / 6 attention）全部在设备上，
+路由留在设备上做（不回读 host），MoE 层不与 host 同步。
+代价是**数值不再逐位一致**：设备 kernel 的求和顺序与 host 的 NEON kernel
+不同，Mamba-2 递归把这一层差异放大，实测 logits 相对 L2 1.9%–5.8%
+（见 §B7），因此设备路径按仓库惯例用**误差门限**验收，不声称逐位一致。
 
 ## 1. 契约（从 `unsloth/Nemotron-3-Nano-30B-A3B-GGUF` 头部读出）
 
@@ -355,38 +356,95 @@ kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活
 - JEV 的单次与分组判定本来就按 arch 分派，两个入口都覆盖，实测概率完全相同
   （单次 A 0.0307 / B 0.9693；分组 A 0.0640 / B 0.9360）。
 
-### B7. Vulkan 设备路径 ❌ 未实现（主要缺口）
+### B7. Vulkan 设备路径 ✅ 已完成（2026-11-10，阶段 3）
 
-分两层，都还没做：
+分三层，全部落地：
 
 1. ~~**Q5_0 与 Q5_1 的设备 kernel**~~ ✅ **已完成（2026-11-09）**。30B 的
    `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 是 **Q5_0**，共享专家的
    `ffn_up_shexp` 是 **Q5_1**，换量化档躲不掉；两个格式现在都有设备 kernel
    （见 §3·5）。
-2. **MoE 层的设备分支**（还没做）。要落的有五块：
+2. ~~**MoE 层的设备分支**~~ ✅ **已完成（2026-11-10）**。
+3. **入口与自动分发**：`nemotron_h_moe` 已列入
+   `ComputePolicy::has_complete_device_path`，`--compute vulkan` / `Auto`
+   走设备路径；HTTP 侧与 CLI 同源（§B6）。
 
-   | 部件 | 做法 | 参照 |
-   |---|---|---|
-   | 路由器 | `ffn_gate_inp`（F32 2688×128）在设备上出 128 个 logit，读回 host 做 sigmoid + top-6 + 归一化 + scale | `src/vulkan/qwen35/moe.rs` 的 host routing（每层读回一次，不是每 token 一次） |
-   | 专家投影 | 每个 token 的 6 个专家各自 `up_exps[e]`（Q5_0 2688×1856）与 `down_exps[e]`（Q8_0 1856×2688），激活是 `relu(x)^2` | 4B 的 `relu_square` pipeline 已有 |
-   | 共享专家 | `ffn_up_shexp`（Q5_1 2688×3712）+ `ffn_down_shexp`（Q8_0），**没有门控、不乘权重** | 与 qwen35 的共享专家语义不同，不能复用 |
-   | 3D 张量绑定 | 每层 128 个专家各绑一段 range（`bind_weight_ranges`） | qwen35 的 `MoeBindings` |
-   | 归约 | 加权求和 + 共享专家直加 | qwen35 的 `record_moe_reduce` |
+#### B7.1 MoE 设备分支的形状与做法
 
-   三个要算清的约束：
+| 部件 | 做法 | 与 host 语义的关系 |
+|---|---|---|
+| 路由器 | `ffn_gate_inp`（F32 2688×128）在设备上出 128 个 logit | 与 CPU 的 `ffn_gate_inp` 同矩阵、同 F32 累加 |
+| 路由 | 新 shader `nemotron_moe_route`：sigmoid → 加 `exp_probs_b.bias` 排序 → top-6 → 按**无偏**概率归一化 → ×2.5 | 与 `src/models/nemotron_h/trunk/moe.rs::route_experts` 逐条对齐（bias 只参与排序，不进权重；`SUM_FLOOR = 2^-14`） |
+| 专家选择 | 选中的 id 与权重**写进 arena**，专家 kernel 自己读 id 并把权重偏移一个专家矩阵 | 路由**不回读 host**：一层不产生同步点 |
+| 专家投影 | 每个 slot 一次 dispatch：`ffn_up_exps[e]`（Q5_0 2688×1856）→ `relu(x)^2` → `ffn_down_exps[e]`（Q8_0 1856×2688） | 激活是 `relu(x)^2`，与 llama.cpp 的 `LLM_FFN_RELU_SQR` 一致 |
+| 共享专家 | `ffn_up_shexp`（Q5_1 2688×3712）→ `relu(x)^2` → `ffn_down_shexp`（Q8_0） | **没有门控、不乘权重** |
+| 归约 | 新 shader `nemotron_moe_reduce`：加权求和 + 共享专家直加 + 残差 | — |
 
-   - **显存**：专家权重约 26 GB（23 层 × 128 专家 × (Q5_0 2688×1856 + Q8_0 1856×2688)），
-     再加注意力/SSM/共享专家，整个模型约 24.5 GB，与 host 侧的 mmap 同一份数据的
-     两份拷贝。GB10 的 128 GB 统一内存放得下，但要先确认 arena 与 staging 的峰值。
-   - **descriptor set 数量**：4B 的 session 按 `3 + 6 × n_layer` 分配；30B 每层多
-     128 个专家 × 2 个矩阵，描述符池要重新算（qwen35 是每专家一个 set）。
-   - **host routing 的同步**：每层一次读回 = 每 token 23 次读回，decode 时是同步
-     瓶颈；qwen35 用 `moe_experts_per_submission()` 限制每次提交的专家数，
-     30B 要照着量一次。
+**3D 张量的绑定**：ggml 把专家轴放在最后且连续，所以「专家 e 的矩阵」就是
+第 e 段。一个 MoE 层因此只需要**一个** descriptor set（整个 3D 张量整体绑定），
+而不是每专家一个 —— 描述符预算仍是 `3 + 6 × n_layer`（norm + 5 个权重）。
+专家 id 由 push constant 的第 22–25 个 word 传进 kernel
+（`expert_count / expert_ids_word / expert_used / expert_slot`）。
 
-**数值契约**：CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32 累加结构；
-设备上的 int8 dot + F32 scale 累加与之**不逐位相同**，设备路径要按仓库既有惯例
-用误差门限验收，不能声称逐位一致。
+**显存**：专家权重约 24.2 GB（23 层 × 128 专家 × (Q5_0 2688×1856 + Q8_0
+1856×2688)），单层最大张量 428 MB（up）/ 620 MB（down），都在 GB10 的
+`maxMemoryAllocationSize`（约 4 GiB）之下；整模 24.5 GB 的权重与 host 侧的
+mmap 是同一份数据的两份拷贝，统一内存放得下。
+
+#### B7.2 数值契约：为什么是 8% 门限而不是 1%
+
+CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32 累加结构；设备上的
+int8 dot + F32 scale 累加与之**不逐位相同**。30B 比 4B 更敏感：
+
+- 单个投影的差异就已经不小：Q5_0 的 `ssm_in`（2688×10304）设备 vs CPU
+  `max_rel = 3.791e-3`（Q8_0 的 kernel 则是**逐位一致**，`max_abs = 0`）。
+- Mamba-2 的递归把这个差异沿 52 层放大，router 还可能在近似平局上翻转。
+
+实测（GB10，1 / 2 / 3 token 的 prefill，logits 相对 L2 / 缩放最大绝对误差）：
+
+| 配置 | 1 token | 2 token | 3 token |
+|---|---|---|---|
+| 全部在设备 | 4.28% / 3.35% | 4.23% / 3.40% | 1.79% / 1.39% |
+| 只有 SSM 在设备 | 5.51% / 4.57% | 4.14% / 2.57% | 1.93% / 1.57% |
+| 只有 MoE 在设备 | 5.45% / 5.50% | 3.72% / 2.45% | 1.92% / 1.49% |
+| 只有 attention 在设备 | 4.32% / 3.86% | 1.23% / 0.95% | 1.17% / 0.94% |
+| **全部在 host**（只留最终归一化 + 输出投影在设备） | **0% / 0%** | **0% / 0%** | **0% / 0%** |
+
+最后一行说明两件事：设备的**最终 RMS 归一化与 Q8_0 输出投影与 CPU 逐位一致**；
+三个分支各自的贡献量级相当（1%–6%），而且**不可加** —— 放大是混沌的，
+「全部在设备」并不比「只有 SSM 在设备」更差。整张表的最大值是 **5.51%**。
+
+硬件测试的门限因此取 **8%**（相对 L2 与缩放最大绝对误差各一条），另加一条
+更硬的**功能门限**：设备路径必须选出与 CPU 路径相同的 top-1 token
+（1 / 2 / 3 token 的 prefill 实测都相同）。测试：
+`RMI_NEMOTRON_MOE_MODEL=<gguf> cargo test --locked --profile release-fast
+--features vulkan --test nemotron3_nano_30b_device -- --ignored --nocapture`。
+
+> **踩坑一：设备路径里跑在 host 上的层必须锁在 CPU 语义上。**
+> 设备 session 在场时，`ops::kernel::q4_k` 的 `forward_prepared` 会把
+> **host 上的 Q4_K matmul 也 offload 到设备**（`gpu_matmul_active()` 为真）。
+> 30B 的 `ssm_out` / `attn_output` 都是 Q4_K，于是「在 host 上跑的层」与
+> 纯 CPU 运行**不等价**：一个投影就差 1e-7，再经 Mamba-2 递归放大，最后
+> 一层 hidden state 差 18%。`RMI_NH_CPU_*` 这三个覆盖开关因此必须配一个
+> `ComputePolicy::Cpu` scope，否则没法把差异归因到真正搬上设备的那个分支。
+> 修好之后，「全部在 host」这一行是 **0**（逐位一致）。
+
+> **踩坑二：路由权重的求和要用 F64。**
+> CPU 的 `route_experts` 复刻的是 ggml 的 `ggml_sum_rows`：F64 累加器，
+> 末尾舍入成 F32。shader 里若用 F32 累加，权重会差 1 ULP 量级，
+> 经递归放大后 logits 的相对 L2 从 **4.28%** 变成 **5.84%**
+> （`nemotron_moe_route.comp` 因此开了 `GL_ARB_gpu_shader_fp64`）。
+
+#### B7.3 性能（GB10，8 线程，55 token 提示 + 16 token 生成）
+
+| | prefill | 生成 | 端到端 |
+|---|---|---|---|
+| CPU | 5.9 t/s | 9.6 t/s | 1.4 tok/s |
+| Vulkan 设备路径 | **28.7 t/s** | 9.0 t/s | **4.3 tok/s** |
+
+prefill 快 **4.9×**（权重读一次、多行复用），逐 token 生成与 CPU 持平
+（单 token 走的是共用 Q8_0 kernel 的标量 int8 路径，没有用上 DP4A 单元；
+这与 4B 的情况一样，是共用 kernel 的性质）。
 
 ## 3. 估算
 

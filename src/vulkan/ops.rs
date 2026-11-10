@@ -91,6 +91,11 @@ const QWEN35_RECURRENT_CONV_SHADER: &[u8] =
 const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_ssm.spv");
 const QWEN35_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_route.spv");
+/// The Nemotron-3 Nano MoE router (sigmoid routing with a selection bias)
+/// and its reducer (the shared expert is ungated).
+const NEMOTRON_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/nemotron_moe_route.spv");
+const NEMOTRON_MOE_REDUCE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_moe_reduce.spv");
 const QWEN35_MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_reduce.spv");
 const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
 const SENSENOVA_MHC_SHADER: &[u8] = include_bytes!("../../shaders/bin/sensenova_mhc.spv");
@@ -233,6 +238,10 @@ const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED: usize = 62;
 /// indices stay valid.
 const Q5_0_MATMUL: usize = 63;
 const Q5_1_MATMUL: usize = 64;
+
+/// The Nemotron-3 Nano MoE router and reducer.
+const NEMOTRON_MOE_ROUTE: usize = 65;
+const NEMOTRON_MOE_REDUCE: usize = 66;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -377,6 +386,8 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q8_matmul_tiled_dp4a_wide_add_transposed",
     "q5_0_matmul",
     "q5_1_matmul",
+    "nemotron_moe_route",
+    "nemotron_moe_reduce",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -502,7 +513,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 65] = [
+const OPERATOR_SHADERS: [&[u8]; 67] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -568,6 +579,8 @@ const OPERATOR_SHADERS: [&[u8]; 65] = [
     Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED_SHADER,
     Q5_0_MATMUL_SHADER,
     Q5_1_MATMUL_SHADER,
+    NEMOTRON_MOE_ROUTE_SHADER,
+    NEMOTRON_MOE_REDUCE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4062,8 +4075,16 @@ impl<'a> Qwen3Ops<'a> {
             input_stride,
         )?;
         if let Some(selection) = selection {
-            if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::F32)
-                || selection.count == 0
+            // The formats whose kernels read the selected expert id from
+            // the arena: the Q8_0 group, the two 5-bit block formats and
+            // the F32 kernel.
+            if !matches!(
+                format,
+                GpuWeightFormat::Q8_0
+                    | GpuWeightFormat::Q5_0
+                    | GpuWeightFormat::Q5_1
+                    | GpuWeightFormat::F32
+            ) || selection.count == 0
                 || selection.used == 0
                 || selection.used > selection.count
                 || selection.slot >= selection.used
@@ -6414,6 +6435,109 @@ impl<'a> Qwen3Ops<'a> {
         ];
         let grid = row_dispatch(1, rows, &self.context.limits)?;
         self.record_linear_dispatch(commands, QWEN35_MOE_ROUTE, self.arena_bindings, &push, grid);
+        Ok(())
+    }
+
+    /// Record the Nemotron-3 Nano MoE routing.
+    ///
+    /// The routing differs from Qwen3.5's in three ways, and all three
+    /// live in the shader:
+    ///
+    /// * the gate is a **sigmoid**, not a softmax;
+    /// * the selection bias only takes part in the ranking, so the weight
+    ///   of a chosen expert is its *unbiased* probability;
+    /// * the weights are normalized by `max(sum, 2^-14)` and then scaled.
+    ///
+    /// The chosen ids stay on the device: the expert kernels read them
+    /// from the arena, so a layer does not synchronise with the host.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_moe_route(
+        &self,
+        commands: &TokenCommands<'_>,
+        logits: ArenaRegion,
+        probs: ArenaRegion,
+        selection: ArenaRegion,
+        ids: ArenaRegion,
+        weights: ArenaRegion,
+        bias: ArenaRegion,
+        experts: usize,
+        used: usize,
+        scale: f32,
+        normalize: bool,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if experts == 0 || used == 0 || used > experts || !scale.is_finite() {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron MoE routing dimensions/scale".into(),
+            ));
+        }
+        // ggml uses zero as the metadata sentinel for "no additional
+        // scaling".
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        if bias.size < experts * 4 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron MoE selection bias region is too small".into(),
+            ));
+        }
+        let push = [
+            self.f32_rows_word(logits, rows, experts, experts, "router logits")?,
+            self.f32_rows_word(probs, rows, experts, experts, "router probabilities")?,
+            self.f32_rows_word(selection, rows, experts, experts, "router selection")?,
+            self.f32_rows_word(ids, rows, used, used, "expert IDs")?,
+            self.f32_rows_word(weights, rows, used, used, "expert weights")?,
+            as_u32(bias.offset / 4, "router selection bias")?,
+            as_u32(experts, "experts")?,
+            as_u32(used, "selected experts")?,
+            scale.to_bits(),
+            u32::from(normalize),
+        ];
+        let grid = row_dispatch(1, rows, &self.context.limits)?;
+        self.record_linear_dispatch(
+            commands,
+            NEMOTRON_MOE_ROUTE,
+            self.arena_bindings,
+            &push,
+            grid,
+        );
+        Ok(())
+    }
+
+    /// Record the Nemotron-3 Nano MoE reduction.
+    ///
+    /// The routed part is the weighted sum of the expert outputs; the
+    /// shared expert is added on top of it **without a gate and without a
+    /// weight**, which is what separates it from Qwen3.5's reducer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_moe_reduce(
+        &self,
+        commands: &TokenCommands<'_>,
+        target: ArenaRegion,
+        routed: ArenaRegion,
+        weights: ArenaRegion,
+        shared: ArenaRegion,
+        width: usize,
+        used: usize,
+        rows: usize,
+        has_shared: bool,
+    ) -> Result<(), VulkanError> {
+        let routed_width = width.checked_mul(used).ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(target, rows, width, width, "MoE residual")?,
+            self.f32_rows_word(routed, rows, routed_width, routed_width, "expert output")?,
+            self.f32_rows_word(weights, rows, used, used, "expert weights")?,
+            self.f32_rows_word(shared, rows, width, width, "shared expert")?,
+            as_u32(width, "MoE width")?,
+            as_u32(used, "selected experts")?,
+            u32::from(has_shared),
+        ];
+        let grid = row_dispatch(width.div_ceil(64), rows, &self.context.limits)?;
+        self.record_linear_dispatch(
+            commands,
+            NEMOTRON_MOE_REDUCE,
+            self.arena_bindings,
+            &push,
+            grid,
+        );
         Ok(())
     }
 
@@ -10072,6 +10196,16 @@ mod tests {
             (Q4_1_MATMUL, "q4_1_matmul", Q4_1_MATMUL_SHADER),
             (Q5_0_MATMUL, "q5_0_matmul", Q5_0_MATMUL_SHADER),
             (Q5_1_MATMUL, "q5_1_matmul", Q5_1_MATMUL_SHADER),
+            (
+                NEMOTRON_MOE_ROUTE,
+                "nemotron_moe_route",
+                NEMOTRON_MOE_ROUTE_SHADER,
+            ),
+            (
+                NEMOTRON_MOE_REDUCE,
+                "nemotron_moe_reduce",
+                NEMOTRON_MOE_REDUCE_SHADER,
+            ),
             (Q4_K_MATMUL, "q4_k_matmul", Q4_K_MATMUL_SHADER),
             (Q6_K_MATMUL, "q6_k_matmul", Q6_K_MATMUL_SHADER),
             (F16_MATMUL, "f16_matmul", F16_MATMUL_SHADER),
@@ -12893,6 +13027,17 @@ mod tests {
     fn q5_k_matvec_runs_on_vulkan() {
         let context = super::VulkanContext::new().unwrap();
         super::check_weight_format(&context, "q5_k").unwrap();
+    }
+
+    /// The 30B's `ssm_in` projection is the widest Q5_0 matvec the device
+    /// path runs: 2688 wide, 10304 rows. The shape used to be enough to
+    /// trip the dispatch's row limits, so it is pinned here.
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn q5_0_matvec_matches_the_cpu_at_the_30b_ssm_projection_shape() {
+        let context = super::VulkanContext::new().unwrap();
+        super::check_weight_matvec(&context, "q5_0", super::GpuWeightFormat::Q5_0, 2688, 10304)
+            .unwrap();
     }
 
     #[test]
