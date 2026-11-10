@@ -1,7 +1,7 @@
 {
   "date": "2026-11-10",
   "timezone": "Asia/Shanghai",
-  "code_commit": "5d8079d7b918",
+  "code_commit": "5e10f55a8684",
   "model": {
     "repository": "modelscope:empero-ai/PiVo-1.4M",
     "source_revision": "b573f75b8cc1d2f30b3d3dac0dad0827b867a80d",
