@@ -1771,7 +1771,7 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
-        let (key, _) = self.ensure_weight(weight_bytes, spec, rows, n_in, n_out, true)?;
+        let (key, _) = self.ensure_weight(weight_bytes, spec, n_in, n_out, true)?;
         let bindings = self.weights.get(&key).unwrap().1;
         // The activation copy has to land before the command buffer starts
         // recording. The barrier that begin_commands places is the one that
@@ -1884,7 +1884,7 @@ impl BatchedLinearRuntime {
                 *n_out,
                 output.len(),
             )?;
-            let (key, buffer) = self.ensure_weight(weight, *spec, rows, *n_in, *n_out, false)?;
+            let (key, buffer) = self.ensure_weight(weight, *spec, *n_in, *n_out, false)?;
             keys.push(key);
             buffers.push(buffer);
             formats.push(spec.format);
@@ -2002,7 +2002,7 @@ impl BatchedLinearRuntime {
             )?;
         }
         for (weight, spec, rows, n_out) in group.iter().copied() {
-            let (key, _) = self.ensure_weight(weight, spec, rows, n_in, n_out, false)?;
+            let (key, _) = self.ensure_weight(weight, spec, n_in, n_out, false)?;
             cached_bindings.push(self.weights.get(&key).unwrap().1);
         }
 
@@ -12235,7 +12235,7 @@ mod tests {
                 let mut actual = vec![f32::NAN; rows * n_out];
                 if transposed {
                     let (key, _) = runtime
-                        .ensure_weight(&bytes, spec, rows, n_in, n_out, true)
+                        .ensure_weight(&bytes, spec, n_in, n_out, true)
                         .unwrap();
                     runtime.write_input(&input).unwrap();
                     let commands = TokenCommands::begin(context).unwrap();
