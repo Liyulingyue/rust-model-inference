@@ -130,20 +130,26 @@ YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
 
 ## 图像与 `--compute`：谁能在 Vulkan 上带图
 
-规则只有一条（`src/app/text/runtime.rs::vulkan_allows_images`）：
+规则只有一条（`src/app/text/runtime.rs::vulkan_allows_images`，实现是
+`ComputePolicy::supports_vision`）：
 
 | 架构 | `--compute vulkan` + 图像 | 原因 |
 |---|---|---|
-| **完整设备路径**（`has_complete_device_path`：llama/qwen3/qwen35/qwen35moe/dory/nemotron_h/sensenova_loop） | **拒绝**，报 "full Vulkan runtime supports text input only" | 整条 decode 都在设备上，没有视觉塔的位置 |
-| **其余架构**（partial 或没有设备路径） | **放行** | 视觉塔留在 CPU，设备只跑它能跑的部分 |
+| **有视觉路径**（`qwen3` / `qwen3vl` / `qwen2vl` / `qwen3vlmoe` / `mage_vl` / `qwen35` / `qwen35moe` / `edge0` / `sensenova_loop`） | **放行** | 视觉塔在 CPU 编码，设备只跑它能跑的部分；完整路径架构走常驻解码器 + CPU 视觉 |
+| **没有视觉路径**（llama 家族、`lfm2moe`、`lfm3`、`falcon-h1`、`mellum`、`spark2_5`、`dory`、`gemma4`…） | **拒绝**，报 "<arch> has no vision path; --mmproj/--image are not supported" | 这些 runtime 没有图像分支，放进去会静默丢掉媒体、只回答纯文本 prompt |
 
-放行是**有意的架构级规则**，不是逐模型白名单：它与 `ComputePolicy::validate_text_arch`
-决定是否打印 "partial device path" 警告用的是同一个划分，因此新增一个 partial 路径的
-架构时不需要再改图像门禁。
+放行**不再**以 `has_complete_device_path` 为界。原因是那条界限保护不了新东西：
+设备侧的量化 kernel 本来就不与 CPU 逐位一致（Q8_0 设备 kernel 与 CPU 的差异见
+TODO-046），而这套漂移在完整路径架构的**纯文本**上早已被接受，于是"图像一律拒绝"
+并没有挡住任何文本路径没有的数值风险。
 
-**验证状态**：Qwen3-VL 家族（塔在 CPU、解码器在设备，上游 #224）与 Mage-VL-Cowork
-（混合投影）有实机证据；其余架构是**按规则放行但未逐个验证**。放行不等于该架构的
-图像路径已在设备上验证 —— 详见各模型的 validation。
+**验证状态**（2026-11-10 实测，见 [统一计算验收](UNIFIED_COMPUTE_VALIDATION.md)）：
+Qwen3.5-0.8B Q8_0 + Qwen3.5-0.8B-mmproj-F16 + 448×448 图像，CPU 与 Vulkan 都能出
+连贯描述，视觉 embedding 两档逐位相同；文本差异与同模型 CPU F16↔F32 KV 的差异同量级。
+`qwen3vl` 家族（上游 #224）与 `mage_vl`（本分支）另有实机证据。
+
+已知不一致（**未改**）：CPU 策略对没有视觉路径的架构仍然静默忽略图像，只有 Vulkan
+会明确报错。要统一需要给每个 runtime 加能力声明，属于独立的改动。
 
 ## 架构
 
