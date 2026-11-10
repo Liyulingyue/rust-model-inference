@@ -201,6 +201,56 @@ tokens and exact reference positions. Golden resizing includes
 The four-image Vulkan smoke completed at 372 tokens, but has no four-image
 numerical reference yet.
 
+## Independent decision-level run (2026-11-10, Linux x86_64)
+
+The acceptance gates above decide whether a format may be called numerically
+equivalent to the reference. They are not a usability verdict, so the same
+question was asked again at the decision level on this host, with the real
+ModelScope checkpoint (`f17dca26…`, SHA256 verified), the F32 export as the
+reference and three quantized exports measured against it.
+
+The reference is the repository's own F32 export, not the official Python
+runtime: this run answers "does the quantized checkpoint still decide the same
+way", which is a weaker and more operational question than "is it numerically
+equivalent to the official implementation".
+
+| Export | Size | Decision flips | Largest probability drift | Reads as |
+|---|---:|---:|---:|---|
+| F32 | 18,190,652,320 B | reference | reference | reference |
+| Q8_0 | 4,869,984,512 B | 0 of 3 | 0.009093 | usable |
+| Q4_0 | 3,734,443,520 B | 1 of 3 | 0.193776 | changes a decision |
+| Q4_1 | 3,997,283,680 B | 1 of 3 | 0.260803 | changes a decision |
+
+Three native decision requests (a choice/noul/score request over a refund
+message, a Chinese noul request over a structured state, and a choice request
+over an arithmetic check) were run per export on CPU with eight threads. The
+flipped decision is the same one in both 4-bit exports: the `urgency` score
+moves from `High` to `Normal`. F32 gives `Low/Normal/High` =
+0.0338/0.3268/0.6394 and Q8_0 gives 0.0316/0.3199/0.6485, both still `High`;
+Q4_0 gives 0.0687/0.4857/0.4456 and Q4_1 gives 0.1018/0.5196/0.3786, both
+`Normal`. The choice and noul answers of the same request move by at most
+0.0011 in the 4-bit exports. Q8_0 keeps every decision and moves every
+probability by at most 0.0091.
+
+This matches the acceptance matrix rather than contradicting it: Q8_0's
+probability gate passes and only its text full-vocabulary logits RMSE misses,
+while the 4-bit formats miss the probability limit itself. The operational
+reading is that the Q8_0 export is a usable checkpoint that cannot carry the
+"numerically validated" label, and the 4-bit exports are not.
+
+Wall clock on the same host (the three requests, 8 threads, CPU): F32
+51.2 / 24.9 / 20.7 s, Q8_0 9.9 / 6.0 / 4.9 s, Q4_0 22.4 / 12.9 / 10.4 s.
+Q8_0 is about four times faster than F32; the 4-bit exports are slower than
+Q8_0 because their dequantization costs more and their vision weights stay
+F32.
+
+The Q4_1 export additionally exposed a shared-kernel gap: the Q4_1 kernel had
+no `embedding_lookup`, so a GGUF with a Q4_1 `token_embd` panicked with
+"embedding_lookup not implemented for this kernel type" while every other
+matmul-capable block type had one. `ops::embedding::embedding_lookup_q4_1`
+and the Q4_1 kernel's implementation now exist and are unit-tested against
+the block layout.
+
 ## Coverage matrix and entrypoint evidence
 
 Implementation and verification are separate. Pass means the stated check ran;
