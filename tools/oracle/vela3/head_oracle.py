@@ -28,8 +28,8 @@ def main():
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-        config = json.loads((root / "vela3_config.json").read_text())
-        width = json.loads((root / "config.json").read_text())["text_config"]["hidden_size"]
+        config = json.loads((root / "vela3_config.json").read_text(encoding="utf-8"))
+        width = json.loads((root / "config.json").read_text(encoding="utf-8"))["text_config"]["hidden_size"]
         words = torch.sin(torch.arange(width * 3).float() * .017).reshape(3, width)
         labels = torch.cos(torch.arange(width * 2).float() * .031).reshape(2, width)
         for route in ("span", "ner", "relation", "image_halu"):

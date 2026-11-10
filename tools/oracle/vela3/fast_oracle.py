@@ -21,7 +21,7 @@ def make_tiny_snapshot(source: Path, destination: Path):
     for file in source.iterdir():
         if file.suffix in (".py", ".json") and file.name != "repo-files.json":
             shutil.copyfile(file, destination / file.name)
-    cfg = json.loads((destination / "config.json").read_text())
+    cfg = json.loads((destination / "config.json").read_text(encoding="utf-8"))
     cfg.update(hidden_size=8, intermediate_size=12, num_hidden_layers=2, num_attention_heads=2,
                num_key_value_heads=1, head_dim=4, attention_windows=[2, None], rope_theta=[10000., 2560000.],
                rmi_fixture="synthetic weights; official modeling and readout code")
@@ -75,7 +75,7 @@ def synthetic_request(root: Path, window: int | None):
         "described": {"type": "span", "criteria": {"person": "A person name", "organization": "A company name"}, "threshold": 0.},
     }
     grouped = 0
-    for text, schema in json.loads((root / "router_questions.json").read_text())["questions"].items():
+    for text, schema in json.loads((root / "router_questions.json").read_text(encoding="utf-8"))["questions"].items():
         task = schema["id"] in ("domain", "factcheck", "feedback")
         if task or (schema["type"] == "set" and "router_set" not in questions):
             key = schema["id"] if task else "router_set"
@@ -92,7 +92,7 @@ def synthetic_request(root: Path, window: int | None):
 
 def adapter_files(root: Path):
     """All configured files, including adapters the official loader can silently omit."""
-    cfg = json.loads((root / "vela3_config.json").read_text())
+    cfg = json.loads((root / "vela3_config.json").read_text(encoding="utf-8"))
     files = {entry["file"] for entry in cfg.get("adapters", {}).values() if entry.get("file")}
     for entry in cfg.get("router", {}).get("task_adapters", {}).values():
         files.update(entry.get("files") or [entry["file"]])
@@ -109,7 +109,7 @@ def span_only_model(base, root: Path):
     import vela3_schema as schema
     model = official.Vela3Encoder.__new__(official.Vela3Encoder)
     model.decision = base
-    model.cfg = json.loads((root / "vela3_config.json").read_text())
+    model.cfg = json.loads((root / "vela3_config.json").read_text(encoding="utf-8"))
     model.name = model.cfg["name"]
     model._VS = schema
     model.router_q, model.router_task = {}, {}
@@ -162,9 +162,9 @@ def main():
     import vela3_encoder as official
     if not args.request and not args.synthetic:
         parser.error("--request is required for official checkpoint weights")
-    request = json.loads(args.request.read_text()) if args.request else synthetic_request(root, args.span_window)
+    request = json.loads(args.request.read_text(encoding="utf-8")) if args.request else synthetic_request(root, args.span_window)
     if args.synthetic and args.span_window:
-        runtime = json.loads((root / "vela3_config.json").read_text())
+        runtime = json.loads((root / "vela3_config.json").read_text(encoding="utf-8"))
         runtime["span"]["window"]["max_len"] = args.span_window
         (root / "vela3_config.json").write_text(json.dumps(runtime))
     torch.set_num_threads(1)
@@ -190,7 +190,7 @@ def main():
     result = dict(snapshot="vllm-sr/vela3-fast@8485c157", request=request, records=records,
                   decision=dict(model="vllm-sr/vela3-fast", answers=answers, usage=dict(input_tokens=input_tokens, output_tokens=0)),
                   reference=dict(torch=torch.__version__, dtype="float32", device="cpu", attention="sdpa",
-                                 weights=json.loads((root / "config.json").read_text()).get("rmi_fixture", "official checkpoint"),
+                                 weights=json.loads((root / "config.json").read_text(encoding="utf-8")).get("rmi_fixture", "official checkpoint"),
                                  adapter_files_present=[name for name in configured_adapters if (root / name).is_file()],
                                  require_all_adapters=args.require_all_adapters))
     if args.system_one or args.synthetic or args.span_only:

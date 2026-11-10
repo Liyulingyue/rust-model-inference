@@ -72,7 +72,12 @@ fn run_jev_decision_qwen3_visual(
     use super::run_jev_decision_core;
     use super::JevScorer;
 
-    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
+    // `compute_jev_result` encodes the A/B/C label chars through this
+    // tokenizer to find their logits, so the visual scorer needs one even
+    // though it never tokenizes the prompt itself. The labels live in the
+    // text GGUF, which is the same source the multimodal helper loads.
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     verify_label_tokens_single(&tokenizer)?;
     let mut scorer = Qwen3VisualJevScorer {
         tokenizer,
@@ -92,6 +97,7 @@ fn run_jev_decision_qwen3_visual(
 /// JEV scorer backed by the shared qwen3 multimodal logits helper, so the two
 /// projector families and their deepstack wiring stay in one place.
 struct Qwen3VisualJevScorer {
+    /// Only used to encode the candidate label chars for logit lookup.
     tokenizer: BPETokenizer,
     /// Rendered `(system, payload)` for the question being scored. `build_prompt`
     /// fills it and `forward_logits` consumes it; `run_jev_decision_core` calls
@@ -218,6 +224,12 @@ impl JevScorer for Qwen3JevScorer {
     ) -> Result<(Vec<f32>, std::time::Duration), String> {
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
+            // Size the KV cache to this prompt, not to the model's whole
+            // context. `new_with_compute` preallocates
+            // `n_layer * capacity * kv_stride` bytes up front, so a model
+            // advertising a 262144-token context asked for a 15 GB
+            // allocation to score one short prompt and the HTTP server died
+            // with "memory allocation of 15032385536 bytes failed".
             token_ids.len(),
             KvFormat::F16,
             crate::core::scratchpad::KvLifecycle::Ephemeral,

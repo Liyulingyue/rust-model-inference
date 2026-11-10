@@ -45,6 +45,9 @@ shader_names=(
     q8_matmul_tiled_dp4a
     q8_matmul_tiled_dp4a_wide
     q8_matmul_tiled_dp4a_wide_add
+    q8_matmul_tiled_dp4a_transposed
+    q8_matmul_tiled_dp4a_wide_transposed
+    q8_matmul_tiled_dp4a_wide_add_transposed
     f16_matmul_tiled
     attention_scores_tiled
     float_matmul_tiled
@@ -52,12 +55,23 @@ shader_names=(
     attention_online
     attention_online_wide
     conv3d_tiled
+    sensenova_mhc
     conv1d_tiled
     auk_fir
     auk_snake
     auk_interleave
     auk_scale
     q8_matmul_transposed
+    relu_square
+    kv_write_f32
+    attention_scores_f32
+    attention_values_f32_kv
+    softmax_f32
+    nemotron_h_ssm_conv
+    nemotron_h_ssm_dt
+    nemotron_h_ssm_scan
+    nemotron_h_ssm_gate
+    nemotron_h_ssm_norm
 )
 manifest="$root_dir/shaders/manifest.sha256"
 

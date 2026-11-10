@@ -148,6 +148,14 @@ impl Gemma4Session<'_> {
                 .per_layer_model_proj
                 .as_ref()
                 .expect("per-layer projection enabled but tensor missing");
+            // The projection runs the repository's own BF16 kernel: the F32
+            // activation stays in F32 and the products accumulate in F32.
+            // llama.cpp instead rounds the activation to BF16 and accumulates
+            // in F64, which is ggml's implementation detail rather than a
+            // precision optimum, so the repository does not copy it (see the
+            // operator-internal-dispatch skill). The two differ by about 1e-3
+            // of the summands; `tests.rs` pins our values and records the
+            // llama.cpp ones next to them.
             prefill_matmul_rows(
                 "per_layer_model_proj.weight",
                 pm,
@@ -763,7 +771,7 @@ fn try_linear_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prefill_matmul_rows(
+pub(super) fn prefill_matmul_rows(
     name: &str,
     weight: &Weight<'_>,
     input: &[f32],

@@ -34,7 +34,7 @@ import numpy as np
 
 class Checkpoint:
     def __init__(self, model_dir: Path):
-        index = json.loads((model_dir / "model.safetensors.index.json").read_text())
+        index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
         self.weight_map = index["weight_map"]
         self.model_dir = model_dir
         self._cache: dict[str, np.ndarray] = {}

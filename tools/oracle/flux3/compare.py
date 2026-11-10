@@ -61,13 +61,13 @@ def validate_reference(rows, arguments):
 
 
 def compare(reference, actual):
-    expected = [json.loads(line) for line in reference.read_text().splitlines()]
-    observed = [json.loads(line) for line in actual.read_text().splitlines()]
+    expected = [json.loads(line) for line in reference.read_text(encoding="utf-8").splitlines()]
+    observed = [json.loads(line) for line in actual.read_text(encoding="utf-8").splitlines()]
     assert expected, 'empty Oracle trace'
     provenance = reference.parent / 'run.json'
     dtype = 'f32'
     if provenance.exists():
-        arguments = json.loads(provenance.read_text())['arguments']
+        arguments = json.loads(provenance.read_text(encoding="utf-8"))['arguments']
         dtype = arguments['dtype']
         assert dtype in ('f32', 'bf16'), 'invalid Oracle dtype'
         validate_reference(expected, arguments)

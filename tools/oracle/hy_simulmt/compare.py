@@ -26,7 +26,7 @@ def metrics(a, b):
 
 def records(root):
     found = {}
-    for line in (root / "trace.jsonl").read_text().splitlines():
+    for line in (root / "trace.jsonl").read_text(encoding="utf-8").splitlines():
         r = json.loads(line)
         if r["name"] in {"hy.enc_inp", "hy.after_transformer", "hy.after_proj2", "hy.projected", "hy.logits"} or r["name"].startswith("hy.projection."):
             key = (r["name"], r["occurrence"])
@@ -44,11 +44,11 @@ def compare(reference, actual, lossy_baseline=None):
     result = {}
     for name in ("tokens.json", "turns.json"):
         if (reference / name).exists():
-            left = json.loads((reference / name).read_text())
-            right = json.loads((actual / name).read_text())
+            left = json.loads((reference / name).read_text(encoding="utf-8"))
+            right = json.loads((actual / name).read_text(encoding="utf-8"))
             assert left == right, f"{name}: discrete output differs"
             if baseline:
-                assert left == json.loads((baseline / name).read_text()), "reference paths have different contexts"
+                assert left == json.loads((baseline / name).read_text(encoding="utf-8")), "reference paths have different contexts"
             result[name] = {"exact": True, "cases": len(left)}
     if (reference / "trace.jsonl").exists():
         left, right = records(reference), records(actual)

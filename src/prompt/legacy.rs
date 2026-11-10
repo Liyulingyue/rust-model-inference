@@ -116,7 +116,8 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
         // GGUF `tokenizer.chat_template` field for these archs. Falcon-H1
         // ships a Qwen-style im_start/im_end template too.
         "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe"
-        | "edge0" | "qwen3tts" | "nemotron_h" | "falcon-h1" | "mellum" => ChatTemplate::ChatML,
+        | "edge0" | "sensenova_loop" | "qwen3tts" | "nemotron_h" | "nemotron_h_moe"
+        | "falcon-h1" | "mellum" => ChatTemplate::ChatML,
 
         // Dory 1.0 ships the same `<|im_start|>role\n … <|im_end|>\n` markers
         // as the Qwen family (its GGUF `tokenizer.chat_template` is ChatML
@@ -167,7 +168,7 @@ pub fn default_template(arch: &str) -> Option<ChatTemplate> {
 pub fn parse_preset(name: &str) -> Option<ChatTemplate> {
     match name.trim().to_ascii_lowercase().as_str() {
         "chatml" | "qwen" | "qwen3" => Some(ChatTemplate::ChatML),
-        "nemotron" | "nemotron_h" => Some(ChatTemplate::ChatML),
+        "nemotron" | "nemotron_h" | "nemotron_h_moe" => Some(ChatTemplate::ChatML),
         "llama3" | "llama" => Some(ChatTemplate::Llama3),
         "exaone" => Some(ChatTemplate::Exaone),
         "phi" | "phi3" | "phi4" => Some(ChatTemplate::Phi4),

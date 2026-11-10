@@ -84,7 +84,7 @@ def compare(directory, quantizer_library=None, quantize=None):
     amplification = []
     available = set()
     oracle = {}
-    for line in (directory / "checkpoints.tsv").read_text().splitlines():
+    for line in (directory / "checkpoints.tsv").read_text(encoding="utf-8").splitlines():
         step, name, *dims = line.split("\t")
         if " (" in name:
             continue
@@ -95,7 +95,7 @@ def compare(directory, quantizer_library=None, quantize=None):
     first = None
     worst = (0.0, None)
     embedding_count = 0
-    for line in (directory / "rust.jsonl").read_text().splitlines():
+    for line in (directory / "rust.jsonl").read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         optional = row["name"] in OPTIONAL_NAMES
         if row["name"] not in NAMES and not optional:

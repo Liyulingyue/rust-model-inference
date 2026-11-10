@@ -18,6 +18,8 @@ pub(crate) mod dory;
 #[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
+pub(crate) mod nemotron_h;
+#[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
 pub(crate) mod q8_layout;
@@ -331,6 +333,7 @@ pub(crate) struct GpuBuffer {
 }
 
 #[cfg(feature = "vulkan")]
+#[derive(Clone)]
 struct DeviceCandidate {
     physical_device: vk::PhysicalDevice,
     queue_family: u32,
@@ -410,7 +413,7 @@ impl VulkanContext {
                 }
             }
 
-            for candidate in rank_supported(candidates) {
+            for candidate in select_device(rank_supported(candidates)) {
                 match Self::create_candidate_resources(&instance, &candidate) {
                     Ok(resources) => {
                         eprintln!(
@@ -2257,6 +2260,41 @@ fn rank_supported(mut candidates: Vec<DeviceCandidate>) -> Vec<DeviceCandidate> 
         _ => 4,
     });
     candidates
+}
+
+/// Pin the Vulkan device when the host has more than one.
+///
+/// The loader and the NVIDIA ICD both ignore `CUDA_VISIBLE_DEVICES`, and the
+/// loader's own `VK_LOADER_DEVICE_SELECT` cannot tell two identical cards
+/// apart, so a shared host has no way to keep a run off a busy GPU. The
+/// selector is either an index into the ranked list or a substring of the
+/// device name; an unknown selector keeps every candidate.
+#[cfg(feature = "vulkan")]
+fn select_device(candidates: Vec<DeviceCandidate>) -> Vec<DeviceCandidate> {
+    let Ok(selector) = std::env::var("RMI_VK_DEVICE") else {
+        return candidates;
+    };
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return candidates;
+    }
+    let selected: Vec<DeviceCandidate> = match selector.parse::<usize>() {
+        Ok(index) => candidates
+            .get(index)
+            .cloned()
+            .map(|candidate| vec![candidate])
+            .unwrap_or_default(),
+        Err(_) => candidates
+            .iter()
+            .filter(|candidate| candidate.name.contains(selector))
+            .cloned()
+            .collect(),
+    };
+    if selected.is_empty() {
+        eprintln!("[GPU] RMI_VK_DEVICE={selector} matched no Vulkan device");
+        return candidates;
+    }
+    selected
 }
 
 #[cfg(feature = "vulkan")]
