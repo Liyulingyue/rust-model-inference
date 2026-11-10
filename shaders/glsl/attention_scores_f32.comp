@@ -1,0 +1,69 @@
+#version 450
+
+// Attention scores in F32.
+//
+// `attention_scores.comp` rounds the query and the key to F16 before the dot
+// product, which is what llama.cpp's F16 KV cache needs. Nemotron-3 Nano
+// keeps an F32 KV cache, so the scores have to be computed on the F32 values
+// the cache actually holds; rounding them here would put the F16 error back
+// into the scores even with an F32 cache.
+//
+// The reduction is the mode-0 compensated F32 sum of
+// `attention_scores.comp`: a single accumulator with a Kahan-style
+// correction term, which is both more accurate and more reproducible than the
+// 8/16/32-lane accumulator modes.
+//
+// The push constant block is identical to `attention_scores.comp`.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint cache_k_word;
+    uint scores_word;
+    uint layer;
+    uint sequence_length;
+    uint capacity;
+    uint q_heads;
+    uint kv_heads;
+    uint head_dim;
+    float scale;
+    uint base_position;
+    uint rows;
+    uint full_attention;
+    uint reduction_mode;
+} pc;
+
+void add_pair(inout float high, inout float low, float value) {
+    precise float sum = high + value;
+    precise float value_virtual = sum - high;
+    precise float error = (high - (sum - value_virtual)) + (value - value_virtual) + low;
+    high = sum + error;
+    low = error - (high - sum);
+}
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    uint total = pc.q_heads * pc.sequence_length;
+    if (index >= total) return;
+    uint head = index / pc.sequence_length;
+    uint token = index - head * pc.sequence_length;
+    if (token >= pc.base_position + row + 1u) return;
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    uint q_base = pc.q_word + (row * pc.q_heads + head) * pc.head_dim;
+    uint key_base = pc.cache_k_word
+        + (pc.layer * pc.capacity + token) * (pc.kv_heads * pc.head_dim)
+        + kv_head * pc.head_dim;
+    precise float sum = 0.0;
+    precise float correction = 0.0;
+    for (uint dimension = 0u; dimension < pc.head_dim; dimension++) {
+        float query = uintBitsToFloat(arena.data[q_base + dimension]);
+        float key = uintBitsToFloat(arena.data[key_base + dimension]);
+        add_pair(sum, correction, query * key);
+    }
+    arena.data[pc.scores_word + row * total + index] = floatBitsToUint((sum + correction) * pc.scale);
+}

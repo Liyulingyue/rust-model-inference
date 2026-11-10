@@ -21,7 +21,7 @@ class ConverterTests(unittest.TestCase):
         self.assertEqual(tensor_type('small.weight', {'shape':[2, 128], 'dtype':'BF16'}, 'q4_k'), 30)
 
     def fixture(self, root, finite=True):
-        config = json.loads(Path('tests/fixtures/unlimited_ocr_config.json').read_text())
+        config = json.loads(Path('tests/fixtures/unlimited_ocr_config.json').read_text(encoding="utf-8"))
         (root/'config.json').write_text(json.dumps(config))
         (root/'tokenizer.json').write_text('{}')
         values = np.arange(512, dtype='<f4')/512

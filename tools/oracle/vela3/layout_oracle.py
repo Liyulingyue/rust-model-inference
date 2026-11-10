@@ -22,7 +22,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(2)
     _, _, Processor, core = official_classes(root)
-    cfg = json.loads((root / "processor_config.json").read_text())
+    cfg = json.loads((root / "processor_config.json").read_text(encoding="utf-8"))
     processor = Idefics3Processor(Processor(**cfg["image_processor"]),
                                 GPT2Tokenizer.from_pretrained(root), image_seq_len=cfg["image_seq_len"])
     layouts = []

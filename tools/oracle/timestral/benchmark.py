@@ -93,7 +93,7 @@ def execute(command, env, log, timeout, wait_idle=False):
 
 
 def backend_evidence(log, mode):
-    text = log.read_text()
+    text = log.read_text(encoding="utf-8")
     backends = re.findall(r'scope=timestral\.transformer backend=(\w+)', text)
     expected = 'Cpu' if mode == 'cpu' else 'Vulkan'
     assert backends and all(value == expected for value in backends), (mode, backends)
@@ -172,7 +172,7 @@ def main():
             resident = json.loads(output)
             resident.update(resource)
             resident['backend_evidence'] = backend_evidence(Path(resource['log']), mode)
-            first = json.loads(Path(resident['output_path']).read_text())
+            first = json.loads(Path(resident['output_path']).read_text(encoding="utf-8"))
             cli = []
             for repeat in range(args.cli_repeats):
                 command = [args.binary.resolve(), '--model', args.model.resolve(), '--timestral-request',
@@ -189,9 +189,9 @@ def main():
             (root / 'report.json').write_text(json.dumps(report, indent=2))
             print(f'end {name} {mode} warm={warm:.3f}ms cli={result["modes"][mode]["cli_median_ms"]:.3f}ms', flush=True)
         if 'cpu' in result['modes']:
-            reference = json.loads(Path(result['modes']['cpu']['resident']['output_path']).read_text())
+            reference = json.loads(Path(result['modes']['cpu']['resident']['output_path']).read_text(encoding="utf-8"))
             for mode, measured in result['modes'].items():
-                actual = json.loads(Path(measured['resident']['output_path']).read_text())
+                actual = json.loads(Path(measured['resident']['output_path']).read_text(encoding="utf-8"))
                 measured['numeric_vs_cpu'] = compare(reference, actual)
             for mode in ('vulkan', 'auto'):
                 if mode in result['modes']:

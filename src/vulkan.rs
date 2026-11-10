@@ -18,6 +18,8 @@ pub(crate) mod dory;
 #[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;
 #[cfg(feature = "vulkan")]
+pub(crate) mod nemotron_h;
+#[cfg(feature = "vulkan")]
 pub(crate) mod ops;
 #[cfg(feature = "vulkan")]
 pub(crate) mod q8_layout;

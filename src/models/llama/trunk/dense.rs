@@ -199,6 +199,8 @@ pub(super) fn gpu_shape(s: &LlamaSession<'_>) -> crate::vulkan::dense::DenseShap
         vocab: c.vocab,
         freq_base: c.freq_base,
         rope_layout: crate::vulkan::ops::RopeLayout::Interleaved,
+        rope_mrope_sections: None,
+        n_deepstack_layers: 0,
         approximate_silu_multiline: false,
         attention_mode: crate::vulkan::ops::AttentionMode::OnlineF32,
     }
@@ -324,7 +326,13 @@ impl LlamaSession<'_> {
                         );
                     }
                     let result = gpu
-                        .forward_chunk(&self.scratch.x[..rows * width], base, rows, project_logits)
+                        .forward_chunk(
+                            &self.scratch.x[..rows * width],
+                            base,
+                            crate::vulkan::dense::ChunkExtras::default(),
+                            rows,
+                            project_logits,
+                        )
                         .map_err(|e| e.to_string())?;
                     crate::compute::state::commit_kv_cache(
                         &mut self.kv_cache,
