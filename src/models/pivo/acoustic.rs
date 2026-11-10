@@ -86,13 +86,22 @@ impl Model {
         result
     }
 
-    pub(super) fn encode(&self, tokens: &[usize], voice: usize) -> (Vec<f32>, Vec<f32>) {
+    /// The token embeddings with the speaker vector added.
+    ///
+    /// The gather stays on the host in the device path too: the token stream
+    /// is short and the copy is a handful of elements per token.
+    pub(super) fn embed(&self, tokens: &[usize], voice: usize) -> Vec<f32> {
         let embeddings = self.w("acoustic.tokens.weight");
         let speaker = &self.w("acoustic.voices.weight")[voice * 96..][..96];
-        let mut x: Vec<f32> = tokens
+        tokens
             .iter()
             .flat_map(|&id| add(&embeddings[id * 96..][..96], speaker))
-            .collect();
+            .collect()
+    }
+
+    /// The six text blocks and the final norm.
+    pub(super) fn text_blocks(&self, x: &[f32]) -> Vec<f32> {
+        let mut x = x.to_vec();
         for i in 0..6 {
             let p = format!("acoustic.text_blocks.{i}");
             x = if i % 2 == 0 {
@@ -106,8 +115,25 @@ impl Model {
                 add(&x, &output)
             };
         }
-        let encoded = self.norm("acoustic.text_norm", &x);
-        let mut durations = self.linear("acoustic.durations.in_proj", &encoded);
+        self.norm("acoustic.text_norm", &x)
+    }
+
+    /// The whole encoder on the host.
+    pub(super) fn encode(&self, tokens: &[usize], voice: usize) -> (Vec<f32>, Vec<f32>) {
+        let x = self.embed(tokens, voice);
+        let encoded = self.text_blocks(&x);
+        let log_durations = self.duration_head(&encoded);
+        (encoded, log_durations)
+    }
+
+    /// The frame duration head.
+    ///
+    /// The head produces the integer frame durations, and the device path
+    /// keeps it on the host: the rounding of the durations is sensitive, and
+    /// the host and the device have to agree on the log duration to far
+    /// better than the rounding margin.
+    pub(super) fn duration_head(&self, encoded: &[f32]) -> Vec<f32> {
+        let mut durations = self.linear("acoustic.durations.in_proj", encoded);
         silu(&mut durations);
         for i in 0..2 {
             let p = format!("acoustic.durations.layers.{i}");
@@ -116,7 +142,7 @@ impl Model {
             silu(&mut durations);
             durations = self.norm(&format!("acoustic.durations.norms.{i}"), &durations);
         }
-        (encoded, self.linear("acoustic.durations.out", &durations))
+        self.linear("acoustic.durations.out", &durations)
     }
 
     pub(super) fn decode(&self, expanded: &[f32]) -> Vec<f32> {

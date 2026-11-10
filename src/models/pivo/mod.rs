@@ -1,5 +1,7 @@
 //! PiVo-1.4M: English frontend, acoustic network and FARGAN vocoder.
 mod acoustic;
+#[cfg(feature = "vulkan")]
+mod gpu;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -110,6 +112,37 @@ pub struct Model {
     frontend: text::Frontend,
     /// How the GGUF stored the weights. The arithmetic is F32 either way.
     pub format: WeightFormat,
+    /// Whether the acoustic encoder runs on the Vulkan device.
+    device: bool,
+    /// The policy the model was loaded with.
+    policy: ComputePolicy,
+}
+
+/// Whether the acoustic encoder runs on the device.
+///
+/// The encoder is the only part of PiVo that can: the vocoder is a strictly
+/// sequential recurrence, and the decoder feeds a pitch period whose
+/// rounding margin is smaller than the difference between the host and the
+/// device. The device path therefore runs the encoder on the device and
+/// keeps the duration head, the decoder and the vocoder on the host, which
+/// leaves the frame durations the host's.
+///
+/// `Auto` stays on the host. Two reasons, and both of them hold:
+/// the device path is measured slower than the host's SIMD path at PiVo's
+/// sizes -- the encoder is a small part of an utterance and the device's
+/// per-dispatch cost dominates it -- and the host's frame durations are the
+/// reference the oracle checks the WAV bytes against. The strict policy
+/// still runs the encoder on the device: the flag asks for a device, and the
+/// device path is there to be used.
+fn device_enabled(compute: ComputePolicy) -> bool {
+    match compute {
+        ComputePolicy::Cpu => false,
+        #[cfg(feature = "vulkan")]
+        ComputePolicy::Vulkan => crate::ops::get_vulkan_context().is_some(),
+        #[cfg(not(feature = "vulkan"))]
+        ComputePolicy::Vulkan => false,
+        ComputePolicy::Auto => false,
+    }
 }
 
 /// Reads one contract tensor and returns its F32 values.
@@ -180,8 +213,9 @@ fn load_tensor(source: &dyn TensorSource, name: &str, shape: &[usize]) -> Result
 
 impl Model {
     pub fn from_source(source: &dyn TensorSource, compute: ComputePolicy) -> Result<Self, String> {
-        if compute == ComputePolicy::Vulkan {
-            return Err("PiVo has no Vulkan path; use --compute cpu or auto".into());
+        let device = device_enabled(compute);
+        if compute == ComputePolicy::Vulkan && !device {
+            return Err("PiVo needs a Vulkan device for --compute vulkan".into());
         }
         let meta = |key| source.metadata(key).and_then(MetaValue::to_string_val);
         if meta("general.architecture").as_deref() != Some(ARCHITECTURE) {
@@ -202,11 +236,12 @@ impl Model {
             weights.insert(name.clone(), Tensor { shape, data });
         }
         let frontend = text::Frontend::new(meta("pivo.lexicon").ok_or("Missing pivo.lexicon")?)?;
-        compute.trace("pivo", crate::compute::UsedBackend::Cpu, 1);
         Ok(Self {
             weights,
             frontend,
             format,
+            device,
+            policy: compute,
         })
     }
 
@@ -226,7 +261,29 @@ impl Model {
             .frontend
             .phonemize(&request.input, &request.overrides)
             .map_err(InvalidInput)?;
+        #[cfg(feature = "vulkan")]
+        let (encoded, log_durations) = if self.device {
+            let encoded = self
+                .encode_on_device(&front.tokens, voice)
+                .map_err(Numerical)?;
+            let log_durations = self.duration_head(&encoded);
+            (encoded, log_durations)
+        } else {
+            self.encode(&front.tokens, voice)
+        };
+        #[cfg(not(feature = "vulkan"))]
         let (encoded, log_durations) = self.encode(&front.tokens, voice);
+        // The encoder is the only part that can be on the device, so the
+        // trace reports the encoder's backend and not the utterance's.
+        self.policy.trace(
+            "pivo_encoder",
+            if self.device {
+                crate::compute::UsedBackend::Vulkan
+            } else {
+                crate::compute::UsedBackend::Cpu
+            },
+            front.tokens.len(),
+        );
         if encoded.iter().chain(&log_durations).any(|v| !v.is_finite()) {
             return Err(Numerical("PiVo produced non-finite encoder output".into()));
         }

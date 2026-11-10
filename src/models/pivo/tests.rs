@@ -58,10 +58,11 @@ fn loader_rejects_arch_config_missing_component_shape_dtype_length_and_nan() {
     let mut s = source();
     assert!(Model::from_source(&s, ComputePolicy::Cpu).is_ok());
     assert!(Model::from_source(&s, ComputePolicy::Auto).is_ok());
-    assert!(Model::from_source(&s, ComputePolicy::Vulkan)
-        .err()
-        .unwrap()
-        .contains("no Vulkan"));
+    // The strict policy needs a device: a build without the Vulkan feature
+    // has none, and a build with one still needs a device to be present.
+    if let Err(error) = Model::from_source(&s, ComputePolicy::Vulkan) {
+        assert!(error.contains("Vulkan"), "{error}");
+    }
     for (key, value) in [
         ("general.architecture", "qwen3"),
         ("pivo.format", "unknown"),
@@ -531,4 +532,62 @@ fn official_onnx_checkpoints_and_waveform() {
             gates.pcm.1,
         );
     }
+}
+
+/// The device encoder has to keep the host's frame durations.
+///
+/// The durations are rounded to whole frames and the rounding margin of the
+/// shortest oracle case is 0.0024 frames, so the device and the host have to
+/// agree on the log duration to far better than that before the frame count
+/// can differ. The frames decide the length of the waveform, so a difference
+/// here is an audible difference and not a rounding detail.
+#[cfg(feature = "vulkan")]
+#[test]
+fn device_encoder_keeps_the_host_frame_durations() {
+    let path = std::path::Path::new("models/PiVo-1.4M/pivo-F32.gguf");
+    if !path.exists() {
+        eprintln!("the PiVo model file is missing, the device check is skipped");
+        return;
+    }
+    // The strict policy brings the device up and keeps it in the legacy
+    // scope for the rest of the test.
+    let _scope = match ComputePolicy::Vulkan.configure_cli() {
+        Ok(scope) => scope,
+        Err(error) => {
+            eprintln!("no Vulkan device, the device check is skipped: {error}");
+            return;
+        }
+    };
+    let source = crate::core::loader::GGUFLoader::from_file(path).unwrap();
+    let host = Model::from_source(&source, ComputePolicy::Cpu).unwrap();
+    let device = Model::from_source(&source, ComputePolicy::Vulkan).unwrap();
+    let text = "NASA is ready for the next mission.";
+    let front = host.frontend.phonemize(text, &HashMap::new()).unwrap();
+    let (host_encoded, host_logs) = host.encode(&front.tokens, 0);
+    let device_encoded = device.encode_on_device(&front.tokens, 0).unwrap();
+    let device_logs = device.duration_head(&device_encoded);
+
+    let scale = host_encoded.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let error = host_encoded
+        .iter()
+        .zip(&device_encoded)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    let log_error = host_logs
+        .iter()
+        .zip(&device_logs)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    eprintln!(
+        "encoder: |x|max={scale:e} error={error:e} relative={:e} log-duration error={log_error:e}",
+        error / scale
+    );
+    let host_frames = acoustic::durations(&front.tokens, &host_logs, 1.0).unwrap();
+    let device_frames = acoustic::durations(&front.tokens, &device_logs, 1.0).unwrap();
+    eprintln!("frames: host={host_frames:?}");
+    eprintln!("frames: device={device_frames:?}");
+    assert_eq!(
+        host_frames, device_frames,
+        "the device and the host disagree on the frame durations"
+    );
 }

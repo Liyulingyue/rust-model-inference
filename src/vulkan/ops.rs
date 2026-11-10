@@ -48,6 +48,21 @@ const AUK_INTERLEAVE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_inter
 /// Elementwise scale for the AuK VAE residual sum.
 const AUK_SCALE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_scale.spv");
 
+/// Dense projection for the PiVo acoustic network.
+const PIVO_LINEAR_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_linear.spv");
+/// Split-half rotary embedding for the PiVo attention.
+const PIVO_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_rope.spv");
+/// Grouped-query attention for the PiVo acoustic network.
+const PIVO_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_attention.spv");
+/// RMS normalisation with the weight resident in the arena.
+const PIVO_RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_rms_norm.spv");
+/// Dilated 1D convolution in PiVo's frame major layout.
+const PIVO_CONV1D_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_conv1d.spv");
+/// Gated linear unit for the PiVo feed-forward blocks.
+const PIVO_SWIGLU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_swiglu.spv");
+/// SiLU activation for the PiVo convolution blocks.
+const PIVO_SILU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_silu.spv");
+
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
@@ -223,6 +238,18 @@ const Q8_MATMUL_GROUPED_TILED_TRANSPOSED: usize = 60;
 const Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED: usize = 61;
 const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED: usize = 62;
 
+/// The PiVo acoustic network operators.
+///
+/// They are appended after every other operator, so the existing pipeline
+/// indices stay valid.
+const PIVO_LINEAR: usize = 63;
+const PIVO_ROPE: usize = 64;
+const PIVO_ATTENTION: usize = 65;
+const PIVO_RMS_NORM: usize = 66;
+const PIVO_CONV1D: usize = 67;
+const PIVO_SWIGLU: usize = 68;
+const PIVO_SILU: usize = 69;
+
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
         2
@@ -364,6 +391,13 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q8_matmul_tiled_dp4a_transposed",
     "q8_matmul_tiled_dp4a_wide_transposed",
     "q8_matmul_tiled_dp4a_wide_add_transposed",
+    "pivo_linear",
+    "pivo_rope",
+    "pivo_attention",
+    "pivo_rms_norm",
+    "pivo_conv1d",
+    "pivo_swiglu",
+    "pivo_silu",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -489,7 +523,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 63] = [
+const OPERATOR_SHADERS: [&[u8]; 70] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -553,6 +587,13 @@ const OPERATOR_SHADERS: [&[u8]; 63] = [
     Q8_MATMUL_GROUPED_TILED_TRANSPOSED_SHADER,
     Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED_SHADER,
     Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED_SHADER,
+    PIVO_LINEAR_SHADER,
+    PIVO_ROPE_SHADER,
+    PIVO_ATTENTION_SHADER,
+    PIVO_RMS_NORM_SHADER,
+    PIVO_CONV1D_SHADER,
+    PIVO_SWIGLU_SHADER,
+    PIVO_SILU_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2530,6 +2571,448 @@ impl AukVaeRuntime {
         count: usize,
     ) -> Result<(), VulkanError> {
         self.scale(source, destination, count, 1.0)
+    }
+}
+
+/// The arena capacity of the PiVo acoustic network, in floats.
+pub(crate) struct PivoCapacity {
+    /// Floats per activation buffer.
+    pub(crate) activation: usize,
+    /// Floats in the rotation table of the rotary embedding.
+    pub(crate) rope_table: usize,
+    /// Floats in the resident weight pool.
+    pub(crate) weight: usize,
+    /// Floats in the resident bias pool.
+    pub(crate) bias: usize,
+}
+
+/// The device runtime of the PiVo acoustic network.
+///
+/// The activations stay in the arena between the operators and the weights
+/// are uploaded once and stay resident, so a block runs without touching the
+/// host. PiVo's own layout is used everywhere: the activations are frame
+/// major and the convolution weight is `[out][in][tap]`, so nothing has to
+/// be transposed on the way in or out.
+pub(crate) struct PivoRuntime {
+    ops: Qwen3Ops<'static>,
+    pub(crate) x: ArenaRegion,
+    pub(crate) normed: ArenaRegion,
+    pub(crate) q: ArenaRegion,
+    pub(crate) k: ArenaRegion,
+    pub(crate) v: ArenaRegion,
+    pub(crate) attn: ArenaRegion,
+    pub(crate) projection: ArenaRegion,
+    pub(crate) gate: ArenaRegion,
+    pub(crate) up: ArenaRegion,
+    pub(crate) down: ArenaRegion,
+    pub(crate) conv: ArenaRegion,
+    /// The rotation table of the rotary embedding, filled by the host.
+    pub(crate) rope_table: ArenaRegion,
+    weight: ArenaRegion,
+    bias: ArenaRegion,
+    weight_used: usize,
+    bias_used: usize,
+}
+
+impl PivoRuntime {
+    /// The device context the runtime records into.
+    pub(crate) fn context(&self) -> &'static VulkanContext {
+        self.ops.context
+    }
+
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: PivoCapacity,
+    ) -> Result<Self, VulkanError> {
+        if capacity.activation == 0
+            || capacity.rope_table == 0
+            || capacity.weight == 0
+            || capacity.bias == 0
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo arena needs a non-empty region".into(),
+            ));
+        }
+        let mut cursor = 0;
+        let mut regions = Vec::with_capacity(14);
+        for _ in 0..11 {
+            regions.push(f32_region(&mut cursor, capacity.activation)?);
+        }
+        regions.push(f32_region(&mut cursor, capacity.rope_table)?);
+        regions.push(f32_region(&mut cursor, capacity.weight)?);
+        regions.push(f32_region(&mut cursor, capacity.bias)?);
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            x: regions[0],
+            normed: regions[1],
+            q: regions[2],
+            k: regions[3],
+            v: regions[4],
+            attn: regions[5],
+            projection: regions[6],
+            gate: regions[7],
+            up: regions[8],
+            down: regions[9],
+            conv: regions[10],
+            rope_table: regions[11],
+            weight: regions[12],
+            bias: regions[13],
+            weight_used: 0,
+            bias_used: 0,
+        })
+    }
+
+    /// Check a work grid against the device limits.
+    ///
+    /// The shared dispatcher does not validate the grid, so the PiVo
+    /// operators check it themselves: an empty group is a no-op that would
+    /// silently skip the operator.
+    fn check_grid(&self, grid: [u32; 3], label: &str) -> Result<(), VulkanError> {
+        for (index, count) in grid.iter().enumerate() {
+            if *count == 0 {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "PiVo {label} dispatch is empty"
+                )));
+            }
+            if *count > self.ops.context.limits.max_compute_work_group_count[index] {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "PiVo {label} dispatch {index}={count} exceeds the device limit {}",
+                    self.ops.context.limits.max_compute_work_group_count[index]
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Upload host data into an arena region.
+    pub(crate) fn upload(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
+        self.ops.write_f32(region, values)
+    }
+
+    /// Read an arena region back to the host.
+    pub(crate) fn download(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+    ) -> Result<Vec<f32>, VulkanError> {
+        Ok(self.ops.read_f32(region, count)?.to_vec())
+    }
+
+    /// Reserve a slice of the resident weight pool and fill it.
+    ///
+    /// The weights stay on the device for the lifetime of the runtime, so a
+    /// block does not re-upload them.
+    pub(crate) fn upload_weight(&mut self, values: &[f32]) -> Result<ArenaRegion, VulkanError> {
+        let bytes = values
+            .len()
+            .checked_mul(4)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if self.weight_used + bytes > self.weight.size {
+            return Err(VulkanError::OutOfMemory);
+        }
+        let region = self.weight.shifted(self.weight_used);
+        self.weight_used += bytes;
+        self.ops.write_f32(region, values)?;
+        Ok(region)
+    }
+
+    /// Reserve a slice of the resident bias pool and fill it.
+    pub(crate) fn upload_bias(&mut self, values: &[f32]) -> Result<ArenaRegion, VulkanError> {
+        let bytes = values
+            .len()
+            .checked_mul(4)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if self.bias_used + bytes > self.bias.size {
+            return Err(VulkanError::OutOfMemory);
+        }
+        let region = self.bias.shifted(self.bias_used);
+        self.bias_used += bytes;
+        self.ops.write_f32(region, values)?;
+        Ok(region)
+    }
+
+    /// `output[row][o] = bias[o] + sum_i input[row][i] * weight[o][i]`.
+    pub(crate) fn linear(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: ArenaRegion,
+        bias: Option<ArenaRegion>,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+        input_stride: usize,
+        output_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let weight_stride = n_in;
+        let push = [
+            self.ops
+                .f32_word(input, rows * input_stride, "PiVo linear input")?,
+            self.ops
+                .f32_word(weight, n_out * weight_stride, "PiVo linear weight")?,
+            match bias {
+                Some(bias) => self.ops.f32_word(bias, n_out, "PiVo linear bias")?,
+                None => u32::MAX,
+            },
+            self.ops
+                .f32_word(output, rows * output_stride, "PiVo linear output")?,
+            as_u32(n_in, "PiVo linear input width")?,
+            as_u32(n_out, "PiVo linear output width")?,
+            as_u32(rows, "PiVo linear rows")?,
+            as_u32(input_stride, "PiVo linear input stride")?,
+            as_u32(output_stride, "PiVo linear output stride")?,
+            as_u32(weight_stride, "PiVo linear weight stride")?,
+        ];
+        let dispatch = [n_out.div_ceil(64) as u32, 1, rows as u32];
+        self.check_grid(dispatch, "pivo_linear")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_LINEAR,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// RMS normalisation with the weight resident in the arena.
+    pub(crate) fn rms_norm(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: ArenaRegion,
+        count: usize,
+        eps: f32,
+        rows: usize,
+        input_stride: usize,
+        output_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops
+                .f32_word(input, rows * input_stride, "PiVo norm input")?,
+            self.ops.f32_word(weight, count, "PiVo norm weight")?,
+            self.ops
+                .f32_word(output, rows * output_stride, "PiVo norm output")?,
+            as_u32(count, "PiVo norm width")?,
+            as_u32(rows, "PiVo norm rows")?,
+            eps.to_bits(),
+            as_u32(input_stride, "PiVo norm input stride")?,
+            as_u32(output_stride, "PiVo norm output stride")?,
+        ];
+        let dispatch = super::dispatch_grid(rows, &self.ops.context.limits)?;
+        self.check_grid([dispatch.0, dispatch.1, 1], "pivo_rms_norm")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_RMS_NORM,
+            self.ops.arena_bindings,
+            &push,
+            [dispatch.0, dispatch.1, 1],
+        );
+        Ok(())
+    }
+
+    /// Split-half rotary embedding over `units` heads of 24 elements.
+    ///
+    /// The sine and the cosine come from the table the host filled, so the
+    /// rotation is the host's rotation.
+    pub(crate) fn rope(
+        &self,
+        commands: &TokenCommands<'_>,
+        buffer: ArenaRegion,
+        table: ArenaRegion,
+        rows: usize,
+        width: usize,
+        units: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops
+                .f32_word(buffer, rows * width, "PiVo rope buffer")?,
+            self.ops.f32_word(table, rows * 24, "PiVo rope table")?,
+            as_u32(rows, "PiVo rope rows")?,
+            as_u32(width, "PiVo rope width")?,
+            as_u32(units, "PiVo rope units")?,
+        ];
+        // One lane per rotated pair, so there are twelve lanes per head.
+        let total = rows * units * 12;
+        let dispatch = [total.div_ceil(64) as u32, 1, 1];
+        self.check_grid(dispatch, "pivo_rope")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_ROPE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// Grouped-query attention over the whole sequence or a causal window.
+    pub(crate) fn attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        output: ArenaRegion,
+        rows: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        window: usize,
+        causal: bool,
+    ) -> Result<(), VulkanError> {
+        let q_stride = q_heads * head_dim;
+        let kv_stride = kv_heads * head_dim;
+        let push = [
+            self.ops
+                .f32_word(q, rows * q_stride, "PiVo attention query")?,
+            self.ops
+                .f32_word(k, rows * kv_stride, "PiVo attention key")?,
+            self.ops
+                .f32_word(v, rows * kv_stride, "PiVo attention value")?,
+            self.ops
+                .f32_word(output, rows * q_stride, "PiVo attention output")?,
+            as_u32(rows, "PiVo attention rows")?,
+            as_u32(q_heads, "PiVo attention query heads")?,
+            as_u32(kv_heads, "PiVo attention key heads")?,
+            as_u32(head_dim, "PiVo attention head width")?,
+            as_u32(window, "PiVo attention window")?,
+            u32::from(causal),
+            as_u32(q_stride, "PiVo attention query stride")?,
+            as_u32(kv_stride, "PiVo attention key stride")?,
+            as_u32(q_stride, "PiVo attention output stride")?,
+            // The host divides the score by the square root of the head
+            // width. The square root comes from the host so that both sides
+            // scale the score the same way.
+            (head_dim as f32).sqrt().to_bits(),
+        ];
+        let dispatch = [q_heads as u32, rows as u32, 1];
+        self.check_grid(dispatch, "pivo_attention")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_ATTENTION,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// Dilated 1D convolution in PiVo's frame major layout.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv1d(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: ArenaRegion,
+        bias: Option<ArenaRegion>,
+        in_channels: usize,
+        out_channels: usize,
+        frames: usize,
+        out_frames: usize,
+        kernel: usize,
+        dilation: usize,
+        padding: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops
+                .f32_word(input, frames * in_channels, "PiVo conv input")?,
+            self.ops.f32_word(
+                weight,
+                out_channels * kernel * in_channels,
+                "PiVo conv weight",
+            )?,
+            match bias {
+                Some(bias) => self.ops.f32_word(bias, out_channels, "PiVo conv bias")?,
+                None => u32::MAX,
+            },
+            self.ops
+                .f32_word(output, out_frames * out_channels, "PiVo conv output")?,
+            as_u32(in_channels, "PiVo conv input channels")?,
+            as_u32(out_channels, "PiVo conv output channels")?,
+            as_u32(frames, "PiVo conv frames")?,
+            as_u32(out_frames, "PiVo conv output frames")?,
+            as_u32(kernel, "PiVo conv kernel")?,
+            as_u32(dilation, "PiVo conv dilation")?,
+            as_u32(padding, "PiVo conv padding")?,
+        ];
+        let dispatch = [out_channels.div_ceil(64) as u32, out_frames as u32, 1];
+        self.check_grid(dispatch, "pivo_conv1d")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_CONV1D,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// `output[i] = silu(gate[i]) * up[i]`.
+    pub(crate) fn swiglu(
+        &self,
+        commands: &TokenCommands<'_>,
+        gate: ArenaRegion,
+        up: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops.f32_word(gate, count, "PiVo swiglu gate")?,
+            self.ops.f32_word(up, count, "PiVo swiglu multiplier")?,
+            self.ops.f32_word(output, count, "PiVo swiglu output")?,
+            as_u32(count, "PiVo swiglu count")?,
+            1,
+        ];
+        let dispatch = [count.div_ceil(64) as u32, 1, 1];
+        self.check_grid(dispatch, "pivo_swiglu")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_SWIGLU,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// `output[i] = x / (1 + exp(-x))`, in place.
+    pub(crate) fn silu(
+        &self,
+        commands: &TokenCommands<'_>,
+        buffer: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops.f32_word(buffer, count, "PiVo silu buffer")?,
+            as_u32(count, "PiVo silu count")?,
+            1,
+        ];
+        let dispatch = [count.div_ceil(64) as u32, 1, 1];
+        self.check_grid(dispatch, "pivo_silu")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_SILU,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// Add one region to another, in place on the target.
+    pub(crate) fn add(
+        &self,
+        commands: &TokenCommands<'_>,
+        target: ArenaRegion,
+        addition: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        self.ops.record_add(&commands, target, addition, count)?;
+        Ok(())
     }
 }
 
@@ -10137,6 +10620,13 @@ mod tests {
                 "q8_matmul_tiled_dp4a_wide_add_transposed",
                 Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED_SHADER,
             ),
+            (PIVO_LINEAR, "pivo_linear", PIVO_LINEAR_SHADER),
+            (PIVO_ROPE, "pivo_rope", PIVO_ROPE_SHADER),
+            (PIVO_ATTENTION, "pivo_attention", PIVO_ATTENTION_SHADER),
+            (PIVO_RMS_NORM, "pivo_rms_norm", PIVO_RMS_NORM_SHADER),
+            (PIVO_CONV1D, "pivo_conv1d", PIVO_CONV1D_SHADER),
+            (PIVO_SWIGLU, "pivo_swiglu", PIVO_SWIGLU_SHADER),
+            (PIVO_SILU, "pivo_silu", PIVO_SILU_SHADER),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
@@ -13566,5 +14056,311 @@ mod tests {
                 unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
             }
         }
+    }
+
+    /// The PiVo operators have to agree with the host kernels.
+    ///
+    /// The acoustic encoder's output decides the frame durations, and the
+    /// durations are rounded to whole frames, so an operator that drifts
+    /// turns into a different utterance length. The check runs every operator
+    /// against a reference that follows the host kernel step by step.
+    #[test]
+    fn pivo_operators_match_the_host_kernels() {
+        use super::*;
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let mut runtime = PivoRuntime::new(
+            context,
+            PivoCapacity {
+                activation: 16 * 1024,
+                rope_table: 4 * 1024,
+                weight: 16 * 1024,
+                bias: 64,
+            },
+        )
+        .unwrap();
+        let mut state = 0x1234_5678u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+        };
+        let mut sample = |count: usize| -> Vec<f32> { (0..count).map(|_| next()).collect() };
+
+        // The linear projection.
+        let rows = 3;
+        let n_in = 8;
+        let n_out = 5;
+        let input = sample(rows * n_in);
+        let weight = sample(n_out * n_in);
+        let bias = sample(n_out);
+        let weight_region = runtime.upload_weight(&weight).unwrap();
+        let bias_region = runtime.upload_bias(&bias).unwrap();
+        runtime.upload(runtime.x, &input).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .linear(
+                &commands,
+                runtime.x,
+                runtime.down,
+                weight_region,
+                Some(bias_region),
+                n_in,
+                n_out,
+                rows,
+                n_in,
+                n_out,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.down, rows * n_out).unwrap();
+        let mut want = vec![0f32; rows * n_out];
+        for row in 0..rows {
+            for out in 0..n_out {
+                let mut sum = 0f32;
+                for i in 0..n_in {
+                    sum += input[row * n_in + i] * weight[out * n_in + i];
+                }
+                want[row * n_out + out] = sum + bias[out];
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-4, "linear drifted by {error:e}");
+
+        // The RMS normalisation.
+        let width = 8;
+        let norm_weight = sample(width);
+        let norm_region = runtime.upload_weight(&norm_weight).unwrap();
+        runtime.upload(runtime.normed, &input).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .rms_norm(
+                &commands,
+                runtime.normed,
+                runtime.gate,
+                norm_region,
+                width,
+                1e-6,
+                rows,
+                width,
+                width,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.gate, rows * width).unwrap();
+        let mut want = vec![0f32; rows * width];
+        for row in 0..rows {
+            let slice = &input[row * width..(row + 1) * width];
+            let sum_sq: f64 = slice.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+            let mean_sq = (sum_sq / width as f64) as f32;
+            let scale = 1.0f32 / (mean_sq + 1e-6).sqrt();
+            for i in 0..width {
+                want[row * width + i] = slice[i] * scale * norm_weight[i];
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "rms_norm drifted by {error:e}");
+
+        // The rotary embedding.
+        let units = 4;
+        let head_width = 24;
+        let width = units * head_width;
+        let values = sample(rows * width);
+        let mut table = vec![0f32; rows * 24];
+        for (position, row) in table.chunks_exact_mut(24).enumerate() {
+            for pair in 0..12 {
+                let theta = position as f32 * ((2 * pair) as f32 * (-10000f32.ln() / 24.)).exp();
+                let (sin, cos) = theta.sin_cos();
+                row[pair] = sin;
+                row[12 + pair] = cos;
+            }
+        }
+        runtime.upload(runtime.q, &values).unwrap();
+        runtime.upload(runtime.rope_table, &table).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .rope(&commands, runtime.q, runtime.rope_table, rows, width, units)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.q, rows * width).unwrap();
+        let mut want = values.clone();
+        for (t, row) in want.chunks_exact_mut(width).enumerate() {
+            for head in row.chunks_exact_mut(head_width) {
+                for i in 0..head_width / 2 {
+                    let theta = t as f32 * ((2 * i) as f32 * (-10000f32.ln() / 24.)).exp();
+                    let (sin, cos) = theta.sin_cos();
+                    let (a, b) = (head[i], head[i + head_width / 2]);
+                    head[i] = a * cos - b * sin;
+                    head[i + head_width / 2] = b * cos + a * sin;
+                }
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "rope drifted by {error:e}");
+
+        // The attention.
+        let q_heads = 4;
+        let kv_heads = 2;
+        let head_dim = 24;
+        let q = sample(rows * q_heads * head_dim);
+        let k = sample(rows * kv_heads * head_dim);
+        let v = sample(rows * kv_heads * head_dim);
+        runtime.upload(runtime.q, &q).unwrap();
+        runtime.upload(runtime.k, &k).unwrap();
+        runtime.upload(runtime.v, &v).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .attention(
+                &commands,
+                runtime.q,
+                runtime.k,
+                runtime.v,
+                runtime.attn,
+                rows,
+                q_heads,
+                kv_heads,
+                head_dim,
+                64,
+                false,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime
+            .download(runtime.attn, rows * q_heads * head_dim)
+            .unwrap();
+        let mut want = vec![0f32; rows * q_heads * head_dim];
+        for t in 0..rows {
+            for h in 0..q_heads {
+                let query = &q[t * q_heads * head_dim + h * head_dim..][..head_dim];
+                let mut scores: Vec<f32> = (0..rows)
+                    .map(|s| {
+                        let key = &k[s * kv_heads * head_dim + (h / 2) * head_dim..][..head_dim];
+                        let mut dot = 0f32;
+                        for d in 0..head_dim {
+                            dot += query[d] * key[d];
+                        }
+                        dot / (head_dim as f32).sqrt()
+                    })
+                    .collect();
+                let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0f64;
+                for score in scores.iter_mut() {
+                    *score = (*score - max).exp();
+                    sum += f64::from(*score);
+                }
+                let scale = (1.0 / sum) as f32;
+                for score in scores.iter_mut() {
+                    *score *= scale;
+                }
+                for (s, score) in scores.iter().enumerate() {
+                    for d in 0..head_dim {
+                        want[t * q_heads * head_dim + h * head_dim + d] +=
+                            score * v[s * kv_heads * head_dim + (h / 2) * head_dim + d];
+                    }
+                }
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "attention drifted by {error:e}");
+
+        // The dilated convolution.
+        let in_channels = 8;
+        let out_channels = 4;
+        let frames = 6;
+        let kernel = 5;
+        let dilation = 2;
+        let padding = 4;
+        let out_frames = frames + 2 * padding - dilation * (kernel - 1);
+        let signal = sample(frames * in_channels);
+        let conv_weight = sample(out_channels * in_channels * kernel);
+        let conv_region = runtime.upload_weight(&conv_weight).unwrap();
+        runtime.upload(runtime.normed, &signal).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .conv1d(
+                &commands,
+                runtime.normed,
+                runtime.conv,
+                conv_region,
+                None,
+                in_channels,
+                out_channels,
+                frames,
+                out_frames,
+                kernel,
+                dilation,
+                padding,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime
+            .download(runtime.conv, out_frames * out_channels)
+            .unwrap();
+        let mut want = vec![0f32; out_frames * out_channels];
+        for t in 0..out_frames {
+            let mut window = vec![0f32; in_channels * kernel];
+            for c in 0..in_channels {
+                for j in 0..kernel {
+                    let pos = t as isize + j as isize * dilation as isize - padding as isize;
+                    if (0..frames as isize).contains(&pos) {
+                        window[c * kernel + j] = signal[pos as usize * in_channels + c];
+                    }
+                }
+            }
+            for o in 0..out_channels {
+                let mut sum = 0f32;
+                for c in 0..in_channels {
+                    for j in 0..kernel {
+                        sum += window[c * kernel + j]
+                            * conv_weight[o * in_channels * kernel + c * kernel + j];
+                    }
+                }
+                want[t * out_channels + o] = sum;
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-4, "conv1d drifted by {error:e}");
+
+        // The gated linear unit.
+        let count = rows * 32;
+        let gate = sample(count);
+        let up = sample(count);
+        runtime.upload(runtime.gate, &gate).unwrap();
+        runtime.upload(runtime.up, &up).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .swiglu(&commands, runtime.gate, runtime.up, runtime.down, count)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.down, count).unwrap();
+        let want: Vec<f32> = gate
+            .iter()
+            .zip(&up)
+            .map(|(g, u)| (g / (1.0 + (-g).exp())) * u)
+            .collect();
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "swiglu drifted by {error:e}");
     }
 }

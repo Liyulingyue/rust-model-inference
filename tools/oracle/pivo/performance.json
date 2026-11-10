@@ -1,7 +1,7 @@
 {
   "date": "2026-11-10",
   "timezone": "Asia/Shanghai",
-  "code_commit": "556f1e9f6f1f",
+  "code_commit": "5d8079d7b918",
   "model": {
     "repository": "modelscope:empero-ai/PiVo-1.4M",
     "source_revision": "b573f75b8cc1d2f30b3d3dac0dad0827b867a80d",
@@ -26,12 +26,14 @@
       "runtime": "CPUExecutionProvider, one thread"
     },
     "cache_policy": "Separate CLI processes; the reported Rust number is the wall time from process start to the written WAV, so it includes the model load. The official ONNX number is measured the same way, from importing the session to the finished audio.",
-    "gpu": "none; PiVo has no device path"
+    "gpu": "Intel(R) Graphics (MTL), Meteor Lake integrated GPU, Vulkan 1.3; the device path covers the acoustic encoder only"
   },
   "notes": [
     "RTF is the synthesis wall time divided by the audio duration; both sides are under 0.11, so both run more than ten times faster than real time.",
     "--threads makes no measurable difference: the model is 1.4M parameters, so the per-frame vocoder loop dominates and the thread pool has nothing to parallelise.",
-    "The Q8_0 export is 24.5% smaller than the F32 export, but it is not usable: the FARGAN feedback loop amplifies the weight grid into a carrier phase drift. See validation.md."
+    "The Q8_0 export is 24.5% smaller than the F32 export, but it is not usable: the FARGAN feedback loop amplifies the weight grid into a carrier phase drift. See validation.md.",
+    "The Vulkan device path is measured and slower than the host's SIMD path: the encoder is a small part of an utterance, the vocoder's strictly sequential FARGAN loop is the rest, and the device's per-dispatch cost dominates the encoder. Auto stays on the CPU; the strict --compute vulkan policy is the only way to reach the device path.",
+    "The device path reproduces the host's frame durations exactly, and the waveform stays inside the oracle's gate (RMS 7.41e-5 of full scale against a 7.5e-4 gate). See validation.md#vulkan-device-path."
   ],
   "cases": {
     "short": {
@@ -98,5 +100,48 @@
       "rtf_official_onnx": 0.08852074279983035,
       "rust_over_official_onnx": 0.9422466168916711
     }
+  },
+  "device_path": {
+    "scope": "The strict --compute vulkan policy runs the acoustic encoder on the device. The duration head, the decoder and the vocoder stay on the host: the FARGAN loop is strictly sequential and the pitch period's rounding margin is 1.36e-6.",
+    "measurement": "HTTP request against rust-model-server, the model loaded once, so the number is the synthesis time. Median of the runs, x86_64, release-fast.",
+    "encoder_only_median_ms": {
+      "cpu": {
+        "tokens_34": 2.63,
+        "tokens_100": 8.54,
+        "tokens_200": 14.37
+      },
+      "vulkan": {
+        "tokens_34": 8.01,
+        "tokens_100": 14.54,
+        "tokens_200": 17.1
+      }
+    },
+    "end_to_end_median_ms": {
+      "short": {
+        "text": "NASA is ready for the next mission.",
+        "tokens": 21,
+        "cpu": 75.8,
+        "vulkan": 78.3,
+        "ratio": 1.033,
+        "samples": 29920
+      },
+      "long": {
+        "text": "four sentences",
+        "tokens": 130,
+        "cpu": 561.7,
+        "vulkan": 630.7,
+        "ratio": 1.123,
+        "samples": 120960
+      }
+    },
+    "numerics_against_the_host": {
+      "encoder_relative_error": 4.6092285e-07,
+      "log_duration_absolute_error": 4.7683716e-07,
+      "frame_durations": "identical",
+      "waveform_rms_of_full_scale": 7.4096e-05,
+      "waveform_largest_sample_difference": 13,
+      "oracle_gate_rms": 0.00075
+    },
+    "why_auto_stays_on_the_cpu": "The encoder is 3-12% of an utterance and the device pays about 50 microseconds per dispatch while the encoder needs about 70 dispatches, so the device path is slower here. Auto also keeps the CPU's byte-identical WAVs, which the interface check asserts."
   }
 }

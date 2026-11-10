@@ -74,9 +74,14 @@ corresponding default. Invalid requests return 400 (schema errors 422); concurre
 synthesis returns 429. JEV/chat/embedding routes are not mounted on this backend.
 Numerical inference failures return 500.
 
-CPU and Auto both use existing Rust SIMD operators on the CPU. Strict Vulkan is
-rejected; there is no GPU speedup claim. Every utterance creates independent
-acoustic/vocoder/DSP state.
+CPU and Auto both use existing Rust SIMD operators on the CPU, and Auto's WAV
+bytes are the CPU's. The strict Vulkan policy runs the acoustic encoder on the
+device and keeps the duration head, the decoder and the vocoder on the host;
+the frame durations are the host's and the waveform stays inside the oracle's
+gate, but the encoder is measured slower than the host's SIMD path, so there
+is no GPU speedup claim. Every utterance creates independent
+acoustic/vocoder/DSP state. The device path is documented in
+[validation.md](validation.md#vulkan-device-path).
 
 Same machine, same weights, measured from a cold process to the finished audio
 (Intel Core Ultra 5 125H, x86_64, `release-fast`):

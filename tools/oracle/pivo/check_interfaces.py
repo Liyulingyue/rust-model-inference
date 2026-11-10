@@ -31,13 +31,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix='pivo-check-') as directory:
         root = Path(directory)
 
-        def run(request, compute='cpu'):
+        def run(request, compute='cpu', backend='Cpu'):
             output = root / 'speech.wav'
             command = [cli, *common, '--prompt', request['input'], '--voice', request['voice'],
                        '--speed', str(request['speed']), '--compute', compute, '--out', str(output),
                        '--pronunciations', json.dumps(request.get('overrides', {}))]
             result = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
-            assert 'scope=pivo backend=Cpu' in result.stderr, result.stderr
+            assert f'scope=pivo_encoder backend={backend}' in result.stderr, result.stderr
             return output.read_bytes()
 
         wavs = []
@@ -67,10 +67,30 @@ def main():
             assert not (root / 'bad.wav').exists(), flags
         result = subprocess.run([cli, '--model', str(args.model), '--prompt', 'hello'], capture_output=True)
         assert result.returncode != 0 and b'pivo' in result.stderr.lower(), result.stderr
-        result = subprocess.run([cli, *common, '--prompt', 'hello', '--out', str(root / 'bad.wav'),
-                                 '--compute', 'vulkan'], capture_output=True)
-        assert result.returncode != 0 and b'vulkan' in result.stderr.lower(), result.stderr
-        print('CLI: incompatible controls, task routes and strict Vulkan rejected', flush=True)
+        print('CLI: incompatible controls and task routes rejected', flush=True)
+
+        # The strict Vulkan policy runs the acoustic encoder on the device.
+        # The build decides whether the device path exists at all: a build
+        # without the Vulkan feature rejects the flag.
+        vulkan = subprocess.run([cli, *common, '--prompt', cases[0]['request']['input'],
+                                 '--voice', cases[0]['request']['voice'],
+                                 '--speed', str(cases[0]['request']['speed']),
+                                 '--compute', 'vulkan', '--out', str(root / 'vulkan.wav')],
+                                env=env, capture_output=True, text=True)
+        if vulkan.returncode == 0:
+            assert 'scope=pivo_encoder backend=Vulkan' in vulkan.stderr, vulkan.stderr
+            with wave.open(str(root / 'vulkan.wav')) as wav:
+                device = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2') / 32767.
+            with wave.open(io.BytesIO(wavs[0])) as wav:
+                host = np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2') / 32767.
+            assert device.shape == host.shape, (device.shape, host.shape)
+            delta = device - host
+            assert np.max(np.abs(delta)) <= 5.1e-3 and np.sqrt(np.mean(delta ** 2)) <= 7.6e-4
+            print('CLI: strict Vulkan ran the encoder on the device and stayed inside the gate',
+                  flush=True)
+        else:
+            assert 'vulkan' in vulkan.stderr.lower(), vulkan.stderr
+            print('CLI: strict Vulkan rejected, this build has no device path', flush=True)
 
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))

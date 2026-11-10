@@ -24,11 +24,13 @@ says so; it never says "not applicable" to hide a gap.
 | Pronunciation overrides | `pivo-f32-v1` | F32 | CPU | `--pronunciations '{"zzvo":["Z","IY1","V","OW0"]}'` — oracle case | `{"overrides":{"zzvo":[...]}}` — verified in `check_interfaces.py` | token IDs match the official frontend exactly | implemented / **passed** |
 | Frontend normalization | `pivo-f32-v1` | F32 | CPU | numbers, currency, ISO dates, initialisms, NFKC — oracle cases | same code path | normalized text and token IDs match exactly | implemented / **passed** |
 | JEV, chat, embeddings | — | — | — | — | 404, the routes are absent | — | **not applicable**: PiVo is a speech synthesis model with no scoring or text semantics (contract has no probability head) |
-| Device path (Vulkan) | `pivo-f32-v1` | — | Vulkan | `--compute vulkan` — rejected at load: "PiVo has no Vulkan path" | same rejection at startup | no device kernel, no submission counters | **not implemented** (see [Limits](#limits)) |
+| Device path (Vulkan) | `pivo-f32-v1` | F32 weights, F32 compute | Vulkan | `--compute vulkan` — the acoustic encoder runs on the device, the trace prints `scope=pivo_encoder backend=Vulkan` | the server takes the same flag and the same path | encoder 4.61e-7 relative against the host, frame durations identical, waveform RMSE 7.41e-5 of full scale (gate 7.5e-4); the encoder itself is 1.03x (short) to 1.12x (long) slower than the host's SIMD path | implemented / **passed** — the encoder only, see [Vulkan device path](#vulkan-device-path) |
 | Quantized weights | `pivo-q8_0-v1` | Q8_0 storage, F32 compute | CPU | `--quant q8_0` export — 6,988,192 bytes instead of 9,252,704 | loads, and the server prints the same warning as the CLI | waveform error 0.82 of full scale, pitch period mismatch up to 23.23% | implemented / **failed** — the audio is not usable, see [Q8_0 export](#q80-export-the-audio-is-not-usable) |
 
 Auto is the same code path as CPU: `--compute auto` runs on the CPU, reports
-`scope=pivo backend=Cpu` and produces byte-identical WAVs.
+`scope=pivo_encoder backend=Cpu` and produces byte-identical WAVs. The strict
+`--compute vulkan` policy moves the acoustic encoder to the device; the rest
+of the pipeline stays on the host.
 
 ## Pinned inputs
 
@@ -177,8 +179,81 @@ case and 0.92x on the long one, both far faster than real time. `--threads 1`,
 the per-frame vocoder loop dominates and the thread pool has nothing to
 parallelise.
 
-There is no Vulkan path, so there is no GPU number to report; the model is
-CPU only by design.
+The Vulkan device path exists for the acoustic encoder. It is measured, and it
+is slower than the host's SIMD path, so Auto stays on the CPU and the strict
+policy is the only way to reach it:
+
+| Case | `--compute cpu` (HTTP request) | `--compute vulkan` (HTTP request) | Ratio |
+| --- | --- | --- | --- |
+| "NASA is ready for the next mission." (21 tokens) | 75.8 ms | 78.3 ms | 1.03x |
+| Four sentences (about 130 tokens) | 561.7 ms | 630.7 ms | 1.12x |
+
+The reason is structural, not a missing kernel: the encoder is 3-12% of an
+utterance (the vocoder's strictly sequential FARGAN loop is the rest), and the
+device pays roughly 50 microseconds per dispatch while the encoder needs about
+70 dispatches. The numbers are in [performance.json](performance.json).
+
+## Vulkan device path
+
+The strict `--compute vulkan` policy runs the acoustic encoder on the device.
+Everything else stays on the host, and the split is not a compromise between
+the two: the two parts cannot move.
+
+- **The vocoder stays on the host.** FARGAN feeds its own output back into the
+  next step, so the frames of an utterance are strictly sequential. A device
+  would add a dispatch per frame and remove no work: 92% of an utterance's
+  time is that loop.
+- **The decoder stays on the host.** It feeds a pitch period whose rounding
+  margin is 1.36e-6, smaller than the difference between the host and the
+  device, so a device decoder would flip periods and change the audio.
+- **The duration head stays on the host.** It produces the integer frame
+  durations and those are rounded. The rounding margin of the shortest oracle
+  case is 0.0024 frames, so the device and the host have to agree on the log
+  duration far better than that before the frame count can differ.
+
+What runs on the device is therefore the encoder: three attention blocks, three
+convolution blocks and the final norm. Seven shaders implement it, all in
+PiVo's own layout, because the shared kernels keep a different one and would
+need a transpose on the way in or out:
+
+| Shader | Operator |
+| --- | --- |
+| `pivo_linear.comp` | `out[row][o] = bias[o] + sum_i in[row][i] * weight[o][i]` |
+| `pivo_rms_norm.comp` | RMS normalisation, Kahan sum, weight resident in the arena |
+| `pivo_rope.comp` | split-half rotary embedding, driven by the host's table |
+| `pivo_attention.comp` | grouped-query attention, four query heads over two key heads |
+| `pivo_conv1d.comp` | dilated 1D convolution in PiVo's frame-major layout |
+| `pivo_swiglu.comp` | `silu(gate) * up` |
+| `pivo_silu.comp` | SiLU for the convolution blocks |
+
+The weights are uploaded once and stay resident; the activations stay in the
+arena between the operators, and the whole encoder is recorded into one
+command buffer.
+
+### The rotary embedding is the host's
+
+A device's `sin` and `cos` are a couple of ULP away from the host's, and the
+rotation moves with them. The first version computed the angle on the device
+and the encoder drifted by 34% — the encoder's output is the input of the
+duration head, whose rounding margin is 0.0024 frames, so that much drift
+changes the utterance length. The host now fills a table with its own
+`sin_cos` and the device reads it, which makes the rotation the host's
+rotation bit for bit.
+
+### What the device path reproduces
+
+| Quantity | Device against the host |
+| --- | --- |
+| Encoder output, relative error | 4.61e-7 |
+| Log duration, absolute error | 4.77e-7 |
+| Frame durations | identical, every case |
+| Waveform, RMS error of full scale | 7.41e-5 (the oracle's gate is 7.5e-4) |
+| Waveform, largest sample difference | 13 of 32767, on one Intel integrated GPU |
+
+`src/vulkan/ops.rs` holds an operator-level check that runs every one of the
+seven shaders against a reference that follows the host kernel step by step,
+and `src/models/pivo/tests.rs` holds the encoder-level check that compares the
+frame durations of the device and the host.
 
 ## Interfaces and review
 
@@ -204,8 +279,12 @@ integration run also exposed and fixed the missing `--tts` architecture gate.
 
 The x86 re-run repeated all of it: `check_interfaces.py` reported
 `CLI: 8 oracle cases; CPU/Auto byte-identical WAV`,
-`CLI: incompatible controls, task routes and strict Vulkan rejected` and
+`CLI: incompatible controls and task routes rejected` and
 `HTTP: defaults/overrides, PCM/WAV, reset, 400/404/422/429 passed [200, 429, 429, 429]`.
+
+The Vulkan build adds one line: `CLI: strict Vulkan ran the encoder on the
+device and stayed inside the gate`. A build without the Vulkan feature
+rejects the flag instead and says so.
 
 ## Reproduction and regression
 
@@ -262,10 +341,12 @@ The entire repository test suite and CI are not claimed green.
 
 ## Limits
 
-English Pi/Vo, F32 GGUF, CPU/Auto only. JEV, voice cloning, sampling and
+English Pi/Vo, F32 GGUF, CPU/Auto by default. JEV, voice cloning, sampling and
 streaming HTTP are not implemented. The Q8_0 export exists and loads, but its
 audio is not usable, so the F32 export is the only one to use. Real-model
 measurements were made on an arm64 host and repeated on x86_64; the CI is
 configured for lightweight loader/frontend/CLI regressions, not the downloaded
-oracle. Long-form quality, listening tests, physical GPU execution and
-performance beyond the two cases above remain unverified.
+oracle. Long-form quality, listening tests and performance beyond the cases
+above remain unverified. The device path was measured on one Intel
+integrated GPU; a discrete GPU was not available, and the device path is
+slower than the host's SIMD path there.

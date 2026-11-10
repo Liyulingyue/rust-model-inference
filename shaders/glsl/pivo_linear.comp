@@ -1,0 +1,41 @@
+#version 450
+
+// Dense projection for the PiVo acoustic network.
+//
+// `out[row][o] = bias[o] + sum_i in[row][i] * weight[o][i]`
+//
+// The weight keeps PiVo's own `[out][in]` layout and stays resident in the
+// arena, so a block runs its projections without re-uploading the weights.
+// The accumulation walks the input dimension in order, the same order the
+// host kernel uses, so the device result stays as close to the host one as
+// F32 allows.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint weight_word; uint bias_word; uint output_word;
+    uint n_in; uint n_out; uint rows;
+    uint input_stride; uint output_stride; uint weight_stride;
+} pc;
+
+void main() {
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column = column_base + gl_LocalInvocationID.x;
+    if (column >= pc.n_out) return;
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+
+    float sum = 0.0;
+    for (uint i = 0u; i < pc.n_in; i++) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + row * pc.input_stride + i]);
+        float weight = uintBitsToFloat(
+            arena.data[pc.weight_word + column * pc.weight_stride + i]);
+        sum += value * weight;
+    }
+    if (pc.bias_word != 0xffffffffu) {
+        sum += uintBitsToFloat(arena.data[pc.bias_word + column]);
+    }
+    arena.data[pc.output_word + row * pc.output_stride + column] = floatBitsToUint(sum);
+}
