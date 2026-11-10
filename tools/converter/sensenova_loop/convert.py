@@ -211,7 +211,7 @@ def add_metadata(writer, root, config):
     }
     for key, value in values.items():
         writer.add_meta(f"{ARCH}.{key}", value)
-    tok = json.loads((root / "tokenizer.json").read_text())
+    tok = json.loads((root / "tokenizer.json").read_text(encoding="utf-8"))
     vocab = {i: t for t, i in tok["model"]["vocab"].items()}
     added = tok["added_tokens"]
     vocab.update({t["id"]: t["content"] for t in added})
@@ -235,7 +235,7 @@ def add_metadata(writer, root, config):
     }.items():
         writer.add_meta("tokenizer.ggml." + key, value)
     writer.add_meta(
-        "tokenizer.chat_template", (root / "chat_template.jinja").read_text()
+        "tokenizer.chat_template", (root / "chat_template.jinja").read_text(encoding="utf-8")
     )
 
 
@@ -248,7 +248,7 @@ def convert(root, output, mmproj, quant="f32"):
     from tools.converter.ovisocr3.convert_ovisocr3 import expected_tensor_shapes
     from tools.converter.utils.gguf import GgufWriter, GGML_F32, gguf_dims
 
-    config = json.loads((root / "config.json").read_text())
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))
     if config.get("model_type") != ARCH or config.get("architectures") != [
         "SenseNovaLoopForConditionalGeneration"
     ]:
@@ -344,7 +344,7 @@ def convert(root, output, mmproj, quant="f32"):
     text_partial = writer.path
     # The existing vision encoder consumes Qwen3.5's physical tower unchanged.
     writer = GgufWriter(mmproj.with_suffix(".gguf.partial"))
-    pre = json.loads((root / "preprocessor_config.json").read_text())
+    pre = json.loads((root / "preprocessor_config.json").read_text(encoding="utf-8"))
     v = vision["hidden_size"]
     merge = vision["spatial_merge_size"]
     metadata = {

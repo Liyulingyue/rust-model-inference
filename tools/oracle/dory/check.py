@@ -13,7 +13,7 @@ SCALED_MAX_ABS_LIMIT = 0.01
 
 def load(path):
     tensors, tokens = {}, {}
-    for line in Path(path).read_text().splitlines():
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         if "token_ids" in row:
             if row["name"] in tokens:

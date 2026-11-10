@@ -1,4 +1,4 @@
-use rust_model_inference::app::{parse_cli_options, validate_cli_options};
+use rust_model_inference::app::{parse_cli_options, validate_cli_options, CliOptions};
 
 fn validate(args: &[&str]) -> Result<(), String> {
     let options = parse_cli_options(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
@@ -40,6 +40,8 @@ fn enhancement_is_an_explicit_audio_task() {
         vec!["--jev-context", "test"],
         vec!["--tts-model", "other"],
         vec!["--system-one-request", "request.json"],
+        vec!["--decision-request", "request.json"],
+        vec!["--decision-thinker", "thinker.gguf"],
         vec!["--adapter", "adapter"],
         vec!["--kv-cache", "f16"],
         vec!["--jev-output", "text"],
@@ -50,6 +52,22 @@ fn enhancement_is_an_explicit_audio_task() {
         let mut mixed = args.to_vec();
         mixed.extend(extra.iter().copied());
         assert!(validate(&mixed).is_err(), "{extra:?}");
+    }
+}
+
+#[test]
+fn enhancement_rejects_decision_options_from_direct_callers() {
+    for request in [true, false] {
+        let options = CliOptions {
+            enhance: true,
+            model: "reuse".into(),
+            audio: Some("in.wav".into()),
+            out: Some("out.wav".into()),
+            decision_request: request.then(|| "request.json".into()),
+            decision_thinker: (!request).then(|| "thinker.gguf".into()),
+            ..CliOptions::default()
+        };
+        assert!(validate_cli_options(&options).is_err());
     }
 }
 

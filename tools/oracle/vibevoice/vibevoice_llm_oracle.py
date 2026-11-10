@@ -118,7 +118,7 @@ class GgufSource:
 class SafetensorsSource:
     def __init__(self, model_dir: Path):
         self.path = model_dir
-        self.config = json.loads((model_dir / "config.json").read_text())["decoder_config"]
+        self.config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))["decoder_config"]
         self.reader = ShardedSafetensors(model_dir)
 
     def tensor(self, name: str) -> np.ndarray:

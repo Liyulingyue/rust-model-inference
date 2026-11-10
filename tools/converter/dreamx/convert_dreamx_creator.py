@@ -343,7 +343,7 @@ def _require_file(root: Path, relative: str) -> Path:
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid JSON file: {path}") from error
     if not isinstance(value, dict):
@@ -705,7 +705,7 @@ def build_pair_metadata(
             sorted(set(COMPONENT_PREFIXES) - MAIN_COMPONENTS),
         ),
         ("dreamx.outtype", "bf16"),
-        ("dreamx.tokenizer.json", inventory.tokenizer_json.read_text()),
+        ("dreamx.tokenizer.json", inventory.tokenizer_json.read_text(encoding="utf-8")),
         *common,
     ]
     return {"main": main, "mmproj": mmproj}

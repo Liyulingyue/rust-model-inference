@@ -1070,6 +1070,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 }
             }
         }
+        // Emit complete, unnormalized rows once, independent of chunk size.
         // Before the q/k L2 norms. The oracle emits `q_conv` here (the
         // linear's output) and `q_conv_predelta` after the norm, so without
         // this the two checkpoints cannot say whether a difference came out
@@ -1324,14 +1325,14 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         edge0: bool,
     ) {
-        let n_embd = self.config.n_embd;
-        let n_ff = self.config.n_ff;
         // qwen35moe has no dense FFN: the routed + shared experts replace it.
         let (Some(ffn_gate), Some(ffn_up), Some(ffn_down)) =
             (&layer.ffn_gate, &layer.ffn_up, &layer.ffn_down)
         else {
             return;
         };
+        let n_embd = self.config.n_embd;
+        let n_ff = self.config.n_ff;
         let q8k_required = ffn_gate.uses_q8_k() || ffn_up.uses_q8_k();
         assert!(
             !q8k_required || n_embd % crate::ops::quant::QK_K == 0,

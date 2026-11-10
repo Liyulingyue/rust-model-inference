@@ -181,3 +181,18 @@ The official CPU path uses Python 3.12.3 / Torch 2.9.1+gitff65f5b. The same `qua
 Cross-host fixture audit: source OGG hashes, NumPy 2.5.4, SciPy 1.17.0, SoundFile 0.13.1 and libsndfile 1.2.2 match, but platform-dependent OGG decode rounding changes a few PCM16 samples after pairing. Across all 12 pairs, clean WAVs differ at **60/432,000** samples and noisy WAVs at **75/432,000**, with maximum difference **1/32768** in either set. Decoded OGG crops already differ by at most `1.78813934e-7`; supplying those remote decoded crops to the local pairing code reproduces all 24 remote PCM payloads exactly. Each host records its own clean/input hashes and compares native/oracle against the same local PCM. Cross-host PCM bit identity is not an acceptance gate for this lossy decode path.
 
 These Linux checks do not establish GPU, CUDA-driver, quantized/other-dtype, sustained-load or general perceptual equivalence. No full Linux library baseline comparison was run in this follow-up; the macOS full-suite comparison and prior CI evidence above remain separate.
+
+## Main integration — 2026-11-10
+
+Merged upstream main `0ea4e3837611325b58f22b7457b039cfeaecf176` into branch head `79b4bd5541bc87ab6edde19cf8d6e4b5741aca33`. Resolutions preserve both enhancement and THX-02 help, dispatch and model-list entries, main's `supplied_flags` tracking, and independent enhancement/decision/System One validation blocks. Direct `CliOptions` callers now also reject enhancement combined with either new decision field; the added regression failed before that fix and passes afterward. RE-USE model and shared FFT arithmetic are unchanged by this merge.
+
+Fresh macOS arm64 checks with Rust 1.98.1 (`RMI_SCALAR` and `RMI_PARITY_TRACE` unset):
+
+- Default and `--features vulkan` `cargo check --locked --all-targets`: passed; Vulkan execution remains unverified.
+- `cargo fmt -- --check`: passed.
+- `cargo test --locked --profile release-fast --lib`: before merge **1506 passed / 13 failed / 97 ignored**, after merge **1531 passed / 13 failed / 99 ignored**. The exact failure-name sets are identical, with no added or removed failure.
+- Enhancement CLI **3 passed**, System One CLI **6 passed**, decision CLI **9 passed** using the same test profile.
+- Ordinary-build official-spectral real-weight test: **1 passed**, all 13 chunk/channel groups; worst waveform max absolute error `3.48221511e-6`, worst RMSE `9.05721563e-7`. This still requires identical frontend features.
+- Vela3 Python oracle tests (`python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'`): **6 passed**, including main's fixes for the previously reported fixture failures.
+
+Independent waveform/quality pairs, HTTP inference and remote/GPU execution were not rerun for this integration-only change. Their dated evidence and limits above are unchanged; strict independent waveform parity remains unresolved, and this PR stays Draft / Experimental.

@@ -14,6 +14,8 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         }
         if (options.serve && (options.audio.is_some() || options.out.is_some()))
             || options.system_one_request.is_some()
+            || options.decision_request.is_some()
+            || options.decision_thinker.is_some()
             || options.adapter.is_some()
             || options.jev
             || options.rerank
@@ -91,6 +93,12 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             return Err("--enhance cannot be combined with generation, JEV, other task modes or server-side --audio/--out".into());
         }
         return crate::models::nemotron_reuse::Model::validate_compute(options.compute_policy());
+    }
+    if options.decision_request.is_some() {
+        return crate::app::decision::validate_options(options);
+    }
+    if options.decision_thinker.is_some() && !options.jev && !options.serve {
+        return Err("--decision-thinker requires --decision-request, --jev or server mode".into());
     }
     if options.adapter.is_some() && options.system_one_request.is_none() {
         return Err("--adapter requires --system-one-request".into());
