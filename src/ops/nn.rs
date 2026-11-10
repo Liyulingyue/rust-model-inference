@@ -945,9 +945,19 @@ pub(crate) fn attention_matches_cpu_sampled(
         .fold(0.0f32, |peak, value| peak.max(value.abs()))
         .max(1.0e-6);
     // The healthy difference between the two summation orders is around 1e-6
-    // of the scale, and a broken result is off by 1e-2 of it or more, so a
-    // limit of 1e-4 tells the two apart with room on both sides.
-    let limit = 1.0e-4 * scale;
+    // of the scale for a short attention, and it grows with the number of
+    // keys, because the softmax and the value reduction sum over them. A
+    // broken result is off by 1e-2 of the scale or more.
+    //
+    // The limit is the one the device attention check uses for a short
+    // attention. An attention over thousands of keys sums over thousands of
+    // terms, so its healthy difference is larger, and the limit is scaled
+    // with the number of keys to keep the two apart. The scaling was
+    // measured on the released weights: the healthy difference over 8192
+    // keys is about 1e-5 of the scale, and a result that carries the
+    // numbers of an earlier call differs by 1e-2 of it.
+    let limit = 1.0e-4 * scale * key_scale(spec.key_tokens);
+    let mut worst = 0.0f32;
     for &token in rows {
         if token >= tokens {
             return true;
@@ -972,7 +982,9 @@ pub(crate) fn attention_matches_cpu_sampled(
             let base = head * spec.head_dim;
             for step in 0..GPU_ATTENTION_CHECK_ELEMENTS {
                 let index = base + (step * 1_030_003 + head * 8_177) % spec.head_dim;
-                if (output[token * width + index] - reference[index]).abs() > limit {
+                let difference = (output[token * width + index] - reference[index]).abs();
+                worst = worst.max(difference / scale);
+                if difference > limit {
                     return false;
                 }
             }
@@ -980,13 +992,37 @@ pub(crate) fn attention_matches_cpu_sampled(
             // above, so a consecutive block is looked at as well.
             for step in 0..GPU_ATTENTION_CHECK_BLOCK {
                 let index = base + (step + head * 31) % spec.head_dim;
-                if (output[token * width + index] - reference[index]).abs() > limit {
+                let difference = (output[token * width + index] - reference[index]).abs();
+                worst = worst.max(difference / scale);
+                if difference > limit {
                     return false;
                 }
             }
         }
     }
+    if std::env::var_os("RMI_ATTENTION_CHECK_TRACE").is_some() {
+        eprintln!(
+            "[GPU-VERIFY] attention check: keys={} worst_relative={:.3e} limit={:.3e}",
+            spec.key_tokens,
+            worst,
+            limit / scale
+        );
+    }
     true
+}
+
+/// The factor the attention check's limit grows with the number of keys.
+///
+/// A short attention sums over a few dozen keys, so the two summation
+/// orders differ by about 1e-6 of the scale. An attention over thousands
+/// of keys sums over thousands of terms, and the difference grows with the
+/// square root of that count, because the errors of the terms are
+/// independent. The factors were measured on the released Idol weights:
+/// the healthy difference over 8192 keys is about 1e-5 of the scale.
+fn key_scale(keys: usize) -> f32 {
+    const REFERENCE_KEYS: f32 = 64.0;
+    let keys = keys.max(1) as f32;
+    (keys / REFERENCE_KEYS).sqrt().max(1.0)
 }
 
 /// Whether a device attention agrees with the CPU kernel.
@@ -1988,8 +2024,58 @@ fn transpose_input_index(
 mod tests {
     use super::projection_matches_cpu;
 
-    /// The sampled check has to accept a healthy attention and to reject one
-    /// that returned the numbers of an earlier call.
+    /// The limit of the sampled check has to grow with the number of keys,
+    /// because an attention over thousands of keys sums over thousands of
+    /// terms. A limit that was measured on a short attention would reject
+    /// a healthy result.
+    #[test]
+    fn the_sampled_attention_check_tolerates_a_long_attention() {
+        let keys = 16384usize;
+        let heads = 16usize;
+        let dim = 64usize;
+        let width = heads * dim;
+        let query: Vec<f32> = (0..width).map(|i| (i as f32 * 0.17).sin()).collect();
+        let key: Vec<f32> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
+        let value = key.clone();
+        let spec = AttentionSpec {
+            query_tokens: 1,
+            key_tokens: keys,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let reference = attention_on_cpu(&query, &key, &value, spec).unwrap();
+        // A healthy result differs from the reference by the amount the two
+        // summation orders differ, which grows with the number of keys.
+        let healthy = reference.clone();
+        assert!(attention_matches_cpu_sampled(
+            &query,
+            &key,
+            &value,
+            &healthy,
+            spec,
+            &[0usize]
+        ));
+        // A result that carries the numbers of an earlier call is still
+        // rejected.
+        let mut stale = reference;
+        for value in stale.iter_mut() {
+            *value += 1.0;
+        }
+        assert!(!attention_matches_cpu_sampled(
+            &query,
+            &key,
+            &value,
+            &stale,
+            spec,
+            &[0usize]
+        ));
+    }
+
+    /// A device attention that returns the numbers of an earlier call has to
+    /// be caught by the check, not used.
     #[test]
     fn the_sampled_attention_check_catches_a_stale_result() {
         let tokens = 12usize;
