@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{AppState, Backend};
-use crate::app::decision::JevPlan;
+use crate::app::decision::jev::JevPlan;
 use crate::app::{JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput};
 
 pub(super) fn routes() -> Router<AppState> {

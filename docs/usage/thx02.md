@@ -79,6 +79,28 @@ available with `--allow-remote-images`, under the shared download size,
 timeout, redirect and public-address checks. HTTP requests cannot open local
 files, including `file://` URLs.
 
+## Decision or JEV
+
+Both shapes reach the same engine; they differ in the protocol, not in the
+model. Pick by what the caller already has:
+
+| | Native decision | JEV |
+|---|---|---|
+| Request | one **state** plus **several** typed questions (`choice`, `noul`, `score`) in one JSON object | one question per request (`--jev-question`), with `--jev-multi` for paired choices and `--jev-block` for grouped blocks |
+| Output | every question's full probability distribution, its type, and the `noul`/`score` value | `JevResult`: the chosen label or score with its probability |
+| Entry points | `--decision-request`, `POST /v1/decide`, `POST /v1/decide/batch` | `--jev`, `POST /v1/jev/score`, `/v1/jev/grouped`, `/v1/jev/image`, `/v1/jev/image_grouped` |
+| Extras | TTA (1-8) and the optional thinker checkpoint | none; JEV always runs `think:false` |
+
+The native request is the richer one: it can ask several questions about one
+state in a single forward pass, and its question order, option order and
+readout markers are part of the published protocol, so they are exact. JEV is
+the cross-model scoring contract shared with the other models, and THX-02
+answers it through the same routes as every other model.
+
+Use the native request when the caller has a state and a set of questions, or
+when it needs TTA or a thought. Use JEV when the caller already speaks the
+shared scorer interface and only needs one question answered.
+
 The existing JEV input forms are also available:
 
 ```sh

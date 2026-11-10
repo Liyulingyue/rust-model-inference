@@ -168,7 +168,7 @@ fn main() {
         .filter(|source| app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH)
     {
         app::init_rayon_global_pool(n_threads);
-        app::run_or_exit(app::decision::run_jev_cli(
+        app::run_or_exit(app::decision::jev::run_jev_cli(
             source.clone(),
             &options,
             n_threads,
@@ -622,7 +622,7 @@ fn main() {
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
     if app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH {
-        app::run_or_exit(app::decision::run_jev_cli(
+        app::run_or_exit(app::decision::jev::run_jev_cli(
             source.clone(),
             &options,
             n_threads,
