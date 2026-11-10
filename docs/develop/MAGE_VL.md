@@ -76,6 +76,7 @@ row. Their **full-weight validation** is listed separately for each entry.
 | Text Q8_0 | cpu | Text/image generation and JEV complete | Generation completes; text/image JEV CLI↔HTTP passes | Independent F32-activation Oracle logit gate fails |
 | Text Q8_0 | auto | Generation/JEV complete; image differs from CPU | Generation completes; text/image JEV CLI↔HTTP passes | Text logits equal CPU; image logit gates and smoke fail |
 | Text Q8_0 | vulkan | Text/image generation and JEV complete; device traced | Generation completes; text/image JEV CLI↔HTTP passes | Text logits equal CPU; image logit gates fail |
+| Text Q4_1 | cpu | Not run | Not run | Implemented; shared encoder + loader accept it, unvalidated |
 | Text Q4_0 | cpu | Not run | Not run | Implemented; shared converter/kernel tests pass |
 | Text Q4_0 | auto | Not run | Not run | Implemented; shared linear device test passes |
 | Text Q4_0 | vulkan | Not run | Not run | Implemented; shared linear device test passes |
@@ -92,8 +93,9 @@ row. Their **full-weight validation** is listed separately for each entry.
 | Vision F32 | auto | Generation/JEV complete; quantized-text answers differ | Generation completes; three-format image JEV CLI↔HTTP passes | Real-weight submissions; quantized-text image logit gates fail |
 | Vision F32 | vulkan | Three-format generation/JEV complete; device traced | BF16 smoke passes; quantized image JEV CLI↔HTTP passes | BF16 logit probes pass; quantized-text image gates fail |
 
-Q4_1/IQ exports are outside the existing shared converter's format set. Full
-device execution is not implemented: subsequent Mage/Vulkan work must add
+IQ exports are outside the existing shared converter's format set. Q4_1 is
+exported by the shared encoder and accepted by the loader, but no full-weight
+run backs it, so it stays unvalidated. Full device execution is not implemented: subsequent Mage/Vulkan work must add
 Mage-ViT's per-lane RoPE and attention kernels, retain intermediates on device,
 and calibrate the resident text path. This change implements the review's
 projection-offload option rather than claiming full-device support.

@@ -12,7 +12,7 @@ import re
 
 from tools.converter.mage_flow.convert_qwen3vl_vision import Reader
 from tools.converter.utils.gguf import GgufWriter, GGML_F32, GGML_BF16, gguf_dims
-from tools.converter.utils.quantize_gguf import BLOCK_FORMATS, _quantize_one
+from tools.converter.utils.quantize_gguf import BLOCK_FORMATS, FILE_TYPES, quantize_tensor
 from tools.converter.wevisone_vl.convert_wevisone_vl import TEXT_NAMES, _write
 
 REVISION = "287c5fdc8c83e43c4d207d21bc51024a52fdff38"
@@ -83,8 +83,8 @@ def encode_text_tensor(reader: Reader, name: str, text_type: str) -> tuple[int, 
         return GGML_F32, reader.f32(name).tobytes()
     if reader.dtype(name) != "BF16":
         raise ValueError(f"expected BF16 source: {name}")
-    return _quantize_one(name, reader.raw(name), GGML_BF16, gguf_dims(shape),
-                         text_type, frozenset())
+    return quantize_tensor(name, reader.raw(name), GGML_BF16, gguf_dims(shape),
+                           text_type, frozenset())
 
 
 def export(root: Path, out: Path, text_type: str) -> tuple[Path, Path]:
@@ -111,7 +111,7 @@ def export(root: Path, out: Path, text_type: str) -> tuple[Path, Path]:
         writer.add_meta("general.name", "Mage-VL-Cowork")
         writer.add_meta("mage_vl.source_revision", REVISION)
         writer.add_meta("mage_vl.source_sha256", json.dumps(hashes, sort_keys=True))
-    text.add_meta("general.file_type", text_type)
+    text.add_meta("general.file_type", FILE_TYPES[text_type])
     for name, value in {"embedding_length": 2560, "block_count": 36, "feed_forward_length": 9728,
                         "context_length": 262144, "attention.head_count": 32, "attention.head_count_kv": 8,
                         "attention.key_length": 128, "attention.value_length": 128,

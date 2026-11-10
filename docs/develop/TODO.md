@@ -13,6 +13,17 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **转换器的接受格式集由共享 `BLOCK_FORMATS` 推导，会静默接受模型加载器不支持的格式** —
+      `tools/converter/mage_vl/convert_mage_vl.py` 写 `TEXT_TYPES = ("f32", *BLOCK_FORMATS)`，
+      `tools/converter/thx02/convert_thx02.py` 写 `FORMATS = {..., **BLOCK_FORMATS, ...}`。共享层每
+      新增一种格式（例如 Q4_1 进入 `BLOCK_FORMATS`），这两个转换器就会自动把它列进 `--format`
+      选项里，而对应模型的 Rust 加载器白名单不会跟着变 → 转换器能导出、运行时拒绝加载，
+      用户只看到一句含糊的 tensor type 报错。2026-11-10 实测：合并 main 后 mage_vl 的
+      `--text-type q4_1` 导出成功，但 `models/mage_vl` 的 `TEXT_TYPES` 不含 `GGMLType::Q4_1`
+      （已补上），同时 `test_convert_mage_vl.py` 的体积表缺 `q4_1` 直接 KeyError（已补）。
+      建议：转换器的接受集改成**显式列出该模型支持的格式**（加载器白名单的镜像），或在共享层
+      提供「模型 ↔ 支持格式」的单一来源让两侧都读；至少在给共享 `BLOCK_FORMATS` 加格式时，
+      同时检查所有 `*BLOCK_FORMATS` 的使用点。
 - [x] **HTTP 文本运行时统一（TextRuntime）** — 已完成：`build_text_runtime(arch)` 是唯一
       arch 分发点，`TextInner` 四变体与 server 内手写 decode 循环全部删除；prompt 构造、greedy/
       温度采样、llama 家族的 rep-penalty+停止规则均单一来源（CLI/HTTP 共用）；

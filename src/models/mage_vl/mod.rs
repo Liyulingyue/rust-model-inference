@@ -18,6 +18,7 @@ const TEXT_TYPES: &[GGMLType] = &[
     GGMLType::BF16,
     GGMLType::Q8_0,
     GGMLType::Q4_0,
+    GGMLType::Q4_1,
     GGMLType::Q4K,
     GGMLType::Q5K,
     GGMLType::Q6K,
@@ -88,7 +89,10 @@ fn require_tensor(
         || !types.contains(&info.ggml_type)
         || info.checked_nbytes() != Some(raw.len() as u64)
     {
-        return Err(format!("invalid Mage-VL tensor {name}: shape/type/storage"));
+        return Err(format!(
+            "invalid Mage-VL tensor {name}: shape/type/storage (expected dims {dims:?}, one of {types:?}, got {:?} {:?})",
+            info.ggml_type, info.dims
+        ));
     }
     Ok(())
 }

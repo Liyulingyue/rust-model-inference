@@ -49,7 +49,7 @@ def test_bf16_source_crosses_to_q8_0_and_decodes_back(tmp_path):
     quantize_gguf(source, output, target_format="q8_0", keep=("kept",))
 
     metadata, tensors = _read(output)
-    assert metadata["general.file_type"] == "q8_0"
+    assert metadata["general.file_type"] == 7  # the unsigned GGUF FTYPE enum
     kinds = {name: value[0] for name, value in tensors.items()}
     assert kinds["projection"] == GGML_Q8_0
     # 1-D vectors, 3-D kernels and kept tensors stay BF16.

@@ -29,8 +29,9 @@ python3 tools/oracle/mage_vl/download.py models/Mage-VL-Cowork
 Python conversion needs NumPy. Oracle checks additionally need PyTorch,
 Transformers 4.57.6, torchvision and Pillow, installed in the repository venv
 or read from the host's existing environment. Do not install system packages.
-Text exports support `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_k`, `q5_k` and
-`q6_k`, using the shared converter quantizers and native runtime kernels.
+Text exports support `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q4_k`, `q5_k`
+and `q6_k`, using the shared converter quantizers and native runtime kernels.
+`q4_1` is exported and loadable but has no full-weight numerical evidence yet.
 Vision and norm vectors remain F32. Use a separate output directory for each
 export; existing GGUFs are not overwritten.
 `source-tensors.json` records all 399 text and 297 vision mappings and shapes.

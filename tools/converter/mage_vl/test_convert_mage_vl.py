@@ -58,7 +58,7 @@ class ContractTests(unittest.TestCase):
                 expected_type = GGML_F32 if mode == 'f32' else BLOCK_FORMATS[mode][1]
                 self.assertEqual(dtype, expected_type)
                 sizes = {'f32': 2048, 'bf16': 1024, 'f16': 1024, 'q8_0': 544,
-                         'q4_0': 288, 'q4_k': 288, 'q5_k': 352, 'q6_k': 420}
+                         'q4_0': 288, 'q4_1': 320, 'q4_k': 288, 'q5_k': 352, 'q6_k': 420}
                 self.assertEqual(len(payload), sizes[mode])
                 self.assertEqual(encode_text_tensor(reader, 'norm.weight', mode),
                                  (GGML_F32, reader.f32('norm.weight').tobytes()))
