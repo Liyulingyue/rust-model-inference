@@ -1,5 +1,6 @@
 pub(crate) mod asr;
 pub mod cli;
+pub mod decision;
 pub(crate) mod diffusion;
 pub(crate) mod jev;
 pub(crate) mod media;

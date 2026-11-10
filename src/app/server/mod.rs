@@ -1,5 +1,6 @@
 pub mod api;
 mod auk;
+mod decision;
 mod forecast;
 mod prediction;
 mod rerank;
@@ -36,7 +37,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
 
 // =============================================================================
 // Backend types
@@ -95,6 +96,7 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
+    Decision(crate::models::thx02::Engine),
 }
 
 impl Backend {
@@ -1128,6 +1130,24 @@ fn build_backend(
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
+    let decision_source =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .filter(|source| crate::app::arch_of(source.as_ref()) == crate::models::thx02::ARCH);
+    if let Some(source) = decision_source {
+        let available = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let engine = crate::app::decision::from_source(
+            options,
+            Arc::from(source),
+            resolve_thread_count(options.threads, available),
+        )?;
+        return Ok(Arc::new(Backend::Decision(engine)));
+    }
+    if options.decision_thinker.is_some() {
+        return Err("--decision-thinker requires a THX-02 decision model".into());
+    }
     if crate::models::unlimited_ocr::matches_model(&options.model) {
         crate::models::unlimited_ocr::validate_options(options)?;
         let model = Arc::new(crate::models::unlimited_ocr::Model::load(
@@ -1175,9 +1195,9 @@ fn build_backend(
     // metadata peek BEFORE the full Text build (which would load
     // unrelated multimodal state).
     //
-    // This is the only metadata-probed backend in this function; the others are
-    // flag-driven. Why they differ — and why adding a probe is usually the wrong
-    // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
+    // Decision/forecast architectures select their own task pipelines; rerank
+    // needs this probe because it shares an architecture with text generation.
+    // See docs/develop/SERVER_BACKEND_SELECTION.md.
     if is_rerank_gguf(&options.model) || is_jina_rerank_gguf(&options.model) {
         // The probe outranks the flag-driven backends below, so a caller
         // who explicitly selected one of them would have it silently
@@ -1858,6 +1878,9 @@ fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeSc
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.decision_request.is_some() {
+        return Err("--decision-request is a CLI input; server decisions use /v1/decide".into());
+    }
     if options.system_one_request.is_some() || options.adapter.is_some() {
         return Err("--system-one-request is not supported by rust-model-server".into());
     }
@@ -1930,13 +1953,14 @@ pub fn run_server() {
     // Apply the parsed flag before any request can be decoded.
     api::image_input::set_allow_remote(allow_remote_images);
 
-    let options = match parse_cli_options(&cli_args) {
+    let mut options = match parse_cli_options(&cli_args) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
+    options.serve = true;
     if let Err(error) = reject_unsupported_server_modes(&options) {
         eprintln!("{error}");
         std::process::exit(2);
@@ -2021,6 +2045,7 @@ pub fn run_server() {
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
         Backend::Timestral(_) => "timestral",
+        Backend::Decision(_) => "decision",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -2077,6 +2102,7 @@ pub fn run_server() {
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
+        Backend::Decision(_) => router.merge(decision::routes()),
     };
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
         && matches!(

@@ -46,6 +46,7 @@ pub mod qwen35;
 pub mod qwen_drive;
 pub mod sensenova_loop;
 pub mod spark;
+pub mod thx02;
 pub mod timestral;
 pub mod unlimited_ocr;
 pub mod vela3;
