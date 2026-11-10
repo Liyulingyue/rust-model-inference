@@ -132,10 +132,12 @@ impl Session {
             let mixed = if c.is_recurrent[i] {
                 model.forward_recurrent_layer(
                     i,
+                    i,
                     &norm,
                     rows,
                     &mut self.scratch,
                     pool,
+                    false,
                     false,
                     #[cfg(feature = "parity-trace")]
                     false,
