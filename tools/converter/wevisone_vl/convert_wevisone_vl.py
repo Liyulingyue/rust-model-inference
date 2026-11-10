@@ -109,8 +109,8 @@ def _common(writer: GgufWriter, architecture: str, source_hash: str) -> None:
 
 
 def export_text(root: Path, output: Path, reader: Reader, source_hash: str, dtype: str) -> Path:
-    config = json.loads((root / "config.json").read_text())["text_config"]
-    tokenizer = json.loads((root / "tokenizer.json").read_text())
+    config = json.loads((root / "config.json").read_text(encoding="utf-8"))["text_config"]
+    tokenizer = json.loads((root / "tokenizer.json").read_text(encoding="utf-8"))
     tokens, types = validate_tokenizer(tokenizer)
     writer = GgufWriter(output)
     _common(writer, "qwen3vl", source_hash)
@@ -134,7 +134,7 @@ def export_text(root: Path, output: Path, reader: Reader, source_hash: str, dtyp
         "add_bos_token": False, "add_eos_token": False,
     }.items():
         writer.add_meta(f"tokenizer.ggml.{name}", value)
-    writer.add_meta("tokenizer.chat_template", (root / "chat_template.jinja").read_text())
+    writer.add_meta("tokenizer.chat_template", (root / "chat_template.jinja").read_text(encoding="utf-8"))
     count = 0
     for name in reader.owners:
         if not (name.startswith("model.language_model.") or name == "lm_head.weight"):
@@ -220,8 +220,8 @@ def main() -> None:
     parser.add_argument("--text-type", choices=["bf16", "f32", "f16", "q8_0", "q4_k", "q6_k"], default="bf16")
     args = parser.parse_args()
     root = args.model_dir.resolve()
-    validate_config(json.loads((root / "config.json").read_text()))
-    validate_tokenizer(json.loads((root / "tokenizer.json").read_text()))
+    validate_config(json.loads((root / "config.json").read_text(encoding="utf-8")))
+    validate_tokenizer(json.loads((root / "tokenizer.json").read_text(encoding="utf-8")))
     args.out_dir.mkdir(parents=True, exist_ok=True)
     reader = Reader(root)
     source_hash = sha256_file(root / "model.safetensors")

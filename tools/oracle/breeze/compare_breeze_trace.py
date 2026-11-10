@@ -12,7 +12,7 @@ PAYLOADS = ("binary_path", "token_ids", "usize_values", "bool_values")
 
 
 def records(path: Path) -> list[dict]:
-    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not rows:
         raise ValueError(f"{path}: empty trace")
     occurrences: dict[str, int] = {}

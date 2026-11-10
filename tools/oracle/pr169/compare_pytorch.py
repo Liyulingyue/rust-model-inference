@@ -38,7 +38,7 @@ def relative_l2(actual: list, expected: list) -> dict:
 
 
 def engine_logits(trace: Path, step: int) -> list:
-    rows = [json.loads(line) for line in trace.read_text().splitlines()]
+    rows = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
     outputs = [r for r in rows if r.get("name") == "result_output"]
     prompts = [r for r in rows if r.get("name", "").endswith("prompt_ids")]
     # The engine emits every prefill row; the reference only has the last one.

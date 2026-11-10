@@ -152,9 +152,16 @@ pub fn build_text_runtime(
     let policy = options.compute;
     policy.check_build()?;
     policy.validate_text_arch(arch)?;
+    // Qwen3-VL's vision tower has no Vulkan path: it runs on the CPU and
+    // feeds the GPU decoder its projected embeddings and DeepStack planes.
+    // That split is verified against the CPU, so an mmproj is fine there.
+    // An arch whose whole decode runs on the device stays text-only, while
+    // an arch with a partial device path keeps its vision tower on the CPU.
+    let qwen3_vision = matches!(arch, "qwen3vl" | "qwen3vlmoe" | "qwen2vl");
     if policy == crate::compute::ComputePolicy::Vulkan
-        && crate::compute::ComputePolicy::has_complete_device_path(arch)
         && options.mmproj.is_some()
+        && !qwen3_vision
+        && crate::compute::ComputePolicy::has_complete_device_path(arch)
     {
         return Err("full Vulkan runtime supports text input only".into());
     }
@@ -224,9 +231,15 @@ impl TextRuntime for ComputeTextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
+        // Qwen3-VL's image path runs on the Vulkan decoder: the vision tower
+        // stays on the CPU and hands the GPU its projected embeddings and
+        // DeepStack planes. Every other arch keeps the text-only rule, and
+        // an arch with only a partial device path keeps its vision tower on
+        // the CPU.
         if self.policy == crate::compute::ComputePolicy::Vulkan
-            && crate::compute::ComputePolicy::has_complete_device_path(self.inner.arch())
             && !request.images.is_empty()
+            && !matches!(self.inner.arch(), "qwen3vl" | "qwen3vlmoe" | "qwen2vl")
+            && crate::compute::ComputePolicy::has_complete_device_path(self.inner.arch())
         {
             return Err("full Vulkan runtime supports text input only".into());
         }
@@ -475,6 +488,10 @@ impl TextRuntime for Qwen3TextRuntime {
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
         let _scope = self.options.compute.enter_legacy_scope();
+        // The Qwen3-VL family keeps its image path on Vulkan, because its
+        // vision tower runs on the CPU and those archs have no complete
+        // device path; a plain qwen3 decode does have one, so it stays
+        // text-only.
         if self.options.compute == crate::compute::ComputePolicy::Vulkan
             && crate::compute::ComputePolicy::has_complete_device_path(&self.arch)
             && !request.images.is_empty()

@@ -423,6 +423,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "qwen3vlmoe"
             | "qwen35"
             | "qwen35moe"
+            | "thx02"
             | "edge0"
             | "sensenova_loop"
             | "qwen3tts"
@@ -669,6 +670,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     };
     let n_embd_head = if arch == "qwen35"
         || arch == "qwen35moe"
+        || arch == "thx02"
         || arch == "edge0"
         || arch == "sensenova_loop"
         || arch == "nanbeige"

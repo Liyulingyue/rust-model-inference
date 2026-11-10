@@ -15,6 +15,8 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    /// Parsed option names, excluding their values, for capability-specific validation.
+    pub supplied_flags: Vec<String>,
     pub yue2: bool,
     pub dreamx: bool,
     pub astronex: bool,
@@ -148,6 +150,8 @@ pub struct CliOptions {
     pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
     pub system_one_request: Option<PathBuf>,
+    pub decision_request: Option<PathBuf>,
+    pub decision_thinker: Option<PathBuf>,
     /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
     /// weights; the d3 variants need both.
     pub adapter: Option<PathBuf>,

@@ -408,11 +408,11 @@ def tensor_contracts(encoder: dict, vocab_size: int):
 def convert(model_dir: Path, output: Path) -> None:
     if output.exists():
         raise FileExistsError(output)
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     if config.get("architecture") != "boundary":
         raise ValueError(f"this converter handles architecture='boundary', got {config.get('architecture')!r}")
     encoder = resolve_boundary_encoder(config.get("model_name"))
-    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text())
+    tokenizer_config = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8"))
     # fastino ships both the slow and the fast DeBERTa-v2 class over one SPM
     # vocab; the properties that decide the pieces and the normalizer are
     # checked on the next line, so name exactly these two rather than widening.
@@ -423,7 +423,7 @@ def convert(model_dir: Path, output: Path) -> None:
         raise ValueError("Expected a case-sensitive SentencePiece tokenizer")
     tokenizer_json_path = model_dir / "tokenizer.json"
     fast_json = (
-        tokenizer_json_path.read_text()
+        tokenizer_json_path.read_text(encoding="utf-8")
         if tokenizer_json_path.exists() and not (model_dir / "spm.model").exists()
         else None
     )
