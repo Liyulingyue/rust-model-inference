@@ -61,6 +61,8 @@ import numpy as np
 from tools.converter.utils.gguf import (
     GGML_Q4_0,
     quantize_q4_0,
+    GGML_Q4_1,
+    quantize_q4_1,
     GGML_BF16, GGML_F16, GGML_F32, GGML_Q4K, GGML_Q5K, GGML_Q6K, GGML_Q8_0,
     _read_gguf, GgufWriter, f32_to_bf16, gguf_dims, quantize_q8_0,
 )
@@ -69,6 +71,7 @@ from tools.converter.utils.kquants import quantize_k
 #: Elements per block, and the GGUF type each format produces.
 BLOCK_FORMATS = {
     "q4_0": (32, GGML_Q4_0),
+    "q4_1": (32, GGML_Q4_1),
     "q8_0": (32, GGML_Q8_0),
     "q4_k": (256, GGML_Q4K),
     "q5_k": (256, GGML_Q5K),
@@ -137,8 +140,13 @@ def _quantize_one(
         return target, raw
     values = _decode_f32(raw, source_type)
     if target == GGML_Q4_0:
-        # Per-block `f16 scale / int4 payload`, mirroring the Q8_0 layout.
+        # Per-block `f16 scale / int4 payload`, mirroring the Q4_0 layout.
         return target, quantize_q4_0(values)
+    if target == GGML_Q4_1:
+        # Per-block `f16 scale / f16 min / int4 payload`. The runtime Q4_1
+        # kernel reads the nibbles unsigned, so the block minimum travels in
+        # the `m` field instead of being folded into the scale.
+        return target, quantize_q4_1(values)
     if target == GGML_Q8_0:
         # Per-block `f16 scale / int8 payload` over the F32 dynamic range,
         # which is what `quantize_row_q8_0_ref` in `ggml-quants.c` does.

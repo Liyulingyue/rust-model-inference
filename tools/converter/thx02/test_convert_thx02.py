@@ -16,7 +16,7 @@ import numpy as np
 from tokenizers import Tokenizer, models, normalizers
 
 from tools.converter.utils.gguf import (
-    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4_0, GGML_Q4K, GGML_Q5K,
+    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4_0, GGML_Q4_1, GGML_Q4K, GGML_Q5K,
     GGML_Q6K, GGML_Q8_0, GgufWriter, Safetensors, _read_gguf,
     bf16_to_f32, f32_to_bf16, open_safetensors,
 )
@@ -332,7 +332,8 @@ class Thx02ConverterTests(unittest.TestCase):
     def test_requested_formats_use_existing_encoders(self):
         cases = {"f32": (GGML_F32, 2048), "f16": (GGML_F16, 1024),
                  "bf16": (GGML_BF16, 1024), "q8_0": (GGML_Q8_0, 544),
-                 "q4_0": (GGML_Q4_0, 288), "q4_k": (GGML_Q4K, 288),
+                 "q4_0": (GGML_Q4_0, 288), "q4_1": (GGML_Q4_1, 320),
+                 "q4_k": (GGML_Q4K, 288),
                  "q5_k": (GGML_Q5K, 352), "q6_k": (GGML_Q6K, 420)}
         values = np.linspace(-1, 1, 512, dtype="<f4").reshape(2, 256)
         for target, (expected_type, size) in cases.items():
@@ -340,12 +341,10 @@ class Thx02ConverterTests(unittest.TestCase):
                 _, kind, dims, raw = self.emit(values, self.spec(), target)
                 self.assertEqual((kind, dims, len(raw)), (expected_type, (256, 2), size))
                 self.assertTrue(any(raw))
-        with self.assertRaisesRegex(ValueError, "Q4_1.*exporter"):
-            converter.tensor_type(self.spec(), "q4_1")
 
     def test_vision_low_bit_outputs_keep_float_weights_and_positions(self):
         matrix = self.spec(name="v.blk.0.attn_qkv.weight", vision=True)
-        for target in ("q4_0", "q4_k", "q5_k", "q6_k"):
+        for target in ("q4_0", "q4_1", "q4_k", "q5_k", "q6_k"):
             self.assertEqual(converter.tensor_type(matrix, target), GGML_F32)
         self.assertEqual(converter.tensor_type(matrix, "q8_0"), GGML_Q8_0)
         for target in converter.FORMATS:

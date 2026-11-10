@@ -20,10 +20,10 @@ import numpy as np
 from tokenizers import Tokenizer
 
 from tools.converter.utils.gguf import (
-    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4_0, GGML_Q4K, GGML_Q5K,
+    GGML_BF16, GGML_F16, GGML_F32, GGML_Q4_0, GGML_Q4_1, GGML_Q4K, GGML_Q5K,
     GGML_Q6K, GGML_Q8_0, GgufWriter, Safetensors, _tensor_nbytes,
     bf16_to_f32, f32_to_bf16, gguf_dims, model_metadata_value,
-    open_safetensors, quantize_q4_0, quantize_q8_0,
+    open_safetensors, quantize_q4_0, quantize_q4_1, quantize_q8_0,
 )
 from tools.converter.utils.kquants import quantize_k
 from tools.converter.utils.quantize_gguf import BLOCK_FORMATS
@@ -38,7 +38,7 @@ CHUNK_BYTES = 1 << 20
 FORMATS = {"f32": (1, GGML_F32), **BLOCK_FORMATS, "q4_0": (32, GGML_Q4_0)}
 # GGUF FTYPE describes the mixed file, independently of tensor GGML types.
 FILE_TYPES = {"f32": 0, "f16": 1, "bf16": 32, "q8_0": 7,
-              "q4_0": 2, "q4_k": 14, "q5_k": 16, "q6_k": 18}
+              "q4_0": 2, "q4_1": 3, "q4_k": 14, "q5_k": 16, "q6_k": 18}
 LORA_TARGETS = {
     "in_proj_qkv", "gate_proj", "q_proj", "o_proj", "v_proj", "down_proj",
     "out_proj", "in_proj_z", "k_proj", "up_proj",
@@ -338,8 +338,6 @@ def lora_contract(adapter, specs, config):
 
 def _format(target):
     target = target.lower()
-    if target == "q4_1":
-        raise ValueError("Q4_1 has no existing exporter in tools.converter.utils; export is not implemented")
     if target not in FORMATS:
         raise ValueError(f"unknown format {target!r}; expected {sorted(FORMATS)}")
     return target
@@ -349,7 +347,7 @@ def tensor_type(spec, target):
     target = _format(target)
     if spec.kind == "float":
         return GGML_F32
-    if spec.vision and (target in ("q4_0", "q4_k", "q5_k", "q6_k")
+    if spec.vision and (target in ("q4_0", "q4_1", "q4_k", "q5_k", "q6_k")
                         or (spec.kind == "patch" and target == "q8_0")):
         return GGML_F32
     block, kind = FORMATS[target]
@@ -385,6 +383,8 @@ def _encode(values, kind):
         return quantize_q8_0(values)
     if kind == GGML_Q4_0:
         return quantize_q4_0(values)
+    if kind == GGML_Q4_1:
+        return quantize_q4_1(values)
     return quantize_k({GGML_Q4K: "q4_k", GGML_Q5K: "q5_k", GGML_Q6K: "q6_k"}[kind], values)
 
 

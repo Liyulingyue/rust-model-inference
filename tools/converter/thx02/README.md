@@ -16,10 +16,13 @@ Run from the repository root using the existing environment:
   --format f32
 ```
 
-Supported exports are `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_k`, `q5_k`, and
-`q6_k`, using the existing shared encoders. `q4_1` fails explicitly because the
-repository has no Q4_1 exporter; this is a missing export path, not a claim that
-Q4_1 inference is supported or inapplicable.
+Supported exports are `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q4_k`,
+`q5_k`, and `q6_k`, using the existing shared encoders. `q4_1` uses the shared
+Q4_1 encoder, whose block layout follows the repository's runtime kernel
+(`ops::kernel::q4_1`): an F16 scale, an F16 minimum and unsigned 0..15 nibbles
+that the kernel reads back as `d * q + m`. The encoder is unit-tested against
+an independent decoder; no THX-02 checkpoint has been converted with it, so it
+carries no numerical evidence of its own.
 `general.file_type` uses the standard unsigned GGUF FTYPE enum, independently
 of individual tensor types; uniform K text exports use Q4_K_S/Q5_K_S/Q6_K.
 

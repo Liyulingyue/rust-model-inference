@@ -191,8 +191,10 @@ numerical reference yet.
 ## Coverage matrix and entrypoint evidence
 
 Implementation and verification are separate. Pass means the stated check ran;
-Fail retains the failing metric/output; Not run is not a pass. Q4_1 is a missing
-shared exporter, not N/A. Other ungenerated thinker precisions remain in scope.
+Fail retains the failing metric/output; Not run is not a pass. Q4_1 now has a
+shared exporter (see the L3 item below), but no checkpoint has been converted or
+measured with it, so its row stays unrun rather than N/A. Other ungenerated
+thinker precisions remain in scope.
 Detailed per-component/format/requested-backend rows are in [coverage.csv](coverage.csv),
 with CLI, HTTP, numerical and actual-backend evidence. [results.json](results.json)
 retains file manifests, individual numerical gates and actual entry summaries.
@@ -351,8 +353,16 @@ nine binary targets; no model-specific executable was added.
   `src/ops/kernel`, Qwen3.5 vision and Vulkan hybrid dispatch modules.
   The existing resident causal Qwen3.5 decoder cannot express this graph through
   a stable reusable interface; copying it would fork another model's machinery.
-- **L3, shared converter/quantization owner:** implement the missing Q4_1 export
-  facility, then convert and validate it; no unrelated quantizer is added here.
+- **L3, shared converter/quantization owner:** the missing Q4_1 export facility
+  is now implemented in `tools/converter/utils/gguf.py` (`quantize_q4_1`) and
+  registered in the shared `BLOCK_FORMATS`, with the GGUF writer taught the
+  20-byte block size. Its layout follows the repository's runtime kernel
+  (`ops::kernel::q4_1`): F16 scale, F16 minimum and unsigned 0..15 nibbles read
+  back as `d * q + m`; the encoder is unit-tested against an independent
+  decoder, and the THX-02 converter now accepts `--format q4_1`. What is still
+  missing is the checkpoint side: no Q4_1 export has been converted or run
+  through the numerical gates, and its logits are expected to sit in the same
+  band as the other block formats.
 
 Maximum context, broad task-quality datasets, other devices, no-device
 image/thinker fallback, and thinker formats beyond the generated F16/BF16 assets
