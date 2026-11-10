@@ -166,6 +166,13 @@ pub fn run_embedding(
             kv_format,
             output,
         ),
+        "gemma4-embedding" => crate::models::embeddinggemma2::run_embedding(
+            source,
+            prompt,
+            n_threads_arg,
+            kv_format,
+            output,
+        ),
         // BitNet b1.58 (file_type=40 + per-projection `*_norm_in`
         // tensors). Architecture-neutral dispatch inside the BitNet
         // trunk family: `bitnet::compute_embedding` reads
