@@ -60,6 +60,19 @@ exact. `compare.py` also checks answer types and labels. Thinker greedy IDs are
 compared over eight cached steps, with full-vocabulary logit metrics and the
 first divergent step reported. Limits are not widened after failed runs.
 
+The gates above decide whether a format may be called numerically equivalent to
+the reference. They are not a usability verdict: a block format can miss the
+full-vocabulary logits gate and still return the same label in the same order,
+which is what the caller sees. `compare.py` therefore also emits a decision
+report (`usability` in its JSON): per answer, whether the argmax label moved
+and how far the probabilities drifted, with a separate declared usability
+criterion (`--usable-probability-drift`, default 0.01) that is not the
+acceptance gate and never relaxes it. On the current evidence Q8_0 and Q4_0
+keep the exact contract and stay inside the probability limit while missing
+the text logits RMSE, so they are usable checkpoints that cannot carry the
+"numerically validated" label; the K formats miss the probability limit
+itself, which is the band where a decision can actually move.
+
 Every precision has a same-weight reference. The independent NumPy decoder
 restores source layouts without using exporter quantizers/transforms. Block
 formats retain both a float-activation reference and a native input-QDQ

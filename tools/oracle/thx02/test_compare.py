@@ -27,6 +27,38 @@ class ComparisonTests(unittest.TestCase):
         other["logits"][0][0] += .05
         self.assertFalse(compare([other], [self.case], "Q8_0")["passed"])
 
+    def test_a_block_format_can_miss_the_gate_and_still_be_usable(self):
+        other = copy.deepcopy(self.case)
+        other["logits"][0][0] += .05
+        report = compare([other], [self.case], "Q8_0")
+        # The acceptance gate is not relaxed ...
+        self.assertFalse(report["passed"])
+        # ... but the decision itself did not move.
+        self.assertTrue(report["usability"]["decisions_identical"])
+        self.assertEqual(report["usability"]["flipped_answers"], [])
+        self.assertAlmostEqual(report["usability"]["max_probability_drift"], 0.0)
+        self.assertTrue(report["usability"]["usable"])
+
+    def test_a_flipped_label_is_reported_as_not_usable(self):
+        other = copy.deepcopy(self.case)
+        other["answers"]["q"]["probabilities"] = {"a": .55, "b": .45}
+        report = compare([other], [self.case], "Q8_0")
+        self.assertFalse(report["usability"]["decisions_identical"])
+        self.assertEqual(report["usability"]["flipped_answers"], ["q"])
+        self.assertFalse(report["usability"]["usable"])
+
+    def test_probability_drift_beyond_the_usability_limit_is_reported(self):
+        other = copy.deepcopy(self.case)
+        other["answers"]["q"]["probabilities"] = {"a": .42, "b": .58}
+        report = compare([other], [self.case], "Q8_0")
+        self.assertTrue(report["passed"])          # inside the acceptance gate
+        self.assertTrue(report["usability"]["decisions_identical"])
+        self.assertAlmostEqual(report["usability"]["max_probability_drift"], .02, places=6)
+        self.assertFalse(report["usability"]["usable"])
+        # The usability limit is a declared parameter, not a fixed constant.
+        relaxed = compare([other], [self.case], "Q8_0", usable_drift=.05)
+        self.assertTrue(relaxed["usability"]["usable"])
+
 
 class ThinkerComparisonTests(unittest.TestCase):
     def test_format_limits_and_discrete_contract(self):
