@@ -71,6 +71,44 @@ pub struct Output {
     pub camera: Camera,
 }
 
+/// Why a generation failed.
+///
+/// The distinction decides the status code an HTTP caller sees: a request
+/// the caller can fix is not the same as a device or a server fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// The request itself is wrong, so the caller can correct it.
+    Request,
+    /// The device or the server failed, so the caller can only retry.
+    Server,
+}
+/// A generation failure with the reason it carries.
+#[derive(Debug)]
+pub struct Error {
+    pub failure: Failure,
+    pub message: String,
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for Error {}
+impl Error {
+    pub fn request(message: impl Into<String>) -> Self {
+        Self {
+            failure: Failure::Request,
+            message: message.into(),
+        }
+    }
+    pub fn server(message: impl Into<String>) -> Self {
+        Self {
+            failure: Failure::Server,
+            message: message.into(),
+        }
+    }
+}
+
 pub fn matches_directory(root: &Path) -> bool {
     root.is_dir()
         && std::fs::read(root.join("config.json"))
@@ -164,12 +202,8 @@ impl Model {
             background: background::Background::load(&background)?,
         })
     }
-    pub fn generate(
-        &self,
-        image: image::DynamicImage,
-        options: &Options,
-    ) -> Result<Output, String> {
-        options.validate()?;
+    pub fn generate(&self, image: image::DynamicImage, options: &Options) -> Result<Output, Error> {
+        options.validate().map_err(Error::request)?;
         let _scope = self.compute.enter_legacy_scope();
         let started = std::time::Instant::now();
         let prepared = preprocess::image(
@@ -185,7 +219,8 @@ impl Model {
                 image::GrayImage::from_raw(rgb.width(), rgb.height(), mask)
                     .ok_or_else(|| "Invalid Idol background mask storage".into())
             },
-        )?;
+        )
+        .map_err(classify)?;
         eprintln!(
             "[idol] stage=preprocess elapsed={:.3}s",
             started.elapsed().as_secs_f64()
@@ -193,7 +228,10 @@ impl Model {
         let mut rng = crate::models::diffusion::z_image::dit::TorchMt19937::new(options.seed);
         let mut vae_noise = vec![0.; 32 * 128 * 128];
         rng.fill_normal(&mut vae_noise);
-        let (feature1, feature2) = self.conditioning.encode(prepared.as_raw(), &vae_noise)?;
+        let (feature1, feature2) = self
+            .conditioning
+            .encode(prepared.as_raw(), &vae_noise)
+            .map_err(classify)?;
         eprintln!(
             "[idol] stage=conditioning elapsed={:.3}s",
             started.elapsed().as_secs_f64()
@@ -204,17 +242,25 @@ impl Model {
         rng.fill_normal(&mut latent);
         let mut camera = vec![0.; 5];
         rng.fill_normal(&mut camera);
-        self.denoise(&mut latent, &mut camera, &feature1, &feature2, options)?;
+        self.denoise(&mut latent, &mut camera, &feature1, &feature2, options)
+            .map_err(classify)?;
         eprintln!(
             "[idol] stage=sampling elapsed={:.3}s",
             started.elapsed().as_secs_f64()
         );
         let mut random = StdRng::seed_from_u64(options.seed);
-        let anchors =
-            self.decoder
-                .sample_anchors(&latent, options.num_gaussians / 32, 8, &mut random)?;
-        let features = self.decoder.gaussian_features(&anchors, &latent)?;
-        let gaussians = self.decoder.representation(&anchors, &features)?;
+        let anchors = self
+            .decoder
+            .sample_anchors(&latent, options.num_gaussians / 32, 8, &mut random)
+            .map_err(classify)?;
+        let features = self
+            .decoder
+            .gaussian_features(&anchors, &latent)
+            .map_err(classify)?;
+        let gaussians = self
+            .decoder
+            .representation(&anchors, &features)
+            .map_err(classify)?;
         eprintln!(
             "[idol] stage=decode elapsed={:.3}s",
             started.elapsed().as_secs_f64()
@@ -223,10 +269,9 @@ impl Model {
         if self.compute != crate::compute::ComputePolicy::Cpu {
             if crate::vulkan::gpu_broken() && self.compute == crate::compute::ComputePolicy::Vulkan
             {
-                return Err(
-                    "Idol Vulkan device failed during generation; refusing a silent CPU fallback"
-                        .into(),
-                );
+                return Err(Error::server(
+                    "Idol Vulkan device failed during generation; refusing a silent CPU fallback",
+                ));
             }
             if let Some(context) = crate::ops::get_vulkan_context() {
                 eprintln!(
@@ -237,7 +282,7 @@ impl Model {
         }
         Ok(Output {
             gaussians,
-            camera: decode_camera(&camera)?,
+            camera: decode_camera(&camera).map_err(classify)?,
         })
     }
     fn denoise(
@@ -289,6 +334,27 @@ impl Model {
             eprintln!("[idol] sample {}/{}", step + 1, options.steps);
         }
         Ok(())
+    }
+}
+/// Splits a failure into the ones the caller can correct and the ones the
+/// caller can only retry.
+///
+/// The preprocessing failures are about the picture the caller sent, so they
+/// are request failures. Everything else is about the model, the device or
+/// the configuration, which is a server failure.
+fn classify(message: String) -> Error {
+    const REQUEST_FAILURES: [&str; 3] = [
+        "No object found in the image",
+        "Idol input aspect ratio exceeds preprocessing allocation limit",
+        "Idol alpha crop exceeds preprocessing allocation limit",
+    ];
+    if REQUEST_FAILURES
+        .iter()
+        .any(|prefix| message.starts_with(prefix))
+    {
+        Error::request(message)
+    } else {
+        Error::server(message)
     }
 }
 fn sigma(index: usize, steps: usize, shift: f32) -> f64 {
@@ -361,5 +427,32 @@ mod unit_tests {
         let result = component_config(&path, json!({"hidden_size":1280,"rope_theta":100.0}));
         std::fs::remove_file(&path).unwrap();
         assert!(result.unwrap_err().contains("rope_theta"));
+    }
+    /// A picture the generator cannot use is the caller's problem; a device
+    /// or a configuration fault is not.
+    #[test]
+    fn a_failure_is_split_into_a_request_and_a_server_problem() {
+        for message in [
+            "No object found in the image (the alpha channel is empty)",
+            "Idol input aspect ratio exceeds preprocessing allocation limit",
+            "Idol alpha crop exceeds preprocessing allocation limit",
+        ] {
+            assert_eq!(
+                classify(message.to_string()).failure,
+                Failure::Request,
+                "{message}"
+            );
+        }
+        for message in [
+            "Idol Vulkan device failed during generation; refusing a silent CPU fallback",
+            "Unsupported Idol configuration: expected the released speridlabs/idol contract",
+            "Idol encoder expects square RGB bytes, side a positive multiple of 16 at most 1024",
+        ] {
+            assert_eq!(
+                classify(message.to_string()).failure,
+                Failure::Server,
+                "{message}"
+            );
+        }
     }
 }

@@ -21,7 +21,9 @@ pub(super) async fn generate(
 ) -> Response {
     let req = match body {
         Ok(Json(r)) => r,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e.body_text()),
+        // The rejection knows what was wrong with the request, so its own
+        // status is used: a wrong content type is not a malformed body.
+        Err(e) => return error(e.status(), e.body_text()),
     };
     if let Err(e) = req.options.validate() {
         return error(StatusCode::BAD_REQUEST, e);
@@ -51,9 +53,15 @@ pub(super) async fn generate(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         let image = super::api::image_input::decode_image_bytes(&image_ref.bytes)
             .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-        let output = model
-            .generate(image, &req.options)
-            .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
+        let output = model.generate(image, &req.options).map_err(|e| {
+            // A request the caller can correct is not the same as a device
+            // or a server fault, so the two get different status codes.
+            let status = match e.failure {
+                crate::models::idol::Failure::Request => StatusCode::UNPROCESSABLE_ENTITY,
+                crate::models::idol::Failure::Server => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.message)
+        })?;
         let bytes = crate::app::geometry::ply_bytes(&output.gaussians)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let camera = serde_json::to_string(&output.camera)
@@ -99,5 +107,32 @@ mod tests {
             serde_json::from_str(r#"{"image":"object.png","options":{"num_gaussians":32769}}"#)
                 .unwrap();
         assert!(request.options.validate().is_err());
+    }
+    /// A request the generator cannot process and a device fault are told
+    /// apart, so the caller gets a status it can act on.
+    #[test]
+    fn a_generation_failure_is_split_by_its_reason() {
+        use crate::models::idol::{Error, Failure};
+        let request = Error::request("No object found in the image (the alpha channel is empty)");
+        assert_eq!(request.failure, Failure::Request);
+        let device = Error::server("Idol Vulkan device failed during generation");
+        assert_eq!(device.failure, Failure::Server);
+        // The message survives the classification, so the caller learns why.
+        assert!(request.to_string().contains("No object found"));
+    }
+    /// The status codes the generator route answers with.
+    #[test]
+    fn the_generation_route_maps_the_failures_to_their_status_codes() {
+        use crate::models::idol::Failure;
+        use axum::http::StatusCode;
+        let status = |failure: Failure| match failure {
+            Failure::Request => StatusCode::UNPROCESSABLE_ENTITY,
+            Failure::Server => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        assert_eq!(status(Failure::Request), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(status(Failure::Server), StatusCode::INTERNAL_SERVER_ERROR);
+        // The busy case and the request errors keep their own codes.
+        assert_eq!(StatusCode::TOO_MANY_REQUESTS.as_u16(), 429);
+        assert_eq!(StatusCode::BAD_REQUEST.as_u16(), 400);
     }
 }

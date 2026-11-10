@@ -193,7 +193,9 @@ pub fn run_cli(o: &CliOptions) -> Result<(), String> {
     }
     let image = super::media::decode_image(o.image.as_deref().unwrap())?;
     let model = load(o)?;
-    let output = model.generate(image, &options(o)?)?;
+    let output = model
+        .generate(image, &options(o)?)
+        .map_err(|e| e.to_string())?;
     let bytes = ply_bytes(&output.gaussians)?;
     super::write_output_atomically(out, &bytes, o.overwrite)?;
     eprintln!(
