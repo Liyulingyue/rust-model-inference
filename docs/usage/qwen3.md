@@ -385,7 +385,7 @@ cargo run --release --bin server -- \
 `--compute vulkan` 目前覆盖 Qwen3 家族的**文本**解码，以及 Qwen3-VL 的**图像**路径：
 
 - **文本塔**：整段 resident decoder 走 GPU。启动时会做一次 GPU↔CPU 契约校验（logits + KV cache + 16 步 greedy 必须逐位一致），不通过就回落到 CPU。
-- **图像路径**：视觉塔仍在 CPU 上跑，投影出的 embedding 与 DeepStack 平面交给 GPU 解码器。Qwen3-VL 的 M-RoPE 用 4D 位置（图像 token 共享 T、H/W 递增），GPU 侧按调用方给的逐行位置旋转，不按 cache slot 猜。
+- **图像路径**：视觉塔的**注意力在设备上**（融合双向 kernel，无 mask，单位 scale 之外的常规 `1/sqrt(head_dim)`），投影、norm、FFN、rope 仍在主机；投影出的 embedding 与 DeepStack 平面交给 GPU 解码器。Qwen3-VL 的 M-RoPE 用 4D 位置（图像 token 共享 T、H/W 递增），GPU 侧按调用方给的逐行位置旋转，不按 cache slot 猜。视觉塔的注意力占整层成本的 94%（实测 5.08 s / 5.38 s），上设备后一张 768×768 图的视觉塔从 131 s 降到 11 s。
 - **DeepStack**：只在**带 DeepStack 平面**的分块里注入（prefill 有、decode 没有）。若 decode 步也注入，arena 里上一分块残留的平面会被加到生成 token 的残差流上，结果与 CPU 不一致。
 - **分块上限**：GPU 路径固定按 64 行分块。arena 按分块行数分配并有一份等大的 staging 缓冲，再叠加已上传的权重；更大的 `--prefill-batch-size` 会让共享显存的设备直接丢设备（device lost）。
 - **只有 qwen3vl / qwen3vlmoe / qwen2vl 放行图像**，其余 arch 仍是"仅文本"。

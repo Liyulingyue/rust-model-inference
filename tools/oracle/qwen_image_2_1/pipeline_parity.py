@@ -111,7 +111,7 @@ def main():
     root = Path(args.out).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if args.turbo:
-        sigmas = json.loads(Path(args.turbo_model_index).read_text())['sample_sigmas'] + [0.0]
+        sigmas = json.loads(Path(args.turbo_model_index).read_text(encoding="utf-8"))['sample_sigmas'] + [0.0]
         assert args.steps == 8 and len(sigmas) == 9 and sigmas[0] == 1 and sigmas[-1] == 0
         schedule = root/'checkpoint-sigmas.f32'
         schedule.write_bytes(struct.pack('<9f',*sigmas))

@@ -22,7 +22,7 @@ def require_bf16_checkpoint(root):
 
     root = Path(root)
     index = root / "model.safetensors.index.json"
-    shards = (sorted(set(json.loads(index.read_text())["weight_map"].values()))
+    shards = (sorted(set(json.loads(index.read_text(encoding="utf-8"))["weight_map"].values()))
               if index.is_file() else ["model.safetensors"])
     count = 0
     for shard in shards:

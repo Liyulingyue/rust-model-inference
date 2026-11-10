@@ -60,7 +60,7 @@ sys.path.insert(0, str(llama_cpp))
 sys.path.insert(0, str(llama_cpp / "gguf-py"))
 from conversion.qwen3vl import Qwen3VLVisionModel
 
-size = json.loads((model / "preprocessor_config.json").read_text())["size"]
+size = json.loads((model / "preprocessor_config.json").read_text(encoding="utf-8"))["size"]
 original_set_parameters = Qwen3VLVisionModel.set_gguf_parameters
 
 def set_parameters(self):
@@ -383,14 +383,14 @@ def _read_inventory(path: Path) -> dict[str, tuple[str, tuple[int, ...]]]:
 
 
 def validate_source(model: Path) -> dict:
-    config = json.loads((model / "config.json").read_text())
+    config = json.loads((model / "config.json").read_text(encoding="utf-8"))
     validate_config(config)
-    tokenizer = json.loads((model / "tokenizer.json").read_text())
+    tokenizer = json.loads((model / "tokenizer.json").read_text(encoding="utf-8"))
     if tokenizer.get("model", {}).get("type") != "BPE":
         raise ValueError("OvisOCR3 requires a BPE tokenizer")
     if tokenizer.get("normalizer") != {"type": "NFC"}:
         raise ValueError("OvisOCR3 requires the NFC tokenizer normalizer")
-    tokenizer_config = json.loads((model / "tokenizer_config.json").read_text())
+    tokenizer_config = json.loads((model / "tokenizer_config.json").read_text(encoding="utf-8"))
     if tokenizer_config.get("add_bos_token") is not False:
         raise ValueError("OvisOCR3 requires add_bos_token=false")
     if tokenizer_config.get("tokenizer_class") != "Qwen2Tokenizer":
@@ -409,7 +409,7 @@ def validate_source(model: Path) -> dict:
     }.items():
         if special_tokens.get(str(token_id), {}).get("content") != token:
             raise ValueError(f"tokenizer special token {token_id} is not {token!r}")
-    processor = json.loads((model / "preprocessor_config.json").read_text())
+    processor = json.loads((model / "preprocessor_config.json").read_text(encoding="utf-8"))
     for key, expected in {
         "size": {"shortest_edge": 65536, "longest_edge": 16777216},
         "patch_size": 16,

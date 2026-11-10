@@ -1,0 +1,54 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Nemotron-3 Nano Mamba-2 time step and decay.
+//
+// The CPU path (`src/models/nemotron_h/trunk/forward.rs`) computes, per
+// head `h`:
+//
+//   z    = dt_proj[h] + dt_bias[h]
+//   dt   = z > 20 ? z : log(1 + exp(z))        // softplus
+//   dA   = exp(dt * A_log[h])                   // the per-head decay
+//
+// The softplus deliberately uses the host's libm `expf` and `logf` -- the
+// CPU code calls `f32::exp` and `f32::ln`, not ggml's polynomial. So the
+// device has to reproduce *glibc's* `expf` and `logf` and not merely a
+// correct exponential and logarithm: `nemotron_h_ssm_libm.glsl` transcribes
+// both, and the repository's own `libm_exp` is not enough -- it computes
+// the correctly rounded exponential in double-double arithmetic, while
+// glibc's `expf` has a 0.502 ulp error and disagrees on about one value
+// in a hundred.
+//
+// The decay is the one place where the two exponentials meet: the state
+// recurrence multiplies by `dA` on every token, so a difference in the
+// last mantissa bit survives into the logits.
+
+#include "nemotron_h_ssm_libm.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint dt_word;       // raw time step, `heads` floats
+    uint dt_bias_word;  // `heads` floats
+    uint a_log_word;    // `heads` floats
+    uint out_dt_word;   // softplus output, `heads` floats
+    uint out_da_word;   // decay output, `heads` floats
+    uint heads;         // 96
+} pc;
+
+void main() {
+    uint head = gl_GlobalInvocationID.x;
+    if (head >= pc.heads) return;
+
+    float dt_base = uintBitsToFloat(arena.data[pc.dt_word + head]);
+    float dt_bias = uintBitsToFloat(arena.data[pc.dt_bias_word + head]);
+    float a_log = uintBitsToFloat(arena.data[pc.a_log_word + head]);
+
+    precise float z = dt_base + dt_bias;
+    precise float dt = z > 20.0 ? z : glibc_logf(1.0 + glibc_expf(z));
+    precise float decay = glibc_expf(dt * a_log);
+
+    arena.data[pc.out_dt_word + head] = floatBitsToUint(dt);
+    arena.data[pc.out_da_word + head] = floatBitsToUint(decay);
+}

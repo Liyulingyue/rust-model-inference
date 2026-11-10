@@ -54,6 +54,7 @@ llama.cpp / ggml 的**具体累加结构** —— 几个累加器、什么顺序
 | `softmax_ggml_inplace` | `src/ops/softmax.rs` | 同上 | nemotron 专属 |
 | `forward_prepared_ggml` | `src/ops/kernel/trait_.rs` | nemotron trunk 的 matmul 入口 | nemotron 专属 |
 | `q5_0::neon::*` / `q5_1::neon::*` | `src/ops/kernel/q5_{0,1}/neon.rs` | **生产 kernel 本身**，被重写成 ggml 结构 | 见下方「注意」 |
+| `exp_ggml4` / `silu_ggml4` | `shaders/glsl/exp_ggml.glsl` | ggml 的 `ggml_v_expf`，Mamba-2 的 conv/gate 的 SiLU 必须与 CPU 的 `silu_ggml_inplace` 同一位，否则 1 ULP 会被 Mamba-2 递归放大。仓库自带的 `exp_approx_neon.glsl`（求值顺序不同）与 `exp_accurate.glsl`（更高阶多项式）都不是 ggml 的那一个 | nemotron 专属 |
 
 ### 注意：Q5_0/Q5_1 的 NEON kernel 是生产代码
 

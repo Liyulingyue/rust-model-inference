@@ -198,7 +198,7 @@ def compare(records, native_path, tolerances=(ATOL, RTOL, RMS_RTOL), robust=Fals
     user sees is still held to the strict bound in both modes.
     """
     atol, rtol, rms_rtol = tolerances
-    native = [json.loads(line) for line in native_path.read_text().splitlines()]
+    native = [json.loads(line) for line in native_path.read_text(encoding="utf-8").splitlines()]
     assert len(native) == len(records), (len(native), len(records))
     metrics = []
     occurrences = {}
@@ -353,7 +353,7 @@ def main():
             metrics = compare(
                 trace.records, trace_path, tolerances, robust=file_type != 'f32'
             )
-            last = json.loads(trace_path.read_text().splitlines()[-1])
+            last = json.loads(trace_path.read_text(encoding="utf-8").splitlines()[-1])
             assert np.array_equal(got.ravel().view('u4'), np.fromfile(last['binary_path'], dtype='<u4'))
             assert np.array_equal(np.array(actual['quantile_levels'], dtype='f4'), np.array(model.config.quantile_knots, dtype='f4'))
             worst = max(metrics, key=lambda m:m['nrmse'])

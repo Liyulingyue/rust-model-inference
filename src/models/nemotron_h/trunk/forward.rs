@@ -67,6 +67,11 @@ pub struct NemotronModel {
     /// matmul across N worker threads instead of forcing single-threaded
     /// execution (the previous hard-coded `nth=1`).
     pub pool: Arc<ComputePool>,
+    /// Lazily-initialized Vulkan session. Built when `--compute auto`
+    /// or `--compute vulkan` enables the device; `None` means CPU
+    /// fallback (no eligible GPU or Vulkan init failed).
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu: Option<crate::vulkan::nemotron_h::NemotronHVulkanSession>,
 }
 
 impl NemotronModel {
@@ -99,7 +104,82 @@ impl NemotronModel {
             output_norm,
             output,
             pool,
+            #[cfg(feature = "vulkan")]
+            gpu: None,
         })
+    }
+
+    /// Attach a Vulkan session to this model.
+    ///
+    /// `policy` follows the same convention as the other trunks: `Cpu`
+    /// never touches the device, `Auto` falls back to the CPU when the
+    /// device is missing or ineligible, and `Vulkan` is a hard requirement.
+    ///
+    /// `max_rows` is the largest number of tokens one device call may
+    /// process. The arena scales with it, so a caller that feeds the prompt
+    /// in one chunk should pass the prompt length.
+    #[cfg(feature = "vulkan")]
+    pub fn attach_gpu(
+        &mut self,
+        capacity: usize,
+        max_rows: usize,
+        policy: crate::compute::ComputePolicy,
+    ) -> Result<(), String> {
+        policy.check_build()?;
+        if let Some(context) = policy.context().map_err(|e| e.to_string())? {
+            match crate::vulkan::nemotron_h::NemotronHVulkanSession::try_new_rows(
+                self,
+                capacity,
+                max_rows.max(1),
+                context,
+            ) {
+                Ok(gpu) => self.gpu = gpu,
+                Err(error) if policy == crate::compute::ComputePolicy::Auto => {
+                    eprintln!("Nemotron-H Vulkan unavailable: {error}")
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a Vulkan session is attached.
+    #[cfg(feature = "vulkan")]
+    pub fn gpu_available(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    /// Build the model and try to attach a Vulkan session.
+    ///
+    /// `policy` follows the same convention as the other trunks: `Cpu`
+    /// never touches the device, `Auto` falls back to the CPU when the
+    /// device is missing or ineligible, and `Vulkan` is a hard requirement.
+    pub fn from_source_with_compute(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        capacity: usize,
+        policy: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        let mut model = Self::from_source(source, n_threads)?;
+        #[cfg(feature = "vulkan")]
+        {
+            policy.check_build()?;
+            if let Some(context) = policy.context().map_err(|e| e.to_string())? {
+                match crate::vulkan::nemotron_h::NemotronHVulkanSession::try_new_rows(
+                    &model,
+                    capacity,
+                    capacity.max(1),
+                    context,
+                ) {
+                    Ok(gpu) => model.gpu = gpu,
+                    Err(error) if policy == crate::compute::ComputePolicy::Auto => {
+                        eprintln!("Nemotron-H Vulkan unavailable: {error}")
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+        }
+        Ok(model)
     }
 
     /// Run a single Q8_0 matmul with the kernel's output rows
@@ -261,7 +341,7 @@ impl NemotronScratch {
 impl NemotronModel {
     /// Evaluate the next tokens and return logits for the last position.
     pub fn prefill(
-        &self,
+        &mut self,
         token_ids: &[u32],
         scratch: &mut NemotronScratch,
     ) -> Result<Vec<f32>, String> {
@@ -278,6 +358,95 @@ impl NemotronModel {
                 base_position + n,
                 scratch.capacity
             ));
+        }
+        // Every layer is recorded on the device, so the chunk runs as one
+        // device submission and the hidden state never leaves the arena.
+        // The layer loop below still splits the stack into runs of
+        // device-recorded layers separated by CPU layers, because the
+        // `RMI_NH_CPU_*` overrides move one branch back to the host for
+        // attribution.
+        #[cfg(feature = "vulkan")]
+        if self.gpu.is_some() {
+            // Take the session out so the layer loop can still call
+            // `&self` helpers (`is_ssm_layer`, `forward_layer`) while the
+            // device is borrowed. It goes back before returning.
+            let mut gpu = self.gpu.take().expect("checked above");
+            let hidden_len = n * self.config.n_embd;
+            // `scratch.hidden` is the single source of truth for the layer
+            // loop: the CPU SSM layers read and write it in place, and a
+            // device run reads it as its input and writes its output back
+            // into it. Seeding it here matters because the first layer of
+            // this model is an SSM layer, so the loop can start with a
+            // CPU layer before any device run has happened.
+            for (row, &token) in token_ids.iter().enumerate() {
+                let row_start = row * self.config.n_embd;
+                self.tok_embd.embedding_lookup(
+                    token,
+                    &mut scratch.hidden[row_start..row_start + self.config.n_embd],
+                );
+            }
+            let positions: Vec<usize> = (base_position..base_position + n).collect();
+            // The Mamba-2 recurrence and the KV cache live on the device
+            // now, and the host keeps the same state in the scratch pad.
+            // The two have to describe the same sequence:
+            //
+            // * position zero means the host's state is fresh (a new
+            //   scratch pad, or one that was reset), so the device's
+            //   state is stale and has to be cleared. Without this the
+            //   conv history alone moves every SSM layer's output on the
+            //   first token.
+            // * any other position means the host's state carries the
+            //   recurrence of the tokens before it. The device can only
+            //   agree with it if the device already processed exactly
+            //   those tokens; the host's Mamba-2 state cannot be copied
+            //   into the arena, so a mismatch is an error rather than a
+            //   silent divergence.
+            if base_position == 0 {
+                gpu.reset()?;
+            } else if gpu.committed_position() != base_position {
+                return Err(format!(
+                    "Nemotron Vulkan state is at token {} but the host is at token {}; \
+                     the Mamba-2 recurrence cannot be transferred to the device",
+                    gpu.committed_position(),
+                    base_position
+                ));
+            }
+            let mut layer_start = 0usize;
+            while layer_start < self.config.n_layer {
+                // Find the next run of device-recorded layers.
+                let mut layer_end = layer_start;
+                while layer_end < self.config.n_layer && self.device_layer(layer_end) {
+                    layer_end += 1;
+                }
+                if layer_end > layer_start {
+                    gpu.forward_layers(
+                        &scratch.hidden[..hidden_len],
+                        base_position,
+                        &positions,
+                        n,
+                        layer_start,
+                        layer_end,
+                    )?;
+                    let device_hidden = gpu.read_hidden(n)?;
+                    scratch.hidden[..hidden_len].copy_from_slice(&device_hidden);
+                }
+                // Run the CPU layers one at a time.
+                while layer_end < self.config.n_layer && !self.device_layer(layer_end) {
+                    let lw = &self.layers[layer_end];
+                    self.forward_layer(layer_end, lw, n, base_position, scratch)?;
+                    layer_end += 1;
+                }
+                layer_start = layer_end;
+            }
+            // The CPU SSM layers wrote into `scratch.hidden`; the device
+            // path needs the final hidden state back in its arena.
+            gpu.write_hidden(&scratch.hidden[..hidden_len])?;
+            gpu.finish_logits(n)?;
+            gpu.set_committed_position(base_position + n);
+            let logits = gpu.logits().to_vec();
+            self.gpu = Some(gpu);
+            scratch.next_position += n;
+            return Ok(logits);
         }
         // The trace schema is token-major: one record per (name, layer, step).
         // `step` is the position in the sequence, which is what the oracle's
@@ -352,6 +521,34 @@ impl NemotronModel {
         #[cfg(feature = "parity-trace")]
         trace::global("result_output", base_position + last_pos, &scratch.logits);
         Ok(scratch.logits.clone())
+    }
+
+    /// Whether `layer` runs on the device.
+    ///
+    /// Every layer has a device kernel: the FFN and attention layers use
+    /// the shared projections, and the Mamba-2 SSM layers use the
+    /// conv/scan shaders. The three environment overrides exist so a test
+    /// can attribute a numerical difference to one branch:
+    /// `RMI_NH_CPU_ATTENTION`, `RMI_NH_CPU_FFN` and `RMI_NH_CPU_SSM` move
+    /// the respective branch back to the host.
+    ///
+    /// An override is meant for a whole run. The Mamba-2 recurrence lives
+    /// on the host when the SSM branch runs there and on the device when
+    /// it does not, and the two states cannot be exchanged, so switching
+    /// an override in the middle of a sequence leaves them out of step.
+    fn device_layer(&self, layer: usize) -> bool {
+        if self.config.attention_layers.contains(&layer) {
+            std::env::var_os("RMI_NH_CPU_ATTENTION").is_none()
+        } else if self.config.ffn_layers.contains(&layer) {
+            std::env::var_os("RMI_NH_CPU_FFN").is_none()
+        } else {
+            std::env::var_os("RMI_NH_CPU_SSM").is_none()
+        }
+    }
+
+    /// Whether `layer` is an SSM-only layer (neither attention nor FFN).
+    fn is_ssm_layer(&self, layer: usize) -> bool {
+        !self.config.attention_layers.contains(&layer) && !self.config.ffn_layers.contains(&layer)
     }
 
     fn forward_layer(
@@ -981,7 +1178,7 @@ pub fn run_inference(
     use std::collections::HashMap;
 
     eprintln!("Loading Nemotron-3 Nano from model");
-    let model = NemotronModel::from_source(source.clone(), n_threads_arg)?;
+    let mut model = NemotronModel::from_source(source.clone(), n_threads_arg)?;
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} vocab={}",
         model.config.architecture,
@@ -1035,6 +1232,16 @@ pub fn run_inference(
     if prompt_ids.is_empty() {
         return Err("Nemotron prompt produced no tokens".into());
     }
+
+    // Attach the Vulkan session now that the capacity is known. The
+    // session is built lazily so a CPU-only run never pays the device
+    // init cost.
+    #[cfg(feature = "vulkan")]
+    model.attach_gpu(
+        prompt_ids.len() + max_tokens,
+        prompt_ids.len(),
+        crate::compute::ComputePolicy::legacy(),
+    )?;
 
     let mut scratch = NemotronScratch::new(&model.config, prompt_ids.len() + max_tokens);
     let infer_started = std::time::Instant::now();
@@ -1119,7 +1326,7 @@ pub fn run_forward_logits_nemotron_h(
     prompt_tokens: &[u32],
     n_threads: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
-    let model = NemotronModel::from_source(source, n_threads)?;
+    let mut model = NemotronModel::from_source(source, n_threads)?;
     let mut scratch = NemotronScratch::new(&model.config, prompt_tokens.len());
 
     let prefill_started = std::time::Instant::now();
