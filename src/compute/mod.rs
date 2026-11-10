@@ -239,7 +239,7 @@ mod tests {
             assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
         }
         assert_eq!(ComputePolicy::legacy(), original);
-        for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
+        for arch in ["gemma4", "edge0", "qwen3vl", "mage_vl", "auk", "unknown"] {
             // `--compute vulkan` asks for a real device, not for a
             // particular device path, so an architecture without a
             // complete one is allowed and reported instead.

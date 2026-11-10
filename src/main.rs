@@ -889,7 +889,48 @@ fn main() {
         }
     }
 
-    if arch == "gemma4" && !options.jev {
+    if arch == "mage_vl" && !options.jev {
+        if video.is_some()
+            || audio.is_some()
+            || prompt.is_empty()
+            || options.embedding
+            || options.bench
+            || options.profile
+            || options.dump_logits
+            || options.chat_template.is_some()
+        {
+            app::run_or_exit(Err("Mage-VL-Cowork requires --prompt with text/image generation; video, audio, embedding, bench/profile, dump-logits and built-in template presets are unsupported".into()));
+            return;
+        }
+        let mmproj = explicit_mmproj.map(|p| Arc::from(open_or_exit(p, ComponentRole::Mmproj)));
+        let tokenizer = Arc::new(
+            rust_model_inference::BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1)
+                }),
+        );
+        let runtime_options = app::text::RuntimeOptions::from_model(
+            Arc::clone(&source),
+            Arc::new(rust_model_inference::ComputePool::new(n_threads)),
+            tokenizer,
+        )
+        .with_compute(options.compute_policy())
+        .with_mmproj(mmproj)
+        .with_threads(n_threads)
+        .with_kv_format(options.kv_format)
+        .with_max_context(options.effective_max_context())
+        .with_prefill_batch_size(prefill_batch_size);
+        app::run_or_exit(app::text::run_chat_runtime(
+            runtime_options,
+            prompt,
+            image,
+            max_tokens,
+            temperature,
+            options.effective_repetition_penalty(),
+            &jinja_options,
+        ));
+    } else if arch == "gemma4" && !options.jev {
         app::run_or_exit(app::run_multimodal_with_video(
             Arc::clone(&source),
             model_path,
@@ -1078,6 +1119,20 @@ fn main() {
             Err(e) => app::run_or_exit(Err(e)),
         }
     } else if options.jev {
+        if arch == "mage_vl" {
+            if let Some(path) = explicit_mmproj {
+                app::run_or_exit(
+                    open_model_source(path, ComponentRole::Mmproj)
+                        .map_err(|e| e.to_string())
+                        .and_then(|vision| {
+                            rust_model_inference::models::mage_vl::validate_components(
+                                source.as_ref(),
+                                vision.as_ref(),
+                            )
+                        }),
+                );
+            }
+        }
         match app::build_jev_inputs(&options) {
             Ok(Some(app::JevInputs::Grouped {
                 context,
@@ -1099,6 +1154,7 @@ fn main() {
                     prefill_batch_size,
                     options.jev_output_json,
                     jinja_options.clone(),
+                    options.effective_max_context(),
                 ));
             }
             Ok(Some(app::JevInputs::Single {
@@ -1117,6 +1173,7 @@ fn main() {
                     explicit_mmproj,
                     image,
                     jinja_options.clone(),
+                    options.effective_max_context(),
                 ));
             }
             Ok(None) => {}

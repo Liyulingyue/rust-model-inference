@@ -79,7 +79,11 @@ pub(super) fn prepare(model: &Model, request: &Request) -> Result<PromptResult, 
     let (instruction, images) = instruction(request)?;
     let ids = model.tokens(images.len(), &instruction)?;
     model.check_context(&ids, request.max_tokens)?;
-    Ok(PromptResult { ids, images })
+    Ok(PromptResult {
+        input_tokens: ids.len(),
+        ids,
+        images,
+    })
 }
 
 #[cfg(test)]

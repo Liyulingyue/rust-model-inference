@@ -1,7 +1,6 @@
-use serde::{Deserialize, Serialize};
-use serde_json::ser::{Formatter, Serializer};
+use crate::prompt::jinja::python_json;
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::io;
 
 #[derive(Debug, Deserialize)]
 pub struct Request {
@@ -218,46 +217,6 @@ fn serialize_state(state: &Value) -> Result<String, String> {
         return Err("Laya state must be a string, object or array".into());
     }
     python_json(state)
-}
-
-fn python_json(value: &Value) -> Result<String, String> {
-    let mut bytes = Vec::new();
-    let mut serializer = Serializer::with_formatter(&mut bytes, PythonJsonFormatter);
-    value
-        .serialize(&mut serializer)
-        .map_err(|error| error.to_string())?;
-    String::from_utf8(bytes).map_err(|error| error.to_string())
-}
-
-struct PythonJsonFormatter;
-
-impl Formatter for PythonJsonFormatter {
-    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
-    where
-        W: ?Sized + io::Write,
-    {
-        if !first {
-            writer.write_all(b", ")?;
-        }
-        Ok(())
-    }
-
-    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> io::Result<()>
-    where
-        W: ?Sized + io::Write,
-    {
-        if !first {
-            writer.write_all(b", ")?;
-        }
-        Ok(())
-    }
-
-    fn begin_object_value<W>(&mut self, writer: &mut W) -> io::Result<()>
-    where
-        W: ?Sized + io::Write,
-    {
-        writer.write_all(b": ")
-    }
 }
 
 #[cfg(test)]

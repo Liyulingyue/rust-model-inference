@@ -1628,6 +1628,11 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
     let mmproj = mmp.clone();
+    if arch == "mage_vl" {
+        if let Some(vision) = &mmp {
+            crate::models::mage_vl::validate_components(source.as_ref(), vision.as_ref())?;
+        }
+    }
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
@@ -1671,7 +1676,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     // user explicitly asked for a template, and a config error should surface
     // at startup rather than on the first request.
     let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
-        jinja: options.jinja,
+        jinja: options.jinja || arch == "mage_vl",
         file: options.chat_template_file.clone(),
     });
     let compiled_chat_template =
