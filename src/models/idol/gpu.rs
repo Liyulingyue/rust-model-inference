@@ -415,4 +415,102 @@ mod tests {
             }
         }
     }
+
+    /// The device attention has to agree with the CPU kernel on the shapes
+    /// Idol uses, and it has to keep agreeing after the sampled cross-check
+    /// was added.
+    ///
+    /// The weights are synthetic, so this runs on a software Vulkan device
+    /// and needs no model files. It is the regression that keeps the device
+    /// path inside the numerical contract the oracle measured, because the
+    /// oracle itself needs the released weights and the remote host.
+    #[test]
+    fn device_attention_agrees_with_the_cpu_kernel_on_the_idol_shapes() {
+        let _scope = crate::compute::ComputePolicy::Vulkan
+            .configure_cli()
+            .unwrap();
+        // The shapes the released model uses: the denoiser attends over its
+        // latent tokens with 16 heads, the vision tower over 4101 patches
+        // with 20 heads, and the VAE over 1024 tokens with one head.
+        for (queries, keys, heads, dim) in [
+            (2048usize, 2048usize, 16usize, 64usize),
+            (4101, 4101, 20, 64),
+            (1024, 1024, 1, 512),
+        ] {
+            let width = heads * dim;
+            let q: Vec<_> = (0..queries * width)
+                .map(|i| (i as f32 * 0.17).sin())
+                .collect();
+            let k: Vec<_> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
+            let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
+            let actual = attention(&q, &k, &v, width, heads)
+                .expect("the device attention has to produce a result");
+            assert!(actual.iter().all(|value| value.is_finite()));
+            // The CPU reference of every token costs as much as the
+            // attention itself, so the comparison runs on the rows the
+            // cross-check samples.
+            let rows = sample_rows(queries);
+            assert!(
+                crate::ops::nn::attention_matches_cpu_sampled(
+                    &q,
+                    &k,
+                    &v,
+                    &actual,
+                    crate::ops::nn::AttentionSpec {
+                        query_tokens: queries,
+                        key_tokens: keys,
+                        query_heads: heads,
+                        key_value_heads: heads,
+                        head_dim: dim,
+                        causal: false,
+                        scale: (dim as f32).sqrt().recip(),
+                    },
+                    &rows,
+                ),
+                "the device attention disagrees with the CPU kernel at {queries}/{keys}/{heads}/{dim}"
+            );
+        }
+    }
+    /// A device attention that returns the numbers of an earlier call has to
+    /// be caught by the cross-check, not used.
+    #[test]
+    fn a_stale_device_attention_is_not_used() {
+        let _scope = crate::compute::ComputePolicy::Vulkan
+            .configure_cli()
+            .unwrap();
+        let queries = 64usize;
+        let keys = 64usize;
+        let heads = 4usize;
+        let dim = 64usize;
+        let width = heads * dim;
+        let q: Vec<_> = (0..queries * width)
+            .map(|i| (i as f32 * 0.17).sin())
+            .collect();
+        let k: Vec<_> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
+        let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
+        let actual = attention(&q, &k, &v, width, heads).expect("the device attention");
+        // A result that is off by a large amount is what a device that
+        // returns the numbers of an earlier call produces, and the check
+        // has to tell it apart from a healthy one.
+        let mut stale = actual.clone();
+        for value in stale.iter_mut() {
+            *value += 1.0;
+        }
+        let spec = crate::ops::nn::AttentionSpec {
+            query_tokens: queries,
+            key_tokens: keys,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let rows = sample_rows(queries);
+        assert!(crate::ops::nn::attention_matches_cpu_sampled(
+            &q, &k, &v, &actual, spec, &rows
+        ));
+        assert!(!crate::ops::nn::attention_matches_cpu_sampled(
+            &q, &k, &v, &stale, spec, &rows
+        ));
+    }
 }
