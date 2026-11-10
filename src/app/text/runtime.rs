@@ -143,24 +143,24 @@ impl RuntimeOptions {
     }
 }
 
-/// Build the per-arch runtime. Returns `None` for archs this pass does not
-/// cover (the server keeps its `Fallback` 501 for those).
 /// Whether a Vulkan request may carry images for `arch`.
 ///
-/// An arch whose whole decode runs on the device has no room for a vision
-/// tower, so it stays text-only. Every other arch keeps its vision tower on
-/// the CPU — the device only runs what it can — so images are allowed there.
+/// The gate is capability, not device path: an arch whose text runtime has no
+/// vision branch would silently answer a text-only prompt, so it is rejected.
+/// An arch with a vision path keeps its vision tower on the CPU and lets the
+/// device run what it can, so images are allowed there on every policy.
 ///
-/// The rule is deliberately arch-based rather than a name list: it is the same
-/// split the compute policy already uses to decide whether a warning is
-/// warranted, and it lets a partial device path take images without a
-/// per-arch exemption. Two families are validated with it (Qwen3-VL's CPU
-/// vision tower upstream, Mage-VL's mixed projections); the remaining archs
-/// are permitted by the rule but are not individually validated.
+/// This is deliberately not tied to `has_complete_device_path`: the resident
+/// decoder's numerics already differ from the CPU for quantized weights (the
+/// device Q8_0 kernels are not bit-identical), and that drift is accepted for
+/// text on those archs, so rejecting images would protect against nothing the
+/// text path does not already do.
 fn vulkan_allows_images(arch: &str) -> bool {
-    !crate::compute::ComputePolicy::has_complete_device_path(arch)
+    crate::compute::ComputePolicy::supports_vision(arch)
 }
 
+/// Build the per-arch runtime. Returns `None` for archs this pass does not
+/// cover (the server keeps its `Fallback` 501 for those).
 pub fn build_text_runtime(
     arch: &str,
     options: RuntimeOptions,
@@ -172,7 +172,9 @@ pub fn build_text_runtime(
         && options.mmproj.is_some()
         && !vulkan_allows_images(arch)
     {
-        return Err("full Vulkan runtime supports text input only".into());
+        return Err(format!(
+            "{arch} has no vision path; --mmproj/--image are not supported"
+        ));
     }
     let _scope = policy.enter_legacy_scope();
     let inner: Box<dyn TextRuntime> = if crate::app::text::uses_llama_trunk(arch) {
@@ -230,7 +232,10 @@ impl TextRuntime for ComputeTextRuntime {
             && !images.is_empty()
             && !vulkan_allows_images(self.inner.arch())
         {
-            return Err("full Vulkan runtime supports text input only".into());
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.inner.arch()
+            ));
         }
         self.inner
             .validate_request(token_ids, images, max_new_tokens)
@@ -244,7 +249,10 @@ impl TextRuntime for ComputeTextRuntime {
             && !request.images.is_empty()
             && !vulkan_allows_images(self.inner.arch())
         {
-            return Err("full Vulkan runtime supports text input only".into());
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.inner.arch()
+            ));
         }
         let _scope = self.policy.enter_legacy_scope();
         self.inner.generate(request, sink)
@@ -495,7 +503,10 @@ impl TextRuntime for Qwen3TextRuntime {
             && !request.images.is_empty()
             && !vulkan_allows_images(&self.arch)
         {
-            return Err("full Vulkan runtime supports text input only".into());
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.arch
+            ));
         }
         let capacity = self.options.capacity_for(self.model.config().n_ctx);
         let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
@@ -844,7 +855,10 @@ impl TextRuntime for HybridTextRuntime {
             if self.compute == crate::compute::ComputePolicy::Vulkan
                 && !vulkan_allows_images(&self.arch)
             {
-                return Err("full Vulkan runtime supports text input only".into());
+                return Err(format!(
+                    "{} has no vision path; --mmproj/--image are not supported",
+                    self.arch
+                ));
             }
             if self.arch == "edge0" {
                 return Err("Edge0-35B preview contains no vision weights; text input only".into());
@@ -1061,7 +1075,10 @@ impl TextRuntime for Lfm2MoeTextRuntime {
     ) -> Result<GeneratedText, String> {
         let _scope = self.compute.enter_legacy_scope();
         if self.compute == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
-            return Err("full Vulkan runtime supports text input only".into());
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.arch
+            ));
         }
         let mut session = self.session.lock().map_err(|e| e.to_string())?;
         session.reset();
@@ -1207,10 +1224,13 @@ mod tests {
         assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
         runtime.policy = ComputePolicy::Vulkan;
         request.images.push(vec![1]);
-        assert!(runtime
-            .generate(&request, &mut sink)
-            .unwrap_err()
-            .contains("text input only"));
+        // qwen3 has a vision path, so images reach the inner runtime instead
+        // of being rejected.
+        runtime.inner = Box::new(Probe("qwen3", ComputePolicy::Vulkan));
+        assert_eq!(
+            runtime.generate(&request, &mut sink).unwrap_err(),
+            "probe error"
+        );
         runtime.inner = Box::new(Probe("mage_vl", ComputePolicy::Vulkan));
         assert_eq!(
             runtime
@@ -1223,10 +1243,11 @@ mod tests {
             "probe error"
         );
         assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
-        // The allowance is arch-based, not a name list: any arch without a
-        // complete device path keeps its vision tower on the CPU, so images
-        // reach the inner runtime instead of the text-only error.
-        for arch in ["edge0", "gemma4", "unknown"] {
+        assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
+        // The gate is capability, not device path: an arch with a vision path
+        // takes images on every policy, and one without it is rejected with a
+        // message that says so.
+        for arch in ["qwen35", "edge0", "sensenova_loop"] {
             runtime.inner = Box::new(Probe(arch, ComputePolicy::Vulkan));
             assert_eq!(
                 runtime
@@ -1239,6 +1260,17 @@ mod tests {
                 runtime.generate(&request, &mut sink).unwrap_err(),
                 "probe error",
                 "{arch}"
+            );
+        }
+        for arch in ["llama", "gemma4", "unknown"] {
+            runtime.inner = Box::new(Probe(arch, ComputePolicy::Vulkan));
+            let error = runtime
+                .generate(&request, &mut sink)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("no vision path") && error.contains(arch),
+                "{arch}: {error}"
             );
         }
         assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
