@@ -110,3 +110,4 @@
 | Intern-Decision | 0.8B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-0.8B | `tools/converter/intern_decision` | √ |
 | ZDTaichu5.0 | 9B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/TaichuAI/ZDTaichu5.0-9B | https://huggingface.co/ngquocvinh/ZDTaichu5.0-9B-GGUF | √ |
 | Occamy-1.0 | 2.6B-A41B | 文本、图像 | llama.cpp @ `11fe0215` | https://www.modelscope.cn/models/Accio-Lab/occamy-1.0 | https://huggingface.co/Accio-Lab/occamy-1.0-GGUF | √ |
+| Xing4.0 | 29B-A4B | 文本（稀疏 MoE） | `xing4_0`（对齐提交 `a1d0f6e` / `eb41a27`） | https://www.modelscope.cn/models/XingChen-AGI/Xing4.0-29B-A4B | HF `XingChen-AGI/Xing4.0-29B-A4B-GGUF`（官方自发布，`xing4_0-29b-IQ4_NL.gguf`，约 5.8 GB；ModelScope 官方仅 safetensors） | 语言塔，MLA + mHC 超连接（4 lane）+ 64 experts top-4 稀疏 MoE；`src/models/xing4_0/`。**未逐位对齐，本机当前无 GGUF，未在当前 main 上复核**。 |
