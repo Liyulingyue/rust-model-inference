@@ -2,6 +2,13 @@
   "date": "2026-11-03",
   "host": "Ubuntu 22.04.5 / Xeon Gold 6138 / RTX 5090 32 GiB; NVIDIA 570.153.02",
   "oracle_commit": "4702a7f00850e34b6e83a2170cc123c3e9570744",
+  "geometry": {
+    "kind": "diagnostic",
+    "image_side": 64,
+    "octree_resolution": 16,
+    "q_token_length": 64,
+    "note": "These numbers were measured on the 64 pixel diagnostic fixture of tools/oracle/idol/oracle.py, not on the released 1024 pixel geometry. The production geometry (image side 1024, octree resolution 32, 8192 latent tokens) is exercised by the end-to-end run but was not compared against the official oracle, so these tolerances do not cover it."
+  },
   "inputs_sha256": "015f2ddd8a92cdbde37c0b572aa4dd8b217c75c02a08eba33fd5d4483e8a8560",
   "gates_sha256": "01287e798a9466cc487148750cd4693671cea1ad77efa0d9bec0e73194e0c8e1",
   "fixture_note": "144 unchanged oracle tensors copied server to server; only absolute binary paths relocated; original trace hash ca5d47555e1eb868e9787565faa9da29385e32c8f24e5068a9129a0950cb69b9, relocated 913a3029d89045cb5148219fac48467c136395887d965d96200a4b4665db75de",

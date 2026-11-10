@@ -12,6 +12,13 @@
   "trace_sha256": "ca5d47555e1eb868e9787565faa9da29385e32c8f24e5068a9129a0950cb69b9",
   "gates_sha256": "01287e798a9466cc487148750cd4693671cea1ad77efa0d9bec0e73194e0c8e1",
   "checkpoint_count": 144,
+  "geometry": {
+    "kind": "diagnostic",
+    "image_side": 64,
+    "octree_resolution": 16,
+    "q_token_length": 64,
+    "note": "These numbers were measured on the 64 pixel diagnostic fixture of tools/oracle/idol/oracle.py, not on the released 1024 pixel geometry. The production geometry (image side 1024, octree resolution 32, 8192 latent tokens) is exercised by the end-to-end run but was not compared against the official oracle, so these tolerances do not cover it."
+  },
   "date": "2026-11-03",
   "host": "Linux x86_64 AMD EPYC 9334; container quota 16 CPUs / 55 GiB",
   "passed": true,
