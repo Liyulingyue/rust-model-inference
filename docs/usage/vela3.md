@@ -1,6 +1,6 @@
 # Vela3 System One
 
-六个官方 safetensors 包通过现有 `rust-model-inference --system-one-request` CLI 和 `models::vela3::system_one` Rust API。计算在 CPU 上执行，复用仓库的线程池、矩阵投影、激活与 Qwen3.5 视觉编码器；不调用 Python 或外部加速库。无需 GGUF 转换。
+六个官方 safetensors 包通过现有 `rust-model-inference --system-one-request` CLI 和 `models::vela3` Rust API。默认使用 CPU，可选择共享 Vulkan 线性投影；复用仓库的线程池、矩阵投影、激活与 Qwen3.5 视觉编码器，不调用 Python 或外部推理框架。无需 GGUF 转换。
 
 这三个包是**三个模型族**（架构、格式串与实现都不同），不是同一模型的变体：
 `Vela3-D3`（`vela3/3` + `qwen3_5` decoder，mini/lite/flash/turbo 是同架构的不同尺寸）、
@@ -49,7 +49,7 @@ cargo run --profile release-fast --bin rust-model-inference -- \
 }
 ```
 
-省略 `--threads` 或设为 0 时沿用主程序的自动线程数。只接受 `--model`、`--adapter`、`--system-one-request`、`--threads` 和 `--compute cpu`，其他任务输入放在 JSON 中。`--model` 是主权重（d3 底座快照），`--adapter` 是 Vela3 适配器包（LoRA、heads 与 `vela3_config.json`）；fast/fast-vision 自包含，只给 `--model`（即整个包）。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
+省略 `--threads` 或设为 0 时沿用主程序的自动线程数。只接受 `--model`、`--adapter`、`--system-one-request`、`--threads`、`--compute cpu|auto|vulkan` 或 `--gpu`，其他任务输入放在 JSON 中。`--gpu` 等同 `--compute auto`，两者不能同时传。`--model` 是主权重（d3 底座快照），`--adapter` 是 Vela3 适配器包（LoRA、heads 与 `vela3_config.json`）；fast/fast-vision 自包含，只给 `--model`（即整个包）。图像通过顶层 `images` 数组传本地文件、HTTP(S) URL 或 base64 image data URL；fast-vision 的 choice/noul 最多三张，图像 span/OCR/box 按官方实现使用第一张。Span 的 start/end 是 Unicode 字符偏移，遵循对应官方解码器的 URL、CJK、阈值和边界规则。d3 的 span pass 不计入官方 `usage.input_tokens`，这里保留该口径。turbo 的 usage 按官方入口合并共享 state，并计入路由适配器的额外 pass；当前实现仍按问题重算 state，未验证长文本性能。
 
 fast 的 span 路由只读取包内配置，Rust 入口不采用 Python 的可选 `VELA3_ENTITY_ROUTE` 环境覆盖；阈值和上下文长度缺失会报错。视觉 tokenizer 的普通词表边界来自 tokenizer，起始 ID、上下文来自模型配置；实际使用的图像前缀特殊 token 必须是完整 added token。
 
@@ -61,17 +61,44 @@ turbo 的普通决策按官方 `validated_length` 限制为 32768 tokens，超�
 
 ```rust
 let response = rust_model_inference::models::vela3::system_one(
-    std::path::Path::new("models/vela3-lite"),
-    Some(std::path::Path::new("models/d3-lite")),
+    std::path::Path::new("models/d3-lite"),
+    Some(std::path::Path::new("models/vela3-lite")),
     &request,
     4,
 )?;
 ```
 
+## GPU 投影
+
+```bash
+cargo build --locked --profile release-fast --features vulkan --bin rust-model-inference
+RMI_COMPUTE_TRACE=1 target/release-fast/rust-model-inference \
+  --model models/d3-lite --adapter models/vela3-lite \
+  --system-one-request request.json --threads 4 --compute auto
+```
+
+`cpu` 保持 CPU 执行；`auto` 在可用物理 Vulkan 设备上分发符合条件的投影，没有设备或分发失败时回退 CPU。没有编译 `vulkan` feature 时，Auto 也可使用 CPU。`vulkan` 要求构建包含该 feature 且设备可用，初始化失败在加载权重前报错；请求结束时也检查设备故障，避免共享投影修复到 CPU 后仍把严格请求当作成功。软件 ICD 不作为加速设备。
+
+三个模型族统一通过共享算子分发 F32/F16/BF16 的底座、LoRA 与任务头线性投影；小投影可留在 CPU。d3 的自动标签定义生成固定使用 CPU，避免 GPU 的 greedy token 分叉改写后续 span 提示词。attention、delta recurrence、归一化、预处理及解码等仍包含 CPU 步骤，激活需要往返设备，权重上传也有开销。这是混合路径，不是完整设备计算图，不能据此推断长上下文性能。严格模式会打印 `backend=partial mode=system-one offload=linear`；设置 `RMI_COMPUTE_TRACE=1` 后应同时检查实际 `scope=linear backend=Vulkan` 与提交计数，而不是只看设备初始化日志。
+
+原 `system_one` API 保持 CPU 语义，即使进程中其他会话已启用 GPU。显式策略使用：
+
+```rust
+let response = rust_model_inference::models::vela3::system_one_with_policy(
+    std::path::Path::new("models/d3-lite"),
+    Some(std::path::Path::new("models/vela3-lite")),
+    &request,
+    4,
+    rust_model_inference::compute::ComputePolicy::Auto,
+)?;
+```
+
+本机物理 Apple GPU 的请求对照、浮点格式门槛和设备缺失回退记录见 [2026-11-06 GPU 验证](../../tools/oracle/vela3/gpu-2026-11-06.md)。
+
 ## 精度与边界
 
 Token IDs、提示词、任务路由、窗口与输出偏移做精确检查；SIMD 归约、BF16 舍入、softmax、GELU 等浮点路径使用记录的误差门槛。默认不承诺逐位一致。[Oracle 命令与验证记录](../../tools/oracle/vela3/README.md) 区分真实整模、小型官方计算图和独立任务头。
 
-这次接入为主 CLI 的 CPU safetensors 请求模式，未接入 GGUF、文本生成、HTTP server 或 GPU。`--compute auto/vulkan` 和 `--gpu` 会明确拒绝。mini/flash/turbo 的真实公开请求通过对照，mini/flash 另有四步 greedy IDs 对照；三者的非因果内部 BF16 activation 门槛未通过，仍为实验性。turbo 不含 LM head，没有真实 causal greedy 验证。d3 图像复用 F32 视觉编码器，和官方默认 BF16 塔有可测差异，也属于实验性；长上下文性能、完整任务基准及所有尺寸的整模数值覆盖仍应按验证记录判断。
+主 CLI 的 safetensors 请求模式支持 CPU 与混合 Vulkan 投影；此前仅支持 CPU 的限制已于 2026-11-06 解除。未接入 GGUF、文本生成或 HTTP server。mini/flash/turbo 的真实公开请求通过对照，mini/flash 另有四步 greedy IDs 对照；三者的非因果内部 BF16 activation 门槛未通过，仍为实验性，本次 GPU 接入不改变这些结论。turbo 不含 LM head，没有真实 causal greedy 验证。d3 图像复用 F32 视觉编码器，和官方默认 BF16 塔有可测差异，也属于实验性；长上下文性能、完整任务基准及所有尺寸的整模数值覆盖仍应按验证记录判断。
 
 本轮 review 的逐项结论、保留的官方行为与验证范围见 [修复记录](../../tools/oracle/vela3/review-2026-11-05.md)。

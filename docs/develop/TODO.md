@@ -167,7 +167,7 @@ NEON on aarch64; no AVX-512).
       **算子从未在生产规模验证过**（自检只覆盖 96 个元素，真实是 3800 万）。
       clamp 改 `±80` + 新增生产规模门禁。⚠️ **clamp 值不可调回 88.376**，且
       GPU SiLU 已与 CPU 不再逐位一致（PSNR 33.34 → 31.52 dB）。
-      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)。
+      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
@@ -176,7 +176,7 @@ NEON on aarch64; no AVX-512).
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
       Vulkan shader 用 ±80（补偿算法需要 `1/den` 保持正规数，见
-      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)）。
+      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)）。
       三者的饱和边界因此不同：`x = 88.2` 时 NEON 走慢路径给出接近真值的 2.4e38，
       x86 给 1.65e38（31% 偏差），GPU 给 exp(80) 的饱和值。
       现状：x86 至少不再返回 `+inf`（旧 clamp `88.376_26` 会），并且
@@ -524,13 +524,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
-      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+      详见 [TODO-052](#todo-052-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 - [~] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
       MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
       30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
       trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
-      [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
+      [TODO-053](#todo-053-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
       **B1–B5 已全部完成**：Q5_1 kernel、arch/config、MoE 层、共享专家，以及
       与上游 llama.cpp 的 oracle 对拍（全 52 层 × 6 步逐位一致，最终 logits
@@ -541,13 +541,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       未覆盖 dory。
       另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
-      [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
+      [TODO-054](#todo-054-dory-的默认提示在-cli--http--模型自带模板之间三分jev-的backendpartial提示对-dory-是假的)。
 - [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
   Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
   因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
   pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
   情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
-  详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
+  详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -740,6 +740,37 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 "Microsoft BitNet b1.58 I2_S extension; not upstream ggml"。`docs/usage/bitnet_embedding.md` 第一节
 "已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
 
+- [ ] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** —
+      `src/app/cli/parse.rs` 的主循环统一解析所有 flag（`--gpu` 在第 389 行），
+      但每个模式在解析之后另有一段手写白名单，声明该模式接受哪些 flag，并对带值
+      参数补一次取值校验。`--enhance`、`--system-one-request`、`--decision-request`
+      各有一段，`--gpu` 已经是第 3 个模式接受共享 compute flag —— Vela3 混合投影
+      放开 `--system-one-request` 的 GPU 支持时，就得手改系统模式的白名单，那行
+      `| "--gpu"` 看着像特例，实际是共享 flag 列表的又一份副本。
+      方向：把「模式 → 允许的 flag 集」集中成一份声明，或反过来给 flag 标注归属
+      模式；两者都是**纯重构**，不改行为。`parse.rs` 是所有模型的入口，要**独立成
+      PR**，别混进模型适配。
+      详见 [TODO-064](#todo-064-模式互斥白名单手写枚举每加一个共享-flag-都要改多处)。
+- [ ] **Vela3 的 F32 权重路径每次投影都整份拷贝** — `models/vela3/tensor.rs` 的
+      `linear()` 用 `QuantizedTensor::from_bytes` 交权重：F16/BF16 借用 mmap 字节切片，
+      **F32 会把整份权重 `collect()` 成 `Vec<f32>`**（`ops/kernel/quantized_tensor.rs`）。
+      而 `linear()` 在 `d3.rs` 的 `project()` 里每层每投影调一次 → F32 诊断变体
+      （`vela3-d3-lite-f32` 等）反复拷贝整份权重。发布的 Vela3 权重是 BF16，走零拷贝，
+      **生产默认不受影响**，只有 F32 变体慢。
+      方向：让 `QuantizedTensor::F32` 也借用字节切片（共享算子改动），或在 Vela3 侧
+      加载期转一次并复用。详见
+      [TODO-065](#todo-065-vela3-的-f32-权重路径每次投影都整份拷贝)。
+- [ ] **严格 Vulkan 抓不到「投影静默回落 CPU」** — `--compute vulkan` 的语义是
+      「请求真的在设备上」。共享投影器在若干情况下静默回落 CPU 且**不**把设备标记为
+      故障：输出元素数小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K）时、`RUST_GPU_MAX_ROWS`
+      限流时、形状检查失败时。请求结束时的严格档检查只看「设备是否因队列故障被禁用」，
+      抓不到这些 → 一次 `--compute vulkan` 请求可能全在 CPU 上跑完仍返回 200。
+      「设备根本不存在」已由 `configure_cli()` 的前置检查挡住（实测两种情形都成立）；
+      还没覆盖的是「设备在，但投影因形状或阈值回落」。
+      这是**语义决策而非 bug**：把回落升级成错误，等于承诺严格档的每次投影都在设备上，
+      而小投影留在 CPU 正是当前设计意图。
+      详见 [TODO-066](#todo-066-严格-vulkan-抓不到投影静默回落-cpu)。
+
 ## Low Priority
 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
@@ -764,7 +795,7 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
       超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
       脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
-      **TODO-053**。
+      **TODO-055**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
@@ -4120,7 +4151,7 @@ B1 之后的三个阻塞项也已落地：
 - **B4 共享专家与平方 ReLU**：squared ReLU 内联在 `moe.rs`（`relu` 后 `x*x`）。
 
 **顺带修掉一个更早就存在的语义错误**：`add_bos` 的**优先级**写反了
-（详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)）。30B 的 GGUF
+（详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)）。30B 的 GGUF
 是 `pre = "pixtral"` 且**没有** `add_bos_token` key，参考实现会加 BOS，
 仓库原先不加 —— 少了 `<s>` 提示就与参考实现不同。Dory 反而是对的（它的 GGUF
 明写 `add_bos_token = false`，参考实现同样不加）。
@@ -4413,7 +4444,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 40 层 → 每 token **360 次极小的投影**（1×2048 → 1×512）。设备的 prefill（一次几百行）
 划算 ✓，但 decode 是 360 次单行 dispatch ✗ → 每次的固定开销大于那点算力 ✗。
 
-与仓库里已有的结论同源：TODO-052（Mellum 的 784 次 pool dispatch）、LFM2.5 的
+与仓库里已有的结论同源：TODO-052（每投影一次 pool dispatch，784 次里 26 次的开销大于活）、LFM2.5 的
 `min_gpu_matmul_outputs` 阈值（单行投影留在 CPU）。**qwen35moe 的 decode 目前没有
 类似的"留在 CPU"策略** —— 单行专家投影在设备上必然亏。
 
@@ -4811,3 +4842,118 @@ Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
 **关联**：`src/app/jev/`、`src/models/*/trunk/forward.rs` 的
 `run_forward_logits_*`、`src/models/nemotron_h/trunk/runtime.rs`、
 `docs/develop/jev.md`、TODO-053（30B 适配）。
+
+### TODO-064: 模式互斥白名单手写枚举，每加一个共享 flag 都要改多处
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`src/app/cli/parse.rs` 的主解析循环统一处理所有 flag
+（`--gpu` 在第 389 行就是 `"--gpu" => options.gpu = true`），但每个
+「模式」在解析之后另有一段**手写白名单**，用来声明该模式允许哪些
+flag、并对带值参数补一次取值校验：
+
+- `options.enhance` → `--enhance | --compute | --gpu | --overwrite | --serve`
+- `options.system_one_request` → `--adapter | --system-one-request | --compute | --gpu`
+- `options.decision_request` → 自带一段匹配
+
+白名单里出现一个 flag，就等于「这个模式接受它」；其余任何 flag 都会得到
+「`<模式>` cannot be combined with `<flag>`」。
+
+**为什么它是缺口**：白名单是**手写枚举**，每有一个新模式接受共享 flag，
+就要在三处白名单里各加一次。Vela3 混合 Vulkan 投影
+（`codex/vela3-gpu`，`828c8e8a`）把 `--system-one-request` 从「只允许
+CPU」放开到可带 `--gpu`，就必须手改 `parse.rs` 的系统模式白名单 ——
+那行 `| "--gpu"` 看起来像特例，实际是「共享 flag 列表」的第四份副本。
+下次 `--enhance`（RE-USE）也支持 compute 时，已经改过一次了。
+
+**实测**（GB10，`review/vela3-gpu`）：`--system-one-request --gpu` 走
+`parse_cli_options` → `validate_cli_options` 均通过，`compute_policy()`
+为 `Auto`；`--gpu` 与 `--compute` 同用仍被拒。
+
+**方向**（未定）：
+
+1. 把「模式 → 允许的 flag 集」集中成一份声明（例如每个模式一个
+   `const ALLOWED: &[&str]`），解析后统一查表，取代三处内联白名单。
+   这是**纯重构**，不改任何 flag 的接受或拒绝行为。
+2. 或者反过来：给 flag 声明它属于哪些模式（`--gpu` 属于 text / enhance /
+   decision / system-one / …），模式检查按声明求交集。后者更不容易
+   漏，但要求给每个共享 flag 标注归属，改动面更大。
+3. 两种方案都要带一条「重构前后行为逐项相同」的回归：把现有
+   `src/app/cli/tests.rs` 与 `tests/system_one_cli.rs` 里的模式冲突用例
+   扩充成「每个模式 × 每个共享 flag」的矩阵。
+
+**影响面**：`src/app/cli/parse.rs` 是**所有模型**的入口（Qwen3、GLM-4、
+llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，因此应当
+**独立成 PR**，不要混进模型适配的 PR。
+
+**关联**：`src/app/cli/parse.rs`、`src/app/cli/types.rs`、
+`src/app/cli/validate.rs`、`tests/system_one_cli.rs`。
+
+### TODO-065: Vela3 的 F32 权重路径每次投影都整份拷贝
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`src/models/vela3/tensor.rs` 的 `linear()` 用
+`QuantizedTensor::from_bytes` 把权重交给共享投影器。F16 与 BF16 走
+`QuantizedTensor::F16`/`BF16` 变体，只借用 mmap 的字节切片；**F32 走
+`QuantizedTensor::F32` 变体，会把整份权重 `collect()` 成一份
+`Vec<f32>`**（`src/ops/kernel/quantized_tensor.rs` 的 `from_bytes`）。
+
+`linear()` 在 `models/vela3/d3.rs` 的 `project()` 里被调用，而
+`project()` 每层每投影调一次（q/k/v/o、MLP gate/up、LoRA 的 A/B 各一次），
+于是 F32 变体（`vela3-d3-lite-f32`、`vela3-d3-turbo-f32` 等诊断
+产物）会反复拷贝整份权重。
+
+**为什么现在不严重**：发布的 Vela3 权重是 BF16（README 的
+`--stream-f32-weights` 一节写明「先检查每个源张量都是 BF16」），走的是
+零拷贝路径，所以**生产默认不受影响**；只有 F32 诊断变体会慢。
+
+**方向**（未定）：
+
+1. 让 `QuantizedTensor::F32` 也借用字节切片，kernel 侧按需解释
+   little-endian F32；这是共享算子的改动，影响所有用 F32 的模型。
+2. 或者在 Vela3 侧把 F32 权重在加载期就转成一次性的 `Vec<f32>` 并
+   复用，而不是每次 `linear()` 重新构造。
+3. 验收：F32 变体在固定请求上的墙钟不随投影次数线性增长。
+
+**关联**：`src/models/vela3/tensor.rs`、
+`src/ops/kernel/quantized_tensor.rs`、`tools/oracle/vela3/README.md`。
+
+### TODO-066: 严格 Vulkan 抓不到「投影静默回落 CPU」
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`--compute vulkan` 的语义是「请求真的在设备上」。共享投影器在
+若干情况下会**静默**回落 CPU，并且不把设备标记为故障：
+
+- `try_matmul` 在输出元素数小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K）时
+  返回 `false`，让投影留在 CPU 池上 —— 这是为避免 fence 延迟拖慢小投影
+  的**有意设计**；
+- `RUST_GPU_MAX_ROWS` 限流、形状检查、CPU scope 也走同一出口。
+
+这些出口**不调用** `mark_gpu_broken`，所以请求结束时的严格档检查
+（`ComputePolicy::context()`，只看「设备是否因队列故障被禁用」）**抓不到
+它们**。结果是：一次 `--compute vulkan` 请求可能全部在 CPU 上跑完，
+仍然返回 200 和完整响应。
+
+**已经覆盖的场景**：「设备根本不存在」由 `configure_cli()` 的前置检查
+挡住 —— 严格档在加载权重之前就报 `requires a usable Vulkan device`；
+未编译 `--features vulkan` 时报 `--features vulkan`。Vela3 混合投影
+（`codex/vela3-gpu`）实测这两种情形都成立。
+
+**还没覆盖的场景**：设备存在但投影因形状或阈值回落 CPU。仓库现有惯例是
+把这种回落当作正常行为（共享投影器对所有模型都这样），因此要不要把它
+升级成严格档的错误，**是语义决策而非 bug**：改了就等于承诺「严格档的每
+一次投影都在设备上」，而小投影留在 CPU 恰恰是当前的设计意图。
+
+**方向**（未定）：
+
+1. 先定语义：严格档到底承诺「设备可用」还是「每一次投影都在设备上」。
+2. 若取后者，需要一个能区分「回落原因」的接口（形状不支持 / 阈值太小 /
+   设备故障），并让严格档在出现「非设备故障」的回落时报错或计数上报。
+3. 验收：一次全部落回 CPU 的严格档请求，要么被拒，要么在响应里带一个
+   可观测的「设备投影数 = 0」标记。
+
+**关联**：`src/ops/kernel/vulkan.rs`（`try_matmul`、
+`min_gpu_matmul_outputs`）、`src/compute/mod.rs`（`context`）、
+`src/models/vela3/mod.rs`（严格档事后检查）。
