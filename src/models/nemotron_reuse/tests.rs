@@ -18,10 +18,10 @@ fn contracts_and_config_pin_the_published_architecture() {
             .len(),
         shapes.len()
     );
-    assert!(Model::validate_compute(ComputePolicy::Vulkan)
-        .unwrap_err()
-        .contains("no Vulkan"));
-    assert!(Model::validate_compute(ComputePolicy::Auto).is_ok());
+    // RE-USE has no device code, so it imposes no compute-policy restriction:
+    // `--compute vulkan` is allowed and reported (backend=partial) rather than
+    // refused, matching every other arch without a complete device path. The
+    // flag contract itself is covered by the shared ComputePolicy tests.
 }
 
 struct Source {

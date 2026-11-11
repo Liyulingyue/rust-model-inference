@@ -2138,7 +2138,7 @@ pub fn run_server() {
         // for a device and gets a partial one, so say so once.
         eprintln!(
             "compute requested=Vulkan backend=partial mode=jev \
-             note=no complete device path for this mode; only the \
+             note=no complete device path for this mode; any \
              offloadable parts run on the device"
         );
     }

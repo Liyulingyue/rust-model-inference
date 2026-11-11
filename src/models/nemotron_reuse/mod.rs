@@ -107,7 +107,6 @@ fn contracts() -> Vec<(String, Vec<usize>)> {
 
 impl Model {
     pub fn load(path: &Path, compute: ComputePolicy) -> Result<Self, String> {
-        Self::validate_compute(compute)?;
         let weights = if path.is_dir() {
             path.join("model.safetensors")
         } else {
@@ -136,19 +135,11 @@ impl Model {
         Self::from_source(&source, &config, compute)
     }
 
-    pub fn validate_compute(compute: ComputePolicy) -> Result<(), String> {
-        if compute == ComputePolicy::Vulkan {
-            return Err("RE-USE has no Vulkan implementation; use --compute cpu or auto".into());
-        }
-        Ok(())
-    }
-
     pub fn from_source(
         source: &dyn TensorSource,
         config: &serde_json::Value,
         compute: ComputePolicy,
     ) -> Result<Self, String> {
-        Self::validate_compute(compute)?;
         validate_config(config)?;
         let mut tensors = HashMap::new();
         for (name, shape) in contracts() {

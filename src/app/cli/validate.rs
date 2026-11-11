@@ -92,7 +92,9 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         {
             return Err("--enhance cannot be combined with generation, JEV, other task modes or server-side --audio/--out".into());
         }
-        return crate::models::nemotron_reuse::Model::validate_compute(options.compute_policy());
+        // The mode validates itself; no compute-policy restriction applies
+        // because RE-USE has no device code.
+        return Ok(());
     }
     if options.decision_request.is_some() {
         return crate::app::decision::validate_options(options);
