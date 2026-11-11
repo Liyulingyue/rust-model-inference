@@ -348,6 +348,8 @@ mod qwen3vl_image_tests {
     #[test]
     #[ignore = "requires the remote pinned Sophon vision GGUF"]
     fn real_projected_width_preserves_all_image_and_deepstack_rows() {
+        use sha2::Digest;
+
         let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         let source = crate::core::loader::GGUFLoader::from_file(
             &std::env::var("RMI_SOPHON_VISION").unwrap(),
@@ -360,9 +362,12 @@ mod qwen3vl_image_tests {
         let expected_rows = crate::models::qwen3::vision::qwen_smart_resize(32, 32, &config)
             .unwrap()
             .token_count();
-        let encoded =
-            super::encode_qwen3vl_image_dynamic(&source, &image::DynamicImage::new_rgb8(32, 32), 4)
-                .unwrap();
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            32,
+            32,
+            image::Rgb([255, 0, 0]),
+        ));
+        let encoded = super::encode_qwen3vl_image_dynamic(&source, &image, 4).unwrap();
         assert_eq!(encoded.media.len(), expected_rows * config.projection_dim);
         assert_eq!(
             encoded.deepstack_layers.len(),
@@ -372,6 +377,20 @@ mod qwen3vl_image_tests {
             assert_eq!(layer.len(), encoded.media.len());
         }
         assert!(encoded.media.iter().all(|v| v.is_finite()));
+        let plane = |values: &[f32]| {
+            let mut digest = sha2::Sha256::new();
+            for value in values {
+                digest.update(value.to_le_bytes());
+            }
+            serde_json::json!({"len": values.len(), "sha256": format!("{:x}", digest.finalize())})
+        };
+        eprintln!(
+            "SOPHON_VISION_FIXTURE {}",
+            serde_json::json!({
+                "projected": plane(&encoded.media),
+                "deepstack": encoded.deepstack_layers.iter().map(|v| plane(v)).collect::<Vec<_>>(),
+            })
+        );
     }
 }
 

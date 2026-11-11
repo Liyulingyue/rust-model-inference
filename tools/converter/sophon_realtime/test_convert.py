@@ -241,6 +241,7 @@ class ConverterTests(unittest.TestCase):
             c.vision_writer(out, c.Reader(root), root, config).write()
             meta, ts = _read_gguf(out)
             self.assertEqual(meta["clip.projector_type"], "qwen3vl_merger")
+            self.assertIs(meta.get("clip.vision.preserve_f32"), True)
             self.assertEqual(meta["clip.vision.image_min_pixels"], 16)
             self.assertEqual(meta["clip.vision.is_deepstack_layers"], [True] * 3)
             self.assertEqual(ts["v.post_ln.weight"][1], (4,))

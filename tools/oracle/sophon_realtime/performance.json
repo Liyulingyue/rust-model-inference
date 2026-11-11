@@ -64,15 +64,125 @@
       "binary_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
       "evidence": "target/sophon/speech-http-main-integrated-33367/result.json",
       "condition": "release-fast; shared remote host, concurrent validation; not capacity or speedup evidence"
+    },
+    {
+      "component": "thinker strict Vulkan model contract",
+      "format": "Q8_0",
+      "policy": "vulkan",
+      "threads": 4,
+      "kv": "F16",
+      "prompt_tokens": 13,
+      "requested_generated_tokens": 2,
+      "wall_seconds": 54.551119323819876,
+      "exit": 1,
+      "device_submissions": 714,
+      "static_upload_bytes": 33985213504,
+      "peak_allocation_bytes": 35433457200,
+      "binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "evidence": "target/sophon/reviewed-device-smoke-33367/result.json",
+      "condition": "First-request device upload plus CPU/device contract comparison; failed correctness gate, not generation throughput. Same-KV reference benchmark pending."
+    },
+    {
+      "component": "thinker CPU/Auto fallback comparison",
+      "format": "Q8_0",
+      "kv": "F16",
+      "policy": "cpu",
+      "threads": 4,
+      "prompt_tokens": 13,
+      "generated_tokens": 2,
+      "wall_seconds": 17.540907381102443,
+      "exit": 0,
+      "evidence": "target/sophon/reviewed-auto-cpu-comparison-33367/result.json",
+      "binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "condition": "Auto includes failed GPU contract/upload then CPU fallback; output equals CPU. Same input and KV as strict device check, but no same-KV independent reference timing yet. Shared host and release-fast, not capacity."
+    },
+    {
+      "component": "thinker CPU/Auto fallback comparison",
+      "format": "Q8_0",
+      "kv": "F16",
+      "policy": "auto",
+      "threads": 4,
+      "prompt_tokens": 13,
+      "generated_tokens": 2,
+      "wall_seconds": 39.52592766843736,
+      "exit": 0,
+      "evidence": "target/sophon/reviewed-auto-cpu-comparison-33367/result.json",
+      "binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "condition": "Auto includes failed GPU contract/upload then CPU fallback; output equals CPU. Same input and KV as strict device check, but no same-KV independent reference timing yet. Shared host and release-fast, not capacity."
+    },
+    {
+      "component": "final thinker CPU/Auto fallback comparison",
+      "format": "Q8_0",
+      "kv": "F16",
+      "policy": "cpu",
+      "threads": 4,
+      "prompt_tokens": 13,
+      "generated_tokens": 2,
+      "wall_seconds": 10.18098297342658,
+      "exit": 0,
+      "evidence": "target/sophon/fallback-reviewed-auto-cpu-comparison-33367/result.json",
+      "binary_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+      "condition": "Final fallback-reviewed artifact; Auto has real device submissions, failed unchanged numerical contract, then CPU fallback. CPU and Auto generated text agree. Shared host, release-fast, cold upload/validation included; no capacity or GPU throughput claim."
+    },
+    {
+      "component": "final thinker CPU/Auto fallback comparison",
+      "format": "Q8_0",
+      "kv": "F16",
+      "policy": "auto",
+      "threads": 4,
+      "prompt_tokens": 13,
+      "generated_tokens": 2,
+      "wall_seconds": 35.071198996156454,
+      "exit": 0,
+      "evidence": "target/sophon/fallback-reviewed-auto-cpu-comparison-33367/result.json",
+      "binary_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+      "condition": "Final fallback-reviewed artifact; Auto has real device submissions, failed unchanged numerical contract, then CPU fallback. CPU and Auto generated text agree. Shared host, release-fast, cold upload/validation included; no capacity or GPU throughput claim."
+    },
+    {
+      "component": "final Auto HTTP 68-token JEV device-loss replay validation",
+      "format": "Q8_0",
+      "kv": "F16",
+      "policy": "auto",
+      "threads": 4,
+      "wall_seconds": 52.77591947838664,
+      "max_cpu_probability_difference": 0.0,
+      "evidence": "target/sophon/fallback-reviewed-auto-http-33367/result.json",
+      "binary_sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb",
+      "condition": "Device lost again at chunk32..64; all current-input KV replayed on CPU, probability difference zero. Previous partial-replay failure is not a valid speed baseline. Functional validation, not backend throughput."
+    },
+    {
+      "component": "final lossless image CLI/HTTP suite",
+      "component_formats": {
+        "thinker": "Q8_0",
+        "vision": "F32 with clip.vision.preserve_f32=true"
+      },
+      "kv": "F16",
+      "policy": "cpu",
+      "threads": 4,
+      "cases_wall_seconds": {
+        "cli-jev": 88.45980193652213,
+        "cli-grouped": 96.83302139118314,
+        "cli-generation": 57.706063682213426,
+        "http-jev": 86.72226086258888,
+        "http-grouped": 93.60925915464759,
+        "ordinary-chat-batch": 57.736551059409976,
+        "ordinary-chat-stream": 58.23078357055783,
+        "context-400-False": 0.0018797069787979126,
+        "context-400-True": 0.0012547485530376434
+      },
+      "cli_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+      "server_sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb",
+      "evidence": "target/sophon/entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367/result.json",
+      "condition": "All nine functional checks pass; end-to-end request times include thinker and vision work, not isolated vision or a speedup benchmark."
     }
   ],
   "gpu": {
-    "status": "not measured; no GPU-support or speedup claim",
+    "status": "measured operator passes; complete Q8_0/F16-KV model fails the unchanged CPU/device numerical contract; no speedup claim",
     "gaps": [
       "audio block attention/frontend device kernels",
       "causal convolution and HiFT spectral device kernels"
     ],
-    "existing_path": "Qwen3-VL resident decoder implements M-RoPE/DeepStack with F16 KV; hardware model validation pending"
+    "existing_path": "Qwen3-VL resident decoder executes on gfx1100: 714 submissions, 707 static uploads. The width cap is fixed; reviewed logit0 abs error 0.054603577 exceeds the existing atol=rtol=0.002 contract."
   },
   "release_capacity_benchmark": "not run; release-fast numbers must not be presented as release capacity"
 }

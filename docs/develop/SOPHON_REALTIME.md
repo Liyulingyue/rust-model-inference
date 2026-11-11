@@ -1,6 +1,6 @@
 # Sophon-Realtime-32B-Tag
 
-状态：**Experimental，部分适配**。F32 thinker 八步、F32/BF16 音频边界与短语音组件有独立数值证据，F32 CLI 已输出有效 WAV；量化失败和未验证入口见 [逐项记录](../../tools/oracle/sophon_realtime/validation.md) 与 [543 行覆盖矩阵](../../tools/oracle/sophon_realtime/coverage.json)。这不代表完整双工、原生 FP8 或完整 GPU 支持。
+状态：**Experimental，部分适配**。F32/F16/BF16 thinker 八步、F32 vision encoder 的 32 个 checkpoint、F32/BF16 音频边界与短语音组件有独立数值证据，F32 CLI 已输出有效 WAV；新 lossless 图像 CLI/HTTP 的 9 项入口检查通过。量化失败和未验证入口见 [逐项记录](../../tools/oracle/sophon_realtime/validation.md) 与 [550 行覆盖矩阵](../../tools/oracle/sophon_realtime/coverage.json)。这不代表完整双工、原生 FP8 或完整 GPU 支持。
 
 ## 远端准备
 
@@ -15,12 +15,14 @@
 | 文件 | 内容 | 使用 |
 | --- | --- | --- |
 | thinker-*.gguf | 显式 sophon_realtime 契约，复用 Qwen3-VL decoder | 文本、视觉/音频理解及 JEV |
-| mmproj-F32.gguf | Qwen3-VL 视觉塔、merger、DeepStack | thinker --image |
+| mmproj-F32.gguf；本轮新资产另存 vision-lossless-mmproj-F32.gguf | Qwen3-VL 视觉塔、merger、DeepStack；纯 F32 计算由 metadata 显式 opt-in | thinker --image；新 lossless 入口待复测 |
 | audio-*.gguf | 18 层 Qwen3-ASR encoder + stack-2 Ultravox projector | thinker --audio |
 | talker-*.gguf | 带标签的 CosyVoice3 Qwen2 speech decoder | --tts 或 --tts-model |
 | code2wav-*.gguf | Flow + F32 HiFT + 六个固定 voice prompt | --mmproj 或 --tts-mmproj |
 
 当前 `--mmproj` 选择视觉或音频组件；同次请求组合音频与图像/视频尚未接入。组件版本、architecture、tensor shape/type 和 voice inventory 都会校验，不能拿其他模型的 mmproj 替代。
+
+视觉转换器现写入布尔 `clip.vision.preserve_f32=true`，复用共享 encoder 已有的 lossless 路径，保留 F32 线性权重与激活。历史 `mmproj-F32.gguf` 只有 F32 存储语义，实际对齐的线性层会预打包 Q8 权重并动态量化输入，4304 宽的 FFN-down 输入走 F32 fallback；缺省/false metadata 的行为保留。新资产 `vision-lossless-mmproj-F32.gguf`（SHA256 `38c73644…`）与历史资产（`75a9be7a…`）的 352 个 tensor payload 相同，只新增 opt-in metadata；没有覆盖历史文件。
 
 将 Flow、HiFT 和 voices 打包：
 
@@ -76,8 +78,10 @@ Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均
 
 Tokenizer、shape、控制 token、版本和 stream ordering 精确检查。F32/SIMD/F16/BF16/量化以事先固定的 rRMSE、cosine、max_abs 等指标比较，不要求有损路径逐位相同。原始 FP8 激活损失、导出精度损失和同文件实现误差分别报告。
 
-CPU 走仓库线程池与 SIMD/量化算子。Auto 复用现有分发，须按真实 backend/submission 证据判断；回退 CPU 不代表 GPU 通过。现有 Qwen3-VL resident decoder 已实现 interleaved M-RoPE/DeepStack，设备路径要求 F16 KV 和可用权重格式，仍需本模型实测。音频 block attention/frontend、causal convolution 和 HiFT spectral 的严格设备路径尚缺共享算子，明确拒绝。后续共享层及顺序见 validation；未以没 GPU 硬件掩盖缺 kernel。
+CPU 走仓库线程池与 SIMD/量化算子。Auto 复用现有分发，须按真实 backend/submission 证据判断；回退 CPU 不代表 GPU 通过。现有 Qwen3-VL resident decoder 已实现 interleaved M-RoPE/DeepStack，设备路径要求 F16 KV 和可用权重格式。最新 Q8_0 文本实测有 714 次设备提交，但未过现有 CPU/GPU 数值门槛；不能宣称完整 GPU 支持。音频 block attention/frontend、causal convolution 和 HiFT spectral 的严格设备路径尚缺共享算子，明确拒绝。后续共享层及顺序见 validation；未以没 GPU 硬件掩盖缺 kernel。
 
-量化音频/Flow 存在未过原门槛的结果；F16 talker 有极小 margin 的 greedy 分歧，部分 K talker 在 128-token 边界未 EOS。长 HiFT 的中间检查点仍有失败，尽管最终 waveform 门槛通过。没有广泛听感、任务准确率或真实 full-duplex 质量结论。
+Q8_0 thinker 配 F16 KV 的 CPU 文本、图像及单/分组 JEV 已跑通，CLI/HTTP 概率差为 0；图像记录使用历史 F32 存储、内部 Q8 预打包视觉路径，不能冒充纯 F32 数值对齐。量化音频/Flow 存在未过原门槛的结果；F16 talker 有极小 margin 的 greedy 分歧，部分 K talker 在 128-token 边界未 EOS。长 HiFT 的中间检查点仍有失败，尽管最终 waveform 门槛通过。没有广泛听感、任务准确率或真实 full-duplex 质量结论。
 
-[performance.json](../../tools/oracle/sophon_realtime/performance.json) 保留同机实测。F32 thinker 八步曾耗时 802 秒，发生分页和资源竞争，不能用作常规吞吐或容量。初始独立 TTS 77 speech tokens / 73,920 samples 用时约 78 秒；release-fast 数字不代表 release 部署性能。完整 GPU 与同机参考性能对比尚未运行。
+新 lossless F32 vision 已用官方 Transformers 4.57.6 `Qwen3VLVisionModel`、相同导出权重、CPU 四线程独立验证，不加载 thinker。固定 32×32 红图按源配置放大到 256×256，得到 64 行、每行 5120 维；1152 宽、27 层视觉塔的 input、27 个 block、三层 DeepStack（8/16/24）及最终投影共 **32/32 通过**，最差 rRMSE `1.26997018e-5`、最低 cosine `0.9999999999195905`，无首分叉；原门槛仍为 `0.001 / 0.999999`。历史默认资产的投影与三层 DeepStack 位哈希也在改动前后完全一致。证据见 [vision-results.json](../../tools/oracle/sophon_realtime/vision-results.json)；其他模型的真实 vision 资产缺失，未声称其真实回归通过。新 lossless 图像组件已配合 Q8_0 thinker/F16 KV，在最新构建通过 CLI/HTTP 的 9 项检查：图像 chat、单/分组 JEV、batch/SSE 与上下文预检；两项 CLI/HTTP 概率差均为 0。Auto/Vulkan vision 数值路径仍待验证；独立 encoder 数值和组合入口功能分别留证。
+
+[performance.json](../../tools/oracle/sophon_realtime/performance.json) 保留同机实测。F32 thinker 八步曾耗时 802 秒，发生分页和资源竞争，不能用作常规吞吐或容量。初始独立 TTS 77 speech tokens / 73,920 samples 用时约 78 秒；release-fast 数字不代表 release 部署性能。严格 Q8_0/F16-KV 设备检查耗时 54.55 秒后因数值门槛失败，含上传与 CPU 校验开销，不能作为吞吐；同 KV 参考性能对比仍待完成。

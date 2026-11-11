@@ -669,7 +669,7 @@
       "cpu_reference": "production quantize_q8_0_into plus matmul_q8_0_quantized_range",
       "numerical_gate": {
         "absolute_tolerance": 0.0002,
-        "relative_tolerance": 0.00002,
+        "relative_tolerance": 2e-05,
         "bitwise_required": false
       },
       "checks": [
@@ -924,5 +924,501 @@
     "baseline_capture_exit_code": 0,
     "current_capture_exit_code": 0,
     "comparison_exit_code": 0
+  },
+  "fallback_reviewed_source_identity": {
+    "base_source_commit": "d2179bd0d8586ef6d368ef1f1b1c487a9c4e3448",
+    "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+    "source_manifest_sha256": "5701ac901a75e5405839648f81797448647fc45ee3b9828668c19219a8ba20e4",
+    "source_files_compared": 618,
+    "source_files_mismatched": [],
+    "binaries": {
+      "rust-model-inference": {
+        "path": "target/sophon/fallback-reviewed-rust-model-inference",
+        "sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347"
+      },
+      "rust-model-server": {
+        "path": "target/sophon/fallback-reviewed-rust-model-server",
+        "sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb"
+      }
+    },
+    "build_report": "target/sophon/fallback-reviewed-build-33367.json",
+    "build_report_sha256": "fffb0f2ff59ad5714ea9e7494b90a42f5d87fb83ea3df9886abe189ccc91d8ad",
+    "date": "2026-11-11",
+    "pull_request": "https://github.com/Liyulingyue/rust-model-inference/pull/233",
+    "source_changes_since_final_reviewed": [
+      "src/app/text/vision.rs",
+      "src/models/qwen3/vision/mod.rs",
+      "src/models/qwen3/trunk/prefill.rs"
+    ],
+    "source_comparison": "All 618 Rust/Cargo build-time manifest entries match this checkout by SHA-256. Other reports retain their distinct source manifests and binaries."
+  },
+  "same_feature_library_regression_fallback_reviewed": {
+    "status": "NO_NEW_FAILURES",
+    "baseline": {
+      "log": "target/sophon/upstream-main-baseline-1-33367.log",
+      "log_sha256": "bac86d865ee526a794bcf8bca54f7ba83ebdae6898828558113b3317b5de3d0a",
+      "log_bytes": 1613403,
+      "summary": "test result: FAILED. 1643 passed; 23 failed; 229 ignored; 0 measured; 0 filtered out; finished in 75.89s",
+      "counts": {
+        "passed": 1643,
+        "failed": 23,
+        "ignored": 229,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "current": {
+      "log": "target/sophon/fallback-reviewed-1-33367.log",
+      "log_sha256": "eb5f12fb18fdcc6514a008d550bd135a760e18a424361440a0d2b556b3316ffd",
+      "log_bytes": 1618017,
+      "summary": "test result: FAILED. 1685 passed; 23 failed; 234 ignored; 0 measured; 0 filtered out; finished in 73.54s",
+      "counts": {
+        "passed": 1685,
+        "failed": 23,
+        "ignored": 234,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "new_failures": [],
+    "removed_failures": [],
+    "date": "2026-11-11",
+    "evidence_host": "authorized existing remote 33367",
+    "source_identity": "fallback_reviewed_source_identity"
+  },
+  "prefill_replay_regression_fallback_reviewed": {
+    "status": "PASS",
+    "test": "models::qwen3::trunk::prefill::tests::cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix",
+    "red": {
+      "log": "target/sophon/prefill-replay-red.log",
+      "log_sha256": "fdb4e0081fc951c504787dc53c500d653bb655fbb2cd66d897fb6bfd4340525a",
+      "log_bytes": 95527,
+      "summary": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1941 filtered out; finished in 0.00s",
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0,
+        "measured": 0,
+        "filtered out": 1941
+      },
+      "failures": [
+        "models::qwen3::trunk::prefill::tests::cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix"
+      ],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "green": {
+      "log": "target/sophon/prefill-replay-green.log",
+      "log_sha256": "36b9fd2f82908f4cb0019d8c981cddab4a72bb4d9e956dacc44c7b6d3620c414",
+      "log_bytes": 94802,
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1941 filtered out; finished in 0.00s",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered out": 1941
+      },
+      "failures": [],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "scope": "F32-KV CPU fixture simulates partial device progress and nonfinite current-input KV; committed prefixes 0/2, full logits/KV, final length and replay CPU error retaining original GPU cause. This does not establish device numerical parity.",
+    "initial_harness_error": {
+      "log": "target/sophon/prefill-replay-fixture-error.log",
+      "log_sha256": "b62961922e6abe7b616d0085a087694ed37fe157252d7520eb567c2589f29e1d",
+      "reason": "Initial fixture used default F16 session while expecting F32; corrected before the genuine RED comparison."
+    },
+    "source_identity": "fallback_reviewed_source_identity"
+  },
+  "python_tests_fallback_reviewed": {
+    "status": "PASS",
+    "count": 68,
+    "log": "target/sophon/fallback-reviewed-python-tests.log",
+    "log_sha256": "e7e043e194ec2b136e8ed61c6922eb50057b5442bb510cdcf6a1683c91c50c10"
+  },
+  "f32_cli_regression_fallback_reviewed": {
+    "status": "PASS",
+    "checks": {
+      "distinct_binary_artifacts": true,
+      "same_model_sha256": true,
+      "same_cli_arguments": true,
+      "same_prompt_ids": true,
+      "same_generated_ids": true,
+      "same_logits_count": true,
+      "all_logits_bitwise_equal": true
+    },
+    "baseline": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/upstream-main-1/summary.json",
+    "current": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/fallback-reviewed-1/summary.json",
+    "baseline_binary_sha256": "9e026996f4ec6dc907726200bfd460a886e875a2e21b3fa867495e508f572caf",
+    "current_binary_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+    "compared_values": 4558080,
+    "generated_token_ids": [
+      785,
+      12884,
+      7952,
+      6303,
+      1576,
+      39020,
+      374,
+      36967
+    ],
+    "logits": [
+      {
+        "occurrence": 0,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 1,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 2,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 3,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 4,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 5,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 6,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 7,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 8,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 9,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 10,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 11,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 12,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 13,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 14,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 15,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 16,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 17,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 18,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 19,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 20,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 21,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 22,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 23,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 24,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 25,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 26,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 27,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 28,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 29,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      }
+    ],
+    "date": "2026-11-11",
+    "evidence_host": "authorized remote 33367; only small JSON transferred; model and raw logits remain remote",
+    "source_identity": "fallback_reviewed_source_identity",
+    "comparison": "target/sophon/f32-regression-review-20261111/fallback-reviewed-comparison.json",
+    "scope": "Ordinary upstream Qwen3 F32 CPU inference; 30 logits records and 4558080 values. Existing CPU numerical behavior remains unchanged; this is not a lossy/device bitwise acceptance requirement."
   }
 }

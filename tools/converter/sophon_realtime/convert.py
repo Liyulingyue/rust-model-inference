@@ -568,6 +568,7 @@ def vision_writer(path, reader, root, config):
         "clip.projector_type": "qwen3vl_merger",
         "clip.has_vision_encoder": True,
         "clip.has_text_encoder": False,
+        "clip.vision.preserve_f32": True,
         "clip.use_gelu": True,
         "clip.vision.image_size": math.isqrt(v["num_position_embeddings"])
         * v["patch_size"],
