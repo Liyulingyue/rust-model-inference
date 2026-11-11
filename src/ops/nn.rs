@@ -107,12 +107,12 @@ impl<'a> Linear<'a> {
     /// The weight as a native row-major `[n_out][n_in]` f32 matrix, when the
     /// kernel stores one. Lets a caller keep a bit-exact scalar path instead of
     /// going through the shared matmul.
-    pub fn f32_weight(&self) -> Option<&[f32]> {
+    pub(crate) fn f32_weight(&self) -> Option<&[f32]> {
         self.weight.kernel.f32_slice()
     }
 
     /// The bias vector, when the projection has one.
-    pub fn bias(&self) -> Option<&[f32]> {
+    pub(crate) fn bias(&self) -> Option<&[f32]> {
         self.bias.as_deref()
     }
 
