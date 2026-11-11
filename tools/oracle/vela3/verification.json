@@ -11,7 +11,7 @@
     "pillow": "13.0.0",
     "cpu_threads": 4
   },
-  "scope": "Native Rust CPU safetensors System One; no Python or external acceleration library in runtime",
+  "scope": "Native Rust safetensors System One; original records use CPU, and gpu_2026_11_06 adds shared Vulkan projections. No Python or external inference framework in runtime.",
   "reference_manifest": {
     "path": "tools/oracle/vela3/snapshots.json",
     "sha256": "630393a780ae9886997e5065c33e37a2ca388591df6aba7d3b7069516bf1ace3"
@@ -4445,7 +4445,7 @@
     "flash real-base BF16 internal checkpoint gate FAILED; F32 graph, tested System One response and four greedy token IDs pass",
     "d3 image BF16 checkpoint gate FAILED; image path experimental",
     "fast-vision real checks use shipped Python text implementation with config-only compatibility shim",
-    "No GPU/GGUF/server/video integration, long-context benchmark or cross-device validation"
+    "Original scope had no GPU/GGUF/server/video integration, long-context benchmark or cross-device validation; partial Vulkan projection evidence was added in gpu_2026_11_06. Other omissions remain."
   ],
   "engineering_checks": {
     "vela3": {
@@ -5877,5 +5877,1027 @@
   "cli_flag_rename_2026_11_06": {
     "change": "The System One CLI now names the base weights --model and the Vela3 adapter package --adapter; --base-model is gone. The oracle scripts follow the same convention (--model = base snapshot, --adapter = Vela3 package); the d3 trace task-level flag is --task-adapter.",
     "note": "Command strings recorded before this change keep the old flags on purpose: they are the historical record of what was run. The reproducing_commands and real_main_cli_commands entries are updated to the current flags."
+  },
+  "gpu_2026_11_06": {
+    "verified_at_utc": "2026-11-06T03:16:48.308823+00:00",
+    "source_base_commit": "d03b30a6cbc3e2016036ec3066ededbded1032a6",
+    "source_sha256": {
+      "src/app/cli/parse.rs": "d3866748452d02ef53c6653e5ea34a31f26375fc53f358e9504e5a89f45e1fd5",
+      "src/app/cli/validate.rs": "dcea117af265ee474a6b6961627c19d1d99ece7acd8fa3788b398221e0b7dce5",
+      "src/app/system_one.rs": "96721adc0b035cc79d6fdbb4e9d414b01739c1a67c99199d9484663391aafda4",
+      "src/models/vela3/d3.rs": "cd88dc286a99939767297b614cb5fab0b514fd2fb5fbb3c37cd0914dc7c9f170",
+      "src/models/vela3/mod.rs": "3bb2bc41ce811b7f1ef075dc1e2cb30a9f67e1f4fbacbc75f630725ed74e536e",
+      "src/models/vela3/tensor.rs": "f5a9c854ca853613a5298f5c6dd054f2d5f5c0c94f3fdc4d310d6815e846be0a",
+      "tests/system_one_cli.rs": "ccc3af5ff49940c82b77b57d8f784c7a46704f267576ec7e0d57697af6948a56"
+    },
+    "scope": "Native safetensors System One with shared Vulkan linear projections and remaining CPU operators; no complete resident device graph, shared kernel or dependency changes.",
+    "environment": {
+      "platform": "macOS 27.2 arm64",
+      "device": "Apple M3 Max",
+      "memory_gib": 64,
+      "backend": "physical Vulkan via MoltenVK",
+      "rust": "1.98.1",
+      "profile": "release-fast",
+      "request_threads": 4,
+      "process_env": {
+        "DYLD_LIBRARY_PATH": "/opt/homebrew/lib",
+        "VK_ICD_FILENAMES": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+        "RMI_COMPUTE_TRACE": "1"
+      },
+      "unset_env": [
+        "RMI_SCALAR",
+        "RMI_PARITY_TRACE",
+        "RUST_GPU_MIN_OUTPUTS",
+        "RUST_GPU_MAX_ROWS"
+      ]
+    },
+    "reference_manifest_sha256": "630393a780ae9886997e5065c33e37a2ca388591df6aba7d3b7069516bf1ace3",
+    "artifacts": {
+      "rmi-final": {
+        "sha256": "6a772b803cb0d2e102f43c5fbf281eede54ee49b0cc9e7ad4868d23a61b246c4",
+        "bytes": 32647744
+      },
+      "rmi-vulkan": {
+        "sha256": "01b0777e180b9b8d1815bc3ce9b809e9354c159bcd216944639339924145baf8",
+        "bytes": 32647408
+      },
+      "rmi-no-vulkan": {
+        "sha256": "f4c6d5fe4ee44cfc6e8d1eb8006d9225ef63020e3c22bfbe127c1a0b015a38b0",
+        "bytes": 30497600
+      },
+      "rmi-calibrated": {
+        "sha256": "07b54b5adadb1110d0f6e05a7df454d29b4929388625ad03fccbd9152d4b2d04",
+        "bytes": 32647808
+      },
+      "rmi-main-integrated": {
+        "sha256": "fa7d732eb8e7f1b2fe7dd9615531c999982d3997873ff9de29ecdb13d91129ed",
+        "bytes": 32664896
+      }
+    },
+    "binary_scope": "Fast/lite/vision request matrix and initial CPU/Auto/Vulkan probes used rmi-vulkan. rmi-final added the --gpu parser allowlist and reproduced the mini definition divergence. Final rmi-calibrated additionally scopes automatic definition generation to CPU; its final runtime probes and mini/turbo request reruns are recorded separately. The fast/lite/vision matrix does not invoke this definition generator, so its model computation is unchanged. No-feature runtime probes used rmi-no-vulkan before the definition guard, which does not change those Fast paths.",
+    "comparison_policy": {
+      "exact": [
+        "object keys",
+        "answer order",
+        "choices",
+        "strings",
+        "span offsets",
+        "usage"
+      ],
+      "float_gate": "abs(actual-reference) <= atol + rtol * abs(reference)",
+      "fast_and_fast_vision": {
+        "atol": 0.0005,
+        "rtol": 0.0005
+      },
+      "d3_requests": {
+        "atol": 0.01,
+        "rtol": 0.01
+      },
+      "projection_formats": {
+        "atol": 0.0002,
+        "rtol": 0.0002
+      },
+      "unchanged_existing_bf16_gates": true,
+      "no_bitwise_claim_for_lossy_operations": true
+    },
+    "projection_test": {
+      "test": "models::vela3::tensor::tests::gpu_projection_and_lora_match_cpu_for_all_float_formats",
+      "passed": true,
+      "shape": {
+        "rows": 128,
+        "input": 64,
+        "output": 128,
+        "lora_rank": 32
+      },
+      "formats": {
+        "F32": {
+          "max_abs": 7.1525574e-07,
+          "submissions": 2
+        },
+        "F16": {
+          "max_abs": 0.0,
+          "submissions": 2
+        },
+        "BF16": {
+          "max_abs": 1.4305115e-06,
+          "submissions": 2
+        }
+      },
+      "cpu_before_and_after": {
+        "submissions_delta": 0,
+        "exact_repeat": true
+      },
+      "log": ".codex/vela3/gpu-20261106/gpu-projection-calibrated.log",
+      "final_source_rerun": true
+    },
+    "fast_float_prompt_probe": [
+      {
+        "mode": "cpu",
+        "code": 0,
+        "seconds": 15.16,
+        "gpu_projections": 0,
+        "passed": true,
+        "floats_compared": 6,
+        "max_absolute_error": 1.5524597423155484e-06
+      },
+      {
+        "mode": "auto",
+        "code": 0,
+        "seconds": 12.67,
+        "gpu_projections": 672,
+        "passed": true,
+        "floats_compared": 6,
+        "max_absolute_error": 7.040810438008194e-07
+      },
+      {
+        "mode": "vulkan",
+        "code": 0,
+        "seconds": 11.71,
+        "gpu_projections": 672,
+        "passed": true,
+        "floats_compared": 6,
+        "max_absolute_error": 7.040810438008194e-07
+      }
+    ],
+    "full_request_matrix": [
+      {
+        "case": "fast-all-cpu",
+        "code": 0,
+        "seconds": 151.4,
+        "gpu_projections": 0,
+        "passed": true,
+        "max_absolute_error": 1.7486760879315e-06,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 18
+      },
+      {
+        "case": "fast-all-vulkan",
+        "code": 0,
+        "seconds": 59.07,
+        "gpu_projections": 5040,
+        "passed": true,
+        "max_absolute_error": 1.1718438340801995e-06,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 18,
+        "cpu_comparison_passed": true,
+        "cpu_max_absolute_error": 1.0008634212521628e-06
+      },
+      {
+        "case": "lite-cpu",
+        "code": 0,
+        "seconds": 61.03,
+        "gpu_projections": 0,
+        "passed": true,
+        "max_absolute_error": 0.004633518871616504,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 14
+      },
+      {
+        "case": "lite-vulkan",
+        "code": 0,
+        "seconds": 40.66,
+        "gpu_projections": 2851,
+        "passed": true,
+        "max_absolute_error": 0.008008896125854092,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 14,
+        "cpu_comparison_passed": true,
+        "cpu_max_absolute_error": 0.0036637311180433008
+      },
+      {
+        "case": "vision-mixed-cpu",
+        "code": 0,
+        "seconds": 410.87,
+        "gpu_projections": 0,
+        "passed": true,
+        "max_absolute_error": 3.3527612686157227e-07,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 9
+      },
+      {
+        "case": "vision-mixed-vulkan",
+        "code": 0,
+        "seconds": 59.21,
+        "gpu_projections": 4653,
+        "passed": true,
+        "max_absolute_error": 3.5762786865234375e-07,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 9,
+        "cpu_comparison_passed": true,
+        "cpu_max_absolute_error": 3.5762786865234375e-07
+      }
+    ],
+    "final_binary_runtime": [
+      {
+        "case": "gpu-alias",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--gpu"
+        ],
+        "icd": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+        "exit_code": 0,
+        "seconds": 14.94,
+        "gpu_projections": 672,
+        "exact_reference": true,
+        "max_absolute_error": 0.0
+      },
+      {
+        "case": "missing-device-auto",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "auto"
+        ],
+        "icd": ".codex/vela3/gpu-20261106/missing-icd.json",
+        "exit_code": 0,
+        "seconds": 11.71,
+        "gpu_projections": 0,
+        "exact_reference": true,
+        "max_absolute_error": 0.0
+      },
+      {
+        "case": "missing-device-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "/missing",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "icd": ".codex/vela3/gpu-20261106/missing-icd.json",
+        "exit_code": 2,
+        "seconds": 0.03,
+        "gpu_projections": 0,
+        "stdout_empty": true,
+        "device_error": true
+      }
+    ],
+    "without_vulkan_feature_runtime": [
+      {
+        "case": "no-feature-auto",
+        "exit_code": 0,
+        "seconds": 18.98,
+        "cpu_exact": true,
+        "gpu_projections": 0,
+        "fallback_log": true
+      },
+      {
+        "case": "no-feature-vulkan",
+        "exit_code": 2,
+        "seconds": 0.01,
+        "stdout_empty": true,
+        "feature_error": true
+      }
+    ],
+    "device_counters": {
+      "probe-auto.stderr": {
+        "gpu_projections": 672,
+        "last_cumulative_stats": {
+          "submissions": 673,
+          "static_uploads": 673,
+          "static_upload_bytes": 3995075648,
+          "host_write_bytes": 162779172,
+          "host_read_bytes": 283312256,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3771312,
+          "peak_allocation_bytes": 17387024
+        }
+      },
+      "probe-vulkan.stderr": {
+        "gpu_projections": 672,
+        "last_cumulative_stats": {
+          "submissions": 673,
+          "static_uploads": 673,
+          "static_upload_bytes": 3995075648,
+          "host_write_bytes": 162779172,
+          "host_read_bytes": 283312256,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3771312,
+          "peak_allocation_bytes": 17387024
+        }
+      },
+      "gpu-alias.stderr": {
+        "gpu_projections": 672,
+        "last_cumulative_stats": {
+          "submissions": 673,
+          "static_uploads": 673,
+          "static_upload_bytes": 3995075648,
+          "host_write_bytes": 162779172,
+          "host_read_bytes": 283312256,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3771312,
+          "peak_allocation_bytes": 17387024
+        }
+      },
+      "lite-vulkan.stderr": {
+        "gpu_projections": 2851,
+        "last_cumulative_stats": {
+          "submissions": 2852,
+          "static_uploads": 2852,
+          "static_upload_bytes": 13101171776,
+          "host_write_bytes": 1650682980,
+          "host_read_bytes": 3998404736,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3746832,
+          "peak_allocation_bytes": 20011792
+        }
+      },
+      "fast-all-vulkan.stderr": {
+        "gpu_projections": 5040,
+        "last_cumulative_stats": {
+          "submissions": 5041,
+          "static_uploads": 5041,
+          "static_upload_bytes": 22045262912,
+          "host_write_bytes": 1530415140,
+          "host_read_bytes": 3370549376,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3758032,
+          "peak_allocation_bytes": 20845328
+        }
+      },
+      "vision-mixed-vulkan.stderr": {
+        "gpu_projections": 4653,
+        "last_cumulative_stats": {
+          "submissions": 4654,
+          "static_uploads": 4654,
+          "static_upload_bytes": 11651777600,
+          "host_write_bytes": 8716996644,
+          "host_read_bytes": 8890767488,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 3529808,
+          "peak_allocation_bytes": 45219856
+        }
+      },
+      "mini-vulkan.stderr": {
+        "gpu_projections": 2550,
+        "last_cumulative_stats": {
+          "submissions": 2551,
+          "static_uploads": 2551,
+          "static_upload_bytes": 57621349440,
+          "host_write_bytes": 2776852004,
+          "host_read_bytes": 6493569152,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 4555856,
+          "peak_allocation_bytes": 58070032
+        }
+      },
+      "turbo-vulkan.stderr": {
+        "gpu_projections": 4900,
+        "last_cumulative_stats": {
+          "submissions": 4901,
+          "static_uploads": 4901,
+          "static_upload_bytes": 393224389696,
+          "host_write_bytes": 10194278436,
+          "host_read_bytes": 21091811456,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 7988144,
+          "peak_allocation_bytes": 196170768
+        }
+      }
+    },
+    "engineering_checks": {
+      "cpu_vela": {
+        "passed": 55,
+        "failed": 0,
+        "ignored": 7
+      },
+      "vulkan_vela_portable": {
+        "passed": 54,
+        "failed": 0,
+        "ignored": 8,
+        "final_source_log": ".codex/vela3/gpu-20261106/portable-vulkan-calibrated.log"
+      },
+      "system_one_cli": {
+        "passed": 7,
+        "failed": 0
+      },
+      "main_tests": {
+        "passed": 6,
+        "failed": 0
+      },
+      "library_before": {
+        "passed": 1449,
+        "failed": 21,
+        "ignored": 96
+      },
+      "library_after": {
+        "passed": 1451,
+        "failed": 21,
+        "ignored": 96
+      },
+      "failure_names_identical": true,
+      "failure_names": [
+        "app::media::tests::stereo_uploads_are_refused",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+      ],
+      "new_failures": [],
+      "removed_failures": [],
+      "bin_targets_before_after_identical": [
+        [
+          "codec_test",
+          "src/bin/codec_test.rs"
+        ],
+        [
+          "dump_dims",
+          "src/bin/dump_dims.rs"
+        ],
+        [
+          "dump_emb",
+          "src/bin/dump_emb.rs"
+        ],
+        [
+          "dump_meta",
+          "src/bin/dump_meta.rs"
+        ],
+        [
+          "dump_tensors",
+          "src/bin/dump_tensors.rs"
+        ],
+        [
+          "ggufrs",
+          "src/bin/ggufrs.rs"
+        ],
+        [
+          "micro-bench",
+          "src/bin/micro_bench.rs"
+        ],
+        [
+          "rust-model-inference",
+          "src/main.rs"
+        ],
+        [
+          "rust-model-server",
+          "src/bin/server.rs"
+        ]
+      ],
+      "rustfmt_changed_files": "passed",
+      "git_diff_check": "passed",
+      "vulkan_main_build": "passed",
+      "final_library_log": ".codex/vela3/gpu-20261106/library-calibrated.log",
+      "final_library_summary": "test result: FAILED. 1451 passed; 21 failed; 96 ignored; 0 measured; 0 filtered out; finished in 12.01s"
+    },
+    "commands": [
+      "cargo +1.98.1 test --locked --profile release-fast --lib",
+      "cargo +1.98.1 test --locked --profile release-fast --lib models::vela3::",
+      "cargo +1.98.1 test --locked --profile release-fast --test system_one_cli",
+      "cargo +1.98.1 test --locked --profile release-fast --bin rust-model-inference",
+      "cargo +1.98.1 test --locked --profile release-fast --features vulkan --lib models::vela3::",
+      "cargo +1.98.1 build --locked --profile release-fast --features vulkan --bin rust-model-inference",
+      "DYLD_LIBRARY_PATH=/opt/homebrew/lib VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json RMI_COMPUTE_TRACE=1 target/release-fast/deps/rust_model_inference-4fab629be893e2d8 models::vela3::tensor::tests::gpu_projection_and_lora_match_cpu_for_all_float_formats --exact --ignored --nocapture",
+      "cargo metadata --locked --no-deps --format-version 1",
+      "rustfmt +1.98.1 --edition 2021 --check src/app/cli/parse.rs src/app/cli/validate.rs src/app/system_one.rs src/models/vela3/mod.rs src/models/vela3/tensor.rs tests/system_one_cli.rs",
+      "git diff --check",
+      "rustfmt +1.98.1 --edition 2021 --check src/app/cli/parse.rs src/app/cli/validate.rs src/app/system_one.rs src/models/vela3/mod.rs src/models/vela3/d3.rs src/models/vela3/tensor.rs tests/system_one_cli.rs",
+      "python3 .codex/vela3/gpu-20261106/run-d3-calibrated.py",
+      "cargo +1.98.1 test --locked --profile release-fast --features vulkan --lib gpu_projection_and_lora_match_cpu_for_all_float_formats -- --ignored --nocapture"
+    ],
+    "request_commands": [
+      {
+        "case": "fast-all-cpu",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-all.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "cpu"
+        ],
+        "request_sha256": "00fe8db4431aa43e9212aa2b8128cba4d330b7f6629203250d09120413fd73bb"
+      },
+      {
+        "case": "fast-all-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-all.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "request_sha256": "00fe8db4431aa43e9212aa2b8128cba4d330b7f6629203250d09120413fd73bb"
+      },
+      {
+        "case": "lite-cpu",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/d3-lite",
+          "--adapter",
+          "models/vela3-lite",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/lite.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "cpu"
+        ],
+        "request_sha256": "2262400d54a63b6cbf10466e145eee530c7df78e30629129725813a50634efa9"
+      },
+      {
+        "case": "lite-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/d3-lite",
+          "--adapter",
+          "models/vela3-lite",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/lite.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "request_sha256": "2262400d54a63b6cbf10466e145eee530c7df78e30629129725813a50634efa9"
+      },
+      {
+        "case": "vision-mixed-cpu",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast-vision",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/vision-mixed.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "cpu"
+        ],
+        "request_sha256": "4e7a9a809dc79e555cdb678c3002a8a348507033cbd80a5da5d016882aa91cad"
+      },
+      {
+        "case": "vision-mixed-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast-vision",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/vision-mixed.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "request_sha256": "4e7a9a809dc79e555cdb678c3002a8a348507033cbd80a5da5d016882aa91cad"
+      },
+      {
+        "case": "probe-cpu",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "cpu"
+        ]
+      },
+      {
+        "case": "probe-auto",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "auto"
+        ]
+      },
+      {
+        "case": "probe-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-vulkan",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ]
+      },
+      {
+        "case": "mini-vulkan-final",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "models/d3-mini",
+          "--adapter",
+          "models/vela3-mini",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/mini.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "request_sha256": "d81935284aee6027718ad0d1d19791fab6a970b8dc7270cd32c816ff3fd2d3c0"
+      },
+      {
+        "case": "turbo-vulkan-final",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "models/d3-turbo/pinned",
+          "--adapter",
+          "models/vela3-turbo",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/turbo.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "request_sha256": "8e3b6d7fcaff47081bc8a83f2f9e8f7a6a75c04643c125969f11c94e14b8aebb"
+      }
+    ],
+    "limits": [
+      "Hybrid projection path; attention, delta recurrence, preprocessing, normalization and decoding include CPU work. Weight and activation transfers remain; timings are not benchmarks.",
+      "Flash full-base shards are unavailable locally, so no real flash GPU request was run. d3 image GPU, other vendors/hosts, long-context throughput and full task benchmarks were not validated.",
+      "Existing mini/flash/turbo noncausal internal BF16 and d3 image BF16 failures remain at unchanged gates; this round did not rerun or resolve them.",
+      "No real queue/device failure was injected. The strict post-request device-health check is present; tested negative paths cover missing device and missing build feature.",
+      "System One HTTP/JEV, GGUF, video and generative text entry points remain unsupported. No full Vulkan-feature library suite or Clippy run is claimed."
+    ],
+    "without_vulkan_feature_commands": [
+      [
+        ".codex/vela3/gpu-20261106/rmi-no-vulkan",
+        "--model",
+        "models/vela3-fast",
+        "--system-one-request",
+        ".codex/vela3/gpu-20261106/fast-floats.request.json",
+        "--threads",
+        "4",
+        "--compute",
+        "auto"
+      ],
+      [
+        ".codex/vela3/gpu-20261106/rmi-no-vulkan",
+        "--model",
+        "models/vela3-fast",
+        "--system-one-request",
+        ".codex/vela3/gpu-20261106/fast-floats.request.json",
+        "--threads",
+        "4",
+        "--compute",
+        "vulkan"
+      ]
+    ],
+    "mini_initial_gpu_check": {
+      "result": {
+        "case": "mini-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-final",
+          "--model",
+          "models/d3-mini",
+          "--adapter",
+          "models/vela3-mini",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/mini.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "code": 0,
+        "seconds": 428.47,
+        "passed": false,
+        "max_absolute_error": 0.011052212673837047,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 8,
+        "historical_cpu_comparison_passed": false,
+        "historical_cpu_max_absolute_error": 0.003370436941800725,
+        "historical_cpu_reference": ".codex/vela3/mini-request-native.json",
+        "gpu_projections": 5364
+      },
+      "comparison": {
+        "passed": false,
+        "atol": 0.01,
+        "rtol": 0.01,
+        "floats_compared": 19,
+        "max_absolute_error": 0.011052212673837047,
+        "largest_errors": [
+          {
+            "path": "response.answers.intent.confidence",
+            "absolute_error": 0.011052212673837047
+          },
+          {
+            "path": "response.answers.intent.probabilities.general_quirky",
+            "absolute_error": 0.005030000909974741
+          },
+          {
+            "path": "response.answers.intent.probabilities.qa_factoid",
+            "absolute_error": 0.005030000909974686
+          },
+          {
+            "path": "response.answers.choice.confidence",
+            "absolute_error": 0.003572541672202223
+          },
+          {
+            "path": "response.answers.opt_in.confidence",
+            "absolute_error": 0.001743207288885773
+          },
+          {
+            "path": "response.answers.domain.probabilities.business",
+            "absolute_error": 0.0006442907257998565
+          },
+          {
+            "path": "response.answers.domain.probabilities.other",
+            "absolute_error": 0.0006442907257998565
+          },
+          {
+            "path": "response.answers.choice.probabilities.person",
+            "absolute_error": 0.0006199424251704944
+          },
+          {
+            "path": "response.answers.choice.probabilities.company",
+            "absolute_error": 0.0006199424251704631
+          },
+          {
+            "path": "response.answers.ner_auto.spans[0].score",
+            "absolute_error": 0.0005616243929365272
+          }
+        ],
+        "errors": [
+          {
+            "path": "response.answers.ner_auto.definitions.person",
+            "reason": "exact value differs",
+            "oracle": "The label \"person\" covers text spans that refer to human individuals.",
+            "native": "The label \"person\" covers text spans referring to human individuals."
+          }
+        ]
+      },
+      "note": "Full response failed only on automatically generated definition text; every compared float passed the unchanged abs-plus-relative gate. Initial failure is retained.",
+      "artifacts": [
+        ".codex/vela3/gpu-20261106/mini-initial-vulkan.stderr",
+        ".codex/vela3/gpu-20261106/mini-initial-vulkan.native.json",
+        ".codex/vela3/gpu-20261106/mini-initial-vulkan.comparison.json"
+      ]
+    },
+    "mini_definition_cpu_diagnosis": {
+      "result": {
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-final",
+          "--model",
+          "models/d3-mini",
+          "--adapter",
+          "models/vela3-mini",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/mini-definition.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "cpu"
+        ],
+        "exit_code": 0,
+        "seconds": 274.85
+      },
+      "reference_definition": "The label \"person\" covers text spans that refer to human individuals.",
+      "current_cpu_definition": "The label \"person\" covers text spans that refer to human individuals.",
+      "exact_reference": true,
+      "fix": "generate_definition_ids uses the shared CPU scope for automatic definitions, restoring the outer compute policy before span inference."
+    },
+    "pre_definition_fix_runtime": [
+      {
+        "case": "gpu-alias",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-final",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--gpu"
+        ],
+        "icd": "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+        "exit_code": 0,
+        "seconds": 12.46,
+        "gpu_projections": 672,
+        "exact_reference": true,
+        "max_absolute_error": 0.0
+      },
+      {
+        "case": "missing-device-auto",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-final",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "auto"
+        ],
+        "icd": ".codex/vela3/gpu-20261106/missing-icd.json",
+        "exit_code": 0,
+        "seconds": 11.48,
+        "gpu_projections": 0,
+        "exact_reference": true,
+        "max_absolute_error": 0.0
+      },
+      {
+        "case": "missing-device-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-final",
+          "--model",
+          "/missing",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "icd": ".codex/vela3/gpu-20261106/missing-icd.json",
+        "exit_code": 2,
+        "seconds": 0.03,
+        "gpu_projections": 0,
+        "stdout_empty": true,
+        "device_error": true
+      }
+    ],
+    "d3_final_requests": [
+      {
+        "case": "mini-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "models/d3-mini",
+          "--adapter",
+          "models/vela3-mini",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/mini.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "code": 0,
+        "seconds": 395.63,
+        "passed": true,
+        "max_absolute_error": 0.011052212673837047,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 8,
+        "historical_cpu_comparison_passed": true,
+        "historical_cpu_max_absolute_error": 0.003370436941800725,
+        "historical_cpu_reference": ".codex/vela3/mini-request-native.json",
+        "gpu_projections": 2550
+      },
+      {
+        "case": "turbo-vulkan",
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-calibrated",
+          "--model",
+          "models/d3-turbo/pinned",
+          "--adapter",
+          "models/vela3-turbo",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/turbo.request.json",
+          "--threads",
+          "4",
+          "--compute",
+          "vulkan"
+        ],
+        "code": 0,
+        "seconds": 1444.08,
+        "passed": true,
+        "max_absolute_error": 0.002275935159383846,
+        "answer_order_exact": true,
+        "usage_exact": true,
+        "questions": 8,
+        "historical_cpu_comparison_passed": true,
+        "historical_cpu_max_absolute_error": 0.004648761888941477,
+        "historical_cpu_reference": ".codex/vela3/turbo-request-native-fixed.json",
+        "gpu_projections": 4900
+      }
+    ],
+    "d3_final_cpu_reference_scope": "Mini automatic-definition question was rerun on current CPU; full mini/turbo CPU references are historical. Both final GPU responses also pass the fixed official Oracle. Fast/lite/vision have fresh full CPU references.",
+    "main_integration": {
+      "verified_at_utc": "2026-11-06T03:34:19.027076+00:00",
+      "base_commit": "21c657a65",
+      "merged_original_pr": {
+        "number": 193,
+        "merge_commit": "c99ea3bd91ecbde1a022f707fb5fedb35ed8719e"
+      },
+      "original_gpu_commit": "efad5b1cb80a9ce0ca406eddda43786e0ba17919",
+      "runtime_areas_exactly_equal_to_original_gpu_commit": [
+        "src/models/vela3",
+        "src/ops",
+        "src/compute",
+        "src/core",
+        "src/format",
+        "src/app/system_one.rs",
+        "src/app/cli/parse.rs",
+        "src/app/cli/validate.rs",
+        "src/app/cli/types.rs",
+        "src/main.rs",
+        "tests/system_one_cli.rs"
+      ],
+      "library_before": {
+        "passed": 1450,
+        "failed": 21,
+        "ignored": 96
+      },
+      "library_after": {
+        "passed": 1452,
+        "failed": 21,
+        "ignored": 96
+      },
+      "failure_names_identical_to_original_gpu_record": true,
+      "main_tests": {
+        "passed": 6,
+        "failed": 0
+      },
+      "cli_tests": {
+        "passed": 7,
+        "failed": 0
+      },
+      "logs": [
+        ".codex/vela3/gpu-20261106/library-main-before.log",
+        ".codex/vela3/gpu-20261106/library-main-after.log",
+        ".codex/vela3/gpu-20261106/build-main-vulkan.log"
+      ],
+      "vulkan_build": "passed",
+      "gpu_probe": {
+        "command": [
+          ".codex/vela3/gpu-20261106/rmi-main-integrated",
+          "--model",
+          "models/vela3-fast",
+          "--system-one-request",
+          ".codex/vela3/gpu-20261106/fast-floats.request.json",
+          "--threads",
+          "4",
+          "--gpu"
+        ],
+        "seconds": 13.65,
+        "exit_code": 0,
+        "gpu_projections": 672,
+        "exact_previous_gpu": true
+      },
+      "bin_names_and_paths_unchanged": true,
+      "numeric_scope": "The 57-question matrix was not rerun after latest-main integration. Vela, shared operators/compute/core/format, main CLI and System One entry sources are exactly unchanged; the latest main adds Occamy to the separate text path. The new integrated Vulkan binary repeats the three-question GPU alias probe exactly.",
+      "commands": [
+        "cargo +1.98.1 test --locked --profile release-fast --lib",
+        "cargo +1.98.1 test --locked --profile release-fast --lib --bin rust-model-inference --test system_one_cli --no-fail-fast",
+        "cargo +1.98.1 build --locked --profile release-fast --features vulkan --bin rust-model-inference",
+        "cargo metadata --locked --no-deps --format-version 1"
+      ]
+    }
   }
 }

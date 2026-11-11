@@ -466,4 +466,98 @@ pub(crate) mod tests {
     fn normalization_rejects_nonfinite_bias() {
         assert!(layer_norm(&[1., 2.], &[1., 1.], &[f32::NAN, 0.], 1e-5).is_err());
     }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a physical Vulkan device; checks real dispatches and CPU isolation"]
+    fn gpu_projection_and_lora_match_cpu_for_all_float_formats() {
+        use crate::compute::ComputePolicy;
+        let _gpu = ComputePolicy::Vulkan.configure_cli().unwrap();
+        let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+        let pool = ComputePool::new(2);
+        let input: Vec<_> = (0..128 * 64).map(|i| (i as f32 * 0.13).sin()).collect();
+        for format in [GGMLType::F32, GGMLType::F16, GGMLType::BF16] {
+            let mut base = Source::default();
+            base.add(
+                "proj.weight",
+                &[128, 64],
+                &(0..128 * 64)
+                    .map(|i| (i as f32 * 0.17).cos() * 0.1)
+                    .collect::<Vec<_>>(),
+            );
+            base.add(
+                "proj.bias",
+                &[128],
+                &(0..128).map(|i| i as f32 * 0.001).collect::<Vec<_>>(),
+            );
+            let mut adapter = Source::default();
+            adapter.add(
+                "proj.lora_A",
+                &[32, 64],
+                &(0..32 * 64)
+                    .map(|i| (i as f32 * 0.19).sin() * 0.05)
+                    .collect::<Vec<_>>(),
+            );
+            adapter.add(
+                "proj.lora_B",
+                &[128, 32],
+                &(0..128 * 32)
+                    .map(|i| (i as f32 * 0.23).cos() * 0.05)
+                    .collect::<Vec<_>>(),
+            );
+            for source in [&mut base, &mut adapter] {
+                for (info, bytes) in source
+                    .0
+                    .values_mut()
+                    .filter(|(info, _)| info.dims.len() == 2)
+                {
+                    let values: Vec<_> = bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                        .collect();
+                    *bytes = match format {
+                        GGMLType::F32 => bytes.clone(),
+                        GGMLType::F16 => values
+                            .iter()
+                            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+                            .collect(),
+                        GGMLType::BF16 => values
+                            .iter()
+                            .flat_map(|&v| half::bf16::from_f32(v).to_le_bytes())
+                            .collect(),
+                        _ => unreachable!(),
+                    };
+                    info.ggml_type = format;
+                }
+            }
+            let cpu = || {
+                let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+                linear_lora(&base, &adapter, 2., "proj.weight", &input, 128, &pool).unwrap()
+            };
+            let before = context.compute_stats();
+            let expected = cpu();
+            assert_eq!(context.compute_stats().submissions, before.submissions);
+            let actual =
+                linear_lora(&base, &adapter, 2., "proj.weight", &input, 128, &pool).unwrap();
+            let after = context.compute_stats();
+            assert!(
+                after.submissions > before.submissions,
+                "{format:?} did not dispatch on GPU"
+            );
+            let mut max_abs = 0f32;
+            for (a, b) in actual.iter().zip(&expected) {
+                assert!(
+                    a.is_finite() && (a - b).abs() <= 2e-4 + 2e-4 * b.abs(),
+                    "{format:?}: {a} vs {b}"
+                );
+                max_abs = max_abs.max((a - b).abs());
+            }
+            assert_eq!(cpu(), expected);
+            assert_eq!(context.compute_stats().submissions, after.submissions);
+            eprintln!(
+                "{format:?}: max_abs={max_abs:e} submissions={}",
+                after.submissions - before.submissions
+            );
+        }
+    }
 }
