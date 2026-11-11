@@ -14,6 +14,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     while i < args.len() {
         parsed_flags.push(i);
         match args[i].as_str() {
+            "--enhance" => options.enhance = true,
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
             "--astronex" => options.astronex = true,
@@ -715,6 +716,22 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         .iter()
         .map(|index| args[*index].clone())
         .collect();
+    if options.enhance {
+        for &index in &parsed_flags {
+            let mut index = index;
+            match args[index].as_str() {
+                "--model" | "--audio" | "--out" => {
+                    let flag = &args[index];
+                    required_path_value(args, &mut index, flag)?;
+                }
+                "--threads" => {
+                    required_usize_value(args, &mut index, "--threads")?;
+                }
+                "--enhance" | "--compute" | "--gpu" | "--overwrite" | "--serve" => {}
+                flag => return Err(format!("--enhance cannot be combined with {flag}")),
+            }
+        }
+    }
     if options.decision_request.is_some() {
         crate::app::decision::validate_options(&options)?;
         for mut index in parsed_flags.iter().copied() {
@@ -739,7 +756,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 "--threads" => {
                     required_usize_value(args, &mut index, "--threads")?;
                 }
-                "--adapter" | "--system-one-request" | "--compute" => {}
+                "--adapter" | "--system-one-request" | "--compute" | "--gpu" => {}
                 flag => {
                     return Err(format!(
                         "--system-one-request cannot be combined with {flag}"

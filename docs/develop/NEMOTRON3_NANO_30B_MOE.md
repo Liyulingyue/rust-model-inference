@@ -5,12 +5,19 @@
 
 ## 一句话结论
 
-`nemotron_h_moe`（30B-A3B）**当前仓库完全不支持**：arch 不在白名单、config 前缀
-不同、MoE 层分支不存在、并且它需要的 **Q5_1 量化格式在本仓库没有 dequant kernel**。
-但基座（Mamba-2 SSM + attention 混合 trunk）已经在 `src/models/nemotron_h/trunk/`
-里跑通了，MoE 的 3D 专家张量、路由归一化、共享专家这三块在 `src/models/qwen35/trunk/moe.rs`
-里已经有一份**语义几乎同构**的实现 —— 所以这是一次「扩一个 arch + 换一套路由语义」
-的增量适配，不是从零做。
+`nemotron_h_moe`（30B-A3B）**已适配**：CPU 路径与上游 llama.cpp 逐位一致，
+CLI / HTTP / JEV 三个入口都可用，**Vulkan 设备路径也已落地**（2026-11-10，
+阶段 3）。设备路径的 52 层（23 SSM / 23 MoE / 6 attention）全部在设备上，
+路由留在设备上做（不回读 host），MoE 层不与 host 同步。
+代价是**数值不再逐位一致**：设备 kernel 的求和顺序与 host 的 NEON kernel
+不同，Mamba-2 递归把这一层差异放大，实测 logits 相对 L2 1.9%–5.8%
+（见 §B7），因此设备路径按仓库惯例用**误差门限**验收，不声称逐位一致。
+
+**状态口径（2026-11-11）**：按 `SUPPORTED_MODELS.md` 的四档定义，CPU 路径是
+`Verified`（Q4_K_M 与 Q8_0 两档都对 llama.cpp 逐位），Vulkan 设备路径在
+`Q8_0` 档上**逐位**（`relative_l2 = 0`），在 `Q4_K_M` 档上是 8% 误差门限。
+22 个量化档里 20 个未实测。分层交付时用过的「部分适配」不是仓库的状态词，
+已不再使用。
 
 ## 1. 契约（从 `unsloth/Nemotron-3-Nano-30B-A3B-GGUF` 头部读出）
 
@@ -114,7 +121,13 @@ out        = moe_out + shexp            # 共享专家没有 sigmoid 门
 1. **权重取未加偏置的 probs**，偏置只用来排序（DeepSeek-V3 风格）。
 2. **共享专家没有门控**，也没有乘 `weights`；`moe_out + shexp` 是唯一的加法。
 
-## 1·5. 提示构造：`nemotron_h` / `nemotron_h_moe` 也有 CLI↔HTTP 分叉
+## 1·5. 提示构造：`nemotron_h` / `nemotron_h_moe` 也有 CLI↔HTTP 分叉 ✅ 已修（2026-11-09）
+
+> **状态**：CLI↔HTTP 的分叉已修。两条入口现在都走
+> `prompt::build_nemotron_chat_prompt`（渲染成 ChatML 文本，再用
+> `add_special: true` 编码一次），于是 BOS 与 think 块都和 CLI 一致；
+> `tests/cli_http_agreement.rs` 锁住 4B 与 30B 的逐 token 一致。
+> 下面保留实现前的记录。
 
 这不是 MoE 特有的问题，是这一族模型的共同问题，适配 30B 之前就该修。
 
@@ -171,15 +184,61 @@ llama.cpp 的规则是两步（`src/llama-vocab.cpp`）：
 原先 `src/ops/kernel/` 下有 `q5_0/` 但**没有 `q5_1/`**；`QuantizedTensor::from_bytes`
 （`src/ops/kernel/quantized_tensor.rs`）的 match 里也**没有 `GGMLType::Q5_1`**。
 
-而 `ffn_up_shexp.weight` 在**所有** unsloth 30B 量化档里都是 Q5_1：
+而 `ffn_up_shexp.weight` 在**大多数** unsloth 30B 量化档里都是 Q5_1（2026-11-10
+重新核对：22 个档里 11 个含 Q5_1，其余是 Q5_0 或 Q8_0），23 个 Q5_1 = 23 个
+MoE 层的共享专家 up 投影，**换量化档躲不掉**。
 
-| 量化档 | 张量类型分布 | 缺 Q5_1？ |
-|---|---|---|
-| `Q4_K_M` | Q8_0 37 / F32 237 / Q5_0 75 / Q4_K 29 / Q5_1 23 | ✗ 缺 |
-| `IQ4_XS` | Q8_0 24 / F32 237 / Q5_0 1 / IQ4_NL 87 / IQ4_XS 29 / Q5_1 23 | ✗ 缺 |
-| `Q4_0` | Q8_0 24 / F32 237 / Q4_0 115 / Q4_1 2 / Q5_1 23 | ✗ 缺 |
+**22 个量化档的完整对照**（2026-11-10 从每个档的 GGUF 头部读出，
+`unsloth/Nemotron-3-Nano-30B-A3B-GGUF` 的 22 个文件；F32 的 237 个张量
+每个档都有，下表省略）：
 
-23 个 Q5_1 = 23 个 MoE 层的共享专家 up 投影，**换量化档躲不掉**。
+| 量化档 | 张量类型 | CPU 路径 | Vulkan 设备路径 |
+|---|---|---|---|
+| `Q4_K_M` | Q4_K×29 / Q5_0×75 / Q5_1×23 / Q8_0×37 | ✅ **已验证逐位** | ✅ **已验证**（8% 门限） |
+| `Q8_0` | Q8_0×164 | ✅ **已验证逐位** | ✅ **已验证逐位**（`relative_l2 = 0`） |
+| `Q6_K` | Q6_K×29 / Q8_0×135 | ✅ | ✅ 类型齐全 |
+| `Q5_K_M` | Q5_1×75 / Q5_K×29 / Q8_0×60 | ✅ | ✅ 类型齐全 |
+| `Q5_K_S` | Q5_1×88 / Q5_K×29 / Q8_0×47 | ✅ | ✅ 类型齐全 |
+| `Q4_K_S` | Q4_K×29 / Q5_0×82 / Q5_1×29 / Q8_0×24 | ✅ | ✅ 类型齐全 |
+| `Q4_0` | Q4_0×115 / Q4_1×2 / Q5_1×23 / Q8_0×24 | ✅ | ✅ 类型齐全 |
+| `Q4_1` | Q4_1×117 / Q5_1×23 / Q8_0×24 | ✅ | ✅ 类型齐全 |
+| `UD-Q4_K_XL` | Q4_K×18 / Q5_0×86 / Q5_1×25 / Q5_K×1 / Q6_K×10 / Q8_0×24 | ✅ | ✅ 类型齐全 |
+| `UD-Q5_K_XL` | Q5_0×3 / Q5_1×62 / Q5_K×29 / Q8_0×70 | ✅ | ✅ 类型齐全 |
+| `UD-Q6_K_XL` | Q6_K×29 / Q8_0×135 | ✅ | ✅ 类型齐全 |
+| `UD-Q8_K_XL` | F16×35 / Q8_0×129 | ✅ | ✅ 类型齐全 |
+| `IQ4_NL` | IQ4_NL×116 / Q5_0×1 / Q5_1×23 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL |
+| `IQ4_XS` | IQ4_NL×87 / IQ4_XS×29 / Q5_0×1 / Q5_1×23 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL / IQ4_XS |
+| `Q2_K_L` | IQ4_NL×87 / Q2_K×23 / Q3_K×6 / Q5_0×24 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL / Q2_K / Q3_K |
+| `Q3_K_M` | IQ4_NL×58 / Q3_K×23 / Q4_K×6 / Q5_0×50 / Q5_1×3 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL / Q3_K |
+| `Q3_K_S` | IQ4_NL×87 / Q3_K×29 / Q5_0×24 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL / Q3_K |
+| `UD-Q2_K_XL` | IQ4_NL×47 / Q2_K×15 / Q4_K×4 / Q5_0×64 / Q6_K×10 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL / Q2_K |
+| `UD-Q3_K_XL` | IQ4_NL×47 / Q3_K×15 / Q4_K×3 / Q5_0×60 / Q5_1×4 / Q5_K×1 / Q6_K×10 / Q8_0×24 | ✅ | ❌ 缺 IQ4_NL / Q3_K |
+| `UD-IQ2_M` | IQ2_S×15 / IQ4_NL×109 / IQ4_XS×4 / Q5_0×2 / Q6_K×10 / Q8_0×24 | ✅ | ❌ 缺 IQ2_S / IQ4_NL / IQ4_XS |
+| `UD-IQ2_XXS` | IQ2_XXS×15 / IQ4_NL×109 / IQ4_XS×4 / Q5_0×2 / Q6_K×10 / Q8_0×24 | ✅ | ❌ 缺 IQ2_XXS / IQ4_NL / IQ4_XS |
+| `UD-IQ3_XXS` | IQ3_XXS×15 / IQ4_NL×101 / IQ4_XS×3 / Q5_0×6 / Q5_1×4 / Q5_K×1 / Q6_K×10 / Q8_0×24 | ✅ | ❌ 缺 IQ3_XXS / IQ4_NL / IQ4_XS |
+
+读法：
+
+- **CPU 路径全部可用**：`is_supported_weight_type()` 白名单与
+  `QuantizedTensor::from_bytes` 的 match 覆盖了上表出现的每一种类型，
+  i-quant（IQ4_NL / IQ4_XS / IQ2_XXS / IQ2_S / IQ3_XXS）与 Q2_K / Q3_K
+  的 kernel 都在 `src/ops/kernel/` 里。
+- **设备路径取决于「该档的每一种张量类型是否都有设备 kernel」**：
+  i-quant 与 Q2_K / Q3_K **没有**设备 kernel，所以那 10 个档
+  （IQ4_NL / IQ4_XS / Q2_K_L / Q3_K_M / Q3_K_S 与 5 个 UD i-quant 档）
+  整个 Nemotron session 建不起来 → `--compute auto` 打印
+  `Nemotron-H Vulkan unavailable: …` 后**回退 CPU**，
+  `--compute vulkan`（严格）则直接报错退出。
+  其余 12 个档的类型组合在设备侧**类型齐全**，设备路径可以直接用。
+- **`Q4_K_M` 与 `Q8_0` 两档真实下载并验证过**：`Q4_K_M` 的 CPU 路径逐位、
+  设备路径 8% 门限；`Q8_0` 档**两条路径都逐位**（见 §B7.4）。
+  其余 20 个档的类型分布是**从各档 GGUF 头部读出来的真实契约**，
+  但没有下载权重，因此「能加载、能跑」只是类型层面的推断，不是实测。
+- **`Q8_0` 档是唯一「设备也逐位」的档**：它的张量只有 Q8_0 / F32（头部的
+  F16 计数是 0），而这两类设备 kernel 都是**逐位**的（Q8_0 的
+  `max_abs = 0`，F32 的 `exact_bits = true`），路由 shader 用的也是
+  ggml-exact 的 `exp_reference` + `divide_finite_normal`。实测
+  `relative_l2 = 0`（1 / 2 / 3 token prefill），与 4B 相同。
 
 Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 
@@ -335,6 +394,158 @@ kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活
   复刻（16 对齐就够，因为 dot 的分组边界是 16）。
 - oracle harness 用 `RMI_NEMOTRON_KV=f32`，即 KV cache 是 F32。
 
+### B6. 入口层（CLI / HTTP / JEV）✅ 已完成（2026-11-09）
+
+- `src/models/nemotron_h/trunk/runtime.rs`：`nemotron_h`（4B）与 `nemotron_h_moe`
+  （30B）共用一个 `TextRuntime` 适配器，`/v1/chat/completions` 从 501 变成可用。
+- 设备路径在 HTTP 侧也接上了（4B）：适配器在启动时建一次设备会话（权重要上传到
+  设备，所以不能每请求重建），提示超过 arena 行数的那次请求回退 CPU。
+- **提示分叉已修**：CLI 用 `prompt::legacy::format_chat`（ChatML、`add_special:
+  true`、无 think 块），HTTP 用 qwen 的 ChatML builder（**无 BOS**、**多一个空
+  think 块**）—— 同一条消息 CLI 15 token、HTTP 19 token。两族现在都走
+  `prompt::build_nemotron_chat_prompt`，`tests/cli_http_agreement.rs` 锁住两条
+  入口逐 token 一致。
+- JEV 的单次与分组判定本来就按 arch 分派，两个入口都覆盖，实测概率完全相同
+  （单次 A 0.0307 / B 0.9693；分组 A 0.0640 / B 0.9360）。
+
+### B7. Vulkan 设备路径 ✅ 已完成（2026-11-10，阶段 3）
+
+分三层，全部落地：
+
+1. ~~**Q5_0 与 Q5_1 的设备 kernel**~~ ✅ **已完成（2026-11-09）**。30B 的
+   `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 是 **Q5_0**，共享专家的
+   `ffn_up_shexp` 是 **Q5_1**，换量化档躲不掉；两个格式现在都有设备 kernel
+   （见 §3·5）。
+2. ~~**MoE 层的设备分支**~~ ✅ **已完成（2026-11-10）**。
+3. **入口与自动分发**：`nemotron_h_moe` 已列入
+   `ComputePolicy::has_complete_device_path`，`--compute vulkan` / `Auto`
+   走设备路径；HTTP 侧与 CLI 同源（§B6）。
+
+#### B7.1 MoE 设备分支的形状与做法
+
+| 部件 | 做法 | 与 host 语义的关系 |
+|---|---|---|
+| 路由器 | `ffn_gate_inp`（F32 2688×128）在设备上出 128 个 logit | 与 CPU 的 `ffn_gate_inp` 同矩阵、同 F32 累加 |
+| 路由 | 新 shader `nemotron_moe_route`：sigmoid → 加 `exp_probs_b.bias` 排序 → top-6 → 按**无偏**概率归一化 → ×2.5 | 与 `src/models/nemotron_h/trunk/moe.rs::route_experts` 逐条对齐（bias 只参与排序，不进权重；`SUM_FLOOR = 2^-14`） |
+| 专家选择 | 选中的 id 与权重**写进 arena**，专家 kernel 自己读 id 并把权重偏移一个专家矩阵 | 路由**不回读 host**：一层不产生同步点 |
+| 专家投影 | 每个 slot 一次 dispatch：`ffn_up_exps[e]`（Q5_0 2688×1856）→ `relu(x)^2` → `ffn_down_exps[e]`（Q8_0 1856×2688） | 激活是 `relu(x)^2`，与 llama.cpp 的 `LLM_FFN_RELU_SQR` 一致 |
+| 共享专家 | `ffn_up_shexp`（Q5_1 2688×3712）→ `relu(x)^2` → `ffn_down_shexp`（Q8_0） | **没有门控、不乘权重** |
+| 归约 | 新 shader `nemotron_moe_reduce`：加权求和 + 共享专家直加 + 残差 | — |
+
+**3D 张量的绑定**：ggml 把专家轴放在最后且连续，所以「专家 e 的矩阵」就是
+第 e 段。一个 MoE 层因此只需要**一个** descriptor set（整个 3D 张量整体绑定），
+而不是每专家一个 —— 描述符预算仍是 `3 + 6 × n_layer`（norm + 5 个权重）。
+专家 id 由 push constant 的第 22–25 个 word 传进 kernel
+（`expert_count / expert_ids_word / expert_used / expert_slot`）。
+
+**显存**：专家权重约 24.2 GB（23 层 × 128 专家 × (Q5_0 2688×1856 + Q8_0
+1856×2688)），单层最大张量 428 MB（up）/ 620 MB（down），都在 GB10 的
+`maxMemoryAllocationSize`（约 4 GiB）之下；整模 24.5 GB 的权重与 host 侧的
+mmap 是同一份数据的两份拷贝，统一内存放得下。
+
+#### B7.2 数值契约：为什么是 8% 门限而不是 1%
+
+CPU 路径与 llama.cpp 逐位一致靠的是复刻 ggml 的 F32 累加结构；设备上的
+int8 dot + F32 scale 累加与之**不逐位相同** —— 这只对 Q4_K_M 档成立，
+Q8_0 档的设备路径是逐位的（§B7.4）。30B 比 4B 更敏感：
+
+- 单个投影的差异就已经不小：Q5_0 的 `ssm_in`（2688×10304）设备 vs CPU
+  `max_rel = 3.791e-3`（Q8_0 的 kernel 则是**逐位一致**，`max_abs = 0`）。
+- Mamba-2 的递归把这个差异沿 52 层放大，router 还可能在近似平局上翻转。
+
+实测（GB10，1 / 2 / 3 token 的 prefill，logits 相对 L2 / 缩放最大绝对误差）：
+
+| 配置 | 1 token | 2 token | 3 token |
+|---|---|---|---|
+| 全部在设备 | 4.28% / 3.35% | 4.23% / 3.40% | 1.79% / 1.39% |
+| 只有 SSM 在设备 | 5.51% / 4.57% | 4.14% / 2.57% | 1.93% / 1.57% |
+| 只有 MoE 在设备 | 5.45% / 5.50% | 3.72% / 2.45% | 1.92% / 1.49% |
+| 只有 attention 在设备 | 4.32% / 3.86% | 1.23% / 0.95% | 1.17% / 0.94% |
+| **全部在 host**（只留最终归一化 + 输出投影在设备） | **0% / 0%** | **0% / 0%** | **0% / 0%** |
+
+最后一行说明两件事：设备的**最终 RMS 归一化与 Q8_0 输出投影与 CPU 逐位一致**；
+三个分支各自的贡献量级相当（1%–6%），而且**不可加** —— 放大是混沌的，
+「全部在设备」并不比「只有 SSM 在设备」更差。整张表的最大值是 **5.51%**。
+
+硬件测试的门限因此取 **8%**（相对 L2 与缩放最大绝对误差各一条），另加一条
+更硬的**功能门限**：设备路径必须选出与 CPU 路径相同的 top-1 token
+（1 / 2 / 3 token 的 prefill 实测都相同）。测试：
+`RMI_NEMOTRON_MOE_MODEL=<gguf> cargo test --locked --profile release-fast
+--features vulkan --test nemotron3_nano_30b_device -- --ignored --nocapture`。
+
+> **踩坑一：设备路径里跑在 host 上的层必须锁在 CPU 语义上。**
+> 设备 session 在场时，`ops::kernel::q4_k` 的 `forward_prepared` 会把
+> **host 上的 Q4_K matmul 也 offload 到设备**（`gpu_matmul_active()` 为真）。
+> 30B 的 `ssm_out` / `attn_output` 都是 Q4_K，于是「在 host 上跑的层」与
+> 纯 CPU 运行**不等价**：一个投影就差 1e-7，再经 Mamba-2 递归放大，最后
+> 一层 hidden state 差 18%。`RMI_NH_CPU_*` 这三个覆盖开关因此必须配一个
+> `ComputePolicy::Cpu` scope，否则没法把差异归因到真正搬上设备的那个分支。
+> 修好之后，「全部在 host」这一行是 **0**（逐位一致）。
+
+> **踩坑二：路由权重的求和要用 F64。**
+> CPU 的 `route_experts` 复刻的是 ggml 的 `ggml_sum_rows`：F64 累加器，
+> 末尾舍入成 F32。shader 里若用 F32 累加，权重会差 1 ULP 量级，
+> 经递归放大后 logits 的相对 L2 从 **4.28%** 变成 **5.84%**
+> （`nemotron_moe_route.comp` 因此开了 `GL_ARB_gpu_shader_fp64`）。
+
+#### B7.3 性能（GB10，8 线程，55 token 提示 + 16 token 生成）
+
+| | prefill | 生成 | 端到端 |
+|---|---|---|---|
+| CPU | 5.9 t/s | 9.6 t/s | 1.4 tok/s |
+| Vulkan 设备路径 | **28.7 t/s** | 9.0 t/s | **4.3 tok/s** |
+
+prefill 快 **4.9×**（权重读一次、多行复用），逐 token 生成与 CPU 持平
+（单 token 走的是共用 Q8_0 kernel 的标量 int8 路径，没有用上 DP4A 单元；
+这与 4B 的情况一样，是共用 kernel 的性质）。
+
+#### B7.4 Q8_0 档：设备路径逐位一致（2026-11-11 实测）
+
+§B7.2 的 8% 是 **Q4_K_M 档**的性质，不是设备路径的性质：Q4_K_M 的
+`ssm_in` / attention q/k/v 是 Q5_0、`ssm_out` / `attn_output` 是 Q4_K，
+这两个设备 kernel 的归约顺序与 host 的 NEON kernel 不同。**Q8_0 档没有
+这个问题**：该档 401 个张量里 164 个是 Q8_0、237 个是 F32（头部的 F16 计数
+是 **0**），两类设备 kernel 都是逐位的（Q8_0 `max_abs = 0`，F32
+`exact_bits = true`），路由 shader 用的也是 ggml-exact 的 `exp_reference`
++ `divide_finite_normal`。
+
+实测（GB10，8 线程）：
+
+| 检查 | 结果 |
+|---|---|
+| 设备 vs CPU（1 / 2 / 3 token prefill） | **`relative_l2 = 0`、`scaled_max_abs = 0`**，top-1 token 相同 |
+| CPU vs 上游 llama.cpp（`Hello` + 4 token 生成，2574 个 join 到的 checkpoint） | 全部 `EXACT`；最终 logits `worst disagreement 0.0000`，argmax 1095 相同（margin 1.1368） |
+
+命令：
+
+```sh
+GGUF=models/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q8_0.gguf
+# 设备 vs CPU（RMI_NEMOTRON_MOE_EXACT=1 把门限收紧到 0）
+RMI_NEMOTRON_MOE_MODEL=$GGUF RMI_NEMOTRON_MOE_EXACT=1 \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  cargo test --locked --profile release-fast --features vulkan \
+  --test nemotron3_nano_30b_device -- --ignored --nocapture
+# CPU vs llama.cpp
+RMI_PARITY_TRACE=/tmp/n3_q8/oracle.jsonl RMI_NEMOTRON_THREADS=1 RMI_NEMOTRON_KV=f32 \
+  target/nemotron3-nano-oracle/build/bin/llama-eval-callback \
+  $GGUF /tmp/n3_q8/prompt.txt 4
+RMI_NEMOTRON3_MODEL=$GGUF RMI_PARITY_TRACE=/tmp/n3_q8/rust.jsonl \
+  RMI_NEMOTRON3_PROMPT_FILE=/tmp/n3_q8/prompt.txt RMI_NEMOTRON3_N_PREDICT=4 \
+  cargo test --locked --profile release-fast --features parity-trace \
+  --test nemotron3_nano_moe -- --ignored --nocapture
+python3 tools/oracle/nemotron3_nano/check_moe.py \
+  /tmp/n3_q8/oracle.jsonl /tmp/n3_q8/rust.jsonl
+```
+
+文件 SHA-256 `433a9c0d39c6c3434204797b30991c4d147c0f25328690d60862ec39e2a92188`，
+33,585,495,840 bytes（ModelScope 列表值与实际值一致，下载后校验过）。
+
+**结论**：30B 的「完整设备路径」不是做不到，而是**取决于量化档** ——
+Q8_0 档已经与 4B 同级（逐位），Q4_K_M 档受 Q5_0 / Q4_K 设备 kernel 的归约
+顺序限制。要把 Q4_K_M 也做到逐位，需要让那三个 kernel 复刻 host NEON 的
+`vdotq_s32` 4-lane 分组与 F32 累加顺序（取舍见 §B7.2：逐位要求每行串行
+累加，会牺牲 prefill 的「权重读一次、多行复用」）。
+
 ## 3. 估算
 
 | 工作项 | 规模 | 备注 |
@@ -387,9 +598,12 @@ ggml 一致：ggml 的 `block_q8_1.s` 存的就是 `d * sum(qs)`（已乘激活 
 256 项查表展开（`table_b2b_0` 的 `(b) << 4` 语义），level 落在 0..31 可以直接
 当 int8 交给 `UDOT`。`tests_neon.rs` 断言 NEON 与 scalar **逐位相等**。
 
-**有意没做**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的 GPU 白名单里
-没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，而不是
-静默算错。30B 的 GPU 支持留到 B2/B3 决定架构时一并评估。
+**设备路径（2026-11-09 补上）**：Q5_1 起初没有 Vulkan 路径（GPU 模式会明确报
+「weight format has no Vulkan kernel」，而不是静默算错）。现在有
+`shaders/glsl/q5_1_matmul.comp` 与 `shaders/glsl/q5_0_matmul.comp` 两个设备
+kernel：Q4_1 的设备 kernel 带 `m` 项，正好是 Q5_1 的模板；Q4_0 是 Q5_0 的模板。
+两者与 CPU kernel 的数值在门限内一致（Q5_0 max_rel 6.5e-6，Q5_1 max_rel 3.1e-5），
+且比 CPU 快 2-3×。
 
 ## 4. 怎么复现这份契约
 
