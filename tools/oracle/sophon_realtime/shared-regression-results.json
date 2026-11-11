@@ -1651,5 +1651,297 @@
       }
     ],
     "scope": "All three CI jobs pass on the evidence checkpoint with unchanged Rust/Cargo source. This subsequent run reaches QEMU and Vulkan compile/shader/device-regression steps that the earlier apt DNS failure prevented. CI success is separate from real-model numerical acceptance; failed thinker/GPU gates remain failed."
+  },
+  "grouped_audio_31344_review": {
+    "status": "PASS for targeted tests/build and no new same-feature library failure names; the complete library suite still FAILS",
+    "date": "2026-11-11",
+    "host_port": 31344,
+    "source_identity": {
+      "base_source_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+      "changed_source_files": [
+        "src/app/jev/grouped.rs",
+        "src/app/server/api.rs",
+        "src/app/server/audio_chat.rs"
+      ],
+      "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+      "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+      "source_entries": 618,
+      "build_report": "target/sophon/grouped-audio-31344-build.json",
+      "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+      "cli": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+        "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+        "size": 41362856
+      },
+      "server": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+        "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+        "size": 32469400
+      },
+      "scope": "Functional entrypoint comparison only: Q6_K thinker + F32 audio, CPU/F32 KV; not an all-Q6 component setup or numerical Oracle/GPU acceptance. Synthetic 250ms 440Hz tone checks protocol and deterministic probability equality, not transcription/speech quality.",
+      "source_matches_local_checkout_and_remote_after_run": true
+    },
+    "build": {
+      "status": "passed",
+      "started_at": "2026-11-11T17:52:20.688777+00:00",
+      "base_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+      "changed_source_files": [
+        "src/app/jev/grouped.rs",
+        "src/app/server/api.rs",
+        "src/app/server/audio_chat.rs"
+      ],
+      "source_manifest": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-expected-source-manifest.json",
+      "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+      "source_entries": 618,
+      "source_matches_expected": true,
+      "profile": "release-fast",
+      "features": [
+        "parity-trace"
+      ],
+      "default_features": false,
+      "vulkan_enabled": false,
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+      "config": "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
+      "server_tests": {
+        "summary": "112 passed / 0 failed",
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-server-green-v2.log",
+        "sha256": "0599ea1f805900095933314cdd26e7ad9345be5a57abd804466382dceeb641f7"
+      },
+      "lib_test": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-lib-test",
+        "sha256": "ec785b79ec0591299f2662755c72eef8b4a4e0d66d2c51ae2f7a75f534156d84"
+      },
+      "jobs": [
+        {
+          "label": "lib-suite",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-lib-test",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "seconds": 70.43588425405324,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-lib-suite.log",
+          "sha256": "05d3947936255018376488c926cbeb2f588afce798cbf3f9b389d4019a6edbd3"
+        },
+        {
+          "label": "apps-build",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+            "build",
+            "--offline",
+            "--locked",
+            "--profile",
+            "release-fast",
+            "--no-default-features",
+            "--features",
+            "parity-trace",
+            "--bin",
+            "rust-model-inference",
+            "--bin",
+            "rust-model-server",
+            "-j4"
+          ],
+          "exit_code": 0,
+          "seconds": 164.75394054874778,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-apps-build.log",
+          "sha256": "c3cbde7b50ae379fcc2bfc83f339b3959c420c3f8e7a89bc9ebe01961f47d854"
+        },
+        {
+          "label": "cli-help",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+            "--help"
+          ],
+          "exit_code": 0,
+          "seconds": 0.0025915130972862244,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli-help.log",
+          "sha256": "32a3930a7c0e56bf247b31cb1a11ff40a29ce7a3b567465afd095ebd6b268926"
+        },
+        {
+          "label": "server-help",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+            "--help"
+          ],
+          "exit_code": 0,
+          "seconds": 0.0024179555475711823,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server-help.log",
+          "sha256": "719d9605cbd5b0879e20f523d5f311c6f98f071dd68b6835454bc5fca759d6a5"
+        }
+      ],
+      "lib_suite": {
+        "baseline_summary": [
+          "test result: FAILED. 1566 passed; 16 failed; 106 ignored; 0 measured; 0 filtered out; finished in 70.10s"
+        ],
+        "current_summary": [
+          "test result: FAILED. 1568 passed; 16 failed; 106 ignored; 0 measured; 0 filtered out; finished in 70.41s"
+        ],
+        "baseline_failed_names": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+        ],
+        "current_failed_names": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+        ],
+        "new_failures": [],
+        "removed_failures": [],
+        "same_failed_names": true,
+        "baseline_log_sha256": "015cbcff378b60ae5c4845434e62d173988f5bd2fe7efc28fc211a56f144b02d"
+      },
+      "cli": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+        "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+        "size": 41362856
+      },
+      "server": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+        "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+        "size": 32469400
+      },
+      "source_unchanged_after_build": true,
+      "completed_at": "2026-11-11T17:56:16.094014+00:00"
+    },
+    "red_green": {
+      "route_red": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-route-red.log",
+        "size": 95117,
+        "sha256": "12a21027ff0a4a0020e9f825de9f69c839dce545a8bba12fc9f16be49fd916eb",
+        "summaries": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1688 filtered out; finished in 0.13s"
+        ]
+      },
+      "route_red_observation": "Real loopback HTTP returned 404 rather than 200 before the new route existed.",
+      "nonfinite_red": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-nonfinite-red.log",
+        "size": 96749,
+        "sha256": "3ed8c66508615e4749fbd88b6196d7e83b2c1503aca4997a868efa4a44c95387",
+        "summaries": [
+          "test result: FAILED. 13 passed; 2 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 2.26s"
+        ]
+      },
+      "nonfinite_red_observation": "Shared parser unit test accepted nonfinite values; actual loopback HTTP returned 200 rather than 400.",
+      "server_green": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-server-green-v2.log",
+        "size": 104703,
+        "sha256": "0599ea1f805900095933314cdd26e7ad9345be5a57abd804466382dceeb641f7",
+        "summaries": [
+          "test result: ok. 112 passed; 0 failed; 0 ignored; 0 measured; 1578 filtered out; finished in 3.38s"
+        ],
+        "tail": null
+      },
+      "source_comparison": {
+        "entries": 618,
+        "mismatches": []
+      }
+    },
+    "source_transfer_preflight": {
+      "removed_transfer_metadata_only": [
+        {
+          "path": "src/app/jev/._grouped.rs",
+          "bytes": 163,
+          "sha256": "afd3455c90d031675b9d62f6ca3d04324da13935c0e0151dc6dae3feaa1d03a0",
+          "kind": "Mac AppleDouble archive metadata; not Rust source"
+        },
+        {
+          "path": "src/app/server/._api.rs",
+          "bytes": 163,
+          "sha256": "afd3455c90d031675b9d62f6ca3d04324da13935c0e0151dc6dae3feaa1d03a0",
+          "kind": "Mac AppleDouble archive metadata; not Rust source"
+        },
+        {
+          "path": "src/app/server/._audio_chat.rs",
+          "bytes": 163,
+          "sha256": "afd3455c90d031675b9d62f6ca3d04324da13935c0e0151dc6dae3feaa1d03a0",
+          "kind": "Mac AppleDouble archive metadata; not Rust source"
+        }
+      ],
+      "production_source_modified": false
+    },
+    "remote_audio_download": {
+      "revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
+      "host_port": 31344,
+      "files": [
+        {
+          "path": "thinker/audio/config.json",
+          "size": 1728,
+          "sha256": "134e9c7ddb91e90cc56fd40b4f793cb4deb28bdaa9980d0037b8ad893eb37d04",
+          "verified_sha256": "134e9c7ddb91e90cc56fd40b4f793cb4deb28bdaa9980d0037b8ad893eb37d04"
+        },
+        {
+          "path": "thinker/audio/model.safetensors",
+          "size": 405001088,
+          "sha256": "1fc9fa79d8731b4d9e4762f52935d60286b87a5eb5c2002f548da87abbfd1e04",
+          "verified_sha256": "1fc9fa79d8731b4d9e4762f52935d60286b87a5eb5c2002f548da87abbfd1e04"
+        },
+        {
+          "path": "thinker/audio/preprocessor_config.json",
+          "size": 356,
+          "sha256": "9ec7d9345842ceb81dc580159bbf377b3c8a4e40c8c7ce110a9a2b435f00ad4b",
+          "verified_sha256": "9ec7d9345842ceb81dc580159bbf377b3c8a4e40c8c7ce110a9a2b435f00ad4b"
+        }
+      ],
+      "transport": "Direct streamed ModelScope HTTPS on the remote host; no checkpoint bytes stored on the Mac",
+      "started_epoch": 1794418572.7657583,
+      "status": "PASS",
+      "finished_epoch": 1794418585.167722,
+      "verified_bytes": 405003172
+    },
+    "remote_audio_download_report_sha256": "e1a566e6eda749db79d01efa858fee0cfdada8b10ddcbd153a4b6e1aee3c9a85",
+    "real_entrypoints": {
+      "report": "target/sophon/grouped-audio-entrypoints-31344-v2/result.json",
+      "sha256": "874c600299d104bc110b5af95ae951f9d6cb4bcc46bfcd5f2e3599fdbc473f68",
+      "status": "PASS",
+      "probability_absolute_tolerance": 1e-07,
+      "observed_probability_differences": {
+        "block_choice": 0.0,
+        "multi_select": 0.0,
+        "single": 0.0
+      },
+      "invalid_http_cases": 7,
+      "earlier_harness_error": {
+        "phase": "server startup",
+        "cause": "/health returns plain text ok; initial harness parsed it as JSON",
+        "driver_log": "/workspace/rust-model-inference/target/sophon/run-grouped-audio-entrypoints-31344.log",
+        "driver_log_sha256": "aba775f68946db65ef7135a564a7a63eb1ea6820971dcb0294206200419efadc",
+        "http_scoring_requests_sent": 0,
+        "production_change_required": false
+      }
+    },
+    "limits": [
+      "CPU-only, no-default-features plus parity-trace on replacement host; its 1566/1568 passed and identical 16 failures are a separate configuration from the historical Vulkan/full-feature 1685/23/234 run.",
+      "Only three Rust files changed: route/schema/handler, shared decoding extraction and grouped finite-value validation; no kernels or arithmetic changed.",
+      "The parser fix intentionally rejects previously accepted NaN/inf option scores for every shared grouped caller. Normal finite scores retain their parsing and scoring semantics.",
+      "Synthetic tone verifies protocol/probability consistency only; matching-format precision, task quality, Auto and Vulkan are not established.",
+      "Python production tools are unchanged; the historical 68/68 Python suite was not rerun for these Rust-only changes."
+    ]
   }
 }

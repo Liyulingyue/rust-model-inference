@@ -1,6 +1,6 @@
 {
   "status": "partial entrypoint evidence; build identities delimit source coverage",
-  "host": "authorized remote 33367; models and generated audio remain remote",
+  "host": "Historical authorized remote 33367; grouped audio follow-up on replacement host 31344. Models, raw tensors and generated audio remain remote.",
   "runs": {
     "tts_http_initial": {
       "evidence": "target/sophon/speech-http-final-33367/result.json",
@@ -2903,6 +2903,517 @@
       "pass": true,
       "device_execution_observed": true,
       "fallback_observed": true
+    },
+    "grouped-audio-31344": {
+      "status": "PASS",
+      "host_port": 31344,
+      "started_at": "2026-11-11T18:00:26.957695+00:00",
+      "scope": "Functional entrypoint comparison only: Q6_K thinker + F32 audio, CPU/F32 KV; not an all-Q6 component setup or numerical Oracle/GPU acceptance. Synthetic 250ms 440Hz tone checks protocol and deterministic probability equality, not transcription/speech quality.",
+      "components": {
+        "thinker": {
+          "path": "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+          "sha256": "c7baf117b3bf27385802286fba1dbbcf6fcb41b1bf6678cbae5de43932b579da",
+          "requested_format": "Q6_K"
+        },
+        "audio": {
+          "path": "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+          "sha256": "c112a726c4bc6fb23be9ba7a6f116820b902453522703504a70fa69df46968d4",
+          "requested_format": "F32"
+        }
+      },
+      "binary_provenance": {
+        "build_report": "/workspace/rust-model-inference/target/sophon/grouped-audio-31344-build.json",
+        "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+        "cli": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+          "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+          "size": 41362856
+        },
+        "server": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+          "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+          "size": 32469400
+        },
+        "source_manifest": "/workspace/rust-model-inference/target/sophon/grouped-audio-31344-expected-source-manifest.json",
+        "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+        "source_entries": 618,
+        "features": [
+          "parity-trace"
+        ],
+        "vulkan_enabled": false,
+        "profile": "release-fast"
+      },
+      "input": {
+        "path": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/input.wav",
+        "sha256": "dba41f5cd356b6837ba443522185b1e8121bcc763168eb47e7b6bbd79a0690fb",
+        "rate": 16000,
+        "samples": 4000,
+        "channels": 1,
+        "format": "PCM16"
+      },
+      "probability_absolute_tolerance": 1e-07,
+      "cases": {
+        "block_choice": {
+          "cli": {
+            "command": [
+              "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+              "--model",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+              "--mmproj",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+              "--compute",
+              "cpu",
+              "--kv-cache",
+              "f32",
+              "--threads",
+              "4",
+              "--temperature",
+              "0",
+              "--max-tokens",
+              "2",
+              "--max-context",
+              "512",
+              "--prefill-batch-size",
+              "32",
+              "--audio",
+              "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/input.wav",
+              "--jev",
+              "--jev-context",
+              "判断输入。",
+              "--jev-question",
+              "是否有人讲话？",
+              "--jev-output",
+              "json",
+              "--jev-block",
+              "speech",
+              "--jev-option",
+              "有讲话",
+              "--jev-option",
+              "无讲话",
+              "--jev-block",
+              "language",
+              "--jev-option",
+              "中文",
+              "--jev-option",
+              "其他语言"
+            ],
+            "exit_code": 0,
+            "seconds": 37.49165140837431,
+            "log": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/cli-block_choice.log",
+            "log_sha256": "0179f1cc57b56642e69e625122fa8e65d5e8408c59de0f625a59ea957755f64c",
+            "result": {
+              "mode": "block_choice",
+              "question": "是否有人讲话？",
+              "groups": [
+                {
+                  "label": "speech",
+                  "choice": "B",
+                  "probabilities": {
+                    "A": 0.006495724897831678,
+                    "B": 0.9935043454170227
+                  },
+                  "confidence": 0.9935043454170227,
+                  "entropy": 0.039190951734781265,
+                  "margin": 0.9870086312294006
+                },
+                {
+                  "label": "language",
+                  "choice": "C",
+                  "probabilities": {
+                    "C": 0.7490047216415405,
+                    "D": 0.2509952485561371
+                  },
+                  "confidence": 0.7490047216415405,
+                  "entropy": 0.5634258985519409,
+                  "margin": 0.49800947308540344
+                }
+              ],
+              "prefill_ms": 36068
+            }
+          },
+          "http": {
+            "route": "/v1/jev/audio_grouped",
+            "status": 200,
+            "seconds": 35.02001431956887,
+            "request": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/http-block_choice-request.json",
+            "result": {
+              "mode": "block_choice",
+              "context": "判断输入。",
+              "results": [
+                {
+                  "mode": "block_choice",
+                  "question": "是否有人讲话？",
+                  "groups": [
+                    {
+                      "label": "speech",
+                      "choice": "B",
+                      "probabilities": {
+                        "A": 0.006495724897831678,
+                        "B": 0.9935043454170227
+                      },
+                      "confidence": 0.9935043454170227,
+                      "entropy": 0.039190951734781265,
+                      "margin": 0.9870086312294006
+                    },
+                    {
+                      "label": "language",
+                      "choice": "C",
+                      "probabilities": {
+                        "C": 0.7490047216415405,
+                        "D": 0.2509952485561371
+                      },
+                      "confidence": 0.7490047216415405,
+                      "entropy": 0.5634258985519409,
+                      "margin": 0.49800947308540344
+                    }
+                  ],
+                  "prefill_ms": 35016
+                }
+              ]
+            },
+            "mode_defaulted": false,
+            "maximum_cli_http_probability_difference": 0.0,
+            "pass": true
+          }
+        },
+        "multi_select": {
+          "cli": {
+            "command": [
+              "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+              "--model",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+              "--mmproj",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+              "--compute",
+              "cpu",
+              "--kv-cache",
+              "f32",
+              "--threads",
+              "4",
+              "--temperature",
+              "0",
+              "--max-tokens",
+              "2",
+              "--max-context",
+              "512",
+              "--prefill-batch-size",
+              "32",
+              "--audio",
+              "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/input.wav",
+              "--jev",
+              "--jev-context",
+              "判断输入。",
+              "--jev-question",
+              "是否有人讲话？",
+              "--jev-output",
+              "json",
+              "--jev-multi",
+              "--jev-option",
+              "有讲话",
+              "--jev-option",
+              "无讲话",
+              "--jev-option",
+              "中文",
+              "--jev-option",
+              "其他语言"
+            ],
+            "exit_code": 0,
+            "seconds": 35.97839158587158,
+            "log": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/cli-multi_select.log",
+            "log_sha256": "c5ab4b6f12d9f2d80e7a1d32f391d1895af3a2f77189ceb51dafb0b3ce702d89",
+            "result": {
+              "mode": "multi_select",
+              "question": "是否有人讲话？",
+              "groups": [
+                {
+                  "label": "pair_1",
+                  "choice": "B",
+                  "probabilities": {
+                    "A": 0.006495724897831678,
+                    "B": 0.9935043454170227
+                  },
+                  "confidence": 0.9935043454170227,
+                  "entropy": 0.039190951734781265,
+                  "margin": 0.9870086312294006
+                },
+                {
+                  "label": "pair_2",
+                  "choice": "C",
+                  "probabilities": {
+                    "C": 0.7490047216415405,
+                    "D": 0.2509952485561371
+                  },
+                  "confidence": 0.7490047216415405,
+                  "entropy": 0.5634258985519409,
+                  "margin": 0.49800947308540344
+                }
+              ],
+              "prefill_ms": 34541
+            }
+          },
+          "http": {
+            "route": "/v1/jev/audio_grouped",
+            "status": 200,
+            "seconds": 33.976658994331956,
+            "request": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/http-multi_select-request.json",
+            "result": {
+              "mode": "multi_select",
+              "context": "判断输入。",
+              "results": [
+                {
+                  "mode": "multi_select",
+                  "question": "是否有人讲话？",
+                  "groups": [
+                    {
+                      "label": "pair_1",
+                      "choice": "B",
+                      "probabilities": {
+                        "A": 0.006495724897831678,
+                        "B": 0.9935043454170227
+                      },
+                      "confidence": 0.9935043454170227,
+                      "entropy": 0.039190951734781265,
+                      "margin": 0.9870086312294006
+                    },
+                    {
+                      "label": "pair_2",
+                      "choice": "C",
+                      "probabilities": {
+                        "C": 0.7490047216415405,
+                        "D": 0.2509952485561371
+                      },
+                      "confidence": 0.7490047216415405,
+                      "entropy": 0.5634258985519409,
+                      "margin": 0.49800947308540344
+                    }
+                  ],
+                  "prefill_ms": 33973
+                }
+              ]
+            },
+            "mode_defaulted": true,
+            "maximum_cli_http_probability_difference": 0.0,
+            "pass": true
+          }
+        },
+        "single": {
+          "cli": {
+            "command": [
+              "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+              "--model",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+              "--mmproj",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+              "--compute",
+              "cpu",
+              "--kv-cache",
+              "f32",
+              "--threads",
+              "4",
+              "--temperature",
+              "0",
+              "--max-tokens",
+              "2",
+              "--max-context",
+              "512",
+              "--prefill-batch-size",
+              "32",
+              "--audio",
+              "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/input.wav",
+              "--jev",
+              "--jev-context",
+              "判断输入。",
+              "--jev-question",
+              "是否有人讲话？",
+              "--jev-output",
+              "json",
+              "--jev-option",
+              "有讲话",
+              "--jev-option",
+              "无讲话"
+            ],
+            "exit_code": 0,
+            "seconds": 32.29986212775111,
+            "log": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/cli-single.log",
+            "log_sha256": "5f803a1f9508fd8fd3f0a00d999b7e3473407ad38bd8c9308f52b15c871f9847",
+            "result": {
+              "mode": "choice",
+              "question": "是否有人讲话？",
+              "labels": [
+                "A",
+                "B"
+              ],
+              "descriptions": [
+                "有讲话",
+                "无讲话"
+              ],
+              "values": [
+                0.0,
+                0.0
+              ],
+              "probabilities": {
+                "A": 0.0021658744663000107,
+                "B": 0.9978341460227966
+              },
+              "choice": "B",
+              "confidence": 0.99783415,
+              "entropy": 0.015450997,
+              "margin": 0.9956683,
+              "prefill_ms": 30867
+            }
+          },
+          "http": {
+            "route": "/v1/jev/audio",
+            "status": 200,
+            "seconds": 30.57735868729651,
+            "request": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/http-single-request.json",
+            "result": {
+              "mode": "single",
+              "context": "判断输入。",
+              "results": [
+                {
+                  "mode": "choice",
+                  "question": "是否有人讲话？",
+                  "labels": [
+                    "A",
+                    "B"
+                  ],
+                  "descriptions": [
+                    "有讲话",
+                    "无讲话"
+                  ],
+                  "values": [
+                    0.0,
+                    0.0
+                  ],
+                  "probabilities": {
+                    "A": 0.0021658744663000107,
+                    "B": 0.9978341460227966
+                  },
+                  "choice": "B",
+                  "confidence": 0.9978341460227966,
+                  "entropy": 0.015450997278094292,
+                  "margin": 0.9956682920455933,
+                  "prefill_ms": 30574
+                }
+              ]
+            },
+            "mode_defaulted": false,
+            "maximum_cli_http_probability_difference": 0.0,
+            "pass": true
+          }
+        }
+      },
+      "invalid_cases": {
+        "invalid-mode": {
+          "status": 400,
+          "response": {
+            "error": "Failed to deserialize the JSON body into the target type: mode: unknown variant `single`, expected `multi_select` or `block_choice` at line 1 column 10970"
+          },
+          "seconds": 0.0006668437272310257,
+          "pass": true
+        },
+        "invalid-base64": {
+          "status": 400,
+          "response": {
+            "error": "audio must be raw base64 encoded audio: Invalid symbol 58, offset 5."
+          },
+          "seconds": 0.0003779977560043335,
+          "pass": true
+        },
+        "invalid-wav": {
+          "status": 400,
+          "response": {
+            "error": "Pure-Rust audio decode failed for the upload: Unsupported(\"expected RIFF/WAVE\")"
+          },
+          "seconds": 0.0006577726453542709,
+          "pass": true
+        },
+        "context-overflow": {
+          "status": 400,
+          "response": {
+            "error": "audio prompt plus output budget exceeds context 512"
+          },
+          "seconds": 0.7008870206773281,
+          "pass": true
+        },
+        "empty-questions": {
+          "status": 400,
+          "response": {
+            "error": "--jev requires at least one --jev-question"
+          },
+          "seconds": 0.00047465600073337555,
+          "pass": true
+        },
+        "nonfinite-score": {
+          "status": 400,
+          "response": {
+            "error": "Score value \"NaN\" must be finite"
+          },
+          "seconds": 0.00035177916288375854,
+          "pass": true
+        },
+        "unknown-field": {
+          "status": 400,
+          "response": {
+            "error": "Failed to deserialize the JSON body into the target type: positive: unknown field `positive`, expected one of `audio`, `context`, `questions`, `mode` at line 1 column 10964"
+          },
+          "seconds": 0.0003855861723423004,
+          "pass": true
+        }
+      },
+      "recovered_cli_from": {
+        "path": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/result.json",
+        "sha256": "4ad884a69d37f7d818d21eb5415e842ccdf14eea61b248c1704bbb7afd7d7ce2"
+      },
+      "earlier_harness_error": {
+        "phase": "server startup",
+        "cause": "/health returns plain text ok; initial harness parsed it as JSON",
+        "driver_log": "/workspace/rust-model-inference/target/sophon/run-grouped-audio-entrypoints-31344.log",
+        "driver_log_sha256": "aba775f68946db65ef7135a564a7a63eb1ea6820971dcb0294206200419efadc",
+        "http_scoring_requests_sent": 0,
+        "production_change_required": false
+      },
+      "server_command": [
+        "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f32",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "512",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18239"
+      ],
+      "server_pid": 34519,
+      "active": "HTTP invalid unknown-field",
+      "health": {
+        "status": 200,
+        "body": "ok"
+      },
+      "source_unchanged_after_run": true,
+      "completed_at": "2026-11-11T18:02:26.673096+00:00",
+      "server_exit_code": -15,
+      "server_log_sha256": "25a15682257783fc3178834733eaf6592830d668f344aa8b5f3fb44bbd0c6aa3",
+      "server_stopped": true,
+      "evidence": "target/sophon/grouped-audio-entrypoints-31344-v2/result.json",
+      "evidence_sha256": "874c600299d104bc110b5af95ae951f9d6cb4bcc46bfcd5f2e3599fdbc473f68",
+      "driver": "target/sophon/run-grouped-audio-entrypoints-31344-v2.py",
+      "driver_sha256": "5bd28dca6b137a81b76af8f59ad44c0126fa55a5d7556f93788a3343900bf796"
     }
   },
   "notes": [
@@ -2968,5 +3479,30 @@
     },
     "build_report": "target/sophon/fallback-reviewed-build-33367.json",
     "build_report_sha256": "fffb0f2ff59ad5714ea9e7494b90a42f5d87fb83ea3df9886abe189ccc91d8ad"
+  },
+  "grouped_audio_31344_artifacts": {
+    "base_source_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+    "changed_source_files": [
+      "src/app/jev/grouped.rs",
+      "src/app/server/api.rs",
+      "src/app/server/audio_chat.rs"
+    ],
+    "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+    "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+    "source_entries": 618,
+    "build_report": "target/sophon/grouped-audio-31344-build.json",
+    "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+    "cli": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+      "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+      "size": 41362856
+    },
+    "server": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+      "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+      "size": 32469400
+    },
+    "scope": "Functional entrypoint comparison only: Q6_K thinker + F32 audio, CPU/F32 KV; not an all-Q6 component setup or numerical Oracle/GPU acceptance. Synthetic 250ms 440Hz tone checks protocol and deterministic probability equality, not transcription/speech quality.",
+    "source_matches_local_checkout_and_remote_after_run": true
   }
 }

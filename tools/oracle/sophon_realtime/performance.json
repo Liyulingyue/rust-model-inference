@@ -293,6 +293,53 @@
         "cli_sha256_after_inference": "54c1792d4e63791df6f9bbbfdf41475fd9c2114a064a0c35f1b0adc60f494233"
       },
       "condition": "Reference: one 22-token causal Transformers F32 forward (15 prompt + 7 teacher tokens), selecting eight prediction rows after runtime activation-QDQ. Rust: 15-token prefill plus seven cached continuations with optimized quantized kernels. Native reference SiLU differs from production approximate SiLU. Shared-host release-fast validation timings, not an equal-batching throughput or capacity comparison."
+    },
+    {
+      "component": "single and grouped audio JEV entrypoint validation",
+      "entrypoint_run": "grouped-audio-31344",
+      "host_port": 31344,
+      "format": "Q6_K thinker / F32 audio",
+      "policy": "cpu",
+      "kv": "F32",
+      "threads": 4,
+      "input_samples": 4000,
+      "input_rate": 16000,
+      "cli_wall_seconds": {
+        "block_choice": 37.49165140837431,
+        "multi_select": 35.97839158587158,
+        "single": 32.29986212775111
+      },
+      "http_request_seconds": {
+        "block_choice": 35.02001431956887,
+        "multi_select": 33.976658994331956,
+        "single": 30.57735868729651
+      },
+      "maximum_cli_http_probability_difference": 0.0,
+      "evidence": "target/sophon/grouped-audio-entrypoints-31344-v2/result.json",
+      "evidence_sha256": "874c600299d104bc110b5af95ae951f9d6cb4bcc46bfcd5f2e3599fdbc473f68",
+      "binary_provenance": {
+        "build_report": "/workspace/rust-model-inference/target/sophon/grouped-audio-31344-build.json",
+        "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+        "cli": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+          "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+          "size": 41362856
+        },
+        "server": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+          "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+          "size": 32469400
+        },
+        "source_manifest": "/workspace/rust-model-inference/target/sophon/grouped-audio-31344-expected-source-manifest.json",
+        "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+        "source_entries": 618,
+        "features": [
+          "parity-trace"
+        ],
+        "vulkan_enabled": false,
+        "profile": "release-fast"
+      },
+      "condition": "Sequential release-fast CPU protocol checks with a 250ms synthetic tone. CLI includes loading; resident HTTP does not. These are validation timings, not an equal-work throughput, deployment capacity or speech-quality benchmark."
     }
   ],
   "gpu": {

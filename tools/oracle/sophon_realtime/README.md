@@ -60,6 +60,10 @@ The report's `reproduction` section also records the existing ignored Rust image
 
 ## Audio, speech and integration evidence
 
+Audio grouped scoring uses `/v1/jev/audio_grouped` with raw base64 `audio`, `context`, `questions:[{text,groups:[{label,options}]}]` and optional `mode` (`multi_select` by default or `block_choice`). It shares bounded decoding, resident scoring and per-group normalization with the CLI. Nonfinite `description:value` scores are rejected before inference in both entrypoints; the existing single-mode `/v1/jev/audio` protocol is retained. Measured combinations and artifact identities remain separate from this schema.
+
+Replacement host 31344 passes real CPU single, block-choice and default multi-select CLI/HTTP checks with **zero probability differences** and seven HTTP 400 cases. The distinct CLI/server (`e842da75…` / `88206ac9…`) use Q6_K thinker + F32 audio and a 250ms synthetic tone; this establishes protocol consistency, not speech quality or a matching-format/GPU numerical pass. Server tests pass 112/112; the same-feature CPU-only full suite retains the baseline's identical 16 failures (1566 to 1568 passes, 106 ignored). The original harness health-response parse failure remains recorded. See the artifact-bound [entrypoint](entrypoint-results.json) and [regression](shared-regression-results.json) reports.
+
 - [audio-results.json](audio-results.json): fourteen F32/BF16 boundary cases, explicit F16/runtime-QDQ comparison, and retained six-format quantized failures.
 - [talker.md](talker.md) and [precision-results.json](precision-results.json): exact tokenizer/schedule checks, 29 independent precision jobs, export/runtime separation and extended F32 fixtures.
 - [thinker-results.json](thinker-results.json): eight-step thinker metrics and subsequent format results.

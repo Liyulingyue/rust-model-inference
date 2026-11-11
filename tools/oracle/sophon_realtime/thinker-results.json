@@ -16588,6 +16588,623 @@
         "src/ops/math/exp.rs": "d3a1807a2e3f66d1e7f1fb16397251a001264e2ce1dddeb5b072092ad91704b4"
       },
       "cause_limit": "This is a verified arithmetic difference, not proof of the FFN or final-logit failure cause. No gate or production operator changed."
+    },
+    "ffn_boundary_31344": {
+      "status": "Diagnostic only; original eight-step Q6_K numerical FAIL is unchanged.",
+      "scope": "Replacement host 31344; Q6_K; CPU/F32 KV; same pinned prompt, two generated tokens and 16 traced first-layer rows. Does not cover subsequent decoder layers, other precisions, HTTP, Vulkan or native source FP8 activation.",
+      "gguf": "models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+      "gguf_sha256": "c7baf117b3bf27385802286fba1dbbcf6fcb41b1bf6678cbae5de43932b579da",
+      "oracle": {
+        "torch": "2.9.1+gitff65f5b",
+        "source_config_sha256": "b48dc9247bf75aa54ba2af1109ae9e2e5414db54ce0331dba8169ccd6f4405ba",
+        "transformers_source_sha256": "dd63ed3b124232735b3dca1bfa28f9d6b0d3f7182afcb75dde8f3e724b2b22da",
+        "tensor_types": {
+          "blk.0.attn_norm.weight": 0,
+          "blk.0.ffn_norm.weight": 0,
+          "blk.0.attn_q.weight": 14,
+          "blk.0.attn_k.weight": 14,
+          "blk.0.attn_v.weight": 14,
+          "blk.0.attn_output.weight": 14,
+          "blk.0.attn_q_norm.weight": 0,
+          "blk.0.attn_k_norm.weight": 0,
+          "blk.0.ffn_gate.weight": 14,
+          "blk.0.ffn_up.weight": 14,
+          "blk.0.ffn_down.weight": 14
+        },
+        "forward_seconds": 2.915963290259242,
+        "total_seconds": 9.318403420969844
+      },
+      "first_layer": {
+        "attn_norm-0": {
+          "max_abs": 7.450580596923828e-09,
+          "rmse": 3.0383981490405874e-10,
+          "relative_rmse": 2.4624886187352694e-08,
+          "cosine": 0.9999999999999997,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 9.324342727512935e-08,
+          "diagnostic_f32_failure_rows": []
+        },
+        "Qcur_raw-0": {
+          "max_abs": 2.4322420358657837e-05,
+          "rmse": 1.4761125031458094e-06,
+          "relative_rmse": 3.081523093234191e-05,
+          "cosine": 0.9999999995274687,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.00012053374335895177,
+          "diagnostic_f32_failure_rows": []
+        },
+        "Qcur_normed-0": {
+          "max_abs": 0.0013506412506103516,
+          "rmse": 6.190145881922544e-05,
+          "relative_rmse": 3.4719000014118024e-05,
+          "cosine": 0.9999999993973053,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.00013434854658544445,
+          "diagnostic_f32_failure_rows": []
+        },
+        "Kcur_raw-0": {
+          "max_abs": 2.125650644302368e-05,
+          "rmse": 1.7333482387437403e-06,
+          "relative_rmse": 2.294779677533728e-05,
+          "cosine": 0.999999999738007,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 9.72249805572914e-05,
+          "diagnostic_f32_failure_rows": []
+        },
+        "Kcur_normed-0": {
+          "max_abs": 0.00212860107421875,
+          "rmse": 5.197362011641767e-05,
+          "relative_rmse": 8.548590311608853e-06,
+          "cosine": 0.9999999999637765,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 2.9715232422848067e-05,
+          "diagnostic_f32_failure_rows": []
+        },
+        "kqv_out-0": {
+          "max_abs": 2.2605061531066895e-05,
+          "rmse": 1.501672083426831e-06,
+          "relative_rmse": 5.2220629073859706e-05,
+          "cosine": 0.9999999986366919,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.00015575913280851334,
+          "diagnostic_f32_failure_rows": []
+        },
+        "ffn_input-0": {
+          "max_abs": 0.0014858841896057129,
+          "rmse": 4.331638127677959e-05,
+          "relative_rmse": 0.000346771533430723,
+          "cosine": 0.9999999399113192,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.0011339742552724692,
+          "diagnostic_f32_failure_rows": [
+            5
+          ]
+        },
+        "ffn_norm-0": {
+          "max_abs": 0.0009317398071289062,
+          "rmse": 4.208425592934926e-05,
+          "relative_rmse": 0.0004791652838801733,
+          "cosine": 0.999999885214256,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.001306313912577684,
+          "diagnostic_f32_failure_rows": [
+            5
+          ]
+        },
+        "ffn_gate-0": {
+          "max_abs": 0.003948953002691269,
+          "rmse": 0.00030766452106105945,
+          "relative_rmse": 0.0014495975654805163,
+          "cosine": 0.999998949783718,
+          "diagnostic_f32_gate_pass": false,
+          "maximum_row_relative_rmse": 0.0032803137973369135,
+          "diagnostic_f32_failure_rows": [
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            12,
+            14
+          ]
+        },
+        "ffn_up-0": {
+          "max_abs": 0.004403054714202881,
+          "rmse": 0.000293494615615775,
+          "relative_rmse": 0.001550527674164078,
+          "cosine": 0.9999987979602777,
+          "diagnostic_f32_gate_pass": false,
+          "maximum_row_relative_rmse": 0.0036960657833761666,
+          "diagnostic_f32_failure_rows": [
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            12,
+            13,
+            14
+          ]
+        },
+        "ffn_product-0": {
+          "max_abs": 0.0032911300659179688,
+          "rmse": 4.940037499592287e-05,
+          "relative_rmse": 0.0008450945453083873,
+          "cosine": 0.9999996430536955,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.0014474273213468493,
+          "diagnostic_f32_failure_rows": [
+            5,
+            6,
+            9,
+            10,
+            12,
+            13,
+            14
+          ]
+        },
+        "ffn_out-0": {
+          "max_abs": 0.010401248931884766,
+          "rmse": 0.0006429559911792313,
+          "relative_rmse": 0.001899170930778833,
+          "cosine": 0.9999981974288433,
+          "diagnostic_f32_gate_pass": false,
+          "maximum_row_relative_rmse": 0.0037120123024230174,
+          "diagnostic_f32_failure_rows": [
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            12,
+            13,
+            14,
+            15
+          ]
+        },
+        "Qcur-0": {
+          "max_abs": 0.0013506412506103516,
+          "rmse": 6.190123103577793e-05,
+          "relative_rmse": 3.4718872221567516e-05,
+          "cosine": 0.9999999993973095,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 0.00013434698758048107,
+          "diagnostic_f32_failure_rows": []
+        },
+        "Kcur-0": {
+          "max_abs": 0.00212860107421875,
+          "rmse": 5.19718892081364e-05,
+          "relative_rmse": 8.54830559290849e-06,
+          "cosine": 0.9999999999637782,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 2.971398647634958e-05,
+          "diagnostic_f32_failure_rows": []
+        }
+      },
+      "isolated_exact_rust_inputs": {
+        "blk.0.attn_q.weight": {
+          "max_abs": 3.5762786865234375e-07,
+          "rmse": 1.6335616777969148e-08,
+          "relative_rmse": 3.410205738884072e-07,
+          "cosine": 0.9999999999999418,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 6.065570194991955e-07,
+          "diagnostic_f32_failure_rows": []
+        },
+        "blk.0.attn_k.weight": {
+          "max_abs": 2.384185791015625e-07,
+          "rmse": 2.275877569561066e-08,
+          "relative_rmse": 3.0130294093280197e-07,
+          "cosine": 0.999999999999955,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 6.681970165316206e-07,
+          "diagnostic_f32_failure_rows": []
+        },
+        "blk.0.ffn_gate.weight": {
+          "max_abs": 1.1920928955078125e-06,
+          "rmse": 8.729127607952565e-08,
+          "relative_rmse": 4.112958935348637e-07,
+          "cosine": 0.9999999999999164,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 4.7010071232489484e-07,
+          "diagnostic_f32_failure_rows": []
+        },
+        "blk.0.ffn_up.weight": {
+          "max_abs": 1.430511474609375e-06,
+          "rmse": 8.024923179320877e-08,
+          "relative_rmse": 4.2395923484726717e-07,
+          "cosine": 0.9999999999999107,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 4.6155633887966867e-07,
+          "diagnostic_f32_failure_rows": []
+        },
+        "blk.0.ffn_down.weight": {
+          "max_abs": 2.09808349609375e-05,
+          "rmse": 3.298754736533486e-07,
+          "relative_rmse": 9.743514293572707e-07,
+          "cosine": 0.9999999999995272,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 1.1778423763146384e-06,
+          "diagnostic_f32_failure_rows": []
+        },
+        "attn_output_and_residual_exact_rust_inputs": {
+          "max_abs": 3.337860107421875e-06,
+          "rmse": 6.860740648120977e-08,
+          "relative_rmse": 5.492448696816436e-07,
+          "cosine": 0.9999999999998499,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 7.159492629959725e-07,
+          "diagnostic_f32_failure_rows": []
+        },
+        "silu_product_exact_rust_gate_up": {
+          "max_abs": 2.384185791015625e-07,
+          "rmse": 1.52498933855526e-09,
+          "relative_rmse": 2.6088519949326094e-08,
+          "cosine": 0.9999999999999992,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 7.571731004236299e-08,
+          "diagnostic_f32_failure_rows": []
+        },
+        "ffn_norm_exact_rust_input": {
+          "max_abs": 1.1920928955078125e-07,
+          "rmse": 3.3108292854886254e-09,
+          "relative_rmse": 3.769643074181461e-08,
+          "cosine": 0.9999999999999993,
+          "diagnostic_f32_gate_pass": true,
+          "maximum_row_relative_rmse": 1.4143836057682058e-07,
+          "diagnostic_f32_failure_rows": []
+        }
+      },
+      "qdq_sensitivity": {
+        "attn_norm-0": {
+          "values": 81920,
+          "changed_q8k_codes": 1,
+          "blocks": 320,
+          "changed_code_blocks": 1,
+          "max_scale_absolute_difference": 8.731149137020111e-11,
+          "first_changed_code": {
+            "row": 5,
+            "column": 868,
+            "rust_code": -29,
+            "reference_code": -28,
+            "rust_scaled_value": -28.500001907348633,
+            "reference_scaled_value": -28.499996185302734
+          },
+          "rounded_values": {
+            "max_abs": 0.0003122827038168907,
+            "rmse": 1.0910709269705763e-06,
+            "relative_rmse": 8.843032180531938e-05,
+            "cosine": 0.9999999960900636,
+            "diagnostic_f32_gate_pass": true,
+            "maximum_row_relative_rmse": 0.0003348423725507367,
+            "diagnostic_f32_failure_rows": []
+          }
+        },
+        "kqv_out-0": {
+          "values": 131072,
+          "changed_q8k_codes": 72,
+          "blocks": 512,
+          "changed_code_blocks": 55,
+          "max_scale_absolute_difference": 1.3585668057203293e-07,
+          "first_changed_code": {
+            "row": 5,
+            "column": 64,
+            "rust_code": -87,
+            "reference_code": -88,
+            "rust_scaled_value": -87.49272918701172,
+            "reference_scaled_value": -87.50271606445312
+          },
+          "rounded_values": {
+            "max_abs": 0.0021995268762111664,
+            "rmse": 2.4051642180520475e-05,
+            "relative_rmse": 0.00083633733481374,
+            "cosine": 0.9999996502736777,
+            "diagnostic_f32_gate_pass": true,
+            "maximum_row_relative_rmse": 0.002383134606049494,
+            "diagnostic_f32_failure_rows": [
+              5,
+              6
+            ]
+          }
+        },
+        "ffn_norm-0": {
+          "values": 81920,
+          "changed_q8k_codes": 442,
+          "blocks": 320,
+          "changed_code_blocks": 143,
+          "max_scale_absolute_difference": 7.336493581533432e-06,
+          "first_changed_code": {
+            "row": 5,
+            "column": 25,
+            "rust_code": -16,
+            "reference_code": -15,
+            "rust_scaled_value": -15.50239372253418,
+            "reference_scaled_value": -15.484369277954102
+          },
+          "rounded_values": {
+            "max_abs": 0.007378220558166504,
+            "rmse": 0.00025899299250373495,
+            "relative_rmse": 0.002948611699973074,
+            "cosine": 0.999995653314448,
+            "diagnostic_f32_gate_pass": false,
+            "maximum_row_relative_rmse": 0.006794405711458588,
+            "diagnostic_f32_failure_rows": [
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              12,
+              13,
+              14,
+              15
+            ]
+          }
+        },
+        "ffn_product-0": {
+          "values": 409600,
+          "changed_q8k_codes": 7788,
+          "blocks": 1600,
+          "changed_code_blocks": 953,
+          "max_scale_absolute_difference": 0.0016141235828399658,
+          "first_changed_code": {
+            "row": 2,
+            "column": 24823,
+            "rust_code": 2,
+            "reference_code": 3,
+            "rust_scaled_value": 2.4999847412109375,
+            "reference_scaled_value": 2.5000007152557373
+          },
+          "rounded_values": {
+            "max_abs": 0.018995383754372597,
+            "rmse": 0.00020478317621137518,
+            "relative_rmse": 0.003503027302060266,
+            "cosine": 0.9999938644239825,
+            "diagnostic_f32_gate_pass": false,
+            "maximum_row_relative_rmse": 0.00902364156248112,
+            "diagnostic_f32_failure_rows": [
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              12,
+              13,
+              14,
+              15
+            ]
+          }
+        },
+        "silu_exact_inputs": {
+          "changed_q8k_codes": 0,
+          "values": 409600
+        }
+      },
+      "finding": "The earliest observed discrete divergence is the Q8_K activation input after the initial RMSNorm: row 5, column 868 scales to -28.500001907348633 in Rust versus -28.499996185302734 in the independent reference, giving codes -29 and -28. The 2.46249e-8 RMSNorm rRMSE is small, but input QDQ is discontinuous. First-layer downstream code differences increase to 442 at FFN norm and 7788 at the down-projection input. Isolated tested operations pass diagnostic F32 gates; this is evidence of rounding-threshold propagation, not proof that every later-layer kernel or end-to-end model is correct.",
+      "silu_hypothesis": "Not supported by this fixture: same Rust gate/up inputs give SiLU-product rRMSE 2.60885e-8 and zero changed downstream Q8_K codes. No production SiLU or default SIMD path was changed.",
+      "gate": {
+        "precision": "f32",
+        "relative_rmse_max": 0.001,
+        "cosine_min": 0.999999,
+        "purpose": "Local operator diagnostic, not replacement or relaxation of the block-format end-to-end gate."
+      },
+      "temporary_instrumentation": {
+        "scope": "Arithmetic-preservation check for temporary instrumentation, not bitwise numerical acceptance of a lossy model. This comparison only covers the recorded shared prompt and first two generation predictions.",
+        "source_restored": true,
+        "production_source_manifest_sha256": "4dc5815b9e82efdf6fa228154a4344dd0ec53b80d1042ab93e664594497d988b",
+        "production_cli_sha256": "54c1792d4e63791df6f9bbbfdf41475fd9c2114a064a0c35f1b0adc60f494233",
+        "probe_binary": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/ffn-probe-31344/cli",
+          "sha256": "df355f34dabf26fb9c3b417eed1d410f6c306520d14d31669a40eb170ac9c14f",
+          "size": 41082856,
+          "source_manifest_sha256": "532ade6e01caf5db33320c7700308acaae92e8aa4493b98c30c2e95badbd244b"
+        },
+        "build": {
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+            "build",
+            "--bin",
+            "rust-model-inference",
+            "--offline",
+            "--locked",
+            "--profile",
+            "release-fast",
+            "--no-default-features",
+            "--features",
+            "parity-trace",
+            "-j4"
+          ],
+          "exit_code": 0,
+          "seconds": 116.58697351627052,
+          "patch": "temporary diagnostics only; no arithmetic or production checkout change"
+        },
+        "run": {
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/ffn-probe-31344/cli",
+            "--model",
+            "/root/rmi-sophon-artifacts/repo/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+            "--prompt",
+            "你好，请简短介绍自己。",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "256",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f32",
+            "--prefill-batch-size",
+            "32",
+            "--jinja"
+          ],
+          "exit_code": 0,
+          "seconds": 15.715737484395504,
+          "trace": "/root/rmi-sophon-artifacts/repo/target/sophon/ffn-probe-31344/rust.jsonl",
+          "source_restored": true
+        },
+        "comparisons": [
+          {
+            "name": "prompt_ids",
+            "token_ids_match": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 0,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 1,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 2,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 3,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 4,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 5,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 6,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 7,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 8,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 9,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 10,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 11,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 12,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 13,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 14,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          },
+          {
+            "name": "result_output",
+            "occurrence": 15,
+            "shape": [
+              151936
+            ],
+            "all_bits_unchanged": true
+          }
+        ],
+        "script_sha256": {
+          "target/sophon/run-ffn-probe-31344.py": "b8579a92e219c29987c288cfd0aa6ad97a3da424cc0c0fa11ffa92858859600c",
+          "target/sophon/diagnose-thinker-ffn-31344.py": "73046af72f3633685bf84f58c842693babca9a58b78e23134be27ff7a1884dd0",
+          "target/sophon/ffn-probe-31344/prefill-instrumented.rs": "c5a54c78515cc64b9ba6aaffb963f5ef3957cb16c91b9b159aedb0d27553d7b2",
+          "target/sophon/ffn-probe-31344/source-manifest.json": "532ade6e01caf5db33320c7700308acaae92e8aa4493b98c30c2e95badbd244b",
+          "target/sophon/ffn-probe-31344/rust.jsonl": "403ce80a53b54dcb48cb75d65ce9da1754b5d6bbdfc3d2253ac2244435a2d548",
+          "target/sophon/ffn-probe-31344/oracle-v2/result.json": "7788bee654eb25f40c0e438db92005b2f0cac0f9e02c645d96c28938a4cb626e"
+        }
+      },
+      "instrumentation_identity_note": "Source restore and arithmetic preservation were checked before the subsequent audio grouped HTTP test edits. Probe metadata retains its own source manifest and is not the current application artifact.",
+      "probe_logit_values_unchanged": 2430976,
+      "final_diagnostic_script": {
+        "path": "target/sophon/diagnose-thinker-ffn-31344.py",
+        "sha256": "fe18af59d6a294d609425c126005c4334ee290dbd9e7a0baa345a1e69665af7c"
+      },
+      "final_result": {
+        "path": "target/sophon/ffn-probe-31344/oracle-v3/result.json",
+        "sha256": "4b97ba89fbd19cc41c447ac2da0fc92c8e04a62b2b1d18a3d7af47c7c116fb12"
+      },
+      "raw_arrays": "Remote only; not committed or downloaded to the Mac."
     }
   },
   "transport_interruption": {

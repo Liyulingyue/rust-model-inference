@@ -1,6 +1,6 @@
 # Sophon-Realtime-32B-Tag
 
-状态：**Experimental，部分适配**。F32/F16/BF16 thinker 八步、F32 vision encoder 的 32 个 checkpoint、F32/BF16 音频边界与短语音组件有独立数值证据，F32 CLI 已输出有效 WAV；新 lossless 图像 CLI/HTTP 的 9 项入口检查通过。量化失败和未验证入口见 [逐项记录](../../tools/oracle/sophon_realtime/validation.md) 与 [550 行覆盖矩阵](../../tools/oracle/sophon_realtime/coverage.json)。这不代表完整双工、原生 FP8 或完整 GPU 支持。
+状态：**Experimental，部分适配**。F32/F16/BF16 thinker 八步、F32 vision encoder 的 32 个 checkpoint、F32/BF16 音频边界与短语音组件有独立数值证据，F32 CLI 已输出有效 WAV；新 lossless 图像 CLI/HTTP 的 9 项入口检查通过。量化失败和未验证入口见 [逐项记录](../../tools/oracle/sophon_realtime/validation.md) 与 [552 行覆盖矩阵](../../tools/oracle/sophon_realtime/coverage.json)。这不代表完整双工、原生 FP8 或完整 GPU 支持。
 
 ## 远端准备
 
@@ -15,7 +15,7 @@
 | 文件 | 内容 | 使用 |
 | --- | --- | --- |
 | thinker-*.gguf | 显式 sophon_realtime 契约，复用 Qwen3-VL decoder | 文本、视觉/音频理解及 JEV |
-| mmproj-F32.gguf；本轮新资产另存 vision-lossless-mmproj-F32.gguf | Qwen3-VL 视觉塔、merger、DeepStack；纯 F32 计算由 metadata 显式 opt-in | thinker --image；新 lossless 入口待复测 |
+| mmproj-F32.gguf；本轮新资产另存 vision-lossless-mmproj-F32.gguf | Qwen3-VL 视觉塔、merger、DeepStack；纯 F32 计算由 metadata 显式 opt-in | thinker --image；新 lossless CPU CLI/HTTP 的 9 项入口检查通过 |
 | audio-*.gguf | 18 层 Qwen3-ASR encoder + stack-2 Ultravox projector | thinker --audio |
 | talker-*.gguf | 带标签的 CosyVoice3 Qwen2 speech decoder | --tts 或 --tts-model |
 | code2wav-*.gguf | Flow + F32 HiFT + 六个固定 voice prompt | --mmproj 或 --tts-mmproj |
@@ -57,7 +57,7 @@ $BIN --model "$MODELS/thinker-F32.gguf" --mmproj "$MODELS/audio-F32.gguf" \
   --jev-option 是 --jev-option 否 --jev-output json --compute cpu --threads 4
 ```
 
-Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均支持 `--jev-multi` / `--jev-block`，并复用已配置的 resident runtime、KV 和上下文限制；HTTP 音频 JEV 保持单模式协议。`--tts-model` 与 `--tts-mmproj` 必须成对。语音理解输入统一为 mono 16 kHz；输出为 mono 24 kHz WAV/PCM。speech-to-speech 当前先完成文本生成，再合成语音，尚无双工会话调度。流式 TTS 每十个 speech token 推进，固定提交旧 mel，EOS 释放尾部。
+Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均支持 `--jev-multi` / `--jev-block`，并复用已配置的 resident runtime、KV 和上下文限制；HTTP 音频分组评分使用 `/v1/jev/audio_grouped`。`--tts-model` 与 `--tts-mmproj` 必须成对。语音理解输入统一为 mono 16 kHz；输出为 mono 24 kHz WAV/PCM。speech-to-speech 当前先完成文本生成，再合成语音，尚无双工会话调度。流式 TTS 每十个 speech token 推进，固定提交旧 mel，EOS 释放尾部。
 
 ## HTTP
 
@@ -70,9 +70,14 @@ Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均
 | /v1/jev/score、/v1/jev/image | 现有 JEV 协议 | 候选概率 |
 | /v1/jev/grouped、/v1/jev/image_grouped | 现有 groups 协议；图像加 image_url | 每组独立归一化的候选概率 |
 | /v1/jev/audio | {audio: raw-base64-audio, context, questions:[{text,options}], positive?} | 与 CLI 相同的单模式候选概率 |
+| /v1/jev/audio_grouped | {audio: raw-base64-audio, context, questions:[{text,groups:[{label,options}]}], mode?: multi_select/block_choice} | 每组独立归一化的候选概率；mode 默认为 multi_select |
 | /v1/audio/speech | {input, voice?, response_format: wav/pcm, stream?} | WAV/raw PCM；stream 为 PCM16 base64 SSE |
 
 音频不接受 URL 或本机文件路径。先取得并发许可，再按上下文和十分钟绝对上限限制解码后的样本；无 ffmpeg 时仅接受 16 kHz mono PCM16 WAV，同样先检查预算。输入错误在开始 SSE 前返回 400；音频对话/JEV 的运行失败返回 500，独立 speech batch 延用 422，已开始流的失败使用 error 事件。batch 与 stream 断连均停止 text sink，随后每个 speech token、Flow block/Euler step 和 HiFT stage/resblock 检查取消；音频 encoder/prefill 内部尚未新增逐层取消。
+
+Grouped JEV 的 `描述:分值` 语法要求分值有限；CLI 与 HTTP 都在推理前拒绝 NaN、正负无穷和溢出值。音频单模式协议继续使用 `/v1/jev/audio`。
+
+替换机 31344 的 Q6_K thinker + F32 audio、CPU/F32 KV 实测通过单模式、block_choice 和默认 multi_select 的 CLI/HTTP 对照，三项概率最大差均为 0；七类无效请求返回 400。输入为 250ms 合成音，仅证明入口协议和概率一致性，不代表语音理解质量、全 Q6 组件或 GPU 数值验收。具体二进制与输入身份见 [入口记录](../../tools/oracle/sophon_realtime/entrypoint-results.json)。
 
 ## 对齐、后端与限制
 

@@ -182,6 +182,33 @@ struct JevQuestion {
     options: Vec<String>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GroupedMode {
+    #[default]
+    MultiSelect,
+    BlockChoice,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GroupedJevRequest {
+    audio: String,
+    #[serde(default)]
+    context: String,
+    questions: Vec<crate::app::jev::JevGroupedQuestionInput>,
+    #[serde(default)]
+    mode: GroupedMode,
+}
+
+fn decode_jev_audio(audio: &str, context_length: usize) -> Result<Vec<f32>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(audio)
+        .map_err(|e| format!("audio must be raw base64 encoded audio: {e}"))?;
+    let max_samples = context_length.saturating_mul(2560).min(16_000 * 600);
+    crate::app::media::decode_audio_bytes_bounded(&bytes, max_samples)
+}
+
 pub(super) fn score_media(
     model: &Backend,
     audio: &[Vec<f32>],
@@ -311,13 +338,7 @@ pub(super) async fn jev(
             .collect::<Vec<_>>();
         crate::app::jev::prepare_jev_questions(&questions, request.positive.as_deref())
             .map_err(invalid)?;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&request.audio)
-            .map_err(|e| invalid(format!("audio must be raw base64 encoded audio: {e}")))?;
-        let max_samples = text.context_length.saturating_mul(2560).min(16_000 * 600);
-        let audio = vec![
-            crate::app::media::decode_audio_bytes_bounded(&bytes, max_samples).map_err(invalid)?,
-        ];
+        let audio = vec![decode_jev_audio(&request.audio, text.context_length).map_err(invalid)?];
         let results = score_media(
             state.model.as_ref(),
             &audio,
@@ -327,6 +348,50 @@ pub(super) async fn jev(
             request.positive.as_deref(),
         )?;
         Ok(json!({"mode":"single","context":request.context,"results":results}))
+    })
+    .await;
+    match result {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err((status, e))) => error(status, e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+pub(super) async fn jev_grouped(
+    State(state): State<AppState>,
+    body: Result<Json<GroupedJevRequest>, JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e.body_text()),
+    };
+    let permit = match state.generation_slot.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, e),
+    };
+    let result = super::compute_task(state.compute, move || -> Result<_, (StatusCode, String)> {
+        let _permit = permit;
+        let invalid = |e| (StatusCode::BAD_REQUEST, e);
+        let (mode, name) = match request.mode {
+            GroupedMode::MultiSelect => (crate::app::JevMode::MultiSelect, "multi_select"),
+            GroupedMode::BlockChoice => (crate::app::JevMode::BlockChoice, "block_choice"),
+        };
+        crate::app::jev::prepare_jev_grouped_questions(&request.questions, mode)
+            .map_err(invalid)?;
+        let text = state
+            .model
+            .text_backend()
+            .ok_or_else(|| invalid("server has no text runtime".into()))?;
+        let audio = vec![decode_jev_audio(&request.audio, text.context_length).map_err(invalid)?];
+        let results = score_grouped_media(
+            state.model.as_ref(),
+            &audio,
+            &[],
+            &request.context,
+            &request.questions,
+            mode,
+        )?;
+        Ok(json!({"mode":name,"context":request.context,"results":results}))
     })
     .await;
     match result {

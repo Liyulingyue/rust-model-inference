@@ -157,6 +157,10 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/chat/completions", post(chat))
         .route("/v1/audio/chat", post(super::audio_chat::handle))
         .route("/v1/jev/audio", post(super::audio_chat::jev))
+        .route(
+            "/v1/jev/audio_grouped",
+            post(super::audio_chat::jev_grouped),
+        )
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/responses", post(responses))
@@ -1157,6 +1161,22 @@ mod http_tests {
             fn context_length(&self) -> usize {
                 self.capacity
             }
+            fn validate_audio_request(
+                &self,
+                request: &GenerationRequest,
+                audio: &[Vec<f32>],
+            ) -> Result<(), String> {
+                assert_eq!(audio, [vec![0.0; 160]]);
+                self.validate_request(&request.token_ids, &request.images, request.max_new_tokens)
+            }
+            fn audio_logits(
+                &mut self,
+                ids: &[u32],
+                audio: &[Vec<f32>],
+            ) -> Result<Vec<f32>, String> {
+                assert_eq!(audio, [vec![0.0; 160]]);
+                self.logits(&GenerationRequest::new(ids.to_vec(), 1))
+            }
             fn validate_request(
                 &self,
                 ids: &[u32],
@@ -1231,6 +1251,95 @@ mod http_tests {
             body["image_url"] = json!("data:image/png;base64,AQID");
         }
         body
+    }
+
+    async fn post_grouped_audio(state: AppState, body: Value) -> Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, routes().with_state(state))
+                .await
+                .unwrap();
+        });
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/jev/audio_grouped"))
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.bytes().await.unwrap();
+        server.abort();
+        Response::builder()
+            .status(status)
+            .body(axum::body::Body::from(bytes))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn grouped_audio_jev_scores_each_group_and_maps_errors() {
+        use base64::Engine as _;
+        let wav = crate::format::wav::encode_wav_pcm16_channels(&[0.0; 160], 16_000, 1).unwrap();
+        for mode in ["multi_select", "block_choice"] {
+            for (capacity, fail, expected) in [
+                (1024, false, StatusCode::OK),
+                (8, false, StatusCode::BAD_REQUEST),
+                (1024, true, StatusCode::INTERNAL_SERVER_ERROR),
+            ] {
+                let state = grouped_sophon_state(capacity, fail);
+                let slot = state.generation_slot.clone();
+                let mut body = grouped_sophon_body(false);
+                body["mode"] = json!(mode);
+                body["audio"] = json!(base64::engine::general_purpose::STANDARD.encode(&wav));
+                let response = post_grouped_audio(state, body).await;
+                assert_eq!(response.status(), expected);
+                assert_eq!(slot.available_permits(), 1);
+                if expected == StatusCode::OK {
+                    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                        .await
+                        .unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(value["mode"], mode);
+                    assert_eq!(value["context"], "ctx");
+                    let groups = value["results"][0]["groups"].as_array().unwrap();
+                    assert_eq!(groups.len(), 2);
+                    for (group, choice, probability) in
+                        [(&groups[0], "B", 0.7310586), (&groups[1], "D", 0.8807971)]
+                    {
+                        assert_eq!(group["choice"], choice);
+                        assert!(
+                            (group["probabilities"][choice].as_f64().unwrap() - probability).abs()
+                                < 1e-6
+                        );
+                        let sum: f64 = group["probabilities"]
+                            .as_object()
+                            .unwrap()
+                            .values()
+                            .map(|p| p.as_f64().unwrap())
+                            .sum();
+                        assert!((sum - 1.0).abs() < 1e-6);
+                    }
+                }
+            }
+        }
+        for (key, value) in [
+            ("mode", json!("single")),
+            ("audio", json!("https://example.com/audio.wav")),
+            ("audio", json!("YQ==")),
+            ("questions", json!([])),
+            (
+                "questions",
+                json!([{"text":"q","groups":[{"label":"score","options":["bad:NaN","good:1"]}]}]),
+            ),
+        ] {
+            let mut body = grouped_sophon_body(false);
+            body["audio"] = json!(base64::engine::general_purpose::STANDARD.encode(&wav));
+            body[key] = value;
+            let response = post_grouped_audio(grouped_sophon_state(1024, false), body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 
     #[tokio::test]
