@@ -4179,15 +4179,22 @@ ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think �
     经递归放大后最后一层 hidden state 差 18%）。设备路径里跑在 host 上的层
     现在被锁进 `ComputePolicy::Cpu` scope，`RMI_NH_CPU_*` 三个归因开关才
     能说明差异来自真正搬上设备的那个分支。
-- **其余量化档** —— 上游共 22 个档，只有 `Q4_K_M` 真实下载并验证过。
-  其余 21 个档的**张量类型分布已从各档 GGUF 头部读出**（见 B1 一节与
+- **其余量化档** —— 上游共 22 个档，`Q4_K_M` 与 `Q8_0` 两档真实下载并验证过。
+  其余 20 个档的**张量类型分布已从各档 GGUF 头部读出**（见 B1 一节与
   [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B1 的量化档表）：
   **CPU 路径的类型全部支持**（白名单 + kernel 都在），但没有下载权重，
   所以「能加载、能跑」只是类型层面的推断；**设备路径**则取决于该档的每种
-  张量类型是否都有设备 kernel —— 12 个档类型齐全（含 `Q8_0` 档，它的
-  Q8_0 / F32 设备 kernel 是逐位的，预期能像 4B 一样逐位一致），
-  另外 10 个含 i-quant 或 Q2_K / Q3_K 的档没有对应设备 kernel，
-  整个 session 建不起来（`auto` 回退 CPU，`--compute vulkan` 严格报错）。
+  张量类型是否都有设备 kernel —— 12 个档类型齐全，另外 10 个含 i-quant 或
+  Q2_K / Q3_K 的档没有对应设备 kernel，整个 session 建不起来
+  （`auto` 回退 CPU，`--compute vulkan` 严格报错）。
+  - ✅ **`Q8_0` 档已验证，而且设备路径逐位（2026-11-11）**：该档 401 个张量
+    只有 Q8_0（164）与 F32（237），两类设备 kernel 都是逐位的，路由 shader
+    用 ggml-exact 的 `exp_reference` + `divide_finite_normal`。实测设备 vs CPU
+    的 1 / 2 / 3 token prefill 全部 `relative_l2 = 0`、top-1 token 相同；
+    CPU vs llama.cpp 的 2574 个 join 到的 checkpoint 全部 `EXACT`，最终
+    logits `worst disagreement 0.0000`。细节与命令见
+    [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B7.4。
+    测试可用 `RMI_NEMOTRON_MOE_EXACT=1` 把门限收紧到 0。
 
 ### TODO-054: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 

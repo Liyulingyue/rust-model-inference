@@ -13,10 +13,11 @@ CLI / HTTP / JEV 三个入口都可用，**Vulkan 设备路径也已落地**（2
 不同，Mamba-2 递归把这一层差异放大，实测 logits 相对 L2 1.9%–5.8%
 （见 §B7），因此设备路径按仓库惯例用**误差门限**验收，不声称逐位一致。
 
-**状态口径（2026-11-10）**：按 `SUPPORTED_MODELS.md` 的四档定义，CPU 路径是
-`Verified`（真实 GGUF + llama.cpp Oracle 逐位），Vulkan 设备路径是
-`Experimental`（有入口、能跑，但只有误差界；22 个量化档里 21 个未实测）。
-分层交付时用过的「部分适配」不是仓库的状态词，已不再使用。
+**状态口径（2026-11-11）**：按 `SUPPORTED_MODELS.md` 的四档定义，CPU 路径是
+`Verified`（Q4_K_M 与 Q8_0 两档都对 llama.cpp 逐位），Vulkan 设备路径在
+`Q8_0` 档上**逐位**（`relative_l2 = 0`），在 `Q4_K_M` 档上是 8% 误差门限。
+22 个量化档里 20 个未实测。分层交付时用过的「部分适配」不是仓库的状态词，
+已不再使用。
 
 ## 1. 契约（从 `unsloth/Nemotron-3-Nano-30B-A3B-GGUF` 头部读出）
 
@@ -194,7 +195,7 @@ MoE 层的共享专家 up 投影，**换量化档躲不掉**。
 | 量化档 | 张量类型 | CPU 路径 | Vulkan 设备路径 |
 |---|---|---|---|
 | `Q4_K_M` | Q4_K×29 / Q5_0×75 / Q5_1×23 / Q8_0×37 | ✅ **已验证逐位** | ✅ **已验证**（8% 门限） |
-| `Q8_0` | Q8_0×164 | ✅ | ✅ 类型齐全 |
+| `Q8_0` | Q8_0×164 | ✅ **已验证逐位** | ✅ **已验证逐位**（`relative_l2 = 0`） |
 | `Q6_K` | Q6_K×29 / Q8_0×135 | ✅ | ✅ 类型齐全 |
 | `Q5_K_M` | Q5_1×75 / Q5_K×29 / Q8_0×60 | ✅ | ✅ 类型齐全 |
 | `Q5_K_S` | Q5_1×88 / Q5_K×29 / Q8_0×47 | ✅ | ✅ 类型齐全 |
@@ -229,13 +230,15 @@ MoE 层的共享专家 up 投影，**换量化档躲不掉**。
   `Nemotron-H Vulkan unavailable: …` 后**回退 CPU**，
   `--compute vulkan`（严格）则直接报错退出。
   其余 12 个档的类型组合在设备侧**类型齐全**，设备路径可以直接用。
-- **只有 `Q4_K_M` 真实下载并验证过**（CPU 逐位、设备的 8% 门限）。
-  其余 21 个档的类型分布是**从各档 GGUF 头部读出来的真实契约**，
+- **`Q4_K_M` 与 `Q8_0` 两档真实下载并验证过**：`Q4_K_M` 的 CPU 路径逐位、
+  设备路径 8% 门限；`Q8_0` 档**两条路径都逐位**（见 §B7.4）。
+  其余 20 个档的类型分布是**从各档 GGUF 头部读出来的真实契约**，
   但没有下载权重，因此「能加载、能跑」只是类型层面的推断，不是实测。
-- 值得注意的是 **`Q8_0` 档**：它的张量只有 Q8_0 / F16 / F32，而这些类型的
-  设备 kernel 都是**逐位**的（Q8_0 的 `max_abs = 0`，F32 的
-  `exact_bits = true`）。所以 `Q8_0` 档的 30B 设备路径**预期**能像 4B 那样
-  逐位一致 —— 但这是预期，不是实测。
+- **`Q8_0` 档是唯一「设备也逐位」的档**：它的张量只有 Q8_0 / F32（头部的
+  F16 计数是 0），而这两类设备 kernel 都是**逐位**的（Q8_0 的
+  `max_abs = 0`，F32 的 `exact_bits = true`），路由 shader 用的也是
+  ggml-exact 的 `exp_reference` + `divide_finite_normal`。实测
+  `relative_l2 = 0`（1 / 2 / 3 token prefill），与 4B 相同。
 
 Q5_1 与 Q5_0 的差异很小（ggml `block_q5_1`，24 字节/32 元素）：
 
@@ -494,6 +497,53 @@ int8 dot + F32 scale 累加与之**不逐位相同**。30B 比 4B 更敏感：
 prefill 快 **4.9×**（权重读一次、多行复用），逐 token 生成与 CPU 持平
 （单 token 走的是共用 Q8_0 kernel 的标量 int8 路径，没有用上 DP4A 单元；
 这与 4B 的情况一样，是共用 kernel 的性质）。
+
+#### B7.4 Q8_0 档：设备路径逐位一致（2026-11-11 实测）
+
+§B7.2 的 8% 是 **Q4_K_M 档**的性质，不是设备路径的性质：Q4_K_M 的
+`ssm_in` / attention q/k/v 是 Q5_0、`ssm_out` / `attn_output` 是 Q4_K，
+这两个设备 kernel 的归约顺序与 host 的 NEON kernel 不同。**Q8_0 档没有
+这个问题**：该档 401 个张量里 164 个是 Q8_0、237 个是 F32（头部的 F16 计数
+是 **0**），两类设备 kernel 都是逐位的（Q8_0 `max_abs = 0`，F32
+`exact_bits = true`），路由 shader 用的也是 ggml-exact 的 `exp_reference`
++ `divide_finite_normal`。
+
+实测（GB10，8 线程）：
+
+| 检查 | 结果 |
+|---|---|
+| 设备 vs CPU（1 / 2 / 3 token prefill） | **`relative_l2 = 0`、`scaled_max_abs = 0`**，top-1 token 相同 |
+| CPU vs 上游 llama.cpp（`Hello` + 4 token 生成，2574 个 join 到的 checkpoint） | 全部 `EXACT`；最终 logits `worst disagreement 0.0000`，argmax 1095 相同（margin 1.1368） |
+
+命令：
+
+```sh
+GGUF=models/Nemotron-3-Nano-30B-A3B-GGUF/Nemotron-3-Nano-30B-A3B-Q8_0.gguf
+# 设备 vs CPU（RMI_NEMOTRON_MOE_EXACT=1 把门限收紧到 0）
+RMI_NEMOTRON_MOE_MODEL=$GGUF RMI_NEMOTRON_MOE_EXACT=1 \
+  VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  cargo test --locked --profile release-fast --features vulkan \
+  --test nemotron3_nano_30b_device -- --ignored --nocapture
+# CPU vs llama.cpp
+RMI_PARITY_TRACE=/tmp/n3_q8/oracle.jsonl RMI_NEMOTRON_THREADS=1 RMI_NEMOTRON_KV=f32 \
+  target/nemotron3-nano-oracle/build/bin/llama-eval-callback \
+  $GGUF /tmp/n3_q8/prompt.txt 4
+RMI_NEMOTRON3_MODEL=$GGUF RMI_PARITY_TRACE=/tmp/n3_q8/rust.jsonl \
+  RMI_NEMOTRON3_PROMPT_FILE=/tmp/n3_q8/prompt.txt RMI_NEMOTRON3_N_PREDICT=4 \
+  cargo test --locked --profile release-fast --features parity-trace \
+  --test nemotron3_nano_moe -- --ignored --nocapture
+python3 tools/oracle/nemotron3_nano/check_moe.py \
+  /tmp/n3_q8/oracle.jsonl /tmp/n3_q8/rust.jsonl
+```
+
+文件 SHA-256 `433a9c0d39c6c3434204797b30991c4d147c0f25328690d60862ec39e2a92188`，
+33,585,495,840 bytes（ModelScope 列表值与实际值一致，下载后校验过）。
+
+**结论**：30B 的「完整设备路径」不是做不到，而是**取决于量化档** ——
+Q8_0 档已经与 4B 同级（逐位），Q4_K_M 档受 Q5_0 / Q4_K 设备 kernel 的归约
+顺序限制。要把 Q4_K_M 也做到逐位，需要让那三个 kernel 复刻 host NEON 的
+`vdotq_s32` 4-lane 分组与 F32 累加顺序（取舍见 §B7.2：逐位要求每行串行
+累加，会牺牲 prefill 的「权重读一次、多行复用」）。
 
 ## 3. 估算
 

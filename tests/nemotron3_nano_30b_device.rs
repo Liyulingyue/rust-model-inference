@@ -23,6 +23,18 @@
 //! and the scaled maximum, and the test prints both numbers so a
 //! regression shows how far it moved.
 //!
+//! # The Q8_0 tier is bit-exact
+//!
+//! That 8% bound is a property of the Q4_K_M tier, not of the device path.
+//! Q4_K_M's `ssm_in` and attention q/k/v are Q5_0 and its `ssm_out` and
+//! `attn_output` are Q4_K, and those two device kernels sum the integer
+//! dots in a different order than the host's NEON kernels. The Q8_0 tier
+//! has neither: every quantized tensor in it is Q8_0, whose device kernel
+//! is bit-exact (`max_abs = 0`), and the rest is F32 (`exact_bits = true`).
+//! Measured `relative_l2 = 0` for all three prefill lengths. Set
+//! `RMI_NEMOTRON_MOE_EXACT=1` to hold the test to bit-exactness on that
+//! tier.
+//!
 //! The functional gate is stronger than the numeric one: the device path
 //! has to pick the same top-1 token as the CPU path.
 //!
@@ -49,7 +61,20 @@ use std::sync::Arc;
 /// difference. The worst measurement on the 30B is 5.8% (one-token
 /// prefill); the gate leaves room for that without letting a real
 /// regression through.
+///
+/// This bound applies to the tiers that carry Q5_0 / Q5_1 / Q4_K weights.
+/// The Q8_0 tier is bit-exact; set `RMI_NEMOTRON_MOE_EXACT=1` to demand
+/// that of any tier the test is pointed at.
 const LOGIT_TOLERANCE: f64 = 0.08;
+
+/// The bound this run is held to: zero when `RMI_NEMOTRON_MOE_EXACT` is set.
+fn logit_tolerance() -> f64 {
+    if std::env::var_os("RMI_NEMOTRON_MOE_EXACT").is_some() {
+        0.0
+    } else {
+        LOGIT_TOLERANCE
+    }
+}
 
 fn model_path() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var_os("RMI_NEMOTRON_MOE_MODEL")?);
@@ -105,14 +130,12 @@ fn assert_numerically_aligned(actual: &[f32], expected: &[f32]) {
     }
     let l2 = (diff / reference.max(f64::MIN_POSITIVE)).sqrt();
     let scaled_max_abs = max_abs / scale;
-    eprintln!("GPU relative_l2={l2} scaled_max_abs={scaled_max_abs}");
+    let tolerance = logit_tolerance();
+    eprintln!("GPU relative_l2={l2} scaled_max_abs={scaled_max_abs} tolerance={tolerance}");
+    assert!(l2 <= tolerance, "relative L2 {l2} exceeds {tolerance}");
     assert!(
-        l2 <= LOGIT_TOLERANCE,
-        "relative L2 {l2} exceeds {LOGIT_TOLERANCE}"
-    );
-    assert!(
-        scaled_max_abs <= LOGIT_TOLERANCE,
-        "scaled max abs {scaled_max_abs} exceeds {LOGIT_TOLERANCE}"
+        scaled_max_abs <= tolerance,
+        "scaled max abs {scaled_max_abs} exceeds {tolerance}"
     );
     // The functional gate: the device path has to pick the same token.
     let best = |v: &[f32]| (1..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
