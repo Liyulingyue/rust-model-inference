@@ -525,11 +525,11 @@ fn source_spectrum(source: &[f32]) -> Result<(Vec<f32>, usize), String> {
             };
             input[n] = source[index] * window[n];
         }
-        let mut bins = [0.0; 18];
-        fft.spectrum(&input, &mut bins);
+        let mut bins = [[0.0; 2]; 9];
+        fft.complex(&input, &mut bins);
         for k in 0..9 {
-            output[k * frames + t] = bins[k * 2];
-            output[(k + 9) * frames + t] = bins[k * 2 + 1];
+            output[k * frames + t] = bins[k][0];
+            output[(k + 9) * frames + t] = bins[k][1];
         }
     }
     Ok((output, frames))
@@ -544,15 +544,15 @@ fn waveform(spectral: &[f32], frames: usize) -> Result<Vec<f32>, String> {
     let mut output = vec![0.0; len];
     let mut envelope = vec![0.0; len];
     for t in 0..frames {
-        let mut bins = [0.0; 18];
+        let mut bins = [[0.0; 2]; 9];
         for k in 0..9 {
             let magnitude = spectral[k * frames + t].exp().min(100.0);
             let phase = spectral[(k + 9) * frames + t].sin();
-            bins[k * 2] = magnitude * phase.cos();
-            bins[k * 2 + 1] = magnitude * phase.sin();
+            bins[k][0] = magnitude * phase.cos();
+            bins[k][1] = magnitude * phase.sin();
         }
         let mut values = [0.0; 16];
-        fft.inverse_real(&bins, &mut values);
+        fft.inverse(&bins, &mut values);
         for n in 0..16 {
             let i = t * 4 + n;
             output[i] += values[n] * window[n];

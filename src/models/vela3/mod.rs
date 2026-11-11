@@ -8,6 +8,7 @@ pub(crate) mod text;
 pub(crate) mod ultrabert;
 pub(crate) mod vision;
 
+use crate::compute::ComputePolicy;
 use crate::core::thread_pool::ComputePool;
 use serde_json::Value;
 use std::path::Path;
@@ -38,12 +39,24 @@ fn family(config: &Value, model: &Value) -> Result<Family, String> {
 /// `adapter_dir` holds the Vela3 adapter package (LoRA, heads and config)
 /// that the d3 variants need; the self-contained variants carry their own
 /// adapters and pass `None`.
-/// All computation uses the repository's CPU operators and thread pool.
+/// Uses CPU operators regardless of other sessions' compute policies.
 pub fn system_one(
     model_dir: &Path,
     adapter_dir: Option<&Path>,
     request: &Value,
     threads: usize,
+) -> Result<Value, String> {
+    system_one_with_policy(model_dir, adapter_dir, request, threads, ComputePolicy::Cpu)
+}
+
+/// System One with shared Vulkan projection offload and CPU postprocessing.
+/// Auto falls back to CPU; Vulkan requires a usable device and reports device failure.
+pub fn system_one_with_policy(
+    model_dir: &Path,
+    adapter_dir: Option<&Path>,
+    request: &Value,
+    threads: usize,
+    policy: ComputePolicy,
 ) -> Result<Value, String> {
     if !request.is_object() || !request["questions"].is_object() {
         return Err("request must contain a questions object".into());
@@ -66,6 +79,10 @@ pub fn system_one(
     if threads == 0 {
         return Err("threads must be positive".into());
     }
+    let _compute = policy.configure_cli()?;
+    if policy == ComputePolicy::Vulkan {
+        eprintln!("compute requested=Vulkan backend=partial mode=system-one offload=linear note=no complete device graph; remaining operators use CPU");
+    }
     // The family marker (`vela3_config.json`) ships with the adapter package;
     // the self-contained variants keep it next to their weights.
     let config_dir = adapter_dir.unwrap_or(model_dir);
@@ -83,7 +100,7 @@ pub fn system_one(
     };
     let kind = family(&read(config_path)?, &read("config.json")?)?;
     let pool = Arc::new(ComputePool::new(threads));
-    match kind {
+    let answer = match kind {
         Family::D3 => decoder::predict(
             adapter_dir
                 .ok_or("d3 variants need --adapter pointing to the Vela3 adapter package")?,
@@ -93,7 +110,13 @@ pub fn system_one(
         ),
         Family::Fast => fast::predict(model_dir, request, &pool),
         Family::Vision => vision::predict(model_dir, request, &pool),
+    }?;
+    // Legacy projection kernels repair a failed dispatch on CPU; strict requests still report it.
+    #[cfg(feature = "vulkan")]
+    if policy == ComputePolicy::Vulkan {
+        policy.context().map_err(|e| e.to_string())?;
     }
+    Ok(answer)
 }
 
 #[cfg(test)]
@@ -143,6 +166,39 @@ mod tests {
                 .unwrap_err()
                 .contains("threads")
         );
+    }
+
+    #[test]
+    fn explicit_compute_policy_validates_input_before_device_initialization() {
+        for policy in [
+            ComputePolicy::Cpu,
+            ComputePolicy::Auto,
+            ComputePolicy::Vulkan,
+        ] {
+            assert!(system_one_with_policy(
+                Path::new("/missing"),
+                None,
+                &json!({"questions": []}),
+                1,
+                policy
+            )
+            .unwrap_err()
+            .contains("questions"));
+        }
+    }
+
+    #[cfg(not(feature = "vulkan"))]
+    #[test]
+    fn forced_vulkan_requires_the_feature_before_loading_weights() {
+        assert!(system_one_with_policy(
+            Path::new("/missing"),
+            None,
+            &json!({"questions": {}}),
+            1,
+            ComputePolicy::Vulkan
+        )
+        .unwrap_err()
+        .contains("--features vulkan"));
     }
 
     #[test]

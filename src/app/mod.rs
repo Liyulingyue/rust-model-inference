@@ -1,4 +1,5 @@
 pub(crate) mod asr;
+pub mod audio;
 pub mod audio_chat;
 pub mod cli;
 pub mod decision;

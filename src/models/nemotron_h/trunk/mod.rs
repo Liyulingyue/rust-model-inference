@@ -11,6 +11,7 @@
 pub mod config;
 pub mod forward;
 pub mod moe;
+pub mod runtime;
 pub mod trace;
 pub mod weights;
 
@@ -19,4 +20,5 @@ pub use forward::{
     load_nemotron_tokenizer, run_forward_logits_nemotron_h, run_inference, NemotronModel,
     NemotronScratch,
 };
+pub use runtime::NemotronTextRuntime;
 pub use weights::NemotronLayerWeights;

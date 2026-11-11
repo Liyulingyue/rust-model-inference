@@ -3013,7 +3013,7 @@
     "CPU precision passes do not imply GPU, multimodal or HTTP acceptance.",
     "No source weights, GGUFs or activation binaries are copied to the Mac."
   ],
-  "coordination": "BF16 independent full-prefix reference naturally completed; all8 numerical and greedy rows pass original BF16 gates. Manager282827 remains paused and Q4_K has not started; parent final-binary regression and real entrypoint suite owns the resource window.",
+  "coordination": "Parent granted one Q4_K job window. Q4_K Rust completed exit0 with matching greedy IDs; one full-prefix/f32-activation Oracle baseline runs as PID302179. Orchestration manager282827 is paused, so Q4_K runtime and F16 cannot launch before parent releases the next window.",
   "continuation_evidence_root": "target/sophon/thinker-fullprefix-33367",
   "full_prefix_validation": {
     "status": "tiny model and real F32 8-row calibration passed",
@@ -3325,6 +3325,147 @@
       "cli_trace_filter": "prompt_ids,generated_ids,model.input_embed,attn_norm-0,Qcur_raw-0,Kcur_raw-0,Qcur_normed-0,Kcur_normed-0,Qcur-0,Kcur-0,kqv_out-0,ffn_out-0,result_norm,result_output",
       "purpose": "Exact-input first-layer Q/K and output-head comparisons can distinguish local projection differences from propagated hidden-state drift.",
       "limitation": "hidden_sequence.layer.* is emitted only when project_logits=false; ordinary CLI generation does not emit all-layer hidden checkpoints. Q8 full-prefix versus cached with runtime QDQ has not been calibrated."
+    },
+    "error_decomposition": {
+      "artifact": "target/sophon/thinker-fullprefix-33367/q8-error-decomposition.json",
+      "semantics": "Diagnostic only: centering, top5 and error-energy decomposition do not replace original raw-logit gates.",
+      "failed_rows": {
+        "baseline_cached_f32": [
+          {
+            "step": 7,
+            "mean_error": 0.06999928642931208,
+            "rmse": 0.09880617129947948,
+            "centered_error_rmse": 0.06973348826961986,
+            "centered_relative_rmse": 0.027013839690445126,
+            "uniform_shift_fraction_of_error_energy": 0.5019021822083238,
+            "rust_top5": [
+              111895,
+              104799,
+              106442,
+              33840,
+              110498
+            ],
+            "reference_top5": [
+              111895,
+              104799,
+              106442,
+              33840,
+              110498
+            ],
+            "same_top5_set": true
+          }
+        ],
+        "diagnostic_fullprefix_runtime": [
+          {
+            "step": 1,
+            "mean_error": -0.16845555084708175,
+            "rmse": 0.18307073708198096,
+            "centered_error_rmse": 0.07167720812466156,
+            "centered_relative_rmse": 0.027634838770485216,
+            "uniform_shift_fraction_of_error_energy": 0.846706301812262,
+            "rust_top5": [
+              3837,
+              6313,
+              104198,
+              1773,
+              5373
+            ],
+            "reference_top5": [
+              3837,
+              6313,
+              104198,
+              1773,
+              5373
+            ],
+            "same_top5_set": true
+          },
+          {
+            "step": 5,
+            "mean_error": -0.06504993531232513,
+            "rmse": 0.09930462024788121,
+            "centered_error_rmse": 0.07503274963932892,
+            "centered_relative_rmse": 0.028478834353098257,
+            "uniform_shift_fraction_of_error_energy": 0.4290963577078363,
+            "rust_top5": [
+              3837,
+              9909,
+              1773,
+              37945,
+              5122
+            ],
+            "reference_top5": [
+              3837,
+              9909,
+              1773,
+              37945,
+              5122
+            ],
+            "same_top5_set": true
+          },
+          {
+            "step": 7,
+            "mean_error": -0.006264104891215155,
+            "rmse": 0.0834684033397454,
+            "centered_error_rmse": 0.08323301836409801,
+            "centered_relative_rmse": 0.032222679504510666,
+            "uniform_shift_fraction_of_error_energy": 0.005632145043546204,
+            "rust_top5": [
+              111895,
+              104799,
+              106442,
+              33840,
+              110498
+            ],
+            "reference_top5": [
+              111895,
+              104799,
+              106442,
+              33840,
+              110498
+            ],
+            "same_top5_set": true
+          }
+        ]
+      },
+      "conclusion": "A uniform logit shift explains about50% of baseline step7 and85% of runtime step1 squared error, but runtime step7 retains centered relative RMSE0.03222268. Shifts do not explain all failures; original raw-logit gates remain failed."
     }
+  },
+  "rust_execution_only": [
+    {
+      "precision": "Q4_K",
+      "exit_code": 0,
+      "wall_seconds": 23.35903277248144,
+      "greedy_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "matches_f32_ids": true,
+      "rust_trace": "target/sophon/thinker-fullprefix-33367/q4_k-rust.jsonl",
+      "numerical_reference": "running; no numerical acceptance claimed"
+    }
+  ],
+  "scratch_lifetime": {
+    "semantics": "One TemporaryFile per process; mappings share its single unlinked inode. The inode is reclaimed after the last mmap/fd disappears at process exit. No original weights, GGUFs or metrics are removed.",
+    "source": [
+      "tools/oracle/sophon_realtime/oracle.py:163",
+      "tools/oracle/sophon_realtime/oracle.py:77"
+    ],
+    "active_q4k_observation": {
+      "unique_unlinked_scratch_files": 1,
+      "mapping_fd_count": 450,
+      "unique_scratch_bytes": 131045785600,
+      "all_link_counts_zero": true,
+      "filesystem_free_bytes": 906308706304,
+      "completed_q8_fd_count": 0,
+      "completed_bf16_fd_count": 0,
+      "artifact": "target/sophon/thinker-fullprefix-33367/scratch-live-lifetime.json"
+    },
+    "q4k_exit_recovery": "pending natural completion observation"
   }
 }

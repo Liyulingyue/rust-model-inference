@@ -659,9 +659,10 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
             && options.planner.is_none()
             && options.perception.is_none()
             && !options.tts
+            && options.tts_model.is_none()
             && !options.dreamx
         {
-            Err("--seed requires Z-Image components or --tts".into())
+            Err("--seed requires Z-Image components, --tts or --tts-model".into())
         } else {
             Ok(None)
         };

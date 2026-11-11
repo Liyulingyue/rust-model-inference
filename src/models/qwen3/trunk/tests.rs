@@ -4,7 +4,7 @@
 
 #![cfg(test)]
 
-use crate::core::scratchpad::{KvCache, KvState};
+use crate::core::scratchpad::{KvCache, KvFormat, KvState};
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
@@ -369,6 +369,192 @@ pub(super) fn deterministic_session_model(n_ctx: usize) -> Qwen3Model {
         token_embedding: f32_weight(WIDTH, VOCAB, 8),
         output: f32_weight(WIDTH, VOCAB, 9),
         cls_score: None,
+    }
+}
+
+#[test]
+fn mage_projection_session_keeps_host_kv_and_cpu_numerics() {
+    use crate::compute::ComputePolicy;
+    let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+    let mut model = deterministic_session_model(16);
+    let ids = [0, 1, 2];
+    let positions = super::positions::qwen_text_positions(ids.len());
+    let input = || super::forward::Qwen3Input {
+        token_ids: &ids,
+        positions: &positions,
+        embeddings: None,
+        deepstack_embeddings: None,
+    };
+    let expected = Qwen3Session::new_with_compute(
+        &model,
+        16,
+        KvFormat::F32,
+        crate::KvLifecycle::Ephemeral,
+        ComputePolicy::Cpu,
+    )
+    .unwrap()
+    .forward_logits(input(), 2)
+    .unwrap()
+    .0;
+    model.config.architecture = crate::models::mage_vl::ARCH.into();
+    for policy in [ComputePolicy::Cpu, ComputePolicy::Auto] {
+        let mut session = Qwen3Session::new_with_compute(
+            &model,
+            16,
+            KvFormat::F32,
+            crate::KvLifecycle::Ephemeral,
+            policy,
+        )
+        .unwrap();
+        assert_eq!(session.compute_policy, policy);
+        assert_eq!(
+            session.hidden_linear.is_some(),
+            policy == ComputePolicy::Auto
+        );
+        assert_eq!(session.forward_logits(input(), 2).unwrap().0, expected);
+        assert_eq!(session.kv_state().format, KvFormat::F32);
+    }
+    #[cfg(not(feature = "vulkan"))]
+    assert!(Qwen3Session::new_with_compute(
+        &model,
+        16,
+        KvFormat::F32,
+        crate::KvLifecycle::Ephemeral,
+        ComputePolicy::Vulkan
+    )
+    .err()
+    .unwrap()
+    .contains("vulkan"));
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires hardware Vulkan; run alone with RUST_GPU_MIN_OUTPUTS=0 and --test-threads=1"]
+fn mage_projection_session_runs_quantized_prefill_and_decode_on_device() {
+    use crate::compute::ComputePolicy;
+    assert_eq!(crate::ops::kernel::vulkan::min_gpu_matmul_outputs(), 0);
+    let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+    for dtype in [GGMLType::F32, GGMLType::BF16, GGMLType::Q8_0, GGMLType::Q4K] {
+        let mut model = deterministic_session_model(16);
+        model.config.architecture = crate::models::mage_vl::ARCH.into();
+        model.config.n_embd = 256;
+        model.config.n_embd_head_k = 256;
+        model.config.n_embd_head_v = 256;
+        model.config.n_ff = 256;
+        model.output_norm = vec![1.0; 256];
+        model.token_embedding = f32_weight(256, 8, 8);
+        model.output = f32_weight(256, 8, 9);
+        let layer = &mut model.layers[0];
+        layer.attn_norm = vec![1.0; 256];
+        layer.ffn_norm = vec![1.0; 256];
+        for (seed, weight) in [
+            &mut layer.wq,
+            &mut layer.wk,
+            &mut layer.wv,
+            &mut layer.wo,
+            &mut layer.w_gate,
+            &mut layer.w_up,
+            &mut layer.w_down,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes: Vec<u8> = match dtype {
+                GGMLType::F32 | GGMLType::BF16 => (0..256 * 256)
+                    .flat_map(|i| {
+                        let value = ((i * 13 + seed * 7) % 23) as f32 / 256.0 - 0.043;
+                        if dtype == GGMLType::F32 {
+                            value.to_le_bytes().to_vec()
+                        } else {
+                            crate::ops::f32_to_bf16(value).to_le_bytes().to_vec()
+                        }
+                    })
+                    .collect(),
+                GGMLType::Q8_0 => (0..256 * 8)
+                    .flat_map(|block| {
+                        let mut bytes = crate::ops::f32_to_f16(0.0005).to_le_bytes().to_vec();
+                        bytes.extend(
+                            (0..32)
+                                .map(|i| ((i * 13 + block * 7 + seed) % 179) as i8 - 89)
+                                .map(|q| q as u8),
+                        );
+                        bytes
+                    })
+                    .collect(),
+                GGMLType::Q4K => (0..256)
+                    .flat_map(|row| {
+                        let mut bytes = vec![0; 144];
+                        bytes[..2].copy_from_slice(&crate::ops::f32_to_f16(0.0001).to_le_bytes());
+                        bytes[2..4].copy_from_slice(&crate::ops::f32_to_f16(0.0007).to_le_bytes());
+                        bytes[4..16].fill(0x11);
+                        for (i, b) in bytes[16..].iter_mut().enumerate() {
+                            *b = (i * 13 + row * 7 + seed) as u8;
+                        }
+                        bytes
+                    })
+                    .collect(),
+                _ => unreachable!(),
+            };
+            *weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+                Box::leak(bytes.into_boxed_slice()),
+                dtype,
+                256,
+                256,
+            ));
+        }
+        for kv in [KvFormat::F32, KvFormat::F16] {
+            let mut cpu = Qwen3Session::new_with_compute(
+                &model,
+                16,
+                kv,
+                crate::KvLifecycle::Ephemeral,
+                ComputePolicy::Cpu,
+            )
+            .unwrap();
+            for policy in [ComputePolicy::Vulkan, ComputePolicy::Auto] {
+                cpu.reset_kv();
+                let mut device = Qwen3Session::new_with_compute(
+                    &model,
+                    16,
+                    kv,
+                    crate::KvLifecycle::Ephemeral,
+                    policy,
+                )
+                .unwrap();
+                assert!(
+                    device.gpu.is_none(),
+                    "Mage uses projections, not the Qwen resident graph"
+                );
+                for ids in [&[0, 1, 2][..], &[3][..], &[4][..]] {
+                    let base = cpu.kv_state().seq_len;
+                    let positions: Vec<_> = (base..base + ids.len()).map(|i| [i; 4]).collect();
+                    let input = || Qwen3Input {
+                        token_ids: ids,
+                        positions: &positions,
+                        embeddings: None,
+                        deepstack_embeddings: None,
+                    };
+                    let expected = cpu.forward_logits(input(), 2).unwrap().0;
+                    let before = context.compute_stats().submissions;
+                    let actual = device.forward_logits(input(), 2).unwrap().0;
+                    assert!(
+                        context.compute_stats().submissions > before,
+                        "{dtype:?}/{kv:?}/{policy:?}"
+                    );
+                    super::session::validate_model_logits(&actual, &expected).unwrap();
+                    assert_eq!(device.kv_state().seq_len, cpu.kv_state().seq_len);
+                    eprintln!(
+                        "Mage synthetic {dtype:?}/{kv:?}/{policy:?} tokens={} max_abs={}",
+                        ids.len(),
+                        actual
+                            .iter()
+                            .zip(&expected)
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0f32, f32::max)
+                    );
+                }
+            }
+        }
     }
 }
 

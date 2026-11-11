@@ -179,7 +179,7 @@
   "same_feature_library_regression_final_source": {
     "baseline": {
       "log": "target/sophon/baseline-tmpdir-serial-33367.log",
-      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1868 filtered out; finished in 0.00s",
+      "summary": "test result: FAILED. 1624 passed; 23 failed; 222 ignored; 0 measured; 0 filtered out; finished in 71.35s",
       "failures": [
         "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
         "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
@@ -208,7 +208,7 @@
     },
     "current": {
       "log": "target/sophon/current-final-source-1-33367.log",
-      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1910 filtered out; finished in 0.00s",
+      "summary": "test result: FAILED. 1663 passed; 23 failed; 225 ignored; 0 measured; 0 filtered out; finished in 72.88s",
       "failures": [
         "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
         "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",

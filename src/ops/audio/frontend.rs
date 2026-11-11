@@ -385,38 +385,39 @@ impl RealFft {
         }
     }
 
-    pub(crate) fn spectrum(&mut self, input: &[f32], output: &mut [f32]) {
+    pub(crate) fn complex(&mut self, input: &[f32], output: &mut [[f32; 2]]) {
         assert_eq!(input.len(), self.size);
-        assert_eq!(output.len(), (self.size / 2 + 1) * 2);
+        assert_eq!(output.len(), self.size / 2 + 1);
         self.transform(input);
-        output.copy_from_slice(&self.output[..output.len()]);
+        for (bin, value) in output.iter_mut().enumerate() {
+            *value = [self.output[bin * 2], self.output[bin * 2 + 1]];
+        }
+        output[0][1] = 0.0;
+        if self.size.is_multiple_of(2) {
+            output[self.size / 2][1] = 0.0;
+        }
     }
 
-    /// Inverse of the one-sided spectrum, with the usual 1/N normalization.
-    pub(crate) fn inverse_real(&mut self, spectrum: &[f32], output: &mut [f32]) {
-        assert_eq!(spectrum.len(), (self.size / 2 + 1) * 2);
+    pub(crate) fn inverse(&mut self, input: &[[f32; 2]], output: &mut [f32]) {
+        assert_eq!(input.len(), self.size / 2 + 1);
         assert_eq!(output.len(), self.size);
         let mut real = vec![0.0; self.size];
-        let mut imag = vec![0.0; self.size];
-        for k in 0..=self.size / 2 {
-            real[k] = spectrum[2 * k];
-            imag[k] = spectrum[2 * k + 1];
-        }
-        imag[0] = 0.0;
-        if self.size % 2 == 0 {
-            imag[self.size / 2] = 0.0;
-        }
-        for k in 1..=(self.size - 1) / 2 {
-            real[self.size - k] = real[k];
-            imag[self.size - k] = -imag[k];
+        let mut imaginary = vec![0.0; self.size];
+        for (bin, &[re, im]) in input.iter().enumerate() {
+            real[bin] = re;
+            if bin != 0 && bin * 2 != self.size {
+                imaginary[bin] = im;
+                real[self.size - bin] = re;
+                imaginary[self.size - bin] = -im;
+            }
         }
         self.transform(&real);
-        for (n, value) in output.iter_mut().enumerate() {
-            *value = self.output[n * 2];
+        for (i, value) in output.iter_mut().enumerate() {
+            *value = self.output[2 * i];
         }
-        self.transform(&imag);
-        for (n, value) in output.iter_mut().enumerate() {
-            *value = (*value + self.output[n * 2 + 1]) / self.size as f32;
+        self.transform(&imaginary);
+        for (i, value) in output.iter_mut().enumerate() {
+            *value = (*value + self.output[2 * i + 1]) / self.size as f32;
         }
     }
 }
@@ -432,10 +433,10 @@ mod spectrum_tests {
                 .map(|n| (n as f32 * 0.3).sin() + n as f32 / 100.0)
                 .collect();
             let mut fft = RealFft::new(size).unwrap();
-            let mut spectrum = vec![0.0; (size / 2 + 1) * 2];
+            let mut spectrum = vec![[0.0; 2]; size / 2 + 1];
             let mut output = vec![0.0; size];
-            fft.spectrum(&input, &mut spectrum);
-            fft.inverse_real(&spectrum, &mut output);
+            fft.complex(&input, &mut spectrum);
+            fft.inverse(&spectrum, &mut output);
             assert!(output.iter().zip(&input).all(|(a, b)| (a - b).abs() < 1e-5));
         }
     }
