@@ -480,6 +480,51 @@ pub fn load_f32_tensor<S: TensorSource + ?Sized>(
             info.dims, info.ggml_type, dims, DECODABLE_TO_F32
         ));
     }
+    decode_tensor_to_f32(source, name, &info)
+}
+
+/// Load a tensor as `Vec<f32>` by element count instead of by shape.
+///
+/// The same tensor ships with different shapes across model variants: the
+/// Flux2 VAE that ERNIE-Image uses keeps its attention projections as
+/// two-dimensional matrices while the Flux1 one keeps them flat. The payload
+/// and the element order are the same in both, so the element count is the
+/// contract that matters, and the shape only selects the decoder for the
+/// block-quantized layouts.
+pub fn load_f32_tensor_flat<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    elements: usize,
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if !DECODABLE_TO_F32.contains(&info.ggml_type) {
+        return Err(format!(
+            "Invalid tensor {name}: type {:?}; expected one of {:?}",
+            info.ggml_type, DECODABLE_TO_F32
+        ));
+    }
+    let count = info
+        .dims
+        .iter()
+        .try_fold(1u64, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| format!("Invalid tensor dims for {name}"))?;
+    if count != elements as u64 {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} holds {count} elements; expected {elements}",
+            info.dims
+        ));
+    }
+    decode_tensor_to_f32(source, name, &info)
+}
+
+/// Decode a validated tensor's payload into F32.
+fn decode_tensor_to_f32<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    info: &crate::core::tensor::TensorInfo,
+) -> Result<Vec<f32>, String> {
     let expected = usize::try_from(
         info.checked_nbytes()
             .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
@@ -512,8 +557,11 @@ pub fn load_f32_tensor<S: TensorSource + ?Sized>(
     // token, so the cost is amortized away. The big projections never come
     // through this path; they stay quantized and are consumed by
     // `QuantizedTensor::from_bytes`.
-    let n_cols = *dims.first().ok_or_else(|| format!("{name}: no dims"))? as usize;
-    let n_rows = dims[1..]
+    let n_cols = *info
+        .dims
+        .first()
+        .ok_or_else(|| format!("{name}: no dims"))? as usize;
+    let n_rows = info.dims[1..]
         .iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
         .ok_or_else(|| format!("{name}: dims overflow"))?;

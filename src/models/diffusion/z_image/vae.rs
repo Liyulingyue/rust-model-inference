@@ -984,7 +984,11 @@ fn resize_f32(values: &mut Vec<f32>, name: &str, len: usize) -> Result<(), Strin
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
-    let values = crate::core::tensor::load_f32_tensor(source, name, &[len as u64])?;
+    // The element count is the contract, not the shape: the Flux2 VAE that
+    // ERNIE-Image uses keeps its attention projections as two-dimensional
+    // matrices, and the payload and the element order are the same either
+    // way.
+    let values = crate::core::tensor::load_f32_tensor_flat(source, name, len)?;
     if values.iter().any(|value| !value.is_finite()) {
         return Err(format!("Non-finite tensor: {name}"));
     }
