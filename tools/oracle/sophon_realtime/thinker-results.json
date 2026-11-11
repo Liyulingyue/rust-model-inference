@@ -1,5 +1,5 @@
 {
-  "status": "in progress; experimental; missing or failing rows are not accepted",
+  "status": "Partial CPU precision evidence; Q6_K reference result/exit uncollected after SSH transport interruption. Completed numerical failures remain failed; Q6_K is unknown, neither pass nor numerical fail.",
   "evidence_root": "target/sophon/thinker-precisions-33367",
   "source_revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
   "configuration": {
@@ -10758,11 +10758,2459 @@
       "greedy_comparison_scope": "Rust versus the independent reference of the identical GGUF on the Rust teacher history; not output equivalence with F32/source weights.",
       "historical_f32_teacher_ids_match": true,
       "timing_limit": "Reference process naturally ran without SIGSTOP. Shared-host compilation/other permitted work was not isolated; forward timing excludes weight decoding/setup, result metrics and GGUF hashing. No controlled cross-format speedup claim."
+    },
+    {
+      "precision": "Q5_K",
+      "activation": "runtime",
+      "reference_execution": "full-prefix",
+      "strict_pass": false,
+      "numerical_pass": false,
+      "greedy_pass": true,
+      "numerical_failures": 7,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": 1,
+      "first_greedy_failure_step": null,
+      "max_relative_rmse": 0.08472909003007065,
+      "max_abs": 1.1880340576171875,
+      "minimum_cosine": 0.9965598579425139,
+      "minimum_greedy_margin": 0.8437824249267578,
+      "gguf_sha256": "cdd44b141dc1bf97b68bd9c142f2cec9a72da2553798c44a5d3980cec0d72956",
+      "gguf_file_type": 17,
+      "actual_tensor_types": {
+        "F32": 257,
+        "Q5_K": 450
+      },
+      "prompt_ids": [
+        151644,
+        872,
+        198,
+        108386,
+        37945,
+        98237,
+        99534,
+        100157,
+        99283,
+        1773,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ],
+      "reference_greedy_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "teacher_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "records": [
+        {
+          "step": 0,
+          "greedy_id": 108386,
+          "greedy_margin": 0.8437824249267578,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 1.1880340576171875,
+            "rmse": 0.18499043768366563,
+            "relative_rmse": 0.02460305549981391,
+            "cosine": 0.9997944961338234
+          },
+          "rust_greedy_id": 108386,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "greedy_id": 3837,
+          "greedy_margin": 1.5326499938964844,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 1.1735429763793945,
+            "rmse": 0.33604016025035705,
+            "relative_rmse": 0.06266850237705159,
+            "cosine": 0.9990525653597025
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "greedy_id": 104198,
+          "greedy_margin": 2.329029083251953,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.9512128829956055,
+            "rmse": 0.19448685417193096,
+            "relative_rmse": 0.041496088560891146,
+            "cosine": 0.9992859129876416
+          },
+          "rust_greedy_id": 104198,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "greedy_id": 99473,
+          "greedy_margin": 1.9900684356689453,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.8598101139068604,
+            "rmse": 0.1814296225553362,
+            "relative_rmse": 0.05705116414597612,
+            "cosine": 0.9986312444109212
+          },
+          "rust_greedy_id": 99473,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "greedy_id": 44729,
+          "greedy_margin": 8.20689582824707,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.9063444137573242,
+            "rmse": 0.15472983928280218,
+            "relative_rmse": 0.04448012236583705,
+            "cosine": 0.9990576260845255
+          },
+          "rust_greedy_id": 44729,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "greedy_id": 3837,
+          "greedy_margin": 4.440397262573242,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.8823654651641846,
+            "rmse": 0.20286998898155512,
+            "relative_rmse": 0.07723890607380171,
+            "cosine": 0.9970285774205923
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "greedy_id": 15469,
+          "greedy_margin": 1.872344970703125,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 1.1003875732421875,
+            "rmse": 0.22473701873771332,
+            "relative_rmse": 0.08472909003007065,
+            "cosine": 0.9965598579425139
+          },
+          "rust_greedy_id": 15469,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "greedy_id": 111895,
+          "greedy_margin": 3.6248531341552734,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.9205837249755859,
+            "rmse": 0.1808905139461713,
+            "relative_rmse": 0.06725073086506377,
+            "cosine": 0.9977994558085472
+          },
+          "rust_greedy_id": 111895,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        }
+      ],
+      "reference_forward_seconds": 370.68887742981315,
+      "result": "target/sophon/thinker-fullprefix-33367/q5_k-oracle-runtime/result.json",
+      "rust_trace": "target/sophon/thinker-fullprefix-33367/q5_k-rust.jsonl",
+      "activation_projections": [
+        {
+          "tensor": "blk.0.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.0.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.0.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.0.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.0.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.0.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.0.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.1.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.2.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.3.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.4.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.5.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.6.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.7.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.8.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.9.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.10.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.11.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.12.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.13.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.14.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.15.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.16.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.17.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.18.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.19.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.20.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.21.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.22.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.23.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.24.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.25.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.26.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.27.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.28.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.29.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.30.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.31.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.32.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.33.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.34.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.35.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.36.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.37.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.38.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.39.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.40.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.41.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.42.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.43.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.44.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.45.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.46.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.47.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.48.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.49.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.50.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.51.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.52.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.53.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.54.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.55.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.56.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.57.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.58.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.59.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.60.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.61.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.62.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.attn_q.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.attn_k.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.attn_v.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.attn_output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.ffn_gate.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.ffn_up.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "blk.63.ffn_down.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        },
+        {
+          "tensor": "output.weight",
+          "weight_type": 13,
+          "activation": "q8_k"
+        }
+      ],
+      "reference_process_wall_seconds": 724.8894134480506,
+      "reference_exit_code": 1,
+      "rust_cli_wall_seconds": 28.00930893048644,
+      "binary_provenance": {
+        "binary": "target/sophon/final-reviewed-rust-model-inference",
+        "binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+        "source_manifest": "target/sophon/thinker-fullprefix-33367/reviewed-source-1d6ebd0c893c3095.json",
+        "source_manifest_sha256": "1afcf53bcb77c6f74e2e055a080446777531a27a16cf5a1be5ba237195581eb4",
+        "build_time_source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+        "build_time_source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+        "build_report": "target/sophon/final-reviewed-build-33367.json",
+        "build_report_sha256": "4e4570fef6642caa9a528c2a0ec0a7da0e7e548791b49cdb11db1f475b03c643",
+        "no_legacy_binary_fallback": true
+      },
+      "greedy_comparison_scope": "Rust versus the independent reference of the identical GGUF on the Rust teacher history; not output equivalence with F32/source weights.",
+      "historical_f32_teacher_ids_match": true,
+      "timing_limit": "Reference process naturally ran without SIGSTOP. Shared-host work was not isolated; forward timing excludes weight decoding/setup, result metrics and GGUF hashing. No controlled cross-format speedup claim."
     }
   ],
   "pending": [
-    "Q5_K CPU and runtime-QDQ independent reference; plain F32 activation not planned",
-    "Q6_K CPU and runtime-QDQ independent reference; plain F32 activation not planned"
+    "Q6_K runtime independent reference result and exit uncollected; last known Oracle PID466421; numerical status unknown after transport interruption",
+    "Replacement-port-31344 Q6_K export and independent comparison in progress; no new numerical result collected at this checkpoint."
   ],
   "execution_errors": [
     {
@@ -10793,19 +13241,19 @@
   ],
   "remaining_coverage": {
     "backends": {
-      "cpu": "precision numerical verification in progress",
+      "cpu": "Completed rows preserved; final Q6_K reference outcome unknown because transport was lost.",
       "auto": "not run",
       "strict_vulkan": "not run"
     },
     "entrypoints": {
-      "cli_text": "F32/BF16 8-step CPU thinker comparisons pass using protected CLI; Q8_0 baseline and runtime diagnostics have numerical gate failures with all greedy IDs matching. New final-binary real entrypoint suite is owned by parent and not included in these precision results.",
+      "cli_text": "This CPU precision ledger has historical F32/BF16 and fixed-binary F16 passing evidence, failed completed blockquant numerical rows, and uncollected Q6_K reference. Greedy matching is same-GGUF; Q4_0 differs from historical F32 output. Parent owns latest-bin entrypoint validation separately.",
       "http_text": "not run",
       "cli_image": "not run",
       "http_image": "not run",
       "cli_jev_text_and_image": "not run",
       "http_jev_text_and_image": "not run"
     },
-    "actual_device_execution": "not yet measured; Auto fallback is not GPU evidence",
+    "actual_device_execution": "Not measured by this CPU precision matrix; parent owns separate device evidence and later Auto/vision fixes.",
     "scope": "CPU thinker precision evidence owned here; parent owns separate real entrypoint/device reports."
   },
   "limits": [
@@ -10815,7 +13263,7 @@
     "No source weights, GGUFs or activation binaries are copied to the Mac.",
     "Runtime-QDQ reproduces production input quantization, but the independent reference retains native Transformers SiLU and F32 accumulation. Rust CPU uses an approximate SIMD SiLU path; no exact per-operator arithmetic equivalence or SiLU root cause is established."
   ],
-  "coordination": "Sequential manager owns one large thinker task at a time; metadata observer never launches model jobs.",
+  "coordination": "Historical port-33367 coordination snapshot at the transport interruption: No further reconnect loop or model restart. Parent confirmed TCP33367 Connection refused and is waiting for user-supplied recovery/reachable endpoint. Preserve existing remote results and inspect original Q6 task before any recovery. Current recovery: the user supplied replacement port 31344, whose 23 source files are verified and whose separately protected CPU CLI is built. A new Q6_K export/reference is in progress; see validation.md and shared-regression-results.json:q6_resumed_31344_build. The retired process outcome remains UNKNOWN.",
   "continuation_evidence_root": "target/sophon/thinker-fullprefix-33367",
   "full_prefix_validation": {
     "status": "tiny model and real F32 8-row calibration passed",
@@ -11232,7 +13680,20 @@
       "conclusion": "A uniform logit shift explains about50% of baseline step7 and85% of runtime step1 squared error, but runtime step7 retains centered relative RMSE0.03222268. Shifts do not explain all failures; original raw-logit gates remain failed."
     }
   },
-  "rust_execution_only": [],
+  "rust_execution_only": [
+    {
+      "precision": "Q6_K",
+      "exit_code": 0,
+      "wall_seconds": 19.606886262074113,
+      "evidence": "target/sophon/thinker-fullprefix-33367/remaining-observer-state.json",
+      "rust_trace": "target/sophon/thinker-fullprefix-33367/q6_k-rust.jsonl",
+      "provenance_artifact": "target/sophon/thinker-fullprefix-33367/q6_k-rust-provenance.json",
+      "trace_and_provenance_collected_locally": false,
+      "configured_binary": "target/sophon/final-reviewed-rust-model-inference",
+      "configured_binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "numerical_reference": "Last known running as PID466421; result/exit uncollected. No numerical acceptance or failure claimed."
+    }
+  ],
   "scratch_lifetime": {
     "semantics": "One TemporaryFile per process; mappings share its single unlinked inode. The inode is reclaimed after the last mmap/fd disappears at process exit. No original weights, GGUFs or metrics are removed.",
     "source": [
@@ -11358,7 +13819,7 @@
     "pid": 433567,
     "script": "target/sophon/run-thinker-runtime-only-33367.py",
     "log": "target/sophon/thinker-runtime-only-driver-33367.log",
-    "phase": "running: q5_k-oracle-runtime PID462868",
+    "phase": "Remote outcome unknown after transport interruption; last known Q6_K Oracle PID466421. Do not restart solely because observation was lost.",
     "build_gate": "target/sophon/final-reviewed-build-33367.json array first item exit == 0",
     "binary": "target/sophon/final-reviewed-rust-model-inference",
     "priority": [
@@ -11371,7 +13832,11 @@
     "previous_pid": 413170,
     "transition": "target/sophon/thinker-fullprefix-33367/runtime-only-transition.json",
     "release": "target/sophon/thinker-fullprefix-33367/runtime-only-release.json",
-    "final_two_release": "target/sophon/thinker-fullprefix-33367/q5k-q6k-release.json"
+    "final_two_release": "target/sophon/thinker-fullprefix-33367/q5k-q6k-release.json",
+    "last_known_oracle_pid": 466421,
+    "transport_reachable": false,
+    "last_known_pid": 433567,
+    "scope": "Historical retired-port-33367 driver snapshot; this is not the replacement-port-31344 live driver."
   },
   "reference_plan": {
     "Q4_0_Q4_1_Q5_K_Q6_K": "Run runtime-QDQ independent full-prefix/F32-KV reference directly as same-file implementation checks using production input-quantization semantics, independent F32 arithmetic and native Transformers SiLU. Plain F32 activation is not run for these formats.",
@@ -11647,5 +14112,64 @@
       },
       "cause_limit": "This is a verified arithmetic difference, not proof of the FFN or final-logit failure cause. No gate or production operator changed."
     }
-  }
+  },
+  "transport_interruption": {
+    "status": "unresolved; remote process outcome unknown",
+    "recorded_at_utc": "2026-11-11T16:11:29.292564+00:00",
+    "last_successful_observer_metadata_mtime_utc": "2026-11-11T16:06:22.575504+00:00",
+    "local_observer_session": 66910,
+    "local_observer_exit": 1,
+    "ssh_wrapper_exit": 255,
+    "ssh_wrapper_stderr": "Connection closed by UNKNOWN port 65535",
+    "parent_cross_check": {
+      "reported_by": "root",
+      "port": 33367,
+      "result": "Direct TCP Connection refused; ssh wrapper also exit255"
+    },
+    "last_known_manager_pid": 433567,
+    "last_known_oracle": {
+      "precision": "Q6_K",
+      "pid": 466421,
+      "activation": "runtime",
+      "reference_execution": "full-prefix",
+      "kv": "f32",
+      "result_collected": false,
+      "exit_collected": false,
+      "numerical_status": "unknown; neither pass nor numerical fail"
+    },
+    "last_known_rust": {
+      "job": "q6_k-rust",
+      "exit_code": 0,
+      "seconds": 19.606886262074113
+    },
+    "recovery": "After an authorized SSH endpoint is restored, inspect the existing manager/Q6 PID, .exit and result.json first. If the original run completed, collect its JSON/trace/provenance and merge it without rerunning solely because observation was lost.",
+    "artifact": "target/sophon/thinker-fullprefix-33367/transport-interruption-q6k.json",
+    "model_processes_stopped_or_restarted_by_this_agent": false
+  },
+  "not_run_reference_modes": [
+    {
+      "precision": "Q4_0",
+      "activation": "f32",
+      "reference_execution": "full-prefix",
+      "reason": "Parent directed independent runtime-QDQ input-quantization reference directly; plain F32 activation not run."
+    },
+    {
+      "precision": "Q4_1",
+      "activation": "f32",
+      "reference_execution": "full-prefix",
+      "reason": "Parent directed independent runtime-QDQ input-quantization reference directly; plain F32 activation not run."
+    },
+    {
+      "precision": "Q5_K",
+      "activation": "f32",
+      "reference_execution": "full-prefix",
+      "reason": "Parent directed independent runtime-QDQ input-quantization reference directly; plain F32 activation not run."
+    },
+    {
+      "precision": "Q6_K",
+      "activation": "f32",
+      "reference_execution": "full-prefix",
+      "reason": "Parent directed independent runtime-QDQ input-quantization reference directly; plain F32 activation not run."
+    }
+  ]
 }

@@ -17,7 +17,7 @@ curl --fail --location "$MODELSCOPE_PINNED_URL" |
 ssh "$REMOTE" 'sha256sum /path/to/checkout/models/source/file.partial'
 ```
 
-The initial validation downloaded 64 selected files directly to the remote host (42,318,478,677 bytes); redundant ONNX flow/batch-tokenizer copies and the documentation image were not required. No source weights or converted GGUFs were stored on the laptop.
+The initial validation downloaded 64 selected files directly to the remote host (42,318,478,677 bytes); redundant ONNX flow/batch-tokenizer copies and the documentation image were not required. After that host was retired, the Q6_K recovery downloaded the 16 thinker shards and six small files, then the separately indexed `thinker/visual.safetensors` required by the existing reader: 23 files, 35,935,130,322 bytes, all size/SHA256 checks passing on replacement port 31344. The first missing-visual conversion failure remains recorded separately. Historical component reports retain their original host/artifact identities. No source weights or converted GGUFs were stored on the laptop.
 
 ## Independent thinker oracle
 
@@ -31,7 +31,7 @@ The reference uses upstream `gguf` to decode the actual exported file and the Tr
   --output target/sophon/oracle-f32 --steps 8 --threads 8 --kv f32
 ```
 
-For a Rust `parity-trace`, pass `--rust-trace target/sophon/cpu.jsonl`. Prompt IDs must match the official tokenizer/template exactly. Compare logits at each teacher-forced step using the predeclared gates in `validation.md`, retain greedy margins, and locate the first checkpoint divergence if they fail. Output directories must be new so old and new evidence cannot be mixed.
+For a Rust `parity-trace`, pass `--rust-trace target/sophon/cpu.jsonl`. Prompt IDs must match the official tokenizer/template exactly. Eight steps compare the prompt-end prediction and seven teacher-forced continuation predictions. With `--reference-execution full-prefix`, one 22-token causal forward supplies those eight rows for the retained 15-token prompt; it does not recompute eight prefixes. Use the predeclared gates in `validation.md`, retain greedy margins, and locate the first checkpoint divergence if they fail. Output directories must be new so old and new evidence cannot be mixed.
 
 ## Independent F32 vision oracle
 

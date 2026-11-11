@@ -950,7 +950,8 @@
       "src/models/qwen3/vision/mod.rs",
       "src/models/qwen3/trunk/prefill.rs"
     ],
-    "source_comparison": "All 618 Rust/Cargo build-time manifest entries match this checkout by SHA-256. Other reports retain their distinct source manifests and binaries."
+    "source_comparison": "All 618 Rust/Cargo build-time manifest entries match this checkout by SHA-256. Other reports retain their distinct source manifests and binaries.",
+    "pushed_source_commit": "304d93a10002db99a17d93aad6ab33c25837ee63"
   },
   "same_feature_library_regression_fallback_reviewed": {
     "status": "NO_NEW_FAILURES",
@@ -1420,5 +1421,202 @@
     "source_identity": "fallback_reviewed_source_identity",
     "comparison": "target/sophon/f32-regression-review-20261111/fallback-reviewed-comparison.json",
     "scope": "Ordinary upstream Qwen3 F32 CPU inference; 30 logits records and 4558080 values. Existing CPU numerical behavior remains unchanged; this is not a lossy/device bitwise acceptance requirement."
+  },
+  "ci_fallback_reviewed": {
+    "status": "ENVIRONMENT_FAILURE",
+    "head": "304d93a10002db99a17d93aad6ab33c25837ee63",
+    "workflow": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644",
+    "source_identity": "fallback_reviewed_source_identity",
+    "jobs": [
+      {
+        "name": "x86 dispatch regressions",
+        "conclusion": "failure",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644/job/130633790351",
+        "failed_steps": [
+          "Q8 dispatch without F16C"
+        ],
+        "successful_steps": [
+          "Set up job",
+          "Run actions/checkout@v4",
+          "Run dtolnay/rust-toolchain@stable",
+          "Require native SIMD coverage",
+          "Run cargo test --locked --lib ops::softmax::tests::softmax_approx_avx2_",
+          "Run cargo test --locked --lib ops::math::exp::tests::",
+          "Run cargo test --locked --lib ops::kernel::q8_0::",
+          "Run cargo test --locked --lib raw_hidden_",
+          "Run cargo test --locked --lib models::vela3::",
+          "Run cargo test --locked --lib format::safetensors::tests::",
+          "Run cargo test --locked --test system_one_cli",
+          "Run cargo test --locked --lib models::nemotron_reuse::",
+          "Run cargo test --locked --test nemotron_reuse_cli",
+          "Run python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'",
+          "Run cargo test --locked --lib ggml_dots_honor_scalar_dispatch",
+          "Run RMI_SCALAR=1 cargo test --locked --lib ggml_dots_honor_scalar_dispatch",
+          "Run cargo test --locked --lib hy_mt2_",
+          "Run cargo test --locked --lib hy_",
+          "Run RMI_SCALAR=1 cargo test --locked --lib hy_",
+          "Run cargo test --locked --lib ops::audio::",
+          "Run cargo test --locked --lib unlimited_ocr",
+          "Run cargo test --locked --lib models::diffusion::dreamx::kernels::tests::",
+          "Run cargo test --locked --test unlimited_ocr_cli",
+          "Run cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline",
+          "Post Run actions/checkout@v4",
+          "Complete job"
+        ],
+        "classification": "environment: Ubuntu Azure mirror DNS resolution",
+        "failure_excerpt": [
+          "2026-11-11T16:00:23.3939010Z   Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T16:00:23.3993705Z E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-user_8.2.2%2bds-0ubuntu1.18_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T16:00:23.3994355Z E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-user-binfmt_8.2.2%2bds-0ubuntu1.18_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'"
+        ],
+        "captured_log_sha256": "58a4cedefc10740af7e0dd59b7f05c34047192edfb5fdb3f1d38fe2ab36653b4"
+      },
+      {
+        "name": "Rustfmt",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644/job/130633790827",
+        "failed_steps": [],
+        "successful_steps": [
+          "Set up job",
+          "Run actions/checkout@v4",
+          "Run dtolnay/rust-toolchain@stable",
+          "Run cargo fmt --check",
+          "Post Run actions/checkout@v4",
+          "Complete job"
+        ]
+      },
+      {
+        "name": "Vulkan compile and shaders",
+        "conclusion": "failure",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644/job/130633791146",
+        "failed_steps": [
+          "Run sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools mesa-vulkan-drivers libvulkan1"
+        ],
+        "successful_steps": [
+          "Set up job",
+          "Run actions/checkout@v4",
+          "Run dtolnay/rust-toolchain@stable",
+          "Post Run actions/checkout@v4",
+          "Complete job"
+        ],
+        "classification": "environment: Ubuntu Azure mirror DNS resolution",
+        "failure_excerpt": [
+          "2026-11-11T15:58:45.7990212Z E: Failed to fetch mirror+file:/etc/apt/apt-mirrors.txt/pool/universe/s/spirv-tools/spirv-tools_2025.1%7erc1-1%7eubuntu0.24.04.2_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T15:58:45.7991836Z E: Failed to fetch mirror+file:/etc/apt/apt-mirrors.txt/pool/universe/g/glslang/glslang-tools_15.1.0-2%7eubuntu0.24.04.2_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T15:58:45.7993340Z E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/main/m/mesa/mesa-vulkan-drivers_25.2.8-0ubuntu0.24.04.4_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'"
+        ],
+        "captured_log_sha256": "62bcad282230e15b68f1b96fe7d269cef14b61c7dc79326a4d54564e6a5b6ce0"
+      }
+    ],
+    "scope": "Rustfmt passes. x86 code checks before QEMU pass; QEMU is not reached after apt DNS failure. Vulkan shader/compile checks are not reached after the same apt DNS failure. Separately recorded remote library, binary builds and genuine GPU operator/Auto checks retain their independent evidence."
+  },
+  "q6_resumed_31344_build": {
+    "status": "PASS_CPU_BUILD_AND_REPLAY_FIXTURE",
+    "host_port": 31344,
+    "source_archive_commit": "304d93a1",
+    "build_report": "target/sophon/q6-resumed-31344-build.json",
+    "build_report_sha256": "0fbdeccc86023f3944d385e093eb6051e26c8d58f6f12986c536c964e33b7206",
+    "cli": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli",
+      "sha256": "54c1792d4e63791df6f9bbbfdf41475fd9c2114a064a0c35f1b0adc60f494233",
+      "bytes": 41077552
+    },
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "features": [
+      "parity-trace"
+    ],
+    "default_features": false,
+    "vulkan_enabled": false,
+    "profile": "release-fast",
+    "build_configuration": "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
+    "build_source_manifest": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-source-manifest.json",
+    "build_source_manifest_sha256": "4dc5815b9e82efdf6fa228154a4344dd0ec53b80d1042ab93e664594497d988b",
+    "source_entries": 618,
+    "source_matches_fallback_reviewed": true,
+    "source_unchanged_after_build": true,
+    "source_manifest_after_sha256": "4dc5815b9e82efdf6fa228154a4344dd0ec53b80d1042ab93e664594497d988b",
+    "source_reference": "fallback_reviewed_source_identity",
+    "commands": [
+      {
+        "name": "cli-build",
+        "command": [
+          "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+          "build",
+          "--bin",
+          "rust-model-inference",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--no-default-features",
+          "--features",
+          "parity-trace",
+          "-j4"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli-build.log",
+        "exit_code": 0,
+        "elapsed_seconds": 161.38472235575318,
+        "log_sha256": "cfcc13cbea7147e098b52769256fce48d79d522991fa8bb68e8b245a34986af3"
+      },
+      {
+        "name": "cli-help",
+        "command": [
+          "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli",
+          "--help"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli-help.log",
+        "exit_code": 0,
+        "elapsed_seconds": 0.003669820725917816,
+        "log_sha256": "32a3930a7c0e56bf247b31cb1a11ff40a29ce7a3b567465afd095ebd6b268926"
+      },
+      {
+        "name": "cli-ldd",
+        "command": [
+          "ldd",
+          "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli-ldd.log",
+        "exit_code": 0,
+        "elapsed_seconds": 0.007575679570436478,
+        "log_sha256": "84dee14131738d386427d16eb0f8427dfb73f6b3e4c50205445bc6ec36d36b34"
+      },
+      {
+        "name": "cpu-replay-test",
+        "command": [
+          "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+          "test",
+          "--lib",
+          "cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--no-default-features",
+          "--features",
+          "parity-trace",
+          "-j4",
+          "--",
+          "--nocapture"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cpu-replay-test.log",
+        "exit_code": 0,
+        "elapsed_seconds": 132.43279593996704,
+        "log_sha256": "3d3bd60119662e3efdac1b7fe974c0d8e03364e33d89d97a1a6a29eb7fcca88f"
+      }
+    ],
+    "test_result": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered_out": 1687,
+      "fixture": "models::qwen3::trunk::prefill::tests::cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix"
+    },
+    "finalization": {
+      "initial_driver_exit_code": 1,
+      "initial_error": "Archive helper glob also matched the CLI executable after the build and test commands had passed.",
+      "resolution": "Selected the exact lib-test executable named by the Cargo test log; independently verified CLI SHA, all command exit codes, test count, and source manifests.",
+      "exit_code": 0
+    },
+    "scope": "Replacement-host CPU+parity-trace CLI only. The build and one CPU replay fixture pass; this is not a new full-library, HTTP, Auto, Vulkan or model numerical acceptance result. Historical protected binaries keep their own identities."
   }
 }
