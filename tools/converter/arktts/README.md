@@ -20,8 +20,9 @@ MODEL_DIR=/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-TTS-Real
   --out-dir "$MODEL_DIR/multiq/q4_k" --format q4_k --codec-format q4_k
 ```
 
-主模型的 embedding、norm、bias 保留 BF16/F32；Q4/Q5/Q6_K 仅量化能整除块宽的 FFN
-down projection，896 宽的 attention/embedding 矩阵保留 BF16。codec 的卷积、norm、codebook
+主模型的 norm、bias 保留 BF16；二维 embedding 和 projection 按所选格式导出。
+Q4/Q5/Q6_K 仅量化能整除块宽的 FFN down projection，896 宽的 attention/embedding
+矩阵保留 BF16。codec 的卷积、norm、codebook
 以及量化敏感的 `quantizer.upsample.*` / `quantizer.downsample.*` ConvNeXt 投影保留 F32，
 其余二维 dense projection 按所选格式导出。这样每个配对文件仍是原生块量化格式，同时避免
 重采样通道的激活量化误差被放大到波形。

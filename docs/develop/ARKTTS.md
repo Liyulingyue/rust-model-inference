@@ -32,7 +32,7 @@ The numerical gates are tolerance based. F32/BF16 use relative RMSE `1e-4`, norm
 `0.01 / 0.01 / 0.25 / 0.001 / 0.0001`; block quantized formats use `0.2 / 0.15 / 5 / 0.006 /
 0.001`. Lossy floating point and quantized paths are not expected to be bitwise equal.
 
-Reproduce the matrix from the repository root:
+Run the focused checks from the repository root:
 
 ```sh
 MODEL_DIR=/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-TTS-Realistic-Air
@@ -41,8 +41,30 @@ cargo test --locked --profile release-fast --features vulkan,parity-trace --lib 
   tools.oracle.arktts.test_compare tools.converter.arktts.test_convert_arktts
 ```
 
-The complete evidence is kept outside Git under `MODEL_DIR/multiq/`; weights are intentionally not
-part of this repository. `tools/oracle/arktts/performance.json` contains the same-host timing
-observations. They use `release-fast`, four threads and four frames, include model/server loading,
-and are not a release-throughput promise. A release build and longer-context performance run remain
-separate work.
+The [complete matrix commands](../../tools/oracle/arktts/README.md#完整矩阵复现) include conversion,
+the same-weight Oracle, fixed-history traces, free-running greedy, projections, and CLI/HTTP.
+Evidence is kept outside Git under `MODEL_DIR/multiq/`; weights are intentionally not in Git.
+`tools/oracle/arktts/performance.json` separates request-level observations from phase timings
+that exclude loading and trace I/O. All timings use `release-fast`, four threads and four frames.
+A release build and longer-context performance run remain separate work.
+
+Same-host generation phase (seconds, median over the three four-frame texts):
+
+| Format | CPU | Auto | Vulkan | Official CPU |
+| --- | ---: | ---: | ---: | ---: |
+| F32 | 2.861 | 3.490 | 3.256 | 0.427 |
+| BF16 | 1.403 | 1.943 | 2.830 | 0.623 |
+| F16 | 0.428 | 0.545 | 0.911 | 1.004 |
+| Q8_0 | 0.179 | 0.421 | 0.792 | 1.192 |
+| Q4_0 | 0.808 | 0.453 | 0.743 | 0.504 |
+| Q4_1 | 0.209 | 0.303 | 0.771 | 0.580 |
+| Q4_K | 0.999 | 1.543 | 2.093 | 0.457 |
+| Q5_K | 1.023 | 1.547 | 2.091 | 0.456 |
+| Q6_K | 1.087 | 1.547 | 2.102 | 0.453 |
+
+These are single-pass observations, not isolated throughput trials. Generation excludes model loading
+and trace I/O but includes Rust executor setup/device uploads. The Oracle uses the same GGUF
+weights and activation-QDQ contract on CPU; its F16 reduction accumulates more widely.
+The JSON also records matched fixed-code decode and reference encode phases. Per-projection
+synchronization and host attention/codec work can make this hybrid Vulkan path slower than CPU.
+Resources were not isolated; some Oracle timing overlapped compilation.

@@ -36,8 +36,11 @@ class ComparisonTests(unittest.TestCase):
             self.check([1.0], [float("nan")])
 
     def test_precision_profiles_are_explicit_and_unknown_profiles_are_rejected(self):
-        from tools.oracle.arktts.compare import TOLERANCES
+        from tools.oracle.arktts.compare import TOLERANCES, precision_profile
         self.assertEqual(set(TOLERANCES), {"float", "quantized", "f16"})
+        for kinds, expected in [({0, 30}, "float"), ({0, 1, 30}, "f16"),
+                                ({0, 1, 2}, "quantized"), ({0, 14}, "quantized")]:
+            self.assertEqual(precision_profile(kinds), expected)
         with self.assertRaisesRegex(ValueError, "profile"):
             compare("unused", "unused", profile="typo")
 

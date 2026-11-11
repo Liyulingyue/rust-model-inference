@@ -3266,7 +3266,7 @@ pub(crate) fn build_operator_pipelines(
                 NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
             ) && !context.shader_float64
             {
-                // Optional FP64 SSM kernels must not prevent ordinary projections from loading.
+                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
                 ATTENTION_SCORES_SHADER
             } else {

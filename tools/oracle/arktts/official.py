@@ -119,7 +119,9 @@ def main(model_dir: Path, output: Path, frames: int, main_gguf=None, codec_gguf=
         reference_audio.tofile(output / "reference.f32")
         # Keep generation and codec traces in the same order as the Rust test.
         trace_enabled["value"] = False
+        began = time.perf_counter()
         reference_codes, _ = codec.encode(torch.from_numpy(reference_audio)[None, None])
+        timings.append({"phase": "codec_encode", "samples": length, "seconds": time.perf_counter() - began})
         trace_enabled["value"] = True
         reference_codes = reference_codes[0].transpose(0, 1).tolist()
         specifications = [
@@ -139,12 +141,13 @@ def main(model_dir: Path, output: Path, frames: int, main_gguf=None, codec_gguf=
             prompt, mask = model._prepare_prompt(**inputs)
             context["step"] = 0
             greedy = None
-            if fixed_history:
+            if main_gguf:
                 trace_enabled["value"] = False
                 began = time.perf_counter()
                 greedy = model.generate(input_ids=prompt, attention_mask=mask, max_new_tokens=frames,
                                         do_sample=False, temperature=1.0)[0].T.tolist()
-                timings.append({"name": name, "generate_seconds": time.perf_counter() - began})
+                timings.append({"phase": "generate", "name": name, "frames": len(greedy),
+                                "seconds": time.perf_counter() - began})
                 trace_enabled["value"] = True
                 context["step"] = 0
             class ForceHistory:
@@ -171,18 +174,26 @@ def main(model_dir: Path, output: Path, frames: int, main_gguf=None, codec_gguf=
             fixed = [[2345, 4, 5, 6, 7, 8, 9, 10, 11, 12],
                      [3456, 5000, 999, 8, 17, 26, 135, 244, 353, 462],
                      [123, 78, 56, 14, 33, 28, 12, 41, 19, 42]]
+        trace_enabled["value"] = False
+        began = time.perf_counter()
+        codec.decode(torch.tensor(fixed).T[None])
+        timings.append({"phase": "codec_decode", "frames": len(fixed), "seconds": time.perf_counter() - began})
+        trace_enabled["value"] = True
         waveform = codec.decode(torch.tensor(fixed).T[None])[0, 0]
         record("arktts.codec.audio", waveform)
         waveform.numpy().astype("<f4").tofile(output / "waveform.f32")
         codec_phase["value"] = "encode"
         encoded, _ = codec.encode(torch.from_numpy(reference_audio)[None, None])
         encoded = encoded[0].T.tolist()
-    codec_f16 = codec_gguf and "F16.gguf" in str(codec_gguf) and "BF16.gguf" not in str(codec_gguf)
+    from tools.oracle.arktts.compare import TOLERANCES, precision_profile
+    codec_types = {kind for kind, _ in codec_contracts.values()} if codec_gguf else set()
+    profile = precision_profile(codec_types)
+    _, _, _, waveform_max, waveform_rmse = TOLERANCES[profile]
     (output / "performance.json").write_text(json.dumps(timings, indent=2))
     (output / "cases.json").write_text(json.dumps({"max_frames": frames,
-        "waveform_max_abs": 0.001 if codec_f16 else (0.006 if main_gguf else 0.0002),
-        "waveform_rmse": 0.0001 if codec_f16 else (0.001 if main_gguf else 0.00002),
-        "exact_reference_codes": not main_gguf, "cases": cases, "fixed_codes": fixed, "reference_codes": encoded}, ensure_ascii=False, indent=2))
+        "waveform_max_abs": waveform_max, "waveform_rmse": waveform_rmse,
+        "exact_reference_codes": not main_gguf, "exact_generated_codes": not main_gguf,
+        "cases": cases, "fixed_codes": fixed, "reference_codes": encoded}, ensure_ascii=False, indent=2))
     (output / "trace.json").write_text(json.dumps(records, ensure_ascii=False, indent=2))
     print(json.dumps({"cases": len(cases), "frames": [len(c["frames"]) for c in cases], "checkpoints": len(records), "samples": waveform.numel()}, indent=2))
 

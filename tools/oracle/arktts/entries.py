@@ -89,6 +89,8 @@ def run(root, binaries, formats, computes, output_dir=None):
             row["last_device_counters"] = re.findall(r"ComputeStats \{[^\n]+", logs)[-1:]
             if compute != "cpu":
                 assert row["gpu_linear_calls"] > 0, "Auto fallback is not GPU verification"
+                if compute == "vulkan":
+                    assert row["cpu_linear_calls"] == 0, "strict Vulkan must not fall back to host linear"
             else:
                 assert row["gpu_linear_calls"] == 0
             rows.append(row)

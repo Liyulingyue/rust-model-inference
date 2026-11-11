@@ -17,6 +17,12 @@ TOLERANCES = {
 }
 
 
+def precision_profile(kinds):
+    if set(kinds) & {2, 3, 8, 12, 13, 14}:
+        return "quantized"
+    return "f16" if 1 in kinds else "float"
+
+
 def compare(oracle, rust, profile="float"):
     if profile not in TOLERANCES:
         raise ValueError(f"unknown precision profile {profile}")

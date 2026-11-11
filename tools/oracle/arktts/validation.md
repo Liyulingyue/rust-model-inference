@@ -75,7 +75,7 @@ Rust 1.99.1 工具链；原始 BF16 权重提升为 F32 计算，对照官方 CP
 - `cargo check --locked --profile release-fast --features vulkan --lib --bin rust-model-inference --bin rust-model-server`：通过；真实 GPU 运行另由下方 Vulkan 矩阵和 4308 次 dense device calls 证明。
 - 真实权重集成测试：原始 BF16/F32 CPU 三组短历史通过；九档 held-out CPU/Auto/Vulkan 全部通过。
 - `git diff --check`：通过。
-- 全库 lib 回归（不启用 Vulkan feature）：1553 passed / 13 failed / 100 ignored；当次基线为 1552 / 14 / 99，失败名单仍是原有平台/合同用例，没有新增 ArkTTS 失败。
+- 全库 lib 回归（不启用 Vulkan feature）：1553 passed / 13 failed / 100 ignored；未修改的 `upstream/main@d16dc16d9` 当次基线为 1544 / 13 / 99，13 个失败名称完全一致。此前 1552 / 14 / 99 的记录包含新增用例的 red 阶段，不能当作未修改主线基线，现予以更正。
 
 既有失败位于：Breeze 的 3 个 dtype 契约用例、CLM 的 2 个 golden/embedding 用例、
 Z-Image 的 3 个 NEON 逐位用例、FunASR 的 2 个 NEON 逐位用例、Gemma4 的 1 个 trunk 用例、
@@ -88,6 +88,11 @@ shader 输出逐字节相同，失败文件为 q4_k/q5_k/q6_k/f16 matmul 的源�
 本次新增的 module 顺序和 backend probe 换行问题已修正；余下 32 个 Rustfmt diff blocks 均出现在未修改基线中。
 未改写无关模型/算子的既有格式或 shader 校验和；上述两项 CI 仍受基线问题影响。
 
+2026-11-11 合并 `main@d16dc16d9` 后复验：`cargo fmt --all --check` 已通过，原来的格式
+失败结论不再适用于当前树。`scripts/vulkan-shaders.sh check` 的所有 checksum 检查通过，
+随后本机重编译 `nemotron_moe_route.spv` 与提交产物在 char 13 不同；未修改主线出现同样结果。
+这与 2026-11-04 的八个 checksum 失败不同，本次没有改动任何 GLSL/SPIR-V。
+
 自查已修复：
 
 1. P1，`src/app/server/audio_speech.rs:168`：生成锁移入 blocking worker，防止 HTTP 取消后旧推理继续而新请求并发加载 codec；以连接取消后的 429 验证。
@@ -95,6 +100,9 @@ shader 输出逐字节相同，失败文件为 q4_k/q5_k/q6_k/f16 matmul 的源�
 3. P1，`src/models/arktts/mod.rs:139`：main/codec bundle ID 校验，防止混配不同 checkpoint；精确识别架构，不按相近 Qwen 模型路由；混配单测通过。
 4. P2，`src/app/tts/mod.rs:214`、`src/main.rs:592`：对不支持的 CLI/HTTP 控制和文本/JEV 模式明确报错；修正文本后处理桥的固定 Qwen3/24 kHz 描述；两种二进制的拒绝入口已实测。
 5. P2，`src/models/arktts/mod.rs:461`：文本清洗补齐 Python 视为空白的 U+001C–U+001F；温度下限与官方 `1e-5` 一致；单测与 Oracle 通过。
+6. P1，发布树校验：之前 API 发布遗漏主线删除的两份旧兼容文件；合并已发布分支后保留本地正确树，发布前比较树 SHA，并保留 main 的真实合并祖先。
+7. P2，Oracle 根据 GGUF 实际张量类型选择波形门槛；入口证据对严格 Vulkan 额外断言 host linear 为零，测试的拒绝入口使用所选主模型文件，避免依赖另一档 BF16 文件。
+8. P2，性能分开记录含加载的请求观察与同口径 generate/codec 计时；新增自由 greedy 分叉、量化相对原精度的损失记录，并补完整矩阵复现命令。
 
 ## GPU 与多精度复验（2026-11-11）
 
@@ -124,6 +132,141 @@ attention/KV、卷积、codebook、采样仍在主机。每个 Auto 组合记录
 calls + 7548 次 host linear calls；严格 Vulkan 记录 8736 次 device calls、0 次 host
 linear calls。CPU/Auto/严格 Vulkan 的每个格式都分别通过 CLI 普通、CLI 克隆、HTTP WAV 和
 HTTP PCM，HTTP 字节与 CLI 字节相等；对应入口证据在 `multiq/entries-v2-results.json`。
+
+### 自由生成与性能复验
+
+固定历史验收通过不代表自由码流相等。新增不带 trace I/O 的自由 greedy 检查：每档三个文本、各 4 帧，
+共 120 个 ID；原始 ID/首个分叉及逐阶段计时保存在 `multiq/review-20261111/`。
+
+| 格式 | CPU / Auto / Vulkan 与同权重 Oracle 相同的 ID 数（各 120 个） |
+| --- | --- |
+| F32 | 120 / 120 / 120 |
+| BF16 | 120 / 120 / 120 |
+| F16 | 119 / 119 / 119 |
+| Q8_0 | 62 / 62 / 62 |
+| Q4_0 | 31 / 31 / 31 |
+| Q4_1 | 87 / 87 / 87 |
+| Q4_K | 77 / 67 / 47 |
+| Q5_K | 72 / 72 / 70 |
+| Q6_K | 95 / 87 / 64 |
+
+F16 和块量化在多步 greedy 中出现离散分叉，K 格式在后端间也可能分叉。独立同输入 projection 的
+误差满足 5e-5 relative RMSE 门槛，固定历史中间层误差另按上面的分精度门槛验收；
+归约/RMS/RoPE 的舍入可跨越 activation QDQ 的 bin 边界，之后自回归历史会放大差异。
+这不能替代主观音质、说话人相似度或长音频任务质量评估；F16/块量化保留 Experimental 标记。
+
+性能 JSON 已将含加载的 CLI/HTTP 观察与不含加载、无 trace I/O 的 generate/codec 分阶段时间分开。
+同机四线程数据见 `docs/develop/ARKTTS.md`；资源未隔离、部分 Oracle 计时与编译重叠，
+属于单次观察值，不作速度排名。GPU 仍有逐投影同步/上传和主机 attention/codec 开销。
+
+量化损失与实现误差分别记录：`multiq/review-20261111/quantization-reference.json` 比较原始
+官方权重和同档 GGUF 的官方 Oracle（相同 prompt codes、固定解码 codes），而上面的
+1053 检查点表比较同一 GGUF 的 Oracle 与 Rust。固定码流波形的前一项损失为：
+
+| 格式 | Oracle 自由 ID 对原精度相同数 / 120 | 波形 max_abs | 波形 RMSE |
+| --- | ---: | ---: | ---: |
+| F32 | 120 | 0 | 0 |
+| BF16 | 120 | 0.002624 | 0.0003523 |
+| F16 | 120 | 0.0003250 | 0.00003974 |
+| Q8_0 | 62 | 0.04056 | 0.004473 |
+| Q4_0 | 6 | 0.03744 | 0.006020 |
+| Q4_1 | 18 | 0.1290 | 0.01501 |
+| Q4_K | 23 | 0.08470 | 0.01115 |
+| Q5_K | 42 | 0.04889 | 0.006544 |
+| Q6_K | 44 | 0.04027 | 0.004577 |
+
+这张表描述权重/激活精度改变后的损失，没有将其混入同权重实现误差；它也不等于语音质量评分。
+
+## 覆盖矩阵与改动边界
+
+以下每行同时覆盖 `arktts` 主模型、`arktts_codec` 的 encode/decode，以及普通 TTS 和参考声音克隆。
+CLI 为普通/克隆两条命令，HTTP 为普通/克隆各自的 WAV/PCM 请求；命令和请求体由 `entries.py` 写入 JSON。
+KV、attention 和输出缓冲为 F32；矩阵乘使用共享 Prepared 契约，F16 激活/累加及块量化 QDQ 遵循共享 kernel。
+这是每档 4 帧、三种文本的数值/入口验收，不是长音频质量或全图 GPU 验收。
+
+| 主模型 + codec 格式 | 请求后端 | CLI 普通/克隆 | HTTP WAV/PCM 普通/克隆 | 实际 dense device / host calls | 实现状态 | 验证状态 |
+| --- | --- | --- | --- | ---: | --- | --- |
+| F32 | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| F32 | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| F32 | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| F16 | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| F16 | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| F16 | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| BF16 | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| BF16 | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| BF16 | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| Q8_0 | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| Q8_0 | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| Q8_0 | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| Q4_0 | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| Q4_0 | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| Q4_0 | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| Q4_1 | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| Q4_1 | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| Q4_1 | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| Q4_K | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| Q4_K | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| Q4_K | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| Q5_K | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| Q5_K | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| Q5_K | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+| Q6_K | cpu | 通过 / 通过 | 通过（4 请求） | 0 / 8736 | 已实现 | 通过 |
+| Q6_K | auto | 通过 / 通过 | 通过（4 请求） | 1188 / 7548 | 已实现 | 通过 |
+| Q6_K | vulkan | 通过 / 通过 | 通过（4 请求） | 8736 / 0 | 已实现 | 通过 |
+
+证据根目录为上面的 `multiq/`：入口矩阵是 `entries-v2-results.json`，逐条原始日志/WAV 在
+`entries-v2/<format>/<format>-<backend>/`；固定历史矩阵为 `validation-v2-results.json`，
+逐检查点指标/日志在 `<format>/validation-v2-<backend>/`，同输入算子证据为 `projection-results.json`。
+`inventory-v2.json` 保存全部 18 个导出文件的大小、SHA-256、bundle ID 和逐类型张量数。
+
+转换器复用共享导出格式集合：F32 + `quantize_gguf.BLOCK_FORMATS`。Q5_0/Q5_1 虽有共享运行内核，
+当前共享 Python exporter 没有编码器；IQ 也没有匹配的共享 LinearExecutor Vulkan kernel，
+本转换器没有新增这些量化算法，也不把它们宣称为已支持。
+
+九档文件都是混合精度。主模型 norm/bias 保留 BF16；K 格式只量化 28 个 4864 宽的 down projection，
+其余 198 个张量保留 BF16。codec 的卷积/norm/codebook/重采样 ConvNeXt 保留 F32；
+K 格式还保留 1216 宽 down projection，因此 codec 只有 92 个 K 格式张量；非 K 格式转换 100 个 dense 张量。
+F16/BF16/Q8_0/Q4_0/Q4_1 的主模型有 144 个所选格式二维张量（BF16 总共 226 个），
+F32 主模型也保留 82 个 BF16 向量，不能解读成所有张量均为 F32。
+
+改动范围：模型/codec/Transformer 位于 `src/models/arktts/`，转换/Oracle 工具位于各自 arktts 目录；
+必要接线为 models 注册、既有 CLI `--tts`、按能力命名的 HTTP `/v1/audio/speech` 及文本后处理桥。
+纯 TTS 不提供文本评分/JEV，也没有流式协议；CLI/HTTP 对这些请求明确拒绝。Cargo metadata 与
+`upstream/main@d16dc16d9` 对比，9 个 binary targets 的名称/源码路径一致。
+
+共享变更仅有：Breeze causal Conv 的 crate 内可见性放开以直接复用其实现；以及 Vulkan 的
+`build_operator_pipelines` 在无 shaderFloat64 设备上为 Nemotron MoE router 使用占位 pipeline，
+并由 `record_nemotron_moe_route` 在记录前明确拒绝。这修复了 M3 上所有 dense executor 的全局初始化失败；
+FP64 设备仍使用原 shader，Qwen/Nemotron 的模型配置、权重和默认计算语义未改。
+受影响路径是 `VulkanContext::operator_pipelines` 的所有调用方和 Nemotron MoE router；
+真实 M3 dense 提交及共享 compute 测试覆盖了可用设备路径。没有 Nemotron 30B 权重/FP64 设备，
+该旧模型真实推理回归未运行，不以 ArkTTS 通过代替其回归。
+
+
+### 本次导出文件身份
+
+文件名为 `Audio8-TTS-Realistic-Air-<FORMAT>.gguf` 与 `Audio8-TTS-Realistic-Air-codec-<FORMAT>.gguf`，
+位于 `multiq/<format>/`。共同 bundle ID 为 `8ff0085d1ab4bbe1fbf8f68167ca44d091d88c7beb2c363e2563bde0fce0a391`。
+下表从 `inventory-v2.json` 保留完整身份；原始 2026-11-04 文件另见上方表，新增 `general.file_type` 会改变 GGUF 哈希。
+
+| 格式 | 主模型字节数 / SHA-256 | codec 字节数 / SHA-256 |
+| --- | --- | --- |
+| F32 | 2416713408 / `508acc5ecaa94303d64e8a53cddc4f48a842ab27ddf2d39f3a5b61b9e168dbf9` | 1349626848 / `f50e1f52b878518f8ab012daa52c7b528053632c66e260a5553bfab0e46eddf3` |
+| BF16 | 1214553792 / `c6a26e3ddeb6b8b7e25ac6e8fa26891929d3fe236c4e573f959f2ac30a6aef19` | 912370656 / `5c05c5017c0f13096a93a807e9a940e2b7676a473774ef9b256bdc8b2eafe033` |
+| F16 | 1214553792 / `e1a152a5e7f6aeb6a40899e1d2407dbe3afd5e2608ddccda4d0d995f4b09691e` | 912370656 / `0eebc4a94ecae9c412fa18871ac69bfe8e44c7493e2961f9b780a0f453e8b8af` |
+| Q8_0 | 651041472 / `dc078f273da83f219596ac89046905544eaa7f077d388618ecc4d50d81c85599` | 707406816 / `a15704063f14d23bad396b768dde732534a74935e0a5c18cc4f9d085b86bf589` |
+| Q4_0 | 350501568 / `9aa78f08b6a5145aa14b03473346659b41131ffea2c00a108a5246b2c9b511d9` | 598092768 / `3e5079beb89dfc2d14ba83b8ea84264bb83e237f8e401d4a8e7b66019b523a4c` |
+| Q4_1 | 388069056 / `78c148d1329c8338a97691b1bf83c7fc2a0b38f396bd9a5f7817f20fa53f2bb6` | 611757024 / `66bcc58d321fa2417d72998623603a4a86a488f857ee11fdffc9c542d43f8e6d` |
+| Q4_K | 1039138496 / `a2d5bad578ebe5b044a6264dec9249881ef5a7191355d3219cd35dc4bd63cdf1` | 632335328 / `bcf725d253b65861320b5fdc107d56085a00425fa9b6dad3364fae2dd7d130e4` |
+| Q5_K | 1054392000 / `02fa16a3dd9b8f131f3637f84fd36d7a8a037b44ebe2f85449d6d5756170d702` | 658418656 / `c3f603b8bc6cfa913b96a03a44b458ef329d8145bcf14bc48bfeae185ec3a6d0` |
+| Q6_K | 1070598848 / `462ae46b6e184ba47e4fdac8cd42c4b02cbcb659049c2e51da3645035b6b6d49` | 686132192 / `da197f0fdee862bfb19bbc7605e6314b88c1c163dfb0a6cf58810517f92281d4` |
+
+新增复验：6 个真实设备 compute::linear 用例通过，标量门禁用例按其要求在独立
+`RMI_SCALAR=1` 进程通过（批量 include-ignored 未满足这个前提的那次失败不算产品回归）。
+Q4_0 的 CPU/Auto/Vulkan CLI/HTTP 普通与克隆重新运行通过；禁用 ICD 后，CLI/HTTP Auto
+回退输出均与 CPU WAV 相同，两个入口的严格 Vulkan 均拒绝启动。证据在
+`multiq/review-20261111/{entries,fallback}/`。新 Oracle 与既有 27 份固定历史 trace 再比较，
+每份 1053 个检查点仍全部通过；记录在 `review-20261111/fixed-history-results.json`。
 
 ## 仍未覆盖
 

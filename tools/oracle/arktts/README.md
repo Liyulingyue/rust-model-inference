@@ -67,7 +67,7 @@ Python Oracle 使用下载的原始 `configuration_arktts.py`、`modeling_arktts
 
 ```sh
 # 仓库内 .venv：Python 3.12，torch 2.9.1，transformers 4.57.3，numpy，safetensors，soundfile
-.venv/bin/python tools/oracle/arktts/official.py "$MODEL_DIR" "$MODEL_DIR/oracle" --frames 96
+.venv/bin/python -m tools.oracle.arktts.official "$MODEL_DIR" "$MODEL_DIR/oracle" --frames 96
 cargo test --locked --profile release-fast --lib arktts
 cargo test --locked --profile release-fast --lib audio_speech
 # 使用全新的 trace 路径；检查点文件会随 trace 一起写入磁盘。
@@ -75,7 +75,7 @@ RAYON_NUM_THREADS=4 RMI_ARKTTS_MODEL_DIR="$MODEL_DIR" \
   RMI_ARKTTS_ORACLE_DIR="$MODEL_DIR/oracle" RMI_PARITY_TRACE=/tmp/arktts-rust.jsonl \
   cargo test --locked --profile release-fast --features parity-trace \
   --test arktts_reference -- --ignored --nocapture
-OPENBLAS_NUM_THREADS=1 .venv/bin/python tools/oracle/arktts/compare.py \
+.venv/bin/python -m tools.oracle.arktts.compare \
   "$MODEL_DIR/oracle/trace.json" /tmp/arktts-rust.jsonl --output "$MODEL_DIR/comparison.json"
 .venv/bin/python -m unittest tools.oracle.arktts.test_compare tools.converter.arktts.test_convert_arktts
 ```
@@ -125,6 +125,63 @@ logits max_abs ≤ 5、waveform max_abs < 0.006 且 RMSE < 0.001；F16 使用
 次设备 calls、0 次主机 linear calls（卷积等非 linear host 操作仍存在）。证据由
 `tools/oracle/arktts/entries.py`、`projections.py`、`same_weight.py` 生成。
 
-性能记录见 [`performance.json`](performance.json) 和 `docs/develop/ARKTTS.md`。当前数字是
-同一台 M3 Max 上 `release-fast`、4 线程、4 帧短样例参考，不是发布构建吞吐承诺；端到端
-速度仍受主机 codec/attention 占比影响。
+完整的逐组合状态与证据路径见 [validation.md](validation.md#覆盖矩阵与改动边界)。
+导出格式集合来自共享 `quantize_gguf.BLOCK_FORMATS` 加 F32；没有为 ArkTTS 新增量化算法。
+K 格式保留不满足 256 元素块宽的主模型行和 codec 1216 宽行，不能把这些混合文件描述为全图低比特。
+
+### 完整矩阵复现
+
+在仓库根 `.venv` 安装上述 Oracle 依赖及 `gguf==0.17.1`，使用全新的 `RUN_DIR`，避免覆盖
+现有权重和 trace。CPU/Auto/Vulkan 共用每档相同的 GGUF；以下命令还分别运行真实 CLI/HTTP：
+
+```sh
+set -eu
+MODEL_DIR=/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-TTS-Realistic-Air
+RUN_DIR="$MODEL_DIR/reproduce-$(date +%Y%m%dT%H%M%S)"
+MATRIX_DIR="$RUN_DIR/multiq"
+mkdir -p "$MATRIX_DIR"
+cargo build --locked --profile release-fast --features vulkan,parity-trace \
+  --bin rust-model-inference --bin rust-model-server
+.venv/bin/python -m tools.oracle.arktts.official "$MODEL_DIR" \
+  "$RUN_DIR/oracle-validation-base" --suite validation --frames 4
+export RAYON_NUM_THREADS=4 RMI_ARKTTS_MODEL_DIR="$MODEL_DIR"
+for fmt in f32 f16 bf16 q8_0 q4_0 q4_1 q4_k q5_k q6_k; do
+  .venv/bin/python -m tools.converter.arktts.convert_arktts "$MODEL_DIR" \
+    --out-dir "$MATRIX_DIR/$fmt" --format "$fmt" --codec-format "$fmt"
+  upper=$(printf '%s' "$fmt" | tr '[:lower:]' '[:upper:]')
+  export RMI_ARKTTS_MAIN="$MATRIX_DIR/$fmt/Audio8-TTS-Realistic-Air-$upper.gguf"
+  export RMI_ARKTTS_CODEC="$MATRIX_DIR/$fmt/Audio8-TTS-Realistic-Air-codec-$upper.gguf"
+  export RMI_ARKTTS_ORACLE_DIR="$MATRIX_DIR/$fmt/oracle"
+  .venv/bin/python -m tools.oracle.arktts.official "$MODEL_DIR" "$RMI_ARKTTS_ORACLE_DIR" \
+    --suite validation --frames 4 --history "$RUN_DIR/oracle-validation-base/cases.json" \
+    --main-gguf "$RMI_ARKTTS_MAIN" --codec-gguf "$RMI_ARKTTS_CODEC"
+  profile=quantized
+  case "$fmt" in f32|bf16) profile=float ;; f16) profile=f16 ;; esac
+  for backend in cpu auto vulkan; do
+    export RMI_ARKTTS_COMPUTE="$backend"
+    trace="$MATRIX_DIR/$fmt/$backend.jsonl"
+    RMI_ARKTTS_REPLAY=1 RMI_PARITY_TRACE="$trace" RMI_COMPUTE_TRACE=1 \
+      cargo test --locked --profile release-fast --features vulkan,parity-trace \
+      --test arktts_reference -- --ignored --nocapture > "$MATRIX_DIR/$fmt/$backend.log" 2>&1
+    .venv/bin/python -m tools.oracle.arktts.compare "$RMI_ARKTTS_ORACLE_DIR/trace.json" \
+      "$trace" --profile "$profile" --output "$MATRIX_DIR/$fmt/$backend-metrics.json"
+    # No trace I/O: report free-running greedy differences and per-phase wall time.
+    cargo test --locked --profile release-fast --features vulkan,parity-trace \
+      --test arktts_reference -- --ignored --nocapture > "$MATRIX_DIR/$fmt/$backend-greedy.log" 2>&1
+  done
+done
+.venv/bin/python -m tools.oracle.arktts.projections "$MATRIX_DIR"
+for fmt in f32 f16 bf16 q8_0 q4_0 q4_1 q4_k q5_k q6_k; do
+  for backend in cpu auto vulkan; do
+    RMI_ARKTTS_PROJECTIONS="$MATRIX_DIR/$fmt/projections.json" RMI_ARKTTS_COMPUTE="$backend" \
+      cargo test --locked --profile release-fast --features vulkan,parity-trace --lib \
+      same_input_projections_match_independent_oracle -- --ignored --nocapture
+  done
+done
+.venv/bin/python -m tools.oracle.arktts.entries "$MATRIX_DIR" --output-dir "$RUN_DIR/entries"
+```
+
+量化的同权重 Oracle 通过独立 gguf-py 反量化，并适配共享算子的 activation QDQ；官方
+模型源码保持只读。固定历史检查计算误差，自由 greedy 报告离散分叉，两者分别留证。
+性能记录见 [`performance.json`](performance.json) 和 `docs/develop/ARKTTS.md`；它是同机
+`release-fast`、4 线程、4 帧参考，不能当作发布构建吞吐或长音频质量结论。

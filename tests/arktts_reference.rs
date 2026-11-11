@@ -22,6 +22,12 @@ fn real_checkpoint_matches_official() {
         std::env::var("RMI_ARKTTS_ORACLE_DIR")
             .unwrap_or(root.join("oracle").to_string_lossy().into_owned()),
     );
+    let main_path = std::env::var_os("RMI_ARKTTS_MAIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("Audio8-TTS-Realistic-Air-BF16.gguf"));
+    let codec_path = std::env::var_os("RMI_ARKTTS_CODEC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("Audio8-TTS-Realistic-Air-codec-F32.gguf"));
     for extra in [
         vec![],
         vec![
@@ -35,26 +41,13 @@ fn real_checkpoint_matches_official() {
         ],
     ] {
         let result = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
-            .args([
-                "--model",
-                root.join("Audio8-TTS-Realistic-Air-BF16.gguf")
-                    .to_str()
-                    .unwrap(),
-                "--prompt",
-                "hello",
-            ])
+            .args(["--model", main_path.to_str().unwrap(), "--prompt", "hello"])
             .args(extra)
             .output()
             .unwrap();
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("requires --tts"));
     }
-    let main_path = std::env::var_os("RMI_ARKTTS_MAIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("Audio8-TTS-Realistic-Air-BF16.gguf"));
-    let codec_path = std::env::var_os("RMI_ARKTTS_CODEC")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("Audio8-TTS-Realistic-Air-codec-F32.gguf"));
     let compute = match std::env::var("RMI_ARKTTS_COMPUTE").as_deref() {
         Ok("vulkan") => ComputePolicy::Vulkan,
         Ok("auto") => ComputePolicy::Auto,
@@ -87,6 +80,7 @@ fn real_checkpoint_matches_official() {
         let replay = std::env::var_os("RMI_ARKTTS_REPLAY").is_some();
         #[cfg(not(feature = "parity-trace"))]
         let replay = false;
+        let began = std::time::Instant::now();
         let frames = if replay {
             #[cfg(feature = "parity-trace")]
             {
@@ -109,16 +103,39 @@ fn real_checkpoint_matches_official() {
                 )
                 .unwrap()
         };
-        assert_eq!(frames, expected, "frames {}", case["name"]);
         println!(
-            "{}: {} prompt columns / {} greedy frames aligned",
+            "performance phase=generate case={} replay={replay} frames={} seconds={:.9}",
+            case["name"].as_str().unwrap(),
+            frames.len(),
+            began.elapsed().as_secs_f64()
+        );
+        if !replay && !data["exact_generated_codes"].as_bool().unwrap_or(true) {
+            let expected: Vec<Frame> =
+                serde_json::from_value(case["greedy_frames"].clone()).unwrap();
+            assert!(!frames.is_empty() && frames.len() <= max_frames);
+            assert!(frames.iter().flatten().all(|&id| id < 4096));
+            println!(
+                "greedy_comparison {}",
+                serde_json::json!({"case": case["name"], "actual": frames, "expected": expected})
+            );
+        } else {
+            assert_eq!(frames, expected, "frames {}", case["name"]);
+        }
+        println!(
+            "{}: {} prompt columns / {} generated frames checked",
             case["name"],
             prompt.len(),
             frames.len()
         );
     }
     let fixed: Vec<Frame> = serde_json::from_value(data["fixed_codes"].clone()).unwrap();
+    let began = std::time::Instant::now();
     let actual = codec.decode(&fixed).unwrap();
+    println!(
+        "performance phase=codec_decode frames={} seconds={:.9}",
+        fixed.len(),
+        began.elapsed().as_secs_f64()
+    );
     let expected = read_f32(&oracle.join("waveform.f32"));
     assert_eq!(actual.len(), expected.len());
     let max_abs = actual
@@ -144,9 +161,14 @@ fn real_checkpoint_matches_official() {
         "waveform max_abs={max_abs} RMSE={rmse}"
     );
     let expected: Vec<Frame> = serde_json::from_value(data["reference_codes"].clone()).unwrap();
-    let actual = codec
-        .encode(&read_f32(&oracle.join("reference.f32")))
-        .unwrap();
+    let reference = read_f32(&oracle.join("reference.f32"));
+    let began = std::time::Instant::now();
+    let actual = codec.encode(&reference).unwrap();
+    println!(
+        "performance phase=codec_encode samples={} seconds={:.9}",
+        reference.len(),
+        began.elapsed().as_secs_f64()
+    );
     if data["exact_reference_codes"].as_bool().unwrap_or(true) {
         assert_eq!(actual, expected, "reference encoder codes");
     } else {
