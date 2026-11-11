@@ -16169,6 +16169,104 @@
       "configured_binary": "target/sophon/final-reviewed-rust-model-inference",
       "configured_binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
       "numerical_reference": "Last known running as PID466421; result/exit uncollected. No numerical acceptance or failure claimed."
+    },
+    {
+      "precision": "Q6_K",
+      "kv": "F16",
+      "activation": "runtime",
+      "reference_execution": "cached",
+      "attempt_id": "thinker-q6-f16kv-31344-v1",
+      "host_port": 31344,
+      "status": "Rust execution completed; independent reference result and exit UNKNOWN after transport loss. Not numerical acceptance.",
+      "steps": 8,
+      "threads": 4,
+      "compute": "cpu",
+      "max_context": 256,
+      "prefill_batch_size": 32,
+      "temperature": 0,
+      "model": "models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+      "model_sha256": "c7baf117b3bf27385802286fba1dbbcf6fcb41b1bf6678cbae5de43932b579da",
+      "rust_exit_code": 0,
+      "rust_cli_wall_seconds": 15.98737115971744,
+      "rust_teacher_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "rust_log": "target/sophon/thinker-q6-f16kv-31344-v1/rust.log",
+      "rust_log_sha256": "5b07a16762a803bb2c84ea4bb0a9f0b3139dfb2ef3af56f61fefa9d582743834",
+      "binary_provenance": {
+        "base_source_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+        "changed_source_files": [
+          "src/app/jev/grouped.rs",
+          "src/app/server/api.rs",
+          "src/app/server/audio_chat.rs"
+        ],
+        "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+        "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+        "source_entries": 618,
+        "build_report": "target/sophon/grouped-audio-31344-build.json",
+        "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+        "cli": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+          "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+          "size": 41362856
+        }
+      },
+      "gate_declared_before_launch": {
+        "maximum_relative_rmse": 0.03,
+        "minimum_cosine": 0.999
+      },
+      "source_unchanged_before_launch": true,
+      "python_source_manifest": "target/sophon/thinker-resumed-31344-v3/python-source-manifest.json",
+      "python_source_manifest_sha256": "75a361001820dc947bd0ebd157e1a52306e5b12c40fae2a248cb27c875c0e2a8",
+      "state_report": "target/sophon/thinker-q6-f16kv-31344-v1/state.json",
+      "reference_output": "target/sophon/thinker-q6-f16kv-31344-v1/oracle/result.json",
+      "local_driver": "target/sophon/run-q6-f16kv-31344.py",
+      "local_driver_sha256": "2d5749923ea760df3f66216df4c6bf31f1f729898cf91c32ea038aaf0689e336",
+      "transport_interruption": {
+        "recorded_at_utc": "2026-11-11T18:14:50.355796+00:00",
+        "host_port": 31344,
+        "scope": "Separate Q6_K/F16-KV CPU comparison; original Q6_K/F32-KV numerical FAIL unchanged",
+        "driver": "target/sophon/run-q6-f16kv-31344.py",
+        "local_driver_sha256": "2d5749923ea760df3f66216df4c6bf31f1f729898cf91c32ea038aaf0689e336",
+        "evidence_root": "target/sophon/thinker-q6-f16kv-31344-v1",
+        "last_observed_status": "RUNNING oracle",
+        "last_observed_pid": 34613,
+        "rust_exit_code": 0,
+        "rust_cli_seconds": 15.98737115971744,
+        "rust_log_sha256": "5b07a16762a803bb2c84ea4bb0a9f0b3139dfb2ef3af56f61fefa9d582743834",
+        "rust_teacher_ids": [
+          108386,
+          3837,
+          104198,
+          99473,
+          44729,
+          3837,
+          15469,
+          111895
+        ],
+        "reference_result_collected": false,
+        "reference_exit_collected": false,
+        "numerical_acceptance": "UNKNOWN / not verified",
+        "transport_observations": [
+          "Previously working en0-bound SSH wrapper subsequently exits 255: Connection closed by UNKNOWN port 65535",
+          "Direct SSH exits 255: Connection closed by 36.150.116.206 port 31344",
+          "Unbound TCP connection succeeded once while en0-bound TCP probe returned Connection refused; machine state/restart/port-change cause not established"
+        ],
+        "remote_model_processes_killed_or_restarted": false,
+        "next_action": "On restored/new user-supplied access, inspect the existing original process and artifacts first; do not duplicate a potentially running reference."
+      },
+      "limits": [
+        "Rust greedy IDs match the prior Rust F32-KV run; the F16-KV reference has not been collected, so no same-file reference greedy or numerical conclusion is possible.",
+        "Neither local state nor a prior live PID establishes that the unobservable remote process remains running now. On recovery inspect original process/results first.",
+        "This CPU CLI execution adds no HTTP, Auto, Vulkan, task-quality or model-completion evidence."
+      ]
     }
   ],
   "scratch_lifetime": {

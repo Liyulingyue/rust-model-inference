@@ -1943,5 +1943,33 @@
       "Synthetic tone verifies protocol/probability consistency only; matching-format precision, task quality, Auto and Vulkan are not established.",
       "Python production tools are unchanged; the historical 68/68 Python suite was not rerun for these Rust-only changes."
     ]
+  },
+  "ci_grouped_audio_checkpoint": {
+    "status": "PASS",
+    "head": "ef0a969c7e748d411c25ebde1356db7e42d90e94",
+    "workflow": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523",
+    "captured_report": "target/sophon/ci-ef0a969-report.json",
+    "captured_report_sha256": "2fa615ae347c4969be91d5dfd208928935c26a12411bb0ac9721e663bd2e38e2",
+    "jobs": [
+      {
+        "name": "Vulkan compile and shaders",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523/job/130710367197"
+      },
+      {
+        "name": "x86 dispatch regressions",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523/job/130710367668"
+      },
+      {
+        "name": "Rustfmt",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523/job/130710367856"
+      }
+    ],
+    "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+    "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+    "all_618_source_hashes_match_local_checkout": true,
+    "scope": "CI applies to exact code/evidence head ef0a969. New documentation-only checkpoints preserve its Rust/Cargo input hashes, but their own CI status is separate. It does not establish failed real-model numerical acceptance."
   }
 }

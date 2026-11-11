@@ -6,6 +6,8 @@ Read-only references: Sophon `541d83c29ca68dd5235d2e344a2b72d29e6299c2` and Dupl
 
 All nine thinker exports have CPU/F32-KV numerical records with separately identified artifacts: F32/F16/BF16 pass; Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K fail the original block gates. The replacement-host Q6_K run has greedy agreement 8/8 but seven numerical failures, max rRMSE 0.1524552110 and minimum cosine 0.9883425540. This fresh result does not determine the retired host's uncollected Q6 outcome, or establish HTTP/device acceptance for those formats.
 
+An additional Q6_K/F16-KV CPU CLI completes eight prediction rows, but its independent reference result and exit remain **UNKNOWN** after SSH transport loss. The matching Rust token IDs are execution evidence only. This pending attempt does not replace the completed F32-KV numerical failure. Exact-head CI for code checkpoint `ef0a969` passes all three jobs; see [regression evidence](shared-regression-results.json).
+
 ## Remote assets
 
 Download on the inference host. The source supports direct remote ModelScope HTTPS downloads, so neither a Mac model cache nor an intermediate Mac weight file is necessary. Check the filesystem backing `models/`, not just `/`: the validation host's workspace has a separate capacity cap, so GGUF exports use a `models/` symlink backed by its larger remote filesystem.
