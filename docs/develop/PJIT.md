@@ -1,43 +1,51 @@
 # P-JiT 21K (Experimental / partial)
 
-The released Linum-AI P-JiT model generates still images directly in pixel space.
-It combines a 2.184B-parameter DiT with Qwen3.5-4B caption features from raw blocks
-7, 15 and 27. No VAE or image projector is required.
-
-The existing inference binary accepts a `pjit` DiT GGUF and `--text-encoder` Qwen
-GGUF. The existing server exposes `POST /v1/images/generations`. Model semantics,
-caption extraction, padding/cropping, APG and Euler sampling are shared in
+The released Linum-AI model generates still images directly in pixel space. It
+combines a 2.184B-parameter DiT with Qwen3.5-4B raw block 7/15/27 caption features;
+no VAE or image projector is required. The existing inference binary accepts a
+`pjit` DiT GGUF plus `--text-encoder`; the existing server exposes
+`POST /v1/images/generations`. Model computation is shared in
 `src/models/diffusion/pjit`. See the [run instructions](../../tools/oracle/pjit/README.md).
 
-Storage formats implemented by the converter and loader are F32, F16, BF16,
-Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. Unaligned K rows retain source float
-storage. All arithmetic uses the repository's existing kernels; BF16 storage
-does not mean native BF16 activation arithmetic. CPU uses shared SIMD and the
-compute pool. Auto/Vulkan offloads DiT projections and supported attention;
-normalization, RoPE, elementwise work and sampling remain on the host.
+Converters/loaders support F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K.
+Unaligned K rows retain source floats. Storage, shared activation rounding and
+F32 accumulation are recorded separately; BF16 storage does not imply native
+BF16 activation arithmetic. All 18 exports have verified
+[hash/type manifests](../../tools/oracle/pjit/gguf_hashes.json). Weights remain on
+the authorized Linux host; only small validation records/images are on the Mac.
 
-Caption extraction currently recomputes three CPU Qwen prefixes through the
-public Qwen API. The resident GPU decoder does not expose raw intermediate
-states at multiple layers. A follow-up in the shared compute/Qwen layer must
-add that API and verify the caption matrix before this becomes a full device
-pipeline. The new adapter does not change the existing Qwen implementation.
+All 27 storage/backend combinations passed real CLI and HTTP requests, including
+PNG shape and malformed-request checks. Corresponding CLI/HTTP PNG bytes match.
+Float DiT single-forward CPU/Auto/Vulkan gates and the post-APG-fix seven-step F32
+sampling chain pass. The chain's final NRMSE is 0.0197263 / cosine 0.99980654,
+superseding the pre-fix 0.03215 failure. A real 1024×1024 / 50-step F16 CPU
+generation also completed; its official same-feature/noise replay passes all
+50 gates (final NRMSE 0.0196754, cosine 0.99980697). Decoded PNG RGB RMSE is
+1.15923 on the 0–255 scale (PSNR 46.85 dB). This is one prompt, not a broad
+perceptual-quality evaluation. Quantized end-to-end gates remain open;
+independent same-input projection replay is reported separately, without hiding
+full-forward failures or changing thresholds. Exact token IDs for eight Unicode,
+whitespace, special-token and truncation cases match the official template.
+See the [full matrix and measurements](../../tools/oracle/pjit/validation.md).
 
-Numerical status: float DiT single-forward checks passed; quantized full-forward
-and the recorded seven-step sampler did not meet the predeclared NRMSE gate.
-Q8 same-input independent replay passed all 217 projections (worst NRMSE
-5.41e-7); the end-to-end failure remains a separate open gate.
-Tokenizer contracts passed. Small CLI/HTTP CPU and Auto runs passed for the
-first six formats. Remaining device transport checks, K text checks, final
-multi-step rerun, default-size quality and warm performance checks were blocked
-when the authorized SSH host stopped accepting connections.
-The replacement host also became unreachable during validation; its source
-hash manifest and observed Q8 replay summary are preserved in the Oracle records.
-This model is not
-listed as fully verified. Exact results and the complete matrix are in
-[validation.md](../../tools/oracle/pjit/validation.md).
+CPU uses existing SIMD kernels and the compute pool. Auto/Vulkan executes DiT
+projections and supported attention on the device; norms, RoPE, elementwise work,
+sampling and caption extraction stay on CPU. Caption extraction recomputes three
+prefixes through public Qwen APIs. The resident device decoder exposes normalized
+final states/logits, rather than raw features at several layers; a shared
+compute/Qwen follow-up must add that API and validate the caption matrix. No
+other model or shared kernel implementation was changed for this adapter.
 
-Diagnostic same-host 33×35 / 18-caption-token F32 prediction timings were
-7.803182 s Rust CPU and 44.780257 s Rust Vulkan (including cold session/upload),
-versus 2.341076 s official PyTorch ROCm F32 (already loaded, checkpoint I/O).
-These scopes do not support a speed ratio. The release/warm benchmark was
-interrupted; see [performance.json](../../tools/oracle/pjit/performance.json).
+Same-host release warm F32 single-forward baseline (33×35, 18 caption tokens,
+batch 1, four repeats, median of the final three): CPU **0.771232 s**, Vulkan
+**3.058170 s**, official PyTorch ROCm **0.197731 s**. The Vulkan path remains
+slower. It includes synchronous per-projection transfers/submits and host work.
+The container has a 16-CPU quota and 55 GiB RAM despite reporting 128 logical CPUs;
+other work shares the host. Timing scopes, cold samples and limits are in
+[performance.json](../../tools/oracle/pjit/performance.json).
+
+The model batches up to 256 projection rows and reuses spatial RoPE phases across
+tokens/heads. Default-size output, preserved 1024×1024 old/new forward checks and
+remaining numerical limits are recorded in the validation matrix. This remains
+an Experimental partial adaptation until the numerical and shared-device gaps
+are closed.

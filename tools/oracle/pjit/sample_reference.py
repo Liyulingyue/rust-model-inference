@@ -111,7 +111,8 @@ def main():
                 baseline_x = baseline_x + (next_t - t) * ((baseline_x - (baseline_state - t * baseline_guided)) / t)
                 result['oracle_batch_one_vs_batch_two'] = metrics(baseline_x[0, :, 0].cpu().numpy(), x[0, :, 0].cpu().numpy())
             results.append(result)
-    args.output.write_text(json.dumps(results, indent=2))
+            args.output.write_text(json.dumps(results, indent=2))
+            print(f'Oracle sampling step {index + 1}/{len(actual)}', flush=True)
     from PIL import Image
     pixels = ((x[0, :, 0].clamp(-1., 1.) + 1.) * 127.5).round().byte().permute(1, 2, 0).cpu().numpy()
     Image.fromarray(pixels).save(args.output.with_suffix('.png'))

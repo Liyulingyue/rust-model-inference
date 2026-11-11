@@ -5,9 +5,12 @@ Qwen3.5-4B caption encoder, with raw block outputs 7/15/27 concatenated to 7680
 features per token. There is no VAE. Rust uses existing SIMD/thread-pool kernels
 and `LinearExecutor`; floating-point results are compared numerically.
 
-**Experimental / partial adaptation.** Float DiT checks pass, but quantized
-end-to-end and multi-step gates do not yet pass. The caption encoder runs on
-CPU even when DiT uses Vulkan. See [validation](validation.md) before using it.
+**Experimental / partial adaptation.** Float DiT single-forward checks and the
+post-fix seven-step F32 and default 1024px/50-step F16 sampling replays pass.
+Quantized end-to-end numerical gates remain unresolved. The caption encoder
+runs on CPU even when DiT uses Vulkan.
+All 27 format/backend CLI and HTTP combinations have real transport evidence;
+see [validation](validation.md) for their separate numerical results.
 
 Pinned inputs:
 
@@ -51,7 +54,7 @@ python -m tools.converter.utils.quantize_gguf models/Qwen3.5-4B/text-bf16.gguf m
 cargo build --locked --profile release-fast --features vulkan,parity-trace --bin rust-model-inference --bin rust-model-server
 
 target/release-fast/rust-model-inference \
-  --model models/pjit-21k/pjit-f32.gguf \
+  --model models/pjit-21k/pjit-f16.gguf \
   --text-encoder models/Qwen3.5-4B/text-bf16.gguf \
   --prompt 'A red cube on a white table.' --resolution 1024 \
   --steps 50 --seed 42 --threads 8 --compute cpu --out target/pjit.png
@@ -107,10 +110,23 @@ PYTHONPATH=. python tools/oracle/pjit/text_reference.py --oracle target/pjit-ora
 # Add --activation-quant for quantized caption files.
 ```
 
-Capture a complete CLI run with `RMI_PARITY_FILTER=pjit.text,pjit.initial_noise,pjit.euler`
-and replay its identical inputs with `sample_reference.py --oracle PATH --weights PATH
---trace TRACE --output METRICS`. This exercises official F32 DiT/APG across the
-entire chain; it does not claim equality with native BF16 autocast.
+Both reference helpers accept `--batch-size 2`: duplicate the identical input
+and compare the first sample with batch one to measure the Oracle's own
+accumulation/quantization sensitivity. This diagnostic keeps the GGUF, device
+and activation QDQ fixed. It does not replace or relax a failed runtime gate.
+
+Capture a complete CLI run with
+`RMI_PARITY_FILTER=pjit.text,pjit.initial_noise,pjit.euler,pjit.prediction` and
+replay its identical inputs with `sample_reference.py --oracle PATH --weights PATH
+--trace TRACE --output METRICS`. Add `--gguf PATH` for the exact stored float
+weights. The helper also compares DiT and Euler/APG on each traced Rust input,
+separating accumulated BF16-boundary drift from a local operation error. It does
+not claim equality with native BF16 autocast. Quantized sampling needs activation
+QDQ as well; the sampling helper alone is not a quantized-kernel oracle.
+`--batch-one-baseline` also measures independent batch-one/batch-two Oracle
+chains. Metrics are saved after every step so long replays retain progress.
+Use a fresh trace path for each run: JSONL traces append records, and the replay
+helper expects exactly one complete invocation.
 
 `RMI_PARITY_TRACE=target/pjit.jsonl` records patch, block and final output
 checkpoints; `RMI_PARITY_FILTER` can select exact names. The reference uses hooks
@@ -118,3 +134,7 @@ without editing the pinned source. The caption fixture records original token
 IDs; `--text-f32` measures F32 computation over the original BF16 text weights.
 See [validation](validation.md) for thresholds, results and remaining limits,
 and [performance](performance.json) for same-host measurements.
+
+Exported GGUF hashes/types are in [gguf_hashes.json](gguf_hashes.json), exact
+tokenizer IDs in [tokenizer_cases.json](tokenizer_cases.json), and the final
+format/backend commands and metrics in [matrix_results.json](matrix_results.json).

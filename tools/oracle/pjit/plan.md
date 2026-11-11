@@ -18,9 +18,13 @@ Text feature extraction composes existing public Qwen3.5 APIs locally; no trunk 
 - [x] Contract/converter checks; explicit arch and exact tensor inventory.
 - [x] DiT, padding/cropping, text features, APG and deterministic sampler checks.
 - [x] CLI and HTTP share models implementation and validate incompatible options.
-- [ ] Full real-weight matrix: see validation.md for failures and unfinished rows.
+- [x] Run all 27 DiT and nine caption numerical rows; retain failed gates explicitly.
+- [x] All 27 CLI/HTTP combinations, Auto CPU fallback and strict no-device rejection.
+- [x] All 12 quantized CPU/Vulkan projection replays (217 operations each).
+- [x] Official batch-one/two sensitivity: all six quantized DiT and nine caption formats.
 - [x] Self-review and repair findings; local checks and documentation.
-- [ ] Remote follow-up after SSH availability is restored; release/default-size checks.
+- [x] Final release-fast/release CLI/server builds and final F16 Auto entry smoke.
+- [x] Default 1024px/50-step F16 output and official same-input replay; all 50 gates pass.
 
 Coverage: DiT and Qwen text F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K;
 CPU/Auto/Vulkan × CLI/HTTP. K formats retain source floats for unaligned rows.
@@ -31,3 +35,13 @@ Thresholds before measurement: discrete shapes/token IDs exact; F32 DiT referenc
 max_abs <= 0.002 and cosine >= .99999; lossy same-weight reference normalized RMSE <= .02,
 cosine >= .999; quantization quality measured separately against F32, not an implementation gate.
 Native BF16 sampling vs F32 arithmetic measured separately; no bitwise float acceptance gate.
+
+Quantized full-forward numerical gates remain failed; completed measurements do
+not imply acceptance. The existing gates stay unchanged after the Oracle's own
+batch-sensitivity diagnostic. Keep this layer Experimental / partial.
+
+Shared compute/Qwen follow-up layer: expose raw resident device features at
+blocks 7/15/27 for all nine storage formats, then replace local CPU prefix
+recomputation and validate every caption CPU/Auto/Vulkan row. The current shared
+API exposes normalized final states/logits, so full-device caption extraction
+cannot be composed through its public interface in this model-local layer.
