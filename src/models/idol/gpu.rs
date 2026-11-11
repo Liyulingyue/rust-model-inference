@@ -416,6 +416,41 @@ mod tests {
         }
     }
 
+    /// The device attention on a given device, without the compute policy.
+    ///
+    /// The policy refuses a software Vulkan device, and the check has to run
+    /// on one in CI, so the runtime is driven directly.
+    fn device_attention(
+        context: &'static crate::vulkan::VulkanContext,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        width: usize,
+        heads: usize,
+    ) -> Vec<f32> {
+        use crate::vulkan::ops::AttentionRuntime;
+        let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+        let mut output = vec![0.; q.len()];
+        runtime
+            .forward(
+                q,
+                k,
+                v,
+                &mut output,
+                crate::ops::nn::AttentionSpec {
+                    query_tokens: q.len() / width,
+                    key_tokens: k.len() / width,
+                    query_heads: heads,
+                    key_value_heads: heads,
+                    head_dim: width / heads,
+                    causal: false,
+                    scale: ((width / heads) as f32).sqrt().recip(),
+                },
+            )
+            .unwrap();
+        output
+    }
+
     /// The device attention has to agree with the CPU kernel on the shapes
     /// Idol uses, and it has to keep agreeing after the sampled cross-check
     /// was added.
@@ -424,11 +459,13 @@ mod tests {
     /// and needs no model files. It is the regression that keeps the device
     /// path inside the numerical contract the oracle measured, because the
     /// oracle itself needs the released weights and the remote host.
+    ///
+    /// The device is opened directly, the way the other device regressions
+    /// do, because a software Vulkan device is not an accelerator and the
+    /// compute policy refuses it.
     #[test]
     fn device_attention_agrees_with_the_cpu_kernel_on_the_idol_shapes() {
-        let _scope = crate::compute::ComputePolicy::Vulkan
-            .configure_cli()
-            .unwrap();
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
         // The shapes the released model uses: the denoiser attends over its
         // latent tokens with 16 heads, the vision tower over 4101 patches
         // with 20 heads, and the VAE over 1024 tokens with one head.
@@ -443,8 +480,7 @@ mod tests {
                 .collect();
             let k: Vec<_> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
             let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
-            let actual = attention(&q, &k, &v, width, heads)
-                .expect("the device attention has to produce a result");
+            let actual = device_attention(context, &q, &k, &v, width, heads);
             assert!(actual.iter().all(|value| value.is_finite()));
             // The CPU reference of every token costs as much as the
             // attention itself, so the comparison runs on the rows the
@@ -475,9 +511,7 @@ mod tests {
     /// be caught by the cross-check, not used.
     #[test]
     fn a_stale_device_attention_is_not_used() {
-        let _scope = crate::compute::ComputePolicy::Vulkan
-            .configure_cli()
-            .unwrap();
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
         let queries = 64usize;
         let keys = 64usize;
         let heads = 4usize;
@@ -488,7 +522,7 @@ mod tests {
             .collect();
         let k: Vec<_> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
         let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
-        let actual = attention(&q, &k, &v, width, heads).expect("the device attention");
+        let actual = device_attention(context, &q, &k, &v, width, heads);
         // A result that is off by a large amount is what a device that
         // returns the numbers of an earlier call produces, and the check
         // has to tell it apart from a healthy one.
