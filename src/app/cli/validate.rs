@@ -10,6 +10,104 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if options.geometry_mode.is_some() || options.num_gaussians.is_some() {
         return Err("--geometry-mode and --num-gaussians require --image-to-3d".into());
     }
+    if options.enhance {
+        if options.model.as_os_str().is_empty()
+            || (!options.serve && (options.audio.is_none() || options.out.is_none()))
+        {
+            return Err(
+                "--enhance requires --model, --audio and --out (server: --model only)".into(),
+            );
+        }
+        if (options.serve && (options.audio.is_some() || options.out.is_some()))
+            || options.system_one_request.is_some()
+            || options.decision_request.is_some()
+            || options.decision_thinker.is_some()
+            || options.adapter.is_some()
+            || options.jev
+            || options.rerank
+            || options.embedding
+            || options.tts
+            || options.yue2
+            || options.dreamx
+            || options.astronex
+            || options.timestral_request.is_some()
+            || options.laya_request.is_some()
+            || options.wevisone_request.is_some()
+            || options.wevisone_decoder.is_some()
+            || options.mmproj.is_some()
+            || options.image.is_some()
+            || options.video.is_some()
+            || options.prompt.is_some()
+            || options.output.is_some()
+            || options.vae.is_some()
+            || options.text_encoder.is_some()
+            || options.planner.is_some()
+            || options.perception.is_some()
+            || options.longcat_kind.is_some()
+            || options.components.is_some()
+            || options.input.is_some()
+            || options.ref_audio.is_some()
+            || options.source_audio.is_some()
+            || options.edit
+            || options.qwen_image_turbo
+            || options.gliner2_decide
+            || options.gliner2_boundary
+            || options.clm_head.is_some()
+            || options.temperature.is_some()
+            || options.max_tokens.is_some()
+            || options.top_k.is_some()
+            || options.top_p.is_some()
+            || options.thinking
+            || options.dump_logits
+            || options.bench
+            || options.jinja
+            || options.chat_template.is_some()
+            || options.chat_template_file.is_some()
+            || options.steps.is_some()
+            || options.seed.is_some()
+            || options.width.is_some()
+            || options.height.is_some()
+            || options.noise.is_some()
+            || !options.references.is_empty()
+            || options.cfg.is_some()
+            || options.dry_run
+            || options.instruction.is_some()
+            || options.ref_text.is_some()
+            || options.source_text.is_some()
+            || options.target_text.is_some()
+            || options.use_xvector_supplied
+            || options.tts_model.is_some()
+            || options.tts_mmproj.is_some()
+            || options.qwen_omni_bf16.is_some()
+            || options.srt
+            || options.chunk_seconds.is_some()
+            || options.vad.is_some()
+            || options.jev_context.is_some()
+            || !options.jev_questions.is_empty()
+            || options.jev_positive.is_some()
+            || options.jev_output_json
+            || options.jev_multi
+            || !options.jev_blocks.is_empty()
+            || options.gliner2_schema.is_some()
+            || options.rerank_query.is_some()
+            || !options.rerank_documents.is_empty()
+            || options.rerank_documents_file.is_some()
+            || options.rerank_instruction.is_some()
+            || options.rerank_max_tokens.is_some()
+            || options.language.is_some()
+        {
+            return Err("--enhance cannot be combined with generation, JEV, other task modes or server-side --audio/--out".into());
+        }
+        // The mode validates itself; no compute-policy restriction applies
+        // because RE-USE has no device code.
+        return Ok(());
+    }
+    if options.decision_request.is_some() {
+        return crate::app::decision::validate_options(options);
+    }
+    if options.decision_thinker.is_some() && !options.jev && !options.serve {
+        return Err("--decision-thinker requires --decision-request, --jev or server mode".into());
+    }
     if options.adapter.is_some() && options.system_one_request.is_none() {
         return Err("--adapter requires --system-one-request".into());
     }
@@ -21,6 +119,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             return Err("--system-one-request supports CPU only; use --compute cpu".into());
         }
         if options.serve
+            || options.enhance
             || options.jev
             || options.rerank
             || options.embedding

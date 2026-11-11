@@ -166,3 +166,29 @@ one sequential accumulator. That would need a local reimplementation inside
   canvas origin `pos_0 - 1`) is still an assumption.
 * Everything after `pos_embed` is untested: the split means the 27 ViT blocks,
   the `vit_merger` and the final projector have never been compared at all.
+
+## GPU projection offload (2026-11-10)
+
+`--compute auto|vulkan` now submits the vision tower's projections to the shared
+linear executor: the patch embedding, each ViT layer's q/k/v/o and FFN pair, the
+`vit_merger` attention and downsample MLP, and the `mm` projector. The
+attention, layer norms, slicing and canvas positions stay on the CPU, and the
+CPU path is unchanged — it is still the original `dot_f32` loop, so the oracle
+comparison above is untouched.
+
+Measured on this host (Linux x86_64, NVIDIA L20, `release-fast --features
+vulkan`, 8 threads, F16 KV, `--jinja`), ModelScope `OpenBMB/MiniCPM-V-4.7-1B-gguf`
+Q4_0 text tower + `mmproj-model-f16.gguf`, 448x448 image:
+
+| | CPU | Auto (Vulkan) |
+|---|---|---|
+| First 5 vision embeddings | `-0.12874526, -0.10658422, -0.8893334, -0.16679844, -0.31190887` | `-0.12877294, -0.10657281, -0.889336, -0.16679639, -0.31192762` |
+| Device submissions | 0 | 172, 2.17 GB of static uploads |
+
+The CPU column is bit-identical to the pre-offload implementation (verified by
+re-running the same request with the change stashed). The device path differs by
+about 3e-5 on these embeddings, the same band as the tower's other float paths.
+
+Not measured: the 35B-A3B tower (shares the projector implementation), other
+image sizes and slice counts, and the end-to-end text, which the device path
+changes the same way it changes the qwen35 text path.

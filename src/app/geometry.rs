@@ -12,7 +12,10 @@ pub fn validate_options(o: &CliOptions) -> Result<(), String> {
     }
     o.validate_compute_mode()?;
     o.compute_policy().check_build()?;
-    if o.jev
+    if o.enhance
+        || o.decision_request.is_some()
+        || o.decision_thinker.is_some()
+        || o.jev
         || o.embedding
         || o.rerank
         || o.tts
@@ -286,6 +289,48 @@ mod tests {
             .contains("--image-to-3d"));
         o.num_gaussians = None;
         o.geometry_mode = Some("real".into());
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("--image-to-3d"));
+    }
+
+    #[test]
+    fn enhancement_and_decision_options_do_not_bypass_geometry_validation() {
+        let mut o = CliOptions {
+            image_to_3d: true,
+            model: "idol".into(),
+            image: Some("a.png".into()),
+            out: Some("a.ply".into()),
+            ..CliOptions::default()
+        };
+        o.enhance = true;
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("Idol"));
+        o.enhance = false;
+        o.decision_request = Some("request.json".into());
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("Idol"));
+        o.decision_request = None;
+        o.decision_thinker = Some("thinker.gguf".into());
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("Idol"));
+
+        let mut o = CliOptions {
+            model: "model".into(),
+            enhance: true,
+            audio: Some("in.wav".into()),
+            out: Some("out.wav".into()),
+            geometry_mode: Some("real".into()),
+            ..CliOptions::default()
+        };
+        assert!(crate::app::validate_cli_options(&o)
+            .unwrap_err()
+            .contains("--image-to-3d"));
+        o.enhance = false;
+        o.decision_request = Some("request.json".into());
         assert!(crate::app::validate_cli_options(&o)
             .unwrap_err()
             .contains("--image-to-3d"));

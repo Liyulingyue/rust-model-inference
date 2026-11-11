@@ -38,6 +38,8 @@ jobs:
       - run: 'cargo test --locked --lib models::vela3::'
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
+      - run: 'cargo test --locked --lib models::nemotron_reuse::'
+      - run: cargo test --locked --test nemotron_reuse_cli
       - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
       - run: python3 -m unittest discover -s tools/oracle/idol -p 'test_*.py'
       - run: cargo test --locked --lib ggml_dots_honor_scalar_dispatch

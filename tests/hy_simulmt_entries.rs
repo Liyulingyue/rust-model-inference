@@ -1,6 +1,6 @@
 use rust_model_inference::app::{
-    run_jev_decision_data, run_jev_grouped_decision_data, JevGroupInput, JevGroupedQuestionInput,
-    JevMode, JevQuestionInput,
+    run_jev_decision_data, run_jev_grouped_decision_data, CliOptions, JevGroupInput,
+    JevGroupedQuestionInput, JevMode, JevQuestionInput,
 };
 use rust_model_inference::core::tensor::{MetaValue, TensorInfo, TensorSource};
 use std::sync::Arc;
@@ -36,6 +36,7 @@ fn hy_text_jev_is_rejected() {
         1,
         8,
         Default::default(),
+        CliOptions::DEFAULT_MAX_CONTEXT,
     )
     .unwrap_err();
     assert!(error.contains("--jev is not yet supported"), "{error}");
@@ -57,6 +58,7 @@ fn hy_grouped_jev_is_rejected() {
         1,
         8,
         Default::default(),
+        CliOptions::DEFAULT_MAX_CONTEXT,
     )
     .unwrap_err();
     assert!(

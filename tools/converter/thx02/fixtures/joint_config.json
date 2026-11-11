@@ -1,0 +1,9 @@
+{
+  "version": 3,
+  "template": "joint-question-inline-readout-v1",
+  "marker": "<|fim_suffix|>",
+  "readout_offset": 0,
+  "max_questions": null,
+  "max_length": null,
+  "usage": "nonpadding_joint_sequence_including_template_and_image_positions"
+}

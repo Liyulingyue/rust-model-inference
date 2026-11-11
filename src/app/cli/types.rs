@@ -18,6 +18,8 @@ pub struct CliOptions {
     pub image_to_3d: bool,
     pub geometry_mode: Option<String>,
     pub num_gaussians: Option<usize>,
+    /// Parsed option names, excluding their values, for capability-specific validation.
+    pub supplied_flags: Vec<String>,
     pub yue2: bool,
     pub dreamx: bool,
     pub astronex: bool,
@@ -49,6 +51,7 @@ pub struct CliOptions {
     /// Defaults to one task built from `--jev-question` + `--jev-option`.
     pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
+    pub enhance: bool,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
@@ -151,6 +154,8 @@ pub struct CliOptions {
     pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
     pub system_one_request: Option<PathBuf>,
+    pub decision_request: Option<PathBuf>,
+    pub decision_thinker: Option<PathBuf>,
     /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
     /// weights; the d3 variants need both.
     pub adapter: Option<PathBuf>,
@@ -224,7 +229,7 @@ impl CliOptions {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; only the \
+                         note=no complete device path for this mode; any \
                          offloadable parts run on the device"
                     );
                 }

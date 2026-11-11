@@ -13,6 +13,26 @@ use crate::ops::kernel::Weight;
 
 pub type Linear = Weight<'static>;
 
+/// A ViT/projector projection: weight plus bias, dispatchable to the device.
+///
+/// The weights are still eagerly materialised as `Vec<f32>` (the forward is
+/// pinned to an oracle trace), so this borrows nothing and owns its data.
+pub type Projection = crate::ops::nn::Linear<'static>;
+
+/// Decode one `[n_out][n_in]` matrix and its bias into a [`Projection`].
+fn projection(
+    source: &dyn TensorSource,
+    weight_name: &str,
+    bias_name: &str,
+    n_in: usize,
+    n_out: usize,
+) -> Result<Projection, String> {
+    let rows = decode_param(source, weight_name, n_in, n_out)?;
+    let bias = decode_param(source, bias_name, 1, n_out)?;
+    crate::ops::nn::Linear::from_weight(linear_from_rows(rows, n_in, n_out), Some(bias))
+        .map_err(|error| format!("{weight_name}: {error}"))
+}
+
 /// Decode a F32/F16/BF16 parameter slice into row-major `[n_out][n_in]`.
 pub fn decode_param(
     source: &dyn TensorSource,
@@ -100,60 +120,42 @@ pub fn decode_matrix(
     }
 }
 
-#[derive(Debug, Clone, Default)]
 pub struct ViTLayer {
     pub ln1_w: Vec<f32>,
     pub ln1_b: Vec<f32>,
-    pub q_w: Vec<f32>,
-    pub q_b: Vec<f32>,
-    pub k_w: Vec<f32>,
-    pub k_b: Vec<f32>,
-    pub v_w: Vec<f32>,
-    pub v_b: Vec<f32>,
-    pub o_w: Vec<f32>,
-    pub o_b: Vec<f32>,
+    pub q: Projection,
+    pub k: Projection,
+    pub v: Projection,
+    pub o: Projection,
     pub ln2_w: Vec<f32>,
     pub ln2_b: Vec<f32>,
-    pub ff_up_w: Vec<f32>,
-    pub ff_up_b: Vec<f32>,
-    pub ff_down_w: Vec<f32>,
-    pub ff_down_b: Vec<f32>,
+    pub ff_up: Projection,
+    pub ff_down: Projection,
 }
 
-#[derive(Debug, Clone, Default)]
 pub struct MergerWeights {
     pub ln1_w: Vec<f32>,
     pub ln1_b: Vec<f32>,
-    pub q_w: Vec<f32>,
-    pub q_b: Vec<f32>,
-    pub k_w: Vec<f32>,
-    pub k_b: Vec<f32>,
-    pub v_w: Vec<f32>,
-    pub v_b: Vec<f32>,
-    pub o_w: Vec<f32>,
-    pub o_b: Vec<f32>,
+    pub q: Projection,
+    pub k: Projection,
+    pub v: Projection,
+    pub o: Projection,
     pub ds_ln_w: Vec<f32>,
     pub ds_ln_b: Vec<f32>,
-    pub ds_up_w: Vec<f32>,
-    pub ds_up_b: Vec<f32>,
-    pub ds_down_w: Vec<f32>,
-    pub ds_down_b: Vec<f32>,
+    pub ds_up: Projection,
+    pub ds_down: Projection,
 }
 
-#[derive(Debug, Clone, Default)]
 pub struct ProjectorWeights {
     pub input_norm_w: Vec<f32>,
     pub input_norm_b: Vec<f32>,
-    pub up_w: Vec<f32>,
-    pub up_b: Vec<f32>,
-    pub down_w: Vec<f32>,
-    pub down_b: Vec<f32>,
+    pub up: Projection,
+    pub down: Projection,
 }
 
 pub struct MiniCpmV47Weights {
     pub config: MiniCpmV47Config,
-    pub patch_embd_w: Vec<f32>,
-    pub patch_embd_b: Vec<f32>,
+    pub patch_embd: Projection,
     /// `[n_positions, n_embd]`, row major — ggml's `get_rows` indexes the
     /// first dimension, so this is indexed by patch position.
     pub position_embd: Vec<f32>,
@@ -173,15 +175,14 @@ impl MiniCpmV47Weights {
     pub fn load(source: &dyn TensorSource) -> Result<Self, String> {
         let config = MiniCpmV47Config::from_source(source)?;
         let d = config.n_embd;
-        let h = config.n_head;
-
-        let patch_embd_w = decode_param(
+        let patch_dim = 3 * config.patch_size * config.patch_size;
+        let patch_embd = projection(
             source,
             "v.patch_embd.weight",
-            3 * config.patch_size * config.patch_size,
+            "v.patch_embd.bias",
+            patch_dim,
             d,
         )?;
-        let patch_embd_b = decode_param(source, "v.patch_embd.bias", 1, d)?;
 
         let pos_info = source
             .tensor_info("v.position_embd.weight")
@@ -203,20 +204,50 @@ impl MiniCpmV47Weights {
             layers.push(ViTLayer {
                 ln1_w: decode_param(source, &format!("{p}.ln1.weight"), 1, d)?,
                 ln1_b: decode_param(source, &format!("{p}.ln1.bias"), 1, d)?,
-                q_w: decode_param(source, &format!("{p}.attn_q.weight"), d, d)?,
-                q_b: decode_param(source, &format!("{p}.attn_q.bias"), 1, d)?,
-                k_w: decode_param(source, &format!("{p}.attn_k.weight"), d, d)?,
-                k_b: decode_param(source, &format!("{p}.attn_k.bias"), 1, d)?,
-                v_w: decode_param(source, &format!("{p}.attn_v.weight"), d, d)?,
-                v_b: decode_param(source, &format!("{p}.attn_v.bias"), 1, d)?,
-                o_w: decode_param(source, &format!("{p}.attn_out.weight"), d, d)?,
-                o_b: decode_param(source, &format!("{p}.attn_out.bias"), 1, d)?,
+                q: projection(
+                    source,
+                    &format!("{p}.attn_q.weight"),
+                    &format!("{p}.attn_q.bias"),
+                    d,
+                    d,
+                )?,
+                k: projection(
+                    source,
+                    &format!("{p}.attn_k.weight"),
+                    &format!("{p}.attn_k.bias"),
+                    d,
+                    d,
+                )?,
+                v: projection(
+                    source,
+                    &format!("{p}.attn_v.weight"),
+                    &format!("{p}.attn_v.bias"),
+                    d,
+                    d,
+                )?,
+                o: projection(
+                    source,
+                    &format!("{p}.attn_out.weight"),
+                    &format!("{p}.attn_out.bias"),
+                    d,
+                    d,
+                )?,
                 ln2_w: decode_param(source, &format!("{p}.ln2.weight"), 1, d)?,
                 ln2_b: decode_param(source, &format!("{p}.ln2.bias"), 1, d)?,
-                ff_up_w: decode_param(source, &format!("{p}.ffn_up.weight"), d, config.n_ff)?,
-                ff_up_b: decode_param(source, &format!("{p}.ffn_up.bias"), 1, config.n_ff)?,
-                ff_down_w: decode_param(source, &format!("{p}.ffn_down.weight"), config.n_ff, d)?,
-                ff_down_b: decode_param(source, &format!("{p}.ffn_down.bias"), 1, d)?,
+                ff_up: projection(
+                    source,
+                    &format!("{p}.ffn_up.weight"),
+                    &format!("{p}.ffn_up.bias"),
+                    d,
+                    config.n_ff,
+                )?,
+                ff_down: projection(
+                    source,
+                    &format!("{p}.ffn_down.weight"),
+                    &format!("{p}.ffn_down.bias"),
+                    config.n_ff,
+                    d,
+                )?,
             });
         }
 
@@ -238,20 +269,50 @@ impl MiniCpmV47Weights {
         let merger = MergerWeights {
             ln1_w: decode_param(source, "v.vit_merger.ln1.weight", 1, d)?,
             ln1_b: decode_param(source, "v.vit_merger.ln1.bias", 1, d)?,
-            q_w: decode_param(source, "v.vit_merger.attn_q.weight", d, d)?,
-            q_b: decode_param(source, "v.vit_merger.attn_q.bias", 1, d)?,
-            k_w: decode_param(source, "v.vit_merger.attn_k.weight", d, d)?,
-            k_b: decode_param(source, "v.vit_merger.attn_k.bias", 1, d)?,
-            v_w: decode_param(source, "v.vit_merger.attn_v.weight", d, d)?,
-            v_b: decode_param(source, "v.vit_merger.attn_v.bias", 1, d)?,
-            o_w: decode_param(source, "v.vit_merger.attn_out.weight", d, d)?,
-            o_b: decode_param(source, "v.vit_merger.attn_out.bias", 1, d)?,
+            q: projection(
+                source,
+                "v.vit_merger.attn_q.weight",
+                "v.vit_merger.attn_q.bias",
+                d,
+                d,
+            )?,
+            k: projection(
+                source,
+                "v.vit_merger.attn_k.weight",
+                "v.vit_merger.attn_k.bias",
+                d,
+                d,
+            )?,
+            v: projection(
+                source,
+                "v.vit_merger.attn_v.weight",
+                "v.vit_merger.attn_v.bias",
+                d,
+                d,
+            )?,
+            o: projection(
+                source,
+                "v.vit_merger.attn_out.weight",
+                "v.vit_merger.attn_out.bias",
+                d,
+                d,
+            )?,
             ds_ln_w: decode_param(source, "v.vit_merger.ds_ln.weight", 1, merged)?,
             ds_ln_b: decode_param(source, "v.vit_merger.ds_ln.bias", 1, merged)?,
-            ds_up_w: decode_param(source, "v.vit_merger.ds_ffn_up.weight", merged, ds_hidden)?,
-            ds_up_b: decode_param(source, "v.vit_merger.ds_ffn_up.bias", 1, ds_hidden)?,
-            ds_down_w: decode_param(source, "v.vit_merger.ds_ffn_down.weight", ds_hidden, d)?,
-            ds_down_b: decode_param(source, "v.vit_merger.ds_ffn_down.bias", 1, d)?,
+            ds_up: projection(
+                source,
+                "v.vit_merger.ds_ffn_up.weight",
+                "v.vit_merger.ds_ffn_up.bias",
+                merged,
+                ds_hidden,
+            )?,
+            ds_down: projection(
+                source,
+                "v.vit_merger.ds_ffn_down.weight",
+                "v.vit_merger.ds_ffn_down.bias",
+                ds_hidden,
+                d,
+            )?,
         };
 
         let up_info = source
@@ -266,10 +327,14 @@ impl MiniCpmV47Weights {
         let projector = ProjectorWeights {
             input_norm_w: decode_param(source, "mm.input_norm.weight", 1, merged)?,
             input_norm_b: decode_param(source, "mm.input_norm.bias", 1, merged)?,
-            up_w: decode_param(source, "mm.up.weight", merged, up_dims[1])?,
-            up_b: decode_param(source, "mm.up.bias", 1, up_dims[1])?,
-            down_w: decode_param(source, "mm.down.weight", merged, config.n_embd_text)?,
-            down_b: decode_param(source, "mm.down.bias", 1, config.n_embd_text)?,
+            up: projection(source, "mm.up.weight", "mm.up.bias", merged, up_dims[1])?,
+            down: projection(
+                source,
+                "mm.down.weight",
+                "mm.down.bias",
+                merged,
+                config.n_embd_text,
+            )?,
         };
 
         let sep_info = source
@@ -287,8 +352,7 @@ impl MiniCpmV47Weights {
 
         Ok(Self {
             config,
-            patch_embd_w,
-            patch_embd_b,
+            patch_embd,
             position_embd,
             n_positions,
             layers,
