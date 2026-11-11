@@ -48,6 +48,7 @@ pub struct CliOptions {
     /// Defaults to one task built from `--jev-question` + `--jev-option`.
     pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
+    pub enhance: bool,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
@@ -225,7 +226,7 @@ impl CliOptions {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; only the \
+                         note=no complete device path for this mode; any \
                          offloadable parts run on the device"
                     );
                 }

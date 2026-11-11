@@ -1,4 +1,5 @@
 pub mod api;
+mod audio;
 mod auk;
 mod decision;
 mod forecast;
@@ -37,7 +38,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
 
 // =============================================================================
 // Backend types
@@ -86,6 +87,7 @@ enum Backend {
     Asr(AsrBackend),
     HySimulMt(HySimulMtBackend),
     Audio8(Audio8Backend),
+    AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
     Tts(TtsBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
@@ -1127,6 +1129,11 @@ fn build_backend(
     options: &CliOptions,
     auk_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<Arc<Backend>, String> {
+    if options.enhance {
+        return Ok(Arc::new(Backend::AudioEnhancement(Arc::new(
+            crate::models::nemotron_reuse::Model::load(&options.model, options.compute_policy())?,
+        ))));
+    }
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
@@ -1974,6 +1981,9 @@ pub fn run_server() {
     // server receives both over HTTP. Inject placeholders so validation
     // passes; the real values come from `/v1/audio/speech` requests.
     let mut options = options;
+    if options.enhance {
+        options.serve = true;
+    }
     if options.tts {
         if options.prompt.as_deref().is_none_or(str::is_empty) {
             options.prompt = Some("placeholder".to_string());
@@ -2043,6 +2053,7 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
+        Backend::AudioEnhancement(_) => "audio-enhancement",
         Backend::Tts(_) => "tts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
@@ -2086,6 +2097,10 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::AudioEnhancement(_) => router.route(
+            "/v1/audio/enhancements",
+            post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),
@@ -2123,7 +2138,7 @@ pub fn run_server() {
         // for a device and gets a partial one, so say so once.
         eprintln!(
             "compute requested=Vulkan backend=partial mode=jev \
-             note=no complete device path for this mode; only the \
+             note=no complete device path for this mode; any \
              offloadable parts run on the device"
         );
     }

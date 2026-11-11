@@ -40,6 +40,7 @@ pub mod mage_vl;
 pub mod mellum;
 pub mod minicpmv;
 pub mod nemotron_h;
+pub mod nemotron_reuse;
 pub mod occamy;
 pub mod phi3;
 pub mod qwen3;
