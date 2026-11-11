@@ -1,0 +1,142 @@
+{
+  "oracle_commit": "4702a7f00850e34b6e83a2170cc123c3e9570744",
+  "seed": 20261103,
+  "versions": {
+    "torch": "2.9.1+gitff65f5b",
+    "transformers": "4.56.0",
+    "diffusers": "0.36.0",
+    "safetensors": "0.7.0"
+  },
+  "attention": "sdpa math; F16 decoder/denoiser blocks, F32 DINO, BF16 VAE",
+  "inputs_sha256": "015f2ddd8a92cdbde37c0b572aa4dd8b217c75c02a08eba33fd5d4483e8a8560",
+  "trace_sha256": "ca5d47555e1eb868e9787565faa9da29385e32c8f24e5068a9129a0950cb69b9",
+  "gates_sha256": "01287e798a9466cc487148750cd4693671cea1ad77efa0d9bec0e73194e0c8e1",
+  "checkpoint_count": 144,
+  "geometry": {
+    "kind": "diagnostic",
+    "image_side": 64,
+    "octree_resolution": 16,
+    "q_token_length": 64,
+    "note": "These numbers were measured on the 64 pixel diagnostic fixture of tools/oracle/idol/oracle.py, not on the released 1024 pixel geometry. The production geometry (image side 1024, octree resolution 32, 8192 latent tokens) is exercised by the end-to-end run but was not compared against the official oracle, so these tolerances do not cover it."
+  },
+  "date": "2026-11-03",
+  "host": "Linux x86_64 AMD EPYC 9334; container quota 16 CPUs / 55 GiB",
+  "passed": true,
+  "endpoints": [
+    {
+      "name": "idol.preprocess",
+      "shape": [
+        64,
+        64,
+        3
+      ],
+      "max_abs": 0.0,
+      "rmse": 0.0,
+      "relative_rmse": 0.0,
+      "cosine": 1.0,
+      "passed": true
+    },
+    {
+      "name": "idol.denoiser.velocity_latent",
+      "shape": [
+        1,
+        32,
+        16
+      ],
+      "max_abs": 0.005012989044189453,
+      "rmse": 0.0014002683220331836,
+      "relative_rmse": 0.0012656758458191402,
+      "cosine": 0.9999992013749827,
+      "passed": true
+    },
+    {
+      "name": "idol.denoiser.velocity_camera",
+      "shape": [
+        1,
+        1,
+        5
+      ],
+      "max_abs": 0.019348502159118652,
+      "rmse": 0.011163980273489743,
+      "relative_rmse": 0.01119446319434203,
+      "cosine": 0.9999373550527572,
+      "passed": true
+    },
+    {
+      "name": "idol.octree.output",
+      "shape": [
+        12,
+        8
+      ],
+      "max_abs": 0.029169559478759766,
+      "rmse": 0.0073755736897100545,
+      "relative_rmse": 0.0014599841677411074,
+      "cosine": 0.9999989361969973,
+      "passed": true
+    },
+    {
+      "name": "idol.gaussian.output",
+      "shape": [
+        12,
+        480
+      ],
+      "max_abs": 0.028026878833770752,
+      "rmse": 0.0029061405676772943,
+      "relative_rmse": 0.0008497142552344678,
+      "cosine": 0.9999996399902296,
+      "passed": true
+    },
+    {
+      "name": "idol.ply",
+      "shape": [
+        384,
+        17
+      ],
+      "max_abs": 4.76837158203125e-07,
+      "rmse": 4.912897003806623e-08,
+      "relative_rmse": 1.2089615487304451e-08,
+      "cosine": 0.9999999999999999,
+      "passed": true
+    },
+    {
+      "name": "idol.condition.feature1",
+      "shape": [
+        1,
+        21,
+        1280
+      ],
+      "max_abs": 1.5139579772949219e-05,
+      "rmse": 1.363131250941511e-06,
+      "relative_rmse": 1.363278330360812e-06,
+      "cosine": 0.9999999999990709,
+      "passed": true
+    },
+    {
+      "name": "idol.condition.feature2",
+      "shape": [
+        1,
+        21,
+        128
+      ],
+      "max_abs": 0.0234375,
+      "rmse": 0.004566546836941311,
+      "relative_rmse": 0.006757809123817214,
+      "cosine": 0.9999772149981005,
+      "passed": true
+    },
+    {
+      "name": "idol.background.alpha",
+      "shape": [
+        1,
+        64,
+        64,
+        1
+      ],
+      "max_abs": 2.1827872842550278e-10,
+      "rmse": 2.0474055077045957e-11,
+      "relative_rmse": 1.907648008092161e-06,
+      "cosine": 0.999999999998289,
+      "passed": true
+    }
+  ]
+}

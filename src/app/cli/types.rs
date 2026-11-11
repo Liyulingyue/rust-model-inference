@@ -15,6 +15,9 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    pub image_to_3d: bool,
+    pub geometry_mode: Option<String>,
+    pub num_gaussians: Option<usize>,
     /// Parsed option names, excluding their values, for capability-specific validation.
     pub supplied_flags: Vec<String>,
     pub yue2: bool,

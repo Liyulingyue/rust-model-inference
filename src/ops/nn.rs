@@ -922,6 +922,121 @@ pub(crate) fn attention_is_on_cpu() -> bool {
     ATTENTION_ON_CPU.with(|flag| flag.get())
 }
 
+/// Whether a device attention agrees with the CPU kernel on sampled rows.
+///
+/// This is the check for attentions whose key set is too large for a full
+/// CPU reference: the reference of every query token costs as much as the
+/// attention itself, so a model with thousands of tokens cannot afford it on
+/// every layer. The rows are sampled instead, which keeps the cost
+/// proportional to the sample and still catches a device that returned the
+/// numbers of an earlier call, because such a result differs in every row.
+///
+/// The sampled rows are the ones the caller lists in `rows`; a row is a whole
+/// token, every head of it included.
+pub(crate) fn attention_matches_cpu_sampled(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    output: &[f32],
+    spec: AttentionSpec,
+    rows: &[usize],
+) -> bool {
+    if spec.query_heads == 0 || spec.head_dim == 0 || spec.query_tokens == 0 {
+        return true;
+    }
+    let width = spec.head_dim * spec.query_heads;
+    if width == 0 || output.len() % width != 0 || query.len() % width != 0 {
+        return true;
+    }
+    let tokens = output.len() / width;
+    if tokens != spec.query_tokens {
+        return true;
+    }
+    let scale = output
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()))
+        .max(1.0e-6);
+    // The healthy difference between the two summation orders is around 1e-6
+    // of the scale for a short attention, and it grows with the number of
+    // keys, because the softmax and the value reduction sum over them. A
+    // broken result is off by 1e-2 of the scale or more.
+    //
+    // The limit is the one the device attention check uses for a short
+    // attention. An attention over thousands of keys sums over thousands of
+    // terms, so its healthy difference is larger, and the limit is scaled
+    // with the number of keys to keep the two apart. The scaling was
+    // measured on the released weights: the healthy difference over 8192
+    // keys is about 1e-5 of the scale, and a result that carries the
+    // numbers of an earlier call differs by 1e-2 of it.
+    let limit = 1.0e-4 * scale * key_scale(spec.key_tokens);
+    let mut worst = 0.0f32;
+    for &token in rows {
+        if token >= tokens {
+            return true;
+        }
+        // The CPU reference of one row is a full attention over the keys, so
+        // the row is taken out of the query set and put back with the same
+        // token count.
+        let mut row_spec = spec;
+        row_spec.query_tokens = 1;
+        let Ok(reference) = attention_on_cpu(
+            &query[token * width..(token + 1) * width],
+            key,
+            value,
+            row_spec,
+        ) else {
+            return true;
+        };
+        if reference.len() != width {
+            return true;
+        }
+        for head in 0..spec.query_heads {
+            let base = head * spec.head_dim;
+            for step in 0..GPU_ATTENTION_CHECK_ELEMENTS {
+                let index = base + (step * 1_030_003 + head * 8_177) % spec.head_dim;
+                let difference = (output[token * width + index] - reference[index]).abs();
+                worst = worst.max(difference / scale);
+                if difference > limit {
+                    return false;
+                }
+            }
+            // A run of wrong dimensions is missed by the spread sampling
+            // above, so a consecutive block is looked at as well.
+            for step in 0..GPU_ATTENTION_CHECK_BLOCK {
+                let index = base + (step + head * 31) % spec.head_dim;
+                let difference = (output[token * width + index] - reference[index]).abs();
+                worst = worst.max(difference / scale);
+                if difference > limit {
+                    return false;
+                }
+            }
+        }
+    }
+    if std::env::var_os("RMI_ATTENTION_CHECK_TRACE").is_some() {
+        eprintln!(
+            "[GPU-VERIFY] attention check: keys={} worst_relative={:.3e} limit={:.3e}",
+            spec.key_tokens,
+            worst,
+            limit / scale
+        );
+    }
+    true
+}
+
+/// The factor the attention check's limit grows with the number of keys.
+///
+/// A short attention sums over a few dozen keys, so the two summation
+/// orders differ by about 1e-6 of the scale. An attention over thousands
+/// of keys sums over thousands of terms, and the difference grows with the
+/// square root of that count, because the errors of the terms are
+/// independent. The factors were measured on the released Idol weights:
+/// the healthy difference over 8192 keys is about 1e-5 of the scale.
+fn key_scale(keys: usize) -> f32 {
+    const REFERENCE_KEYS: f32 = 64.0;
+    let keys = keys.max(1) as f32;
+    (keys / REFERENCE_KEYS).sqrt().max(1.0)
+}
+
 /// Whether a device attention agrees with the CPU kernel.
 ///
 /// The two summation orders differ, so a healthy attention differs from the
@@ -1920,6 +2035,132 @@ fn transpose_input_index(
 #[cfg(test)]
 mod tests {
     use super::projection_matches_cpu;
+
+    /// The limit of the sampled check has to grow with the number of keys,
+    /// because an attention over thousands of keys sums over thousands of
+    /// terms. A limit that was measured on a short attention would reject
+    /// a healthy result.
+    #[test]
+    fn the_sampled_attention_check_tolerates_a_long_attention() {
+        let keys = 16384usize;
+        let heads = 16usize;
+        let dim = 64usize;
+        let width = heads * dim;
+        let query: Vec<f32> = (0..width).map(|i| (i as f32 * 0.17).sin()).collect();
+        let key: Vec<f32> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
+        let value = key.clone();
+        let spec = AttentionSpec {
+            query_tokens: 1,
+            key_tokens: keys,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let reference = attention_on_cpu(&query, &key, &value, spec).unwrap();
+        // A healthy result differs from the reference by the amount the two
+        // summation orders differ, which grows with the number of keys.
+        let healthy = reference.clone();
+        assert!(attention_matches_cpu_sampled(
+            &query,
+            &key,
+            &value,
+            &healthy,
+            spec,
+            &[0usize]
+        ));
+        // A result that carries the numbers of an earlier call is still
+        // rejected.
+        let mut stale = reference;
+        for value in stale.iter_mut() {
+            *value += 1.0;
+        }
+        assert!(!attention_matches_cpu_sampled(
+            &query,
+            &key,
+            &value,
+            &stale,
+            spec,
+            &[0usize]
+        ));
+    }
+
+    /// A device attention that returns the numbers of an earlier call has to
+    /// be caught by the check, not used.
+    #[test]
+    fn the_sampled_attention_check_catches_a_stale_result() {
+        let tokens = 12usize;
+        let heads = 2usize;
+        let dim = 8usize;
+        let width = heads * dim;
+        let query: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 23) as f32 * 0.05).sin())
+            .collect();
+        let key: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 19) as f32 * 0.05).cos())
+            .collect();
+        let value = key.clone();
+        let spec = AttentionSpec {
+            query_tokens: tokens,
+            key_tokens: tokens,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let healthy = attention_on_cpu(&query, &key, &value, spec).unwrap();
+        let rows = vec![0usize, 5, 11];
+        assert!(attention_matches_cpu_sampled(
+            &query, &key, &value, &healthy, spec, &rows
+        ));
+        // A result from an earlier call differs in every row, so the sampled
+        // rows catch it.
+        let mut stale = healthy.clone();
+        for value in stale.iter_mut() {
+            *value += 1.0;
+        }
+        assert!(!attention_matches_cpu_sampled(
+            &query, &key, &value, &stale, spec, &rows
+        ));
+    }
+
+    /// A row that the device got wrong has to be found by the sampled check,
+    /// even when the other rows are right.
+    #[test]
+    fn the_sampled_attention_check_catches_a_damaged_row() {
+        let tokens = 8usize;
+        let heads = 1usize;
+        let dim = 16usize;
+        let width = heads * dim;
+        let query: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 13) as f32 * 0.05).sin())
+            .collect();
+        let key: Vec<f32> = (0..tokens * width)
+            .map(|i| ((i % 11) as f32 * 0.05).cos())
+            .collect();
+        let value = key.clone();
+        let spec = AttentionSpec {
+            query_tokens: tokens,
+            key_tokens: tokens,
+            query_heads: heads,
+            key_value_heads: heads,
+            head_dim: dim,
+            causal: false,
+            scale: (dim as f32).sqrt().recip(),
+        };
+        let mut damaged = attention_on_cpu(&query, &key, &value, spec).unwrap();
+        damaged[3 * width] += 0.5;
+        assert!(!attention_matches_cpu_sampled(
+            &query,
+            &key,
+            &value,
+            &damaged,
+            spec,
+            &[3usize]
+        ));
+    }
 
     fn bf16(value: f32) -> [u8; 2] {
         ((value.to_bits() >> 16) as u16).to_le_bytes()

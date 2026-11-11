@@ -726,13 +726,23 @@ impl VulkanContext {
     pub fn warmup(&self) -> Result<(), VulkanError> {
         let n_in = 32usize;
         let n_out = 32usize;
-        let weight = vec![0u8; n_out * (n_in / 32) * 34];
-        let input = vec![0u8; n_in];
-        let scales = vec![0.0f32; n_in / 32];
+        let mut weight = vec![1u8; n_out * (n_in / 32) * 34];
+        for block in weight.chunks_exact_mut(34) {
+            block[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        }
+        let input = vec![1u8; n_in];
+        let scales = vec![1.0f32; n_in / 32];
         let mut out = vec![0.0f32; n_out];
         let result = unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) };
         self.release_cached_weight(&weight);
-        result
+        result?;
+        // Zero inputs accepted a silently dropped dispatch on a broken cloud driver.
+        if out.iter().any(|&value| value != n_in as f32) {
+            return Err(VulkanError::InitFailed(
+                "Vulkan warmup did not compute the expected nonzero result".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Snapshot of the completed-matmul generation; pair with [`Self::wait_for_gen`].

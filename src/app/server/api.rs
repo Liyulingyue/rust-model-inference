@@ -1843,6 +1843,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
         Backend::Timestral(_) => "timestral",
+        Backend::Idol(_) => "idol",
         Backend::Decision(_) => "decision",
     }
 }

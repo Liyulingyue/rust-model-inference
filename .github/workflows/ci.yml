@@ -41,6 +41,7 @@ jobs:
       - run: 'cargo test --locked --lib models::nemotron_reuse::'
       - run: cargo test --locked --test nemotron_reuse_cli
       - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
+      - run: python3 -m unittest discover -s tools/oracle/idol -p 'test_*.py'
       - run: cargo test --locked --lib ggml_dots_honor_scalar_dispatch
       - run: RMI_SCALAR=1 cargo test --locked --lib ggml_dots_honor_scalar_dispatch
       - run: cargo test --locked --lib hy_mt2_
@@ -84,6 +85,11 @@ jobs:
           export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
           test -n "$VK_DRIVER_FILES"
           cargo test --locked --features vulkan --lib batched_linear_device_review_ -- --ignored --test-threads=1
+      - name: Idol device attention agrees with the CPU kernel on Lavapipe
+        run: |
+          export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
+          test -n "$VK_DRIVER_FILES"
+          cargo test --locked --features vulkan --lib models::idol::gpu::tests:: -- --test-threads=1
       - run: cargo test --locked --features vulkan --lib raw_hidden_
       - run: 'cargo test --locked --features vulkan --lib qwen_image_2_1::gpu::tests::'
       - run: cargo test --locked --features vulkan --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

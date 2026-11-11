@@ -1,0 +1,273 @@
+{
+  "full_lib": {
+    "baseline_commit": "8f39f278d512f8e46991b3d960bb72eac9b94aed",
+    "identical_failure_names": true,
+    "runs": [
+      {
+        "log": "artifacts/idol/native-baseline.log",
+        "summary": "test result: FAILED. 1450 passed; 22 failed; 199 ignored; 0 measured; 0 filtered out; finished in 132.19s",
+        "failures": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::argmax::tests::large_random",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+        ]
+      },
+      {
+        "log": "artifacts/idol/final-standard-offload.log",
+        "summary": "test result: FAILED. 1451 passed; 22 failed; 202 ignored; 0 measured; 0 filtered out; finished in 53.85s",
+        "failures": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::argmax::tests::large_random",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+        ],
+        "exit_code": 101,
+        "seconds": 54.210004437714815
+      }
+    ],
+    "configuration": "vulkan,parity-trace; release-fast; x86-64-v3; 16 test threads; RAYON_NUM_THREADS=16; default GPU size threshold"
+  },
+  "policy": [
+    {
+      "compute": "cpu",
+      "exit_code": 1,
+      "output": "compute requested=Cpu backend=Cpu arch=idol scope=projection_attention_convolution\nInference error: Read Idol config: No such file or directory (os error 2)\n"
+    },
+    {
+      "compute": "auto",
+      "exit_code": 1,
+      "output": "compute requested=Auto backend=Cpu reason=Vulkan init failed: Unable to find a Vulkan driver\ncompute requested=Auto backend=Cpu arch=idol scope=projection_attention_convolution\nInference error: Read Idol config: No such file or directory (os error 2)\n"
+    },
+    {
+      "compute": "vulkan",
+      "exit_code": 2,
+      "output": "compute requested=Vulkan backend=partial mode=image note=no complete device path for this mode; only the offloadable parts run on the device\n--compute vulkan requires a usable Vulkan device: compute device failure: Vulkan init failed: Unable to find a Vulkan driver\n"
+    }
+  ],
+  "shared_baseline": [
+    {
+      "filter": "vulkan::ops::tests::batched_linear",
+      "exit_code": -11,
+      "seconds": 1.8620637096464634,
+      "summary": [
+        "test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 1663 filtered out; finished in 1.38s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::compute_device_metrics_count_upload_reuse_and_copies",
+      "exit_code": -11,
+      "seconds": 0.7645152620971203,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1670 filtered out; finished in 0.48s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::vulkan_q8_matches_cpu_reduction_bits",
+      "exit_code": -11,
+      "seconds": 0.8733403841033578,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1670 filtered out; finished in 0.55s"
+      ]
+    },
+    {
+      "filter": "vulkan::tests::warmup_releases_temporary_cached_weights",
+      "exit_code": 0,
+      "seconds": 0.6903262985870242,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1670 filtered out; finished in 0.66s"
+      ]
+    },
+    {
+      "filter": "vulkan::tests::batched_linear_device_context_drop_retains_uncertain_resources",
+      "exit_code": 0,
+      "seconds": 0.5584975415840745,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1670 filtered out; finished in 0.54s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::staged_arena_failed_transfer_recovers_before_reusing_staging",
+      "exit_code": 0,
+      "seconds": 0.6171783367171884,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1670 filtered out; finished in 0.59s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::staged_static_upload_preserves_bytes_and_zeroes_padding",
+      "exit_code": 0,
+      "seconds": 0.6178033016622066,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1670 filtered out; finished in 0.48s"
+      ]
+    }
+  ],
+  "shared_final": [
+    {
+      "filter": "vulkan::ops::tests::batched_linear",
+      "exit_code": 101,
+      "seconds": 7.102757511660457,
+      "summary": [
+        "test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 1667 filtered out; finished in 6.79s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::compute_device_metrics_count_upload_reuse_and_copies",
+      "exit_code": 0,
+      "seconds": 0.6359420577064157,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.50s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::vulkan_q8_matches_cpu_reduction_bits",
+      "exit_code": 0,
+      "seconds": 0.7944765808060765,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.66s"
+      ]
+    },
+    {
+      "filter": "vulkan::tests::warmup_releases_temporary_cached_weights",
+      "exit_code": 0,
+      "seconds": 0.5545801231637597,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.53s"
+      ]
+    },
+    {
+      "filter": "vulkan::tests::batched_linear_device_context_drop_retains_uncertain_resources",
+      "exit_code": 0,
+      "seconds": 0.585158247500658,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.56s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::staged_arena_failed_transfer_recovers_before_reusing_staging",
+      "exit_code": 0,
+      "seconds": 0.6569580128416419,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.63s"
+      ]
+    },
+    {
+      "filter": "vulkan::ops::tests::staged_static_upload_preserves_bytes_and_zeroes_padding",
+      "exit_code": -11,
+      "seconds": 0.7274280143901706,
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.43s"
+      ]
+    }
+  ],
+  "preexisting_q4_k_mismatch_sha256": "4de38143a822a143dfe475f0cae8d1b2d4f8b0ee648039f6d8880b8658969866",
+  "note": "Isolated device tests sometimes segfault during process teardown on both baseline and modified builds; assertion summaries are distinguished from process exit codes. Existing Q4_K row/batch mismatch remains identical; byte/zero-padding, F32/F16/BF16/Q8_0/Q4_0/Q4_1 and failure/recovery checks have no new assertion failures.",
+  "forced_offload_full_lib": {
+    "environment": {
+      "RUST_GPU_MIN_OUTPUTS": "0",
+      "RAYON_NUM_THREADS": "16"
+    },
+    "identical_failure_names": true,
+    "baseline": {
+      "log": "artifacts/idol/final-baseline-forced-offload.log",
+      "exit_code": 101,
+      "seconds": 54.02438998967409
+    },
+    "modified": {
+      "log": "artifacts/idol/final-full-lib.log",
+      "exit_code": 101,
+      "seconds": 53.867893683724105
+    },
+    "baseline_summary": "test result: FAILED. 1445 passed; 27 failed; 199 ignored; 0 measured; 0 filtered out; finished in 53.74s",
+    "modified_summary": "test result: FAILED. 1446 passed; 27 failed; 202 ignored; 0 measured; 0 filtered out; finished in 53.21s",
+    "failures": [
+      "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+      "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+      "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+      "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+      "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+      "models::llama::trunk::compute_tests::llama_dense_recipe_preserves_original_cpu_bits",
+      "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+      "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+      "models::yue2::ar::performance_tests::prefill_projects_only_returned_logits_and_preserves_decode_bits",
+      "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+      "models::yue2::tests::per_row_and_direct_kernel_agree_for_one_row",
+      "ops::argmax::tests::large_random",
+      "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+      "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+      "ops::matmul::neon_tests::prepared_group_matches_mixed_format_sequential_bits",
+      "ops::matmul::neon_tests::prepared_rows_match_sequential_matmul_bits_and_reuse_storage",
+      "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+      "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+    ],
+    "additional_vs_default": [
+      "models::llama::trunk::compute_tests::llama_dense_recipe_preserves_original_cpu_bits",
+      "models::yue2::ar::performance_tests::prefill_projects_only_returned_logits_and_preserves_decode_bits",
+      "models::yue2::tests::per_row_and_direct_kernel_agree_for_one_row",
+      "ops::matmul::neon_tests::prepared_group_matches_mixed_format_sequential_bits",
+      "ops::matmul::neon_tests::prepared_rows_match_sequential_matmul_bits_and_reuse_storage"
+    ],
+    "note": "Forcing even small operators onto GPU exposes five additional existing CPU-bitwise assertions on both baseline and modified builds. Not counted as new regressions or green tests."
+  },
+  "final_idol_gpu": {
+    "name": "final-idol-gpu",
+    "log": "artifacts/idol/final-idol-gpu.log",
+    "exit_code": 0,
+    "seconds": 94.20156891550869,
+    "summary": [
+      "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 1644 filtered out; finished in 93.47s"
+    ]
+  },
+  "preview_cli": {
+    "evidence": "performance-validation.json",
+    "output_validated": true,
+    "producer_exit_code": -11,
+    "clean_cli_success": false
+  }
+}

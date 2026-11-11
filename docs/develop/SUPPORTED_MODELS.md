@@ -118,6 +118,7 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 
 | 模型 / 范围 | GGUF architecture | 能力 | 所需组件 | 当前覆盖 | 状态 | 证据 / 限制 |
 |---|---|---|---|---|---|---|
+| Idol | 原始 safetensors 或自包含 `idol` GGUF，固定发布版契约 | 单图 → binary 3DGS PLY；CLI/HTTP | denoiser、octree、Gaussian、DINOv3、FLUX.2 VAE、BiRefNet | 原始组件已有 CPU/Vulkan/Auto 验证；GGUF 支持 original/F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K，运行时解码为现有 F32 图 | `Experimental`（GGUF 待核验） | GGUF metadata、组件前缀、配置、整数标量和块格式边界已校验；转换器按 tensor 流式写入，权重不落 Mac。远端同权重 Oracle、每种格式的 CPU/Auto/Vulkan、CLI/HTTP 及性能矩阵仍待运行；有损格式按误差门限验收，不要求逐位一致。JEV 不适用。[复现与限制](../../tools/oracle/idol/README.md)。 |
 | ERNIE-Image | 错标 `wan`，按完整 ERNIE 张量契约识别 | 文生图 | DiT + Ministral-3-3B 文本编码器 + 转换的 Flux2 VAE | Q4_K_M DiT/Text，VAE Conv F16 / Attention Linear F32 | `Experimental`（CPU） | 固定 stable-diffusion.cpp `3f8527a` / ggml `89c4413`；64×64、seed 42、1 步、CFG 1 的 token IDs、25 层文本输出、36 层 DiT、Euler latent 和完整 VAE RGB F32 共 93 个检查点 / 6,440,960 个值标量逐位一致；2 步 / CFG 5 的两路条件与完整生成另有 261 个检查点 / 16,132,096 个值一致。远端 256×256 / 32 步运行成功，样图漏猫，质量尚未通过。`--gpu` 明确拒绝，Turbo 权重与大尺寸质量未验证。[权重和复现](../../tools/oracle/ernie_image/README.md)。 |
 | 其他 Qwen3 文本 GGUF | `qwen3` | 文本生成 | 无 | 通用 metadata/tensor 分发 | `Supported` | 未逐个验证尺寸和量化组合；应为目标 GGUF 补一次真实推理。 |
 | Gemma 4 12B 图像 | `gemma4` | 图像 | F16 `gemma4uv` mmproj | 图像预处理、投影和生成入口 | `Supported` | 入口已接入，但尚未执行 12B 图像 Oracle 或独立真实冒烟，不继承文本/音频的 `Verified` 状态。 |

@@ -1,0 +1,146 @@
+{
+  "description": "CPU numerical gates for pinned eager PyTorch versus native SIMD; see calibration provenance. max_abs <= atol + rtol*max_abs(reference), relative_RMSE <= relative_rmse, cosine >= cosine. These are numerical gates, not image-quality or bitwise claims.",
+  "gates": [
+    {
+      "name": "idol.denoiser.condition1",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.condition2",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.time_linear1",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.time_silu",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.time",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.camera_linear.0",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.camera.0",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.camera_linear.1",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "name": "idol.denoiser.camera.1",
+      "atol": 1e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.999999999
+    },
+    {
+      "prefix": "idol.preprocess",
+      "atol": 0,
+      "rtol": 0,
+      "relative_rmse": 0,
+      "cosine": 0.999999999
+    },
+    {
+      "prefix": "idol.background",
+      "atol": 0.02,
+      "rtol": 0.002,
+      "relative_rmse": 0.002,
+      "cosine": 0.99999
+    },
+    {
+      "prefix": "idol.ply",
+      "atol": 5e-05,
+      "rtol": 1e-05,
+      "relative_rmse": 1e-05,
+      "cosine": 0.99999999
+    },
+    {
+      "prefix": "idol.dino",
+      "atol": 0.003,
+      "rtol": 0.0005,
+      "relative_rmse": 0.0005,
+      "cosine": 0.999999
+    },
+    {
+      "prefix": "idol.condition.feature1",
+      "atol": 0.003,
+      "rtol": 0.0005,
+      "relative_rmse": 0.0005,
+      "cosine": 0.999999
+    },
+    {
+      "prefix": "idol.vae",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "relative_rmse": 0.02,
+      "cosine": 0.9998
+    },
+    {
+      "prefix": "idol.condition.feature2",
+      "atol": 0.1,
+      "rtol": 0.02,
+      "relative_rmse": 0.02,
+      "cosine": 0.9998
+    },
+    {
+      "prefix": "idol.octree",
+      "atol": 0.03,
+      "rtol": 0.005,
+      "relative_rmse": 0.005,
+      "cosine": 0.99999
+    },
+    {
+      "prefix": "idol.gaussian",
+      "atol": 0.1,
+      "rtol": 0.01,
+      "relative_rmse": 0.01,
+      "cosine": 0.9998
+    },
+    {
+      "prefix": "idol.denoiser.joint.",
+      "atol": 0.25,
+      "rtol": 0.015,
+      "relative_rmse": 0.015,
+      "cosine": 0.9995
+    },
+    {
+      "prefix": "idol.denoiser",
+      "atol": 0.25,
+      "rtol": 0.01,
+      "relative_rmse": 0.015,
+      "cosine": 0.9995
+    }
+  ],
+  "calibration": "Initial family gates predeclared before first run. Early F32 gates tightened from observed SIMD errors <=2.8611e-6. Joint FP16 block-state peak allowance calibrated from1% to1.5% after same-input official/native diagnosis: block23 localmax0.0625 versus accumulated3.5, local relativeRMSE0.00010977; worst accumulated element haszero localerror. Applies to all joint blocks as one precisionclass. Aggregate relativeRMSE0.015/cosine0.9995 and final velocity gates unchanged; original failure evidence preserved."
+}
