@@ -190,12 +190,11 @@ def _qkx2_batch(x: np.ndarray, weights: np.ndarray) -> tuple[np.ndarray, np.ndar
     safe_span = np.where(span == 0.0, 1.0, span)
     sum_w = wd.sum(axis=2)
     sum_x = (wd * xd).sum(axis=2)
-    sum_x2 = (wd * xd * xd).sum(axis=2)
 
     # is=0 seed, mirroring the reference's first estimate.
     isc0 = 15.0 / safe_span
     L0 = np.clip(np.floor(isc0[..., None] * (xd - lo[..., None]) + 0.5), 0, 15)
-    scale0 = np.where(sum_x2 > 0.0, sum_x / np.maximum((wd * L0 * L0).sum(axis=2), 1e-300), 1.0 / isc0)
+    scale0 = 1.0 / isc0
     resid0 = scale0[..., None] * L0 + lo[..., None] - xd
     best_err = (wd * resid0 * resid0).sum(axis=2)
     best_scale = scale0

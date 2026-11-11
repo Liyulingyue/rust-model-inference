@@ -18,15 +18,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct CancellationGuard {
+pub(super) struct CancellationGuard {
     flag: Arc<AtomicBool>,
     armed: bool,
 }
 impl CancellationGuard {
-    fn new(flag: Arc<AtomicBool>) -> Self {
+    pub(super) fn new(flag: Arc<AtomicBool>) -> Self {
         Self { flag, armed: true }
     }
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.armed = false;
     }
 }
@@ -155,6 +155,8 @@ use std::collections::{HashMap, HashSet};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/audio/chat", post(super::audio_chat::handle))
+        .route("/v1/jev/audio", post(super::audio_chat::jev))
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/responses", post(responses))
@@ -718,15 +720,16 @@ fn generate(
     cancelled: impl Fn() -> bool,
 ) -> Result<Generation, String> {
     let (arch, handle) = match state.model.as_ref() {
-        Backend::Text(text) => (text.arch.as_str(), text.runtime.as_ref()),
-        Backend::WeVisOne(wevisone) => {
-            (wevisone.text.arch.as_str(), wevisone.text.runtime.as_ref())
-        }
         Backend::UnlimitedOcr(native) => (
             crate::models::unlimited_ocr::MODEL_TYPE,
             Some(&native.runtime),
         ),
-        _ => return Err("Server is not running a text model".into()),
+        backend => {
+            let text = backend
+                .text_backend()
+                .ok_or("Server is not running a text model")?;
+            (text.arch.as_str(), text.runtime.as_ref())
+        }
     };
     if cancelled() {
         return Err("Client disconnected".into());
@@ -1084,6 +1087,273 @@ mod http_tests {
         }
         assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
     }
+
+    fn grouped_sophon_state(capacity: usize, fail: bool) -> AppState {
+        struct Source {
+            component: crate::MetaValue,
+            arch: crate::MetaValue,
+        }
+        impl crate::core::tensor::TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&crate::MetaValue> {
+                match key {
+                    "sophon_realtime.component" => Some(&self.component),
+                    "general.architecture" => Some(&self.arch),
+                    _ => None,
+                }
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+        struct Runtime {
+            tokenizer: Arc<crate::core::tokenizer::BPETokenizer>,
+            capacity: usize,
+            fail: bool,
+        }
+        impl crate::ops::generation_runtime::TextRuntime for Runtime {
+            fn arch(&self) -> &str {
+                "qwen3vl"
+            }
+            fn context_length(&self) -> usize {
+                self.capacity
+            }
+            fn validate_request(
+                &self,
+                ids: &[u32],
+                _: &[Vec<u8>],
+                output: usize,
+            ) -> Result<(), String> {
+                if ids.len() + output > self.capacity {
+                    Err("grouped prompt exceeds configured context".into())
+                } else {
+                    Ok(())
+                }
+            }
+            fn generate(
+                &mut self,
+                _: &GenerationRequest,
+                _: &mut dyn TokenSink,
+            ) -> Result<crate::ops::generation_runtime::GeneratedText, String> {
+                panic!("grouped JEV must score logits")
+            }
+            fn logits(&mut self, request: &GenerationRequest) -> Result<Vec<f32>, String> {
+                if self.fail {
+                    return Err("grouped device execution failed".into());
+                }
+                let prompt = String::from_utf8(
+                    request
+                        .token_ids
+                        .iter()
+                        .flat_map(|&id| self.tokenizer.token_piece_bytes(id, true))
+                        .collect(),
+                )
+                .unwrap();
+                assert!(
+                    prompt.starts_with("PINNED|For each group, select the best option."),
+                    "{prompt}"
+                );
+                assert!(prompt.contains("\"context\": \"ctx\""), "{prompt}");
+                assert!(request.images.is_empty() || request.images == [vec![1, 2, 3]]);
+                let mut logits = vec![0.0; self.tokenizer.vocab_size()];
+                for (label, value) in [("A", 1.0), ("B", 2.0), ("C", 1.0), ("D", 3.0)] {
+                    logits[self.tokenizer.token_id(label).unwrap() as usize] = value;
+                }
+                Ok(logits)
+            }
+        }
+        let mut state = state();
+        let Backend::Text(text) = Arc::get_mut(&mut state.model).unwrap() else {
+            unreachable!()
+        };
+        text.source = Arc::new(Source {
+            component: crate::MetaValue::String("thinker".into()),
+            arch: crate::MetaValue::String("qwen3vl".into()),
+        });
+        text.compiled_chat_template = Arc::new(Some(
+            crate::prompt::jinja::JinjaChatTemplate::compile(
+                "PINNED|{{ messages[0].content }}|{{ messages[1].content }}",
+                "grouped-test",
+            )
+            .unwrap(),
+        ));
+        text.context_length = capacity;
+        text.runtime = Some(std::sync::Mutex::new(Box::new(Runtime {
+            tokenizer: text.tokenizer.clone(),
+            capacity,
+            fail,
+        })));
+        state
+    }
+
+    fn grouped_sophon_body(image: bool) -> Value {
+        let mut body = json!({"context":"ctx", "mode":"block_choice", "questions":[{"text":"q", "groups":[{"label":"first", "options":["no","yes"]},{"label":"second","options":["other","chosen"]}]}]});
+        if image {
+            body["image_url"] = json!("data:image/png;base64,AQID");
+        }
+        body
+    }
+
+    #[tokio::test]
+    async fn sophon_grouped_routes_use_resident_runtime_and_validate_context() {
+        for image in [false, true] {
+            for (capacity, fail, expected) in [
+                (1024, false, StatusCode::OK),
+                (8, false, StatusCode::BAD_REQUEST),
+                (1024, true, StatusCode::INTERNAL_SERVER_ERROR),
+            ] {
+                let state = grouped_sophon_state(capacity, fail);
+                let body = grouped_sophon_body(image);
+                let response = if image {
+                    jev_image_grouped(
+                        State(state),
+                        Ok(Json(serde_json::from_value(body).unwrap())),
+                    )
+                    .await
+                } else {
+                    jev_grouped(
+                        State(state),
+                        Ok(Json(serde_json::from_value(body).unwrap())),
+                    )
+                    .await
+                };
+                assert_eq!(
+                    response.status(),
+                    expected,
+                    "image={image}, capacity={capacity}, fail={fail}"
+                );
+                if expected == StatusCode::OK {
+                    let value: Value = serde_json::from_slice(
+                        &axum::body::to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let groups = &value["results"][0]["groups"];
+                    assert_eq!(groups[0]["choice"], "B");
+                    assert_eq!(groups[1]["choice"], "D");
+                    assert!(
+                        (groups[0]["probabilities"]["B"].as_f64().unwrap() - 0.7310586).abs()
+                            < 1e-6
+                    );
+                    assert!(
+                        (groups[1]["probabilities"]["D"].as_f64().unwrap() - 0.8807971).abs()
+                            < 1e-6
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sophon_grouped_routes_reject_busy_generation_slot() {
+        for image in [false, true] {
+            let state = grouped_sophon_state(1024, false);
+            let _permit = state.generation_slot.clone().try_acquire_owned().unwrap();
+            let body = grouped_sophon_body(image);
+            let response = if image {
+                jev_image_grouped(
+                    State(state),
+                    Ok(Json(serde_json::from_value(body).unwrap())),
+                )
+                .await
+            } else {
+                jev_grouped(
+                    State(state),
+                    Ok(Json(serde_json::from_value(body).unwrap())),
+                )
+                .await
+            };
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "image={image}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn audio_chat_batch_disconnect_releases_generation_slot() {
+        struct Runtime(Arc<tokio::sync::Notify>);
+        impl crate::ops::generation_runtime::TextRuntime for Runtime {
+            fn arch(&self) -> &str {
+                "audio-test"
+            }
+            fn context_length(&self) -> usize {
+                1024
+            }
+            fn validate_audio_request(
+                &self,
+                _: &GenerationRequest,
+                _: &[Vec<f32>],
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn generate(
+                &mut self,
+                _: &GenerationRequest,
+                _: &mut dyn TokenSink,
+            ) -> Result<crate::ops::generation_runtime::GeneratedText, String> {
+                unreachable!()
+            }
+            fn generate_audio(
+                &mut self,
+                _: &GenerationRequest,
+                _: &[Vec<f32>],
+                sink: &mut dyn TokenSink,
+            ) -> Result<crate::ops::generation_runtime::GeneratedText, String> {
+                self.0.notify_one();
+                for _ in 0..200 {
+                    if sink.push_text("chunk") == Flow::Stop {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(crate::ops::generation_runtime::GeneratedText {
+                    text: "reply".into(),
+                    token_ids: vec![],
+                    finish: crate::ops::generation_runtime::Finish::Cancelled,
+                })
+            }
+        }
+        use base64::Engine as _;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let mut state = state();
+        let Backend::Text(text) = Arc::get_mut(&mut state.model).unwrap() else {
+            unreachable!()
+        };
+        let path =
+            std::env::temp_dir().join(format!("rmi-audio-cancel-{}.jinja", rand::random::<u64>()));
+        std::fs::write(&path, "{{ messages[0].content }}").unwrap();
+        text.chat_template = Arc::new(crate::prompt::jinja::Options {
+            jinja: true,
+            file: Some(path.clone()),
+        });
+        text.runtime = Some(std::sync::Mutex::new(Box::new(Runtime(started.clone()))));
+        let wav = crate::format::wav::encode_wav_pcm16_channels(&[0.0; 160], 16_000, 1).unwrap();
+        let request = serde_json::from_value(
+            json!({"audio":base64::engine::general_purpose::STANDARD.encode(wav),"max_tokens":4}),
+        )
+        .unwrap();
+        let slot = state.generation_slot.clone();
+        let task = tokio::spawn(super::super::audio_chat::handle(
+            State(state),
+            Ok(Json(request)),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        let released = tokio::time::timeout(Duration::from_millis(400), slot.acquire_owned()).await;
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            released.is_ok(),
+            "batch disconnect left generation occupied"
+        );
+    }
     #[tokio::test]
     async fn jev_on_a_non_text_backend_is_a_client_error() {
         let mut state = state();
@@ -1108,6 +1378,102 @@ mod http_tests {
         .unwrap();
         let response = jev_image_score(State(state), Ok(Json(body))).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn audio_jev_distinguishes_input_errors_from_inference_failures() {
+        struct AudioFailure(bool);
+        impl crate::ops::generation_runtime::TextRuntime for AudioFailure {
+            fn arch(&self) -> &str {
+                "audio-test"
+            }
+            fn context_length(&self) -> usize {
+                1024
+            }
+            fn validate_audio_request(
+                &self,
+                _: &GenerationRequest,
+                _: &[Vec<f32>],
+            ) -> Result<(), String> {
+                if self.0 {
+                    Err("audio input exceeds context".into())
+                } else {
+                    Ok(())
+                }
+            }
+            fn validate_request(&self, _: &[u32], _: &[Vec<u8>], _: usize) -> Result<(), String> {
+                if self.0 {
+                    Err("media input exceeds context".into())
+                } else {
+                    Ok(())
+                }
+            }
+            fn generate(
+                &mut self,
+                _: &GenerationRequest,
+                _: &mut dyn TokenSink,
+            ) -> Result<crate::ops::generation_runtime::GeneratedText, String> {
+                panic!("JEV must score logits")
+            }
+            fn audio_logits(&mut self, _: &[u32], _: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+                Err("device execution failed".into())
+            }
+            fn logits(&mut self, _: &GenerationRequest) -> Result<Vec<f32>, String> {
+                Err("device execution failed".into())
+            }
+        }
+        use base64::Engine as _;
+        let path = std::env::temp_dir().join(format!(
+            "rmi-audio-jev-{}-{}.jinja",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            "{{ messages[0].content }}\n{{ messages[1].content }}",
+        )
+        .unwrap();
+        let wav = crate::format::wav::encode_wav_pcm16_channels(&[0.0; 160], 16_000, 1).unwrap();
+        for (invalid, expected) in [
+            (true, StatusCode::BAD_REQUEST),
+            (false, StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let mut state = state();
+            let Backend::Text(text) = std::sync::Arc::get_mut(&mut state.model).unwrap() else {
+                unreachable!()
+            };
+            text.chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
+                jinja: true,
+                file: Some(path.clone()),
+            });
+            text.runtime = Some(std::sync::Mutex::new(Box::new(AudioFailure(invalid))));
+            let questions = [crate::app::jev::JevQuestionInput {
+                text: "q".into(),
+                options: vec!["one".into(), "two".into()],
+            }];
+            for images in [vec![], vec![vec![1, 2, 3]]] {
+                assert_eq!(
+                    super::super::audio_chat::score_media(
+                        state.model.as_ref(),
+                        &[],
+                        &images,
+                        "",
+                        &questions,
+                        None
+                    )
+                    .unwrap_err()
+                    .0,
+                    expected
+                );
+            }
+            let body = serde_json::from_value(json!({"audio":base64::engine::general_purpose::STANDARD.encode(&wav),"questions":[{"text":"q","options":["one","two"]}]})).unwrap();
+            let response = super::super::audio_chat::jev(State(state), Ok(Json(body))).await;
+            assert_eq!(response.status(), expected);
+        }
+        std::fs::remove_file(path).unwrap();
     }
     #[tokio::test]
     async fn image_preflight_errors_are_400_before_streaming_or_generation() {
@@ -1580,8 +1946,8 @@ pub async fn jev_score(
             "questions must contain at least one item".to_string(),
         );
     }
-    let _compute_scope = state.compute.enter_legacy_scope();
     if let Backend::Gliner2(gliner2) = state.model.as_ref() {
+        let _compute_scope = state.compute.enter_legacy_scope();
         // The label set is caller-supplied, exactly like the other JEV modes,
         // so the request shape does not change.  Each question is one task:
         // the question text is the head name, the options are its labels.
@@ -1646,6 +2012,40 @@ pub async fn jev_score(
         .collect();
     let positive = req.positive.as_deref();
 
+    if crate::models::sophon_realtime::is_thinker(source.as_ref()) {
+        if let Err(e) = crate::app::jev::prepare_jev_questions(&questions, positive) {
+            return jev_error(StatusCode::BAD_REQUEST, e);
+        }
+        let permit = match state.generation_slot.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(e) => return jev_error(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        };
+        let model = Arc::clone(&state.model);
+        let context = req.context.clone();
+        let positive = req.positive.clone();
+        let result = super::compute_task(state.compute, move || {
+            let _permit = permit;
+            super::audio_chat::score_media(
+                model.as_ref(),
+                &[],
+                &[],
+                &context,
+                &questions,
+                positive.as_deref(),
+            )
+        })
+        .await;
+        return match result {
+            Ok(Ok(results)) => {
+                Json(json!({"mode":"single","context":req.context,"results":results}))
+                    .into_response()
+            }
+            Ok(Err((status, e))) => jev_error(status, e),
+            Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+    }
+
+    let _compute_scope = state.compute.enter_legacy_scope();
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
@@ -1678,9 +2078,12 @@ pub async fn jev_score(
         positive,
         threads,
         prefill_batch_size,
-        // The JEV HTTP endpoints have no chat-template switch yet; they
-        // keep the hand-built prompt layout.
-        crate::prompt::jinja::Options::default(),
+        state
+            .model
+            .text_backend()
+            .filter(|text| crate::models::sophon_realtime::is_thinker(text.source.as_ref()))
+            .map(|text| text.chat_template.as_ref().clone())
+            .unwrap_or_default(),
     ) {
         Ok(r) => r,
         Err(e) => return jev_error(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -1718,7 +2121,6 @@ async fn jev_grouped(
             );
         }
     };
-    let _compute_scope = state.compute.enter_legacy_scope();
     let source = match text_source(&state) {
         Ok(s) => s,
         // A JEV request against a server that is not running a text model
@@ -1726,22 +2128,12 @@ async fn jev_grouped(
         Err(e) => return jev_error(StatusCode::BAD_REQUEST, e),
     };
 
-    let questions: Vec<crate::app::JevGroupedQuestionInput> = req
-        .questions
-        .into_iter()
-        .map(|q| crate::app::JevGroupedQuestionInput {
-            text: q.text,
-            groups: q
-                .groups
-                .into_iter()
-                .map(|g| crate::app::JevGroupInput {
-                    label: g.label,
-                    options: g.options,
-                })
-                .collect(),
-        })
-        .collect();
+    let questions = grouped_inputs(req.questions);
+    if crate::models::sophon_realtime::is_thinker(source.as_ref()) {
+        return sophon_grouped(state, req.context, questions, mode, None, None).await;
+    }
 
+    let _compute_scope = state.compute.enter_legacy_scope();
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
@@ -1770,10 +2162,65 @@ async fn jev_grouped(
     .into_response()
 }
 
+fn grouped_inputs(
+    questions: Vec<JevGroupedOptionInput>,
+) -> Vec<crate::app::JevGroupedQuestionInput> {
+    questions
+        .into_iter()
+        .map(|q| crate::app::JevGroupedQuestionInput {
+            text: q.text,
+            groups: q
+                .groups
+                .into_iter()
+                .map(|g| crate::app::JevGroupInput {
+                    label: g.label,
+                    options: g.options,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+async fn sophon_grouped(
+    state: AppState,
+    context: String,
+    questions: Vec<crate::app::JevGroupedQuestionInput>,
+    mode: crate::app::JevMode,
+    image: Option<String>,
+    temperature: Option<f32>,
+) -> Response {
+    let permit = match state.generation_slot.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(e) => return jev_error(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+    };
+    let result = super::compute_task(state.compute, move || {
+        let _permit = permit;
+        crate::app::prepare_jev_grouped_questions(&questions, mode)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let images = if let Some(image) = image {
+            let path = decode_image_to_tempfile(&image).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let bytes = std::fs::read(&path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+            let _ = std::fs::remove_file(path);
+            vec![bytes?]
+        } else { vec![] };
+        let results = super::audio_chat::score_grouped_media(state.model.as_ref(), &[], &images,
+            &context, &questions, mode)?;
+        let mut value = json!({"mode":if mode == crate::app::JevMode::MultiSelect {"multi_select"} else {"block_choice"},"context":context,"results":results});
+        if let Some(temperature) = temperature { value["temperature"] = json!(temperature); }
+        Ok::<_, (StatusCode, String)>(value)
+    }).await;
+    match result {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err((status, e))) => jev_error(status, e),
+        Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSource>, String> {
     match state.model.as_ref() {
         Backend::Text(text) => Ok(Arc::clone(&text.source)),
         Backend::WeVisOne(wevisone) => Ok(Arc::clone(&wevisone.text.source)),
+        Backend::AudioChat(backend) => Ok(Arc::clone(&backend.text.source)),
         // CLM owns an encoder too; it just scores differently.
         Backend::Clm(clm) => Ok(Arc::clone(&clm.source)),
         other => Err(format!(
@@ -1785,13 +2232,13 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
 
 fn backend_label(b: &Backend) -> &'static str {
     match b {
-        Backend::Text(_) | Backend::WeVisOne(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) | Backend::AudioChat(_) => "text",
         Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
-        Backend::Tts(_) => "tts",
+        Backend::Tts(_) | Backend::TagSpeech(_) => "tts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
@@ -1803,9 +2250,10 @@ fn backend_label(b: &Backend) -> &'static str {
 }
 
 fn jev_threads(state: &AppState) -> usize {
+    if let Some(text) = state.model.text_backend() {
+        return text.pool.n_threads();
+    }
     match state.model.as_ref() {
-        Backend::Text(text) => text.pool.n_threads(),
-        Backend::WeVisOne(wevisone) => wevisone.text.pool.n_threads(),
         Backend::Clm(clm) => clm.model.pool().n_threads(),
         Backend::Gliner2(gliner2) => gliner2.n_threads,
         _ => 1,
@@ -1813,9 +2261,10 @@ fn jev_threads(state: &AppState) -> usize {
 }
 
 fn jev_prefill_batch_size(state: &AppState) -> usize {
+    if let Some(text) = state.model.text_backend() {
+        return text.prefill_batch_size;
+    }
     match state.model.as_ref() {
-        Backend::Text(text) => text.prefill_batch_size,
-        Backend::WeVisOne(wevisone) => wevisone.text.prefill_batch_size,
         Backend::Clm(clm) => clm.prefill_batch_size,
         _ => 64,
     }
@@ -1902,6 +2351,51 @@ async fn jev_image_score(
                 backend_label(state.model.as_ref())
             ),
         );
+    }
+    if state
+        .model
+        .text_backend()
+        .is_some_and(|text| crate::models::sophon_realtime::is_thinker(text.source.as_ref()))
+    {
+        let permit = match state.generation_slot.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(e) => return jev_error(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        };
+        let context = req.context.clone();
+        let result = super::compute_task(state.compute, move || {
+            let _permit = permit;
+            let questions = req
+                .questions
+                .into_iter()
+                .map(|q| crate::app::jev::JevQuestionInput {
+                    text: q.text,
+                    options: q.options,
+                })
+                .collect::<Vec<_>>();
+            crate::app::jev::prepare_jev_questions(&questions, req.positive.as_deref())
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let path = decode_image_to_tempfile(&req.image_url)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            let bytes = std::fs::read(&path)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+            let _ = std::fs::remove_file(path);
+            super::audio_chat::score_media(
+                state.model.as_ref(),
+                &[],
+                &[bytes?],
+                &req.context,
+                &questions,
+                req.positive.as_deref(),
+            )
+        })
+        .await;
+        return match result {
+            Ok(Ok(results)) => {
+                Json(json!({"mode":"single", "context":context, "results":results})).into_response()
+            }
+            Ok(Err((status, e))) => jev_error(status, e),
+            Err(e) => jev_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
     }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
@@ -1993,6 +2487,26 @@ async fn jev_image_grouped(
                 backend_label(state.model.as_ref())
             ),
         );
+    }
+    if state
+        .model
+        .text_backend()
+        .is_some_and(|text| crate::models::sophon_realtime::is_thinker(text.source.as_ref()))
+    {
+        let mode = if req.mode == "multi_select" {
+            crate::app::JevMode::MultiSelect
+        } else {
+            crate::app::JevMode::BlockChoice
+        };
+        return sophon_grouped(
+            state,
+            req.context,
+            grouped_inputs(req.questions),
+            mode,
+            Some(req.image_url),
+            Some(req.temperature),
+        )
+        .await;
     }
     let image_path = match decode_image_to_tempfile(&req.image_url) {
         Ok(p) => p,
@@ -2381,28 +2895,51 @@ async fn run_multimodal_text_only(
     // the CLI scorer; folding it into `prompt` puts it in the user turn instead.
     system_prompt: String,
 ) -> Result<Vec<f32>, String> {
-    // Multimodal logits-only forward — dispatch by arch.
-    let arch = match state.model.as_ref() {
-        Backend::Text(text) => text.arch.clone(),
-        Backend::WeVisOne(wevisone) => wevisone.text.arch.clone(),
-        other => {
-            return Err(format!(
-                "/v1/jev/image requires a text backend (got {})",
-                backend_label(other)
-            ));
-        }
-    };
-    let source = match state.model.as_ref() {
-        Backend::Text(text) => Arc::clone(&text.source),
-        Backend::WeVisOne(wevisone) => Arc::clone(&wevisone.text.source),
-        _ => unreachable!(),
-    };
-    let mmproj_path = match state.model.as_ref() {
-        Backend::Text(text) => text.mmproj_path.clone(),
-        Backend::WeVisOne(wevisone) => wevisone.text.mmproj_path.clone(),
-        _ => None,
+    if state
+        .model
+        .text_backend()
+        .is_some_and(|text| crate::models::sophon_realtime::is_thinker(text.source.as_ref()))
+    {
+        let model = Arc::clone(&state.model);
+        return super::compute_task(state.compute, move || {
+            let text = model.text_backend().ok_or("server has no text backend")?;
+            let template = text
+                .chat_template
+                .resolve(&|key| text.source.metadata(key).cloned())?
+                .ok_or("image scoring requires a chat template")?;
+            let ids = crate::prompt::jinja::render_text_conversation(
+                &*text.tokenizer,
+                &template,
+                Some(&system_prompt),
+                &prompt,
+                false,
+            )?;
+            let mut request = GenerationRequest::new(ids, 1);
+            request
+                .images
+                .push(std::fs::read(image_path).map_err(|e| e.to_string())?);
+            text.runtime
+                .as_ref()
+                .ok_or("server has no text runtime")?
+                .lock()
+                .map_err(|e| e.to_string())?
+                .logits(&request)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
     }
-    .ok_or_else(|| "/v1/jev/image requires the server to be started with --mmproj".to_string())?;
+    // Multimodal logits-only forward — dispatch by arch.
+    let text = state.model.text_backend().ok_or_else(|| {
+        format!(
+            "/v1/jev/image requires a text backend (got {})",
+            backend_label(state.model.as_ref())
+        )
+    })?;
+    let arch = text.arch.clone();
+    let source = Arc::clone(&text.source);
+    let mmproj_path = text.mmproj_path.clone().ok_or_else(|| {
+        "/v1/jev/image requires the server to be started with --mmproj".to_string()
+    })?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 

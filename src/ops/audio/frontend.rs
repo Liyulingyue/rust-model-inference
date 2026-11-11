@@ -67,6 +67,13 @@ pub fn decode_pcm16_wav(bytes: &[u8]) -> Result<Vec<f32>, AsrAudioError> {
 }
 
 pub fn decode_pcm16_wav_any(bytes: &[u8]) -> Result<DecodedPcm16Wav, AsrAudioError> {
+    decode_pcm16_wav_any_bounded(bytes, usize::MAX)
+}
+
+pub(crate) fn decode_pcm16_wav_any_bounded(
+    bytes: &[u8],
+    max_samples: usize,
+) -> Result<DecodedPcm16Wav, AsrAudioError> {
     if bytes.get(0..4) != Some(b"RIFF") {
         return Err(AsrAudioError::Unsupported("expected RIFF/WAVE".into()));
     }
@@ -171,6 +178,11 @@ pub fn decode_pcm16_wav_any(bytes: &[u8]) -> Result<DecodedPcm16Wav, AsrAudioErr
     if pcm.is_empty() || pcm.len() % usize::from(block_align) != 0 {
         return Err(AsrAudioError::Invalid(
             "PCM data must contain complete interleaved frames".into(),
+        ));
+    }
+    if pcm.len() / 2 > max_samples {
+        return Err(AsrAudioError::Invalid(
+            "decoded audio exceeds context sample budget".into(),
         ));
     }
     let mut samples = Vec::new();
@@ -370,6 +382,61 @@ impl RealFft {
             let real = self.output[bin * 2];
             let imaginary = self.output[bin * 2 + 1];
             *value = real.mul_add(real, imaginary * imaginary).sqrt();
+        }
+    }
+
+    pub(crate) fn spectrum(&mut self, input: &[f32], output: &mut [f32]) {
+        assert_eq!(input.len(), self.size);
+        assert_eq!(output.len(), (self.size / 2 + 1) * 2);
+        self.transform(input);
+        output.copy_from_slice(&self.output[..output.len()]);
+    }
+
+    /// Inverse of the one-sided spectrum, with the usual 1/N normalization.
+    pub(crate) fn inverse_real(&mut self, spectrum: &[f32], output: &mut [f32]) {
+        assert_eq!(spectrum.len(), (self.size / 2 + 1) * 2);
+        assert_eq!(output.len(), self.size);
+        let mut real = vec![0.0; self.size];
+        let mut imag = vec![0.0; self.size];
+        for k in 0..=self.size / 2 {
+            real[k] = spectrum[2 * k];
+            imag[k] = spectrum[2 * k + 1];
+        }
+        imag[0] = 0.0;
+        if self.size % 2 == 0 {
+            imag[self.size / 2] = 0.0;
+        }
+        for k in 1..=(self.size - 1) / 2 {
+            real[self.size - k] = real[k];
+            imag[self.size - k] = -imag[k];
+        }
+        self.transform(&real);
+        for (n, value) in output.iter_mut().enumerate() {
+            *value = self.output[n * 2];
+        }
+        self.transform(&imag);
+        for (n, value) in output.iter_mut().enumerate() {
+            *value = (*value + self.output[n * 2 + 1]) / self.size as f32;
+        }
+    }
+}
+
+#[cfg(test)]
+mod spectrum_tests {
+    use super::RealFft;
+
+    #[test]
+    fn one_sided_inverse_restores_even_and_odd_signals() {
+        for size in [1, 15, 16, 400] {
+            let input: Vec<_> = (0..size)
+                .map(|n| (n as f32 * 0.3).sin() + n as f32 / 100.0)
+                .collect();
+            let mut fft = RealFft::new(size).unwrap();
+            let mut spectrum = vec![0.0; (size / 2 + 1) * 2];
+            let mut output = vec![0.0; size];
+            fft.spectrum(&input, &mut spectrum);
+            fft.inverse_real(&spectrum, &mut output);
+            assert!(output.iter().zip(&input).all(|(a, b)| (a - b).abs() < 1e-5));
         }
     }
 }

@@ -1,0 +1,237 @@
+{
+  "status": "partial entrypoint evidence; build identities delimit source coverage",
+  "host": "authorized remote 33367; models and generated audio remain remote",
+  "runs": {
+    "tts_http_initial": {
+      "evidence": "target/sophon/speech-http-final-33367/result.json",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/current-isolated-rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "128",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18237"
+      ],
+      "binary_sha256": "4be897393b1341660236d1146b3deac01e281f2c4325555a114f63dc1edb932b",
+      "cases": {
+        "unknown-voice": {
+          "status": 400,
+          "body": "{\"error\":\"unknown voice \\\"missing\\\"; available: brand_en, brand_zh, chelsie_en, chelsie_zh, ryan_en, vivian_zh\"}",
+          "seconds": 0.0017775055021047592
+        },
+        "empty": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002863481640815735
+        },
+        "unknown-field": {
+          "status": 400,
+          "body": "{\"error\":\"Failed to deserialize the JSON body into the target type: file: unknown field `file`, expected one of `model`, `input`, `voice`, `max_tokens`, `temperature`, `seed`, `speed`, `response_format`, `stream` at line 1 column 21\"}",
+          "seconds": 0.00031958892941474915
+        },
+        "bad-stream-format": {
+          "status": 400,
+          "body": "{\"error\":\"streaming speech requires response_format=pcm\"}",
+          "seconds": 0.00025583989918231964
+        },
+        "bad-budget": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002406388521194458
+        },
+        "batch-wav": {
+          "status": 200,
+          "samples": 73920,
+          "bytes": 147884,
+          "sha256": "9a1e2129d2922916e0c596e9ac5e52d9f9fad7c7e9d89fecf53c185b48a9e80d",
+          "seconds": 62.09234063513577,
+          "content_type": "audio/wav"
+        },
+        "batch-pcm": {
+          "status": 200,
+          "samples": 73920,
+          "bytes": 147840,
+          "sha256": "4a96fff9c419338bbb034ce37c44714577495bed8269ea0d8fbc0edcaab07818",
+          "seconds": 59.427688566967845,
+          "content_type": "audio/pcm"
+        },
+        "stream": {
+          "status": 200,
+          "samples": 73920,
+          "chunk_samples": [
+            2880,
+            9600,
+            9600,
+            9600,
+            9600,
+            9600,
+            9600,
+            13440
+          ],
+          "events": [
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "done",
+              "value": {
+                "speech_tokens": 77,
+                "samples": 73920,
+                "terminated": true,
+                "cancelled": false
+              }
+            }
+          ],
+          "seconds": 267.4641415346414,
+          "sha256": "f8b308f9d8dcf168f01799c7904995ef40271a862c0ff6ec148dc184527a9d77",
+          "not_expected_equal_to_batch": "Flow commits prefixes while the attention chunk grows"
+        }
+      },
+      "profile": "release-fast; concurrent jobs, timings not capacity",
+      "server_pid": 256058,
+      "pass": false,
+      "error": "Traceback (most recent call last):\n  File \"/root/rmi-sophon-artifacts/repo/target/sophon/run-speech-http-33367.py\", line 58, in <module>\n    else:raise AssertionError('generation permit not released after disconnect')\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: generation permit not released after disconnect\n"
+    },
+    "tts_http_stream_cancel_fix": {
+      "evidence": "target/sophon/speech-http-cancel-fixed-33367/result.json",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/current-review-fixed-rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "128",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18237"
+      ],
+      "binary_sha256": "fd9636cb87fb6d6bcedfc4023fc9c3d0f594c58706f9a0654efb9eaab7d028d3",
+      "cases": {
+        "unknown-voice": {
+          "status": 400,
+          "body": "{\"error\":\"unknown voice \\\"missing\\\"; available: brand_en, brand_zh, chelsie_en, chelsie_zh, ryan_en, vivian_zh\"}",
+          "seconds": 0.0010951608419418335
+        },
+        "empty": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.00028683803975582123
+        },
+        "unknown-field": {
+          "status": 400,
+          "body": "{\"error\":\"Failed to deserialize the JSON body into the target type: file: unknown field `file`, expected one of `model`, `input`, `voice`, `max_tokens`, `temperature`, `seed`, `speed`, `response_format`, `stream` at line 1 column 21\"}",
+          "seconds": 0.0002673584967851639
+        },
+        "bad-stream-format": {
+          "status": 400,
+          "body": "{\"error\":\"streaming speech requires response_format=pcm\"}",
+          "seconds": 0.00038463249802589417
+        },
+        "bad-budget": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002330690622329712
+        },
+        "disconnect": {
+          "first_pcm_observed": true,
+          "admission_released": true,
+          "probe_status": 400,
+          "probe_attempts": 3
+        }
+      },
+      "profile": "release-fast; concurrent jobs, timings not capacity",
+      "server_pid": 276315,
+      "pass": true
+    }
+  },
+  "notes": [
+    "The initial full speech HTTP suite passed WAV/PCM/stream output checks but failed its 20-second post-disconnect admission probe. The later cancel-only suite uses a distinct build and succeeds after three probes; the original failure remains visible.",
+    "Later grouped-JEV and batch cancellation changes require their own final-source verification."
+  ]
+}

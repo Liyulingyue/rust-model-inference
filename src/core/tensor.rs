@@ -306,6 +306,11 @@ pub trait TensorSource: Send + Sync {
     fn tensor_info(&self, name: &str) -> Option<&TensorInfo>;
     fn tensor_slice(&self, name: &str) -> Option<&[u8]>;
 
+    /// Opt in only when every static-weight consumer retains this source for its whole lifetime.
+    fn borrowed_static_f32_weights(&self) -> bool {
+        false
+    }
+
     fn model_config(&self) -> Result<crate::core::traits::ModelConfig, String> {
         crate::core::loader::model_config_from_source(self)
     }

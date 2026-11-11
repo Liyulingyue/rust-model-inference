@@ -621,6 +621,14 @@ fn main() {
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
+    let source = match rust_model_inference::models::sophon_realtime::decoder_source(source) {
+        Ok(source) => source,
+        Err(error) => {
+            app::run_or_exit(Err(error));
+            return;
+        }
+    };
+    let sophon = rust_model_inference::models::sophon_realtime::is_thinker(source.as_ref());
     if app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH {
         app::run_or_exit(app::decision::jev::run_jev_cli(
             source.clone(),
@@ -668,7 +676,7 @@ fn main() {
     // `--jinja` / `--chat-template-file`. Off unless asked for, so the
     // hand-written builders keep producing today's exact token ids.
     let jinja_options = rust_model_inference::prompt::jinja::Options {
-        jinja: options.jinja,
+        jinja: options.jinja || sophon,
         file: options.chat_template_file.clone(),
     };
 
@@ -676,6 +684,14 @@ fn main() {
         .mmproj
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    if sophon && options.audio.is_none() {
+        if let Some(path) = explicit_mmproj {
+            let vision = open_or_exit(path, ComponentRole::Mmproj);
+            app::run_or_exit(
+                rust_model_inference::models::sophon_realtime::validate_vision(vision.as_ref()),
+            );
+        }
+    }
     let tts_model = options
         .tts_model
         .as_deref()
@@ -684,6 +700,12 @@ fn main() {
         .tts_mmproj
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+    if options.voice.is_some() && tts_model.is_some() && !sophon {
+        app::run_or_exit(Err(
+            "--voice with --tts-model requires a packaged-voice speech model".into(),
+        ));
+        return;
+    }
     let image = options
         .image
         .as_deref()
@@ -696,6 +718,15 @@ fn main() {
         .video
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
+
+    if sophon && (audio.is_some() || tts_model.is_some() || options.jev) && !options.embedding {
+        app::run_or_exit(app::audio_chat::run_cli(
+            source.clone(),
+            &options,
+            n_threads,
+        ));
+        return;
+    }
 
     if options.jev && (options.embedding || video.is_some() || audio.is_some()) {
         app::run_or_exit(Err(
@@ -1165,6 +1196,7 @@ fn main() {
                 options.embedding_output,
             );
         } else if arch == "qwen3vl"
+            && !sophon
             && (source.metadata("wevisone_vl.source_revision").is_none()
                 || options.dump_logits
                 || options.bench

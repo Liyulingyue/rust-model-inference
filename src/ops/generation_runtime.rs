@@ -150,6 +150,34 @@ pub trait TextRuntime: Send {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String>;
+
+    /// Audio is mono 16kHz F32 PCM, in prompt-placeholder order.
+    fn validate_audio_request(
+        &self,
+        _request: &GenerationRequest,
+        _audio: &[Vec<f32>],
+    ) -> Result<(), String> {
+        Err("this text runtime does not support audio input".into())
+    }
+
+    fn generate_audio(
+        &mut self,
+        _request: &GenerationRequest,
+        _audio: &[Vec<f32>],
+        _sink: &mut dyn TokenSink,
+    ) -> Result<GeneratedText, String> {
+        Err("this text runtime does not support audio input".into())
+    }
+
+    /// Last-position logits for audio-conditioned candidate scoring.
+    fn audio_logits(&mut self, _ids: &[u32], _audio: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+        Err("this text runtime does not support audio scoring".into())
+    }
+
+    /// Last-position logits using the same text/image preparation as generation.
+    fn logits(&mut self, _request: &GenerationRequest) -> Result<Vec<f32>, String> {
+        Err("this text runtime does not support candidate scoring".into())
+    }
 }
 
 /// Shared handle type for the server: a `Mutex` around the per-arch adapter.
@@ -222,6 +250,34 @@ mod tests {
         assert_eq!(request.token_ids, vec![1, 2, 3]);
         assert_eq!(request.max_new_tokens, 16);
         assert!((request.sampling.temperature - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn text_only_adapters_refuse_audio_by_default() {
+        struct TextOnly;
+        impl TextRuntime for TextOnly {
+            fn arch(&self) -> &str {
+                "text-only-test"
+            }
+            fn context_length(&self) -> usize {
+                16
+            }
+            fn generate(
+                &mut self,
+                _: &GenerationRequest,
+                _: &mut dyn TokenSink,
+            ) -> Result<GeneratedText, String> {
+                unreachable!("audio must not call the ordinary text path")
+            }
+        }
+        let mut runtime = TextOnly;
+        let request = GenerationRequest::new(vec![1], 1);
+        assert!(runtime
+            .validate_audio_request(&request, &[vec![0.0; 16]])
+            .is_err());
+        assert!(runtime
+            .generate_audio(&request, &[vec![0.0; 16]], &mut CollectSink::new())
+            .is_err());
     }
 
     #[test]

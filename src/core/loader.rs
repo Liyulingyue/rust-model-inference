@@ -859,7 +859,7 @@ pub struct Qwen3AllowedDimensions {
     pub freq_base_bits: u32,
 }
 
-/// The single Qwen3-VL main-model configuration currently supported
+/// The original Qwen3-VL main-model configuration
 /// (1024-dim, 28-layer, 65 k context, 1e-6 / 1e6 RoPE base).
 const KNOWN_QWEN3VL_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
     n_embd: 1024,
@@ -917,6 +917,19 @@ const KNOWN_QWEN3VL_8B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensio
     n_embd_head_k: 128,
     n_embd_head_v: 128,
     n_ff: 12288,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
+const KNOWN_QWEN3VL_32B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 5120,
+    n_layer: 64,
+    n_head: 64,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 25600,
     n_ctx: 262_144,
     norm_eps_bits: 1e-6_f32.to_bits(),
     freq_base_bits: 5_000_000_f32.to_bits(),
@@ -1066,6 +1079,10 @@ pub fn load_static_weight(
     // SAFETY: see function-level docstring. The caller (a model struct
     // holding an Arc to the TensorSource) guarantees the source outl
     let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+    if ggml_type == GGMLType::F32 && source.borrowed_static_f32_weights() {
+        return Weight::from_f32_bytes(bytes_static, rows, cols)
+            .unwrap_or_else(|| panic!("invalid F32 matrix {name}: {rows}x{cols}"));
+    }
     Weight::from_quantized(QuantizedTensor::from_bytes(
         bytes_static,
         ggml_type,
@@ -1099,6 +1116,7 @@ pub(crate) fn check_qwen3_allowed_dimensions(
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
         || (allowed == KNOWN_QWEN3VL_2B_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_8B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_32B_DIMENSIONS))
     {
         Ok(())
     } else {
@@ -1122,6 +1140,56 @@ pub(crate) fn check_qwen3_allowed_dimensions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_f32_weight_borrows_aligned_source_and_preserves_matmul() {
+        struct FloatSource {
+            info: TensorInfo,
+            values: Vec<f32>,
+            borrow: bool,
+        }
+        impl TensorSource for FloatSource {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+                Some(&self.info)
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                Some(bytemuck::cast_slice(&self.values))
+            }
+            fn borrowed_static_f32_weights(&self) -> bool {
+                self.borrow
+            }
+        }
+        let mut source = FloatSource {
+            info: TensorInfo {
+                name: "weight".into(),
+                dims: vec![3, 2],
+                ggml_type: GGMLType::F32,
+                offset: 0,
+            },
+            values: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            borrow: true,
+        };
+        let weight = load_static_weight(&source, "weight", 3, 2);
+        if cfg!(target_endian = "little") {
+            assert_eq!(
+                weight.kernel.weight_bytes().unwrap().as_ptr(),
+                source.values.as_ptr().cast::<u8>()
+            );
+        }
+        assert_eq!(weight.matmul(&[1.0, 2.0, 3.0]), [14.0, 32.0]);
+        drop(weight);
+        source.borrow = false;
+        let owned = load_static_weight(&source, "weight", 3, 2);
+        assert_ne!(
+            owned.kernel.weight_bytes().unwrap().as_ptr(),
+            source.values.as_ptr().cast::<u8>()
+        );
+        drop(source);
+        assert_eq!(owned.matmul(&[1.0, 2.0, 3.0]), [14.0, 32.0]);
+    }
     use crate::core::tensor::{GGMLType, MetaValueType, TensorInfo, TensorSource};
 
     fn push_u8(buf: &mut Vec<u8>, v: u8) {

@@ -435,6 +435,9 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     i += 1;
                 }
             }
+            "--voice" => {
+                options.voice = Some(required_string_value(args, &mut i, "--voice")?);
+            }
             "--tts-mmproj" => {
                 if i + 1 < args.len() {
                     options.tts_mmproj = Some(args[i + 1].as_str().into());

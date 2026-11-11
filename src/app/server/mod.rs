@@ -1,9 +1,11 @@
 pub mod api;
+mod audio_chat;
 mod auk;
 mod decision;
 mod forecast;
 mod prediction;
 mod rerank;
+mod speech_output;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -87,6 +89,8 @@ enum Backend {
     HySimulMt(HySimulMtBackend),
     Audio8(Audio8Backend),
     Tts(TtsBackend),
+    TagSpeech(speech_output::SpeechBackend),
+    AudioChat(audio_chat::AudioChatBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -106,6 +110,7 @@ impl Backend {
         match self {
             Backend::Text(text) => Some(text),
             Backend::WeVisOne(wevisone) => Some(&wevisone.text),
+            Backend::AudioChat(backend) => Some(&backend.text),
             _ => None,
         }
     }
@@ -1164,6 +1169,18 @@ fn build_backend(
         })));
     }
     if options.tts {
+        let source: Arc<dyn TensorSource> = Arc::from(
+            crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                .map_err(|e| e.to_string())?,
+        );
+        if crate::app::arch_of(source.as_ref()) == "sophon_realtime_talker" {
+            return Ok(Arc::new(Backend::TagSpeech(speech_output::build(
+                options, source,
+            )?)));
+        }
+        if options.voice.is_some() {
+            return Err("--voice requires a model with packaged voice prompts".into());
+        }
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
@@ -1171,7 +1188,13 @@ fn build_backend(
     if let Some(source) = auk_source {
         return Ok(Arc::new(Backend::Auk(auk::build_auk(options, source)?)));
     }
-    if options.audio.is_some() {
+    let audio_chat = options.audio.is_some()
+        && crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|source| {
+                crate::app::arch_of(source.as_ref()) == crate::models::sophon_realtime::ARCH
+            });
+    if options.audio.is_some() && !audio_chat {
         if is_hy_simulmt_gguf(&options.model) {
             return Ok(Arc::new(Backend::HySimulMt(build_hy_simulmt(options)?)));
         }
@@ -1227,6 +1250,17 @@ fn build_backend(
         )?)));
     }
     let (text, wevisone) = build_text(options)?;
+    if options.tts_model.is_some()
+        && crate::models::sophon_realtime::is_thinker(text.source.as_ref())
+    {
+        return Ok(Arc::new(Backend::AudioChat(audio_chat::AudioChatBackend {
+            text,
+            speech: speech_output::build_postprocessor(options)?,
+        })));
+    }
+    if options.voice.is_some() && options.tts_model.is_some() {
+        return Err("--voice with --tts-model requires a packaged-voice speech model".into());
+    }
     Ok(Arc::new(match wevisone {
         Some(extra) => Backend::WeVisOne(WeVisOneBackend {
             text,
@@ -1556,6 +1590,8 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     let prefill_batch_size = options.effective_prefill_batch_size()?;
     let raw_source: Arc<dyn TensorSource> =
         Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let raw_source = crate::models::sophon_realtime::decoder_source(raw_source)?;
+    let sophon = crate::models::sophon_realtime::is_thinker(raw_source.as_ref());
     let model_path: std::path::PathBuf = options.model.clone();
     // Snapshot the few metadata fields we need before moving `raw_source`
     // into the (optional) Phi3Source wrapper. Reading them through `&raw_source`
@@ -1628,6 +1664,19 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
     let mmproj = mmp.clone();
+    if sophon {
+        if let Some(vision) = &mmproj {
+            if vision
+                .metadata("sophon_realtime.component")
+                .and_then(MetaValue::to_string_val)
+                == Some("audio")
+            {
+                crate::models::sophon_realtime::audio::AudioEncoder::from_source(vision.as_ref())?;
+            } else {
+                crate::models::sophon_realtime::validate_vision(vision.as_ref())?;
+            }
+        }
+    }
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
@@ -1671,7 +1720,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     // user explicitly asked for a template, and a config error should surface
     // at startup rather than on the first request.
     let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
-        jinja: options.jinja,
+        jinja: options.jinja || sophon,
         file: options.chat_template_file.clone(),
     });
     let compiled_chat_template =
@@ -2032,13 +2081,13 @@ pub fn run_server() {
         .to_string();
 
     let mode_label = match backend.as_ref() {
-        Backend::Text(_) | Backend::WeVisOne(_) => "text",
+        Backend::Text(_) | Backend::WeVisOne(_) | Backend::AudioChat(_) => "text",
         Backend::UnlimitedOcr(_) => "unlimited-ocr",
         Backend::Embedding(_) => "embedding",
         Backend::Asr(_) => "asr",
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
-        Backend::Tts(_) => "tts",
+        Backend::Tts(_) | Backend::TagSpeech(_) => "tts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
@@ -2065,6 +2114,9 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::AudioChat(_) => router
+            .merge(api::routes())
+            .route("/v1/audio/speech", post(speech_output::handle)),
         Backend::WeVisOne(_) => router.merge(api::routes()).route(
             "/v1/prediction",
             post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
@@ -2081,6 +2133,7 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::TagSpeech(_) => router.route("/v1/audio/speech", post(speech_output::handle)),
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),
@@ -2107,7 +2160,11 @@ pub fn run_server() {
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
         && matches!(
             state.model.as_ref(),
-            Backend::Text(_) | Backend::WeVisOne(_) | Backend::Clm(_) | Backend::Gliner2(_)
+            Backend::Text(_)
+                | Backend::WeVisOne(_)
+                | Backend::AudioChat(_)
+                | Backend::Clm(_)
+                | Backend::Gliner2(_)
         )
     {
         // The JEV routes score with the same text forward pass, so they

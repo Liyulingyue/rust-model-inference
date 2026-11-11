@@ -1,0 +1,247 @@
+{
+  "scope": "Ordinary Qwen3 F32 text-generation regression and shared Q4_K encoder real-row samples",
+  "date": "2026-11-11",
+  "evidence_host": "existing remote 33367; weights, sample GGUFs, raw logits and fixtures remain remote",
+  "f32_cli_regression": {
+    "status": "PASS",
+    "checks": {
+      "distinct_binary_artifacts": true,
+      "same_model_sha256": true,
+      "same_cli_arguments": true,
+      "same_prompt_ids": true,
+      "same_generated_ids": true,
+      "same_logits_count": true,
+      "all_logits_bitwise_equal": true
+    },
+    "baseline": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/baseline-1/summary.json",
+    "current": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/current-d650-1/summary.json",
+    "baseline_binary_sha256": "d78fd24b4727bea86f773b9dcb1a9f6483821e31bed3fe130236f7dfd862654d",
+    "current_binary_sha256": "d650a15995198b901001ffb4e950e9aa00d34702ee80132f829d4d479c5c410f",
+    "compared_values": 4558080,
+    "generated_token_ids": [
+      785,
+      12884,
+      7952,
+      6303,
+      1576,
+      39020,
+      374,
+      36967
+    ],
+    "source_snapshot": "Protected d650 CLI precedes later unified text/image logits and per-token/Flow-block/HiFT-stage cancellation follow-ups; this snapshot does not validate those changes.",
+    "evidence_root": "target/sophon/f32-regression-review-20261111",
+    "model_origin": "All 310 tensors independently dequantized with official gguf 0.18.0 from real Qwen3-0.6B-Q4_K_M; all 32 metadata keys/types retained, only general.file_type 15->0.",
+    "source_model_sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
+    "f32_model_sha256": "7de72a3ee39fd5c69c66ee9c385987ec953d8125f7cc870495fad4cd996d8ada",
+    "independent_decoder_source_sha256": "46461f4f9db2fccaf9364c06566b281af2520fbcc1e01f223a3973aa122adc5b",
+    "prompt": "Explain why the sky is blue in one sentence.",
+    "compute": "cpu",
+    "kv_cache": "f32",
+    "threads": 4,
+    "temperature": 0,
+    "max_tokens": 8,
+    "prefill_batch_size": 64,
+    "max_context": 256,
+    "logits_count": 30,
+    "max_abs": 0,
+    "limitation": "Single short prompt at the recorded build identities; no broader prompt, other architecture, GPU, HTTP or performance claim."
+  },
+  "q4_k_real_weight_samples": {
+    "status": "PASS",
+    "checks": {
+      "new_row_error_within_gate": true,
+      "aggregate_weighted_error_not_increased": true,
+      "all_norms_bitwise_unchanged": true
+    },
+    "gates_declared_before_run": {
+      "maximum_new_row_relative_rmse": 0.1,
+      "maximum_new_to_old_aggregate_weighted_sse_ratio": 1.0,
+      "norm_type_and_bytes_unchanged": true
+    },
+    "model": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/Qwen3-0.6B-independent-F32.gguf",
+    "model_sha256": "7de72a3ee39fd5c69c66ee9c385987ec953d8125f7cc870495fad4cd996d8ada",
+    "model_origin": "Independent official gguf dequantization of real Qwen3-0.6B-Q4_K_M.gguf; not original HF full-precision weights",
+    "old_quantizer_sha256": "1476a4d9275a99b7b3a46c97a79e61788d0e5fce649383d5fc1acedd492c1b47",
+    "new_quantizer_sha256": "68e475895d55cea5f52efe90f5e831e574ab301f6ea4cccf9a93081ab296ce12",
+    "independent_decoder": "gguf.quants.dequantize",
+    "independent_decoder_sha256": "46461f4f9db2fccaf9364c06566b281af2520fbcc1e01f223a3973aa122adc5b",
+    "shared_dispatch_sha256": "1f8181e20c15a50f849a378ee36f033ac2f234c53b4acef452a44e816248770b",
+    "matrix_count": 197,
+    "row_count": 591,
+    "norm_count": 113,
+    "sampled_values": 863232,
+    "weighted_sse": {
+      "old": 0.03806546215545253,
+      "new": 0.03806238267022851
+    },
+    "new_to_old_weighted_sse_ratio": 0.9999191002801584,
+    "changed_rows": 21,
+    "rows_with_higher_new_weighted_sse": 11,
+    "maximum_new_row_relative_rmse": 0.08818428059334005,
+    "limitations": [
+      "Row samples only; does not establish full conversion, full inference, downstream model accuracy, or bitwise agreement with llama.cpp quantization.",
+      "The F32 source is a real mixed Q4_K/Q6_K model independently dequantized; original quantization loss remains.",
+      "Only the sampled rows and all 1-D norm tensors are serialized in the two sample GGUFs."
+    ],
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367",
+    "evidence_root": "target/sophon/q4-k-sample-review-20261111-run-1",
+    "old_source_revision": "0ea4e3837611325b58f22b7457b039cfeaecf176",
+    "old_mean_row_relative_rmse": 0.014879486984504628,
+    "new_mean_row_relative_rmse": 0.01487571168948873,
+    "largest_weighted_sse_increases": [
+      {
+        "tensor": "blk.18.ffn_gate.weight",
+        "row": 1536,
+        "old": 5.123163709948387e-06,
+        "new": 5.189310845396158e-06,
+        "increase": 6.614713544777092e-08
+      },
+      {
+        "tensor": "blk.15.ffn_down.weight",
+        "row": 1023,
+        "old": 6.3616254999200265e-06,
+        "new": 6.410595438896825e-06,
+        "increase": 4.896993897679827e-08
+      },
+      {
+        "tensor": "blk.11.ffn_up.weight",
+        "row": 0,
+        "old": 1.4297608326640347e-06,
+        "new": 1.4692216537930042e-06,
+        "increase": 3.9460821128969525e-08
+      }
+    ]
+  },
+  "same_feature_library_regression_review_fixed": {
+    "baseline": {
+      "log": "target/sophon/baseline-tmpdir-serial-33367.log",
+      "summary": "test result: FAILED. 1624 passed; 23 failed; 222 ignored; 0 measured; 0 filtered out; finished in 71.35s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "current": {
+      "log": "target/sophon/current-review-fixed-tmpdir-serial-33367.log",
+      "summary": "test result: FAILED. 1658 passed; 23 failed; 225 ignored; 0 measured; 0 filtered out; finished in 72.57s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "current_only": [],
+    "baseline_only": [],
+    "environment": "Same Linux/x86-64, features vulkan,parity-trace; TMPDIR in repository instead of full /tmp; --test-threads=1"
+  },
+  "same_feature_library_regression_final_source": {
+    "baseline": {
+      "log": "target/sophon/baseline-tmpdir-serial-33367.log",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1868 filtered out; finished in 0.00s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "current": {
+      "log": "target/sophon/current-final-source-1-33367.log",
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1910 filtered out; finished in 0.00s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "baseline_only": [],
+    "current_only": [],
+    "artifact_identity": {
+      "cli_sha256": "ae5951e730e5cbd3e8ee5855444b80daebb286ac6bf6a25e0e0a73405f160318",
+      "server_sha256": "248a96ef9336e30635583d3136a80f5fc0bf163d26bd5b45b786be579ba4c6e8",
+      "source_manifest": "target/sophon/current-final-source-manifest.json",
+      "source_comparison": "610 actual Rust/Cargo source inputs match local files; AppleDouble metadata excluded"
+    }
+  }
+}

@@ -39,7 +39,7 @@ pub(crate) trait JevGroupedScorer {
 /// function. Calls `scorer.build_grouped_prompt` for token ids +
 /// per-group labels, `scorer.forward_logits` for the prefill,
 /// and finally `compute_grouped_jev_result` to score each group.
-fn run_jev_grouped_core<S: JevGroupedScorer>(
+pub(crate) fn run_jev_grouped_core<S: JevGroupedScorer>(
     _source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedGroupedQuestion],
@@ -184,7 +184,7 @@ pub fn build_grouped_payload(context: &str, q: &PreparedGroupedQuestion) -> Resu
     Ok(payload)
 }
 
-fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
+pub(crate) fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     let mut all = Vec::with_capacity(q.groups.len());
     let mut next = b'A';
     for group in &q.groups {
@@ -783,7 +783,7 @@ pub fn run_jev_grouped_decision(
     Ok(())
 }
 
-fn print_grouped_result_text(r: &JevGroupedResult) {
+pub(crate) fn print_grouped_result_text(r: &JevGroupedResult) {
     println!("\n--- JEV decision ({:?}) ---", r.mode);
     for g in &r.groups {
         if let Some(score) = g.score {

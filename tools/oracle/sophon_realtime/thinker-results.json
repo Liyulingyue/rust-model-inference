@@ -1,0 +1,3330 @@
+{
+  "status": "in progress; experimental; missing or failing rows are not accepted",
+  "evidence_root": "target/sophon/thinker-precisions-33367",
+  "source_revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
+  "configuration": {
+    "prompt": "你好，请简短介绍自己。",
+    "chat_template": "GGUF Jinja; official tokenizer enable_thinking=false; exact prompt IDs required",
+    "steps": 8,
+    "threads": 4,
+    "compute": "cpu",
+    "kv": "f32",
+    "max_context": 256,
+    "prefill_batch_size": 32,
+    "temperature": 0,
+    "precision_priority": [
+      "Q8_0",
+      "BF16",
+      "Q4_K",
+      "F16",
+      "Q4_0",
+      "Q4_1",
+      "Q5_K",
+      "Q6_K"
+    ]
+  },
+  "protected_cli": {
+    "path": "target/sophon/thinker-validation-cli",
+    "sha256": "6318b27d735469daff4c11ef07ad808ac76db467db4d21ff9af50d19e8aa0ce0",
+    "size": 42751144,
+    "mtime_epoch": 1794391406.771184,
+    "sophon_markers_confirmed": true,
+    "coverage_limit": "This protected CLI predates later owner opt-in, streaming and cancellation fixes. These precision traces do not validate newer final binaries."
+  },
+  "gates": {
+    "f32": {
+      "maximum_relative_rmse": 0.001,
+      "minimum_cosine": 0.999999
+    },
+    "f16_bf16": {
+      "maximum_relative_rmse": 0.005,
+      "minimum_cosine": 0.99998
+    },
+    "blockquant": {
+      "maximum_relative_rmse": 0.03,
+      "minimum_cosine": 0.999
+    },
+    "discrete": "greedy IDs separately reported; strict overall parity requires every numerical row and greedy ID to pass; no gates changed"
+  },
+  "f32_prior_baseline": {
+    "strict_pass": true,
+    "steps": 8,
+    "threads": 8,
+    "kv": "f32",
+    "gguf_sha256": "c70b2a4a6f0577b78df543b1872339e033c30bfced7aabf755223c75ba275db8",
+    "max_relative_rmse": 5.2664077703914e-06,
+    "max_abs": 6.490945816040039e-05,
+    "minimum_cosine": 0.9999999999861761,
+    "greedy_ids": [
+      108386,
+      3837,
+      104198,
+      99473,
+      44729,
+      3837,
+      15469,
+      111895
+    ],
+    "result": "target/sophon/thinker-f32-comparison-33367-template-fixed/result.json",
+    "rerun": false,
+    "records": [
+      {
+        "step": 0,
+        "greedy_id": 108386,
+        "greedy_margin": 0.9859027862548828,
+        "seconds": 309.707553608343,
+        "rust_metrics": {
+          "max_abs": 3.62396240234375e-05,
+          "rmse": 7.147652349828881e-06,
+          "relative_rmse": 9.69988871672752e-07,
+          "cosine": 0.9999999999995338
+        },
+        "rust_greedy_id": 108386,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 1,
+        "greedy_id": 3837,
+        "greedy_margin": 1.1029014587402344,
+        "seconds": 152.7395439464599,
+        "rust_metrics": {
+          "max_abs": 5.507469177246094e-05,
+          "rmse": 1.700539368653497e-05,
+          "relative_rmse": 3.244248782296279e-06,
+          "cosine": 0.9999999999976406
+        },
+        "rust_greedy_id": 3837,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 2,
+        "greedy_id": 104198,
+        "greedy_margin": 1.9697990417480469,
+        "seconds": 161.9592695236206,
+        "rust_metrics": {
+          "max_abs": 6.490945816040039e-05,
+          "rmse": 2.1215590048494686e-05,
+          "relative_rmse": 4.850590912616634e-06,
+          "cosine": 0.9999999999940927
+        },
+        "rust_greedy_id": 104198,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 3,
+        "greedy_id": 99473,
+        "greedy_margin": 2.550457000732422,
+        "seconds": 202.94983725994825,
+        "rust_metrics": {
+          "max_abs": 4.482269287109375e-05,
+          "rmse": 1.136221112958442e-05,
+          "relative_rmse": 3.6004274912998443e-06,
+          "cosine": 0.9999999999942248
+        },
+        "rust_greedy_id": 99473,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 4,
+        "greedy_id": 44729,
+        "greedy_margin": 8.049968719482422,
+        "seconds": 208.80283883213997,
+        "rust_metrics": {
+          "max_abs": 6.020069122314453e-05,
+          "rmse": 1.1389403715371569e-05,
+          "relative_rmse": 3.271966330333325e-06,
+          "cosine": 0.9999999999952429
+        },
+        "rust_greedy_id": 44729,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 5,
+        "greedy_id": 3837,
+        "greedy_margin": 4.919620513916016,
+        "seconds": 342.39554864540696,
+        "rust_metrics": {
+          "max_abs": 5.519390106201172e-05,
+          "rmse": 1.3891318347939435e-05,
+          "relative_rmse": 5.2664077703914e-06,
+          "cosine": 0.9999999999861761
+        },
+        "rust_greedy_id": 3837,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 6,
+        "greedy_id": 15469,
+        "greedy_margin": 2.1364688873291016,
+        "seconds": 318.19889389164746,
+        "rust_metrics": {
+          "max_abs": 4.291534423828125e-05,
+          "rmse": 7.77931632372562e-06,
+          "relative_rmse": 2.9210134475717047e-06,
+          "cosine": 0.9999999999957351
+        },
+        "rust_greedy_id": 15469,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      },
+      {
+        "step": 7,
+        "greedy_id": 111895,
+        "greedy_margin": 3.58587646484375,
+        "seconds": 205.79487041011453,
+        "rust_metrics": {
+          "max_abs": 5.650520324707031e-05,
+          "rmse": 9.418599407302693e-06,
+          "relative_rmse": 3.5494702467834944e-06,
+          "cosine": 0.9999999999937249
+        },
+        "rust_greedy_id": 111895,
+        "numerical_gate_pass": true,
+        "greedy_match": true
+      }
+    ],
+    "minimum_greedy_margin": 0.9859027862548828,
+    "local_metadata": "target/sophon/thinker-f32-result-33367.json"
+  },
+  "completed": [
+    {
+      "precision": "Q8_0",
+      "activation": "f32",
+      "reference_execution": "cached",
+      "strict_pass": false,
+      "numerical_pass": false,
+      "greedy_pass": true,
+      "numerical_failures": 1,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": 7,
+      "first_greedy_failure_step": null,
+      "max_relative_rmse": 0.037359508033673064,
+      "minimum_cosine": 0.9993127730581102,
+      "minimum_greedy_margin": 1.0585556030273438,
+      "gguf_sha256": "737ca0a194dc842c3a917caa47591953735b98640a8aad56fcac1b12bc156b09",
+      "gguf_file_type": 7,
+      "actual_tensor_types": {
+        "F32": 257,
+        "Q8_0": 450
+      },
+      "prompt_ids": [
+        151644,
+        872,
+        198,
+        108386,
+        37945,
+        98237,
+        99534,
+        100157,
+        99283,
+        1773,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ],
+      "reference_greedy_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "records": [
+        {
+          "step": 0,
+          "greedy_id": 108386,
+          "greedy_margin": 1.0585556030273438,
+          "seconds": 282.1486628912389,
+          "rust_metrics": {
+            "max_abs": 0.33073222637176514,
+            "rmse": 0.05652639902204221,
+            "relative_rmse": 0.007682113408207261,
+            "cosine": 0.9999720910885379
+          },
+          "rust_greedy_id": 108386,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "greedy_id": 3837,
+          "greedy_margin": 1.1728477478027344,
+          "seconds": 125.27439806051552,
+          "rust_metrics": {
+            "max_abs": 0.407487154006958,
+            "rmse": 0.11485733904582279,
+            "relative_rmse": 0.022270105185126187,
+            "cosine": 0.9998730897836151
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "greedy_id": 104198,
+          "greedy_margin": 1.8848400115966797,
+          "seconds": 128.77992472611368,
+          "rust_metrics": {
+            "max_abs": 0.4091787338256836,
+            "rmse": 0.0852536056792357,
+            "relative_rmse": 0.01984019394466627,
+            "cosine": 0.9998589669421065
+          },
+          "rust_greedy_id": 104198,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "greedy_id": 99473,
+          "greedy_margin": 2.5084056854248047,
+          "seconds": 127.7047339528799,
+          "rust_metrics": {
+            "max_abs": 0.3289804458618164,
+            "rmse": 0.05661573103307584,
+            "relative_rmse": 0.01799947991458678,
+            "cosine": 0.9998390499958962
+          },
+          "rust_greedy_id": 99473,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "greedy_id": 44729,
+          "greedy_margin": 8.002914428710938,
+          "seconds": 124.07049885205925,
+          "rust_metrics": {
+            "max_abs": 0.4102092385292053,
+            "rmse": 0.08069926668437469,
+            "relative_rmse": 0.023062893438679653,
+            "cosine": 0.9997672485745105
+          },
+          "rust_greedy_id": 44729,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "greedy_id": 3837,
+          "greedy_margin": 4.992382049560547,
+          "seconds": 125.29735942557454,
+          "rust_metrics": {
+            "max_abs": 0.36813855171203613,
+            "rmse": 0.07627693381628528,
+            "relative_rmse": 0.02893192098141585,
+            "cosine": 0.9995821748680972
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "greedy_id": 15469,
+          "greedy_margin": 2.1548519134521484,
+          "seconds": 123.58994215913117,
+          "rust_metrics": {
+            "max_abs": 0.38098764419555664,
+            "rmse": 0.06843807091294916,
+            "relative_rmse": 0.025724398224938612,
+            "cosine": 0.9996722499836521
+          },
+          "rust_greedy_id": 15469,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "greedy_id": 111895,
+          "greedy_margin": 3.578622817993164,
+          "seconds": 121.69985872134566,
+          "rust_metrics": {
+            "max_abs": 0.3895423412322998,
+            "rmse": 0.09880617129947948,
+            "relative_rmse": 0.037359508033673064,
+            "cosine": 0.9993127730581102
+          },
+          "rust_greedy_id": 111895,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        }
+      ],
+      "reference_forward_seconds": 1158.5653787888587,
+      "rust_cli_wall_seconds": 43.2568450383842,
+      "result": "target/sophon/thinker-precisions-33367/q8_0-oracle-f32-metadata-fixed/result.json",
+      "rust_trace": "target/sophon/thinker-precisions-33367/q8_0-rust.jsonl"
+    },
+    {
+      "precision": "Q8_0",
+      "activation": "runtime",
+      "reference_execution": "full-prefix",
+      "strict_pass": false,
+      "numerical_pass": false,
+      "greedy_pass": true,
+      "numerical_failures": 3,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": 1,
+      "first_greedy_failure_step": null,
+      "max_relative_rmse": 0.037686836563945655,
+      "minimum_cosine": 0.9992896877611974,
+      "minimum_greedy_margin": 1.0167312622070312,
+      "gguf_sha256": "737ca0a194dc842c3a917caa47591953735b98640a8aad56fcac1b12bc156b09",
+      "gguf_file_type": 7,
+      "actual_tensor_types": {
+        "F32": 257,
+        "Q8_0": 450
+      },
+      "prompt_ids": [
+        151644,
+        872,
+        198,
+        108386,
+        37945,
+        98237,
+        99534,
+        100157,
+        99283,
+        1773,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ],
+      "reference_greedy_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "records": [
+        {
+          "step": 0,
+          "greedy_id": 108386,
+          "greedy_margin": 1.0167312622070312,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.35703611373901367,
+            "rmse": 0.08973384552917096,
+            "relative_rmse": 0.012112545102872322,
+            "cosine": 0.9999630840063248
+          },
+          "rust_greedy_id": 108386,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "greedy_id": 3837,
+          "greedy_margin": 1.149749755859375,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.5748424530029297,
+            "rmse": 0.18307073708198096,
+            "relative_rmse": 0.03507129262606616,
+            "cosine": 0.9997556503487203
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "greedy_id": 104198,
+          "greedy_margin": 1.8890228271484375,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.4317439794540405,
+            "rmse": 0.10852426875327405,
+            "relative_rmse": 0.02515951499118118,
+            "cosine": 0.9997851318585739
+          },
+          "rust_greedy_id": 104198,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "greedy_id": 99473,
+          "greedy_margin": 2.444284439086914,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.37873220443725586,
+            "rmse": 0.07385959257166869,
+            "relative_rmse": 0.02364464450360872,
+            "cosine": 0.9997359930714864
+          },
+          "rust_greedy_id": 99473,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "greedy_id": 44729,
+          "greedy_margin": 7.929450035095215,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.4559059143066406,
+            "rmse": 0.08951041661213377,
+            "relative_rmse": 0.025556862572493566,
+            "cosine": 0.9997141963206233
+          },
+          "rust_greedy_id": 44729,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "greedy_id": 3837,
+          "greedy_margin": 4.900638580322266,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.4879181385040283,
+            "rmse": 0.09930462024788121,
+            "relative_rmse": 0.037686836563945655,
+            "cosine": 0.9992896877611974
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "greedy_id": 15469,
+          "greedy_margin": 2.153818130493164,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.41937267780303955,
+            "rmse": 0.07849907205350172,
+            "relative_rmse": 0.029503765499256207,
+            "cosine": 0.9995677834234563
+          },
+          "rust_greedy_id": 15469,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "greedy_id": 111895,
+          "greedy_margin": 3.485147476196289,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.46401357650756836,
+            "rmse": 0.0834684033397454,
+            "relative_rmse": 0.03172700992915886,
+            "cosine": 0.9994966561050049
+          },
+          "rust_greedy_id": 111895,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        }
+      ],
+      "reference_forward_seconds": 367.8929793257266,
+      "result": "target/sophon/thinker-fullprefix-33367/q8_0-oracle-runtime/result.json",
+      "rust_trace": "target/sophon/thinker-precisions-33367/q8_0-rust.jsonl",
+      "activation_projections": [
+        {
+          "tensor": "blk.0.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.0.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.0.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.0.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.0.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.0.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.0.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.1.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.2.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.3.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.4.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.5.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.6.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.7.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.8.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.9.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.10.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.11.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.12.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.13.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.14.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.15.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.16.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.17.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.18.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.19.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.20.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.21.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.22.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.23.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.24.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.25.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.26.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.27.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.28.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.29.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.30.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.31.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.32.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.33.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.34.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.35.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.36.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.37.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.38.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.39.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.40.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.41.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.42.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.43.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.44.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.45.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.46.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.47.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.48.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.49.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.50.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.51.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.52.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.53.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.54.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.55.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.56.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.57.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.58.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.59.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.60.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.61.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.62.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.attn_q.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.attn_k.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.attn_v.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.attn_output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.ffn_gate.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.ffn_up.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "blk.63.ffn_down.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        },
+        {
+          "tensor": "output.weight",
+          "weight_type": 8,
+          "activation": "q8_0"
+        }
+      ],
+      "comparison_limit": "Baseline used cached/f32 activation, while this diagnostic uses full-prefix/runtime activation. F32 cached/full-prefix calibration passed, but this is not a controlled Q8 activation-only comparison."
+    },
+    {
+      "precision": "BF16",
+      "activation": "f32",
+      "reference_execution": "full-prefix",
+      "strict_pass": true,
+      "numerical_pass": true,
+      "greedy_pass": true,
+      "numerical_failures": 0,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": null,
+      "max_relative_rmse": 6.211079687809817e-06,
+      "max_abs": 6.657838821411133e-05,
+      "minimum_cosine": 0.9999999999815987,
+      "minimum_greedy_margin": 0.9737052917480469,
+      "gguf_sha256": "3ea79a320ec315ac0fbef4225ba7bfc9cee1a6a75dc7320f9c852fc07bbb57c7",
+      "gguf_file_type": 32,
+      "actual_tensor_types": {
+        "BF16": 450,
+        "F32": 257
+      },
+      "prompt_ids": [
+        151644,
+        872,
+        198,
+        108386,
+        37945,
+        98237,
+        99534,
+        100157,
+        99283,
+        1773,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ],
+      "reference_greedy_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "records": [
+        {
+          "step": 0,
+          "greedy_id": 108386,
+          "greedy_margin": 0.9737052917480469,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 3.62396240234375e-05,
+            "rmse": 7.517053819416976e-06,
+            "relative_rmse": 1.021232271249534e-06,
+            "cosine": 0.9999999999995117
+          },
+          "rust_greedy_id": 108386,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "greedy_id": 3837,
+          "greedy_margin": 1.0811386108398438,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 5.125999450683594e-05,
+            "rmse": 1.4478998356543853e-05,
+            "relative_rmse": 2.7707374907322382e-06,
+            "cosine": 0.9999999999980769
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "greedy_id": 104198,
+          "greedy_margin": 1.9812240600585938,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 5.054473876953125e-05,
+            "rmse": 1.108911449927305e-05,
+            "relative_rmse": 2.533668757127035e-06,
+            "cosine": 0.9999999999975597
+          },
+          "rust_greedy_id": 104198,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "greedy_id": 99473,
+          "greedy_margin": 2.573854446411133,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.291534423828125e-05,
+            "rmse": 9.265013379549757e-06,
+            "relative_rmse": 2.9300227122470326e-06,
+            "cosine": 0.9999999999961483
+          },
+          "rust_greedy_id": 99473,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "greedy_id": 44729,
+          "greedy_margin": 8.080851554870605,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 5.173683166503906e-05,
+            "rmse": 1.0246422160631168e-05,
+            "relative_rmse": 2.9512204774300935e-06,
+            "cosine": 0.9999999999960727
+          },
+          "rust_greedy_id": 44729,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "greedy_id": 3837,
+          "greedy_margin": 4.933231353759766,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 5.53131103515625e-05,
+            "rmse": 1.2017986145181196e-05,
+            "relative_rmse": 4.556759216515525e-06,
+            "cosine": 0.9999999999896475
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "greedy_id": 15469,
+          "greedy_margin": 2.1085987091064453,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 5.0067901611328125e-05,
+            "rmse": 1.3377691451916092e-05,
+            "relative_rmse": 5.025209551080635e-06,
+            "cosine": 0.9999999999880078
+          },
+          "rust_greedy_id": 15469,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "greedy_id": 111895,
+          "greedy_margin": 3.568502426147461,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 6.657838821411133e-05,
+            "rmse": 1.6468079178793078e-05,
+            "relative_rmse": 6.211079687809817e-06,
+            "cosine": 0.9999999999815987
+          },
+          "rust_greedy_id": 111895,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        }
+      ],
+      "reference_forward_seconds": 360.76099627278745,
+      "result": "target/sophon/thinker-fullprefix-33367/bf16-oracle-f32/result.json",
+      "rust_trace": "target/sophon/thinker-precisions-33367/bf16-rust.jsonl",
+      "rust_cli_adoption": "target/sophon/thinker-precisions-33367/bf16-rust-adoption.json"
+    }
+  ],
+  "pending": [
+    "Q4_K CPU and independent reference",
+    "F16 CPU and independent reference",
+    "Q4_0 CPU and independent reference",
+    "Q4_1 CPU and independent reference",
+    "Q5_K CPU and independent reference",
+    "Q6_K CPU and independent reference"
+  ],
+  "execution_errors": [
+    {
+      "precision": "Q8_0",
+      "phase": "first Oracle baseline invocation",
+      "model_loaded": false,
+      "numeric_result_produced": false,
+      "cause": "An added metadata check incorrectly expected talker requested_quant metadata on thinker GGUF. Thinker uses general.file_type. Inapplicable check removed; original architecture/component/revision checks retained.",
+      "artifact": "q8_0-oracle-f32.log",
+      "retry": "new q8_0-oracle-f32-metadata-fixed directory; original failed output preserved"
+    },
+    {
+      "phase": "full-prefix continuation orchestration after completed F32 calibration",
+      "model_loaded": false,
+      "numeric_result_produced": false,
+      "cause": "The manager script import path lacked the repository root when importing tools.oracle helpers after the F32 child naturally completed. No Q8 or later model task had started.",
+      "artifact": "target/sophon/thinker-fullprefix-driver-33367.log",
+      "retry": "New calibrated continuation manager reuses saved F32 result and 8-row cached comparison, Q8 Rust trace and cached baseline; no completed model task rerun."
+    }
+  ],
+  "remaining_coverage": {
+    "backends": {
+      "cpu": "precision numerical verification in progress",
+      "auto": "not run",
+      "strict_vulkan": "not run"
+    },
+    "entrypoints": {
+      "cli_text": "F32/BF16 8-step CPU thinker comparisons pass using protected CLI; Q8_0 baseline and runtime diagnostics have numerical gate failures with all greedy IDs matching. New final-binary real entrypoint suite is owned by parent and not included in these precision results.",
+      "http_text": "not run",
+      "cli_image": "not run",
+      "http_image": "not run",
+      "cli_jev_text_and_image": "not run",
+      "http_jev_text_and_image": "not run"
+    },
+    "actual_device_execution": "not yet measured; Auto fallback is not GPU evidence"
+  },
+  "limits": [
+    "Independent same-GGUF reference uses widened F32 weights and arithmetic, with optional explicit runtime input QDQ. It does not reproduce source dynamic FP8 activation quantization.",
+    "F32 prior baseline uses8 threads; new precision runs use4 threads. Timings are not a controlled cross-format benchmark.",
+    "CPU precision passes do not imply GPU, multimodal or HTTP acceptance.",
+    "No source weights, GGUFs or activation binaries are copied to the Mac."
+  ],
+  "coordination": "BF16 independent full-prefix reference naturally completed; all8 numerical and greedy rows pass original BF16 gates. Manager282827 remains paused and Q4_K has not started; parent final-binary regression and real entrypoint suite owns the resource window.",
+  "continuation_evidence_root": "target/sophon/thinker-fullprefix-33367",
+  "full_prefix_validation": {
+    "status": "tiny model and real F32 8-row calibration passed",
+    "flag": "--reference-execution full-prefix",
+    "default": "cached remains unchanged",
+    "requirements": "Rust teacher trace and F32 KV",
+    "causal_rows": "One prefix consists of prompt plus first7 Rust tokens; select hidden rows prompt_len-1 through prompt_len+6 for8 next-token logits.",
+    "tiny_random_qwen3vl": {
+      "layers": 2,
+      "hidden": 32,
+      "vocab": 64,
+      "rows_compared": 8,
+      "absolute_tolerance": 3e-06,
+      "relative_tolerance": 3e-06,
+      "local_pass": true,
+      "remote_pass": true
+    },
+    "f32_real_cached_comparison": {
+      "strict_pass": true,
+      "maximum_relative_rmse": 4.762560848689022e-06,
+      "minimum_cosine": 0.9999999999928225,
+      "maximum_absolute_error": 5.745887756347656e-05,
+      "all_eight_greedy_ids_match": true,
+      "cached_threads": 8,
+      "full_prefix_threads": 4,
+      "rows": [
+        {
+          "step": 0,
+          "max_abs": 3.5762786865234375e-05,
+          "rmse": 1.065079268735917e-05,
+          "relative_rmse": 1.4453907206999586e-06,
+          "cosine": 0.9999999999995448,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "max_abs": 4.57763671875e-05,
+          "rmse": 9.350749109627159e-06,
+          "relative_rmse": 1.7839137965083617e-06,
+          "cosine": 0.999999999998891,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "max_abs": 5.745887756347656e-05,
+          "rmse": 2.0830562784419858e-05,
+          "relative_rmse": 4.762560848689022e-06,
+          "cosine": 0.9999999999942409,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "max_abs": 3.6716461181640625e-05,
+          "rmse": 6.6047975967043215e-06,
+          "relative_rmse": 2.09291084019094e-06,
+          "cosine": 0.9999999999978113,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "max_abs": 5.125999450683594e-05,
+          "rmse": 1.3999154166422193e-05,
+          "relative_rmse": 4.021699663157876e-06,
+          "cosine": 0.9999999999940796,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "max_abs": 5.0902366638183594e-05,
+          "rmse": 9.59292126422179e-06,
+          "relative_rmse": 3.636820769725174e-06,
+          "cosine": 0.9999999999933975,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "max_abs": 4.1961669921875e-05,
+          "rmse": 8.33722321924135e-06,
+          "relative_rmse": 3.1304988928831718e-06,
+          "cosine": 0.999999999995182,
+          "numerical_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "max_abs": 4.553794860839844e-05,
+          "rmse": 1.0158534769032696e-05,
+          "relative_rmse": 3.8283204704130575e-06,
+          "cosine": 0.9999999999928225,
+          "numerical_pass": true,
+          "greedy_match": true
+        }
+      ],
+      "result": "target/sophon/thinker-fullprefix-33367/full-prefix-cached-calibration.json"
+    },
+    "timing": "Full-prefix per-row seconds are null; total forward seconds are reported once, preventing a fabricated per-decode timing.",
+    "f32_full_prefix_vs_rust": {
+      "strict_pass": true,
+      "maximum_relative_rmse": 3.793887011654845e-06,
+      "all_eight_greedy_ids_match": true,
+      "reference_forward_seconds": 350.01327178813517,
+      "result": "target/sophon/thinker-fullprefix-33367/f32-full-prefix-calibration/result.json",
+      "records": [
+        {
+          "step": 0,
+          "greedy_id": 108386,
+          "greedy_margin": 0.9858894348144531,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.2438507080078125e-05,
+            "rmse": 1.0341255510138509e-05,
+            "relative_rmse": 1.4033857773623829e-06,
+            "cosine": 0.9999999999995091
+          },
+          "rust_greedy_id": 108386,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "greedy_id": 3837,
+          "greedy_margin": 1.1029167175292969,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.9591064453125e-05,
+            "rmse": 1.1898247590312173e-05,
+            "relative_rmse": 2.2699217589758044e-06,
+            "cosine": 0.999999999998443
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "greedy_id": 104198,
+          "greedy_margin": 1.9698123931884766,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.029273986816406e-05,
+            "rmse": 7.931325621015932e-06,
+            "relative_rmse": 1.8133714138670183e-06,
+            "cosine": 0.9999999999983594
+          },
+          "rust_greedy_id": 104198,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "greedy_id": 99473,
+          "greedy_margin": 2.5504188537597656,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.2319297790527344e-05,
+            "rmse": 1.0317759333655669e-05,
+            "relative_rmse": 3.2694641851941008e-06,
+            "cosine": 0.9999999999952996
+          },
+          "rust_greedy_id": 99473,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "greedy_id": 44729,
+          "greedy_margin": 8.049976348876953,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.9233436584472656e-05,
+            "rmse": 1.0783310436380573e-05,
+            "relative_rmse": 3.097840424362713e-06,
+            "cosine": 0.9999999999956923
+          },
+          "rust_greedy_id": 44729,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "greedy_id": 3837,
+          "greedy_margin": 4.919637680053711,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 6.395578384399414e-05,
+            "rmse": 1.0007219733049235e-05,
+            "relative_rmse": 3.793887011654845e-06,
+            "cosine": 0.9999999999928997
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "greedy_id": 15469,
+          "greedy_margin": 2.1364917755126953,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 4.482269287109375e-05,
+            "rmse": 9.148675704835109e-06,
+            "relative_rmse": 3.4351881919249958e-06,
+            "cosine": 0.999999999994165
+          },
+          "rust_greedy_id": 15469,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "greedy_id": 111895,
+          "greedy_margin": 3.5858802795410156,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 5.14984130859375e-05,
+            "rmse": 9.799511427584099e-06,
+            "relative_rmse": 3.6930218400183125e-06,
+            "cosine": 0.9999999999932352
+          },
+          "rust_greedy_id": 111895,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        }
+      ]
+    }
+  },
+  "verification": {
+    "unit_tests_local": 31,
+    "remote_new_full_prefix_test": "PASS",
+    "ruff": "PASS for oracle.py and test_oracle.py",
+    "no_rust_edits_or_builds": true,
+    "unit_tests_remote": 31,
+    "diff_check": "PASS via git diff --no-index --check for untracked owned Oracle source, tests and thinker-results.json"
+  },
+  "q8_failure_investigation": {
+    "scope": "Read-only source contract review and existing trace inspection; no model production code changed, no extra model task run.",
+    "trace_available": {
+      "prompt_ids": 1,
+      "result_output": 22,
+      "generated_ids": 1,
+      "layer_checkpoints": 0,
+      "result_norm": 0
+    },
+    "first_baseline_gate_failure": {
+      "reference_execution": "cached",
+      "activation": "f32",
+      "decode_step": 7,
+      "checkpoint": "result_output",
+      "occurrence": 21,
+      "shape": [
+        151936
+      ],
+      "rust_binary": "target/sophon/thinker-precisions-33367/q8_0-rust.jsonl.result_output.21.f32",
+      "reference_binary": "target/sophon/thinker-precisions-33367/q8_0-oracle-f32-metadata-fixed/logits-7.f32",
+      "relative_rmse": 0.037359508033673064,
+      "greedy_id": 111895,
+      "greedy_match": true
+    },
+    "first_runtime_diagnostic_gate_failure": {
+      "reference_execution": "full-prefix",
+      "activation": "runtime",
+      "decode_step": 1,
+      "checkpoint": "result_output",
+      "occurrence": 15,
+      "shape": [
+        151936
+      ],
+      "rust_binary": "target/sophon/thinker-precisions-33367/q8_0-rust.jsonl.result_output.15.f32",
+      "reference_binary": "target/sophon/thinker-fullprefix-33367/q8_0-oracle-runtime/logits-1.f32",
+      "relative_rmse": 0.03507129262606616,
+      "greedy_id": 3837,
+      "greedy_match": true
+    },
+    "activation_contract_source_review": {
+      "block_width": 32,
+      "scale_before_storage": "F32 amax/127",
+      "inverse": "F32 127/amax for x86 AVX2; zero for zero blocks",
+      "rounding": "ties to even",
+      "scale_storage": "F16 then widen to F32",
+      "linear_projection_count": 449,
+      "quantized_weight_count": 450,
+      "embedding_is_not_input_quantized": true,
+      "duplicate_projection_count": 0,
+      "rust_sources": [
+        "src/ops/quant/q8_0.rs:176",
+        "src/ops/kernel/mod.rs:80",
+        "src/models/qwen3/trunk/prefill.rs:1082"
+      ],
+      "reference_sources": [
+        "tools/oracle/thx02/oracle.py:180",
+        "tools/oracle/sophon_realtime/code2wav_oracle.py:154",
+        "tools/oracle/sophon_realtime/oracle.py:91"
+      ],
+      "conclusion": "Current source-level Q8 QDQ formula and placement agree with the independent reference. Existing production trace cannot identify a faulty layer, establish exact activation-code equality or validate final binaries.",
+      "remote_cpu_features": {
+        "machine": "x86_64",
+        "avx2": true,
+        "fma": true,
+        "f16c": true
+      }
+    },
+    "next_evidence_without_production_code_edits": {
+      "cli_trace_filter": "prompt_ids,generated_ids,model.input_embed,attn_norm-0,Qcur_raw-0,Kcur_raw-0,Qcur_normed-0,Kcur_normed-0,Qcur-0,Kcur-0,kqv_out-0,ffn_out-0,result_norm,result_output",
+      "purpose": "Exact-input first-layer Q/K and output-head comparisons can distinguish local projection differences from propagated hidden-state drift.",
+      "limitation": "hidden_sequence.layer.* is emitted only when project_logits=false; ordinary CLI generation does not emit all-layer hidden checkpoints. Q8 full-prefix versus cached with runtime QDQ has not been calibrated."
+    }
+  }
+}

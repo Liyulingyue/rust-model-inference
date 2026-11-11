@@ -209,7 +209,10 @@ impl TextRuntime for ComputeTextRuntime {
         images: &[Vec<u8>],
         max_new_tokens: usize,
     ) -> Result<(), String> {
-        if self.policy == crate::compute::ComputePolicy::Vulkan && !images.is_empty() {
+        if self.policy == crate::compute::ComputePolicy::Vulkan
+            && !images.is_empty()
+            && !matches!(self.inner.arch(), "qwen3vl" | "qwen3vlmoe" | "qwen2vl")
+        {
             return Err("full Vulkan runtime supports text input only".into());
         }
         self.inner
@@ -231,6 +234,35 @@ impl TextRuntime for ComputeTextRuntime {
         }
         let _scope = self.policy.enter_legacy_scope();
         self.inner.generate(request, sink)
+    }
+
+    fn validate_audio_request(
+        &self,
+        request: &GenerationRequest,
+        audio: &[Vec<f32>],
+    ) -> Result<(), String> {
+        let _scope = self.policy.enter_legacy_scope();
+        self.inner.validate_audio_request(request, audio)
+    }
+
+    fn generate_audio(
+        &mut self,
+        request: &GenerationRequest,
+        audio: &[Vec<f32>],
+        sink: &mut dyn TokenSink,
+    ) -> Result<GeneratedText, String> {
+        let _scope = self.policy.enter_legacy_scope();
+        self.inner.generate_audio(request, audio, sink)
+    }
+
+    fn audio_logits(&mut self, ids: &[u32], audio: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+        let _scope = self.policy.enter_legacy_scope();
+        self.inner.audio_logits(ids, audio)
+    }
+
+    fn logits(&mut self, request: &GenerationRequest) -> Result<Vec<f32>, String> {
+        let _scope = self.policy.enter_legacy_scope();
+        self.inner.logits(request)
     }
 }
 
@@ -453,7 +485,61 @@ impl TextRuntime for Qwen3TextRuntime {
     }
 
     fn context_length(&self) -> usize {
-        self.model.config().n_ctx
+        if crate::models::sophon_realtime::is_thinker(self.options.source.as_ref()) {
+            self.options.capacity_for(self.model.config().n_ctx)
+        } else {
+            self.model.config().n_ctx
+        }
+    }
+
+    fn validate_request(
+        &self,
+        token_ids: &[u32],
+        images: &[Vec<u8>],
+        max_new_tokens: usize,
+    ) -> Result<(), String> {
+        if !crate::models::sophon_realtime::is_thinker(self.options.source.as_ref()) {
+            return Ok(());
+        }
+        let mut prompt_len = token_ids.len();
+        if !images.is_empty() {
+            let source = self.mmproj.as_ref().ok_or(
+                "image input requires a vision projector; start the server with --mmproj <path>",
+            )?;
+            crate::models::sophon_realtime::validate_vision(source.as_ref())?;
+            let config = crate::models::qwen3::vision::clip_config::ClipVisionConfig::from_source(
+                source.as_ref(),
+            )?;
+            let mut rows = 0usize;
+            for bytes in images {
+                let image = crate::app::media::decode_image_bytes(bytes)?;
+                let grid = crate::models::qwen3::vision::qwen_smart_resize(
+                    image.width() as usize,
+                    image.height() as usize,
+                    &config,
+                )?;
+                rows = rows
+                    .checked_add(grid.token_count())
+                    .ok_or("vision token count overflow")?;
+            }
+            if rows > MAX_VISION_TOKENS {
+                return Err(format!("image(s) expand to {rows} vision tokens, over the {MAX_VISION_TOKENS} token budget; downscale the image before sending"));
+            }
+            prompt_len = prompt_len
+                .checked_add(rows)
+                .and_then(|n| n.checked_add(2))
+                .ok_or("context length overflow")?;
+        }
+        let capacity = prompt_len
+            .checked_add(max_new_tokens)
+            .ok_or("context length overflow")?;
+        if capacity > self.context_length() {
+            return Err(format!(
+                "request needs {capacity} tokens, exceeds context limit {}",
+                self.context_length()
+            ));
+        }
+        Ok(())
     }
 
     fn generate(
@@ -462,14 +548,7 @@ impl TextRuntime for Qwen3TextRuntime {
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
         let _scope = self.options.compute.enter_legacy_scope();
-        let capacity = self.options.capacity_for(self.model.config().n_ctx);
-        let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
-            &self.model,
-            capacity,
-            self.options.kv_format,
-            crate::KvLifecycle::Ephemeral,
-            self.options.compute,
-        )?;
+        self.validate_request(&request.token_ids, &request.images, request.max_new_tokens)?;
         // Image path for qwen3vl: encode through the Qwen3-VL projector, splice
         // the placeholder run into the user turn, then inject the projected
         // embeddings AND the per-layer deepstack features. Mirrors
@@ -480,12 +559,128 @@ impl TextRuntime for Qwen3TextRuntime {
         } else {
             self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
         };
-        let input = crate::models::qwen3::Qwen3Input {
-            token_ids: &token_ids,
-            positions: &positions,
-            embeddings: embeddings.as_deref(),
-            deepstack_embeddings: deepstack.as_deref(),
+        self.generate_input(
+            request,
+            sink,
+            crate::models::qwen3::Qwen3Input {
+                token_ids: &token_ids,
+                positions: &positions,
+                embeddings: embeddings.as_deref(),
+                deepstack_embeddings: deepstack.as_deref(),
+            },
+        )
+    }
+
+    fn validate_audio_request(
+        &self,
+        request: &GenerationRequest,
+        audio: &[Vec<f32>],
+    ) -> Result<(), String> {
+        if !request.images.is_empty() {
+            return Err("combined audio/image generation is not wired yet".into());
+        }
+        self.audio_decoder()?
+            .validate(&request.token_ids, audio, request.max_new_tokens)?;
+        Ok(())
+    }
+
+    fn generate_audio(
+        &mut self,
+        request: &GenerationRequest,
+        audio: &[Vec<f32>],
+        sink: &mut dyn TokenSink,
+    ) -> Result<GeneratedText, String> {
+        let _scope = self.options.compute.enter_legacy_scope();
+        if !request.images.is_empty() {
+            return Err("combined audio/image generation is not wired yet".into());
+        }
+        let input =
+            self.audio_decoder()?
+                .prepare(&request.token_ids, audio, request.max_new_tokens)?;
+        self.generate_input(
+            request,
+            sink,
+            crate::models::qwen3::Qwen3Input {
+                token_ids: &input.token_ids,
+                positions: &input.positions,
+                embeddings: Some(&input.embeddings),
+                deepstack_embeddings: None,
+            },
+        )
+    }
+
+    fn audio_logits(&mut self, ids: &[u32], audio: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+        let _scope = self.options.compute.enter_legacy_scope();
+        self.audio_decoder()?.logits(
+            ids,
+            audio,
+            self.options.kv_format,
+            self.options.prefill_batch_size,
+            self.options.compute,
+        )
+    }
+
+    fn logits(&mut self, request: &GenerationRequest) -> Result<Vec<f32>, String> {
+        let _scope = self.options.compute.enter_legacy_scope();
+        self.validate_request(&request.token_ids, &request.images, 1)?;
+        let (ids, embeddings, deepstack, positions) = if request.images.is_empty() {
+            (
+                request.token_ids.clone(),
+                None,
+                None,
+                crate::models::qwen3::trunk::qwen_text_positions(request.token_ids.len()),
+            )
+        } else {
+            self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
         };
+        let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
+            &self.model,
+            self.options.capacity_for(self.model.config().n_ctx),
+            self.options.kv_format,
+            crate::KvLifecycle::Ephemeral,
+            self.options.compute,
+        )?;
+        session
+            .forward_logits(
+                crate::models::qwen3::Qwen3Input {
+                    token_ids: &ids,
+                    positions: &positions,
+                    embeddings: embeddings.as_deref(),
+                    deepstack_embeddings: deepstack.as_deref(),
+                },
+                self.options.prefill_batch_size,
+            )
+            .map(|(logits, _)| logits)
+    }
+}
+
+impl Qwen3TextRuntime {
+    fn audio_decoder(
+        &self,
+    ) -> Result<crate::models::sophon_realtime::audio::AudioDecoder<'_>, String> {
+        crate::models::sophon_realtime::audio::AudioDecoder::new(
+            self.options.source.as_ref(),
+            &self.model,
+            self.mmproj.as_deref(),
+            self.options.capacity_for(self.model.config().n_ctx),
+            self.options.compute,
+        )
+    }
+
+    fn generate_input(
+        &self,
+        request: &GenerationRequest,
+        sink: &mut dyn TokenSink,
+        input: crate::models::qwen3::Qwen3Input<'_>,
+    ) -> Result<GeneratedText, String> {
+        let capacity = self.options.capacity_for(self.model.config().n_ctx);
+        let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
+            &self.model,
+            capacity,
+            self.options.kv_format,
+            crate::KvLifecycle::Ephemeral,
+            self.options.compute,
+        )?;
         let options_qwen3 = crate::models::qwen3::Qwen3GenerateOptions {
             max_new_tokens: request.max_new_tokens,
             temperature: request.sampling.temperature,
@@ -1095,10 +1290,10 @@ mod tests {
     fn compute_runtime_scope_restores_on_error_and_rejects_images() {
         use super::*;
         use crate::compute::ComputePolicy;
-        struct Probe;
+        struct Probe(&'static str);
         impl TextRuntime for Probe {
             fn arch(&self) -> &str {
-                "probe"
+                self.0
             }
             fn context_length(&self) -> usize {
                 4
@@ -1117,7 +1312,7 @@ mod tests {
         }
         let _outer = ComputePolicy::Auto.enter_legacy_scope();
         let mut runtime = ComputeTextRuntime {
-            inner: Box::new(Probe),
+            inner: Box::new(Probe("probe")),
             policy: ComputePolicy::Cpu,
         };
         let mut request = GenerationRequest::new(vec![1], 1);
@@ -1139,6 +1334,15 @@ mod tests {
             .generate(&request, &mut sink)
             .unwrap_err()
             .contains("text input only"));
+        for arch in ["qwen3vl", "qwen3vlmoe", "qwen2vl"] {
+            runtime.inner = Box::new(Probe(arch));
+            assert_eq!(
+                runtime
+                    .validate_request(&request.token_ids, &request.images, 1)
+                    .unwrap_err(),
+                "probe validation error"
+            );
+        }
     }
 
     #[test]
@@ -1178,6 +1382,123 @@ mod tests {
             arch: arch.into(),
             max_context,
         }
+    }
+
+    #[test]
+    fn sophon_preflight_counts_image_tokens_before_inference() {
+        use super::*;
+        use crate::core::tensor::{MetaValue, MetaValueType};
+        struct Source(std::collections::HashMap<String, MetaValue>);
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&MetaValue> {
+                self.0.get(key)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                panic!("preflight must not run inference")
+            }
+        }
+        let tokenizer = Arc::new(stub_tokenizer());
+        let pool = Arc::new(crate::core::thread_pool::ComputePool::new(1));
+        let source = Arc::new(Source(
+            [(
+                "sophon_realtime.component".into(),
+                MetaValue::String("thinker".into()),
+            )]
+            .into(),
+        ));
+        let options = RuntimeOptions::from_model(source, pool.clone(), tokenizer.clone())
+            .with_max_context(64);
+        let mut runtime = Qwen3TextRuntime {
+            model: Arc::new(crate::models::qwen3::trunk::tests::test_model(
+                tokenizer.clone(),
+                128,
+                32,
+            )),
+            tokenizer,
+            pool,
+            mmproj: None,
+            threads: 1,
+            options,
+            arch: "qwen3vl".into(),
+        };
+        assert_eq!(runtime.context_length(), 64);
+        assert!(runtime
+            .validate_request(&[0; 63], &[], 2)
+            .unwrap_err()
+            .contains("exceeds context limit 64"));
+        assert!(runtime
+            .validate_request(&[0], &[], usize::MAX)
+            .unwrap_err()
+            .contains("overflow"));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(256, 256)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let images = vec![png.into_inner()];
+        assert!(runtime
+            .validate_request(&[0; 14], &images, 2)
+            .unwrap_err()
+            .contains("requires a vision projector"));
+        let mut metadata: std::collections::HashMap<String, MetaValue> = [
+            ("general.architecture", "clip"),
+            ("sophon_realtime.component", "vision"),
+            (
+                "sophon_realtime.source_revision",
+                crate::models::sophon_realtime::SOURCE_REVISION,
+            ),
+            ("clip.projector_type", "qwen3vl_merger"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), MetaValue::String(value.into())))
+        .collect();
+        metadata.extend(
+            [
+                ("image_size", 256),
+                ("patch_size", 16),
+                ("spatial_merge_size", 2),
+                ("embedding_length", 1152),
+                ("feed_forward_length", 4304),
+                ("block_count", 27),
+                ("attention.head_count", 16),
+                ("projection_dim", 5120),
+            ]
+            .into_iter()
+            .map(|(key, value)| (format!("clip.vision.{key}"), MetaValue::Uint32(value))),
+        );
+        metadata.insert(
+            "clip.vision.attention.layer_norm_epsilon".into(),
+            MetaValue::Float32(1e-6),
+        );
+        metadata.insert(
+            "clip.vision.is_deepstack_layers".into(),
+            MetaValue::Array(
+                MetaValueType::Bool,
+                (0..27)
+                    .map(|i| MetaValue::Bool([8, 16, 24].contains(&i)))
+                    .collect(),
+            ),
+        );
+        runtime.mmproj = Some(Arc::new(Source(metadata)));
+        assert_eq!(
+            runtime.validate_request(&[0; 14], &images, 2).unwrap_err(),
+            "request needs 82 tokens, exceeds context limit 64"
+        );
+        let mut request = GenerationRequest::new(vec![0; 14], 2);
+        request.images = images;
+        assert!(runtime
+            .logits(&request)
+            .unwrap_err()
+            .contains("exceeds context limit 64"));
+        assert!(runtime
+            .generate(
+                &request,
+                &mut crate::ops::generation_runtime::CollectSink::new()
+            )
+            .unwrap_err()
+            .contains("exceeds context limit 64"));
     }
 
     #[test]

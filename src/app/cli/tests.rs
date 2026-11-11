@@ -8,6 +8,26 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[test]
+fn speech_postprocessor_requires_a_component_pair_and_rejects_scoring() {
+    for flags in [
+        vec!["rmi", "--model", "x.gguf", "--tts-model", "talker.gguf"],
+        vec!["rmi", "--model", "x.gguf", "--tts-mmproj", "codec.gguf"],
+        vec![
+            "rmi",
+            "--model",
+            "x.gguf",
+            "--tts-model",
+            "talker.gguf",
+            "--tts-mmproj",
+            "codec.gguf",
+            "--jev",
+        ],
+    ] {
+        assert!(validate_cli_options(&parse_cli_options(&args(&flags)).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn compute_policy_options_are_shared_and_unambiguous() {
     use crate::compute::ComputePolicy::{Auto, Cpu, Vulkan};
     for (flags, expected) in [

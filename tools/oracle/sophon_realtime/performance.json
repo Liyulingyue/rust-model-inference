@@ -1,0 +1,52 @@
+{
+  "status": "experimental validation timings, not deployment capacity",
+  "date": "2026-11-11",
+  "host": "authorized remote Linux x86_64 EPYC 9334; container about 16 CPU cores / 55 GiB RAM; AMD gfx1100 visible",
+  "profile": "release-fast",
+  "runs": [
+    {
+      "component": "thinker",
+      "format": "F32",
+      "policy": "cpu",
+      "threads": 8,
+      "kv": "F32",
+      "prompt_tokens": 15,
+      "generated_tokens": 8,
+      "rust_seconds": 802.034,
+      "reference_step_seconds": [
+        309.707553608343,
+        152.7395439464599,
+        161.9592695236206,
+        202.94983725994825,
+        208.80283883213997,
+        342.39554864540696,
+        318.19889389164746,
+        205.79487041011453
+      ],
+      "condition": "Memory paging and concurrent tasks; unsuitable for capacity or speedup claims",
+      "evidence": "target/sophon/thinker-f32-comparison-33367-template-fixed/result.json"
+    },
+    {
+      "component": "tts CLI",
+      "format": "F32 talker / F32 flow / F32 HiFT",
+      "policy": "cpu",
+      "threads": 4,
+      "speech_tokens": 77,
+      "samples": 73920,
+      "sample_rate": 24000,
+      "wall_seconds": 78.235,
+      "internal_seconds": 77.825,
+      "evidence": "target/sophon/tts-f32-cli-initial-33367/result.json",
+      "limit": "Initial binary before subsequent streaming/ownership/entrypoint fixes; standalone nonstream result only"
+    }
+  ],
+  "gpu": {
+    "status": "not measured; no GPU-support or speedup claim",
+    "gaps": [
+      "audio block attention/frontend device kernels",
+      "causal convolution and HiFT spectral device kernels"
+    ],
+    "existing_path": "Qwen3-VL resident decoder implements M-RoPE/DeepStack with F16 KV; hardware model validation pending"
+  },
+  "release_capacity_benchmark": "not run; release-fast numbers must not be presented as release capacity"
+}

@@ -189,3 +189,18 @@ def test_q6_k_empty_and_incomplete_blocks():
     assert kquants.quantize_q6_k(np.empty(0, dtype=np.float32)) == b""
     with pytest.raises(ValueError, match="multiple of 256"):
         kquants.quantize_q6_k(np.zeros(257, dtype=np.float32))
+
+
+@pytest.mark.parametrize("values", [
+    np.full(256, 1.0, dtype=np.float32),
+    np.full(256, -1.0, dtype=np.float32),
+    np.zeros(256, dtype=np.float32),
+    _values()[:256],
+])
+def test_q4_k_seed_round_trips_independent_dequantizer(values):
+    quants = pytest.importorskip("gguf.quants")
+    from gguf import GGMLQuantizationType
+
+    payload = kquants.quantize_q4_k(values)
+    decoded = quants.dequantize(np.frombuffer(payload, dtype=np.uint8), GGMLQuantizationType.Q4_K)
+    np.testing.assert_allclose(decoded.reshape(-1), values, atol=max(0.001, float(np.max(np.abs(values))) * 0.15), rtol=0)
