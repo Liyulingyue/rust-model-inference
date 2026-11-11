@@ -28,7 +28,7 @@ models/dinov3-vith16plus/{config.json,model.safetensors}
 models/FLUX.2-dev/vae/{config.json,diffusion_pytorch_model.safetensors}
 ```
 
-The primary config and each required tensor's shape/type/finite values are checked before inference. A self-contained `idol` GGUF can carry the six components and pinned configs together; supported export labels are `original`, `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q4_k`, `q5_k`, and `q6_k`. GGUF storage is decoded at load into the existing F32 graph, so this is storage compatibility rather than packed low-precision runtime acceleration. Quantized formats require independent same-weight dequantized Oracle evidence before they can be marked verified. The reader represents rank-zero scalars as one-element vectors; integers remain exact.
+The primary config and each required tensor's shape/type/finite values are checked before inference. A self-contained `idol` GGUF can carry the six components and pinned configs together; supported export labels are `original`, `f32`, `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q4_k`, `q5_k`, and `q6_k`. GGUF storage is decoded at load into the existing F32 graph, so this is storage compatibility rather than packed low-precision runtime acceleration. Quantized formats require independent same-weight dequantized Oracle evidence before they can be marked verified. The reader represents rank-zero scalars as one-element vectors; integers remain exact. The per-component × format × backend status is tracked in [gguf-coverage.csv](gguf-coverage.csv).
 
 ## CLI and HTTP
 
