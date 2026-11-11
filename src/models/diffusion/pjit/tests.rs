@@ -140,6 +140,19 @@ fn apg_is_orthogonal_and_clips_norm() {
     assert!(apg(&[0.; 3], &[0.; 3], &mut vec![0.; 3], 15.)
         .iter()
         .all(|x| x.is_finite()));
+    // Pinned official APG, with nonzero momentum and active norm clipping.
+    let mut momentum = [-0.4382, 1.3445, -3.1212, 4.4567, -0.05287, 1.67458];
+    let actual = apg(
+        &[1.2345, -0.4321, 2.3456, -3.4567, 0.01637, -0.29871],
+        &[0.9876, 0.3456, -1.7654, 2.1212, -0.9763, 0.0198],
+        &mut momentum,
+        15.,
+    );
+    for (actual, expected) in actual.iter().zip([
+        -31.858047, -9.836471, 10.436587, -7.596448, 13.149012, -11.299533,
+    ]) {
+        assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
+    }
 }
 #[test]
 fn text_template_disables_thinking() {
@@ -177,17 +190,34 @@ fn pjit_released_dit_matches_fixture() {
     };
     let _scope = policy.configure_cli().unwrap();
     let started = std::time::Instant::now();
-    let output = dit
-        .session()
-        .unwrap()
-        .predict(
-            &read("image.f32"),
-            spec["width"].as_u64().unwrap() as usize,
-            spec["height"].as_u64().unwrap() as usize,
-            &read("text.f32"),
-            spec["timestep"].as_u64().unwrap() as usize,
-        )
-        .unwrap();
+    let mut session = dit.session().unwrap();
+    eprintln!(
+        "PJIT_SESSION_SECONDS={:.6}",
+        started.elapsed().as_secs_f64()
+    );
+    let image = read("image.f32");
+    let text = read("text.f32");
+    let repeats = std::env::var("RMI_PJIT_REPEAT")
+        .map(|v| v.parse::<usize>().unwrap())
+        .unwrap_or(1);
+    assert!((1..=100).contains(&repeats));
+    let mut output = Vec::new();
+    for iteration in 0..repeats {
+        let started = std::time::Instant::now();
+        output = session
+            .predict(
+                &image,
+                spec["width"].as_u64().unwrap() as usize,
+                spec["height"].as_u64().unwrap() as usize,
+                &text,
+                spec["timestep"].as_u64().unwrap() as usize,
+            )
+            .unwrap();
+        eprintln!(
+            "PJIT_PREDICT_SECONDS[{iteration}]={:.6}",
+            started.elapsed().as_secs_f64()
+        );
+    }
     let out = std::env::var("RMI_PJIT_OUTPUT").unwrap();
     std::fs::write(
         out,
@@ -197,10 +227,6 @@ fn pjit_released_dit_matches_fixture() {
             .collect::<Vec<_>>(),
     )
     .unwrap();
-    eprintln!(
-        "PJIT_PREDICT_SECONDS={:.6}",
-        started.elapsed().as_secs_f64()
-    );
 }
 #[test]
 #[ignore = "requires RMI_PJIT_GGUF, RMI_PJIT_TEXT and RMI_PJIT_TEXT_OUTPUT"]
