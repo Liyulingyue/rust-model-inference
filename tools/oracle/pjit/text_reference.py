@@ -72,9 +72,10 @@ def main():
             raise ValueError(f'unmapped parameter {name}: {mapped}')
         tensor = tensors[mapped]
         values = gguf.quants.dequantize(tensor.data, tensor.tensor_type)
-        state[name] = torch.from_numpy(restore(values, name, tuple(original.shape)))
+        with torch.no_grad():
+            original.copy_(torch.from_numpy(restore(values, name, tuple(original.shape))))
         loaded.append(mapped)
-    encoder.model.load_state_dict(state, strict=True)
+    del state, original, values
     encoder.model.to('cuda')
     encoder.device = torch.device('cuda')
     if a.activation_quant:
