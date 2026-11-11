@@ -167,7 +167,7 @@ NEON on aarch64; no AVX-512).
       **算子从未在生产规模验证过**（自检只覆盖 96 个元素，真实是 3800 万）。
       clamp 改 `±80` + 新增生产规模门禁。⚠️ **clamp 值不可调回 88.376**，且
       GPU SiLU 已与 CPU 不再逐位一致（PSNR 33.34 → 31.52 dB）。
-      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)。
+      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
@@ -176,7 +176,7 @@ NEON on aarch64; no AVX-512).
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
       Vulkan shader 用 ±80（补偿算法需要 `1/den` 保持正规数，见
-      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)）。
+      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)）。
       三者的饱和边界因此不同：`x = 88.2` 时 NEON 走慢路径给出接近真值的 2.4e38，
       x86 给 1.65e38（31% 偏差），GPU 给 exp(80) 的饱和值。
       现状：x86 至少不再返回 `+inf`（旧 clamp `88.376_26` 会），并且
@@ -524,13 +524,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
-      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+      详见 [TODO-052](#todo-052-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 - [~] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
       MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
       30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
       trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
-      [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
+      [TODO-053](#todo-053-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
       **B1–B5 已全部完成**：Q5_1 kernel、arch/config、MoE 层、共享专家，以及
       与上游 llama.cpp 的 oracle 对拍（全 52 层 × 6 步逐位一致，最终 logits
@@ -541,13 +541,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       未覆盖 dory。
       另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
-      [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
+      [TODO-054](#todo-054-dory-的默认提示在-cli--http--模型自带模板之间三分jev-的backendpartial提示对-dory-是假的)。
 - [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
   Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
   因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
   pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
   情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
-  详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
+  详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -795,7 +795,7 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
       超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
       脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
-      **TODO-053**。
+      **TODO-055**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
@@ -4151,7 +4151,7 @@ B1 之后的三个阻塞项也已落地：
 - **B4 共享专家与平方 ReLU**：squared ReLU 内联在 `moe.rs`（`relu` 后 `x*x`）。
 
 **顺带修掉一个更早就存在的语义错误**：`add_bos` 的**优先级**写反了
-（详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)）。30B 的 GGUF
+（详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)）。30B 的 GGUF
 是 `pre = "pixtral"` 且**没有** `add_bos_token` key，参考实现会加 BOS，
 仓库原先不加 —— 少了 `<s>` 提示就与参考实现不同。Dory 反而是对的（它的 GGUF
 明写 `add_bos_token = false`，参考实现同样不加）。
@@ -4444,7 +4444,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 40 层 → 每 token **360 次极小的投影**（1×2048 → 1×512）。设备的 prefill（一次几百行）
 划算 ✓，但 decode 是 360 次单行 dispatch ✗ → 每次的固定开销大于那点算力 ✗。
 
-与仓库里已有的结论同源：TODO-052（Mellum 的 784 次 pool dispatch）、LFM2.5 的
+与仓库里已有的结论同源：TODO-052（每投影一次 pool dispatch，784 次里 26 次的开销大于活）、LFM2.5 的
 `min_gpu_matmul_outputs` 阈值（单行投影留在 CPU）。**qwen35moe 的 decode 目前没有
 类似的"留在 CPU"策略** —— 单行专家投影在设备上必然亏。
 
