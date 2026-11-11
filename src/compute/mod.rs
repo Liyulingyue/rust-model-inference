@@ -91,12 +91,20 @@ impl ComputePolicy {
     /// `nemotron_h` is the dense Nemotron-3 Nano 4B: its Mamba-2 SSM
     /// layers have device kernels, so all 42 layers run on the device.
     /// The mixture-of-experts variant (`nemotron_h_moe`, the 30B-A3B) is
-    /// a separate architecture and is not on this list -- its expert
-    /// routing still runs on the host.
+    /// on this list too: its routed experts run on the device as well,
+    /// and the routing stays there (the chosen expert ids are written
+    /// into the arena, so a layer does not synchronise with the host).
     pub fn has_complete_device_path(arch: &str) -> bool {
         matches!(
             arch,
-            "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory" | "nemotron_h" | "sensenova_loop"
+            "llama"
+                | "qwen3"
+                | "qwen35"
+                | "qwen35moe"
+                | "dory"
+                | "nemotron_h"
+                | "nemotron_h_moe"
+                | "sensenova_loop"
         )
     }
 
@@ -267,7 +275,14 @@ mod tests {
             assert!(ComputePolicy::Auto.validate_text_arch(arch).is_ok());
             assert!(!ComputePolicy::has_complete_device_path(arch));
         }
-        for arch in ["llama", "qwen3", "qwen35", "qwen35moe", "dory"] {
+        for arch in [
+            "llama",
+            "qwen3",
+            "qwen35",
+            "qwen35moe",
+            "dory",
+            "nemotron_h_moe",
+        ] {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
             assert!(ComputePolicy::has_complete_device_path(arch));
         }
