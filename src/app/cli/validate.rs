@@ -4,6 +4,12 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if options.decision_request.is_some() {
+        return crate::app::decision::validate_options(options);
+    }
+    if options.decision_thinker.is_some() && !options.jev && !options.serve {
+        return Err("--decision-thinker requires --decision-request, --jev or server mode".into());
+    }
     if !options.tts && crate::models::pivo::matches_model(&options.model) {
         return Err("PiVo requires --tts; it is an English speech synthesis model".into());
     }
