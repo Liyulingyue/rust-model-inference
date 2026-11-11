@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-11",
+  "status": "incomplete; diagnostic cold measurements only",
+  "host": {
+    "cpu": "AMD EPYC 9334",
+    "logical_cpus": 128,
+    "gpu": "RADV gfx1100; 48 exposed CUs; approximately 48 GB VRAM"
+  },
+  "input": {
+    "width": 33,
+    "height": 35,
+    "text_tokens": 18,
+    "batch": 1,
+    "timestep": 750,
+    "weight": "F32"
+  },
+  "measurements": [
+    {
+      "runtime": "Rust CPU",
+      "profile": "release-fast",
+      "seconds": 7.803182,
+      "scope": "session creation and one prediction; cold/contended"
+    },
+    {
+      "runtime": "Rust Vulkan",
+      "profile": "release-fast",
+      "seconds": 44.780257,
+      "scope": "session creation, cold 8.7 GB weight upload and one prediction; 244 submissions"
+    },
+    {
+      "runtime": "official PyTorch ROCm F32",
+      "seconds": 2.341076,
+      "scope": "forward with checkpoint hooks and disk writes; model already loaded"
+    },
+    {
+      "runtime": "official PyTorch ROCm BF16 autocast",
+      "seconds": 5.183166,
+      "scope": "forward with checkpoint hooks and disk writes; different activation precision"
+    }
+  ],
+  "limitations": [
+    "No valid speed ratio: cold setup scopes and precision differ.",
+    "Warm repeated release CPU/Vulkan/official same-host comparison remains unverified after SSH loss.",
+    "1024x1024/50-step CPU run had reached step 7 when last inspected; no completed output observed.",
+    "Final release build was in progress at SSH loss; its result is unknown."
+  ]
+}
