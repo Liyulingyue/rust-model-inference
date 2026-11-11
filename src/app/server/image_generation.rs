@@ -20,10 +20,7 @@ pub(super) fn build(
     options: &CliOptions,
     source: Arc<dyn TensorSource>,
 ) -> Result<PjitBackend, String> {
-    let defaults = pjit_options(options)?;
-    if options.noise.is_some() {
-        return Err("HTTP image generation does not accept a server-local --noise file".into());
-    }
+    let defaults = server_defaults(options)?;
     let text = options
         .text_encoder
         .as_deref()
@@ -37,6 +34,17 @@ pub(super) fn build(
         pipeline: PjitPipeline::load(source, text, threads)?,
         defaults,
     })
+}
+fn server_defaults(options: &CliOptions) -> Result<PjitOptions, String> {
+    let defaults = pjit_options(options)?;
+    if options.noise.is_some()
+        || options.out.is_some()
+        || options.prompt.is_some()
+        || options.overwrite
+    {
+        return Err("HTTP image generation does not accept --prompt, --noise, --out or --overwrite; supply prompts per request".into());
+    }
+    Ok(defaults)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,6 +165,27 @@ pub(super) async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_cli_only_server_options_before_loading() {
+        for extra in [
+            vec!["--noise", "noise.f32"],
+            vec!["--out", "output.png"],
+            vec!["--prompt", "cat"],
+            vec!["--overwrite"],
+        ] {
+            let args: Vec<_> = [vec!["server", "--model", "pjit.gguf"], extra]
+                .concat()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            let options = crate::app::parse_cli_options(&args).unwrap();
+            assert!(server_defaults(&options)
+                .unwrap_err()
+                .contains("HTTP image generation"));
+        }
+        let args = ["server", "--model", "pjit.gguf"].map(String::from);
+        assert!(server_defaults(&crate::app::parse_cli_options(&args).unwrap()).is_ok());
+    }
     #[test]
     fn rejects_invalid_image_requests_before_loading() {
         let request: Request =

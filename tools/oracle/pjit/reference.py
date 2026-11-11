@@ -25,6 +25,7 @@ def main():
     p.add_argument('--text-f32',action='store_true');p.add_argument('--device',default='cuda');p.add_argument('--native-bf16',action='store_true')
     p.add_argument('--prompt',default='A red cube on a white table.');p.add_argument('--fixture',type=Path);p.add_argument('--prepare-only',action='store_true')
     p.add_argument('--repeat',type=int,default=1);p.add_argument('--no-checkpoints',action='store_true')
+    p.add_argument('--batch-size',type=int,choices=(1,2),default=1,help='duplicate the same input to measure Oracle batch sensitivity')
     a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
     if not 1<=a.repeat<=100:raise ValueError('repeat must be 1..100')
     import subprocess
@@ -100,6 +101,9 @@ def main():
         model.patch_embed.register_forward_hook(patch_hook)
     lengths=torch.tensor([length],device=a.device,dtype=torch.int32)
     timestep=torch.tensor([spec['timestep'] if a.fixture else 750],device=a.device)
+    if a.batch_size==2:
+        image=image.repeat(2,1,1,1,1);padded=padded.repeat(2,1,1)
+        lengths=lengths.repeat(2);timestep=timestep.repeat(2)
     times=[]
     with torch.inference_mode(),torch.autocast(device_type=a.device,dtype=torch.bfloat16,enabled=a.native_bf16):
         for _ in range(a.repeat):
@@ -109,7 +113,7 @@ def main():
             torch.cuda.synchronize() if a.device=='cuda' else None
             times.append(time.perf_counter()-started)
     save('pjit.prediction',output[0,:,0])
-    report=dict(oracle_commit=revision,device=a.device,seconds=times[-1],seconds_samples=times,checkpoints=not a.no_checkpoints,native_bf16=a.native_bf16,width=a.width,height=a.height,text_tokens=length,gguf=str(a.gguf) if a.gguf else None,activation_quant=a.activation_quant)
+    report=dict(oracle_commit=revision,device=a.device,batch_size=a.batch_size,seconds=times[-1],seconds_samples=times,checkpoints=not a.no_checkpoints,native_bf16=a.native_bf16,width=a.width,height=a.height,text_tokens=length,gguf=str(a.gguf) if a.gguf else None,activation_quant=a.activation_quant)
     (a.output/'run.json').write_text(json.dumps(report,indent=2));print(json.dumps(report))
 
 if __name__=='__main__':main()
