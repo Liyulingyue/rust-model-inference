@@ -1,0 +1,33 @@
+{
+  "date": "2026-11-11",
+  "host": "AMD Radeon Graphics gfx1100 / RADV NAVI31, 48 GiB VRAM",
+  "gguf": {
+    "weight_format": "original",
+    "bytes": 6777565952,
+    "sha256": "4134dabd42e7f906559bc2d42b380eaa55663eeeb3e42556eca4a371533aa5e4"
+  },
+  "cli": {
+    "compute": "vulkan",
+    "steps": 1,
+    "cfg": 0,
+    "num_gaussians": 32768,
+    "seed": 42,
+    "elapsed_seconds": 429.245,
+    "stage_seconds": {"preprocess": 0.228, "conditioning": 201.592, "sampling": 194.791, "decode": 32.634},
+    "device_submissions": 33031,
+    "output_gaussians": 32768,
+    "output_bytes": 2228639,
+    "output_sha256": "68f715eb0bc38a4882d03a6f06918e64141ba663c3e2b3109cf249f7cb320220"
+  },
+  "oracle": {"checkpoints": 144, "cpu_passed": 144, "cpu_elapsed_seconds": 31.50},
+  "gpu_oracle": {
+    "auto_submissions": 1273,
+    "vulkan_submissions": 1273,
+    "passed": 143,
+    "failed": 1,
+    "failed_checkpoint": "idol.denoiser.joint.23.out",
+    "relative_rmse": 0.00668105,
+    "cosine": 0.999977688
+  },
+  "status": "Experimental: original GGUF CPU verified; GPU numerical gate and quantized real-weight rows remain open"
+}
