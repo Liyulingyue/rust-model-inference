@@ -8,6 +8,26 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[test]
+fn speech_postprocessor_requires_a_component_pair_and_rejects_scoring() {
+    for flags in [
+        vec!["rmi", "--model", "x.gguf", "--tts-model", "talker.gguf"],
+        vec!["rmi", "--model", "x.gguf", "--tts-mmproj", "codec.gguf"],
+        vec![
+            "rmi",
+            "--model",
+            "x.gguf",
+            "--tts-model",
+            "talker.gguf",
+            "--tts-mmproj",
+            "codec.gguf",
+            "--jev",
+        ],
+    ] {
+        assert!(validate_cli_options(&parse_cli_options(&args(&flags)).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn compute_policy_options_are_shared_and_unambiguous() {
     use crate::compute::ComputePolicy::{Auto, Cpu, Vulkan};
     for (flags, expected) in [
@@ -851,6 +871,30 @@ fn seed_is_valid_for_tts_but_still_rejected_for_unscoped_model_mode() {
     ]))
     .unwrap();
     assert!(validate_cli_options(&tts).is_ok());
+    for serve in [false, true] {
+        let mut args = args(&[
+            "rmi",
+            "--model",
+            "thinker.gguf",
+            "--mmproj",
+            "audio.gguf",
+            "--tts-model",
+            "talker.gguf",
+            "--tts-mmproj",
+            "codec.gguf",
+            "--prompt",
+            "hello",
+            "--seed",
+            "7",
+            "--out",
+            "o.wav",
+        ]);
+        if serve {
+            args.push("--serve".into());
+        }
+        let composed = parse_cli_options(&args).unwrap();
+        assert!(validate_cli_options(&composed).is_ok());
+    }
     let plain = parse_cli_options(&args(&["rmi", "--seed", "7"])).unwrap();
     assert!(validate_cli_options(&plain)
         .unwrap_err()

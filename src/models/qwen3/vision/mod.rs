@@ -1,7 +1,7 @@
 pub mod clip_config;
 pub mod media;
 
-use crate::core::tensor::{optional_f32_tensor_bytes, TensorSource};
+use crate::core::tensor::{optional_f32_tensor_bytes, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     gelu_inplace, rope_vision, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add, vec_add_into,
@@ -653,7 +653,10 @@ impl<'a> VisionEncoder<'a> {
             mm_2_weight,
             mm_2_bias,
             precomputed: None,
-            preserve_f32: source.metadata("wevisone_vl.source_revision").is_some(),
+            preserve_f32: matches!(
+                source.metadata("clip.vision.preserve_f32"),
+                Some(MetaValue::Bool(true))
+            ) || source.metadata("wevisone_vl.source_revision").is_some(),
             pool,
             #[cfg(feature = "vulkan")]
             device: std::cell::RefCell::new(None),
@@ -2384,6 +2387,101 @@ fn matmul_f16_f32_single(
 mod tests {
     use super::{decode_linear_weight, disable_missing_deepstack_layers, spatial_blocks, Q8Weight};
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+
+    #[test]
+    fn f32_metadata_opt_in_keeps_linears_lossless_and_defaults_quantized() {
+        struct Source {
+            metadata: std::collections::HashMap<&'static str, MetaValue>,
+            matrix: Vec<u8>,
+            patch: Vec<u8>,
+            info: TensorInfo,
+        }
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&MetaValue> {
+                self.metadata.get(key)
+            }
+            fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+                (name == "mm.2.weight").then_some(&self.info)
+            }
+            fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+                match name {
+                    "v.patch_embd.weight" => Some(&self.patch),
+                    "mm.0.weight" | "mm.2.weight" => Some(&self.matrix),
+                    _ => None,
+                }
+            }
+        }
+        let mut source = Source {
+            metadata: [
+                ("clip.vision.image_size", 1),
+                ("clip.vision.patch_size", 1),
+                ("clip.vision.embedding_length", 32),
+                ("clip.vision.feed_forward_length", 32),
+                ("clip.vision.block_count", 0),
+                ("clip.vision.attention.head_count", 1),
+                ("clip.vision.spatial_merge_size", 1),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key, MetaValue::Uint32(value)))
+            .chain([(
+                "clip.vision.attention.layer_norm_epsilon",
+                MetaValue::Float32(1e-6),
+            )])
+            .collect(),
+            matrix: (0..32 * 32)
+                .flat_map(|i| if i / 32 == i % 32 { 1.0003f32 } else { 0.0 }.to_le_bytes())
+                .collect(),
+            patch: vec![0; 32 * 3 * 4],
+            info: TensorInfo {
+                name: "mm.2.weight".into(),
+                dims: vec![32, 32],
+                ggml_type: GGMLType::F32,
+                offset: 0,
+            },
+        };
+        let pool = std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(1));
+        let linear = |encoder: &super::VisionEncoder<'_>| {
+            let mut output = [0.0; 32];
+            encoder
+                .precomputed
+                .as_ref()
+                .unwrap()
+                .mm_0_weight
+                .matmul_single(&pool, &[0.8; 32], &mut output, &mut [0; 32], &mut [0.0; 1]);
+            output
+        };
+        for (value, lossless) in [
+            (None, false),
+            (Some(MetaValue::Bool(false)), false),
+            (Some(MetaValue::String("true".into())), false),
+            (Some(MetaValue::Uint32(1)), false),
+            (Some(MetaValue::Bool(true)), true),
+        ] {
+            source.metadata.remove("clip.vision.preserve_f32");
+            if let Some(value) = value {
+                source.metadata.insert("clip.vision.preserve_f32", value);
+            }
+            let mut encoder = super::VisionEncoder::from_source(&source, pool.clone()).unwrap();
+            encoder.precompute();
+            assert_eq!(encoder.precomputed.as_ref().unwrap().lossless, lossless);
+            let output = linear(&encoder);
+            if lossless {
+                assert!(output.iter().all(|&v| (v - 0.80024).abs() < 1e-7));
+                encoder.precompute_lossless();
+                assert_eq!(output, linear(&encoder));
+            } else {
+                assert!(output.iter().all(|&v| (v - 0.80024).abs() > 1e-5));
+            }
+        }
+        source.metadata.remove("clip.vision.preserve_f32");
+        source.metadata.insert(
+            "wevisone_vl.source_revision",
+            MetaValue::String("legacy".into()),
+        );
+        let mut encoder = super::VisionEncoder::from_source(&source, pool.clone()).unwrap();
+        encoder.precompute();
+        assert!(linear(&encoder).iter().all(|&v| (v - 0.80024).abs() < 1e-7));
+    }
 
     struct TensorNames(Vec<String>);
 

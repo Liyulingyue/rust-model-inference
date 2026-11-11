@@ -19,6 +19,7 @@ use std::time::Instant;
 enum TtsFrontend<'a> {
     Breeze,
     Dots,
+    TagSpeech,
     Qwen3 {
         prompt_text: &'a str,
         language: &'static str,
@@ -31,6 +32,16 @@ fn tts_frontend<'a>(
     codec_arch: &str,
     is_dots_mmproj: bool,
 ) -> Result<TtsFrontend<'a>, String> {
+    if model_arch == "sophon_realtime_talker" || codec_arch == "sophon_realtime_code2wav" {
+        if model_arch != "sophon_realtime_talker" || codec_arch != "sophon_realtime_code2wav" {
+            return Err("tag speech requires a matching talker and code2wav --mmproj".into());
+        }
+        validate_tag_speech_options(options)?;
+        return Ok(TtsFrontend::TagSpeech);
+    }
+    if options.voice.is_some() {
+        return Err("--voice requires a model with packaged voice prompts".into());
+    }
     if model_arch == "breeze" || codec_arch == "breeze_audio" {
         if model_arch != "breeze" || codec_arch != "breeze_audio" {
             return Err(
@@ -61,6 +72,22 @@ fn tts_frontend<'a>(
         prompt_text,
         language,
     })
+}
+
+pub(crate) fn validate_tag_speech_options(options: &crate::app::CliOptions) -> Result<(), String> {
+    if options.edit
+        || options.ref_audio.is_some()
+        || options.instruction.is_some()
+        || options.top_k.is_some()
+        || options.top_p.is_some()
+        || options.cfg_scale.is_some()
+        || options.steps.is_some_and(|n| n != 4)
+    {
+        return Err(
+            "tag speech uses packaged voice prompts and its pinned sampling/flow defaults".into(),
+        );
+    }
+    Ok(())
 }
 
 pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> {
@@ -97,6 +124,39 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
             return breeze::run_breeze_tts_cli(options, source.as_ref(), mmproj_probe.as_ref())
         }
         TtsFrontend::Dots => return dots::run_dots_tts_cli(options),
+        TtsFrontend::TagSpeech => {
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1);
+            let mut engine = crate::models::sophon_realtime::speech::SpeechEngine::new(
+                source,
+                Arc::from(mmproj_probe),
+                resolve_thread_count(options.threads, available),
+                options.compute_policy(),
+            )?;
+            let request = crate::models::sophon_realtime::speech::SpeechRequest {
+                text: options
+                    .prompt
+                    .as_deref()
+                    .ok_or("speech requires --prompt")?,
+                voice: options.voice.as_deref().unwrap_or("brand_zh"),
+                max_tokens: options.max_tokens.unwrap_or(128),
+                temperature: options.temperature.unwrap_or(0.0),
+                seed: options.seed.unwrap_or(0) as u64,
+                stream: false,
+            };
+            let result = engine.synthesize(&request, |_| true)?;
+            let bytes = encode_wav_pcm16_channels(&result.waveform, 24_000, 1)?;
+            crate::app::write_output_atomically(out_path, &bytes, false)?;
+            eprintln!(
+                "Speech: {} tokens, {} samples, terminated={}, {:.3}s",
+                result.speech_tokens.len(),
+                result.waveform.len(),
+                result.terminated,
+                started.elapsed().as_secs_f64()
+            );
+            return Ok(());
+        }
         TtsFrontend::Qwen3 {
             prompt_text,
             language,

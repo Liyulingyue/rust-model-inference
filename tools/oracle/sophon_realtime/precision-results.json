@@ -1,0 +1,1304 @@
+{
+  "status": "experimental; failures retained; not a full speech-quality acceptance",
+  "source_revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
+  "evidence_root": "target/sophon/precision-components-33367",
+  "scope": "CPU same-GGUF independent decoding plus pinned official reference; short component fixture. Baseline uses F32 activations; runtime applies independent PreparedRows input QDQ. No gate was relaxed.",
+  "oracle_jobs": 29,
+  "rust_jobs": {
+    "count": 16,
+    "all_exit_zero": true,
+    "scope": "execution and structural assertions only; independent numerical outcomes below"
+  },
+  "reference": {
+    "torch": "2.9.1+gitff65f5b",
+    "transformers": "4.57.6",
+    "threads": 8,
+    "kv": "F32"
+  },
+  "gates": {
+    "talker_f32": {
+      "maximum_relative_rmse": 0.001,
+      "minimum_cosine": 0.999999
+    },
+    "talker_f16_bf16": {
+      "maximum_relative_rmse": 0.005,
+      "minimum_cosine": 0.99998
+    },
+    "talker_blockquant": {
+      "maximum_relative_rmse": 0.03,
+      "minimum_cosine": 0.999
+    },
+    "talker_discrete": "every masked or forced greedy ID must match for a strict overall pass",
+    "code2wav_intermediate": {
+      "maximum_relative_rmse": 0.001,
+      "minimum_cosine": 0.999999
+    },
+    "code2wav_waveform": {
+      "maximum_relative_rmse": 0.01,
+      "minimum_cosine": 0.9999,
+      "maximum_absolute_error": 0.01
+    }
+  },
+  "payload_boundary": {
+    "hift": {
+      "actual_type": "F32",
+      "tensor_count": 246,
+      "applies_to": "all nine requested formats",
+      "independent_hift_fixture": true,
+      "not_flow_output": "HiFT receives the same separately provided mel/noise fixture, not each quantized flow output"
+    },
+    "requested_formats": "F32 F16 BF16 Q8_0 Q4_0 Q4_1 Q4_K Q5_K Q6_K"
+  },
+  "jobs": [
+    {
+      "component": "talker",
+      "precision": "F16",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.0008745771583706228,
+      "result": "talker-f16-oracle-f32/result.json",
+      "steps": 79,
+      "numerical_failures": 0,
+      "greedy_failures": 1,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": 51,
+      "gguf_sha256": "3308514979e3b2471e181a3406e073d5fca5fdf4004d69a28653d11972f69f1c",
+      "actual_tensor_types": {
+        "F16": 171,
+        "F32": 121
+      },
+      "first_greedy_failure": {
+        "step": 51,
+        "rust_id": 642,
+        "reference_id": 640,
+        "reference_margin": 0.001735687255859375,
+        "relative_rmse": 0.0005155649024951421
+      }
+    },
+    {
+      "component": "talker",
+      "precision": "F16",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.0011374154659351896,
+      "result": "talker-f16-oracle-runtime/result.json",
+      "steps": 79,
+      "numerical_failures": 0,
+      "greedy_failures": 1,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": 51,
+      "gguf_sha256": "3308514979e3b2471e181a3406e073d5fca5fdf4004d69a28653d11972f69f1c",
+      "actual_tensor_types": {
+        "F16": 171,
+        "F32": 121
+      },
+      "first_greedy_failure": {
+        "step": 51,
+        "rust_id": 642,
+        "reference_id": 640,
+        "reference_margin": 0.0007190704345703125,
+        "relative_rmse": 0.0005301313382253865
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "F16",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.01428749174584061,
+      "result": "code2wav-f16-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.01428749174584061,
+      "flow_mel_relative_rmse": 0.008119317728798888,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "2aca9c1ba0ee8e90f7bde12f7e40382abc88dedfffee6b06f51ac4b5d7ed4120",
+      "hift_gguf_sha256": "e55eeb9975f90b636fa313313916b2181f7882cdb306c0328182295c68df8bd8"
+    },
+    {
+      "component": "code2wav",
+      "precision": "F16",
+      "activation": "runtime",
+      "strict_pass": true,
+      "max_relative_rmse": 0.0009427362985684514,
+      "result": "code2wav-f16-oracle-runtime/result.json",
+      "first_failed_checkpoint": null,
+      "flow_velocity_0_relative_rmse": 0.0007540196114328089,
+      "flow_mel_relative_rmse": 0.00047049277935541563,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "2aca9c1ba0ee8e90f7bde12f7e40382abc88dedfffee6b06f51ac4b5d7ed4120",
+      "hift_gguf_sha256": "e55eeb9975f90b636fa313313916b2181f7882cdb306c0328182295c68df8bd8"
+    },
+    {
+      "component": "talker",
+      "precision": "BF16",
+      "activation": "f32",
+      "strict_pass": true,
+      "max_relative_rmse": 2.501423835001995e-06,
+      "result": "talker-bf16-oracle-f32/result.json",
+      "steps": 81,
+      "numerical_failures": 0,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": null,
+      "gguf_sha256": "36c4d57958e382facb32d0d80055c5976fa2b5750c8435c744686d34ea0c024b",
+      "actual_tensor_types": {
+        "BF16": 171,
+        "F32": 121
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "BF16",
+      "activation": "f32",
+      "strict_pass": true,
+      "max_relative_rmse": 9.194746714134155e-05,
+      "result": "code2wav-bf16-oracle-f32/result.json",
+      "first_failed_checkpoint": null,
+      "flow_velocity_0_relative_rmse": 1.0079909439507146e-05,
+      "flow_mel_relative_rmse": 5.824160843699148e-06,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "70f5fa7dd2bdde474a87b26b17d9af0ba0965b889fae817281a270442da8a503",
+      "hift_gguf_sha256": "b297c5a7b56fa24f7ed67b6d45e84d765f3882c857357e543764b3134f22e577"
+    },
+    {
+      "component": "talker",
+      "precision": "Q8_0",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.02804535015344273,
+      "result": "talker-q8_0-oracle-f32/result.json",
+      "steps": 81,
+      "numerical_failures": 0,
+      "greedy_failures": 2,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": 57,
+      "gguf_sha256": "ec1ffbe7487febf1d28643742624f86d07dac3f45f4f13dd139a15a551e0800b",
+      "actual_tensor_types": {
+        "F32": 121,
+        "Q8_0": 171
+      },
+      "first_greedy_failure": {
+        "step": 57,
+        "rust_id": 5948,
+        "reference_id": 5219,
+        "reference_margin": 0.038921356201171875,
+        "relative_rmse": 0.012304677788768575
+      }
+    },
+    {
+      "component": "talker",
+      "precision": "Q8_0",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.03354902382084492,
+      "result": "talker-q8_0-oracle-runtime/result.json",
+      "steps": 81,
+      "numerical_failures": 1,
+      "greedy_failures": 3,
+      "first_numerical_failure_step": 79,
+      "first_greedy_failure_step": 57,
+      "gguf_sha256": "ec1ffbe7487febf1d28643742624f86d07dac3f45f4f13dd139a15a551e0800b",
+      "actual_tensor_types": {
+        "F32": 121,
+        "Q8_0": 171
+      },
+      "first_greedy_failure": {
+        "step": 57,
+        "rust_id": 5948,
+        "reference_id": 5219,
+        "reference_margin": 0.022609710693359375,
+        "relative_rmse": 0.013913201101078645
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q8_0",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.018725791980026076,
+      "result": "code2wav-q8_0-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.018725791980026076,
+      "flow_mel_relative_rmse": 0.00713754593256133,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "6e49d60b551f22b4ef9de8115e25cf1963f6e73929b34f23ba4f5774ec79b113",
+      "hift_gguf_sha256": "64c0030e07b120204f9a2dc0891ac5005501bb854468bf2dbfe811b40b3afbc9"
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q8_0",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.020718187397661177,
+      "result": "code2wav-q8_0-oracle-runtime/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.020718187397661177,
+      "flow_mel_relative_rmse": 0.008648188267047312,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "6e49d60b551f22b4ef9de8115e25cf1963f6e73929b34f23ba4f5774ec79b113",
+      "hift_gguf_sha256": "64c0030e07b120204f9a2dc0891ac5005501bb854468bf2dbfe811b40b3afbc9"
+    },
+    {
+      "component": "talker",
+      "precision": "Q4_0",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.025279884244775598,
+      "result": "talker-q4_0-oracle-f32/result.json",
+      "steps": 80,
+      "numerical_failures": 0,
+      "greedy_failures": 1,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": 51,
+      "gguf_sha256": "d5728c740d9ee1344b69a43a9ecd4e94d9c39724f6d76fb38f6b158e08e77cf4",
+      "actual_tensor_types": {
+        "F32": 121,
+        "Q4_0": 171
+      },
+      "first_greedy_failure": {
+        "step": 51,
+        "rust_id": 550,
+        "reference_id": 553,
+        "reference_margin": 0.011966705322265625,
+        "relative_rmse": 0.015589617059739196
+      }
+    },
+    {
+      "component": "talker",
+      "precision": "Q4_0",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.03014342507955788,
+      "result": "talker-q4_0-oracle-runtime/result.json",
+      "steps": 80,
+      "numerical_failures": 1,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": 75,
+      "first_greedy_failure_step": null,
+      "gguf_sha256": "d5728c740d9ee1344b69a43a9ecd4e94d9c39724f6d76fb38f6b158e08e77cf4",
+      "actual_tensor_types": {
+        "F32": 121,
+        "Q4_0": 171
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q4_0",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.022994087748844445,
+      "result": "code2wav-q4_0-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.022994087748844445,
+      "flow_mel_relative_rmse": 0.009088019373785642,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "b8af7c1f2b582dd53b549b363a56a27b544a1d32a868070a9016d7b79b572549",
+      "hift_gguf_sha256": "f1cc84c5979d83b7b4ab7bd92ebdac4ce48134610729cd01909b869b7f4c1e9b"
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q4_0",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.016570068957578718,
+      "result": "code2wav-q4_0-oracle-runtime/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.006628076885309129,
+      "flow_mel_relative_rmse": 0.007525193235213379,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "b8af7c1f2b582dd53b549b363a56a27b544a1d32a868070a9016d7b79b572549",
+      "hift_gguf_sha256": "f1cc84c5979d83b7b4ab7bd92ebdac4ce48134610729cd01909b869b7f4c1e9b"
+    },
+    {
+      "component": "talker",
+      "precision": "Q4_1",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.03024597980495672,
+      "result": "talker-q4_1-oracle-f32/result.json",
+      "steps": 74,
+      "numerical_failures": 2,
+      "greedy_failures": 2,
+      "first_numerical_failure_step": 66,
+      "first_greedy_failure_step": 49,
+      "gguf_sha256": "db9182d28e8f7aaf78e5822171a3e0bf6a7a464b5aa44a9c4a967d5b81ed0f73",
+      "actual_tensor_types": {
+        "F32": 121,
+        "Q4_1": 171
+      },
+      "first_greedy_failure": {
+        "step": 49,
+        "rust_id": 4358,
+        "reference_id": 4115,
+        "reference_margin": 0.09856605529785156,
+        "relative_rmse": 0.019193248796620432
+      }
+    },
+    {
+      "component": "talker",
+      "precision": "Q4_1",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.037127639502476904,
+      "result": "talker-q4_1-oracle-runtime/result.json",
+      "steps": 74,
+      "numerical_failures": 10,
+      "greedy_failures": 3,
+      "first_numerical_failure_step": 29,
+      "first_greedy_failure_step": 26,
+      "gguf_sha256": "db9182d28e8f7aaf78e5822171a3e0bf6a7a464b5aa44a9c4a967d5b81ed0f73",
+      "actual_tensor_types": {
+        "F32": 121,
+        "Q4_1": 171
+      },
+      "first_greedy_failure": {
+        "step": 26,
+        "rust_id": 6544,
+        "reference_id": 6545,
+        "reference_margin": 0.0038013458251953125,
+        "relative_rmse": 0.013157303548661741
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q4_1",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.026074568274253473,
+      "result": "code2wav-q4_1-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.026074568274253473,
+      "flow_mel_relative_rmse": 0.019366939315008103,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "47f1419579015477836395d84f43c4549963a914b03a7f1566d1537d09f4368b",
+      "hift_gguf_sha256": "bbbed3fe282a006b5fd7b9094db05c045ca5783281831bbe2b12d8828869cd0e"
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q4_1",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.022423474044526534,
+      "result": "code2wav-q4_1-oracle-runtime/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.022423474044526534,
+      "flow_mel_relative_rmse": 0.011009652203422184,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "47f1419579015477836395d84f43c4549963a914b03a7f1566d1537d09f4368b",
+      "hift_gguf_sha256": "bbbed3fe282a006b5fd7b9094db05c045ca5783281831bbe2b12d8828869cd0e"
+    },
+    {
+      "component": "talker",
+      "precision": "Q4_K",
+      "activation": "f32",
+      "strict_pass": true,
+      "max_relative_rmse": 0.023008680428301172,
+      "result": "talker-q4_k-oracle-f32/result.json",
+      "steps": 131,
+      "numerical_failures": 0,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": null,
+      "gguf_sha256": "015d0548975111afd2802f2d49f82740c894fe609649376ee83d5ac6cf802433",
+      "actual_tensor_types": {
+        "F32": 268,
+        "Q4_K": 24
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q4_K",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.02967688836336254,
+      "result": "code2wav-q4_k-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.02967688836336254,
+      "flow_mel_relative_rmse": 0.024148525668791457,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "de6fe94445a858ac9946f46fcea59f1828477ba799e4abcb0a7276b621d1998d",
+      "hift_gguf_sha256": "d646b14aeace6805e8a022fa388ee3447812ba4b9e1065e912df90476e6d34cb"
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q4_K",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.03197303400365952,
+      "result": "code2wav-q4_k-oracle-runtime/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.019602942452986983,
+      "flow_mel_relative_rmse": 0.01780414179782212,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "de6fe94445a858ac9946f46fcea59f1828477ba799e4abcb0a7276b621d1998d",
+      "hift_gguf_sha256": "d646b14aeace6805e8a022fa388ee3447812ba4b9e1065e912df90476e6d34cb"
+    },
+    {
+      "component": "talker",
+      "precision": "Q5_K",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.050162564709275055,
+      "result": "talker-q5_k-oracle-f32/result.json",
+      "steps": 131,
+      "numerical_failures": 5,
+      "greedy_failures": 1,
+      "first_numerical_failure_step": 7,
+      "first_greedy_failure_step": 3,
+      "gguf_sha256": "6dc8239745080ffa19b81863694a82f988155d4813ee01db2b48d48247a92854",
+      "actual_tensor_types": {
+        "F32": 268,
+        "Q5_K": 24
+      },
+      "first_greedy_failure": {
+        "step": 3,
+        "rust_id": 4124,
+        "reference_id": 3881,
+        "reference_margin": 0.04050636291503906,
+        "relative_rmse": 0.01991675259582101
+      }
+    },
+    {
+      "component": "talker",
+      "precision": "Q5_K",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.04094013898437312,
+      "result": "talker-q5_k-oracle-runtime/result.json",
+      "steps": 131,
+      "numerical_failures": 2,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": 33,
+      "first_greedy_failure_step": null,
+      "gguf_sha256": "6dc8239745080ffa19b81863694a82f988155d4813ee01db2b48d48247a92854",
+      "actual_tensor_types": {
+        "F32": 268,
+        "Q5_K": 24
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q5_K",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.038435221107686095,
+      "result": "code2wav-q5_k-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.038435221107686095,
+      "flow_mel_relative_rmse": 0.020970670961827368,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "3bd0ec2b1942c9bbb080e5a1b16f2f92d07c8d11f804d3c850e8d4e0c6764b8e",
+      "hift_gguf_sha256": "ebb8eefd66bfa871ac6e769905097e04f5578577450cd87c96ef228fd457d724"
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q5_K",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.02885333694058722,
+      "result": "code2wav-q5_k-oracle-runtime/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.02885333694058722,
+      "flow_mel_relative_rmse": 0.01633686309791209,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "3bd0ec2b1942c9bbb080e5a1b16f2f92d07c8d11f804d3c850e8d4e0c6764b8e",
+      "hift_gguf_sha256": "ebb8eefd66bfa871ac6e769905097e04f5578577450cd87c96ef228fd457d724"
+    },
+    {
+      "component": "talker",
+      "precision": "Q6_K",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.031454830359596946,
+      "result": "talker-q6_k-oracle-f32/result.json",
+      "steps": 81,
+      "numerical_failures": 1,
+      "greedy_failures": 1,
+      "first_numerical_failure_step": 40,
+      "first_greedy_failure_step": 41,
+      "gguf_sha256": "cd1bba3348a80ac06ed1e63a8c0a8aac132944375146254c976820ca2139ee3b",
+      "actual_tensor_types": {
+        "F32": 268,
+        "Q6_K": 24
+      },
+      "first_greedy_failure": {
+        "step": 41,
+        "rust_id": 802,
+        "reference_id": 1531,
+        "reference_margin": 0.08740997314453125,
+        "relative_rmse": 0.021222528463145707
+      }
+    },
+    {
+      "component": "talker",
+      "precision": "Q6_K",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.028803417884444522,
+      "result": "talker-q6_k-oracle-runtime/result.json",
+      "steps": 81,
+      "numerical_failures": 0,
+      "greedy_failures": 2,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": 41,
+      "gguf_sha256": "cd1bba3348a80ac06ed1e63a8c0a8aac132944375146254c976820ca2139ee3b",
+      "actual_tensor_types": {
+        "F32": 268,
+        "Q6_K": 24
+      },
+      "first_greedy_failure": {
+        "step": 41,
+        "rust_id": 802,
+        "reference_id": 1531,
+        "reference_margin": 0.05366325378417969,
+        "relative_rmse": 0.013126358922699165
+      }
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q6_K",
+      "activation": "f32",
+      "strict_pass": false,
+      "max_relative_rmse": 0.03868763377793182,
+      "result": "code2wav-q6_k-oracle-f32/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.03868763377793182,
+      "flow_mel_relative_rmse": 0.01954045727700967,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "27887f34b290efc3d168d21b4b4048e1d52abf8836e7c79b25b2780496fd8416",
+      "hift_gguf_sha256": "b0acd8bc2d0bfa899cae3015dadbf5bc7c2047cc7ea1d01f6801cf3c50bd334c"
+    },
+    {
+      "component": "code2wav",
+      "precision": "Q6_K",
+      "activation": "runtime",
+      "strict_pass": false,
+      "max_relative_rmse": 0.03348412232174526,
+      "result": "code2wav-q6_k-oracle-runtime/result.json",
+      "first_failed_checkpoint": "flow.velocity.0",
+      "flow_velocity_0_relative_rmse": 0.03348412232174526,
+      "flow_mel_relative_rmse": 0.0193821581362255,
+      "all_hift_pass": true,
+      "hift_waveform_relative_rmse": 1.3216743949980394e-05,
+      "flow_gguf_sha256": "27887f34b290efc3d168d21b4b4048e1d52abf8836e7c79b25b2780496fd8416",
+      "hift_gguf_sha256": "b0acd8bc2d0bfa899cae3015dadbf5bc7c2047cc7ea1d01f6801cf3c50bd334c"
+    }
+  ],
+  "autonomous_greedy_vs_f32": {
+    "text": "你好，欢迎使用语音助手。[breath]",
+    "semantics": "Independent autonomous Rust masked-greedy output drift against exact Oracle-matched F32 reference; token distance is not perceptual speech quality",
+    "normalization": "speech-only Levenshtein divided by longer sequence length; control IDs excluded",
+    "speech_token_limit": 128,
+    "records": [
+      {
+        "format": "F32",
+        "complete_steps": 81,
+        "speech_tokens": 77,
+        "terminated": true,
+        "speech_common_prefix": 77,
+        "speech_levenshtein": 0,
+        "normalized_by_longer": 0.0
+      },
+      {
+        "format": "F16",
+        "complete_steps": 79,
+        "speech_tokens": 75,
+        "terminated": true,
+        "speech_common_prefix": 48,
+        "speech_levenshtein": 22,
+        "normalized_by_longer": 0.2857142857142857
+      },
+      {
+        "format": "BF16",
+        "complete_steps": 81,
+        "speech_tokens": 77,
+        "terminated": true,
+        "speech_common_prefix": 77,
+        "speech_levenshtein": 0,
+        "normalized_by_longer": 0.0
+      },
+      {
+        "format": "Q8_0",
+        "complete_steps": 81,
+        "speech_tokens": 77,
+        "terminated": true,
+        "speech_common_prefix": 54,
+        "speech_levenshtein": 17,
+        "normalized_by_longer": 0.22077922077922077
+      },
+      {
+        "format": "Q4_0",
+        "complete_steps": 80,
+        "speech_tokens": 76,
+        "terminated": true,
+        "speech_common_prefix": 4,
+        "speech_levenshtein": 39,
+        "normalized_by_longer": 0.5064935064935064
+      },
+      {
+        "format": "Q4_1",
+        "complete_steps": 74,
+        "speech_tokens": 70,
+        "terminated": true,
+        "speech_common_prefix": 2,
+        "speech_levenshtein": 29,
+        "normalized_by_longer": 0.37662337662337664
+      },
+      {
+        "format": "Q4_K",
+        "complete_steps": 131,
+        "speech_tokens": 128,
+        "terminated": false,
+        "speech_common_prefix": 1,
+        "speech_levenshtein": 127,
+        "normalized_by_longer": 0.9921875
+      },
+      {
+        "format": "Q5_K",
+        "complete_steps": 131,
+        "speech_tokens": 128,
+        "terminated": false,
+        "speech_common_prefix": 1,
+        "speech_levenshtein": 112,
+        "normalized_by_longer": 0.875
+      },
+      {
+        "format": "Q6_K",
+        "complete_steps": 81,
+        "speech_tokens": 77,
+        "terminated": true,
+        "speech_common_prefix": 38,
+        "speech_levenshtein": 13,
+        "normalized_by_longer": 0.16883116883116883
+      }
+    ]
+  },
+  "q8_same_input_projection": {
+    "scope": "100 exact Rust first-layer normalized input rows; independently decoded same-GGUF Q/K weights and biases. Does not validate later layers or flow.",
+    "gate": "strict F32 numerical gate",
+    "rows": 100,
+    "attn_q": {
+      "relative_rmse": 1.9358771154793625e-08,
+      "maximum_absolute_error": 7.62939453125e-06,
+      "maximum_row_relative_rmse": 4.8886284799536795e-08,
+      "row_failures": 0
+    },
+    "attn_k": {
+      "relative_rmse": 9.612987606295145e-09,
+      "maximum_absolute_error": 7.62939453125e-06,
+      "maximum_row_relative_rmse": 2.7662434000499285e-08,
+      "row_failures": 0
+    },
+    "artifact": "talker-q8_0-projection-rust/projection-comparison.json",
+    "projections": {
+      "attn_q": {
+        "f32": {
+          "max_abs": 0.012394607067108154,
+          "rmse": 0.0015462120821069705,
+          "relative_rmse": 0.00021958639420643607,
+          "cosine": 0.9999999758909299,
+          "pass": true,
+          "maximum_row_relative_rmse": 0.00031309336660274736,
+          "row_failures": 0
+        },
+        "runtime": {
+          "max_abs": 7.62939453125e-06,
+          "rmse": 1.3631432683730314e-07,
+          "relative_rmse": 1.9358771154793625e-08,
+          "cosine": 0.9999999999999998,
+          "pass": true,
+          "maximum_row_relative_rmse": 4.8886284799536795e-08,
+          "row_failures": 0
+        }
+      },
+      "attn_k": {
+        "f32": {
+          "max_abs": 0.0191497802734375,
+          "rmse": 0.002048527453139555,
+          "relative_rmse": 8.183611825186321e-05,
+          "cosine": 0.9999999966519197,
+          "pass": true,
+          "maximum_row_relative_rmse": 0.000137415064198274,
+          "row_failures": 0
+        },
+        "runtime": {
+          "max_abs": 7.62939453125e-06,
+          "rmse": 2.4063321866100633e-07,
+          "relative_rmse": 9.612987606295145e-09,
+          "cosine": 0.9999999999999999,
+          "pass": true,
+          "maximum_row_relative_rmse": 2.7662434000499285e-08,
+          "row_failures": 0
+        }
+      }
+    }
+  },
+  "limits": [
+    "F16 talker numerical gates pass but one tiny-margin greedy row still differs.",
+    "Q4_K talker same-file baseline passes, while autonomous output does not reach EOS within 128 speech tokens. Q5_K also reaches that bound.",
+    "All six blockquant flow runs fail unchanged intermediate gates, including after runtime QDQ.",
+    "HiFT has F32 payloads in every requested format; its fixture pass does not establish quantized HiFT or an end-to-end quantized speech pass.",
+    "No source-to-export quality gate, subjective voice assessment, original F64/FP8 chain equivalence, live starvation or GPU numerical acceptance is claimed.",
+    "Extended F32 nonfinal fixture passes all15 checkpoints. Longer64-flow-frame/20-HiFT-frame fixture fails only HiFT stage0 at relative RMSE0.0011014503 >0.001; its waveform passes the separate waveform gate. This remains an overall failure."
+  ],
+  "verification": {
+    "unit_tests_local": {
+      "passed": 29,
+      "seconds": 1.019
+    },
+    "unit_tests_remote": {
+      "passed": 29,
+      "seconds": 3.104
+    },
+    "owned_talker_code2wav_tests": 15,
+    "black": "passed for four owned Python/test files",
+    "ruff": "passed for four owned Python/test files",
+    "diff_check": "passed"
+  },
+  "extended_f32_fixtures": [
+    {
+      "case": "nonfinal",
+      "strict_pass": true,
+      "reference_input_sha256": "b52fc58ec2251aed4047e1193ca9d7a2cffc5f4fb65e5562c5272ad6e6a7570d",
+      "reference_thread_counts": [
+        1,
+        8
+      ],
+      "reference_thread_calibration_pass": true,
+      "reference_thread_calibration_max_abs": 0.0,
+      "first_failed_checkpoint": null,
+      "max_relative_rmse": 0.00014637717127019076,
+      "flow_mel": {
+        "max_abs": 0.00022745132446289062,
+        "rmse": 2.315074329922982e-05,
+        "relative_rmse": 7.747075169564277e-06,
+        "cosine": 0.9999999999702236,
+        "gate": {
+          "maximum_relative_rmse": 0.001,
+          "minimum_cosine": 0.999999
+        },
+        "pass": true
+      },
+      "hift_waveform": {
+        "max_abs": 3.1474046409130096e-06,
+        "rmse": 4.924980382861264e-07,
+        "relative_rmse": 4.9343418175672616e-05,
+        "cosine": 0.9999999987842563,
+        "gate": {
+          "maximum_relative_rmse": 0.01,
+          "minimum_cosine": 0.9999,
+          "maximum_absolute_error": 0.01
+        },
+        "pass": true
+      },
+      "shapes": {
+        "flow.mu": [
+          80,
+          14
+        ],
+        "flow.cond": [
+          80,
+          14
+        ],
+        "flow.speaker": [
+          80
+        ],
+        "flow.velocity.0": [
+          80,
+          14
+        ],
+        "flow.velocity.1": [
+          80,
+          14
+        ],
+        "flow.velocity.2": [
+          80,
+          14
+        ],
+        "flow.velocity.3": [
+          80,
+          14
+        ],
+        "flow.mel": [
+          80,
+          10
+        ],
+        "hift.f0": [
+          9
+        ],
+        "hift.source": [
+          4320
+        ],
+        "hift.spectrum": [
+          18,
+          601
+        ],
+        "hift.stage.0": [
+          256,
+          40
+        ],
+        "hift.stage.1": [
+          128,
+          200
+        ],
+        "hift.stage.2": [
+          64,
+          601
+        ],
+        "hift.waveform": [
+          1920
+        ]
+      },
+      "checkpoints": {
+        "flow.mu": {
+          "max_abs": 4.410743713378906e-06,
+          "rmse": 7.566539127060597e-07,
+          "relative_rmse": 1.0594101118193603e-06,
+          "cosine": 0.9999999999994407,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.cond": {
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 0.9999999999999999,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.speaker": {
+          "max_abs": 7.450580596923828e-08,
+          "rmse": 2.976027406933081e-08,
+          "relative_rmse": 1.7251139837825978e-07,
+          "cosine": 0.9999999999999851,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.0": {
+          "max_abs": 8.058547973632812e-05,
+          "rmse": 1.5605806672128093e-05,
+          "relative_rmse": 4.1949162551355545e-06,
+          "cosine": 0.9999999999912159,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.1": {
+          "max_abs": 0.0001583099365234375,
+          "rmse": 1.9297443620133367e-05,
+          "relative_rmse": 5.138638754499009e-06,
+          "cosine": 0.999999999986894,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.2": {
+          "max_abs": 0.00011491775512695312,
+          "rmse": 1.6006041011963498e-05,
+          "relative_rmse": 4.379993780784869e-06,
+          "cosine": 0.9999999999904079,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.3": {
+          "max_abs": 0.0005729198455810547,
+          "rmse": 4.819076686366582e-05,
+          "relative_rmse": 1.3377342813342818e-05,
+          "cosine": 0.9999999999107196,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.mel": {
+          "max_abs": 0.00022745132446289062,
+          "rmse": 2.315074329922982e-05,
+          "relative_rmse": 7.747075169564277e-06,
+          "cosine": 0.9999999999702236,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.f0": {
+          "max_abs": 0.0006542205810546875,
+          "rmse": 0.0003405210765115607,
+          "relative_rmse": 6.254625791885427e-06,
+          "cosine": 0.9999999999808944,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.source": {
+          "max_abs": 7.79004767537117e-06,
+          "rmse": 2.723477668021886e-06,
+          "relative_rmse": 0.00014637717127019076,
+          "cosine": 0.9999999894542386,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.spectrum": {
+          "max_abs": 3.254413604736328e-05,
+          "rmse": 3.4572491154465614e-06,
+          "relative_rmse": 3.307239650731603e-06,
+          "cosine": 0.9999999999945448,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.stage.0": {
+          "max_abs": 0.000308990478515625,
+          "rmse": 1.644890134074027e-05,
+          "relative_rmse": 1.8744244845027474e-06,
+          "cosine": 0.999999999998258,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.stage.1": {
+          "max_abs": 0.0016765594482421875,
+          "rmse": 9.899724776948748e-05,
+          "relative_rmse": 9.30341594463724e-06,
+          "cosine": 0.9999999999567264,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.stage.2": {
+          "max_abs": 0.00069427490234375,
+          "rmse": 3.803972204892256e-05,
+          "relative_rmse": 4.363957727887932e-06,
+          "cosine": 0.9999999999905376,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.waveform": {
+          "max_abs": 3.1474046409130096e-06,
+          "rmse": 4.924980382861264e-07,
+          "relative_rmse": 4.9343418175672616e-05,
+          "cosine": 0.9999999987842563,
+          "gate": {
+            "maximum_relative_rmse": 0.01,
+            "minimum_cosine": 0.9999,
+            "maximum_absolute_error": 0.01
+          },
+          "pass": true
+        }
+      },
+      "reference_result": "target/sophon/code2wav-nonfinal-f32-calibration-33367/result.json",
+      "rust_comparison": "target/sophon/code2wav-nonfinal-f32-calibration-33367/rust-comparison.json",
+      "rust_input_adapter": "Only adds hift_finalize=false; every original numerical/configuration field is identical",
+      "rust_input_sha256": "efd2cf2fad8b1911d519c5241683c389e9a2da995320cc9faed1b73f2899e87d"
+    },
+    {
+      "case": "longer",
+      "strict_pass": false,
+      "reference_input_sha256": "0349db235423a7681c30c1bb949375bdcb3b56a88af9f22753bf7ea11cdd99f9",
+      "reference_thread_counts": [
+        1,
+        8
+      ],
+      "reference_thread_calibration_pass": true,
+      "reference_thread_calibration_max_abs": 0.0,
+      "first_failed_checkpoint": "hift.stage.0",
+      "max_relative_rmse": 0.0036007659933175212,
+      "flow_mel": {
+        "max_abs": 0.0005418956279754639,
+        "rmse": 3.588008439558781e-05,
+        "relative_rmse": 1.0670218136387748e-05,
+        "cosine": 0.9999999999467031,
+        "gate": {
+          "maximum_relative_rmse": 0.001,
+          "minimum_cosine": 0.999999
+        },
+        "pass": true
+      },
+      "hift_waveform": {
+        "max_abs": 0.0007278807461261749,
+        "rmse": 3.563408281454388e-05,
+        "relative_rmse": 0.0036007659933175212,
+        "cosine": 0.9999935220148692,
+        "gate": {
+          "maximum_relative_rmse": 0.01,
+          "minimum_cosine": 0.9999,
+          "maximum_absolute_error": 0.01
+        },
+        "pass": true
+      },
+      "shapes": {
+        "flow.mu": [
+          80,
+          64
+        ],
+        "flow.cond": [
+          80,
+          64
+        ],
+        "flow.speaker": [
+          80
+        ],
+        "flow.velocity.0": [
+          80,
+          64
+        ],
+        "flow.velocity.1": [
+          80,
+          64
+        ],
+        "flow.velocity.2": [
+          80,
+          64
+        ],
+        "flow.velocity.3": [
+          80,
+          64
+        ],
+        "flow.mel": [
+          80,
+          60
+        ],
+        "hift.f0": [
+          20
+        ],
+        "hift.source": [
+          9600
+        ],
+        "hift.spectrum": [
+          18,
+          2401
+        ],
+        "hift.stage.0": [
+          256,
+          160
+        ],
+        "hift.stage.1": [
+          128,
+          800
+        ],
+        "hift.stage.2": [
+          64,
+          2401
+        ],
+        "hift.waveform": [
+          9600
+        ]
+      },
+      "checkpoints": {
+        "flow.mu": {
+          "max_abs": 3.337860107421875e-06,
+          "rmse": 5.382994103217557e-07,
+          "relative_rmse": 7.167703916275904e-07,
+          "cosine": 0.9999999999997441,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.cond": {
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.speaker": {
+          "max_abs": 7.450580596923828e-08,
+          "rmse": 2.976027406933081e-08,
+          "relative_rmse": 1.7251139837825978e-07,
+          "cosine": 0.9999999999999851,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.0": {
+          "max_abs": 0.0050618648529052734,
+          "rmse": 0.00018100284239613455,
+          "relative_rmse": 4.826729255779443e-05,
+          "cosine": 0.9999999988386961,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.1": {
+          "max_abs": 0.0004889965057373047,
+          "rmse": 3.216094909408943e-05,
+          "relative_rmse": 9.002133600854427e-06,
+          "cosine": 0.9999999999612439,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.2": {
+          "max_abs": 0.0008103847503662109,
+          "rmse": 5.436009259803421e-05,
+          "relative_rmse": 1.5265992753184855e-05,
+          "cosine": 0.9999999998863833,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.velocity.3": {
+          "max_abs": 0.0005195140838623047,
+          "rmse": 4.377936102584624e-05,
+          "relative_rmse": 1.2484064832007348e-05,
+          "cosine": 0.9999999999245094,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "flow.mel": {
+          "max_abs": 0.0005418956279754639,
+          "rmse": 3.588008439558781e-05,
+          "relative_rmse": 1.0670218136387748e-05,
+          "cosine": 0.9999999999467031,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.f0": {
+          "max_abs": 0.0021638870239257812,
+          "rmse": 0.0008717728765605597,
+          "relative_rmse": 1.4614727588818331e-05,
+          "cosine": 0.9999999998943223,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.source": {
+          "max_abs": 2.8925016522407532e-05,
+          "rmse": 6.577969488003258e-06,
+          "relative_rmse": 0.00040069991397949275,
+          "cosine": 0.9999999262219793,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.spectrum": {
+          "max_abs": 0.010654211044311523,
+          "rmse": 0.0004935092707629258,
+          "relative_rmse": 0.00037322814032819413,
+          "cosine": 0.9999999311045376,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.stage.0": {
+          "max_abs": 0.42806243896484375,
+          "rmse": 0.0106727179166178,
+          "relative_rmse": 0.0011014503447394884,
+          "cosine": 0.9999993936970705,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": false
+        },
+        "hift.stage.1": {
+          "max_abs": 0.19773626327514648,
+          "rmse": 0.006622760657734558,
+          "relative_rmse": 0.0005797165449401398,
+          "cosine": 0.9999998319644511,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.stage.2": {
+          "max_abs": 0.06793212890625,
+          "rmse": 0.002926063211983679,
+          "relative_rmse": 0.00028730957760255516,
+          "cosine": 0.999999958965946,
+          "gate": {
+            "maximum_relative_rmse": 0.001,
+            "minimum_cosine": 0.999999
+          },
+          "pass": true
+        },
+        "hift.waveform": {
+          "max_abs": 0.0007278807461261749,
+          "rmse": 3.563408281454388e-05,
+          "relative_rmse": 0.0036007659933175212,
+          "cosine": 0.9999935220148692,
+          "gate": {
+            "maximum_relative_rmse": 0.01,
+            "minimum_cosine": 0.9999,
+            "maximum_absolute_error": 0.01
+          },
+          "pass": true
+        }
+      },
+      "reference_result": "target/sophon/code2wav-longer-f32-calibration-33367/result.json",
+      "rust_comparison": "target/sophon/code2wav-longer-f32-calibration-33367/rust-comparison.json"
+    }
+  ]
+}

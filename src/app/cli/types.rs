@@ -134,6 +134,7 @@ pub struct CliOptions {
     pub gpu: bool,
     pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
+    pub voice: Option<String>,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
     pub source_text: Option<String>,

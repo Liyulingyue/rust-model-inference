@@ -1,0 +1,3508 @@
+{
+  "status": "partial entrypoint evidence; build identities delimit source coverage",
+  "host": "Historical authorized remote 33367; grouped audio follow-up on replacement host 31344. Models, raw tensors and generated audio remain remote.",
+  "runs": {
+    "tts_http_initial": {
+      "evidence": "target/sophon/speech-http-final-33367/result.json",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/current-isolated-rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "128",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18237"
+      ],
+      "binary_sha256": "4be897393b1341660236d1146b3deac01e281f2c4325555a114f63dc1edb932b",
+      "cases": {
+        "unknown-voice": {
+          "status": 400,
+          "body": "{\"error\":\"unknown voice \\\"missing\\\"; available: brand_en, brand_zh, chelsie_en, chelsie_zh, ryan_en, vivian_zh\"}",
+          "seconds": 0.0017775055021047592
+        },
+        "empty": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002863481640815735
+        },
+        "unknown-field": {
+          "status": 400,
+          "body": "{\"error\":\"Failed to deserialize the JSON body into the target type: file: unknown field `file`, expected one of `model`, `input`, `voice`, `max_tokens`, `temperature`, `seed`, `speed`, `response_format`, `stream` at line 1 column 21\"}",
+          "seconds": 0.00031958892941474915
+        },
+        "bad-stream-format": {
+          "status": 400,
+          "body": "{\"error\":\"streaming speech requires response_format=pcm\"}",
+          "seconds": 0.00025583989918231964
+        },
+        "bad-budget": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002406388521194458
+        },
+        "batch-wav": {
+          "status": 200,
+          "samples": 73920,
+          "bytes": 147884,
+          "sha256": "9a1e2129d2922916e0c596e9ac5e52d9f9fad7c7e9d89fecf53c185b48a9e80d",
+          "seconds": 62.09234063513577,
+          "content_type": "audio/wav"
+        },
+        "batch-pcm": {
+          "status": 200,
+          "samples": 73920,
+          "bytes": 147840,
+          "sha256": "4a96fff9c419338bbb034ce37c44714577495bed8269ea0d8fbc0edcaab07818",
+          "seconds": 59.427688566967845,
+          "content_type": "audio/pcm"
+        },
+        "stream": {
+          "status": 200,
+          "samples": 73920,
+          "chunk_samples": [
+            2880,
+            9600,
+            9600,
+            9600,
+            9600,
+            9600,
+            9600,
+            13440
+          ],
+          "events": [
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "audio",
+              "value": {
+                "format": "pcm16",
+                "sample_rate": 24000,
+                "channels": 1
+              }
+            },
+            {
+              "event": "done",
+              "value": {
+                "speech_tokens": 77,
+                "samples": 73920,
+                "terminated": true,
+                "cancelled": false
+              }
+            }
+          ],
+          "seconds": 267.4641415346414,
+          "sha256": "f8b308f9d8dcf168f01799c7904995ef40271a862c0ff6ec148dc184527a9d77",
+          "not_expected_equal_to_batch": "Flow commits prefixes while the attention chunk grows"
+        }
+      },
+      "profile": "release-fast; concurrent jobs, timings not capacity",
+      "server_pid": 256058,
+      "pass": false,
+      "error": "Traceback (most recent call last):\n  File \"/root/rmi-sophon-artifacts/repo/target/sophon/run-speech-http-33367.py\", line 58, in <module>\n    else:raise AssertionError('generation permit not released after disconnect')\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: generation permit not released after disconnect\n"
+    },
+    "tts_http_stream_cancel_fix": {
+      "evidence": "target/sophon/speech-http-cancel-fixed-33367/result.json",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/current-review-fixed-rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "128",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18237"
+      ],
+      "binary_sha256": "fd9636cb87fb6d6bcedfc4023fc9c3d0f594c58706f9a0654efb9eaab7d028d3",
+      "cases": {
+        "unknown-voice": {
+          "status": 400,
+          "body": "{\"error\":\"unknown voice \\\"missing\\\"; available: brand_en, brand_zh, chelsie_en, chelsie_zh, ryan_en, vivian_zh\"}",
+          "seconds": 0.0010951608419418335
+        },
+        "empty": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.00028683803975582123
+        },
+        "unknown-field": {
+          "status": 400,
+          "body": "{\"error\":\"Failed to deserialize the JSON body into the target type: file: unknown field `file`, expected one of `model`, `input`, `voice`, `max_tokens`, `temperature`, `seed`, `speed`, `response_format`, `stream` at line 1 column 21\"}",
+          "seconds": 0.0002673584967851639
+        },
+        "bad-stream-format": {
+          "status": 400,
+          "body": "{\"error\":\"streaming speech requires response_format=pcm\"}",
+          "seconds": 0.00038463249802589417
+        },
+        "bad-budget": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002330690622329712
+        },
+        "disconnect": {
+          "first_pcm_observed": true,
+          "admission_released": true,
+          "probe_status": 400,
+          "probe_attempts": 3
+        }
+      },
+      "profile": "release-fast; concurrent jobs, timings not capacity",
+      "server_pid": 276315,
+      "pass": true
+    },
+    "entrypoints-main-integrated-q8-cpu-audio-repair-33367": {
+      "format": "Q8_0",
+      "policy": "cpu",
+      "kv": "f32",
+      "mode": "audio",
+      "cases": {
+        "cli-jev": {
+          "pass": true,
+          "seconds": 64.04573942348361,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f32",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/audio-F32.gguf",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-option",
+            "是",
+            "--jev-option",
+            "否",
+            "--jev-output",
+            "json",
+            "--audio",
+            "/workspace/rust-model-inference/target/sophon/entrypoint-audio-input-16k.wav"
+          ],
+          "wall_seconds": 64.04570033401251,
+          "probabilities": {
+            "A": 0.9993942975997925,
+            "B": 0.0006057416903786361
+          }
+        },
+        "cli-grouped": {
+          "pass": true,
+          "seconds": 62.99352912604809,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f32",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/audio-F32.gguf",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-output",
+            "json",
+            "--jev-block",
+            "speech",
+            "--jev-option",
+            "有讲话",
+            "--jev-option",
+            "无讲话",
+            "--jev-block",
+            "language",
+            "--jev-option",
+            "中文",
+            "--jev-option",
+            "其他语言",
+            "--audio",
+            "/workspace/rust-model-inference/target/sophon/entrypoint-audio-input-16k.wav"
+          ],
+          "wall_seconds": 62.99348949827254
+        },
+        "http-jev": {
+          "pass": true,
+          "seconds": 54.32423245720565,
+          "route": "/v1/jev/audio",
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.9993942975997925,
+                  "B": 0.0006057416903786361
+                },
+                "choice": "A",
+                "confidence": 0.9993942975997925,
+                "entropy": 0.00509349349886179,
+                "margin": 0.9987885355949402,
+                "prefill_ms": 54316
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "ordinary-chat-batch": {
+          "pass": true,
+          "seconds": 7.689256960526109,
+          "response": {
+            "id": "chatcmpl-64e25354e4f01467",
+            "object": "chat.completion",
+            "created": 1794402845,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 13,
+              "completion_tokens": 2,
+              "total_tokens": 15
+            }
+          }
+        },
+        "ordinary-chat-stream": {
+          "pass": true,
+          "seconds": 7.537807688117027,
+          "event_types": [
+            null,
+            null,
+            null,
+            null,
+            "done"
+          ]
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.00182320736348629,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0012705102562904358,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "audio-input-400": {
+          "pass": true,
+          "seconds": 0.0008650701493024826,
+          "body": "{\"error\":\"audio must be raw base64 encoded audio: Invalid symbol 45, offset 3.\"}"
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f32",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/audio-F32.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238",
+        "--tts-model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--tts-mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--seed",
+        "0"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=25",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+      ],
+      "pass": true,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-cpu-audio-repair-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded.",
+      "component_formats": {
+        "thinker": "Q8_0",
+        "audio_encoder_projector": "F32",
+        "talker": "F32",
+        "flow": "F32",
+        "hift": "F32"
+      }
+    },
+    "entrypoints-main-integrated-q8-cpu-audio-33367": {
+      "format": "Q8_0",
+      "policy": "cpu",
+      "kv": "f32",
+      "mode": "audio",
+      "cases": {
+        "cli-jev": {
+          "pass": false,
+          "seconds": 51.905739072710276,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 37, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 56, in cli_jev\n    assert len(values)==1,value['stdout'];value['probabilities']=values[0]['probabilities'];value['score']=values[0];return value\n           ^^^^^^^^^^^^^^\nAssertionError: 是否有人讲话？: A (confidence 0.999394)\n\n"
+        },
+        "cli-grouped": {
+          "pass": false,
+          "seconds": 47.094628144055605,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 37, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 66, in cli_grouped\n    assert len(scores)==1 and len(scores[0]['groups'])==2,value['stdout']\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: \n--- JEV decision (BlockChoice) ---\n  [speech] choice: A\n    A: 0.9985 — 有讲话\n    B: 0.0015 — 无讲话\n    confidence: 0.9985 | entropy: 0.0111 | margin: 0.9970\n  [language] choice: C\n    C: 0.9024 — 中文\n    D: 0.0976 — 其他语言\n    confidence: 0.9024 | entropy: 0.3198 | margin: 0.8048\nprefill: 45555 ms\n\n"
+        },
+        "cli-s2s": {
+          "pass": true,
+          "seconds": 46.99381276220083,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f32",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/audio-F32.gguf",
+            "--prompt",
+            "请只回复你好。",
+            "--audio",
+            "/workspace/rust-model-inference/target/sophon/entrypoint-audio-input-16k.wav",
+            "--tts-model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+            "--tts-mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+            "--voice",
+            "brand_zh",
+            "--seed",
+            "0",
+            "--out",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-main-integrated-q8-cpu-audio-33367/answer.wav"
+          ],
+          "wall_seconds": 46.99357636272907,
+          "samples": 17280,
+          "wav_sha256": "35d8f0f40b74f0e4831b022125d18e66581befb45d931869d690e5e226130d2a"
+        },
+        "http-jev": {
+          "pass": true,
+          "seconds": 45.06203390844166,
+          "route": "/v1/jev/audio",
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.9993942975997925,
+                  "B": 0.0006057416903786361
+                },
+                "choice": "A",
+                "confidence": 0.9993942975997925,
+                "entropy": 0.00509349349886179,
+                "margin": 0.9987885355949402,
+                "prefill_ms": 45052
+              }
+            ]
+          },
+          "max_cli_probability_difference": null
+        },
+        "ordinary-chat-batch": {
+          "pass": false,
+          "seconds": 0.001100817695260048,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 37, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 142, in <lambda>\n    check('ordinary-chat-batch',lambda:dict(response=json.loads(request('/v1/chat/completions',chat,'chat-batch')[0])))\n                                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 89, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (404, b'{\"error\":{\"message\":\"Model \\\\\"local\\\\\" is not loaded; available model is \\\\\"thinker-Q8_0\\\\\"\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "ordinary-chat-stream": {
+          "pass": false,
+          "seconds": 0.0005770809948444366,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 37, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 144, in stream_chat\n    data,_=request('/v1/chat/completions',{**chat,'stream':True},'chat-stream');events=parsed_sse(data)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 89, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (404, b'{\"error\":{\"message\":\"Model \\\\\"local\\\\\" is not loaded; available model is \\\\\"thinker-Q8_0\\\\\"\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "context-400-False": {
+          "pass": false,
+          "seconds": 0.0005528498440980911,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 37, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 150, in <lambda>\n    check('context-400-'+str(stream),lambda payload=payload:dict(body=request('/v1/chat/completions',payload,'context-'+str(stream),400)[0].decode()))\n                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 89, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (404, b'{\"error\":{\"message\":\"Model \\\\\"local\\\\\" is not loaded; available model is \\\\\"thinker-Q8_0\\\\\"\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "context-400-True": {
+          "pass": false,
+          "seconds": 0.00047961995005607605,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 37, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 150, in <lambda>\n    check('context-400-'+str(stream),lambda payload=payload:dict(body=request('/v1/chat/completions',payload,'context-'+str(stream),400)[0].decode()))\n                                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 89, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (404, b'{\"error\":{\"message\":\"Model \\\\\"local\\\\\" is not loaded; available model is \\\\\"thinker-Q8_0\\\\\"\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "audio-input-400": {
+          "pass": true,
+          "seconds": 0.002191225066781044,
+          "body": "{\"error\":\"audio must be raw base64 encoded audio: Invalid symbol 45, offset 3.\"}"
+        },
+        "s2s-batch": {
+          "pass": true,
+          "seconds": 44.833077697083354,
+          "response": {
+            "text": "你好。",
+            "token_ids": [
+              108386,
+              1773
+            ],
+            "speech_tokens": 18,
+            "samples": 17280,
+            "audio": {
+              "data": "stored remotely",
+              "format": "wav",
+              "sample_rate": 24000,
+              "channels": 1
+            }
+          },
+          "samples": 17280,
+          "wav_sha256": "35d8f0f40b74f0e4831b022125d18e66581befb45d931869d690e5e226130d2a"
+        },
+        "s2s-stream": {
+          "pass": true,
+          "seconds": 71.83626656979322,
+          "chunk_samples": [
+            2880,
+            14400
+          ],
+          "samples": 17280,
+          "event_types": [
+            "delta",
+            "delta",
+            "audio",
+            "audio",
+            "done"
+          ]
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f32",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/audio-F32.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238",
+        "--tts-model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--tts-mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--seed",
+        "0"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=25",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=2",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=8",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=5",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=2",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=8",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=5",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+      ],
+      "pass": false,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-cpu-audio-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded.",
+      "component_formats": {
+        "thinker": "Q8_0",
+        "audio_encoder_projector": "F32",
+        "talker": "F32",
+        "flow": "F32",
+        "hift": "F32"
+      },
+      "verification_harness_errors": [
+        "CLI used --jev-output-json; actual flag is --jev-output json. The inference succeeded but output parsing failed.",
+        "HTTP used model=local instead of thinker-Q8_0. These 404s are corrected in the audio-repair run."
+      ]
+    },
+    "entrypoints-main-integrated-q8-cpu-text-33367": {
+      "format": "Q8_0",
+      "policy": "cpu",
+      "kv": "f16",
+      "mode": "text",
+      "cases": {
+        "cli-jev": {
+          "pass": true,
+          "seconds": 41.08045254461467,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-option",
+            "是",
+            "--jev-option",
+            "否",
+            "--jev-output",
+            "json"
+          ],
+          "wall_seconds": 41.0804048050195,
+          "probabilities": {
+            "A": 0.02607853151857853,
+            "B": 0.973921537399292
+          }
+        },
+        "cli-grouped": {
+          "pass": true,
+          "seconds": 44.485990948975086,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-output",
+            "json",
+            "--jev-block",
+            "speech",
+            "--jev-option",
+            "有讲话",
+            "--jev-option",
+            "无讲话",
+            "--jev-block",
+            "language",
+            "--jev-option",
+            "中文",
+            "--jev-option",
+            "其他语言"
+          ],
+          "wall_seconds": 44.48594314791262
+        },
+        "cli-generation": {
+          "pass": true,
+          "seconds": 10.430746909230947,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "wall_seconds": 10.430742217227817
+        },
+        "http-jev": {
+          "pass": true,
+          "seconds": 35.39349107258022,
+          "route": "/v1/jev/score",
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.02607853151857853,
+                  "B": 0.973921537399292
+                },
+                "choice": "B",
+                "confidence": 0.973921537399292,
+                "entropy": 0.12083451449871063,
+                "margin": 0.9478430151939392,
+                "prefill_ms": 35390
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "http-grouped": {
+          "pass": true,
+          "seconds": 41.02868494950235,
+          "route": "/v1/jev/grouped",
+          "response": {
+            "mode": "block_choice",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "block_choice",
+                "question": "是否有人讲话？",
+                "groups": [
+                  {
+                    "label": "speech",
+                    "choice": "B",
+                    "probabilities": {
+                      "A": 0.08921006321907043,
+                      "B": 0.910789966583252
+                    },
+                    "confidence": 0.910789966583252,
+                    "entropy": 0.30070632696151733,
+                    "margin": 0.8215799331665039
+                  },
+                  {
+                    "label": "language",
+                    "choice": "C",
+                    "probabilities": {
+                      "C": 0.7891099452972412,
+                      "D": 0.21089008450508118
+                    },
+                    "confidence": 0.7891099452972412,
+                    "entropy": 0.5151335597038269,
+                    "margin": 0.5782198905944824
+                  }
+                ],
+                "prefill_ms": 41026
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "ordinary-chat-batch": {
+          "pass": true,
+          "seconds": 7.495622869580984,
+          "response": {
+            "id": "chatcmpl-75c2d67ae77cb245",
+            "object": "chat.completion",
+            "created": 1794403035,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 13,
+              "completion_tokens": 2,
+              "total_tokens": 15
+            }
+          }
+        },
+        "ordinary-chat-stream": {
+          "pass": true,
+          "seconds": 7.394065801054239,
+          "event_types": [
+            null,
+            null,
+            null,
+            null,
+            "done"
+          ]
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.001877637580037117,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0011155307292938232,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=4",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+      ],
+      "pass": true,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-cpu-text-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "speech-http-main-integrated-33367": {
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "128",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18237"
+      ],
+      "binary_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "cases": {
+        "unknown-voice": {
+          "status": 400,
+          "body": "{\"error\":\"unknown voice \\\"missing\\\"; available: brand_en, brand_zh, chelsie_en, chelsie_zh, ryan_en, vivian_zh\"}",
+          "seconds": 0.0005105901509523392
+        },
+        "empty": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.00031171925365924835
+        },
+        "unknown-field": {
+          "status": 400,
+          "body": "{\"error\":\"Failed to deserialize the JSON body into the target type: file: unknown field `file`, expected one of `model`, `input`, `voice`, `max_tokens`, `temperature`, `seed`, `speed`, `response_format`, `stream` at line 1 column 21\"}",
+          "seconds": 0.0002970602363348007
+        },
+        "bad-stream-format": {
+          "status": 400,
+          "body": "{\"error\":\"streaming speech requires response_format=pcm\"}",
+          "seconds": 0.00027398020029067993
+        },
+        "bad-budget": {
+          "status": 400,
+          "body": "{\"error\":\"speech requires nonempty text up to 64 KiB, 1..=1250 tokens and finite temperature in [0,2]\"}",
+          "seconds": 0.0002679489552974701
+        },
+        "batch-wav": {
+          "status": 200,
+          "samples": 73920,
+          "bytes": 147884,
+          "sha256": "9a1e2129d2922916e0c596e9ac5e52d9f9fad7c7e9d89fecf53c185b48a9e80d",
+          "seconds": 63.64015396311879,
+          "content_type": "audio/wav"
+        },
+        "batch-pcm": {
+          "status": 200,
+          "samples": 73920,
+          "bytes": 147840,
+          "sha256": "4a96fff9c419338bbb034ce37c44714577495bed8269ea0d8fbc0edcaab07818",
+          "seconds": 57.7631556764245,
+          "content_type": "audio/pcm"
+        },
+        "stream": {
+          "status": 200,
+          "samples": 73920,
+          "chunk_samples": [
+            2880,
+            9600,
+            9600,
+            9600,
+            9600,
+            9600,
+            9600,
+            13440
+          ],
+          "seconds": 278.828524004668,
+          "sha256": "f8b308f9d8dcf168f01799c7904995ef40271a862c0ff6ec148dc184527a9d77",
+          "not_expected_equal_to_batch": "Flow commits prefixes while the attention chunk grows",
+          "event_types": [
+            "audio",
+            "audio",
+            "audio",
+            "audio",
+            "audio",
+            "audio",
+            "audio",
+            "audio",
+            "done"
+          ]
+        },
+        "disconnect": {
+          "first_pcm_observed": true,
+          "admission_released": true,
+          "probe_status": 400,
+          "probe_attempts": 2
+        }
+      },
+      "profile": "release-fast; concurrent jobs, timings not capacity",
+      "server_pid": 366176,
+      "pass": true,
+      "evidence": "target/sophon/speech-http-main-integrated-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "entrypoints-main-integrated-q8-auto-text-33367": {
+      "format": "Q8_0",
+      "policy": "auto",
+      "kv": "f16",
+      "mode": "text",
+      "cases": {
+        "cli-jev": {
+          "pass": true,
+          "seconds": 60.19693311676383,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "auto",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-option",
+            "是",
+            "--jev-option",
+            "否",
+            "--jev-output",
+            "json"
+          ],
+          "wall_seconds": 60.19685382582247,
+          "probabilities": {
+            "A": 0.02607853151857853,
+            "B": 0.973921537399292
+          }
+        },
+        "cli-grouped": {
+          "pass": true,
+          "seconds": 63.116740964353085,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "auto",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-output",
+            "json",
+            "--jev-block",
+            "speech",
+            "--jev-option",
+            "有讲话",
+            "--jev-option",
+            "无讲话",
+            "--jev-block",
+            "language",
+            "--jev-option",
+            "中文",
+            "--jev-option",
+            "其他语言"
+          ],
+          "wall_seconds": 63.11668824404478
+        },
+        "cli-generation": {
+          "pass": true,
+          "seconds": 31.518722170963883,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "auto",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "wall_seconds": 31.518714463338256
+        },
+        "http-jev": {
+          "pass": true,
+          "seconds": 58.22843184322119,
+          "route": "/v1/jev/score",
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.02607853151857853,
+                  "B": 0.973921537399292
+                },
+                "choice": "B",
+                "confidence": 0.973921537399292,
+                "entropy": 0.12083451449871063,
+                "margin": 0.9478430151939392,
+                "prefill_ms": 58225
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "http-grouped": {
+          "pass": true,
+          "seconds": 58.91857248544693,
+          "route": "/v1/jev/grouped",
+          "response": {
+            "mode": "block_choice",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "block_choice",
+                "question": "是否有人讲话？",
+                "groups": [
+                  {
+                    "label": "speech",
+                    "choice": "B",
+                    "probabilities": {
+                      "A": 0.08921006321907043,
+                      "B": 0.910789966583252
+                    },
+                    "confidence": 0.910789966583252,
+                    "entropy": 0.30070632696151733,
+                    "margin": 0.8215799331665039
+                  },
+                  {
+                    "label": "language",
+                    "choice": "C",
+                    "probabilities": {
+                      "C": 0.7891099452972412,
+                      "D": 0.21089008450508118
+                    },
+                    "confidence": 0.7891099452972412,
+                    "entropy": 0.5151335597038269,
+                    "margin": 0.5782198905944824
+                  }
+                ],
+                "prefill_ms": 58913
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "ordinary-chat-batch": {
+          "pass": true,
+          "seconds": 25.274177683517337,
+          "response": {
+            "id": "chatcmpl-f4f1be977b6a2309",
+            "object": "chat.completion",
+            "created": 1794403342,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 13,
+              "completion_tokens": 2,
+              "total_tokens": 15
+            }
+          }
+        },
+        "ordinary-chat-stream": {
+          "pass": true,
+          "seconds": 37.23166446760297,
+          "event_types": [
+            null,
+            null,
+            null,
+            null,
+            "done"
+          ]
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.00643819198012352,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0011705681681632996,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "auto",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=4",
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=1",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=1"
+      ],
+      "pass": true,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-auto-text-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "entrypoints-main-integrated-q8-vulkan-vision-33367": {
+      "format": "Q8_0",
+      "policy": "vulkan",
+      "kv": "f16",
+      "mode": "vision",
+      "cases": {
+        "cli-jev": {
+          "pass": false,
+          "seconds": 31.11370021663606,
+          "error": " last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 50, in cli_jev\n    value=cli_run('cli-jev',jev_extra+media_extra)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, 'compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\\n[GPU] Warming up Vulkan pipeline (driver JIT)...\\n[GPU] Warmup done in 0.0s\\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\\n[GPU] Q8_0 matmul: packed int8 dot product\\n[vision-timing] total=3.314s  patch_embed=0.178s (5.4%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.003s (0.1%)  vit_layers=3.100s (93.6%)  post_ln=0.000s (0.0%)  projection=0.032s (1.0%)\\nInference error: Vision projector width does not match model width\\n')\n"
+        },
+        "cli-grouped": {
+          "pass": false,
+          "seconds": 27.656593445688486,
+          "error": "/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 65, in cli_grouped\n    value=cli_run('cli-grouped',group_extra+media_extra)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, 'compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\\n[GPU] Warming up Vulkan pipeline (driver JIT)...\\n[GPU] Warmup done in 0.0s\\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\\n[GPU] Q8_0 matmul: packed int8 dot product\\n[vision-timing] total=3.195s  patch_embed=0.184s (5.7%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.002s (0.1%)  vit_layers=2.966s (92.8%)  post_ln=0.000s (0.0%)  projection=0.043s (1.3%)\\nInference error: Vision projector width does not match model width\\n')\n"
+        },
+        "cli-generation": {
+          "pass": false,
+          "seconds": 28.05483307875693,
+          "error": "eck\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 78, in <lambda>\n    else:check('cli-generation',lambda:cli_run('cli-generation',['--prompt',prompt,*media_extra]))\n                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, 'compute requested=Vulkan backend=partial mode=mmproj note=no complete device path for this mode; any offloadable parts run on the device\\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\\n[GPU] Warming up Vulkan pipeline (driver JIT)...\\n[GPU] Warmup done in 0.0s\\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\\n[GPU] Q8_0 matmul: packed int8 dot product\\n[vision-timing] total=3.144s  patch_embed=0.178s (5.7%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.002s (0.1%)  vit_layers=2.919s (92.8%)  post_ln=0.000s (0.0%)  projection=0.045s (1.4%)\\nInference error: Unsupported shape: invalid Vulkan matmul input width/stride\\n')\n"
+        },
+        "http-jev": {
+          "pass": false,
+          "seconds": 4.496212610974908,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 114, in score_http\n    value=json.loads(request(score_route,score_body,'jev')[0]);assert len(value['results'])==1\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Vision projector width does not match model width\",\"type\":\"invalid_request_error\"}}')\n"
+        },
+        "http-grouped": {
+          "pass": false,
+          "seconds": 4.102851420640945,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 129, in grouped_http\n    value=json.loads(request(group_route,group_body,'grouped')[0]);assert len(value['results'])==1\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Vision projector width does not match model width\",\"type\":\"invalid_request_error\"}}')\n"
+        },
+        "ordinary-chat-batch": {
+          "pass": false,
+          "seconds": 4.182827470824122,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 143, in <lambda>\n    check('ordinary-chat-batch',lambda:dict(response=json.loads(request('/v1/chat/completions',chat,'chat-batch')[0])))\n                                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Vision projector width does not match model width\",\"type\":\"api_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "ordinary-chat-stream": {
+          "pass": false,
+          "seconds": 4.15213511697948,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 146, in stream_chat\n    assert events and events[-1][0]=='done';assert not any('error' in (v or {}) for _,v in events);return {'events':events}\n                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.0015909671783447266,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0011143870651721954,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Vulkan backend=partial mode=mmproj note=no complete device path for this mode; any offloadable parts run on the device",
+        "compute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device",
+        "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device"
+      ],
+      "pass": false,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-vulkan-vision-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "entrypoints-main-integrated-q8-cpu-vision-33367": {
+      "format": "Q8_0",
+      "policy": "cpu",
+      "kv": "f16",
+      "mode": "vision",
+      "cases": {
+        "cli-jev": {
+          "pass": false,
+          "seconds": 6.674929590895772,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 50, in cli_jev\n    value=cli_run('cli-jev',jev_extra+media_extra)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, '[vision-timing] total=3.727s  patch_embed=0.181s (4.9%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.006s (0.2%)  vit_layers=3.507s (94.1%)  post_ln=0.000s (0.0%)  projection=0.033s (0.9%)\\nInference error: Vision projector width does not match model width\\n')\n"
+        },
+        "cli-grouped": {
+          "pass": false,
+          "seconds": 6.173756089061499,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 65, in cli_grouped\n    value=cli_run('cli-grouped',group_extra+media_extra)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, '[vision-timing] total=4.060s  patch_embed=0.182s (4.5%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.003s (0.1%)  vit_layers=3.829s (94.3%)  post_ln=0.000s (0.0%)  projection=0.045s (1.1%)\\nInference error: Vision projector width does not match model width\\n')\n"
+        },
+        "cli-generation": {
+          "pass": true,
+          "seconds": 52.5467735119164,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+            "--prompt",
+            "请只回复你好。",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-main-integrated-q8-cpu-vision-33367/red.png"
+          ],
+          "wall_seconds": 52.546768233180046
+        },
+        "http-jev": {
+          "pass": false,
+          "seconds": 5.475925497710705,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 114, in score_http\n    value=json.loads(request(score_route,score_body,'jev')[0]);assert len(value['results'])==1\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Vision projector width does not match model width\",\"type\":\"invalid_request_error\"}}')\n"
+        },
+        "http-grouped": {
+          "pass": false,
+          "seconds": 4.8786307759583,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 129, in grouped_http\n    value=json.loads(request(group_route,group_body,'grouped')[0]);assert len(value['results'])==1\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Vision projector width does not match model width\",\"type\":\"invalid_request_error\"}}')\n"
+        },
+        "ordinary-chat-batch": {
+          "pass": false,
+          "seconds": 4.7272500060498714,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 143, in <lambda>\n    check('ordinary-chat-batch',lambda:dict(response=json.loads(request('/v1/chat/completions',chat,'chat-batch')[0])))\n                                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Vision projector width does not match model width\",\"type\":\"api_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "ordinary-chat-stream": {
+          "pass": false,
+          "seconds": 4.571422217413783,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 146, in stream_chat\n    assert events and events[-1][0]=='done';assert not any('error' in (v or {}) for _,v in events);return {'events':events}\n                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.0016626864671707153,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0011314209550619125,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [],
+      "pass": false,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-cpu-vision-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "entrypoints-main-integrated-q8-vulkan-text-33367": {
+      "format": "Q8_0",
+      "policy": "vulkan",
+      "kv": "f16",
+      "mode": "text",
+      "cases": {
+        "cli-jev": {
+          "pass": false,
+          "seconds": 47.137442622333765,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 50, in cli_jev\n    value=cli_run('cli-jev',jev_extra+media_extra)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, 'compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\\n[GPU] Warming up Vulkan pipeline (driver JIT)...\\n[GPU] Warmup done in 0.0s\\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\\n[GPU] Q8_0 matmul: packed int8 dot product\\nInference error: Unsupported shape: invalid Vulkan matmul input width/stride\\n')\n"
+        },
+        "cli-grouped": {
+          "pass": false,
+          "seconds": 40.47963533364236,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 65, in cli_grouped\n    value=cli_run('cli-grouped',group_extra+media_extra)\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, 'compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\\n[GPU] Warming up Vulkan pipeline (driver JIT)...\\n[GPU] Warmup done in 0.0s\\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\\n[GPU] Q8_0 matmul: packed int8 dot product\\nInference error: Unsupported shape: invalid Vulkan matmul input width/stride\\n')\n"
+        },
+        "cli-generation": {
+          "pass": false,
+          "seconds": 23.701620746403933,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 78, in <lambda>\n    else:check('cli-generation',lambda:cli_run('cli-generation',['--prompt',prompt,*media_extra]))\n                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 45, in cli_run\n    assert done.returncode==0,(done.returncode,(out/(name+'.stderr')).read_text()[-2000:])\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: (1, '[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\\n[GPU] Warming up Vulkan pipeline (driver JIT)...\\n[GPU] Warmup done in 0.0s\\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\\ncompute pool: 4 threads\\n[GPU] Q8_0 matmul: packed int8 dot product\\nInference error: Unsupported shape: invalid Vulkan matmul input width/stride\\n')\n"
+        },
+        "http-jev": {
+          "pass": false,
+          "seconds": 20.25380538403988,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 114, in score_http\n    value=json.loads(request(score_route,score_body,'jev')[0]);assert len(value['results'])==1\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Unsupported shape: invalid Vulkan matmul input width/stride\",\"type\":\"invalid_request_error\"}}')\n"
+        },
+        "http-grouped": {
+          "pass": false,
+          "seconds": 22.793491112068295,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 129, in grouped_http\n    value=json.loads(request(group_route,group_body,'grouped')[0]);assert len(value['results'])==1\n                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Unsupported shape: invalid Vulkan matmul input width/stride\",\"type\":\"invalid_request_error\"}}')\n"
+        },
+        "ordinary-chat-batch": {
+          "pass": false,
+          "seconds": 18.978515416383743,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 143, in <lambda>\n    check('ordinary-chat-batch',lambda:dict(response=json.loads(request('/v1/chat/completions',chat,'chat-batch')[0])))\n                                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 90, in request\n    assert status==expected,(status,data[:1000]);return data,headers\n           ^^^^^^^^^^^^^^^^\nAssertionError: (500, b'{\"error\":{\"message\":\"Unsupported shape: invalid Vulkan matmul input width/stride\",\"type\":\"api_error\",\"param\":null,\"code\":null}}')\n"
+        },
+        "ordinary-chat-stream": {
+          "pass": false,
+          "seconds": 19.127605073153973,
+          "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 38, in check\n    value=fn();result['cases'][name]={'pass':True,'seconds':time.monotonic()-start,**(value or {})};save();return value\n          ^^^^\n  File \"/workspace/rust-model-inference/target/sophon/run-final-entrypoints-33367.py\", line 146, in stream_chat\n    assert events and events[-1][0]=='done';assert not any('error' in (v or {}) for _,v in events);return {'events':events}\n                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.0015916470438241959,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0010490771383047104,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/main-integrated-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device",
+        "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device"
+      ],
+      "pass": false,
+      "evidence": "target/sophon/entrypoints-main-integrated-q8-vulkan-text-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "tts-cli-main-integrated-33367": {
+      "command": [
+        "target/sophon/main-integrated-rust-model-inference",
+        "--tts",
+        "--model",
+        "models/Sophon-Realtime-32B-Tag-GGUF/talker-F32.gguf",
+        "--mmproj",
+        "models/Sophon-Realtime-32B-Tag-GGUF/code2wav-F32.gguf",
+        "--voice",
+        "brand_zh",
+        "--prompt",
+        "你好，欢迎使用语音助手。[breath]",
+        "--compute",
+        "cpu",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "128",
+        "--threads",
+        "4",
+        "--seed",
+        "0",
+        "--out",
+        "target/sophon/tts-cli-main-integrated-33367/output.wav"
+      ],
+      "exit": 0,
+      "seconds": 59.75901228748262,
+      "binary_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "samples": 73920,
+      "sample_rate": 24000,
+      "wav_sha256": "9a1e2129d2922916e0c596e9ac5e52d9f9fad7c7e9d89fecf53c185b48a9e80d",
+      "same_as_prior_and_http": true,
+      "pass": true,
+      "evidence": "target/sophon/tts-cli-main-integrated-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "entrypoints-final-reviewed-q8-cpu-vision-33367": {
+      "format": "Q8_0",
+      "policy": "cpu",
+      "kv": "f16",
+      "mode": "vision",
+      "cases": {
+        "cli-jev": {
+          "pass": true,
+          "seconds": 76.68677837960422,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-option",
+            "是",
+            "--jev-option",
+            "否",
+            "--jev-output",
+            "json",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-final-reviewed-q8-cpu-vision-33367/red.png"
+          ],
+          "wall_seconds": 76.68673996627331,
+          "probabilities": {
+            "A": 0.0005204128683544695,
+            "B": 0.9994795918464661
+          }
+        },
+        "cli-grouped": {
+          "pass": true,
+          "seconds": 78.24382198229432,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-output",
+            "json",
+            "--jev-block",
+            "speech",
+            "--jev-option",
+            "有讲话",
+            "--jev-option",
+            "无讲话",
+            "--jev-block",
+            "language",
+            "--jev-option",
+            "中文",
+            "--jev-option",
+            "其他语言",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-final-reviewed-q8-cpu-vision-33367/red.png"
+          ],
+          "wall_seconds": 78.2437851447612
+        },
+        "cli-generation": {
+          "pass": true,
+          "seconds": 46.990897515788674,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+            "--prompt",
+            "请只回复你好。",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-final-reviewed-q8-cpu-vision-33367/red.png"
+          ],
+          "wall_seconds": 46.99089250899851
+        },
+        "http-jev": {
+          "pass": true,
+          "seconds": 70.96734659187496,
+          "route": "/v1/jev/image",
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.0005204128683544695,
+                  "B": 0.9994795918464661
+                },
+                "choice": "B",
+                "confidence": 0.9994795918464661,
+                "entropy": 0.004455056041479111,
+                "margin": 0.9989591836929321,
+                "prefill_ms": 70961
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "http-grouped": {
+          "pass": true,
+          "seconds": 73.16676370613277,
+          "route": "/v1/jev/image_grouped",
+          "response": {
+            "mode": "block_choice",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "block_choice",
+                "question": "是否有人讲话？",
+                "groups": [
+                  {
+                    "label": "speech",
+                    "choice": "B",
+                    "probabilities": {
+                      "A": 0.0006696340860798955,
+                      "B": 0.9993304014205933
+                    },
+                    "confidence": 0.9993304014205933,
+                    "entropy": 0.005563582293689251,
+                    "margin": 0.9986607432365417
+                  },
+                  {
+                    "label": "language",
+                    "choice": "C",
+                    "probabilities": {
+                      "C": 0.805397629737854,
+                      "D": 0.1946023851633072
+                    },
+                    "confidence": 0.805397629737854,
+                    "entropy": 0.4928280711174011,
+                    "margin": 0.610795259475708
+                  }
+                ],
+                "prefill_ms": 73163
+              }
+            ],
+            "temperature": 0.699999988079071
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "ordinary-chat-batch": {
+          "pass": true,
+          "seconds": 45.308911345899105,
+          "response": {
+            "id": "chatcmpl-6015a8b3814a2661",
+            "object": "chat.completion",
+            "created": 1794407439,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 17,
+              "completion_tokens": 2,
+              "total_tokens": 19
+            }
+          }
+        },
+        "ordinary-chat-stream": {
+          "pass": true,
+          "seconds": 43.914594292640686,
+          "event_types": [
+            null,
+            null,
+            null,
+            null,
+            "done"
+          ]
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.0017594192177057266,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0011434797197580338,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "server_sha256": "a4dec2b3fe79ef2adc0eda9a671ac2706e3cd069704445b5a0f6577633e2928c",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=6",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=15",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=19",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=19",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+      ],
+      "pass": true,
+      "evidence": "target/sophon/entrypoints-final-reviewed-q8-cpu-vision-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "reviewed-device-smoke-33367": {
+      "binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+      "cases": {
+        "text": {
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "vulkan",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "exit": 1,
+          "seconds": 54.551119323819876,
+          "compute_trace": [
+            "compute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device",
+            "compute requested=Vulkan scope=resident_decoder backend=Vulkan rows=13",
+            "compute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+            "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+            "Inference error: Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842"
+          ],
+          "pass": false,
+          "stderr_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 0.0s\ncompute requested=Vulkan backend=partial arch=qwen3vl note=no complete device path for this architecture; any offloadable parts run on the device\ncompute pool: 4 threads\n[GPU] Q8_0 matmul: packed int8 dot product\ncompute requested=Vulkan scope=resident_decoder backend=Vulkan rows=13\ncompute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }\ncompute requested=Cpu scope=decoder backend=Cpu rows=13\nInference error: Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842\n"
+        }
+      },
+      "profile": "release-fast; functional validation and first-request CPU/device contract overhead; not capacity",
+      "pass": false,
+      "evidence": "target/sophon/reviewed-device-smoke-33367/result.json",
+      "acceptance_boundary": "Functional entrypoint evidence only; numerical gates and precision failures remain independently recorded."
+    },
+    "reviewed-auto-cpu-comparison-33367": {
+      "binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+      "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+      "cases": {
+        "cpu": {
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "exit": 0,
+          "seconds": 17.540907381102443,
+          "stdout": "Model: qwen3vl | n_embd=5120 n_layer=64 n_head=64 n_head_kv=8 n_ff=25600 | loaded in 90ms\nPrompt: 13 tokens\nOutput: 你好。\n[2 output tokens in 15605ms]\n",
+          "compute_trace": [
+            "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+            "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+          ],
+          "stderr_tail": "compute pool: 4 threads\ncompute requested=Cpu scope=decoder backend=Cpu rows=13\ncompute requested=Cpu scope=decoder backend=Cpu rows=1\nPrompt: 0.9 t/s | Generation: 2.8 t/s | end-to-end: 0.1 tok/s\n",
+          "generated_text": "你好。"
+        },
+        "auto": {
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "auto",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "exit": 0,
+          "seconds": 39.52592766843736,
+          "stdout": "Model: qwen3vl | n_embd=5120 n_layer=64 n_head=64 n_head_kv=8 n_ff=25600 | loaded in 65ms\nPrompt: 13 tokens\noperator=attention_score_reduction max_abs=0.000e0 max_rel=0.000e0 first_bad=None\noperator=attention_value_reduction exact=true\noperator=quantize_tie_even exact=true scales_exact=true blocks=4\nOutput: 你好。\n[2 output tokens in 17473ms]\n",
+          "compute_trace": [
+            "compute requested=Auto scope=resident_decoder backend=Vulkan rows=13",
+            "compute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+            "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+            "[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.",
+            "compute requested=Auto scope=decoder backend=Cpu rows=13",
+            "compute requested=Auto scope=decoder backend=Cpu rows=1"
+          ],
+          "stderr_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 0.0s\ncompute pool: 4 threads\n[GPU] Q8_0 matmul: packed int8 dot product\ncompute requested=Auto scope=resident_decoder backend=Vulkan rows=13\ncompute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }\ncompute requested=Cpu scope=decoder backend=Cpu rows=13\n[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.\ncompute requested=Auto scope=decoder backend=Cpu rows=13\ncompute requested=Auto scope=decoder backend=Cpu rows=1\nPrompt: 0.8 t/s | Generation: 2.8 t/s | end-to-end: 0.1 tok/s\n",
+          "generated_text": "你好。"
+        }
+      },
+      "profile": "release-fast; shared host; first-request contract validation included, not capacity",
+      "pass": true,
+      "initial_harness_pass": false,
+      "harness_correction": "Compare generated text, not complete CLI stdout containing load/inference timings and GPU operator diagnostics. No inference was rerun; initial stdout and initial harness result retained.",
+      "evidence": "target/sophon/reviewed-auto-cpu-comparison-33367/result.json",
+      "acceptance_boundary": "Auto fallback validation and generated-text agreement only; the failed strict GPU model contract remains a failure."
+    },
+    "reviewed-auto-http-33367": {
+      "command": [
+        "/workspace/rust-model-inference/target/sophon/final-reviewed-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "auto",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "binary_sha256": "a4dec2b3fe79ef2adc0eda9a671ac2706e3cd069704445b5a0f6577633e2928c",
+      "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+      "cases": {
+        "chat-batch": {
+          "seconds": 36.20475944317877,
+          "response": {
+            "id": "chatcmpl-a93413cd92f8032b",
+            "object": "chat.completion",
+            "created": 1794409361,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 13,
+              "completion_tokens": 2,
+              "total_tokens": 15
+            }
+          },
+          "cpu_text_equal": true,
+          "pass": true
+        },
+        "chat-stream": {
+          "seconds": 32.46085449680686,
+          "text": "你好。",
+          "cpu_text_equal": true,
+          "done": true,
+          "pass": true
+        },
+        "single-jev": {
+          "seconds": 36.70381504483521,
+          "error": "Traceback (most recent call last):\n  File \"/root/rmi-sophon-artifacts/repo/target/sophon/run-reviewed-auto-http-33367.py\", line 15, in check\n    try:result['cases'][name]=dict(pass_=True,seconds=time.monotonic()-start,**func())\n                                                                               ^^^^^^\n  File \"/root/rmi-sophon-artifacts/repo/target/sophon/run-reviewed-auto-http-33367.py\", line 46, in jev\n    difference=max(abs(probs[k]-expected_probs[k]) for k in probs);assert difference<=1e-6,difference\n                                                                          ^^^^^^^^^^^^^^^^\nAssertionError: 0.02338428422808647\n",
+          "pass": false
+        }
+      },
+      "reference": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "profile": "release-fast; shared host; first-request numerical contract/upload overhead included, not capacity",
+      "compute_trace": [
+        "compute requested=Auto scope=resident_decoder backend=Vulkan rows=13",
+        "compute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=1",
+        "compute requested=Auto scope=resident_decoder backend=Vulkan rows=13",
+        "compute counters=device_cumulative ComputeStats { submissions: 1421, static_uploads: 1413, static_upload_bytes: 67970425920, host_write_bytes: 547488, host_read_bytes: 15421236, transfer_submissions: 1412, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=1",
+        "compute requested=Auto scope=resident_decoder backend=Vulkan rows=32",
+        "compute counters=device_cumulative ComputeStats { submissions: 2128, static_uploads: 2119, static_upload_bytes: 101955638336, host_write_bytes: 1219232, host_read_bytes: 32874292, transfer_submissions: 2118, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=4"
+      ],
+      "pass": false,
+      "evidence_root": "target/sophon/reviewed-auto-http-33367",
+      "status": "HISTORICAL PRODUCT FAILURE: partial GPU KV remained after a later chunk failed; superseded only after a separately identified replay fix",
+      "failure_scope": {
+        "prompt_tokens": 68,
+        "first_gpu_chunk": [
+          0,
+          32
+        ],
+        "failed_gpu_chunk": [
+          32,
+          64
+        ],
+        "failure": "device lost; current chunk recomputed on CPU while preceding unvalidated device KV remained",
+        "max_cpu_probability_difference": 0.02338428422808647,
+        "probability_gate": 1e-06,
+        "fix": "Replay the entire current input from prefill_base on Auto device failure; keep the already committed prefix."
+      }
+    },
+    "entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367": {
+      "format": "Q8_0",
+      "policy": "cpu",
+      "kv": "f16",
+      "mode": "vision",
+      "cases": {
+        "cli-jev": {
+          "pass": true,
+          "seconds": 88.45980193652213,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-option",
+            "是",
+            "--jev-option",
+            "否",
+            "--jev-output",
+            "json",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367/red.png"
+          ],
+          "stdout": "{\"mode\":\"choice\",\"question\":\"是否有人讲话？\",\"labels\":[\"A\",\"B\"],\"descriptions\":[\"是\",\"否\"],\"values\":[0.0,0.0],\"probabilities\":{\"A\":0.0005592590314336121,\"B\":0.9994407296180725},\"choice\":\"B\",\"confidence\":0.9994407,\"entropy\":0.0047473474,\"margin\":0.99888146,\"prefill_ms\":86929}\n",
+          "wall_seconds": 88.45975489541888,
+          "probabilities": {
+            "A": 0.0005592590314336121,
+            "B": 0.9994407296180725
+          },
+          "score": {
+            "mode": "choice",
+            "question": "是否有人讲话？",
+            "labels": [
+              "A",
+              "B"
+            ],
+            "descriptions": [
+              "是",
+              "否"
+            ],
+            "values": [
+              0.0,
+              0.0
+            ],
+            "probabilities": {
+              "A": 0.0005592590314336121,
+              "B": 0.9994407296180725
+            },
+            "choice": "B",
+            "confidence": 0.9994407,
+            "entropy": 0.0047473474,
+            "margin": 0.99888146,
+            "prefill_ms": 86929
+          }
+        },
+        "cli-grouped": {
+          "pass": true,
+          "seconds": 96.83302139118314,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+            "--jev",
+            "--jev-context",
+            "判断输入。",
+            "--jev-question",
+            "是否有人讲话？",
+            "--jev-output",
+            "json",
+            "--jev-block",
+            "speech",
+            "--jev-option",
+            "有讲话",
+            "--jev-option",
+            "无讲话",
+            "--jev-block",
+            "language",
+            "--jev-option",
+            "中文",
+            "--jev-option",
+            "其他语言",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367/red.png"
+          ],
+          "stdout": "{\"mode\":\"block_choice\",\"question\":\"是否有人讲话？\",\"groups\":[{\"label\":\"speech\",\"choice\":\"B\",\"probabilities\":{\"A\":0.0006369738839566708,\"B\":0.9993630051612854},\"confidence\":0.9993630051612854,\"entropy\":0.005324143450707197,\"margin\":0.9987260103225708},{\"label\":\"language\",\"choice\":\"C\",\"probabilities\":{\"C\":0.8038365840911865,\"D\":0.1961633861064911},\"confidence\":0.8038365840911865,\"entropy\":0.4950375556945801,\"margin\":0.607673168182373}],\"prefill_ms\":95236}\n",
+          "wall_seconds": 96.83297445997596,
+          "score": {
+            "mode": "block_choice",
+            "question": "是否有人讲话？",
+            "groups": [
+              {
+                "label": "speech",
+                "choice": "B",
+                "probabilities": {
+                  "A": 0.0006369738839566708,
+                  "B": 0.9993630051612854
+                },
+                "confidence": 0.9993630051612854,
+                "entropy": 0.005324143450707197,
+                "margin": 0.9987260103225708
+              },
+              {
+                "label": "language",
+                "choice": "C",
+                "probabilities": {
+                  "C": 0.8038365840911865,
+                  "D": 0.1961633861064911
+                },
+                "confidence": 0.8038365840911865,
+                "entropy": 0.4950375556945801,
+                "margin": 0.607673168182373
+              }
+            ],
+            "prefill_ms": 95236
+          }
+        },
+        "cli-generation": {
+          "pass": true,
+          "seconds": 57.706063682213426,
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--mmproj",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+            "--prompt",
+            "请只回复你好。",
+            "--image",
+            "/workspace/rust-model-inference/target/sophon/entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367/red.png"
+          ],
+          "stdout": "你好。\n",
+          "wall_seconds": 57.70605871267617
+        },
+        "http-jev": {
+          "pass": true,
+          "seconds": 86.72226086258888,
+          "route": "/v1/jev/image",
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.0005592590314336121,
+                  "B": 0.9994407296180725
+                },
+                "choice": "B",
+                "confidence": 0.9994407296180725,
+                "entropy": 0.004747347440570593,
+                "margin": 0.998881459236145,
+                "prefill_ms": 86619
+              }
+            ]
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "http-grouped": {
+          "pass": true,
+          "seconds": 93.60925915464759,
+          "route": "/v1/jev/image_grouped",
+          "response": {
+            "mode": "block_choice",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "block_choice",
+                "question": "是否有人讲话？",
+                "groups": [
+                  {
+                    "label": "speech",
+                    "choice": "B",
+                    "probabilities": {
+                      "A": 0.0006369738839566708,
+                      "B": 0.9993630051612854
+                    },
+                    "confidence": 0.9993630051612854,
+                    "entropy": 0.005324143450707197,
+                    "margin": 0.9987260103225708
+                  },
+                  {
+                    "label": "language",
+                    "choice": "C",
+                    "probabilities": {
+                      "C": 0.8038365840911865,
+                      "D": 0.1961633861064911
+                    },
+                    "confidence": 0.8038365840911865,
+                    "entropy": 0.4950375556945801,
+                    "margin": 0.607673168182373
+                  }
+                ],
+                "prefill_ms": 93606
+              }
+            ],
+            "temperature": 0.699999988079071
+          },
+          "max_cli_probability_difference": 0.0
+        },
+        "ordinary-chat-batch": {
+          "pass": true,
+          "seconds": 57.736551059409976,
+          "response": {
+            "id": "chatcmpl-45d40b05137b87cb",
+            "object": "chat.completion",
+            "created": 1794411842,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 17,
+              "completion_tokens": 2,
+              "total_tokens": 19
+            }
+          }
+        },
+        "ordinary-chat-stream": {
+          "pass": true,
+          "seconds": 58.23078357055783,
+          "events": [
+            [
+              null,
+              {
+                "id": "chatcmpl-fd6384e311eb460f",
+                "object": "chat.completion.chunk",
+                "created": 1794411842,
+                "model": "thinker-Q8_0",
+                "choices": [
+                  {
+                    "index": 0,
+                    "delta": {
+                      "role": "assistant",
+                      "content": ""
+                    },
+                    "finish_reason": null,
+                    "logprobs": null
+                  }
+                ]
+              }
+            ],
+            [
+              null,
+              {
+                "id": "chatcmpl-fd6384e311eb460f",
+                "object": "chat.completion.chunk",
+                "created": 1794411842,
+                "model": "thinker-Q8_0",
+                "choices": [
+                  {
+                    "index": 0,
+                    "delta": {
+                      "content": "你好"
+                    },
+                    "finish_reason": null,
+                    "logprobs": null
+                  }
+                ]
+              }
+            ],
+            [
+              null,
+              {
+                "id": "chatcmpl-fd6384e311eb460f",
+                "object": "chat.completion.chunk",
+                "created": 1794411842,
+                "model": "thinker-Q8_0",
+                "choices": [
+                  {
+                    "index": 0,
+                    "delta": {
+                      "content": "。"
+                    },
+                    "finish_reason": null,
+                    "logprobs": null
+                  }
+                ]
+              }
+            ],
+            [
+              null,
+              {
+                "id": "chatcmpl-fd6384e311eb460f",
+                "object": "chat.completion.chunk",
+                "created": 1794411842,
+                "model": "thinker-Q8_0",
+                "choices": [
+                  {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "length",
+                    "logprobs": null
+                  }
+                ]
+              }
+            ],
+            [
+              "done",
+              null
+            ]
+          ]
+        },
+        "context-400-False": {
+          "pass": true,
+          "seconds": 0.0018797069787979126,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        },
+        "context-400-True": {
+          "pass": true,
+          "seconds": 0.0012547485530376434,
+          "body": "{\"error\":{\"message\":\"Prompt (2009 tokens) plus output budget (2) exceeds model context (1024)\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}"
+        }
+      },
+      "cli_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+      "server_sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb",
+      "profile": "release-fast; validation only, not deployment capacity",
+      "vision_mmproj": "vision-lossless-mmproj-F32.gguf",
+      "vision_mmproj_sha256": "38c73644e80b490e5d2ab1669cb0202d97f570f14f9bd8d70166145f411400a0",
+      "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+      "server_command": [
+        "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "server_exit": -15,
+      "compute_trace": [
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=6",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=15",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=19",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=32",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=19",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+      ],
+      "pass": true
+    },
+    "fallback-reviewed-auto-http-33367": {
+      "command": [
+        "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+        "--compute",
+        "auto",
+        "--kv-cache",
+        "f16",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "1024",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18238"
+      ],
+      "binary_sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb",
+      "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+      "cases": {
+        "chat-batch": {
+          "seconds": 33.19928236305714,
+          "response": {
+            "id": "chatcmpl-9983d2e45b0d0a2c",
+            "object": "chat.completion",
+            "created": 1794411954,
+            "model": "thinker-Q8_0",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "你好。"
+                },
+                "finish_reason": "length",
+                "logprobs": null
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 13,
+              "completion_tokens": 2,
+              "total_tokens": 15
+            }
+          },
+          "cpu_text_equal": true,
+          "pass": true
+        },
+        "chat-stream": {
+          "seconds": 31.51506636850536,
+          "text": "你好。",
+          "cpu_text_equal": true,
+          "done": true,
+          "pass": true
+        },
+        "single-jev": {
+          "seconds": 52.77591947838664,
+          "response": {
+            "mode": "single",
+            "context": "判断输入。",
+            "results": [
+              {
+                "mode": "choice",
+                "question": "是否有人讲话？",
+                "labels": [
+                  "A",
+                  "B"
+                ],
+                "descriptions": [
+                  "是",
+                  "否"
+                ],
+                "values": [
+                  0.0,
+                  0.0
+                ],
+                "probabilities": {
+                  "A": 0.02607853151857853,
+                  "B": 0.973921537399292
+                },
+                "choice": "B",
+                "confidence": 0.973921537399292,
+                "entropy": 0.12083451449871063,
+                "margin": 0.9478430151939392,
+                "prefill_ms": 52773
+              }
+            ]
+          },
+          "max_cpu_probability_difference": 0.0,
+          "pass": true
+        }
+      },
+      "reference": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "profile": "release-fast; shared host; first-request numerical contract/upload overhead included, not capacity",
+      "compute_trace": [
+        "compute requested=Auto scope=resident_decoder backend=Vulkan rows=13",
+        "compute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=1",
+        "compute requested=Auto scope=resident_decoder backend=Vulkan rows=13",
+        "compute counters=device_cumulative ComputeStats { submissions: 1421, static_uploads: 1413, static_upload_bytes: 67970425920, host_write_bytes: 547488, host_read_bytes: 15421236, transfer_submissions: 1412, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+        "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+        "[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.",
+        "compute requested=Auto scope=decoder backend=Cpu rows=13",
+        "compute requested=Auto scope=decoder backend=Cpu rows=1",
+        "compute requested=Auto scope=resident_decoder backend=Vulkan rows=32",
+        "compute counters=device_cumulative ComputeStats { submissions: 2128, static_uploads: 2119, static_upload_bytes: 101955638336, host_write_bytes: 1219232, host_read_bytes: 32874292, transfer_submissions: 2118, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+        "[GPU] Qwen3 Vulkan chunk 32..64 failed: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>. Recomputing this entire input on CPU.",
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=32",
+        "compute requested=Auto scope=decoder backend=Cpu rows=4"
+      ],
+      "pass": true
+    },
+    "fallback-reviewed-auto-cpu-comparison-33367": {
+      "binary_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+      "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+      "cases": {
+        "cpu": {
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "exit": 0,
+          "seconds": 10.18098297342658,
+          "stdout": "Model: qwen3vl | n_embd=5120 n_layer=64 n_head=64 n_head_kv=8 n_ff=25600 | loaded in 69ms\nPrompt: 13 tokens\nOutput: 你好。\n[2 output tokens in 8643ms]\n",
+          "compute_trace": [
+            "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+            "compute requested=Cpu scope=decoder backend=Cpu rows=1"
+          ],
+          "stderr_tail": "compute pool: 4 threads\ncompute requested=Cpu scope=decoder backend=Cpu rows=13\ncompute requested=Cpu scope=decoder backend=Cpu rows=1\nPrompt: 1.6 t/s | Generation: 2.9 t/s | end-to-end: 0.2 tok/s\n",
+          "generated_text": "你好。"
+        },
+        "auto": {
+          "command": [
+            "/workspace/rust-model-inference/target/sophon/fallback-reviewed-rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/thinker-Q8_0.gguf",
+            "--compute",
+            "auto",
+            "--kv-cache",
+            "f16",
+            "--threads",
+            "4",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "2",
+            "--max-context",
+            "1024",
+            "--prefill-batch-size",
+            "32",
+            "--prompt",
+            "请只回复你好。"
+          ],
+          "exit": 0,
+          "seconds": 35.071198996156454,
+          "stdout": "Model: qwen3vl | n_embd=5120 n_layer=64 n_head=64 n_head_kv=8 n_ff=25600 | loaded in 69ms\nPrompt: 13 tokens\noperator=attention_score_reduction max_abs=0.000e0 max_rel=0.000e0 first_bad=None\noperator=attention_value_reduction exact=true\noperator=quantize_tie_even exact=true scales_exact=true blocks=4\nOutput: 你好。\n[2 output tokens in 16474ms]\n",
+          "compute_trace": [
+            "compute requested=Auto scope=resident_decoder backend=Vulkan rows=13",
+            "compute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }",
+            "compute requested=Cpu scope=decoder backend=Cpu rows=13",
+            "[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.",
+            "compute requested=Auto scope=decoder backend=Cpu rows=13",
+            "compute requested=Auto scope=decoder backend=Cpu rows=1"
+          ],
+          "stderr_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 0.0s\ncompute pool: 4 threads\n[GPU] Q8_0 matmul: packed int8 dot product\ncompute requested=Auto scope=resident_decoder backend=Vulkan rows=13\ncompute counters=device_cumulative ComputeStats { submissions: 714, static_uploads: 707, static_upload_bytes: 33985213504, host_write_bytes: 274592, host_read_bytes: 7711028, transfer_submissions: 706, live_allocation_bytes: 34606925344, peak_allocation_bytes: 35433457200 }\ncompute requested=Cpu scope=decoder backend=Cpu rows=13\n[GPU] Qwen3 Vulkan model contract failed: model logit mismatch at 0: gpu=15.791617 cpu=15.846221 abs=0.054603577 rel=0.003445842. Falling back to CPU.\ncompute requested=Auto scope=decoder backend=Cpu rows=13\ncompute requested=Auto scope=decoder backend=Cpu rows=1\nPrompt: 0.8 t/s | Generation: 2.8 t/s | end-to-end: 0.1 tok/s\n",
+          "generated_text": "你好。"
+        }
+      },
+      "profile": "release-fast; shared host; first-request contract validation included, not capacity",
+      "pass": true,
+      "device_execution_observed": true,
+      "fallback_observed": true
+    },
+    "grouped-audio-31344": {
+      "status": "PASS",
+      "host_port": 31344,
+      "started_at": "2026-11-11T18:00:26.957695+00:00",
+      "scope": "Functional entrypoint comparison only: Q6_K thinker + F32 audio, CPU/F32 KV; not an all-Q6 component setup or numerical Oracle/GPU acceptance. Synthetic 250ms 440Hz tone checks protocol and deterministic probability equality, not transcription/speech quality.",
+      "components": {
+        "thinker": {
+          "path": "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+          "sha256": "c7baf117b3bf27385802286fba1dbbcf6fcb41b1bf6678cbae5de43932b579da",
+          "requested_format": "Q6_K"
+        },
+        "audio": {
+          "path": "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+          "sha256": "c112a726c4bc6fb23be9ba7a6f116820b902453522703504a70fa69df46968d4",
+          "requested_format": "F32"
+        }
+      },
+      "binary_provenance": {
+        "build_report": "/workspace/rust-model-inference/target/sophon/grouped-audio-31344-build.json",
+        "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+        "cli": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+          "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+          "size": 41362856
+        },
+        "server": {
+          "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+          "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+          "size": 32469400
+        },
+        "source_manifest": "/workspace/rust-model-inference/target/sophon/grouped-audio-31344-expected-source-manifest.json",
+        "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+        "source_entries": 618,
+        "features": [
+          "parity-trace"
+        ],
+        "vulkan_enabled": false,
+        "profile": "release-fast"
+      },
+      "input": {
+        "path": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/input.wav",
+        "sha256": "dba41f5cd356b6837ba443522185b1e8121bcc763168eb47e7b6bbd79a0690fb",
+        "rate": 16000,
+        "samples": 4000,
+        "channels": 1,
+        "format": "PCM16"
+      },
+      "probability_absolute_tolerance": 1e-07,
+      "cases": {
+        "block_choice": {
+          "cli": {
+            "command": [
+              "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+              "--model",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+              "--mmproj",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+              "--compute",
+              "cpu",
+              "--kv-cache",
+              "f32",
+              "--threads",
+              "4",
+              "--temperature",
+              "0",
+              "--max-tokens",
+              "2",
+              "--max-context",
+              "512",
+              "--prefill-batch-size",
+              "32",
+              "--audio",
+              "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/input.wav",
+              "--jev",
+              "--jev-context",
+              "判断输入。",
+              "--jev-question",
+              "是否有人讲话？",
+              "--jev-output",
+              "json",
+              "--jev-block",
+              "speech",
+              "--jev-option",
+              "有讲话",
+              "--jev-option",
+              "无讲话",
+              "--jev-block",
+              "language",
+              "--jev-option",
+              "中文",
+              "--jev-option",
+              "其他语言"
+            ],
+            "exit_code": 0,
+            "seconds": 37.49165140837431,
+            "log": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/cli-block_choice.log",
+            "log_sha256": "0179f1cc57b56642e69e625122fa8e65d5e8408c59de0f625a59ea957755f64c",
+            "result": {
+              "mode": "block_choice",
+              "question": "是否有人讲话？",
+              "groups": [
+                {
+                  "label": "speech",
+                  "choice": "B",
+                  "probabilities": {
+                    "A": 0.006495724897831678,
+                    "B": 0.9935043454170227
+                  },
+                  "confidence": 0.9935043454170227,
+                  "entropy": 0.039190951734781265,
+                  "margin": 0.9870086312294006
+                },
+                {
+                  "label": "language",
+                  "choice": "C",
+                  "probabilities": {
+                    "C": 0.7490047216415405,
+                    "D": 0.2509952485561371
+                  },
+                  "confidence": 0.7490047216415405,
+                  "entropy": 0.5634258985519409,
+                  "margin": 0.49800947308540344
+                }
+              ],
+              "prefill_ms": 36068
+            }
+          },
+          "http": {
+            "route": "/v1/jev/audio_grouped",
+            "status": 200,
+            "seconds": 35.02001431956887,
+            "request": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/http-block_choice-request.json",
+            "result": {
+              "mode": "block_choice",
+              "context": "判断输入。",
+              "results": [
+                {
+                  "mode": "block_choice",
+                  "question": "是否有人讲话？",
+                  "groups": [
+                    {
+                      "label": "speech",
+                      "choice": "B",
+                      "probabilities": {
+                        "A": 0.006495724897831678,
+                        "B": 0.9935043454170227
+                      },
+                      "confidence": 0.9935043454170227,
+                      "entropy": 0.039190951734781265,
+                      "margin": 0.9870086312294006
+                    },
+                    {
+                      "label": "language",
+                      "choice": "C",
+                      "probabilities": {
+                        "C": 0.7490047216415405,
+                        "D": 0.2509952485561371
+                      },
+                      "confidence": 0.7490047216415405,
+                      "entropy": 0.5634258985519409,
+                      "margin": 0.49800947308540344
+                    }
+                  ],
+                  "prefill_ms": 35016
+                }
+              ]
+            },
+            "mode_defaulted": false,
+            "maximum_cli_http_probability_difference": 0.0,
+            "pass": true
+          }
+        },
+        "multi_select": {
+          "cli": {
+            "command": [
+              "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+              "--model",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+              "--mmproj",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+              "--compute",
+              "cpu",
+              "--kv-cache",
+              "f32",
+              "--threads",
+              "4",
+              "--temperature",
+              "0",
+              "--max-tokens",
+              "2",
+              "--max-context",
+              "512",
+              "--prefill-batch-size",
+              "32",
+              "--audio",
+              "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/input.wav",
+              "--jev",
+              "--jev-context",
+              "判断输入。",
+              "--jev-question",
+              "是否有人讲话？",
+              "--jev-output",
+              "json",
+              "--jev-multi",
+              "--jev-option",
+              "有讲话",
+              "--jev-option",
+              "无讲话",
+              "--jev-option",
+              "中文",
+              "--jev-option",
+              "其他语言"
+            ],
+            "exit_code": 0,
+            "seconds": 35.97839158587158,
+            "log": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/cli-multi_select.log",
+            "log_sha256": "c5ab4b6f12d9f2d80e7a1d32f391d1895af3a2f77189ceb51dafb0b3ce702d89",
+            "result": {
+              "mode": "multi_select",
+              "question": "是否有人讲话？",
+              "groups": [
+                {
+                  "label": "pair_1",
+                  "choice": "B",
+                  "probabilities": {
+                    "A": 0.006495724897831678,
+                    "B": 0.9935043454170227
+                  },
+                  "confidence": 0.9935043454170227,
+                  "entropy": 0.039190951734781265,
+                  "margin": 0.9870086312294006
+                },
+                {
+                  "label": "pair_2",
+                  "choice": "C",
+                  "probabilities": {
+                    "C": 0.7490047216415405,
+                    "D": 0.2509952485561371
+                  },
+                  "confidence": 0.7490047216415405,
+                  "entropy": 0.5634258985519409,
+                  "margin": 0.49800947308540344
+                }
+              ],
+              "prefill_ms": 34541
+            }
+          },
+          "http": {
+            "route": "/v1/jev/audio_grouped",
+            "status": 200,
+            "seconds": 33.976658994331956,
+            "request": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/http-multi_select-request.json",
+            "result": {
+              "mode": "multi_select",
+              "context": "判断输入。",
+              "results": [
+                {
+                  "mode": "multi_select",
+                  "question": "是否有人讲话？",
+                  "groups": [
+                    {
+                      "label": "pair_1",
+                      "choice": "B",
+                      "probabilities": {
+                        "A": 0.006495724897831678,
+                        "B": 0.9935043454170227
+                      },
+                      "confidence": 0.9935043454170227,
+                      "entropy": 0.039190951734781265,
+                      "margin": 0.9870086312294006
+                    },
+                    {
+                      "label": "pair_2",
+                      "choice": "C",
+                      "probabilities": {
+                        "C": 0.7490047216415405,
+                        "D": 0.2509952485561371
+                      },
+                      "confidence": 0.7490047216415405,
+                      "entropy": 0.5634258985519409,
+                      "margin": 0.49800947308540344
+                    }
+                  ],
+                  "prefill_ms": 33973
+                }
+              ]
+            },
+            "mode_defaulted": true,
+            "maximum_cli_http_probability_difference": 0.0,
+            "pass": true
+          }
+        },
+        "single": {
+          "cli": {
+            "command": [
+              "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+              "--model",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+              "--mmproj",
+              "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+              "--compute",
+              "cpu",
+              "--kv-cache",
+              "f32",
+              "--threads",
+              "4",
+              "--temperature",
+              "0",
+              "--max-tokens",
+              "2",
+              "--max-context",
+              "512",
+              "--prefill-batch-size",
+              "32",
+              "--audio",
+              "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/input.wav",
+              "--jev",
+              "--jev-context",
+              "判断输入。",
+              "--jev-question",
+              "是否有人讲话？",
+              "--jev-output",
+              "json",
+              "--jev-option",
+              "有讲话",
+              "--jev-option",
+              "无讲话"
+            ],
+            "exit_code": 0,
+            "seconds": 32.29986212775111,
+            "log": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/cli-single.log",
+            "log_sha256": "5f803a1f9508fd8fd3f0a00d999b7e3473407ad38bd8c9308f52b15c871f9847",
+            "result": {
+              "mode": "choice",
+              "question": "是否有人讲话？",
+              "labels": [
+                "A",
+                "B"
+              ],
+              "descriptions": [
+                "有讲话",
+                "无讲话"
+              ],
+              "values": [
+                0.0,
+                0.0
+              ],
+              "probabilities": {
+                "A": 0.0021658744663000107,
+                "B": 0.9978341460227966
+              },
+              "choice": "B",
+              "confidence": 0.99783415,
+              "entropy": 0.015450997,
+              "margin": 0.9956683,
+              "prefill_ms": 30867
+            }
+          },
+          "http": {
+            "route": "/v1/jev/audio",
+            "status": 200,
+            "seconds": 30.57735868729651,
+            "request": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344-v2/http-single-request.json",
+            "result": {
+              "mode": "single",
+              "context": "判断输入。",
+              "results": [
+                {
+                  "mode": "choice",
+                  "question": "是否有人讲话？",
+                  "labels": [
+                    "A",
+                    "B"
+                  ],
+                  "descriptions": [
+                    "有讲话",
+                    "无讲话"
+                  ],
+                  "values": [
+                    0.0,
+                    0.0
+                  ],
+                  "probabilities": {
+                    "A": 0.0021658744663000107,
+                    "B": 0.9978341460227966
+                  },
+                  "choice": "B",
+                  "confidence": 0.9978341460227966,
+                  "entropy": 0.015450997278094292,
+                  "margin": 0.9956682920455933,
+                  "prefill_ms": 30574
+                }
+              ]
+            },
+            "mode_defaulted": false,
+            "maximum_cli_http_probability_difference": 0.0,
+            "pass": true
+          }
+        }
+      },
+      "invalid_cases": {
+        "invalid-mode": {
+          "status": 400,
+          "response": {
+            "error": "Failed to deserialize the JSON body into the target type: mode: unknown variant `single`, expected `multi_select` or `block_choice` at line 1 column 10970"
+          },
+          "seconds": 0.0006668437272310257,
+          "pass": true
+        },
+        "invalid-base64": {
+          "status": 400,
+          "response": {
+            "error": "audio must be raw base64 encoded audio: Invalid symbol 58, offset 5."
+          },
+          "seconds": 0.0003779977560043335,
+          "pass": true
+        },
+        "invalid-wav": {
+          "status": 400,
+          "response": {
+            "error": "Pure-Rust audio decode failed for the upload: Unsupported(\"expected RIFF/WAVE\")"
+          },
+          "seconds": 0.0006577726453542709,
+          "pass": true
+        },
+        "context-overflow": {
+          "status": 400,
+          "response": {
+            "error": "audio prompt plus output budget exceeds context 512"
+          },
+          "seconds": 0.7008870206773281,
+          "pass": true
+        },
+        "empty-questions": {
+          "status": 400,
+          "response": {
+            "error": "--jev requires at least one --jev-question"
+          },
+          "seconds": 0.00047465600073337555,
+          "pass": true
+        },
+        "nonfinite-score": {
+          "status": 400,
+          "response": {
+            "error": "Score value \"NaN\" must be finite"
+          },
+          "seconds": 0.00035177916288375854,
+          "pass": true
+        },
+        "unknown-field": {
+          "status": 400,
+          "response": {
+            "error": "Failed to deserialize the JSON body into the target type: positive: unknown field `positive`, expected one of `audio`, `context`, `questions`, `mode` at line 1 column 10964"
+          },
+          "seconds": 0.0003855861723423004,
+          "pass": true
+        }
+      },
+      "recovered_cli_from": {
+        "path": "/workspace/rust-model-inference/target/sophon/grouped-audio-entrypoints-31344/result.json",
+        "sha256": "4ad884a69d37f7d818d21eb5415e842ccdf14eea61b248c1704bbb7afd7d7ce2"
+      },
+      "earlier_harness_error": {
+        "phase": "server startup",
+        "cause": "/health returns plain text ok; initial harness parsed it as JSON",
+        "driver_log": "/workspace/rust-model-inference/target/sophon/run-grouped-audio-entrypoints-31344.log",
+        "driver_log_sha256": "aba775f68946db65ef7135a564a7a63eb1ea6820971dcb0294206200419efadc",
+        "http_scoring_requests_sent": 0,
+        "production_change_required": false
+      },
+      "server_command": [
+        "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+        "--model",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/thinker-Q6_K.gguf",
+        "--mmproj",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF-resumed-31344/audio-F32.gguf",
+        "--compute",
+        "cpu",
+        "--kv-cache",
+        "f32",
+        "--threads",
+        "4",
+        "--temperature",
+        "0",
+        "--max-tokens",
+        "2",
+        "--max-context",
+        "512",
+        "--prefill-batch-size",
+        "32",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18239"
+      ],
+      "server_pid": 34519,
+      "active": "HTTP invalid unknown-field",
+      "health": {
+        "status": 200,
+        "body": "ok"
+      },
+      "source_unchanged_after_run": true,
+      "completed_at": "2026-11-11T18:02:26.673096+00:00",
+      "server_exit_code": -15,
+      "server_log_sha256": "25a15682257783fc3178834733eaf6592830d668f344aa8b5f3fb44bbd0c6aa3",
+      "server_stopped": true,
+      "evidence": "target/sophon/grouped-audio-entrypoints-31344-v2/result.json",
+      "evidence_sha256": "874c600299d104bc110b5af95ae951f9d6cb4bcc46bfcd5f2e3599fdbc473f68",
+      "driver": "target/sophon/run-grouped-audio-entrypoints-31344-v2.py",
+      "driver_sha256": "5bd28dca6b137a81b76af8f59ad44c0126fa55a5d7556f93788a3343900bf796"
+    }
+  },
+  "notes": [
+    "The initial full speech HTTP suite passed WAV/PCM/stream output checks but failed its 20-second post-disconnect admission probe. The later cancel-only suite uses a distinct build and succeeds after three probes; the original failure remains visible.",
+    "Later grouped-JEV and batch cancellation changes require their own final-source verification.",
+    "Final integrated entrypoint smoke runs are bound to the protected a2f47/010a3 binaries. Audio understanding/S2S uses mixed Q8_0 thinker with F32 audio/speech components; these runs do not verify all-Q8 audio. Corrected harness runs retain the original failures separately.",
+    "The reviewed Auto HTTP 68-token single-JEV run is a real product failure: a later device chunk failed after partial GPU progress, leaving unvalidated shadow KV. The observed CPU probability difference was 0.02338428422808647. Keep this historical failure distinct from the later replay fix and its own artifact evidence.",
+    "The fallback-reviewed Q8_0 thinker/F16-KV image suite uses the new explicitly lossless F32 vision asset 38c73644... and passes all nine CLI/HTTP generation, single/grouped JEV, SSE and context-preflight checks. Both CLI/HTTP probability differences are zero. Historical F32-storage/Q8-compute image evidence retains its own identity; this functional suite does not replace independent thinker/image task-quality acceptance.",
+    "Final fallback-reviewed Auto HTTP passes batch/SSE text equality and 68-token single-JEV CPU probability equality. The device again failed on chunk 32..64 after partial progress; replaying the complete current input from prefill_base fixes the historical 0.02338428422808647 probability difference to zero. CPU/Auto CLI also agree after real device submissions and numerical-contract fallback. These fallback passes do not validate the failed complete Vulkan numerical path."
+  ],
+  "final_integrated_artifacts": {
+    "source_manifest": "target/sophon/main-integrated-source-manifest.json",
+    "rust_cargo_inputs": 618,
+    "cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+    "server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+    "source_commit": "a5afdebba; later evidence/documentation commits do not change executable inputs"
+  },
+  "final_reviewed_artifacts": {
+    "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+    "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+    "rust_cargo_inputs": 618,
+    "source_commit": "d2179bd0d",
+    "cli_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+    "server_sha256": "a4dec2b3fe79ef2adc0eda9a671ac2706e3cd069704445b5a0f6577633e2928c"
+  },
+  "vision_width_regression_fixture": {
+    "scope": "Pinned real-asset resize fixture and old helper truncation; metadata read directly from remote GGUF. This is not a numerical Oracle.",
+    "metadata": {
+      "image_width": 32,
+      "image_height": 32,
+      "patch_size": 16,
+      "spatial_merge_size": 2,
+      "image_min_pixels": 65536,
+      "image_max_pixels": 16777216,
+      "vision_tower_width": 1152,
+      "projection_dim": 5120,
+      "resized_width": 256,
+      "resized_height": 256,
+      "merged_rows": 64
+    },
+    "expected_projected_values": 327680,
+    "old_truncated_values": 327168,
+    "old_lost_values": 512,
+    "old_result_not_model_width_aligned": true,
+    "test": "app::text::vision::qwen3vl_image_tests::real_projected_width_preserves_all_image_and_deepstack_rows",
+    "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934"
+  },
+  "fallback_reviewed_artifacts": {
+    "base_source_commit": "d2179bd0d8586ef6d368ef1f1b1c487a9c4e3448",
+    "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+    "source_manifest_sha256": "5701ac901a75e5405839648f81797448647fc45ee3b9828668c19219a8ba20e4",
+    "source_files_compared": 618,
+    "source_files_mismatched": [],
+    "binaries": {
+      "rust-model-inference": {
+        "path": "target/sophon/fallback-reviewed-rust-model-inference",
+        "sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347"
+      },
+      "rust-model-server": {
+        "path": "target/sophon/fallback-reviewed-rust-model-server",
+        "sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb"
+      }
+    },
+    "build_report": "target/sophon/fallback-reviewed-build-33367.json",
+    "build_report_sha256": "fffb0f2ff59ad5714ea9e7494b90a42f5d87fb83ea3df9886abe189ccc91d8ad"
+  },
+  "grouped_audio_31344_artifacts": {
+    "base_source_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+    "changed_source_files": [
+      "src/app/jev/grouped.rs",
+      "src/app/server/api.rs",
+      "src/app/server/audio_chat.rs"
+    ],
+    "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+    "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+    "source_entries": 618,
+    "build_report": "target/sophon/grouped-audio-31344-build.json",
+    "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+    "cli": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+      "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+      "size": 41362856
+    },
+    "server": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+      "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+      "size": 32469400
+    },
+    "scope": "Functional entrypoint comparison only: Q6_K thinker + F32 audio, CPU/F32 KV; not an all-Q6 component setup or numerical Oracle/GPU acceptance. Synthetic 250ms 440Hz tone checks protocol and deterministic probability equality, not transcription/speech quality.",
+    "source_matches_local_checkout_and_remote_after_run": true
+  }
+}

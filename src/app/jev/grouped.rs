@@ -39,7 +39,7 @@ pub(crate) trait JevGroupedScorer {
 /// function. Calls `scorer.build_grouped_prompt` for token ids +
 /// per-group labels, `scorer.forward_logits` for the prefill,
 /// and finally `compute_grouped_jev_result` to score each group.
-fn run_jev_grouped_core<S: JevGroupedScorer>(
+pub(crate) fn run_jev_grouped_core<S: JevGroupedScorer>(
     _source: Arc<dyn TensorSource>,
     context: &str,
     per_question: &[PreparedGroupedQuestion],
@@ -126,6 +126,9 @@ pub fn prepare_jev_grouped_questions(
                     let v: f32 = val_str
                         .parse()
                         .map_err(|e| format!("Score value {:?} is not a float: {}", val_str, e))?;
+                    if !v.is_finite() {
+                        return Err(format!("Score value {:?} must be finite", val_str));
+                    }
                     descriptions.push(desc.to_string());
                     values.push(v);
                 } else {
@@ -184,7 +187,7 @@ pub fn build_grouped_payload(context: &str, q: &PreparedGroupedQuestion) -> Resu
     Ok(payload)
 }
 
-fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
+pub(crate) fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     let mut all = Vec::with_capacity(q.groups.len());
     let mut next = b'A';
     for group in &q.groups {
@@ -787,7 +790,7 @@ pub fn run_jev_grouped_decision(
     Ok(())
 }
 
-fn print_grouped_result_text(r: &JevGroupedResult) {
+pub(crate) fn print_grouped_result_text(r: &JevGroupedResult) {
     println!("\n--- JEV decision ({:?}) ---", r.mode);
     for g in &r.groups {
         if let Some(score) = g.score {
@@ -821,6 +824,32 @@ mod tests {
     use super::grouped_prompt_via_jinja;
     use crate::core::tokenizer::{MockTokenizer, Tokenizer};
     use crate::prompt::jinja::JinjaChatTemplate;
+
+    #[test]
+    fn grouped_scores_reject_nonfinite_option_values() {
+        use crate::app::{JevGroupInput, JevGroupedQuestionInput, JevMode};
+        for mode in [JevMode::MultiSelect, JevMode::BlockChoice] {
+            for value in ["NaN", "inf", "-inf", "1e1000"] {
+                let questions = [JevGroupedQuestionInput {
+                    text: "q".into(),
+                    groups: vec![JevGroupInput {
+                        label: "score".into(),
+                        options: vec![format!("bad:{value}"), "good:1".into()],
+                    }],
+                }];
+                assert!(super::prepare_jev_grouped_questions(&questions, mode).is_err());
+            }
+            let valid = [JevGroupedQuestionInput {
+                text: "q".into(),
+                groups: vec![JevGroupInput {
+                    label: "score".into(),
+                    options: vec!["negative:-1".into(), "zero:0".into(), "positive:2.5".into()],
+                }],
+            }];
+            let prepared = super::prepare_jev_grouped_questions(&valid, mode).unwrap();
+            assert_eq!(prepared[0].groups[0].values, [-1.0, 0.0, 2.5]);
+        }
+    }
 
     /// Grouped JEV used to store `--jinja` on the scorer and then never read
     /// it, because the prompt is built by this free function rather than by the

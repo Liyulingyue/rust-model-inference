@@ -182,9 +182,8 @@ impl Qwen3Session<'_> {
                 ));
             }
         }
-        let final_len = self
-            .kv_state
-            .seq_len
+        let prefill_base = self.kv_state.seq_len;
+        let final_len = prefill_base
             .checked_add(input.token_ids.len())
             .ok_or_else(|| "Qwen3 prompt length overflow".to_string())?;
         if final_len > self.capacity {
@@ -233,7 +232,7 @@ impl Qwen3Session<'_> {
             let project_logits =
                 need_logits && (trace_each_token || range.end == input.token_ids.len());
             #[cfg(feature = "vulkan")]
-            let gpu_error = if let Some(gpu) = &mut self.gpu {
+            if let Some(gpu) = &mut self.gpu {
                 let rows = range.len();
                 let width = self.model.config.n_embd;
                 for row in 0..rows {
@@ -313,22 +312,22 @@ impl Qwen3Session<'_> {
                         if self.compute_policy == crate::compute::ComputePolicy::Vulkan {
                             return Err(error);
                         }
-                        eprintln!("[GPU] Qwen3 Vulkan chunk {}..{} failed: {error}. Recomputing the whole chunk on CPU.", range.start, range.end);
-                        Some(error)
+                        eprintln!("[GPU] Qwen3 Vulkan chunk {}..{} failed: {error}. Recomputing this entire input on CPU.", range.start, range.end);
+                        return self.replay_prefill_on_cpu(
+                            input,
+                            batch_size,
+                            need_logits,
+                            prefill_base,
+                            &error,
+                        );
                     }
                 }
-            } else {
-                None
-            };
+            }
             if let Err(error) = self
                 .forward_cpu_chunk(input, range.clone(), project_logits)
                 .and_then(|()| self.validate_cpu_chunk(base, range.len(), project_logits))
             {
                 self.kv_state.seq_len = base;
-                #[cfg(feature = "vulkan")]
-                if let Some(gpu_error) = gpu_error {
-                    return Err(format!("{error}; original Vulkan error: {gpu_error}"));
-                }
                 return Err(error);
             }
             self.kv_state.seq_len = base + range.len();
@@ -351,12 +350,33 @@ impl Qwen3Session<'_> {
                 );
                 self.gpu = None;
                 self.full_model_gpu_failed = true;
-                return self.prefill(input, batch_size, need_logits);
+                return self.replay_prefill_on_cpu(
+                    input,
+                    batch_size,
+                    need_logits,
+                    prefill_base,
+                    &error,
+                );
             }
             self.gpu_contract_validated = true;
         }
         let elapsed = started.elapsed();
         Ok(elapsed)
+    }
+
+    #[cfg(any(test, feature = "vulkan"))]
+    fn replay_prefill_on_cpu(
+        &mut self,
+        input: &Qwen3Input<'_>,
+        batch_size: usize,
+        need_logits: bool,
+        prefill_base: usize,
+        gpu_error: &str,
+    ) -> Result<Duration, String> {
+        // Earlier device chunks from this call have not passed the model contract.
+        self.kv_state.seq_len = prefill_base;
+        self.prefill(input, batch_size, need_logits)
+            .map_err(|error| format!("{error}; original Vulkan error: {gpu_error}"))
     }
 
     #[cfg(feature = "vulkan")]
@@ -1147,5 +1167,69 @@ mod tests {
         let mut hidden = [10.0, 20.0];
         add_deepstack_embedding(&mut hidden, &deepstack, 1, 0, 2, 2);
         assert_eq!(hidden, [15.0, 26.0]);
+    }
+
+    #[test]
+    fn cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix() {
+        use crate::compute::ComputePolicy;
+        use crate::core::scratchpad::KvCache;
+        use crate::models::qwen3::trunk::{Qwen3Input, Qwen3Session};
+
+        let _scope = ComputePolicy::Cpu.enter_legacy_scope();
+        let model = super::super::tests::deterministic_session_model(16);
+        for prefix in [0, 2] {
+            let session = || {
+                Qwen3Session::new_with_kv_state(
+                    &model,
+                    16,
+                    crate::core::scratchpad::KvFormat::F32,
+                    crate::core::scratchpad::KvLifecycle::Ephemeral,
+                )
+                .unwrap()
+            };
+            let mut expected = session();
+            let mut replay = session();
+            let tokens = [0, 1, 2, 3, 4, 5];
+            let positions: Vec<_> = (0..tokens.len()).map(|i| [i, 0, 0, 0]).collect();
+            let request = |start, end| Qwen3Input {
+                token_ids: &tokens[start..end],
+                positions: &positions[start..end],
+                embeddings: None,
+                deepstack_embeddings: None,
+            };
+            if prefix != 0 {
+                for session in [&mut expected, &mut replay] {
+                    session.prefill(&request(0, prefix), 2, true).unwrap();
+                }
+            }
+            expected.prefill(&request(prefix, 6), 2, true).unwrap();
+            replay
+                .prefill(&request(prefix, prefix + 2), 2, true)
+                .unwrap();
+            if let KvCache::F32(cache) = &mut replay.kv_state.cache {
+                cache.k[prefix * 32] = f32::NAN;
+                cache.v[prefix * 32] = f32::NAN;
+            } else {
+                panic!("fixture must have F32 KV");
+            }
+            replay
+                .replay_prefill_on_cpu(&request(prefix, 6), 2, true, prefix, "injected device loss")
+                .unwrap();
+            assert_eq!(replay.kv_state.seq_len, 6);
+            assert_eq!(replay.last_logits(), expected.last_logits());
+            match (&replay.kv_state.cache, &expected.kv_state.cache) {
+                (KvCache::F32(actual), KvCache::F32(expected)) => {
+                    assert_eq!(actual.k, expected.k);
+                    assert_eq!(actual.v, expected.v);
+                }
+                _ => unreachable!(),
+            }
+            replay.fail_cpu_prefill_after_layer_for_test(0);
+            let error = replay
+                .replay_prefill_on_cpu(&request(prefix, 6), 2, true, prefix, "injected device loss")
+                .unwrap_err();
+            assert!(error.contains("original Vulkan error: injected device loss"));
+            assert_eq!(replay.kv_state.seq_len, prefix);
+        }
     }
 }
