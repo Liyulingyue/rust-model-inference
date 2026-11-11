@@ -3223,6 +3223,12 @@ pub(crate) fn build_operator_pipelines(
                 // Keep ordinary Qwen operators available on baseline
                 // devices; DiT rejects this slot before recording it.
                 ATTENTION_SCORES_SHADER
+            } else if matches!(index, NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM)
+                && !context.shader_float64
+            {
+                // Optional FP64 SSM kernels must not prevent ordinary projections from loading.
+                // Their recorders reject unsupported devices before this placeholder is used.
+                ATTENTION_SCORES_SHADER
             } else {
                 *shader
             }
@@ -5327,6 +5333,11 @@ impl<'a> Qwen3Ops<'a> {
         out_decay: ArenaRegion,
         heads: usize,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM dt requires shaderFloat64".into(),
+            ));
+        }
         if heads == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "Nemotron-H SSM needs at least one head".into(),
@@ -5460,6 +5471,11 @@ impl<'a> Qwen3Ops<'a> {
         groups: usize,
         eps: f32,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM norm requires shaderFloat64".into(),
+            ));
+        }
         if group_len == 0 || groups == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "Nemotron-H SSM norm needs a nonzero group".into(),
@@ -12257,11 +12273,40 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_rows_match_and_reuse_weights() {
-        use super::{BatchedLinearRuntime, GpuWeightFormat::*};
+        use super::{
+            ArenaRegion, BatchedLinearRuntime, GpuWeightFormat::*, Qwen3Ops, TokenCommands,
+        };
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
         // max_rows is 64: the test runs a 64-row batch at the end. The
         // descriptor pool holds one set per weight format plus the arena.
         let mut runtime = BatchedLinearRuntime::new(context, 64, 513, 65, 10).unwrap();
+        if !context.shader_float64 {
+            let ops = Qwen3Ops::new_with_size(context, 4096, 4).unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            let region = ArenaRegion {
+                offset: 0,
+                size: 256,
+            };
+            assert!(ops
+                .record_nemotron_h_ssm_dt(&commands, region, region, region, region, region, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("shaderFloat64"));
+            assert!(ops
+                .record_nemotron_h_ssm_norm(
+                    &commands,
+                    ops.arena_bindings,
+                    region,
+                    region,
+                    1,
+                    1,
+                    1e-6
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("shaderFloat64"));
+            drop(commands);
+        }
         // Keep every source allocation alive: the cache keys are stable slices.
         let weights: Vec<_> = [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K]
             .into_iter()

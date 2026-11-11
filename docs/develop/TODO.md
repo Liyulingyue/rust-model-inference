@@ -13,6 +13,37 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
+      2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
+      vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor
+      （实测 172 次提交 / 2.17 GB 权重上传，vision embedding 与 CPU 差约 3e-5；CPU 路径仍是
+      原来逐位对齐 llama.cpp oracle 的 `dot_f32` 循环，未改）。剩下三块的情况：
+      ① **ViT 块的 attention 技术上可以上**：`AttentionSpec` 支持 `causal: false`，
+      `models/qwen3/vision` 已有先例，而本视觉塔的 `[token, head*d_head]` 布局正好是设备要的
+      `[token, head, dim]`，连重排都省了；**但 `ops::kernel::vulkan::try_attention` 每次都会用
+      CPU kernel 复核结果**（`attention_matches_cpu`，为 TODO-044「设备返回上一次调用的数字」
+      而加，无开关），不符就重试、再不符退回 CPU 重算 → **CPU 时间一点省不下来，反而更慢**。
+      要真提速必须先有"可信设备路径"：让严格档（`--compute vulkan`）跳过复核，或改成首次/抽样
+      校验，并把 TODO-044 的风险写成显式声明。
+      ② **vit_merger 的窗口 attention 上不去**：它是 2x2 块 mask 的，`AttentionSpec` 没有 mask
+      字段，设备路径表达不了 → 需要 mask-aware kernel。
+      ③ **norm 没有独立设备 kernel**，且是逐行小操作（1024×1152）夹在投影中间，搬上去只增加
+      往返；要做只能融合进投影的 epilogue。
+      ④ **slicing 不是计算**：是像素搬运/切片（CPU 侧数据准备），没有内核可移。
+      另外，投影的输出目前都回读到 host（`run_group` 写进调用方缓冲），attention 要用就得重新
+      上传（每层 q/k/v 各 4.7 MB × 27 层 ≈ 380 MB 往返）—— 要省掉这段就是 THX-02/Mage-VL
+      都撞到的 L2（设备常驻中间结果 + 持久权重）。
+- [ ] **转换器的接受格式集由共享 `BLOCK_FORMATS` 推导，会静默接受模型加载器不支持的格式** —
+      `tools/converter/mage_vl/convert_mage_vl.py` 写 `TEXT_TYPES = ("f32", *BLOCK_FORMATS)`，
+      `tools/converter/thx02/convert_thx02.py` 写 `FORMATS = {..., **BLOCK_FORMATS, ...}`。共享层每
+      新增一种格式（例如 Q4_1 进入 `BLOCK_FORMATS`），这两个转换器就会自动把它列进 `--format`
+      选项里，而对应模型的 Rust 加载器白名单不会跟着变 → 转换器能导出、运行时拒绝加载，
+      用户只看到一句含糊的 tensor type 报错。2026-11-10 实测：合并 main 后 mage_vl 的
+      `--text-type q4_1` 导出成功，但 `models/mage_vl` 的 `TEXT_TYPES` 不含 `GGMLType::Q4_1`
+      （已补上），同时 `test_convert_mage_vl.py` 的体积表缺 `q4_1` 直接 KeyError（已补）。
+      建议：转换器的接受集改成**显式列出该模型支持的格式**（加载器白名单的镜像），或在共享层
+      提供「模型 ↔ 支持格式」的单一来源让两侧都读；至少在给共享 `BLOCK_FORMATS` 加格式时，
+      同时检查所有 `*BLOCK_FORMATS` 的使用点。
 - [x] **HTTP 文本运行时统一（TextRuntime）** — 已完成：`build_text_runtime(arch)` 是唯一
       arch 分发点，`TextInner` 四变体与 server 内手写 decode 循环全部删除；prompt 构造、greedy/
       温度采样、llama 家族的 rep-penalty+停止规则均单一来源（CLI/HTTP 共用）；
