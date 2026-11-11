@@ -106,7 +106,7 @@ The trace comparator feeds the **identical native spectral features** to the unm
 ## Paired-speech quality and suppression ablation
 
 ```sh
-.venv/bin/python -m pip install scipy==1.17.0 pystoi==0.4.1 pesq==0.0.4 soundfile==0.13.1
+.venv/bin/python -m pip install scipy==1.17.0 pystoi==0.4.1 pesq==0.0.4 soundfile==0.13.1 einops
 .venv/bin/python -m unittest discover -s tools/oracle/nemotron_reuse -p test_quality.py
 # Rebuild without parity-trace after the diagnostic commands above.
 cargo +1.98.1 build --locked --profile release-fast \
