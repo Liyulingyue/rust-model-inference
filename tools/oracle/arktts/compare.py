@@ -5,8 +5,22 @@ from pathlib import Path
 
 import numpy as np
 
+# Same-weight implementation gates, distinct from quantization quality versus the original weights.
+# F16 Prepared uses native half accumulators; the independent PyTorch Oracle accumulates widely.
+TOLERANCES = {
+    "float": (1e-4, 5e-5, 2e-3, 2e-4, 2e-5),
+    # Frozen from the original three prompts before running the separate validation suite.
+    # RMS/RoPE rounding can cross activation-quantizer bins and amplify across FastAR layers.
+    # Same-input projection fixtures separately enforce 5e-5 relative RMSE for block kernels.
+    "quantized": (2e-1, 1.5e-1, 5.0, 6e-3, 1e-3),
+    "f16": (1e-2, 1e-2, 2.5e-1, 1e-3, 1e-4),
+}
 
-def compare(oracle, rust):
+
+def compare(oracle, rust, profile="float"):
+    if profile not in TOLERANCES:
+        raise ValueError(f"unknown precision profile {profile}")
+    relative_limit, normalized_limit, logits_limit, audio_max, audio_rmse = TOLERANCES[profile]
     expected = json.loads(Path(oracle).read_text())
     actual = [row for line in Path(rust).read_text().splitlines() if (row := json.loads(line)).get("binary_path")]
     if not expected:
@@ -33,11 +47,11 @@ def compare(oracle, rust):
                   "normalized_max_abs": normalized_max_abs, "cosine": cosine}
         metrics.append(result)
         # Residual activations exceed 10,000; scale their FP32 error by the reference magnitude.
-        if normalized_max_abs > 5e-5 or relative_rmse > 1e-4:
+        if normalized_max_abs > normalized_limit or relative_rmse > relative_limit:
             raise AssertionError(f"first out-of-tolerance checkpoint: {result}")
-        if a["name"].endswith(".logits") and max_abs > 2e-3:
+        if a["name"].endswith(".logits") and max_abs > logits_limit:
             raise AssertionError(f"logits out of tolerance: {result}")
-        if a["name"] == "arktts.codec.audio" and (max_abs >= 2e-4 or rmse >= 2e-5):
+        if a["name"] == "arktts.codec.audio" and (max_abs >= audio_max or rmse >= audio_rmse):
             raise AssertionError(f"waveform out of tolerance: {result}")
     print(json.dumps({"checkpoints": len(metrics), "worst_absolute": max(metrics, key=lambda x: x["max_abs"]),
                       "worst_relative": max(metrics, key=lambda x: x["relative_rmse"]),
@@ -50,7 +64,8 @@ if __name__ == "__main__":
     parser.add_argument("oracle")
     parser.add_argument("rust")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--profile", choices=TOLERANCES, default="float")
     args = parser.parse_args()
-    results = compare(args.oracle, args.rust)
+    results = compare(args.oracle, args.rust, args.profile)
     if args.output:
         args.output.write_text(json.dumps(results, indent=2))

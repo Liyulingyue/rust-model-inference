@@ -3261,8 +3261,10 @@ pub(crate) fn build_operator_pipelines(
                 // Keep ordinary Qwen operators available on baseline
                 // devices; DiT rejects this slot before recording it.
                 ATTENTION_SCORES_SHADER
-            } else if matches!(index, NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM)
-                && !context.shader_float64
+            } else if matches!(
+                index,
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+            ) && !context.shader_float64
             {
                 // Optional FP64 SSM kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
@@ -6562,6 +6564,11 @@ impl<'a> Qwen3Ops<'a> {
         normalize: bool,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron MoE routing requires shaderFloat64".into(),
+            ));
+        }
         if experts == 0 || used == 0 || used > experts || !scale.is_finite() {
             return Err(VulkanError::UnsupportedShape(
                 "invalid Nemotron MoE routing dimensions/scale".into(),

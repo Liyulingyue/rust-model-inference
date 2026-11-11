@@ -5,6 +5,8 @@ import argparse
 import json
 import sys
 import types
+import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +15,7 @@ from safetensors.torch import load_file
 from transformers.generation import MaxLengthCriteria, StoppingCriteriaList
 
 
-def main(model_dir: Path, output: Path, frames: int):
+def main(model_dir: Path, output: Path, frames: int, main_gguf=None, codec_gguf=None, history=None, suite="original"):
     torch.set_num_threads(4)
     output.mkdir(parents=True, exist_ok=False)
     package = types.ModuleType("arktts_official")
@@ -29,6 +31,19 @@ def main(model_dir: Path, output: Path, frames: int):
     model.load_state_dict(load_file(model_dir / "model.safetensors"), strict=True)
     processor = ArkttsProcessor.from_pretrained(model_dir, trust_remote_code=True, local_files_only=True)
     codec = model.load_codec(device="cpu", dtype=torch.float32)
+    contracts = {}
+    if bool(main_gguf) != bool(codec_gguf):
+        raise ValueError("same-weight Oracle requires both GGUF components")
+    if main_gguf:
+        from tools.oracle.arktts.same_weight import load, prepared_linears
+        main_contracts, bundle = load(model, main_gguf, "arktts")
+        codec_contracts, codec_bundle = load(codec, codec_gguf, "arktts_codec")
+        if bundle != codec_bundle:
+            raise ValueError("GGUF checkpoint bundles differ")
+        contracts.update(main_contracts)
+        contracts.update(codec_contracts)
+    histories = json.loads(Path(history).read_text())["cases"] if history else None
+    timings = []
     records = []
     codec_phase = {"value": "decode"}
     trace_enabled = {"value": True}
@@ -97,40 +112,77 @@ def main(model_dir: Path, output: Path, frames: int):
         codec.decoder.model[index + 1].register_forward_hook(lambda m, i, o, index=index: record("arktts.codec.decoder", channels(o), layer=index))
 
     cases = []
-    with torch.inference_mode():
-        reference_audio = (0.15 * np.sin(np.arange(4097, dtype=np.float32) * np.float32(0.031))
-                           + 0.04 * np.cos(np.arange(4097, dtype=np.float32) * np.float32(0.071))).astype("<f4")
+    with torch.inference_mode(), (prepared_linears(contracts) if main_gguf else nullcontext()):
+        length, first, second = (6145, 0.027, 0.093) if suite == "validation" else (4097, 0.031, 0.071)
+        reference_audio = (0.15 * np.sin(np.arange(length, dtype=np.float32) * np.float32(first))
+                           + 0.04 * np.cos(np.arange(length, dtype=np.float32) * np.float32(second))).astype("<f4")
         reference_audio.tofile(output / "reference.f32")
         # Keep generation and codec traces in the same order as the Rust test.
         trace_enabled["value"] = False
         reference_codes, _ = codec.encode(torch.from_numpy(reference_audio)[None, None])
         trace_enabled["value"] = True
         reference_codes = reference_codes[0].transpose(0, 1).tolist()
-        for name, text, ref_text in [
+        specifications = [
             ("english", "Hello world.", None),
             ("unicode", "  你好，世界！\tCafé\u0301  日本語。\n", None),
             ("reference", "欢迎使用语音合成。", "  A short reference.\n"),
-        ]:
-            codes = torch.tensor(reference_codes).T if ref_text else None
+        ] if suite == "original" else [
+            ("english", "One, two, three.", None),
+            ("unicode", "  今天气真好，Café！\t日本語。\n", None),
+            ("reference", "模型量化验证。", "A different reference."),
+        ]
+        for name, text, ref_text in specifications:
+            fixed_history = next((c for c in histories if c["name"] == name), None) if histories else None
+            prompt_codes = fixed_history["reference_codes"] if fixed_history else reference_codes
+            codes = torch.tensor(prompt_codes).T if ref_text else None
             inputs = processor(text=text, reference_text=ref_text, reference_codes=codes)
             prompt, mask = model._prepare_prompt(**inputs)
             context["step"] = 0
-            result = model.generate(input_ids=prompt, attention_mask=mask, max_new_tokens=frames,
+            greedy = None
+            if fixed_history:
+                trace_enabled["value"] = False
+                began = time.perf_counter()
+                greedy = model.generate(input_ids=prompt, attention_mask=mask, max_new_tokens=frames,
+                                        do_sample=False, temperature=1.0)[0].T.tolist()
+                timings.append({"name": name, "generate_seconds": time.perf_counter() - began})
+                trace_enabled["value"] = True
+                context["step"] = 0
+            class ForceHistory:
+                def __init__(self, semantic):
+                    self.semantic = semantic
+                def __call__(self, ids, scores):
+                    target = fixed_history["frames"][context["step"] - 1][0 if self.semantic else ids.shape[-1]]
+                    if self.semantic:
+                        target += config.semantic_begin_id
+                    result = torch.full_like(scores, -torch.inf)
+                    result[:, target] = 0
+                    return result
+            forcing = {"logits_processor": [ForceHistory(True)], "codebook_logits_processor": [ForceHistory(False)]} if fixed_history else {}
+            result = model.generate(input_ids=prompt, attention_mask=mask, max_new_tokens=frames, **forcing,
                                     do_sample=False, temperature=1.0, top_k=50, top_p=0.95,
                                     stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(prompt.shape[-1] + frames)]))
             cases.append({"name": name, "text": text, "reference_text": ref_text,
-                          "reference_codes": reference_codes if ref_text else None,
+                          "reference_codes": prompt_codes if ref_text else None, "greedy_frames": greedy,
                           "prompt": prompt[0].T.tolist(), "frames": result[0].T.tolist()})
         fixed = [[0, 0, 1, 2, 3, 4, 5, 6, 1023, 4095],
                  [4095, 5000, 999, 31, 1, 26, 100, 200, 300, 400],
                  [1234, 25, 15, 8, 9, 10, 11, 12, 13, 14]]
+        if suite == "validation":
+            fixed = [[2345, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                     [3456, 5000, 999, 8, 17, 26, 135, 244, 353, 462],
+                     [123, 78, 56, 14, 33, 28, 12, 41, 19, 42]]
         waveform = codec.decode(torch.tensor(fixed).T[None])[0, 0]
         record("arktts.codec.audio", waveform)
         waveform.numpy().astype("<f4").tofile(output / "waveform.f32")
         codec_phase["value"] = "encode"
         encoded, _ = codec.encode(torch.from_numpy(reference_audio)[None, None])
         encoded = encoded[0].T.tolist()
-    (output / "cases.json").write_text(json.dumps({"max_frames": frames, "cases": cases, "fixed_codes": fixed, "reference_codes": encoded}, ensure_ascii=False, indent=2))
+    codec_f16 = codec_gguf and "F16.gguf" in str(codec_gguf) and "BF16.gguf" not in str(codec_gguf)
+    (output / "performance.json").write_text(json.dumps(timings, indent=2))
+    (output / "cases.json").write_text(json.dumps({"max_frames": frames,
+        "waveform_max_abs": 0.001 if codec_f16 else (0.006 if main_gguf else 0.0002),
+        "waveform_rmse": 0.0001 if codec_f16 else (0.001 if main_gguf else 0.00002),
+        "exact_reference_codes": not main_gguf, "cases": cases, "fixed_codes": fixed, "reference_codes": encoded}, ensure_ascii=False, indent=2))
     (output / "trace.json").write_text(json.dumps(records, ensure_ascii=False, indent=2))
     print(json.dumps({"cases": len(cases), "frames": [len(c["frames"]) for c in cases], "checkpoints": len(records), "samples": waveform.numel()}, indent=2))
 
@@ -140,5 +192,9 @@ if __name__ == "__main__":
     parser.add_argument("model_dir", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--frames", type=int, default=4)
+    parser.add_argument("--main-gguf", type=Path)
+    parser.add_argument("--codec-gguf", type=Path)
+    parser.add_argument("--history", type=Path, help="fixed-history cases.json for lossy checkpoint comparisons")
+    parser.add_argument("--suite", choices=("original", "validation"), default="original")
     args = parser.parse_args()
-    main(args.model_dir, args.output, args.frames)
+    main(args.model_dir, args.output, args.frames, args.main_gguf, args.codec_gguf, args.history, args.suite)

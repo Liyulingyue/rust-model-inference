@@ -1,4 +1,5 @@
 use super::{trace, Matrix};
+use crate::compute::linear::LinearExecutor;
 use crate::core::tensor::TensorSource;
 use rayon::prelude::*;
 
@@ -115,7 +116,18 @@ impl<'a> Transformer<'a> {
         normalize(hidden, &self.norm, self.shape.epsilon)
     }
 
-    pub fn forward(&self, mut hidden: Vec<f32>, cache: &mut Cache) -> Result<Vec<f32>, String> {
+    pub fn matrices(&self) -> impl Iterator<Item = &Matrix<'a>> {
+        self.layers
+            .iter()
+            .flat_map(|l| [&l.qkv, &l.output, &l.gate, &l.up, &l.down])
+    }
+
+    pub fn forward(
+        &self,
+        mut hidden: Vec<f32>,
+        cache: &mut Cache,
+        linear: &mut LinearExecutor<'_, '_>,
+    ) -> Result<Vec<f32>, String> {
         let s = self.shape;
         if hidden.is_empty() || hidden.len() % s.width != 0 {
             return Err("invalid ArkTTS transformer input".into());
@@ -138,7 +150,7 @@ impl<'a> Transformer<'a> {
         )?;
         for (index, layer) in self.layers.iter().enumerate() {
             let normalized = normalize(&hidden, &layer.norm1, s.epsilon);
-            let qkv = layer.qkv.forward(&normalized);
+            let qkv = layer.qkv.forward(&normalized, linear)?;
             let q_width = s.heads * 64;
             let kv_width = s.kv * 64;
             let mut query = Vec::with_capacity(frames * q_width);
@@ -183,17 +195,17 @@ impl<'a> Transformer<'a> {
                         }
                     }
                 });
-            let update = layer.output.forward(&attention);
+            let update = layer.output.forward(&attention, linear)?;
             for (i, (out, update)) in hidden.iter_mut().zip(update).enumerate() {
                 *out += update * layer.attn_scale[i % s.width];
             }
             let normalized = normalize(&hidden, &layer.norm2, s.epsilon);
-            let mut gate = layer.gate.forward(&normalized);
-            let up = layer.up.forward(&normalized);
+            let mut gate = layer.gate.forward(&normalized, linear)?;
+            let up = layer.up.forward(&normalized, linear)?;
             for (gate, up) in gate.iter_mut().zip(up) {
                 *gate = crate::ops::silu(*gate) * up;
             }
-            let update = layer.down.forward(&gate);
+            let update = layer.down.forward(&gate, linear)?;
             for (i, (out, update)) in hidden.iter_mut().zip(update).enumerate() {
                 *out += update * layer.ffn_scale[i % s.width];
             }

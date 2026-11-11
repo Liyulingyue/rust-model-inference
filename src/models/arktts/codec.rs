@@ -1,6 +1,7 @@
 //! Published causal codec; buffers are time-major [frames, channels].
 use super::transformer::{Cache, Shape, Transformer};
 use super::{config, trace, Frame, Matrix, CONTEXT, SAMPLES_PER_FRAME};
+use crate::compute::{linear::LinearExecutor, ComputePolicy};
 use crate::core::tensor::{load_f32_tensor, require_tensor_type, GGMLType, TensorSource};
 use crate::models::breeze::CausalConv;
 use crate::models::qwen3::tts::codec::conv::{conv_transpose1d_causal, ConvTranspose1dState};
@@ -212,7 +213,11 @@ impl<'a> Encoder<'a> {
             output: conv(s, "encoder.block.6", 1024, 1024, 3, 1, 1, 1)?,
         })
     }
-    fn apply(&self, audio: &[f32]) -> Result<Vec<f32>, String> {
+    fn apply(
+        &self,
+        audio: &[f32],
+        linear: &mut LinearExecutor<'_, '_>,
+    ) -> Result<Vec<f32>, String> {
         let mut padded = audio.to_vec();
         padded.resize(
             audio.len().div_ceil(SAMPLES_PER_FRAME) * SAMPLES_PER_FRAME,
@@ -226,9 +231,11 @@ impl<'a> Encoder<'a> {
             snake.apply(&mut x)?;
             x = down.forward(&x)?;
             if index == 3 {
-                x = self
-                    .transformer
-                    .normalize(&self.transformer.forward(x, &mut Cache::default())?);
+                x = self.transformer.normalize(&self.transformer.forward(
+                    x,
+                    &mut Cache::default(),
+                    linear,
+                )?);
             }
         }
         self.snake.apply(&mut x)?;
@@ -255,7 +262,11 @@ impl<'a> ConvNeXt<'a> {
             gamma: tensor(s, &format!("{p}.gamma"), &[1024])?,
         })
     }
-    fn apply(&self, mut x: Vec<f32>) -> Result<Vec<f32>, String> {
+    fn apply(
+        &self,
+        mut x: Vec<f32>,
+        linear: &mut LinearExecutor<'_, '_>,
+    ) -> Result<Vec<f32>, String> {
         let depth = self.depth.forward(&x)?;
         let mut normalized = vec![0.0; depth.len()];
         for (out, row) in normalized
@@ -264,11 +275,11 @@ impl<'a> ConvNeXt<'a> {
         {
             crate::ops::layer_norm(row, &self.norm, &self.bias, 1e-6, out);
         }
-        let mut branch = self.first.forward(&normalized);
+        let mut branch = self.first.forward(&normalized, linear)?;
         for value in &mut branch {
             *value = crate::ops::gelu_erf(*value);
         }
-        let branch = self.second.forward(&branch);
+        let branch = self.second.forward(&branch, linear)?;
         for (i, (out, add)) in x.iter_mut().zip(branch).enumerate() {
             *out += add * self.gamma[i % 1024];
         }
@@ -415,6 +426,8 @@ impl Decoder {
 }
 
 pub struct Codec<'a> {
+    compute: ComputePolicy,
+    threads: usize,
     pub(super) bundle: String,
     encoder: Encoder<'a>,
     down: Vec<(CausalConv, ConvNeXt<'a>)>,
@@ -426,6 +439,18 @@ pub struct Codec<'a> {
 }
 impl<'a> Codec<'a> {
     pub fn from_source(s: &'a dyn TensorSource) -> Result<Self, String> {
+        Self::from_source_with_compute(s, 1, ComputePolicy::legacy())
+    }
+
+    pub fn from_source_with_compute(
+        s: &'a dyn TensorSource,
+        threads: usize,
+        compute: ComputePolicy,
+    ) -> Result<Self, String> {
+        super::validate_compute(compute)?;
+        if threads == 0 {
+            return Err("ArkTTS threads must be positive".into());
+        }
         config(s, "arktts_codec")?;
         let mut down = Vec::new();
         let mut up = Vec::new();
@@ -454,6 +479,8 @@ impl<'a> Codec<'a> {
             )?);
         }
         Ok(Self {
+            compute,
+            threads,
             bundle: super::bundle(s)?,
             encoder: Encoder::load(s)?,
             down,
@@ -466,14 +493,22 @@ impl<'a> Codec<'a> {
     }
 
     pub fn encode(&self, audio: &[f32]) -> Result<Vec<Frame>, String> {
-        let _scope = crate::compute::ComputePolicy::Cpu.cpu_scope();
+        let _scope = self.compute.cpu_scope();
         if audio.is_empty()
             || audio.len() > CONTEXT * SAMPLES_PER_FRAME
             || audio.iter().any(|v| !v.is_finite())
         {
             return Err("ArkTTS codec requires finite nonempty mono 44100 Hz audio within 2048 codec frames".into());
         }
-        let mut x = self.encoder.apply(audio)?;
+        let matrices = self
+            .encoder
+            .transformer
+            .matrices()
+            .chain(self.pre.matrices())
+            .chain(self.down.iter().flat_map(|(_, n)| [&n.first, &n.second]))
+            .collect();
+        let mut linear = super::linear(matrices, self.compute, self.threads)?;
+        let mut x = self.encoder.apply(audio, &mut linear)?;
         trace(
             "arktts.codec.encoder",
             None,
@@ -482,11 +517,11 @@ impl<'a> Codec<'a> {
             &x,
         )?;
         for (conv, next) in &self.down {
-            x = next.apply(conv.forward(&x)?)?;
+            x = next.apply(conv.forward(&x)?, &mut linear)?;
         }
         x = self
             .pre
-            .normalize(&self.pre.forward(x, &mut Cache::default())?);
+            .normalize(&self.pre.forward(x, &mut Cache::default(), &mut linear)?);
         trace("arktts.codec.pre", None, None, &[x.len() / 1024, 1024], &x)?;
         let mut frames = vec![[0; 10]; x.len() / 1024];
         for (index, codebook) in self.codebooks.iter().enumerate() {
@@ -506,13 +541,19 @@ impl<'a> Codec<'a> {
     }
 
     pub fn decode(&self, frames: &[Frame]) -> Result<Vec<f32>, String> {
-        let _scope = crate::compute::ComputePolicy::Cpu.cpu_scope();
+        let _scope = self.compute.cpu_scope();
         if frames.len() > CONTEXT {
             return Err("ArkTTS codec exceeds 2048 frames".into());
         }
         if frames.is_empty() {
             return Ok(Vec::new());
         }
+        let matrices = self
+            .post
+            .matrices()
+            .chain(self.up.iter().flat_map(|(_, n)| [&n.first, &n.second]))
+            .collect();
+        let mut linear = super::linear(matrices, self.compute, self.threads)?;
         let mut x = vec![0.0; frames.len() * 1024];
         for (index, codebook) in self.codebooks.iter().enumerate() {
             let codes = frames.iter().map(|frame| frame[index]).collect::<Vec<_>>();
@@ -530,10 +571,10 @@ impl<'a> Codec<'a> {
         )?;
         x = self
             .post
-            .normalize(&self.post.forward(x, &mut Cache::default())?);
+            .normalize(&self.post.forward(x, &mut Cache::default(), &mut linear)?);
         trace("arktts.codec.post", None, None, &[frames.len(), 1024], &x)?;
         for (up, next) in &self.up {
-            x = next.apply(up.apply(&x)?)?;
+            x = next.apply(up.apply(&x)?, &mut linear)?;
         }
         trace(
             "arktts.codec.upsampled",

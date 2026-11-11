@@ -35,6 +35,12 @@ class ComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "invalid checkpoint"):
             self.check([1.0], [float("nan")])
 
+    def test_precision_profiles_are_explicit_and_unknown_profiles_are_rejected(self):
+        from tools.oracle.arktts.compare import TOLERANCES
+        self.assertEqual(set(TOLERANCES), {"float", "quantized", "f16"})
+        with self.assertRaisesRegex(ValueError, "profile"):
+            compare("unused", "unused", profile="typo")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,257 @@
+{
+  "date": "2026-11-11",
+  "host": "Apple M3 Max, macOS 27.0.1 arm64",
+  "threads": 4,
+  "profile": "release-fast",
+  "frames": 4,
+  "method": "one CLI plain+clone and one HTTP WAV/PCM plain+clone per format/backend; timings include model/server loading and are observational, not a throughput gate",
+  "rows": [
+    {
+      "format": "bf16",
+      "compute": "cpu",
+      "cli_seconds_median": 6.448415833496256,
+      "http_seconds_median": 9.560080021008616,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 0.6018791670212522
+    },
+    {
+      "format": "bf16",
+      "compute": "auto",
+      "cli_seconds_median": 10.994262833497487,
+      "http_seconds_median": 11.73027085448848,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 0.6018791670212522
+    },
+    {
+      "format": "bf16",
+      "compute": "vulkan",
+      "cli_seconds_median": 6.733773624990135,
+      "http_seconds_median": 5.740304082981311,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 0.6018791670212522
+    },
+    {
+      "format": "f16",
+      "compute": "cpu",
+      "cli_seconds_median": 4.964541166002164,
+      "http_seconds_median": 3.5951219789567403,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 0.4521373329916969
+    },
+    {
+      "format": "f16",
+      "compute": "auto",
+      "cli_seconds_median": 5.920116250519641,
+      "http_seconds_median": 6.1229516665043775,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 0.4521373329916969
+    },
+    {
+      "format": "f16",
+      "compute": "vulkan",
+      "cli_seconds_median": 6.865220020990819,
+      "http_seconds_median": 6.831096978974529,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 0.4521373329916969
+    },
+    {
+      "format": "f32",
+      "compute": "cpu",
+      "cli_seconds_median": 23.02598385399324,
+      "http_seconds_median": 15.896788416488562,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 0.6021963340463117
+    },
+    {
+      "format": "f32",
+      "compute": "auto",
+      "cli_seconds_median": 7.112782291485928,
+      "http_seconds_median": 6.318652229500003,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 0.6021963340463117
+    },
+    {
+      "format": "f32",
+      "compute": "vulkan",
+      "cli_seconds_median": 7.715616729488829,
+      "http_seconds_median": 7.2006876039959025,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 0.6021963340463117
+    },
+    {
+      "format": "q4_0",
+      "compute": "cpu",
+      "cli_seconds_median": 3.1760921670065727,
+      "http_seconds_median": 2.6659520209941547,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 1.6409862079890445
+    },
+    {
+      "format": "q4_0",
+      "compute": "auto",
+      "cli_seconds_median": 2.663995437033009,
+      "http_seconds_median": 1.8587519579741638,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 1.6409862079890445
+    },
+    {
+      "format": "q4_0",
+      "compute": "vulkan",
+      "cli_seconds_median": 2.9067398750048596,
+      "http_seconds_median": 2.5159656875184737,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 1.6409862079890445
+    },
+    {
+      "format": "q4_1",
+      "compute": "cpu",
+      "cli_seconds_median": 1.6818047704873607,
+      "http_seconds_median": 1.37832385400543,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 1.8965144579997286
+    },
+    {
+      "format": "q4_1",
+      "compute": "auto",
+      "cli_seconds_median": 2.64673037501052,
+      "http_seconds_median": 1.8466683749866206,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 1.8965144579997286
+    },
+    {
+      "format": "q4_1",
+      "compute": "vulkan",
+      "cli_seconds_median": 2.821982958499575,
+      "http_seconds_median": 2.5395596039888915,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 1.8965144579997286
+    },
+    {
+      "format": "q4_k",
+      "compute": "cpu",
+      "cli_seconds_median": 2.537952291488182,
+      "http_seconds_median": 2.979917167016538,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 1.4933374999673106
+    },
+    {
+      "format": "q4_k",
+      "compute": "auto",
+      "cli_seconds_median": 3.920610166504048,
+      "http_seconds_median": 4.50213916649227,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 1.4933374999673106
+    },
+    {
+      "format": "q4_k",
+      "compute": "vulkan",
+      "cli_seconds_median": 4.621347396023339,
+      "http_seconds_median": 4.40363893751055,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 1.4933374999673106
+    },
+    {
+      "format": "q5_k",
+      "compute": "cpu",
+      "cli_seconds_median": 3.5192555829708,
+      "http_seconds_median": 3.2565284169686493,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 1.0384435000014491
+    },
+    {
+      "format": "q5_k",
+      "compute": "auto",
+      "cli_seconds_median": 3.3508669795119204,
+      "http_seconds_median": 4.179872020991752,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 1.0384435000014491
+    },
+    {
+      "format": "q5_k",
+      "compute": "vulkan",
+      "cli_seconds_median": 4.6991762295074295,
+      "http_seconds_median": 4.40935385398916,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 1.0384435000014491
+    },
+    {
+      "format": "q6_k",
+      "compute": "cpu",
+      "cli_seconds_median": 3.766495291463798,
+      "http_seconds_median": 2.871905895473901,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 1.0386715419590473
+    },
+    {
+      "format": "q6_k",
+      "compute": "auto",
+      "cli_seconds_median": 5.031235812522937,
+      "http_seconds_median": 3.739609832991846,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 1.0386715419590473
+    },
+    {
+      "format": "q6_k",
+      "compute": "vulkan",
+      "cli_seconds_median": 4.646619749983074,
+      "http_seconds_median": 4.344280041987076,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 1.0386715419590473
+    },
+    {
+      "format": "q8_0",
+      "compute": "cpu",
+      "cli_seconds_median": 3.062250020506326,
+      "http_seconds_median": 2.0989936664991546,
+      "gpu_dense_calls": 0,
+      "host_linear_calls": 8736,
+      "official_generate_seconds_median": 0.6530757079599425
+    },
+    {
+      "format": "q8_0",
+      "compute": "auto",
+      "cli_seconds_median": 4.083390416519251,
+      "http_seconds_median": 1.9114132710092235,
+      "gpu_dense_calls": 1188,
+      "host_linear_calls": 7548,
+      "official_generate_seconds_median": 0.6530757079599425
+    },
+    {
+      "format": "q8_0",
+      "compute": "vulkan",
+      "cli_seconds_median": 3.221859729499556,
+      "http_seconds_median": 3.2534122295037378,
+      "gpu_dense_calls": 8736,
+      "host_linear_calls": 0,
+      "official_generate_seconds_median": 0.6530757079599425
+    }
+  ],
+  "limits": [
+    "No cargo --release run in this record.",
+    "GPU path accelerates dense projections only; host codec/attention dominate some combinations."
+  ]
+}

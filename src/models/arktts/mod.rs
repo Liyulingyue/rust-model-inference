@@ -3,13 +3,16 @@
 pub mod codec;
 mod transformer;
 
+use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
 use crate::compute::ComputePolicy;
 use crate::core::tensor::{
     load_f32_tensor, require_tensor_type, GGMLType, MetaValue, TensorSource,
 };
+use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
+use std::sync::Arc;
 use transformer::{Cache, Shape, Transformer};
 
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -39,8 +42,23 @@ impl<'a> Matrix<'a> {
             s,
             &name,
             &[input as u64, output as u64],
-            &[GGMLType::BF16, GGMLType::F32],
+            &[
+                GGMLType::F32,
+                GGMLType::F16,
+                GGMLType::BF16,
+                GGMLType::Q8_0,
+                GGMLType::Q4_0,
+                GGMLType::Q4_1,
+                GGMLType::Q4K,
+                GGMLType::Q5K,
+                GGMLType::Q6K,
+            ],
         )?;
+        if !input.is_multiple_of(kind.type_traits().0) {
+            return Err(format!(
+                "ArkTTS matrix {name} has an unaligned {kind:?} row"
+            ));
+        }
         let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
             s.tensor_slice(&name).unwrap(),
             kind,
@@ -59,11 +77,24 @@ impl<'a> Matrix<'a> {
         })
     }
 
-    fn forward(&self, input: &[f32]) -> Vec<f32> {
+    fn forward(
+        &self,
+        input: &[f32],
+        linear: &mut LinearExecutor<'_, '_>,
+    ) -> Result<Vec<f32>, String> {
+        if input.is_empty() || !input.len().is_multiple_of(self.weight.n_in) {
+            return Err("invalid ArkTTS projection input".into());
+        }
         let mut output = vec![0.0; input.len() / self.weight.n_in * self.weight.n_out];
-        self.weight
-            .kernel
-            .forward_batched(input, &mut output, self.weight.n_in, self.weight.n_out);
+        let id = linear.id_for(&self.weight).map_err(|e| e.to_string())?;
+        for (x, y) in input
+            .chunks(self.weight.n_in * linear.max_rows())
+            .zip(output.chunks_mut(self.weight.n_out * linear.max_rows()))
+        {
+            linear
+                .run(id, x, x.len() / self.weight.n_in, y)
+                .map_err(|e| e.to_string())?;
+        }
         if !self.bias.is_empty() {
             for row in output.chunks_exact_mut(self.bias.len()) {
                 for (v, bias) in row.iter_mut().zip(&self.bias) {
@@ -71,7 +102,7 @@ impl<'a> Matrix<'a> {
                 }
             }
         }
-        output
+        Ok(output)
     }
 
     fn embed(&self, token: u32) -> Vec<f32> {
@@ -91,13 +122,31 @@ fn vector(s: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, Stri
 }
 
 pub fn validate_compute(policy: ComputePolicy) -> Result<(), String> {
-    if policy == ComputePolicy::Vulkan {
-        return Err("ArkTTS has no calibrated Vulkan path; use --compute cpu or auto".into());
+    if policy == ComputePolicy::Vulkan && crate::ops::scalar_mode() {
+        return Err("ArkTTS strict Vulkan execution is incompatible with scalar mode".into());
     }
-    if policy == ComputePolicy::Auto {
-        eprintln!("compute requested=Auto backend=Cpu model=arktts (Vulkan path not calibrated)");
-    }
-    Ok(())
+    policy.check_build()
+}
+
+fn linear<'m, 'w>(
+    matrices: Vec<&'m Matrix<'w>>,
+    compute: ComputePolicy,
+    threads: usize,
+) -> Result<LinearExecutor<'m, 'w>, String> {
+    // Bound staging even for the 155776-row tied vocabulary head.
+    LinearExecutor::new(
+        compute,
+        matrices
+            .into_iter()
+            .map(|m| LinearBinding {
+                weight: &m.weight,
+                mode: LinearMode::Prepared,
+            })
+            .collect(),
+        32,
+        Arc::new(ComputePool::new(threads)),
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn config(s: &dyn TensorSource, arch: &str) -> Result<Value, String> {
@@ -188,10 +237,21 @@ pub struct Model<'a> {
     slow: Transformer<'a>,
     fast: Transformer<'a>,
     pool: rayon::ThreadPool,
+    compute: ComputePolicy,
+    threads: usize,
 }
 
 impl<'a> Model<'a> {
     pub fn from_source(s: &'a dyn TensorSource, threads: usize) -> Result<Self, String> {
+        Self::from_source_with_compute(s, threads, ComputePolicy::legacy())
+    }
+
+    pub fn from_source_with_compute(
+        s: &'a dyn TensorSource,
+        threads: usize,
+        compute: ComputePolicy,
+    ) -> Result<Self, String> {
+        validate_compute(compute)?;
         config(s, "arktts")?;
         if threads == 0 {
             return Err("ArkTTS threads must be positive".into());
@@ -222,6 +282,8 @@ impl<'a> Model<'a> {
             window: None,
         };
         Ok(Self {
+            compute,
+            threads,
             bundle: bundle(s)?,
             tokenizer,
             embeddings: Matrix::load(s, "embeddings", WIDTH, VOCAB, false)?,
@@ -344,6 +406,40 @@ impl<'a> Model<'a> {
         max_frames: usize,
         sampling: Sampling,
     ) -> Result<Vec<Frame>, String> {
+        self.generate_impl(text, reference, max_frames, sampling, None)
+    }
+
+    /// Compare lossy kernels on the same history without token divergence hiding the first error.
+    #[cfg(feature = "parity-trace")]
+    pub fn replay(
+        &self,
+        text: &str,
+        reference: Option<(&str, &[Frame])>,
+        frames: &[Frame],
+    ) -> Result<Vec<Frame>, String> {
+        if frames.iter().flatten().any(|&id| id >= 4096) {
+            return Err("invalid ArkTTS replay frame".into());
+        }
+        self.generate_impl(
+            text,
+            reference,
+            frames.len(),
+            Sampling {
+                temperature: 0.0,
+                ..Default::default()
+            },
+            Some(frames),
+        )
+    }
+
+    fn generate_impl(
+        &self,
+        text: &str,
+        reference: Option<(&str, &[Frame])>,
+        max_frames: usize,
+        sampling: Sampling,
+        history: Option<&[Frame]>,
+    ) -> Result<Vec<Frame>, String> {
         sampling.validate()?;
         let prompt = self.prompt(text, reference)?;
         if max_frames == 0 || max_frames > CONTEXT - prompt.len() {
@@ -354,20 +450,29 @@ impl<'a> Model<'a> {
             &prompt.iter().map(|c| c[0]).collect::<Vec<_>>(),
         )?;
         self.pool.install(|| {
-            let _scope = ComputePolicy::Cpu.cpu_scope();
+            let _scope = self.compute.cpu_scope();
+            let mut matrices = vec![&self.embeddings, &self.fast_output];
+            matrices.extend(self.slow.matrices());
+            matrices.extend(self.fast.matrices());
+            let mut linear = linear(matrices, self.compute, self.threads)?;
             let mut rng = rand::rngs::StdRng::seed_from_u64(sampling.seed);
             let mut cache = Cache::default();
-            let mut hidden = self.slow.forward(self.embed(&prompt)?, &mut cache)?;
+            let mut hidden = self
+                .slow
+                .forward(self.embed(&prompt)?, &mut cache, &mut linear)?;
             let mut frames = Vec::new();
             let mut previous: Option<[u32; 10]> = None;
             for step in 0..max_frames {
                 let normalized = self.slow.normalize(&hidden[hidden.len() - WIDTH..]);
-                let logits = self.embeddings.forward(&normalized);
+                let logits = self.embeddings.forward(&normalized, &mut linear)?;
                 trace("arktts.slow.logits", None, Some(step), &[VOCAB], &logits)?;
                 let candidates: Vec<(u32, f32)> = std::iter::once((EOS, logits[EOS as usize]))
                     .chain((0..4096).map(|id| (SEMANTIC + id, logits[(SEMANTIC + id) as usize])))
                     .collect();
                 let mut semantic = draw(&candidates, sampling, &mut rng)?;
+                if let Some(history) = history {
+                    semantic = SEMANTIC + history[step][0];
+                }
                 if sampling.temperature > 0.0 {
                     let high = draw(
                         &candidates,
@@ -388,13 +493,17 @@ impl<'a> Model<'a> {
                 let mut frame = [0; 10];
                 frame[0] = semantic - SEMANTIC;
                 let mut fast_cache = Cache::default();
-                self.fast.forward(normalized, &mut fast_cache)?;
+                self.fast
+                    .forward(normalized, &mut fast_cache, &mut linear)?;
                 for codebook in 1..10 {
                     let fast_hidden = self.fast.forward(
                         self.fast_embeddings.embed(frame[codebook - 1]),
                         &mut fast_cache,
+                        &mut linear,
                     )?;
-                    let logits = self.fast_output.forward(&self.fast.normalize(&fast_hidden));
+                    let logits = self
+                        .fast_output
+                        .forward(&self.fast.normalize(&fast_hidden), &mut linear)?;
                     trace(
                         "arktts.fast.logits",
                         Some(codebook),
@@ -411,6 +520,9 @@ impl<'a> Model<'a> {
                         sampling,
                         &mut rng,
                     )?;
+                    if let Some(history) = history {
+                        frame[codebook] = history[step][codebook];
+                    }
                 }
                 tokens("arktts.frame", &frame)?;
                 frames.push(frame);
@@ -424,7 +536,9 @@ impl<'a> Model<'a> {
                     let mut column = [0; 11];
                     column[0] = semantic;
                     column[1..].copy_from_slice(&frame);
-                    hidden = self.slow.forward(self.embed(&[column])?, &mut cache)?;
+                    hidden = self
+                        .slow
+                        .forward(self.embed(&[column])?, &mut cache, &mut linear)?;
                 }
             }
             Ok(frames)
@@ -443,7 +557,6 @@ impl<'a> Model<'a> {
             return Err("ArkTTS main and codec belong to different checkpoint bundles".into());
         }
         self.pool.install(|| {
-            let _scope = ComputePolicy::Cpu.cpu_scope();
             let codes = reference
                 .map(|(_, audio)| codec.encode(audio))
                 .transpose()?;
@@ -603,12 +716,22 @@ mod tests {
     #[test]
     fn projections_validate_dtype_shape_and_storage_before_running_native_kernels() {
         let mut source = Source::new("arktts");
-        assert_eq!(
-            Matrix::load(&source, "projection", 2, 2, false)
-                .unwrap()
-                .forward(&[1.0, 2.0]),
-            vec![5.0, 11.0]
-        );
+        {
+            let matrix = Matrix::load(&source, "projection", 2, 2, false).unwrap();
+            let mut executor = linear(vec![&matrix], ComputePolicy::Cpu, 2).unwrap();
+            assert_eq!(
+                matrix.forward(&[1.0, 2.0], &mut executor).unwrap(),
+                vec![5.0, 11.0]
+            );
+            assert_eq!(
+                matrix
+                    .forward(&[1.0, 2.0].repeat(33), &mut executor)
+                    .unwrap(),
+                [5.0, 11.0].repeat(33)
+            );
+            assert!(matrix.forward(&[1.0], &mut executor).is_err());
+            assert!(matrix.forward(&[f32::NAN, 2.0], &mut executor).is_err());
+        }
         source.info.dims = vec![4, 1];
         assert!(Matrix::load(&source, "projection", 2, 2, false).is_err());
         source.info.dims = vec![2, 2];
@@ -618,6 +741,103 @@ mod tests {
         source.info.ggml_type = GGMLType::I32;
         assert!(Matrix::load(&source, "projection", 2, 2, false).is_err());
     }
+    #[test]
+    fn projections_accept_shared_float_and_block_formats() {
+        for kind in [
+            GGMLType::F32,
+            GGMLType::F16,
+            GGMLType::BF16,
+            GGMLType::Q8_0,
+            GGMLType::Q4_0,
+            GGMLType::Q4_1,
+            GGMLType::Q4K,
+            GGMLType::Q5K,
+            GGMLType::Q6K,
+        ] {
+            let mut source = Source::new("arktts");
+            let (block, bytes) = kind.type_traits();
+            source.info.dims = vec![256, 2];
+            source.info.ggml_type = kind;
+            source.bytes = vec![0; 256 / block * 2 * bytes];
+            let matrix = Matrix::load(&source, "projection", 256, 2, false)
+                .unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+            assert_eq!(matrix.embed(1), vec![0.0; 256]);
+            drop(matrix);
+            source.bytes.pop();
+            assert!(Matrix::load(&source, "projection", 256, 2, false).is_err());
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a real Vulkan device"]
+    fn projections_submit_to_vulkan_and_match_cpu() {
+        let source = Source::new("arktts");
+        let matrix = Matrix::load(&source, "projection", 2, 2, false).unwrap();
+        let mut gpu = linear(vec![&matrix], ComputePolicy::Vulkan, 2).unwrap();
+        let mut cpu = linear(vec![&matrix], ComputePolicy::Cpu, 2).unwrap();
+        let context = gpu.vulkan_context().unwrap();
+        let before = context.submission_count();
+        let input = [0.1, -0.2].repeat(33);
+        let expected = matrix.forward(&input, &mut cpu).unwrap();
+        let actual = matrix.forward(&input, &mut gpu).unwrap();
+        assert!(context.submission_count() > before);
+        assert!(actual
+            .iter()
+            .zip(expected)
+            .all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    #[ignore = "requires real GGUFs and independent same-input projection fixtures"]
+    fn same_input_projections_match_independent_oracle() {
+        use std::path::Path;
+        let path = std::env::var("RMI_ARKTTS_PROJECTIONS").unwrap();
+        let cases: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let compute = match std::env::var("RMI_ARKTTS_COMPUTE").as_deref() {
+            Ok("vulkan") => ComputePolicy::Vulkan,
+            Ok("auto") => ComputePolicy::Auto,
+            _ => ComputePolicy::Cpu,
+        };
+        for case in cases.as_array().unwrap() {
+            let source = crate::open_model_source(
+                Path::new(case["gguf"].as_str().unwrap()),
+                crate::ComponentRole::Llm,
+            )
+            .unwrap();
+            let name = case["tensor"]
+                .as_str()
+                .unwrap()
+                .strip_suffix(".weight")
+                .unwrap();
+            let input: Vec<f32> = serde_json::from_value(case["input"].clone()).unwrap();
+            let expected: Vec<f32> = serde_json::from_value(case["output"].clone()).unwrap();
+            let n_in = case["n_in"].as_u64().unwrap() as usize;
+            let n_out = expected.len() / (input.len() / n_in);
+            let matrix = Matrix::load(source.as_ref(), name, n_in, n_out, false).unwrap();
+            let embedding: Vec<f32> = serde_json::from_value(case["embedding"].clone()).unwrap();
+            assert!(matrix
+                .embed(1)
+                .iter()
+                .zip(&embedding)
+                .all(|(a, b)| (a - b).abs() < 1e-6));
+            let mut linear = linear(vec![&matrix], compute, 4).unwrap();
+            let actual = matrix.forward(&input, &mut linear).unwrap();
+            let error = actual
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| f64::from(a - b).powi(2))
+                .sum::<f64>();
+            let norm = expected.iter().map(|b| f64::from(*b).powi(2)).sum::<f64>();
+            let relative = (error / norm.max(1e-20)).sqrt();
+            println!("{name} relative_rmse={relative:e}");
+            assert!(
+                relative < case["relative_limit"].as_f64().unwrap(),
+                "{name}: {relative}"
+            );
+        }
+    }
+
     #[test]
     fn sampling_filters_before_temperature_and_keeps_the_best_candidate() {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -643,6 +863,11 @@ mod tests {
         );
         assert!(draw(&[(0, f32::NAN)], p, &mut rng).is_err());
         assert!(Sampling { top_k: 0, ..p }.validate().is_err());
+        assert_eq!(
+            validate_compute(ComputePolicy::Vulkan).is_ok(),
+            cfg!(feature = "vulkan")
+        );
+        let _scalar = crate::ops::ScalarDispatchScope::new(true);
         assert!(validate_compute(ComputePolicy::Vulkan).is_err());
     }
     #[test]

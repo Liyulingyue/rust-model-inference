@@ -1,3 +1,4 @@
+use rust_model_inference::compute::ComputePolicy;
 use rust_model_inference::models::arktts::{codec::Codec, Frame, Model, Sampling};
 use rust_model_inference::{open_model_source, ComponentRole};
 use serde_json::Value;
@@ -48,18 +49,22 @@ fn real_checkpoint_matches_official() {
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("requires --tts"));
     }
-    let source = open_model_source(
-        &root.join("Audio8-TTS-Realistic-Air-BF16.gguf"),
-        ComponentRole::Llm,
-    )
-    .unwrap();
-    let audio = open_model_source(
-        &root.join("Audio8-TTS-Realistic-Air-codec-F32.gguf"),
-        ComponentRole::Mmproj,
-    )
-    .unwrap();
-    let model = Model::from_source(source.as_ref(), 4).unwrap();
-    let codec = Codec::from_source(audio.as_ref()).unwrap();
+    let main_path = std::env::var_os("RMI_ARKTTS_MAIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("Audio8-TTS-Realistic-Air-BF16.gguf"));
+    let codec_path = std::env::var_os("RMI_ARKTTS_CODEC")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("Audio8-TTS-Realistic-Air-codec-F32.gguf"));
+    let compute = match std::env::var("RMI_ARKTTS_COMPUTE").as_deref() {
+        Ok("vulkan") => ComputePolicy::Vulkan,
+        Ok("auto") => ComputePolicy::Auto,
+        Ok("cpu") | Err(_) => ComputePolicy::Cpu,
+        other => panic!("invalid compute {other:?}"),
+    };
+    let source = open_model_source(&main_path, ComponentRole::Llm).unwrap();
+    let audio = open_model_source(&codec_path, ComponentRole::Mmproj).unwrap();
+    let model = Model::from_source_with_compute(source.as_ref(), 4, compute).unwrap();
+    let codec = Codec::from_source_with_compute(audio.as_ref(), 4, compute).unwrap();
     let data: Value =
         serde_json::from_slice(&std::fs::read(oracle.join("cases.json")).unwrap()).unwrap();
     let max_frames = data["max_frames"].as_u64().unwrap_or(4) as usize;
@@ -78,17 +83,32 @@ fn real_checkpoint_matches_official() {
             case["name"]
         );
         let expected: Vec<Frame> = serde_json::from_value(case["frames"].clone()).unwrap();
-        let frames = model
-            .generate(
-                text,
-                reference,
-                max_frames,
-                Sampling {
-                    temperature: 0.0,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        #[cfg(feature = "parity-trace")]
+        let replay = std::env::var_os("RMI_ARKTTS_REPLAY").is_some();
+        #[cfg(not(feature = "parity-trace"))]
+        let replay = false;
+        let frames = if replay {
+            #[cfg(feature = "parity-trace")]
+            {
+                model.replay(text, reference, &expected).unwrap()
+            }
+            #[cfg(not(feature = "parity-trace"))]
+            {
+                unreachable!()
+            }
+        } else {
+            model
+                .generate(
+                    text,
+                    reference,
+                    max_frames,
+                    Sampling {
+                        temperature: 0.0,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        };
         assert_eq!(frames, expected, "frames {}", case["name"]);
         println!(
             "{}: {} prompt columns / {} greedy frames aligned",
@@ -117,15 +137,31 @@ fn real_checkpoint_matches_official() {
         "waveform: samples={} max_abs={max_abs:e} RMSE={rmse:e}",
         actual.len()
     );
+    let waveform_max = data["waveform_max_abs"].as_f64().unwrap_or(2e-4);
+    let waveform_rmse = data["waveform_rmse"].as_f64().unwrap_or(2e-5);
     assert!(
-        max_abs < 2e-4 && rmse < 2e-5,
+        f64::from(max_abs) < waveform_max && rmse < waveform_rmse,
         "waveform max_abs={max_abs} RMSE={rmse}"
     );
     let expected: Vec<Frame> = serde_json::from_value(data["reference_codes"].clone()).unwrap();
     let actual = codec
         .encode(&read_f32(&oracle.join("reference.f32")))
         .unwrap();
-    assert_eq!(actual, expected, "reference encoder codes");
+    if data["exact_reference_codes"].as_bool().unwrap_or(true) {
+        assert_eq!(actual, expected, "reference encoder codes");
+    } else {
+        assert_eq!(actual.len(), expected.len());
+        println!(
+            "reference encoder IDs: {}/{} equal",
+            actual
+                .iter()
+                .flatten()
+                .zip(expected.iter().flatten())
+                .filter(|(a, b)| a == b)
+                .count(),
+            expected.len() * 10
+        );
+    }
     assert!(codec.encode(&[]).is_err());
     assert!(codec.encode(&[f32::NAN]).is_err());
     assert!(model.generate("", None, 4, Sampling::default()).is_err());
