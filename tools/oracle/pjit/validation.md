@@ -12,6 +12,17 @@ converting at the last successful observation. Exported GGUF hashes were not
 collected before the connection was lost; source hashes do not substitute for
 them. No model weights were downloaded onto the Mac.
 
+On the replacement host, all source files were downloaded again directly on
+Linux, and their size/revision/SHA256 manifest was retrieved to
+[source_hashes.json](source_hashes.json). The final rebased code passed 8 targeted
+tests (3 asset-dependent tests ignored). DiT F32/F16/BF16/Q8_0/Q4_0/Q4_1 and text
+F32/F16/BF16/Q8_0 export completion was observed; later conversion completion is
+unknown. A remote-only parallel scheduler reused the shared quantizers, with
+all six formats first checked for exact full-tensor versus tiled payload bytes
+on a 257×2560 BF16 fixture. The replacement endpoint subsequently returned
+`Connection refused` too. No successful final release build, completed transport
+matrix or post-fix sampler result was observed there.
+
 Runtime changes are confined to the new model module, necessary architecture
 registration, CLI orchestration and an image-generation HTTP capability. Shared
 kernels and other model implementations are unchanged. Cargo metadata confirms
@@ -54,8 +65,15 @@ CPU activation-QDQ was then added. Q8 still measures NRMSE 0.0601911 / cosine
 0.9981898 and fails. Its patch checkpoint matches to NRMSE 6.8e-7, first image
 refiner to 0.000162742, block 21 to 0.0313247. This locates gradual divergence;
 it does not prove every shared kernel is correct. The same-input projection
-replay script was added to resolve this, but no successful result was observed
-before the SSH loss. Q4/K activation-QDQ and quantized caption references remain
+replay was subsequently completed for Q8 on the replacement host: all **217
+projections passed**, with worst NRMSE **5.40955e-7** and cosine
+**0.999999999999854**. Each reference receives the exact traced Rust projection
+input, independently decodes the same GGUF weights and applies NumPy activation
+QDQ. This rules out a large local projection error for that fixture and supports
+propagation across quantization boundaries as the source of the full-forward
+drift; it does not make the failing end-to-end gate pass. Only its terminal
+summary was retrieved before the second disconnect. Q4/K projection replay,
+activation-QDQ and quantized caption references remain
 unverified. Do not describe the weight-only comparison as full kernel alignment.
 Weight-only quality loss versus F32 is reported separately in
 [results_snapshot.json](results_snapshot.json), including large Q4 degradation.
@@ -196,7 +214,8 @@ was changed to force parity.
 1. Adapter owner: restore remote access, collect export hashes and raw artifacts,
    finish K text and strict Vulkan CLI/HTTP checks, verify Auto fallback with no
    device and strict failure, rerun final code against real weights.
-2. Adapter numerical owner: complete same-input projection replay and every
+2. Adapter numerical owner: extend the successful Q8 same-input projection replay
+   to Q4/K formats and complete every
    activation-QDQ reference; fix a demonstrated local defect if found. Shared
    compute owner must handle any demonstrated prepared-kernel discrepancy with
    old-model baselines before changing shared arithmetic. All failing rows stay

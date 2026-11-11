@@ -24,10 +24,15 @@ pipeline. The new adapter does not change the existing Qwen implementation.
 
 Numerical status: float DiT single-forward checks passed; quantized full-forward
 and the recorded seven-step sampler did not meet the predeclared NRMSE gate.
+Q8 same-input independent replay passed all 217 projections (worst NRMSE
+5.41e-7); the end-to-end failure remains a separate open gate.
 Tokenizer contracts passed. Small CLI/HTTP CPU and Auto runs passed for the
 first six formats. Remaining device transport checks, K text checks, final
 multi-step rerun, default-size quality and warm performance checks were blocked
-when the authorized SSH host stopped accepting connections. This model is not
+when the authorized SSH host stopped accepting connections.
+The replacement host also became unreachable during validation; its source
+hash manifest and observed Q8 replay summary are preserved in the Oracle records.
+This model is not
 listed as fully verified. Exact results and the complete matrix are in
 [validation.md](../../tools/oracle/pjit/validation.md).
 
