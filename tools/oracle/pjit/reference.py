@@ -61,10 +61,12 @@ def main():
         import gguf
         from gguf.quants import dequantize
         reader=gguf.GGUFReader(str(a.gguf));state=model.state_dict()
-        for tensor in reader.tensors:
-            values=dequantize(tensor.data,tensor.tensor_type).copy()
-            state[tensor.name]=torch.from_numpy(values).reshape(state[tensor.name].shape).to(a.device)
-        model.load_state_dict(state,strict=True)
+        if len(reader.tensors)!=len(state) or {t.name for t in reader.tensors}!=set(state):
+            raise ValueError('GGUF must contain the exact released DiT parameter inventory')
+        with torch.no_grad():
+            for tensor in reader.tensors:
+                values=dequantize(tensor.data,tensor.tensor_type).copy()
+                state[tensor.name].copy_(torch.from_numpy(values).reshape(state[tensor.name].shape))
         if a.activation_quant:
             from tools.oracle.thx02.oracle import activation_roundtrip
             def quantize(kind):

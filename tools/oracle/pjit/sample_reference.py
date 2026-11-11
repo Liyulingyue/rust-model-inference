@@ -1,4 +1,4 @@
-"""Multi-step official F32 DiT/APG replay from identical Rust text/noise traces."""
+"""Multi-step official DiT/APG replay from identical Rust text/noise traces."""
 import argparse
 import json
 from pathlib import Path
@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--oracle', type=Path, required=True)
     parser.add_argument('--weights', type=Path, required=True)
+    parser.add_argument('--gguf', type=Path, help='independently decode the same stored weights')
     parser.add_argument('--trace', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--guidance', type=float, default=15.)
@@ -47,6 +48,16 @@ def main():
         text[index, :len(caption)] = torch.from_numpy(caption).to('cuda')
     lengths = torch.tensor([len(c) for c in captions], dtype=torch.int32, device='cuda')
     model = PyramidJiT.from_pretrained(str(args.weights), device='cuda')
+    if args.gguf:
+        import gguf
+        state = model.state_dict()
+        reader = gguf.GGUFReader(str(args.gguf))
+        if len(reader.tensors) != len(state) or {t.name for t in reader.tensors} != set(state):
+            raise ValueError('GGUF must contain the exact released DiT parameter inventory')
+        with torch.no_grad():
+            for tensor in reader.tensors:
+                values = gguf.quants.dequantize(tensor.data, tensor.tensor_type).copy()
+                state[tensor.name].copy_(torch.from_numpy(values).reshape(state[tensor.name].shape))
     x = torch.from_numpy(noise).to('cuda')[None, :, None]
     momentum = torch.zeros_like(x)
     rust_x, rust_momentum = x.clone(), momentum.clone()

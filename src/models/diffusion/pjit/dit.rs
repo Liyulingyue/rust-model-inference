@@ -13,7 +13,8 @@ use crate::ops::{
 };
 use std::{collections::HashMap, sync::Arc};
 
-const ROWS: usize = 64;
+// Amortize synchronous device submissions at the default 1024px resolution.
+const ROWS: usize = 256;
 const TYPES: &[GGMLType] = &[
     GGMLType::F32,
     GGMLType::F16,
