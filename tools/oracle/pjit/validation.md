@@ -18,6 +18,7 @@ kernels and other model implementations are unchanged. Cargo metadata confirms
 all nine existing binary target names/paths remain unchanged. The branch was
 rebased onto upstream `d16dc16d96126351b10c13c8458f968c5c57b2e7` before submission;
 recorded historical/full-suite baselines refer to the starting commit in plan.md.
+The existing x86 CI job also runs the new model/CLI and HTTP validation tests.
 
 The authorized Linux host reported EPYC 9334 (128 logical CPUs), approximately
 500 GB host memory, RADV gfx1100, 48 exposed CUs and approximately 48 GB VRAM.
