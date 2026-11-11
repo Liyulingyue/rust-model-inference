@@ -3400,6 +3400,16 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 **这一轮的处置**：GPU 路径改成两级。
 
 - 默认仍然拒绝 `--gpu`，错误消息直接说明原因与开关名；
+
+**2026-11-11 的复测**（本机 GB10，`RMI_GPU_UNSAFE=1` 放行，256×256 / 4 步 /
+CFG 1 / seed 42）：连跑 **6 次，PNG 逐位相同**（6 个 md5 一致），这是 TODO-044
+记下「相同结果」之后的又一次观察。门禁**仍然保留**：TODO-044 自己写明这
+不是数学保证，只是「这段时间内没再看到不一样的」，而本条的根因（设备投影
+偶发整片出错）至今没有定位到具体成因。6/6 不能替代那个定位。
+
+对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-067](#todo-067-ernie-image-的设备投影比-cpu-慢--k-quant-权重在设备上没有优势)）
+也是连跑 3 次逐位相同 —— 说明「可复现」这条门禁判据本身是可测的，
+Mage-Flow 缺的仍然是根因，不是证据。
 - `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
   53 秒），代价是结果不保证可复现；
 - 采样器每步检查 latent 是否还可用（非有限或整体塌成零就拒绝），被拒绝时
@@ -4957,3 +4967,51 @@ llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，
 **关联**：`src/ops/kernel/vulkan.rs`（`try_matmul`、
 `min_gpu_matmul_outputs`）、`src/compute/mod.rs`（`context`）、
 `src/models/vela3/mod.rs`（严格档事后检查）。
+
+### TODO-067: ERNIE-Image 的设备投影比 CPU 慢 —— K-quant 权重在设备上没有优势
+
+**状态**：⚠️ 已知缺口，未排期。2026-11-11 实测。
+
+**现象**：ERNIE-Image 的 DiT 投影改成整批上设备之后，结果是**正确但更慢**。
+Q4_K_M DiT、256×256 / 8 步 / CFG 5 / seed 42 / 16 线程：
+
+| 路径 | denoise | 总计 |
+|---|---|---|
+| CPU | 251.8 s | 256.6 s |
+| GPU（`--gpu`） | 559.5 s | 562.0 s |
+
+设备路径慢 **2.2 倍**。64×64 / 1 步时同样落后（1.4 s → 4.7 s）。
+
+**已排除的原因**：
+
+- **不是权重重复上传**：投影运行时是常驻的，`ensure_weight` 按
+  （权重指针、长度、n_in、n_out、layout）缓存，252 个权重各上传一次；
+  同一进程内指针稳定，缓存命中。
+- **不是形状没批**：整批 20 / 260 行一次 dispatch，252 次投影全部走到设备
+  （`RMI_ERNIE_GPU_TRACE=1` 逐条可见，无失败）。
+- **不是数值错误**：GPU 与 CPU 的 PNG 差异 PSNR **41.3 dB**（max_abs 5/255），
+  感知无损；差异来自设备侧的 K-quant 激活量化与求和顺序。
+- **不是不确定**：同一 seed 连跑 3 次，PNG **逐位相同**。这与 TODO-044 的
+  门禁判据不同 —— ERNIE 的设备路径是可复现的，慢是慢，但不会给出坏图。
+
+**指向**：仓库的 CPU 侧有手写的 K-quant 内核（Q4_K / Q5_K / Q6_K），
+设备侧的 K-quant 路径没有同等优化。同一台机器上 Q8_0 权重的 Z-Image
+是 **6.2 倍**加速（TODO 见 `docs/develop/ZIMAGE_STATUS.md`），差距就在
+权重量化格式上。
+
+**方向**（未定）：
+
+1. 量一下设备侧 K-quant 内核与 CPU 侧手写内核在同一形状上的差距，确认
+   是不是内核本身慢，而不是调度或传输慢。
+2. 若确认是内核慢，K-quant 权重的文生图模型就不该把设备路径当作加速
+   手段 —— 要么给 K-quant 写设备内核，要么在调度上按权重量化格式选后端。
+3. ERNIE 另有一条路：Q8_0 的 DiT 走设备的 int8 点积路径，那里 Z-Image
+   已经拿到 6.2 倍。Q8_0 的 ERNIE 权重更大（8.7 GB vs 5.0 GB），CPU 侧会
+   更慢，设备侧的优势可能更大 —— 但需要实测，不能推断。
+
+**验收**：同一个模型同一份 prompt，设备路径要么比 CPU 快，要么明确说明
+它在哪种权重量化格式下才有意义。
+
+**关联**：`src/models/diffusion/ernie_image/gpu.rs`、
+`src/models/diffusion/ernie_image/mod.rs`（`linear_into_rows`）、
+`src/vulkan/ops.rs`（`BatchedLinearRuntime`、`ensure_weight`）。

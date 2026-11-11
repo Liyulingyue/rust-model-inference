@@ -558,15 +558,16 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
-            let _cpu = rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope();
+            // The DiT's projections go through the shared kernel, which hands
+            // a whole batch of rows to the device in one dispatch. The device
+            // declines a shape it will not take and the CPU path then runs the
+            // same per-row loop, so `--compute cpu` and `--compute auto` both
+            // work here.
             let turbo = options
                 .model
                 .to_string_lossy()
                 .to_lowercase()
                 .contains("turbo");
-            if options.compute_policy() != rust_model_inference::compute::ComputePolicy::Cpu {
-                eprintln!("compute scope=ernie_image backend=Cpu reason=unmigrated_model");
-            }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
                     .text_encoder
