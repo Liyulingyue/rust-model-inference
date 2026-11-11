@@ -3,9 +3,14 @@ use rust_model_inference::ops::kernel::q8_0::scalar::matmul_q8_0_quantized_scala
 use rust_model_inference::ops::quantize_q8_0_into;
 
 fn main() {
-    let loader = rust_model_inference::GGUFLoader::from_file(
-        "/home/liyulingyue/Codes/rust-model-inference/models/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q8_0.gguf"
-    ).unwrap();
+    let loader = rust_model_inference::GGUFLoader::from_file(&std::path::PathBuf::from(
+        std::env::var_os("LFM2_GGUF").unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("models/LFM2.5-1.2B-Instruct-GGUF/LFM2.5-1.2B-Instruct-Q8_0.gguf")
+                .into_os_string()
+        }),
+    ))
+    .unwrap();
 
     // Load BOS embedding
     let emb_tensor = loader

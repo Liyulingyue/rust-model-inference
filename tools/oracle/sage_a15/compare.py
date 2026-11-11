@@ -26,7 +26,7 @@ def selected(name, layer):
 
 
 def load(path):
-    records = [json.loads(line) for line in path.read_text().splitlines()]
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     out = {}
     for record in records:
         if "binary_path" not in record:
@@ -110,10 +110,10 @@ def main():
         env.pop("RMI_SCALAR", None)
         env.update(RMI_SAGE_BACKEND=args.backend, RMI_PARITY_TRACE=str(rust_trace), RMI_SAGE_MODEL=str(args.model), RMI_SAGE_PROMPT=prompt, RMI_SAGE_TOKENS=str(directory / "tokens.json"))
         run([args.rust_test, "--ignored", "--exact", "sage_dump_trace", "--nocapture"], directory / "rust.log", env)
-        assert f"Sage trace backend: {args.backend}" in (directory / "rust.log").read_text()
+        assert f"Sage trace backend: {args.backend}" in (directory / "rust.log").read_text(encoding="utf-8")
         records, oracle = load(oracle_trace)
         _, rust = load(rust_trace)
-        tokens = json.loads((directory / "tokens.json").read_text())
+        tokens = json.loads((directory / "tokens.json").read_text(encoding="utf-8"))
         processed = [token for r in records if r["name"] == "qwen35moe.prompt_ids" for token in r["token_ids"]]
         generated = [r["token_ids"] for r in records if r["name"] == "qwen35.greedy_token_ids"]
         summary = compare(oracle, rust, len(processed))

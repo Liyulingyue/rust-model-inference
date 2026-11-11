@@ -1,0 +1,25 @@
+{
+  "state": {
+    "user": "张伟与 Alice 在 Acme 工作。邮箱: zhang@example.com",
+    "answer": "张伟 works at Acme."
+  },
+  "questions": {
+    "kind": {
+      "type": "choice",
+      "instructions": "文中提到了谁？",
+      "criteria": {
+        "人物": "一个人",
+        "公司": null
+      }
+    },
+    "entities": {
+      "type": "span",
+      "criteria": [
+        "person",
+        "company"
+      ],
+      "definitions": null,
+      "threshold": 0.0
+    }
+  }
+}

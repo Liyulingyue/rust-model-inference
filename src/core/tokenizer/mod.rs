@@ -27,6 +27,7 @@ enum PreTokenizer {
     Qwen2,
     Qwen35,
     HunyuanDense,
+    Hunyuan,
     Lfm2,
     LlamaBpe,
     Gemma4,
@@ -554,11 +555,24 @@ impl BPETokenizer {
         let pre = if gemma4 {
             PreTokenizer::Gemma4
         } else {
-            // llama.cpp forces `add_bos = true` for the llama3 pre family
-            // (llama3 / falcon3 / falcon-h1 / lfm2 / pixtral ...) even when
-            // the GGUF omits `tokenizer.ggml.add_bos_token`. Falcon-H1 is
-            // the one arch in this repo whose GGUF relies on that override,
-            // so mirror it explicitly (merged into `add_bos` below).
+            // llama.cpp sets a *default* `add_bos = true` for a whole
+            // family of pre-tokenizers, even when the GGUF omits
+            // `tokenizer.ggml.add_bos_token`. The list below mirrors
+            // `src/llama-vocab.cpp` (the `LLAMA_VOCAB_TYPE_BPE` branch):
+            //
+            //   llama3, llama-v3, llama-bpe, falcon3, falcon-h1,
+            //   midm-2.0, jina-v5-nano, lfm2, tekken, pixtral,
+            //   tekken-num3, chameleon, nemotron-3.5-embed
+            //
+            // Of the pre-tokenizers this repository supports, that is
+            // llama-bpe, pixtral, tekken, lfm2 and falcon-h1. The
+            // GGUF's own `tokenizer.ggml.add_bos_token` still overrides
+            // the default (see below), so this only decides the case
+            // where the key is absent — which is exactly the case the
+            // Nemotron-3-Nano 30B is in (`pre = "pixtral"`, no key).
+            //
+            // Note that `exaone` / `exaone4` / `exaone-moe` are *not* in
+            // llama.cpp's list: they keep `add_bos = false`.
             let mut force_add_bos = false;
             let pre = match get_meta("tokenizer.ggml.pre") {
                 Some(MetaValue::String(value)) if value == "qwen2" => PreTokenizer::Qwen2,
@@ -567,11 +581,20 @@ impl BPETokenizer {
                 Some(MetaValue::String(value)) if value == "hunyuan-dense" => {
                     PreTokenizer::HunyuanDense
                 }
-                Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::HunyuanDense,
-                Some(MetaValue::String(value)) if value == "lfm2" => PreTokenizer::Lfm2,
-                Some(MetaValue::String(value)) if value == "llama-bpe" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "hunyuan" => PreTokenizer::Hunyuan,
+                Some(MetaValue::String(value)) if value == "lfm2" => {
+                    force_add_bos = true;
+                    PreTokenizer::Lfm2
+                }
+                Some(MetaValue::String(value)) if value == "llama-bpe" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 Some(MetaValue::String(value)) if value == "dbrx" => PreTokenizer::LlamaBpe,
-                Some(MetaValue::String(value)) if value == "pixtral" => PreTokenizer::LlamaBpe,
+                Some(MetaValue::String(value)) if value == "pixtral" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 Some(MetaValue::String(value)) if value == "exaone" => PreTokenizer::LlamaBpe,
                 // jina-v1-en / jina-v2-code / roberta-bpe all map to standard
                 // GPT-2 byte-level BPE in llama.cpp
@@ -605,9 +628,14 @@ impl BPETokenizer {
                 // pretokenizer regex. The byte-level BPE encoding is the
                 // same as Llama-3 / pixtral / dbrx, so reusing
                 // `LlamaBpe` is correct. Special-token boundaries
-                // (BOS=1, EOS=2, pad=11) are pinned by the GGUF, no extra
-                // `force_add_bos` needed.
-                Some(MetaValue::String(value)) if value == "tekken" => PreTokenizer::LlamaBpe,
+                // (BOS=1, EOS=2, pad=11) are pinned by the GGUF.
+                // llama.cpp gives `tekken` the `add_bos = true` default,
+                // so the same default is mirrored here; a GGUF that
+                // carries `tokenizer.ggml.add_bos_token` still wins.
+                Some(MetaValue::String(value)) if value == "tekken" => {
+                    force_add_bos = true;
+                    PreTokenizer::LlamaBpe
+                }
                 // JetBrains Mellum 2.1 (`tokenizer.ggml.pre = "mellum2"`).
                 // llama.cpp splits `\p{N}` out before the StarCoder word
                 // regex, so every digit becomes its own pre-token.
@@ -680,10 +708,27 @@ impl BPETokenizer {
             return Err("tokenizer.ggml.model gemma4 requires tokenizer.ggml.bos_token_id".into());
         }
 
-        let add_bos = bool_meta(
-            get_meta("tokenizer.ggml.add_bos_token"),
-            "tokenizer.ggml.add_bos_token",
-        )? || forced_add_bos;
+        // llama.cpp treats the pre-tokenizer's `add_bos` as a *default*
+        // and lets the GGUF override it — including with `false`
+        // (`src/llama-vocab.cpp`):
+        //
+        // ```c
+        // bool temp = true;
+        // if (ml.get_key(LLM_KV_TOKENIZER_ADD_BOS, temp, false)) {
+        //     add_bos = temp;
+        // }
+        // ```
+        //
+        // So the key wins when it is present, and the pre-tokenizer
+        // default stands when it is absent. That distinction matters:
+        // the Dory GGUF says `add_bos_token = false` with
+        // `pre = "pixtral"`, so llama.cpp does **not** add a BOS there,
+        // while the Nemotron-3-Nano 30B GGUF has `pre = "pixtral"` and
+        // no `add_bos_token` key at all, so llama.cpp **does** add one.
+        let add_bos = match get_meta("tokenizer.ggml.add_bos_token") {
+            Some(value) => bool_meta(Some(value.clone()), "tokenizer.ggml.add_bos_token")?,
+            None => forced_add_bos,
+        };
         let add_eos = bool_meta(
             get_meta("tokenizer.ggml.add_eos_token"),
             "tokenizer.ggml.add_eos_token",
@@ -723,7 +768,7 @@ impl BPETokenizer {
         // contract: literals alone do not confer special semantics).
         let force_semantic_registration = matches!(pre, PreTokenizer::Minicpm5);
         let semantic_literals: &[(&str, &str)] = match pre {
-            PreTokenizer::HunyuanDense => HUNYUAN_SEMANTIC_TOKENS,
+            PreTokenizer::HunyuanDense | PreTokenizer::Hunyuan => HUNYUAN_SEMANTIC_TOKENS,
             PreTokenizer::LlamaBpe | PreTokenizer::Minicpm5 => LLAMA_BPE_SEMANTIC_TOKENS,
             PreTokenizer::K2Horizon => K2_HORIZON_SEMANTIC_TOKENS,
             _ => QWEN_SEMANTIC_TOKENS,
@@ -1977,7 +2022,47 @@ fn contractions_are_case_insensitive(pre: PreTokenizer) -> bool {
     !matches!(pre, PreTokenizer::Mellum2)
 }
 
+// Hunyuan-Dense applies three regex passes, including digit and Han/Kana isolation.
+fn scan_hunyuan_dense_ranges(text: &str) -> Vec<Range<usize>> {
+    use std::sync::OnceLock;
+    use tokenizers::utils::SysRegex;
+    static PATTERNS: OnceLock<[SysRegex; 3]> = OnceLock::new();
+    let patterns=PATTERNS.get_or_init(|| [
+        r"\p{N}{1,3}",
+        r"[一-龥぀-ゟ゠-ヿ]+",
+        r##"[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"##,
+    ].map(|p|SysRegex::new(p).expect("valid Hunyuan-Dense regex")));
+    let mut parts = if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![0..text.len()]
+    };
+    for pattern in patterns {
+        let mut next = Vec::new();
+        for part in parts {
+            let mut start = part.start;
+            for (a, b) in pattern.find_iter(&text[part.clone()]) {
+                let a = part.start + a;
+                let b = part.start + b;
+                if start < a {
+                    next.push(start..a);
+                }
+                next.push(a..b);
+                start = b;
+            }
+            if start < part.end {
+                next.push(start..part.end);
+            }
+        }
+        parts = next;
+    }
+    parts
+}
+
 fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
+    if pre == PreTokenizer::HunyuanDense {
+        return scan_hunyuan_dense_ranges(text);
+    }
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let values: Vec<char> = chars.iter().map(|(_, value)| *value).collect();
     let byte_at = |index: usize| {
@@ -2236,6 +2321,45 @@ mod tests {
     use crate::core::tensor::{MetaValue, MetaValueType};
     use std::collections::HashMap;
 
+    #[test]
+    fn hy_mt2_token_ids_match_official_tokenizer() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            text: String,
+            ids: Vec<u32>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            vocab_size: usize,
+            vocab: Vec<(u32, String)>,
+            merges: Vec<(u32, String, String)>,
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/hy_mt2_tokenizer.json"
+        ))
+        .unwrap();
+        let mut tokenizer = tokenizer_with_pre(Some("hunyuan-dense")).unwrap();
+        tokenizer.tokens = vec![String::new(); fixture.vocab_size];
+        tokenizer.token_types = vec![TokenType::Normal; fixture.vocab_size];
+        tokenizer.token_to_id.clear();
+        for (id, token) in fixture.vocab {
+            tokenizer.tokens[id as usize] = token.clone();
+            tokenizer.token_to_id.insert(token, id);
+        }
+        // The sparse fixture keeps the official IDs and original merge ranks.
+        tokenizer.merge_ranks = fixture
+            .merges
+            .into_iter()
+            .map(|(rank, a, b)| ((a, b), rank))
+            .collect();
+        for case in fixture.cases {
+            let ids = tokenizer.encode(&case.text, EncodeOptions::default());
+            assert_eq!(ids, case.ids, "{:?}", case.text);
+            assert_eq!(tokenizer.decode(&ids, false), case.text);
+        }
+    }
+
     fn tokenizer_with_pre(pre: Option<&str>) -> Result<BPETokenizer, String> {
         let mut metadata: HashMap<String, MetaValue> = HashMap::from([
             (
@@ -2270,6 +2394,102 @@ mod tests {
         BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned())
     }
 
+    /// The same fixture, plus a BOS token id and an optional
+    /// `tokenizer.ggml.add_bos_token` key.
+    fn tokenizer_with_bos_policy(
+        pre: &str,
+        add_bos_token: Option<bool>,
+    ) -> Result<BPETokenizer, String> {
+        let mut metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".to_string(),
+                MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    ["<s>", "a", "b", "Ġ", "Ġa", "Ġb"]
+                        .into_iter()
+                        .map(|value| MetaValue::String(value.into()))
+                        .collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".to_string(),
+                MetaValue::Array(
+                    MetaValueType::Uint32,
+                    std::iter::repeat(MetaValue::Uint32(1)).take(6).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.merges".to_string(),
+                MetaValue::Array(MetaValueType::String, vec![]),
+            ),
+            (
+                "tokenizer.ggml.bos_token_id".to_string(),
+                MetaValue::Uint32(0),
+            ),
+            (
+                "tokenizer.ggml.pre".to_string(),
+                MetaValue::String(pre.into()),
+            ),
+        ]);
+        if let Some(value) = add_bos_token {
+            metadata.insert(
+                "tokenizer.ggml.add_bos_token".to_string(),
+                MetaValue::Bool(value),
+            );
+        }
+        BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned())
+    }
+
+    /// llama.cpp gives `pixtral` the `add_bos = true` default, so a GGUF
+    /// without `tokenizer.ggml.add_bos_token` still gets a BOS. This is
+    /// the Nemotron-3-Nano 30B's situation.
+    #[test]
+    fn pixtral_defaults_to_adding_bos() {
+        let tokenizer = tokenizer_with_bos_policy("pixtral", None).expect("load");
+        let ids = tokenizer.encode(
+            "hi",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        assert_eq!(ids.first(), Some(&0), "{ids:?}");
+    }
+
+    /// ... but the GGUF's own `add_bos_token = false` overrides that
+    /// default. This is the Dory GGUF's situation.
+    #[test]
+    fn gguf_add_bos_token_overrides_the_pretokenizer_default() {
+        let tokenizer = tokenizer_with_bos_policy("pixtral", Some(false)).expect("load");
+        let ids = tokenizer.encode(
+            "hi",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        assert_ne!(ids.first(), Some(&0), "{ids:?}");
+    }
+
+    /// `add_bos_token = true` in the GGUF also wins, for a pre-tokenizer
+    /// that has no default of its own.
+    #[test]
+    fn gguf_add_bos_token_true_adds_bos_without_a_default() {
+        let tokenizer = tokenizer_with_bos_policy("qwen2", Some(true)).expect("load");
+        let ids = tokenizer.encode(
+            "hi",
+            EncodeOptions {
+                add_special: true,
+                parse_special: false,
+            },
+        );
+        assert_eq!(ids.first(), Some(&0), "{ids:?}");
+    }
+
     #[test]
     fn rejects_missing_or_unknown_qwen_pre() {
         assert!(tokenizer_with_pre(None)
@@ -2278,6 +2498,47 @@ mod tests {
         assert!(tokenizer_with_pre(Some("default"))
             .unwrap_err()
             .contains("qwen2 or qwen35"));
+    }
+
+    #[test]
+    fn hy_dense_scanner_isolates_numbers_han_and_combining_marks() {
+        assert_eq!(
+            scan_qwen_words("6124c78e", PreTokenizer::HunyuanDense),
+            ["612", "4", "c", "78", "e"]
+        );
+        assert_eq!(
+            scan_qwen_words(
+                "a中文かなb e\u{301} !hello  two",
+                PreTokenizer::HunyuanDense
+            ),
+            [
+                "a",
+                "中文かな",
+                "b",
+                " e\u{301}",
+                " !",
+                "hello",
+                " ",
+                " two"
+            ]
+        );
+    }
+
+    #[test]
+    fn qwen25_omni_encodes_hello() {
+        let tokenizer = BPETokenizer::from_qwen25_omni_embedded_merges().unwrap();
+        let ids = tokenizer.encode(
+            "Hello",
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        eprintln!("'Hello' -> {:?} ({} tokens)", ids, ids.len());
+        for id in &ids {
+            eprintln!("  {} -> {:?}", id, tokenizer.token_piece_bytes(*id, true));
+        }
+        assert!(!ids.is_empty(), "'Hello' should encode to at least 1 token");
     }
 
     #[test]

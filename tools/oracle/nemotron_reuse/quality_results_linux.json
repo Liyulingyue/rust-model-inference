@@ -1,0 +1,840 @@
+{
+  "model_revision": "d66af5dfc20db53a49f885eb32e7e7f1fcb70af2",
+  "mamba_commit": "d7b1ceb3c367ec9022925e812f507bcf706937c6",
+  "model_sha256": "06badaf4029b297f97f7fe48d62990b48d5482608210df577354e0d4e0ed70e1",
+  "binary_sha256": "8c44811c079950ca6af058bdcd3c316ccf8e2c73b3b1d89ee6aa645106e27818",
+  "script_sha256": "901df6a5dbfa4d29170c90bd243cf07ff4f55e5e57c8b59a5711e1bf7c5e09dc",
+  "host": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "python": "3.12.3",
+  "packages": {
+    "torch": "2.9.1+gitff65f5b",
+    "numpy": "2.5.4",
+    "scipy": "1.17.0",
+    "pesq": "0.0.4",
+    "pystoi": "0.4.1",
+    "soundfile": "0.13.1"
+  },
+  "quality_delta_limits": {
+    "pesq": 0.05,
+    "stoi": 0.005
+  },
+  "cases": [
+    {
+      "name": "5703-47212-0000_8000_snr0",
+      "sample_rate": 8000,
+      "frames": 24000,
+      "source_sha256": "a284612b46af0535f7e1873758c4387bb8369f6dbbe192ffdec1f171108f98dd",
+      "clean_sha256": "cbf20f3ca8667b543cc9cbc0e5cb3247d6db8dea52a832eb8747ddea292222e0",
+      "input_sha256": "9d26e4588ea5f19d92249e4047509bfe35eead1942c168d5113f6dfd71602636",
+      "requested_snr_db": 0,
+      "measured_snr_db": 4.759740916131041e-05,
+      "noisy": {
+        "pesq": 1.1563262939453125,
+        "stoi": 0.603383121389144
+      },
+      "official": {
+        "pesq": 1.8711116313934326,
+        "stoi": 0.7957592635406258
+      },
+      "without_suppress": {
+        "pesq": 1.8711116313934326,
+        "stoi": 0.7957592635406258
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 159.32764454744756,
+      "native": {
+        "cpu": {
+          "seconds": 21.731843343004584,
+          "quality": {
+            "pesq": 1.8705222606658936,
+            "stoi": 0.7957314156549844
+          },
+          "delta_from_official": {
+            "pesq": -0.0005893707275390625,
+            "stoi": -2.7847885641363312e-05
+          },
+          "waveform": {
+            "max_abs": 0.005728006362915039,
+            "rmse": 0.00027953742363536664,
+            "relative_rmse": 0.0024594685598097743
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 19.91257201693952,
+          "quality": {
+            "pesq": 1.8705222606658936,
+            "stoi": 0.7957314156549844
+          },
+          "delta_from_official": {
+            "pesq": -0.0005893707275390625,
+            "stoi": -2.7847885641363312e-05
+          },
+          "waveform": {
+            "max_abs": 0.005728006362915039,
+            "rmse": 0.00027953742363536664,
+            "relative_rmse": 0.0024594685598097743
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "5703-47212-0000_8000_snr10",
+      "sample_rate": 8000,
+      "frames": 24000,
+      "source_sha256": "a284612b46af0535f7e1873758c4387bb8369f6dbbe192ffdec1f171108f98dd",
+      "clean_sha256": "cbf20f3ca8667b543cc9cbc0e5cb3247d6db8dea52a832eb8747ddea292222e0",
+      "input_sha256": "6e2b5179c20fb6c7857805425b27ad21e6bb63e0c44d1d070bc85ddd31596ca8",
+      "requested_snr_db": 10,
+      "measured_snr_db": 10.001095075407063,
+      "noisy": {
+        "pesq": 1.3720312118530273,
+        "stoi": 0.7761354471715628
+      },
+      "official": {
+        "pesq": 2.7680771350860596,
+        "stoi": 0.8980359589609176
+      },
+      "without_suppress": {
+        "pesq": 2.7680771350860596,
+        "stoi": 0.8980359589609176
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 159.7809538245201,
+      "native": {
+        "cpu": {
+          "seconds": 23.825419038534164,
+          "quality": {
+            "pesq": 2.7679443359375,
+            "stoi": 0.8980706112961359
+          },
+          "delta_from_official": {
+            "pesq": -0.0001327991485595703,
+            "stoi": 3.465233521826594e-05
+          },
+          "waveform": {
+            "max_abs": 0.0018752142786979675,
+            "rmse": 0.0001717139781710766,
+            "relative_rmse": 0.0017635949627532004
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 23.065254986286163,
+          "quality": {
+            "pesq": 2.7679443359375,
+            "stoi": 0.8980706112961359
+          },
+          "delta_from_official": {
+            "pesq": -0.0001327991485595703,
+            "stoi": 3.465233521826594e-05
+          },
+          "waveform": {
+            "max_abs": 0.0018752142786979675,
+            "rmse": 0.0001717139781710766,
+            "relative_rmse": 0.0017635949627532004
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "5703-47212-0000_16000_snr0",
+      "sample_rate": 16000,
+      "frames": 48000,
+      "source_sha256": "a284612b46af0535f7e1873758c4387bb8369f6dbbe192ffdec1f171108f98dd",
+      "clean_sha256": "fbe12a4ff0b5636a3c01322b1583916c415cf1d761bba25ee22f43d56c5ea6ff",
+      "input_sha256": "3bedf4b8909e6cf2c37b81f83e5e8d79414589a8cb5fbce2e85fb0d837531f80",
+      "requested_snr_db": 0,
+      "measured_snr_db": 5.327769917110614e-05,
+      "noisy": {
+        "pesq": 1.0297842025756836,
+        "stoi": 0.6702825059224187
+      },
+      "official": {
+        "pesq": 1.5305225849151611,
+        "stoi": 0.8346912104939158
+      },
+      "without_suppress": {
+        "pesq": 1.5305225849151611,
+        "stoi": 0.8346912104939158
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 335.73028812743723,
+      "native": {
+        "cpu": {
+          "seconds": 42.45402683317661,
+          "quality": {
+            "pesq": 1.5304698944091797,
+            "stoi": 0.8346952667504703
+          },
+          "delta_from_official": {
+            "pesq": -5.269050598144531e-05,
+            "stoi": 4.056256554529902e-06
+          },
+          "waveform": {
+            "max_abs": 0.0008636116981506348,
+            "rmse": 0.00012689565280046405,
+            "relative_rmse": 0.0015005095710191802
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 43.44512518122792,
+          "quality": {
+            "pesq": 1.5304698944091797,
+            "stoi": 0.8346952667504703
+          },
+          "delta_from_official": {
+            "pesq": -5.269050598144531e-05,
+            "stoi": 4.056256554529902e-06
+          },
+          "waveform": {
+            "max_abs": 0.0008636116981506348,
+            "rmse": 0.00012689565280046405,
+            "relative_rmse": 0.0015005095710191802
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "5703-47212-0000_16000_snr10",
+      "sample_rate": 16000,
+      "frames": 48000,
+      "source_sha256": "a284612b46af0535f7e1873758c4387bb8369f6dbbe192ffdec1f171108f98dd",
+      "clean_sha256": "833afc257ed2d5b60efadf5459f60f37b604a9b63401033d4edbf9f0d91b19e6",
+      "input_sha256": "d10653c7dbd2e93e13995467c018450b9b5235fd3c60c1c294efccac83acee90",
+      "requested_snr_db": 10,
+      "measured_snr_db": 10.001092450490013,
+      "noisy": {
+        "pesq": 1.0514696836471558,
+        "stoi": 0.8215231562973743
+      },
+      "official": {
+        "pesq": 2.0641050338745117,
+        "stoi": 0.9126387473395338
+      },
+      "without_suppress": {
+        "pesq": 2.0641050338745117,
+        "stoi": 0.9126387473395338
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 326.0503123961389,
+      "native": {
+        "cpu": {
+          "seconds": 38.56959177553654,
+          "quality": {
+            "pesq": 2.064180850982666,
+            "stoi": 0.912603249707713
+          },
+          "delta_from_official": {
+            "pesq": 7.581710815429688e-05,
+            "stoi": -3.5497631820757825e-05
+          },
+          "waveform": {
+            "max_abs": 0.0014280229806900024,
+            "rmse": 0.00011538776435988716,
+            "relative_rmse": 0.001207346047099021
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 39.3213999774307,
+          "quality": {
+            "pesq": 2.064180850982666,
+            "stoi": 0.912603249707713
+          },
+          "delta_from_official": {
+            "pesq": 7.581710815429688e-05,
+            "stoi": -3.5497631820757825e-05
+          },
+          "waveform": {
+            "max_abs": 0.0014280229806900024,
+            "rmse": 0.00011538776435988716,
+            "relative_rmse": 0.001207346047099021
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "3436-172162-0000_8000_snr0",
+      "sample_rate": 8000,
+      "frames": 24000,
+      "source_sha256": "780e482b52f2c8a500356babf60178ce005449cc171a8537eb3ef2961eb3e855",
+      "clean_sha256": "b9bc98cf707190bd4f8d3da29bec04028f73f2b8c691e7d0976584ad4a8ff7f3",
+      "input_sha256": "61b5765b438c35bb7b011ad3402471946ad05ac8547607ef8d5ec37abe46ef58",
+      "requested_snr_db": 0,
+      "measured_snr_db": 0.0003297243933550272,
+      "noisy": {
+        "pesq": 1.3747003078460693,
+        "stoi": 0.7844537020019146
+      },
+      "official": {
+        "pesq": 2.6380043029785156,
+        "stoi": 0.8922351899184343
+      },
+      "without_suppress": {
+        "pesq": 2.6380043029785156,
+        "stoi": 0.8922351899184343
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 161.64512958936393,
+      "native": {
+        "cpu": {
+          "seconds": 20.459573451429605,
+          "quality": {
+            "pesq": 2.637960433959961,
+            "stoi": 0.8922368977353218
+          },
+          "delta_from_official": {
+            "pesq": -4.38690185546875e-05,
+            "stoi": 1.7078168874640198e-06
+          },
+          "waveform": {
+            "max_abs": 0.002203837037086487,
+            "rmse": 0.00019573968309558265,
+            "relative_rmse": 0.0022927317400156283
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 20.458300841972232,
+          "quality": {
+            "pesq": 2.637960433959961,
+            "stoi": 0.8922368977353218
+          },
+          "delta_from_official": {
+            "pesq": -4.38690185546875e-05,
+            "stoi": 1.7078168874640198e-06
+          },
+          "waveform": {
+            "max_abs": 0.002203837037086487,
+            "rmse": 0.00019573968309558265,
+            "relative_rmse": 0.0022927317400156283
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "3436-172162-0000_8000_snr10",
+      "sample_rate": 8000,
+      "frames": 24000,
+      "source_sha256": "780e482b52f2c8a500356babf60178ce005449cc171a8537eb3ef2961eb3e855",
+      "clean_sha256": "b9bc98cf707190bd4f8d3da29bec04028f73f2b8c691e7d0976584ad4a8ff7f3",
+      "input_sha256": "a0b833695ee88132541737ebfa7251e837c0610d0ca0e131d306855364b54a32",
+      "requested_snr_db": 10,
+      "measured_snr_db": 10.001871513480092,
+      "noisy": {
+        "pesq": 1.70504629611969,
+        "stoi": 0.918770195845511
+      },
+      "official": {
+        "pesq": 3.616145133972168,
+        "stoi": 0.9685222610593635
+      },
+      "without_suppress": {
+        "pesq": 3.616145133972168,
+        "stoi": 0.9685222610593635
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 156.59300651028752,
+      "native": {
+        "cpu": {
+          "seconds": 23.296887228265405,
+          "quality": {
+            "pesq": 3.6160471439361572,
+            "stoi": 0.9685152060492856
+          },
+          "delta_from_official": {
+            "pesq": -9.799003601074219e-05,
+            "stoi": -7.0550100778055125e-06
+          },
+          "waveform": {
+            "max_abs": 0.0020920932292938232,
+            "rmse": 0.00017857714451827367,
+            "relative_rmse": 0.0018315110159582636
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 23.07541968859732,
+          "quality": {
+            "pesq": 3.6160471439361572,
+            "stoi": 0.9685152060492856
+          },
+          "delta_from_official": {
+            "pesq": -9.799003601074219e-05,
+            "stoi": -7.0550100778055125e-06
+          },
+          "waveform": {
+            "max_abs": 0.0020920932292938232,
+            "rmse": 0.00017857714451827367,
+            "relative_rmse": 0.0018315110159582636
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "3436-172162-0000_16000_snr0",
+      "sample_rate": 16000,
+      "frames": 48000,
+      "source_sha256": "780e482b52f2c8a500356babf60178ce005449cc171a8537eb3ef2961eb3e855",
+      "clean_sha256": "b66bd0ec28d0d558f0e9e077d0548045c3d3be4f53c0633ab5bb23c32f1c93dd",
+      "input_sha256": "16a0503b078b6ee94f47fad028c502a1641b73c341471269cfcf1c8014fedfff",
+      "requested_snr_db": 0,
+      "measured_snr_db": 0.00031491041860830314,
+      "noisy": {
+        "pesq": 1.070020079612732,
+        "stoi": 0.8265074737866416
+      },
+      "official": {
+        "pesq": 1.908416986465454,
+        "stoi": 0.9181557141834553
+      },
+      "without_suppress": {
+        "pesq": 1.908416986465454,
+        "stoi": 0.9181557141834553
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 335.64892355538905,
+      "native": {
+        "cpu": {
+          "seconds": 43.231308126822114,
+          "quality": {
+            "pesq": 1.907875657081604,
+            "stoi": 0.9181332556511445
+          },
+          "delta_from_official": {
+            "pesq": -0.0005413293838500977,
+            "stoi": -2.245853231086503e-05
+          },
+          "waveform": {
+            "max_abs": 0.001180797815322876,
+            "rmse": 0.00010219002984142295,
+            "relative_rmse": 0.0012812519971958313
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 43.52747626975179,
+          "quality": {
+            "pesq": 1.907875657081604,
+            "stoi": 0.9181332556511445
+          },
+          "delta_from_official": {
+            "pesq": -0.0005413293838500977,
+            "stoi": -2.245853231086503e-05
+          },
+          "waveform": {
+            "max_abs": 0.001180797815322876,
+            "rmse": 0.00010219002984142295,
+            "relative_rmse": 0.0012812519971958313
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "3436-172162-0000_16000_snr10",
+      "sample_rate": 16000,
+      "frames": 48000,
+      "source_sha256": "780e482b52f2c8a500356babf60178ce005449cc171a8537eb3ef2961eb3e855",
+      "clean_sha256": "b66bd0ec28d0d558f0e9e077d0548045c3d3be4f53c0633ab5bb23c32f1c93dd",
+      "input_sha256": "2d270b33d6b1b88b61892a994f226726e7e63e6fac05892e51e6aad70ff9ff61",
+      "requested_snr_db": 10,
+      "measured_snr_db": 10.001819246506066,
+      "noisy": {
+        "pesq": 1.1819086074829102,
+        "stoi": 0.9410019618882628
+      },
+      "official": {
+        "pesq": 3.160658359527588,
+        "stoi": 0.9829161514327391
+      },
+      "without_suppress": {
+        "pesq": 3.160658359527588,
+        "stoi": 0.9829161514327391
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 320.70342472940683,
+      "native": {
+        "cpu": {
+          "seconds": 38.84576430357993,
+          "quality": {
+            "pesq": 3.160719156265259,
+            "stoi": 0.9829160342251679
+          },
+          "delta_from_official": {
+            "pesq": 6.079673767089844e-05,
+            "stoi": -1.172075712041476e-07
+          },
+          "waveform": {
+            "max_abs": 0.0017374716699123383,
+            "rmse": 0.000153454842120085,
+            "relative_rmse": 0.001635432281242107
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 38.95384228788316,
+          "quality": {
+            "pesq": 3.160719156265259,
+            "stoi": 0.9829160342251679
+          },
+          "delta_from_official": {
+            "pesq": 6.079673767089844e-05,
+            "stoi": -1.172075712041476e-07
+          },
+          "waveform": {
+            "max_abs": 0.0017374716699123383,
+            "rmse": 0.000153454842120085,
+            "relative_rmse": 0.001635432281242107
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "198-209-0000_8000_snr0",
+      "sample_rate": 8000,
+      "frames": 24000,
+      "source_sha256": "0473ba9613befa1026db5e254546f105aeffba8366b5468fc5e8d474d844ca1d",
+      "clean_sha256": "2c083190e1eb9cceb01d7aa9387d785c58ed40a751f49f505ca80f754c31d070",
+      "input_sha256": "4587b060213ee618fba32648d4b8c35dadc3a9f6821dc0b97dd6f7238a26d3f5",
+      "requested_snr_db": 0,
+      "measured_snr_db": 5.139266741377093e-05,
+      "noisy": {
+        "pesq": 1.2324761152267456,
+        "stoi": 0.7091666372027653
+      },
+      "official": {
+        "pesq": 2.28708815574646,
+        "stoi": 0.8885375456607195
+      },
+      "without_suppress": {
+        "pesq": 2.28708815574646,
+        "stoi": 0.8885375456607195
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 155.71015853062272,
+      "native": {
+        "cpu": {
+          "seconds": 21.10726909339428,
+          "quality": {
+            "pesq": 2.287309408187866,
+            "stoi": 0.8885203827283127
+          },
+          "delta_from_official": {
+            "pesq": 0.00022125244140625,
+            "stoi": -1.716293240683342e-05
+          },
+          "waveform": {
+            "max_abs": 0.008123256266117096,
+            "rmse": 0.000213873275986482,
+            "relative_rmse": 0.002604669512991098
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 20.991944797337055,
+          "quality": {
+            "pesq": 2.287309408187866,
+            "stoi": 0.8885203827283127
+          },
+          "delta_from_official": {
+            "pesq": 0.00022125244140625,
+            "stoi": -1.716293240683342e-05
+          },
+          "waveform": {
+            "max_abs": 0.008123256266117096,
+            "rmse": 0.000213873275986482,
+            "relative_rmse": 0.002604669512991098
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "198-209-0000_8000_snr10",
+      "sample_rate": 8000,
+      "frames": 24000,
+      "source_sha256": "0473ba9613befa1026db5e254546f105aeffba8366b5468fc5e8d474d844ca1d",
+      "clean_sha256": "2c083190e1eb9cceb01d7aa9387d785c58ed40a751f49f505ca80f754c31d070",
+      "input_sha256": "bf398f40750653dfb26136fbb409f3711a8a4902e2bc741c26f4461991d221ff",
+      "requested_snr_db": 10,
+      "measured_snr_db": 10.001382232655565,
+      "noisy": {
+        "pesq": 1.508687973022461,
+        "stoi": 0.8602016299767766
+      },
+      "official": {
+        "pesq": 3.2124013900756836,
+        "stoi": 0.9316139430124744
+      },
+      "without_suppress": {
+        "pesq": 3.2124013900756836,
+        "stoi": 0.9316139430124744
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 158.02444328553975,
+      "native": {
+        "cpu": {
+          "seconds": 24.34206927381456,
+          "quality": {
+            "pesq": 3.2128403186798096,
+            "stoi": 0.9316252835514562
+          },
+          "delta_from_official": {
+            "pesq": 0.00043892860412597656,
+            "stoi": 1.1340538981885473e-05
+          },
+          "waveform": {
+            "max_abs": 0.0042673684656620026,
+            "rmse": 0.00022010231876396476,
+            "relative_rmse": 0.0031963420326938884
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 23.481099160388112,
+          "quality": {
+            "pesq": 3.2128403186798096,
+            "stoi": 0.9316252835514562
+          },
+          "delta_from_official": {
+            "pesq": 0.00043892860412597656,
+            "stoi": 1.1340538981885473e-05
+          },
+          "waveform": {
+            "max_abs": 0.0042673684656620026,
+            "rmse": 0.00022010231876396476,
+            "relative_rmse": 0.0031963420326938884
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "198-209-0000_16000_snr0",
+      "sample_rate": 16000,
+      "frames": 48000,
+      "source_sha256": "0473ba9613befa1026db5e254546f105aeffba8366b5468fc5e8d474d844ca1d",
+      "clean_sha256": "cde0e57e71e3aa3a37ebe32b5919a4a7c2e3ec82df30f3b8aaae88d7329dcc4b",
+      "input_sha256": "46c4fc2f24ca0d169641425b4acbe01a1e0da3b103f941881179df40e24d3c12",
+      "requested_snr_db": 0,
+      "measured_snr_db": 3.8935944322976714e-05,
+      "noisy": {
+        "pesq": 1.0345914363861084,
+        "stoi": 0.7542402636498287
+      },
+      "official": {
+        "pesq": 1.6216235160827637,
+        "stoi": 0.913370563471072
+      },
+      "without_suppress": {
+        "pesq": 1.6216235160827637,
+        "stoi": 0.913370563471072
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 333.54142684675753,
+      "native": {
+        "cpu": {
+          "seconds": 42.65440664999187,
+          "quality": {
+            "pesq": 1.6206824779510498,
+            "stoi": 0.9133675340987203
+          },
+          "delta_from_official": {
+            "pesq": -0.0009410381317138672,
+            "stoi": -3.029372351748272e-06
+          },
+          "waveform": {
+            "max_abs": 0.0036875568330287933,
+            "rmse": 0.00016580829143767237,
+            "relative_rmse": 0.0025989594361051113
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 43.1952253524214,
+          "quality": {
+            "pesq": 1.6206824779510498,
+            "stoi": 0.9133675340987203
+          },
+          "delta_from_official": {
+            "pesq": -0.0009410381317138672,
+            "stoi": -3.029372351748272e-06
+          },
+          "waveform": {
+            "max_abs": 0.0036875568330287933,
+            "rmse": 0.00016580829143767237,
+            "relative_rmse": 0.0025989594361051113
+          },
+          "within_quality_limits": true
+        }
+      }
+    },
+    {
+      "name": "198-209-0000_16000_snr10",
+      "sample_rate": 16000,
+      "frames": 48000,
+      "source_sha256": "0473ba9613befa1026db5e254546f105aeffba8366b5468fc5e8d474d844ca1d",
+      "clean_sha256": "2ecfb51e2d8f1a0ddd07d333719f9cf18771f027ab7a0d503d0ad2feb6c4ba5a",
+      "input_sha256": "0e83d330cdc58fe16be0e52a93f8165be43b065981dc52ccd87395b1e11d8c46",
+      "requested_snr_db": 10,
+      "measured_snr_db": 10.0012748594277,
+      "noisy": {
+        "pesq": 1.1373335123062134,
+        "stoi": 0.903023403200423
+      },
+      "official": {
+        "pesq": 2.5357933044433594,
+        "stoi": 0.9598400074898683
+      },
+      "without_suppress": {
+        "pesq": 2.5357933044433594,
+        "stoi": 0.9598400074898683
+      },
+      "suppress_frames": {
+        "suppressed": 0,
+        "total": 802
+      },
+      "suppress_waveform": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0
+      },
+      "official_seconds": 320.8719726074487,
+      "native": {
+        "cpu": {
+          "seconds": 39.43682779185474,
+          "quality": {
+            "pesq": 2.5353920459747314,
+            "stoi": 0.9598329248104801
+          },
+          "delta_from_official": {
+            "pesq": -0.0004012584686279297,
+            "stoi": -7.08267938820395e-06
+          },
+          "waveform": {
+            "max_abs": 0.003273741342127323,
+            "rmse": 0.00016271846260580914,
+            "relative_rmse": 0.00240709736559914
+          },
+          "within_quality_limits": true
+        },
+        "auto": {
+          "seconds": 39.47858117520809,
+          "quality": {
+            "pesq": 2.5353920459747314,
+            "stoi": 0.9598329248104801
+          },
+          "delta_from_official": {
+            "pesq": -0.0004012584686279297,
+            "stoi": -7.08267938820395e-06
+          },
+          "waveform": {
+            "max_abs": 0.003273741342127323,
+            "rmse": 0.00016271846260580914,
+            "relative_rmse": 0.00240709736559914
+          },
+          "within_quality_limits": true
+        }
+      }
+    }
+  ]
+}

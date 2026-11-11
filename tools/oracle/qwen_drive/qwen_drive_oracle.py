@@ -785,7 +785,7 @@ def perception_frame_fixture(source: Path, frame_dir: Path, model_root: Path) ->
     from PIL import Image
     from transformers import AutoTokenizer
 
-    frame = json.loads((frame_dir / "frame.json").read_text())
+    frame = json.loads((frame_dir / "frame.json").read_text(encoding="utf-8"))
     calibration = np.load(frame_dir / "calib.npz")
     module_path = source / "src/qwen_drive_perception/geometry.py"
     spec = importlib.util.spec_from_file_location("qwen_drive_perception_geometry", module_path)

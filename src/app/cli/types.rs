@@ -15,6 +15,8 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    /// Parsed option names, excluding their values, for capability-specific validation.
+    pub supplied_flags: Vec<String>,
     pub yue2: bool,
     pub dreamx: bool,
     pub astronex: bool,
@@ -46,6 +48,7 @@ pub struct CliOptions {
     /// Defaults to one task built from `--jev-question` + `--jev-option`.
     pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
+    pub enhance: bool,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
@@ -103,6 +106,11 @@ pub struct CliOptions {
     pub allow_memory_overcommit: bool,
     pub temperature: Option<f32>,
     pub cfg_scale: Option<f32>,
+    /// Sway sampling coefficient for the AuK flow-matching time grid.
+    /// `None` (the default) uses the official `-1.0` warp.
+    pub auk_sway: Option<f32>,
+    /// Pin the AuK-Flash distilled recipe: 4 steps, CFG off.
+    pub auk_flash: bool,
     pub top_k: Option<usize>,
     pub top_p: Option<f32>,
     pub threads: usize,
@@ -142,6 +150,12 @@ pub struct CliOptions {
     pub wevisone_request: Option<PathBuf>,
     pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
+    pub system_one_request: Option<PathBuf>,
+    pub decision_request: Option<PathBuf>,
+    pub decision_thinker: Option<PathBuf>,
+    /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
+    /// weights; the d3 variants need both.
+    pub adapter: Option<PathBuf>,
     pub jev_context: Option<String>,
     pub jev_questions: Vec<JevQuestion>,
     pub jev_positive: Option<String>,
@@ -212,7 +226,7 @@ impl CliOptions {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; only the \
+                         note=no complete device path for this mode; any \
                          offloadable parts run on the device"
                     );
                 }

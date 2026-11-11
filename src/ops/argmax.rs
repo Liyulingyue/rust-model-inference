@@ -91,7 +91,14 @@ unsafe fn argmax_f32_avx2(values: &[f32]) -> usize {
     _mm256_storeu_ps(buf_val.as_mut_ptr(), v_best_val);
     _mm256_storeu_si256(buf_idx.as_mut_ptr() as *mut __m256i, v_best_idx);
     for lane in 0..8 {
-        if buf_val[lane] > best_val {
+        if buf_idx[lane] < 0 {
+            continue;
+        }
+        // The lanes hold the per-lane maxima, so lane order is not index
+        // order: lane 0 may carry a later index than lane 6. Resolve ties
+        // by the lower absolute index so the result matches the scalar
+        // path, which scans left to right and keeps the first maximum.
+        if buf_val[lane] > best_val || (buf_val[lane] == best_val && buf_idx[lane] < best_idx) {
             best_val = buf_val[lane];
             best_idx = buf_idx[lane];
         }
@@ -124,11 +131,16 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
     let mut v_best_idx = vdupq_n_s32(-1i32);
     let lane_inc = vdupq_n_s32(4);
     let mut lane_offset = vdupq_n_s32(0);
+    // The index of a lane inside its own 4-wide chunk. Without it every
+    // lane of a chunk carried the chunk base, so the reduction could not
+    // tell the four candidates apart and the reported index was wrong for
+    // any input whose maximum was not in the first lane.
+    let lane_ids = vld1q_s32([0i32, 1, 2, 3].as_ptr());
 
     let mut i = 0;
     while i < n4 {
         let v = vld1q_f32(values.as_ptr().add(i));
-        let idx = lane_offset;
+        let idx = vaddq_s32(lane_offset, lane_ids);
         // vminq_f32 + vceqq: where v > v_best_val, use new (v, idx);
         // otherwise keep running (v_best_val, v_best_idx). Bitwise
         // blend via vbslq.
@@ -139,15 +151,23 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
         i += 4;
     }
 
-    let mut best_val = vmaxvq_f32(v_best_val);
+    let mut best_val = f32::NEG_INFINITY;
     let mut buf_val = [0.0f32; 4];
     let mut buf_idx = [0i32; 4];
     vst1q_f32(buf_val.as_mut_ptr(), v_best_val);
     vst1q_s32(buf_idx.as_mut_ptr(), v_best_idx);
     let mut best_idx = 0i32;
     for lane in 0..4 {
-        if buf_val[lane] == best_val {
-            best_idx = best_idx.max(buf_idx[lane]);
+        if buf_idx[lane] < 0 {
+            continue;
+        }
+        // The lanes hold the per-lane maxima, so lane order is not index
+        // order. Resolve ties by the lower absolute index so the result
+        // matches the scalar path, which scans left to right and keeps the
+        // first maximum.
+        if buf_val[lane] > best_val || (buf_val[lane] == best_val && buf_idx[lane] < best_idx) {
+            best_val = buf_val[lane];
+            best_idx = buf_idx[lane];
         }
     }
 
@@ -163,7 +183,7 @@ unsafe fn argmax_f32_neon(values: &[f32]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::argmax_f32;
+    use super::{argmax_f32, argmax_f32_scalar};
 
     fn assert_argmax_matches_scalar(values: &[f32], expected: usize) {
         let got = argmax_f32(values);
@@ -208,15 +228,122 @@ mod tests {
     }
 
     #[test]
+    fn ties_across_simd_lanes_pick_the_lowest_index() {
+        // The SIMD paths keep a per-lane running max, so the same maximum can
+        // end up in two different lanes at two different positions. Lane
+        // order is not index order, so the reduction has to compare the
+        // absolute indices rather than trusting the lane it scans first.
+        let mut values = vec![0.0f32; 1024];
+        values[22] = 2.0;
+        values[216] = 2.0;
+        assert_argmax_matches_scalar(&values, 22);
+    }
+
+    #[test]
+    fn simd_paths_agree_with_the_scalar_reference() {
+        // The SIMD paths keep a per-lane running max, so they are only
+        // trustworthy if they agree with the scalar path on *every* input,
+        // not just on the hand-picked cases above. Drive both of them over
+        // random and adversarial inputs: short lengths (to hit every tail
+        // shape), a small value range (to force many ties), and infinities
+        // and NaN. The generator is a fixed-seed xorshift, so a failure
+        // reproduces exactly.
+        let mut state: u64 = 0x243f_6a88_85a3_08d3;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut check = |values: &[f32]| {
+            assert_eq!(
+                argmax_f32(values),
+                argmax_f32_scalar(values),
+                "argmax disagrees with the scalar reference on {values:?}"
+            );
+        };
+
+        // Random lengths and a small value range, so ties are frequent and
+        // land in different lanes and chunks.
+        for len in 0..=300usize {
+            for _ in 0..40 {
+                let values: Vec<f32> = (0..len).map(|_| (next() % 5) as f32 - 2.0).collect();
+                check(&values);
+            }
+        }
+
+        // Degenerate shapes: one value, all equal, all negative.
+        for len in [1usize, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 33, 64, 1023, 1024] {
+            check(&vec![1.5f32; len]);
+            let values: Vec<f32> = (0..len).map(|i| -((i % 7) as f32) - 0.5).collect();
+            check(&values);
+        }
+
+        // Two positions share the maximum: the earlier one has to win no
+        // matter which lane each of them lands in.
+        for len in [8usize, 33] {
+            for a in 0..len {
+                for b in 0..len {
+                    if a == b {
+                        continue;
+                    }
+                    let mut values = vec![0.0f32; len];
+                    values[a] = 2.0;
+                    values[b] = 2.0;
+                    check(&values);
+                }
+            }
+        }
+        for _ in 0..2000 {
+            let len = 1024usize;
+            let a = (next() % len as u64) as usize;
+            let b = (next() % len as u64) as usize;
+            if a == b {
+                continue;
+            }
+            let mut values = vec![0.0f32; len];
+            values[a] = 2.0;
+            values[b] = 2.0;
+            check(&values);
+        }
+
+        // Infinities and NaN: NaN never compares greater, so it must not
+        // win over a real value.
+        for len in [4usize, 33, 1024] {
+            let mut values = vec![1.0f32; len];
+            values[len / 2] = f32::INFINITY;
+            check(&values);
+            let mut values = vec![1.0f32; len];
+            values[len / 2] = f32::NEG_INFINITY;
+            check(&values);
+            let mut values = vec![1.0f32; len];
+            values[len / 3] = f32::NAN;
+            check(&values);
+        }
+    }
+
+    #[test]
     fn large_random() {
         let values: Vec<f32> = (0..1024)
             .map(|i| ((i * 17 + 13) % 97) as f32 * 0.07 - 4.5)
             .collect();
+        // The pattern repeats every 97 elements, so the maximum is reached
+        // several times with identical values. `max_by` would return the last
+        // of them; argmax_f32 breaks ties by lowest index, so the reference
+        // has to keep the first one.
         let scalar = values
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .unwrap()
+            .fold(
+                (0usize, f32::NEG_INFINITY),
+                |(best, best_value), (index, value)| {
+                    if *value > best_value {
+                        (index, *value)
+                    } else {
+                        (best, best_value)
+                    }
+                },
+            )
             .0;
         assert_eq!(argmax_f32(&values), scalar);
     }

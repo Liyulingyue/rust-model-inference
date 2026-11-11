@@ -9,7 +9,7 @@
 //!
 //! - The runtime is held in a `OnceLock<Mutex<Option<...>>>` so the first GPU
 //!   dispatch lazily creates it from the singleton `VulkanContext`. A static
-//!   is fine because every model shares one Vulkan device.
+//!   only borrows that singleton. Private contexts use a call-scoped runtime.
 //! - `matmul_q4_k` is safe to call from any thread, but only one matmul can be
 //!   in flight at a time (the inner mutex serialises dispatches). This
 //!   matches `matmul_q8_0`'s model: pool thread 0 submits the fenced
@@ -37,6 +37,15 @@ use super::{VulkanContext, VulkanError};
 /// `None` until the first successful dispatch; recreated only when the cached
 /// shape maxima cannot accommodate a later call.
 static Q4_K_RUNTIME: OnceLock<Mutex<Option<Q4KRuntime>>> = OnceLock::new();
+
+pub(crate) fn release_shared_runtime() -> Result<(), VulkanError> {
+    if let Some(slot) = Q4_K_RUNTIME.get() {
+        slot.lock()
+            .map_err(|_| VulkanError::InitFailed("Q4_K runtime mutex poisoned".into()))?
+            .take();
+    }
+    Ok(())
+}
 
 struct Q4KRuntime {
     runtime: BatchedLinearRuntime,
@@ -87,7 +96,12 @@ pub fn matmul_q4_k(
         "output shorter than rows × n_out"
     );
 
-    let slot = runtime_slot();
+    let local_slot = Mutex::new(None);
+    let slot = if crate::ops::float::is_shared_vulkan_context(context) {
+        runtime_slot()
+    } else {
+        &local_slot
+    };
     let mut guard = slot
         .lock()
         .map_err(|_| VulkanError::InitFailed("Q4_K runtime mutex poisoned".into()))?;
@@ -111,11 +125,8 @@ pub fn matmul_q4_k(
             ),
             None => (DEFAULT_MAX_ROWS.max(rows), n_in, n_out),
         };
-        // `BatchedLinearRuntime::new` takes a `'static` reference. The
-        // singleton VulkanContext lives in a `OnceLock` for the lifetime of
-        // the process, so this transmute is sound — the runtime will drop on
-        // first error or normal program shutdown, well within the
-        // VulkanContext's lifetime.
+        // The shared slot borrows the singleton; local_slot drops before the
+        // caller's context borrow ends, so neither runtime can outlive its context.
         let static_ctx: &'static VulkanContext = unsafe { std::mem::transmute(context) };
         match BatchedLinearRuntime::new(
             static_ctx,
@@ -197,6 +208,7 @@ mod tests {
         let weight = vec![0u8; n_out * n_blocks * 144];
         let input = vec![0.5f32; n_in];
         let mut gpu_output = vec![std::f32::NAN; n_out];
+        let live_before = context.compute_stats().live_allocation_bytes;
 
         match matmul_q4_k(&context, &weight, &input, 1, n_in, n_out, &mut gpu_output) {
             Ok(()) => {
@@ -209,5 +221,10 @@ mod tests {
             }
             Err(error) => panic!("Q4_K GPU matmul failed: {error}"),
         }
+        assert_eq!(
+            context.compute_stats().live_allocation_bytes,
+            live_before,
+            "Q4_K runtime must not outlive a private context"
+        );
     }
 }

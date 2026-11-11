@@ -1,0 +1,2162 @@
+{
+  "schema_version": 2,
+  "recorded_on": "2026-10-28",
+  "status": "Experimental / Draft",
+  "record_scope": "Historical measurements before fdb0f239 removed Hy JEV. The current section names the implementation measured on recorded_on, not the latest branch. JEV is unsupported; see validation.md for the merge review. local_followup_2026_11_01 records subsequent M3 Max validation and supersedes its explicitly named boundaries.",
+  "source": {
+    "base_main_revision": "92d2eca0aad9161694be49a67a4b3057f7514547",
+    "rust_src_tree": "7995d2c2c9a5bf1fd061f814427d2bfc9b9a3b96",
+    "source_manifest_sha256": "56b7298697309df38506eae0c84c6d3dbab4df1a91bb3e936464443a14a3c19e",
+    "source_files": 546,
+    "qwen3_trunk_diff_from_main": false
+  },
+  "reference": {
+    "repository": "https://github.com/lihy715/llama.cpp.Hyv3Speech",
+    "revision": "e41ca4212f786815faa37606ee2e6fcf8611f9e4",
+    "branch": "hyv3-speech",
+    "isa": "AVX2 / FMA / F16C, GGML_NATIVE=OFF; AVX512/VNNI disabled",
+    "independent_lossy_baseline": "same pinned Oracle, CPU weight repacking enabled",
+    "external_acceleration": false,
+    "companion_note": "Audio-only loop guard was repaired after decoder reference runs; numerical kernels and nonzero-limit translation/text paths are unchanged. Both measured executable hashes are recorded."
+  },
+  "runtime": {
+    "cpu": "Intel Xeon Gold 6138",
+    "architecture": "x86_64",
+    "threads": 4,
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "profile": "release-fast",
+    "features": [
+      "parity-trace",
+      "vulkan"
+    ],
+    "simd": "runtime AVX2/FMA/F16C; local ARM64 NEON/DotProd regression tests",
+    "gpu_inventory": [
+      "NVIDIA GeForce RTX 5090, 570.153.02",
+      "NVIDIA GeForce RTX 5090, 570.153.02",
+      "NVIDIA GeForce RTX 5090, 570.153.02",
+      "NVIDIA GeForce RTX 5090, 570.153.02"
+    ],
+    "flash_attention": false,
+    "timing_note": "Functional wall times on a shared host; not a controlled benchmark."
+  },
+  "weights": [
+    {
+      "file": "Hy-SimulMT-30B-A3B-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "350344d24911ab93fdaee8f9b78e6c06041bff942dc7bc578d8c78d185e4f281"
+    },
+    {
+      "file": "Hy-SimulMT-30B-A3B-Interleave-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc"
+    }
+  ],
+  "fixture": {
+    "source": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav",
+    "wav_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+    "samples": 51200,
+    "rate": 16000,
+    "turn_samples": [
+      25600,
+      12800,
+      12800
+    ],
+    "audio_tokens": [
+      11,
+      5,
+      5
+    ],
+    "f32_sha256": "123878986c2d87a1fb18991a4caa14ebf9ad6fa175157a8d2caf57dbe7397b56"
+  },
+  "tolerances": {
+    "discrete": "Exact IDs, protocol, checkpoint names/order/counts/shapes; all values finite.",
+    "projections": {
+      "max_abs": 2e-05,
+      "relative_rms": 2e-06,
+      "cosine": 0.99999999998
+    },
+    "audio": {
+      "max_abs": "0.002 + 0.001 * max(abs(reference))",
+      "relative_rms": 0.003,
+      "cosine": 0.99999
+    },
+    "logits_without_baseline": {
+      "max_abs": 0.15,
+      "relative_rms": 0.005,
+      "cosine": 0.99998
+    },
+    "logits_with_baseline": "Twice independent Oracle-path error; relative RMS hard cap 0.20, cosine floor 0.98. Limits were not widened.",
+    "empty_reference": "Rejected; audio boundary checks assert exactly four checkpoints."
+  },
+  "current": {
+    "cpu": {
+      "standard-translate-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 10,
+        "groups": {
+          "logits": {
+            "checkpoints": 10,
+            "max_abs": 1.2512797117233276,
+            "max_relative_rms": 0.07293087604114223,
+            "min_cosine": 0.9974558236629387
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.0550994873046875,
+            "max_relative_rms": 0.0005794915501452186,
+            "min_cosine": 0.9999998322347387
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 10,
+          "max_abs": 1.3330318927764893,
+          "max_relative_rms": 0.06633272159023641,
+          "min_cosine": 0.9981301359012572
+        },
+        "logit_bounds": {
+          "max_abs": 2.6660637855529785,
+          "relative_rms": 0.13266544318047283,
+          "cosine": 0.9962602718025144
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            1632,
+            270,
+            120008
+          ],
+          [
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      },
+      "standard-text-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 1.3899500370025635,
+            "max_relative_rms": 0.08264123310561843,
+            "min_cosine": 0.9966678637237952
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 1.2369022369384766,
+          "max_relative_rms": 0.08746602609381651,
+          "min_cosine": 0.9970368774014942
+        },
+        "logit_bounds": {
+          "max_abs": 2.473804473876953,
+          "relative_rms": 0.17493205218763302,
+          "cosine": 0.9940737548029883
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            32
+          ]
+        ],
+        "input_ids_exact": true
+      },
+      "standard-text-f16": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 1.2601518630981445,
+            "max_relative_rms": 0.08097859554646376,
+            "min_cosine": 0.9969160883612198
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 1.9260063171386719,
+          "max_relative_rms": 0.09490565850823798,
+          "min_cosine": 0.9954863692083211
+        },
+        "logit_bounds": {
+          "max_abs": 3.8520126342773438,
+          "relative_rms": 0.18981131701647597,
+          "cosine": 0.9909727384166422
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            32
+          ]
+        ],
+        "input_ids_exact": true
+      },
+      "interleave-translate-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 18,
+        "groups": {
+          "logits": {
+            "checkpoints": 18,
+            "max_abs": 2.1249436736106873,
+            "max_relative_rms": 0.15401138916161136,
+            "min_cosine": 0.9892843621359493
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.0597991943359375,
+            "max_relative_rms": 0.0008818199930367588,
+            "min_cosine": 0.9999996138948588
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 18,
+          "max_abs": 2.2396905422210693,
+          "max_relative_rms": 0.22637406730962287,
+          "min_cosine": 0.9808801883097992
+        },
+        "logit_bounds": {
+          "max_abs": 4.479381084442139,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            120008
+          ],
+          [
+            5057,
+            950,
+            11,
+            1685,
+            18495,
+            10334,
+            11,
+            120809,
+            1632,
+            270,
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      },
+      "interleave-text-f32": {
+        "checker_exit": 1,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 3.0889618396759033,
+            "max_relative_rms": 0.2868802718654061,
+            "min_cosine": 0.9641183501584513
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 5.8242833614349365,
+          "max_relative_rms": 0.3956152247116955,
+          "min_cosine": 0.9381553104976071
+        },
+        "logit_bounds": {
+          "max_abs": 11.648566722869873,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "relative_rms",
+            "value": 0.2868802718654061,
+            "limit": 0.2
+          },
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "cosine",
+            "value": 0.9641183501584513,
+            "limit": 0.98
+          }
+        ],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            31168
+          ]
+        ],
+        "input_ids_exact": true
+      },
+      "interleave-text-f16": {
+        "checker_exit": 1,
+        "process_exit": 0,
+        "generated_tokens": 1,
+        "groups": {
+          "logits": {
+            "checkpoints": 1,
+            "max_abs": 1.6766388416290283,
+            "max_relative_rms": 0.22957120620559926,
+            "min_cosine": 0.9746626901341492
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 1,
+          "max_abs": 2.1872754096984863,
+          "max_relative_rms": 0.2514719245362196,
+          "min_cosine": 0.968946026150297
+        },
+        "logit_bounds": {
+          "max_abs": 4.374550819396973,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "relative_rms",
+            "value": 0.22957120620559926,
+            "limit": 0.2
+          },
+          {
+            "checkpoint": [
+              "hy.logits",
+              0
+            ],
+            "metric": "cosine",
+            "value": 0.9746626901341492,
+            "limit": 0.98
+          }
+        ],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            31168
+          ]
+        ],
+        "input_ids_exact": true
+      }
+    },
+    "auto": {
+      "standard-translate-f32": {
+        "checker_exit": 0,
+        "process_exit": 0,
+        "generated_tokens": 10,
+        "groups": {
+          "logits": {
+            "checkpoints": 10,
+            "max_abs": 1.5464855432510376,
+            "max_relative_rms": 0.06636667065077244,
+            "min_cosine": 0.9979351325616931
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.055145263671875,
+            "max_relative_rms": 0.0005794828979416122,
+            "min_cosine": 0.9999998322392353
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 10,
+          "max_abs": 1.3330318927764893,
+          "max_relative_rms": 0.06633272159023641,
+          "min_cosine": 0.9981301359012572
+        },
+        "logit_bounds": {
+          "max_abs": 2.6660637855529785,
+          "relative_rms": 0.13266544318047283,
+          "cosine": 0.9962602718025144
+        },
+        "failures": [],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            1632,
+            270,
+            120008
+          ],
+          [
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      },
+      "interleave-translate-f32": {
+        "checker_exit": 1,
+        "process_exit": 0,
+        "generated_tokens": 18,
+        "groups": {
+          "logits": {
+            "checkpoints": 18,
+            "max_abs": 2.5752105712890625,
+            "max_relative_rms": 0.25841511467301875,
+            "min_cosine": 0.9750506905443544
+          },
+          "audio": {
+            "checkpoints": 12,
+            "max_abs": 0.05980682373046875,
+            "max_relative_rms": 0.0008821123544389531,
+            "min_cosine": 0.9999996136430215
+          }
+        },
+        "oracle_path_variation": {
+          "checkpoints": 18,
+          "max_abs": 2.2396905422210693,
+          "max_relative_rms": 0.22637406730962287,
+          "min_cosine": 0.9808801883097992
+        },
+        "logit_bounds": {
+          "max_abs": 4.479381084442139,
+          "relative_rms": 0.2,
+          "cosine": 0.98
+        },
+        "failures": [
+          {
+            "checkpoint": [
+              "hy.logits",
+              6
+            ],
+            "metric": "relative_rms",
+            "value": 0.25841511467301875,
+            "limit": 0.2
+          },
+          {
+            "checkpoint": [
+              "hy.logits",
+              6
+            ],
+            "metric": "cosine",
+            "value": 0.9750506905443544,
+            "limit": 0.98
+          }
+        ],
+        "generated_ids_exact": true,
+        "turns": [
+          [
+            120008
+          ],
+          [
+            5057,
+            950,
+            11,
+            1685,
+            18495,
+            10334,
+            11,
+            120809,
+            1632,
+            270,
+            5557,
+            3903,
+            50829,
+            612,
+            270,
+            120008
+          ],
+          [
+            120008
+          ]
+        ]
+      }
+    },
+    "components": {
+      "standard": {
+        "tokenizer": {
+          "exact": true,
+          "cases": 60
+        },
+        "projections": {
+          "checkpoints": 21,
+          "max_abs": 1.430511474609375e-06,
+          "max_relative_rms": 2.398840790166703e-07,
+          "min_cosine": 0.9999999999999712
+        },
+        "non_hop_tail": {
+          "checkpoints": 4,
+          "max_abs": 0.0222625732421875,
+          "max_relative_rms": 0.0004772914492263863,
+          "min_cosine": 0.9999998861148246
+        },
+        "silence": {
+          "checkpoints": 4,
+          "max_abs": 0.0028858184814453125,
+          "max_relative_rms": 0.00019981761916826516,
+          "min_cosine": 0.9999999801743866
+        }
+      },
+      "interleave": {
+        "tokenizer": {
+          "exact": true,
+          "cases": 60
+        },
+        "projections": {
+          "checkpoints": 21,
+          "max_abs": 1.9073486328125e-06,
+          "max_relative_rms": 2.3569040343213693e-07,
+          "min_cosine": 0.9999999999999726
+        },
+        "non_hop_tail": {
+          "checkpoints": 4,
+          "max_abs": 0.0127410888671875,
+          "max_relative_rms": 0.0004910722190421718,
+          "min_cosine": 0.9999998794409427
+        },
+        "silence": {
+          "checkpoints": 4,
+          "max_abs": 0.0027618408203125,
+          "max_relative_rms": 0.00020766510712248915,
+          "min_cosine": 0.9999999792495637
+        }
+      }
+    },
+    "real_entry_tests": {
+      "standard": {
+        "tests_exit": 0,
+        "tests_seconds": 191.867851074785,
+        "cli_seconds": 41.39853683486581,
+        "tests_passed": 3,
+        "tests_failed": 0,
+        "cli_exit": 0,
+        "cli_text_matches_library": true
+      },
+      "interleave": {
+        "tests_exit": 0,
+        "tests_seconds": 196.61732137110084,
+        "cli_seconds": 42.35186384152621,
+        "tests_passed": 3,
+        "tests_failed": 0,
+        "cli_exit": 0,
+        "cli_text_matches_library": true
+      }
+    },
+    "cli_auto": {
+      "standard": {
+        "exit": 0,
+        "seconds": 173.9971411684528
+      },
+      "interleave": {
+        "exit": 0,
+        "seconds": 183.40620618965477
+      }
+    },
+    "regressions": {
+      "hy_arm64_default": {
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0
+      },
+      "hy_arm64_scalar": {
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f32_dot_default": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f32_dot_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f16_typed_dot_default": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "f16_typed_dot_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "q6k_neon_dotprod": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "q6k_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "qwen3": {
+        "passed": 111,
+        "failed": 0,
+        "ignored": 4
+      },
+      "tokenizer": {
+        "passed": 31,
+        "failed": 0,
+        "ignored": 2
+      },
+      "audio_frontend": {
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      "shared_nn": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      "jev": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      "server_mode": {
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0
+      },
+      "hy_contract_and_normal_entries": [
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 3
+        }
+      ],
+      "linear_default": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 1
+      },
+      "linear_vulkan_feature": {
+        "passed": 6,
+        "failed": 0,
+        "ignored": 5
+      },
+      "explicit_policy": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "explicit_policy_scalar": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "threshold_zero": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "threshold_custom": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "scalar_device_selection": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "comparison_checker": {
+        "passed": 4,
+        "failed": 0
+      }
+    },
+    "vulkan_device_counters": {
+      "standard-translate-f32-auto-valuedot": {
+        "backend_events": {
+          "Vulkan": 429,
+          "Cpu": 79608
+        },
+        "counter_samples": 429,
+        "final_counters": {
+          "submissions": 1004,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 287397924,
+          "host_read_bytes": 186585216,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      },
+      "standard-cli-auto-1token": {
+        "backend_events": {
+          "Vulkan": 222,
+          "Cpu": 52452
+        },
+        "counter_samples": 222,
+        "final_counters": {
+          "submissions": 547,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 192351268,
+          "host_read_bytes": 125407360,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      },
+      "interleave-translate-f32-auto-valuedot": {
+        "backend_events": {
+          "Vulkan": 437,
+          "Cpu": 89698
+        },
+        "counter_samples": 437,
+        "final_counters": {
+          "submissions": 1012,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 293493796,
+          "host_read_bytes": 194771072,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      },
+      "interleave-cli-auto-1token": {
+        "backend_events": {
+          "Vulkan": 222,
+          "Cpu": 53298
+        },
+        "counter_samples": 222,
+        "final_counters": {
+          "submissions": 547,
+          "static_uploads": 345,
+          "static_upload_bytes": 2077439040,
+          "host_write_bytes": 194361380,
+          "host_read_bytes": 126847104,
+          "transfer_submissions": 0,
+          "live_allocation_bytes": 1895355520,
+          "peak_allocation_bytes": 2197545472
+        }
+      }
+    },
+    "binary_sha256": {
+      "rust-model-inference": "506b2c8270905d9a16bf5448841ae14ccfdab5bf53250aad9f0efcbe8f28f59b",
+      "hy_simulmt_parity": "7ee083b2f9729e5031b866e04a4806e541d419f22f05ac6dafc43259a5dd0173",
+      "hy-oracle-avx2": "fb811def7a47ef7bae0e7db66e9c2c1f9c4f2981dde7c300245009429f702079",
+      "hy-oracle-avx2-audio": "74e9ceeab1d1c2041968378fd253d1aa9fe34323c88efeef3c82174c89ab791c",
+      "hy_simulmt_entries-8f825c163e0d4627": "89e17960ab932ab83974055017a63313d41486ed69414624db8968d9ad25c883"
+    }
+  },
+  "known_limitations": {
+    "failed_numerical_cases": [
+      "interleave-text-f32/cpu",
+      "interleave-text-f16/cpu",
+      "interleave-translate-f32/auto"
+    ],
+    "vulkan_process_exit": {
+      "test": "auto_gpu_threshold_interleaves_rows_and_mixed_group_sizes",
+      "assertions_passed": true,
+      "isolated_process_exit_codes": [
+        -11,
+        -11,
+        -11
+      ],
+      "tested_rust_src_tree": "8017a69161e985a3b2c15f2de84fef653d72f403",
+      "source_note": "Before the final one-line CPU router correction; Vulkan and dispatch code are unchanged.",
+      "gdb": "SIGSEGV in [vkps] Update; main thread in libnvidia-glcore.so.570.153.02 during exit().",
+      "root_cause_confirmed": false,
+      "resolved": false
+    },
+    "gpu_performance": "No speedup established; measured Auto runs are slower than CPU."
+  },
+  "historical": {
+    "source_revision": "a2db408bd6436063ff5ef902aabe9e8a72a19010",
+    "note": "Before the standalone Hy decoder; not current parity evidence.",
+    "full_jfk_cli": {
+      "samples": 176000,
+      "seconds_of_audio": 11,
+      "turns": 13,
+      "audio_tokens": 70,
+      "prompt_tokens": 193,
+      "output_tokens": 35,
+      "seconds": 154.196,
+      "oracle_compared": false,
+      "output_without_newlines": "因此，我的美国同胞们，不要问你的国家能为你做什么，问问你能为你的国家做什么。"
+    },
+    "global_token_limit": {
+      "max_tokens": 4,
+      "turns": [
+        [
+          1632,
+          270,
+          120008
+        ],
+        [
+          5557
+        ]
+      ],
+      "passed": true
+    },
+    "prior_native_isa_failures": [
+      {
+        "reference_isa": "native AVX512",
+        "stage": "Before the current F32 reductions/router",
+        "case": "standard-speech-f32",
+        "cosine": 0.9945174786,
+        "required_cosine": 0.9952345089776164
+      },
+      {
+        "reference_isa": "native AVX512",
+        "stage": "Initial independent decoder, sequential FMA values",
+        "case": "interleave-speech-f32",
+        "max_abs": 5.22658,
+        "required_max_abs": 4.231352210044861
+      }
+    ]
+  },
+  "not_validated": [
+    "whole-repository test suite",
+    "final decoder against an AVX512 Oracle",
+    "whole-model F32 equivalence",
+    "other quantizations",
+    "long recordings",
+    "microphone input",
+    "TTS",
+    "resampling/non-PCM16 WAV",
+    "other GPU models/drivers"
+  ],
+  "text_fixture": {
+    "path": "tools/oracle/hy_simulmt/text.txt",
+    "sha256": "e38866440e7adbc66ca06d4b17f6a299c5dfb8d45734ed643d81fb8b4536fe4c",
+    "prompt": "native no_think A/B text prompt",
+    "generated_tokens": 1
+  },
+  "local_followup_2026_11_01": {
+    "source_base_revision": "c4e7f8b5ecdeda9e2346ab1b61c5b29ac7b943c7",
+    "host": "Apple M3 Max / MoltenVK 1.4.2",
+    "threads": 4,
+    "kv_format": "F32",
+    "oracle_revision": "e41ca4212f786815faa37606ee2e6fcf8611f9e4",
+    "oracle_isa": "native NEON; Accelerate, BLAS, Metal and Vulkan OFF",
+    "vulkan_cleanup": {
+      "pre_fix_exit_audit": "SIGABRT after successful computation; global allocations remained live",
+      "post_fix_exit_audit_children": 3,
+      "post_fix_child_exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "focused_device_tests_passed": 9,
+      "nvidia_570_153_02_retested": false,
+      "original_nvidia_crash_cause_confirmed": false,
+      "khronos_validation_layer": "not installed; initialization with RMI_VULKAN_VALIDATION=1 fails with missing-layer error",
+      "cleanup_commits": [
+        "85cba7d4a",
+        "fd25da1f8"
+      ],
+      "private_context_cache": {
+        "pre_fix_retained_bytes": 7952,
+        "post_fix_retained_bytes": 0,
+        "local_exit_sigsegv_cause_confirmed": true,
+        "cause": "global Q4K runtime outlived a private VulkanContext",
+        "fix": "only singleton contexts enter the global cache; private contexts use call-scoped runtime"
+      },
+      "full_suite_repeats_after_private_context_fix": [
+        {
+          "run": 1,
+          "process_exit": 101,
+          "new_failed_names": [],
+          "removed_failed_names": [],
+          "result": [
+            "test result: FAILED. 1445 passed; 24 failed; 201 ignored; 0 measured; 0 filtered out; finished in 17.21s"
+          ]
+        },
+        {
+          "run": 2,
+          "process_exit": 101,
+          "new_failed_names": [],
+          "removed_failed_names": [],
+          "result": [
+            "test result: FAILED. 1445 passed; 24 failed; 201 ignored; 0 measured; 0 filtered out; finished in 16.92s"
+          ]
+        }
+      ]
+    },
+    "regressions": {
+      "default": {
+        "passed": 1341,
+        "failed": 20,
+        "ignored": 88,
+        "process_exit": 101,
+        "new_failed_names": [],
+        "removed_failed_names": []
+      },
+      "vulkan": {
+        "passed": 1446,
+        "failed": 24,
+        "ignored": 201,
+        "process_exit": 101,
+        "new_failed_names": [],
+        "removed_failed_names": []
+      },
+      "focused_entry_tests_passed": 5,
+      "standard_real_weight_entry_tests_passed": 3,
+      "scalar_hy_tests_passed": 19,
+      "scalar_hy_features": [
+        "parity-trace",
+        "vulkan"
+      ],
+      "normal_hy_tests_passed": 19,
+      "oracle_checker_unit_tests_passed": 4,
+      "interleave_real_weight_entry_tests_passed": 3
+    },
+    "unverified": [
+      "NVIDIA 570.153.02 exit crash",
+      "Khronos validation-layer execution",
+      "other complete quantizations",
+      "long recordings",
+      "GPU speedup",
+      "other models complete real-weight parity"
+    ],
+    "cleanup_only_standard_translation": [
+      {
+        "name": "standard-cpu-final",
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07656117458149744,
+        "min_logit_cosine": 0.9974236137711607,
+        "max_audio_relative_rms": 0.0007531249542767161,
+        "unchanged_from": "standard-cpu-before",
+        "all_checkpoint_bytes_equal": true
+      },
+      {
+        "name": "standard-auto-final-1",
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07803815322421313,
+        "min_logit_cosine": 0.9977130786448526,
+        "max_audio_relative_rms": 0.0007528923760595431,
+        "unchanged_from": "standard-auto-before",
+        "all_checkpoint_bytes_equal": true
+      },
+      {
+        "name": "standard-auto-final-2",
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07803815322421313,
+        "min_logit_cosine": 0.9977130786448526,
+        "max_audio_relative_rms": 0.0007528923760595431,
+        "unchanged_from": "standard-auto-final-1",
+        "all_checkpoint_bytes_equal": true
+      }
+    ],
+    "cleanup_only_standard_cli_http": [
+      {
+        "run": "cli-auto",
+        "exit_code": 0,
+        "seconds": 19.3828884169925,
+        "text": "因此，\n我的美国同胞们，",
+        "matches_library": true,
+        "vulkan_dispatch_reports": 555,
+        "last_counters": "ComputeStats { submissions: 760, static_uploads: 345, static_upload_bytes: 2077439040, host_write_bytes: 249550884, host_read_bytes: 186585216, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+      },
+      {
+        "run": "http-auto",
+        "seconds": 18.800655333005125,
+        "result": {
+          "text": "因此，\n我的美国同胞们，\n"
+        },
+        "matches_library": true,
+        "jev_status": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404
+        },
+        "vulkan_dispatch_reports": 555,
+        "last_counters": "ComputeStats { submissions: 760, static_uploads: 345, static_upload_bytes: 2077439040, host_write_bytes: 249550884, host_read_bytes: 186585216, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+      }
+    ],
+    "standard_translation": [
+      {
+        "name": "standard-swiglu-cpu",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 10,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.08004300607562806,
+        "min_logit_cosine": 0.9973591463594381,
+        "max_audio_relative_rms": 0.0007531249542767161
+      },
+      {
+        "name": "standard-swiglu-auto-1",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 10,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.07922778941851139,
+        "min_logit_cosine": 0.9972538654019886,
+        "max_audio_relative_rms": 0.0007528923760595431
+      },
+      {
+        "name": "standard-swiglu-auto-2",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 10,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.07922778941851139,
+        "min_logit_cosine": 0.9972538654019886,
+        "max_audio_relative_rms": 0.0007528923760595431
+      }
+    ],
+    "interleave_translation": [
+      {
+        "name": "interleave-final-cpu",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.14313646641681918,
+        "min_logit_cosine": 0.9899402847860282,
+        "max_audio_relative_rms": 0.0009083888645683927
+      },
+      {
+        "name": "interleave-final-auto-2",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.13612389167652533,
+        "min_logit_cosine": 0.9924661012109035,
+        "max_audio_relative_rms": 0.0009086410189362891
+      },
+      {
+        "name": "interleave-final-scalar",
+        "process_exit": 0,
+        "checker_exit": 0,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.18662407960575012,
+        "min_logit_cosine": 0.986624340642775,
+        "max_audio_relative_rms": 0.0009081925215337311
+      }
+    ],
+    "interleave_auto_first_run": {
+      "name": "interleave-encoder-auto",
+      "checker_exit": 0,
+      "process_exit": 0,
+      "tokens": 18,
+      "generated_ids_exact": true,
+      "max_logit_relative_rms": 0.13612389167652533,
+      "min_logit_cosine": 0.9924661012109035,
+      "max_audio_relative_rms": 0.0009086410189362891
+    },
+    "interleave_logit_bounds": {
+      "max_abs": 4.955624580383301,
+      "relative_rms": 0.2,
+      "cosine": 0.9852752324815912
+    },
+    "interleave_pre_fix_failures": [
+      {
+        "name": "interleave-cpu-before",
+        "checker_exit": 1,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.1940436383922047,
+        "min_logit_cosine": 0.9838043729824469,
+        "max_audio_relative_rms": 0.0009083888645683927,
+        "max_logit_abs": 2.388488531112671
+      },
+      {
+        "name": "interleave-auto-before",
+        "checker_exit": 1,
+        "tokens": 18,
+        "generated_ids_exact": true,
+        "max_logit_relative_rms": 0.2012441130507573,
+        "min_logit_cosine": 0.9833128351182151,
+        "max_audio_relative_rms": 0.0009086410189362891,
+        "max_logit_abs": 2.5831098556518555
+      }
+    ],
+    "interleave_unguarded_auto_after_swiglu": {
+      "checker_exit": 1,
+      "process_exit": 0,
+      "generated_ids_exact": true,
+      "max_logit_abs": 2.1402106285095215,
+      "max_logit_relative_rms": 0.19780332495484199,
+      "min_logit_cosine": 0.9829592761073523,
+      "failure": "hy.logits occurrence 6 below unchanged calibrated cosine floor; GPU decoder gated to CPU"
+    },
+    "numerical_correction": {
+      "scope": "Hy MoE only; shared SiLU/SwiGLU operators unchanged",
+      "change": "Use existing SIMD silu_mul_approx_inplace, matching the pinned Oracle SwiGLU path and Hy dense FFN",
+      "fixture_absolute_tolerance": 1e-07,
+      "calibration_or_caps_changed": false,
+      "auto_policy": {
+        "standard": "hybrid Vulkan projections/convolutions and CPU attention/KV",
+        "interleave": "GPU audio encoder and CPU decoder; explicit startup reason"
+      },
+      "gpu_decoder_arithmetic_fixed": false
+    },
+    "interleave_download": {
+      "path": "models/Hy-SimulMT-30B-A3B-Interleave-GGUF/Hy-SimulMT-30B-A3B-Interleave-Q4_K_M.gguf",
+      "bytes": 19746809728,
+      "sha256": "26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc",
+      "completion_source": "approved official Hugging Face mirror",
+      "repository_revision": "2aae4719eb91c1e6990c9386f70b2610f106b97e",
+      "full_sha256_verified": true
+    },
+    "cli_http": [
+      {
+        "variant": "standard",
+        "entry": "cli-auto",
+        "exit_code": 0,
+        "text": "因此，\n我的美国同胞们，",
+        "matches_library": true,
+        "vulkan_dispatch_reports": 555,
+        "last_counters": [
+          "ComputeStats { submissions: 760, static_uploads: 345, static_upload_bytes: 2077439040, host_write_bytes: 249550884, host_read_bytes: 186585216, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+        ],
+        "decoder_fallback_reported": false
+      },
+      {
+        "variant": "standard",
+        "entry": "http-json-auto",
+        "status": 200,
+        "result": {
+          "text": "因此，\n我的美国同胞们，\n"
+        },
+        "matches_library": true
+      },
+      {
+        "variant": "standard",
+        "entry": "http-multipart-auto",
+        "status": 200,
+        "result": {
+          "text": "因此，\n我的美国同胞们，\n"
+        },
+        "matches_library": true,
+        "jev_status": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404
+        },
+        "vulkan_dispatch_reports": 1110,
+        "last_counters": [
+          "ComputeStats { submissions: 1519, static_uploads: 613, static_upload_bytes: 3185992768, host_write_bytes: 499101732, host_read_bytes: 373170304, transfer_submissions: 0, live_allocation_bytes: 2019087488, peak_allocation_bytes: 2321449472 }"
+        ],
+        "decoder_fallback_reported": false
+      },
+      {
+        "variant": "interleave",
+        "entry": "cli-auto",
+        "exit_code": 0,
+        "text": "And so, my fellow Americans,<｜hy_place▁holder▁no▁791｜>因此，我的美国同胞们，",
+        "matches_library": true,
+        "vulkan_dispatch_reports": 150,
+        "last_counters": [
+          "ComputeStats { submissions: 163, static_uploads: 149, static_upload_bytes: 1270875200, host_write_bytes: 114313252, host_read_bytes: 59363456, transfer_submissions: 0, live_allocation_bytes: 1022277696, peak_allocation_bytes: 1324639680 }"
+        ],
+        "decoder_fallback_reported": true
+      },
+      {
+        "variant": "interleave",
+        "entry": "http-json-auto",
+        "status": 200,
+        "result": {
+          "text": "And so, my fellow Americans,<｜hy_place▁holder▁no▁791｜>因此，我的美国同胞们，\n"
+        },
+        "matches_library": true
+      },
+      {
+        "variant": "interleave",
+        "entry": "http-multipart-auto",
+        "status": 200,
+        "result": {
+          "text": "And so, my fellow Americans,<｜hy_place▁holder▁no▁791｜>因此，我的美国同胞们，\n"
+        },
+        "matches_library": true,
+        "jev_status": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404
+        },
+        "vulkan_dispatch_reports": 300,
+        "last_counters": [
+          "ComputeStats { submissions: 325, static_uploads: 221, static_upload_bytes: 1572865088, host_write_bytes: 228626468, host_read_bytes: 118726784, transfer_submissions: 0, live_allocation_bytes: 1022277696, peak_allocation_bytes: 1324639680 }"
+        ],
+        "decoder_fallback_reported": true
+      }
+    ],
+    "numerical_source_sha256": {
+      "src/models/hy_simulmt/moe.rs": "498ec675eed8e1d6fa7cbc61a37a26c57092be18743f02c815c258a17de1e693",
+      "src/models/hy_simulmt/runtime.rs": "91913b5442e8def56c99ffa963d65ff0ae2fa019b0b7bace7d6d4434e1008365",
+      "src/models/hy_simulmt/decoder.rs": "677ad80b6aba3d504c0d671f279747147e86aaafa222cbc3a9363d66580f9513",
+      "tools/oracle/hy_simulmt/compare.py": "3a0cd18eab1051c31123a2b587e0b6ba0a403ea0b620161f2166a8d4745d3d9f"
+    },
+    "binary_sha256": {
+      "target/rmi/release-fast/rust-model-inference": "45d2960a9c073afebdcc83c2df66254639f1ccf79ca91e47940afa631c8de9e8",
+      "target/rmi/release-fast/rust-model-server": "3f2dd1e4dd8045dd534423a33f699c5b68d38755047a238a2a45bd9fdcc212a2",
+      "target/rmi/release-fast/examples/hy_simulmt_parity": "bb88f93230272856864a13ecfc4e5cd47c94f0d0c2c467aac8d5621c0dffefcb",
+      "target/hy-fix-review/hy-oracle-m3": "bcaf1ed750b76e7703d5a66775e4b58c44fc8725d7685cb5c147c3e901c7c1b2"
+    },
+    "real_weight_entry_tests": [
+      {
+        "variant": "standard",
+        "exit_code": 0,
+        "result": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 61.39s"
+        ]
+      },
+      {
+        "variant": "interleave",
+        "exit_code": 0,
+        "result": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 60.01s"
+        ]
+      }
+    ],
+    "standard_logit_bounds": {
+      "max_abs": 2.977287173271179,
+      "relative_rms": 0.15149625684956985,
+      "cosine": 0.9942768631809429
+    }
+  },
+  "main_integration_2026_11_04": {
+    "previous_head": "247e8fe2d8f638a4c9e233c71c3d63ca484bb5e2",
+    "merged_main": "f4aa9d15526ec3af828c8c93f9bb943b45069e08",
+    "host": "Apple M3 Max / MoltenVK 1.4.2 / Rust 1.98.1 / release-fast / native NEON",
+    "model_settings": "Both complete Q4_K_M variants, 4 threads, F32 KV, JFK 3.2 seconds, three turns, max_tokens=64",
+    "weights_sha256_verified": true,
+    "oracle_reference": "Existing independent native NEON reference and repacking baseline at e41ca4212f786815faa37606ee2e6fcf8611f9e4; unchanged calibration and hard caps",
+    "test_source_sha256": {
+      "src/compute/linear.rs": "06f7f8c910fb49a3c0de0e24a88fad4ee2f64a8bceb1f96acb7eb4b3e6567231",
+      "src/vulkan/ops.rs": "6e885900e73a401bf5c11c9694f3ead30a1bcd56f7b2db026e4d3243d76e6a9f",
+      "src/ops/quant/neon_k.rs": "d5f5dd03631c6514841ed86e06a17bac1af97ffa048b1769e49efc13c33481b5",
+      "src/ops/quant/mod.rs": "8bf09fcffd4d28569d298c035795e9dbc0af7ce3b06242ee95a71ba82afba984",
+      "src/app/server/mod.rs": "a80b957d59541f7ec9d89ed8a2f2bd12ff78a5f6e6a6c546c81f93039af24c3f",
+      "src/core/tokenizer/mod.rs": "bb809943d7b85b32d8577f5b1cab27430cc2a0426b91598aaf08d9f450c55f03",
+      "shaders/glsl/f16_matmul.comp": "ee366f503024541aa800e8d4d60fd298e08f1c26c8946fcc250179a8db26330a",
+      "shaders/glsl/f16_matmul_tiled.comp": "3352301fc2613b0c66e9918ee83b437fb4c016c5f3775f8d90a4f3b2398d13a3",
+      "shaders/bin/f16_matmul.spv": "0a7713c6024f211bceba84a234da97f12527096ebe2bfedcaab7f54ffeaccbb0",
+      "shaders/bin/f16_matmul_tiled.spv": "42a6d19a4437af40b30a81291b787380097b328354182bc57217a31f5d1bd01a"
+    },
+    "full_library": [
+      {
+        "configuration": "default",
+        "exit_code": 101,
+        "summaries": [
+          "test result: FAILED. 1369 passed; 21 failed; 89 ignored; 0 measured; 0 filtered out; finished in 26.58s"
+        ],
+        "failed_names": [
+          "app::media::tests::stereo_uploads_are_refused",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+        ],
+        "added_failures": [
+          "app::media::tests::stereo_uploads_are_refused"
+        ],
+        "removed_failures": []
+      },
+      {
+        "configuration": "vulkan",
+        "exit_code": 101,
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.13s",
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.00s",
+          "test result: FAILED. 1474 passed; 25 failed; 204 ignored; 0 measured; 0 filtered out; finished in 30.58s"
+        ],
+        "failed_names": [
+          "app::media::tests::stereo_uploads_are_refused",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+        ],
+        "added_failures": [
+          "app::media::tests::stereo_uploads_are_refused"
+        ],
+        "removed_failures": []
+      }
+    ],
+    "added_failure_disposition": {
+      "app::media::tests::stereo_uploads_are_refused": "Also fails on an untouched git archive of main f4aa9d15 with the same FFmpeg-equipped host: the supported FFmpeg path downmixes stereo. The media source is byte-identical to main."
+    },
+    "focused": [
+      {
+        "name": "linear-device-fixed",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "compute::linear::tests::",
+          "--",
+          "--ignored",
+          "--skip",
+          "scalar_linear_selection",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1697 filtered out; finished in 0.91s"
+        ]
+      },
+      {
+        "name": "runtime-device",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "vulkan::ops::tests::batched_linear_device_",
+          "--",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1696 filtered out; finished in 0.72s"
+        ]
+      },
+      {
+        "name": "exit-audit",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "ops::float::tests::shared_vulkan_context_cleans_up_before_driver_exit",
+          "--",
+          "--exact",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 1.18s"
+        ]
+      },
+      {
+        "name": "shutdown",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "vulkan::tests::vulkan_shutdown_drains_device_and_rejects_later_submissions",
+          "--",
+          "--exact",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.40s"
+        ]
+      },
+      {
+        "name": "private-context-smoke",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "vulkan::tests::initializes_with_homebrew_moltenvk",
+          "--",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.36s"
+        ]
+      },
+      {
+        "name": "hy-scalar",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "hy_",
+          "--",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "RMI_SCALAR": "1"
+        },
+        "summaries": [
+          "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 1684 filtered out; finished in 0.03s"
+        ]
+      },
+      {
+        "name": "linear-scalar",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan",
+          "--lib",
+          "compute::linear::tests::scalar_linear_selection_does_not_initialize_a_device",
+          "--",
+          "--exact",
+          "--ignored",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "RMI_SCALAR": "1"
+        },
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.00s"
+        ]
+      },
+      {
+        "name": "build",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "build",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace,vulkan",
+          "--bin",
+          "rust-model-inference",
+          "--bin",
+          "rust-model-server",
+          "--example",
+          "hy_simulmt_parity"
+        ],
+        "environment": {},
+        "summaries": []
+      },
+      {
+        "name": "hy-contract-entries",
+        "exit_code": 0,
+        "command": [
+          "cargo",
+          "test",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "parity-trace,vulkan",
+          "--test",
+          "hy_simulmt",
+          "--test",
+          "hy_simulmt_entries",
+          "--",
+          "--test-threads=1"
+        ],
+        "environment": {},
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "test result: ok. 2 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ]
+      }
+    ],
+    "real_models": [
+      {
+        "name": "standard-cpu-parity",
+        "ids_exact": true,
+        "tokens": 10,
+        "max_logit_relative_rms": 0.08619669141420498,
+        "min_logit_cosine": 0.9963898414050814,
+        "checkpoints": 22,
+        "bounds": {
+          "max_abs": 2.977287173271179,
+          "relative_rms": 0.15149625684956985,
+          "cosine": 0.9942768631809429
+        }
+      },
+      {
+        "name": "standard-auto-parity",
+        "ids_exact": true,
+        "tokens": 10,
+        "max_logit_relative_rms": 0.08386863843663912,
+        "min_logit_cosine": 0.997444530911615,
+        "checkpoints": 22,
+        "bounds": {
+          "max_abs": 2.977287173271179,
+          "relative_rms": 0.15149625684956985,
+          "cosine": 0.9942768631809429
+        }
+      },
+      {
+        "name": "standard-real-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 65.85s"
+        ]
+      },
+      {
+        "name": "standard-cli-auto",
+        "text_matches": true,
+        "vulkan_reports": 555,
+        "submissions": 568,
+        "peak_allocation_bytes": 2631209472
+      },
+      {
+        "name": "standard-http-auto",
+        "json_matches": true,
+        "multipart_matches": true,
+        "jev": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404,
+          "/v1/jev/image_grouped": 404
+        }
+      },
+      {
+        "name": "interleave-cpu-parity",
+        "ids_exact": true,
+        "tokens": 18,
+        "max_logit_relative_rms": 0.11466403716398701,
+        "min_logit_cosine": 0.9934250301082409,
+        "checkpoints": 30,
+        "bounds": {
+          "max_abs": 4.955624580383301,
+          "relative_rms": 0.2,
+          "cosine": 0.9852752324815912
+        }
+      },
+      {
+        "name": "interleave-auto-parity",
+        "ids_exact": true,
+        "tokens": 18,
+        "max_logit_relative_rms": 0.15442687447684955,
+        "min_logit_cosine": 0.9891395041369556,
+        "checkpoints": 30,
+        "bounds": {
+          "max_abs": 4.955624580383301,
+          "relative_rms": 0.2,
+          "cosine": 0.9852752324815912
+        }
+      },
+      {
+        "name": "interleave-real-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 52.70s"
+        ]
+      },
+      {
+        "name": "interleave-cli-auto",
+        "text_matches": true,
+        "vulkan_reports": 150,
+        "submissions": 163,
+        "peak_allocation_bytes": 1325069760
+      },
+      {
+        "name": "interleave-http-auto",
+        "json_matches": true,
+        "multipart_matches": true,
+        "jev": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404,
+          "/v1/jev/image_grouped": 404
+        }
+      }
+    ],
+    "shader_validation": {
+      "manifest": "passed",
+      "spirv_val_vulkan_1_1": {
+        "passed": 54
+      },
+      "full_rebuild_check": "Fails at byte comparison of unchanged softmax.spv on both this merge and untouched main; no full byte-rebuild pass claimed."
+    },
+    "limits": "Local validation only; NVIDIA, other complete quantizations, long recordings and performance speedup were not measured. Interleave GPU decoder gate and unsupported JEV/full-device policies remain.",
+    "local_evidence": "target/hy-main-2026-11-04/"
+  },
+  "review_fixes_2026_11_04": {
+    "host": "Apple M3 Max / arm64 / NEON + DotProd / MoltenVK physical Vulkan",
+    "source_parent_revision": "31322d2be7d98f4c6d8bb65eec8d8ebd0a59312c",
+    "source_files_sha256": {
+      "src/compute/linear.rs": "45d74d1ead4d0d233bb82009e811df777575e35c557621764a7f62b96248da94",
+      "src/core/tokenizer/mod.rs": "9130a3fc55fa78e7fb594bca7a8c168d938ad67dc763a7f16d6e2e6ef83fea01",
+      "src/models/falcon_h1/trunk/forward.rs": "fd4c3422b5ab8d82b158d29b97e6f907e5712a616376b4795e91789801e3cf19",
+      "src/models/hy_simulmt/audio.rs": "4014a664f2706e090b41d5b274aac673127a4734fe02e6f2a0bf39d547d9c5a6",
+      "src/models/hy_simulmt/config.rs": "8516abc20505f39aeb68037f1a5282508ebeaea3e1e46e570914bc84ed110d87",
+      "src/models/hy_simulmt/decoder.rs": "c90df660e1e557e98a3e2697c4c08032582f119fa14922e882b07d0ecde8a586",
+      "src/models/hy_simulmt/decoder_tests.rs": "8d9690d242f6f0040c85069d2687555a0a2315ff272140a1e8fa80b86e7588e9",
+      "src/models/hy_simulmt/mod.rs": "0baf6e254a076e2e8b181a5d435673f2e9156dffed0944c56a9d2383f3ec2026",
+      "src/models/hy_simulmt/moe.rs": "7421d501d7606dd679b249de0ca3958b43e09529685ad73b5b54d6dcd5ea52be",
+      "src/models/hy_simulmt/weights.rs": "81041a5f67df269f5f0d50b28cef4e4a6ab01daa12d47853c5922d63c7575ea2",
+      "src/ops/audio/frontend.rs": "d47a16d17e1baeb0cff5f5d7d9ae6a31f5f39fe17476b2ef88b37af88fe6dede",
+      "src/ops/audio/transformer.rs": "3018af668c8b1ada2d0b33cc6eba9636f089b36cbda9fa10b7c205367db5f8ce",
+      "src/ops/float.rs": "df5abd68be830af3313860234a24e63e2c23a610d3541ba4de8b9a263b4e0d4a",
+      "src/ops/matmul_tests.rs": "595a0174c9c80c5cb189868f9333b93046ea82d62d0afd2d399b53c89d641fac",
+      "src/ops/nn.rs": "cbb0de838073270bf4d10af1f5e1799ed12851b9b48d22d49a0e38d4e76a26f7",
+      "src/vulkan/ops.rs": "d7f91d2af3e7b8030c71a25aedcc4958b6c376734cdae5596624bf3f8fb259bd",
+      "tests/hy_simulmt.rs": "8eea79f22d45c03cbf2ce8e5fe48f244961969e020ea47fe21fdd66c805bae6b",
+      "tests/fixtures/hy_mt2_tokenizer.json": "9e43c6e5a3c7ca24a25bdd9e2667c137bd1bff8b34cf815e127ad8b1e5caa3a9",
+      "tools/oracle/hy_simulmt/f16_matmul_probe.cpp": "ff27595a1c38bef30d3be2a249b1990407b2b7bf6b8cdfed351c7bfa989e15e4"
+    },
+    "build": "Rust 1.98.1; release-fast; native target; parity-trace,vulkan for numerical traces and ordinary vulkan for CLI/HTTP and real entries",
+    "review_disposition": {
+      "M1": "existing scalar gates confirmed; direct dot regression added",
+      "M2": "legacy GPU opt-in restored",
+      "M3": "router tensor selects layer kind",
+      "M4": "missing output ties embedding; malformed existing output rejected",
+      "M5": "reference defaults and scalar/array expert width; key and epsilon remain required",
+      "M6": "one-row head executor and descriptor limits",
+      "M7": "bounded group descriptor recycling after confirmed completion",
+      "M8": "restore decodable LayerNorm types and preserve finite/length validation",
+      "M9": "individual projection kernel semantics retained in groups",
+      "M10": "early three-weight descriptor/group bound",
+      "M11": "seven official Hy-MT2 token-ID regressions",
+      "M12": "reference F16 input narrowing confirmed by independent graph probe",
+      "M13": "neutral shared naming/traces, successful mel cache, dead FFI removal; distinct Falcon arithmetic and existing nonconflicting exports retained"
+    },
+    "weight_sha256_verified": [
+      "350344d24911ab93fdaee8f9b78e6c06041bff942dc7bc578d8c78d185e4f281  models/Hy-SimulMT-30B-A3B-GGUF/Hy-SimulMT-30B-A3B-Q4_K_M.gguf",
+      "26c87f0a5f6409f3a57f8c4d2a49d58ad0f5c0753141643789e73564339cedbc  models/Hy-SimulMT-30B-A3B-Interleave-GGUF/Hy-SimulMT-30B-A3B-Interleave-Q4_K_M.gguf"
+    ],
+    "numerical_runs": [
+      {
+        "name": "standard-cpu-parity",
+        "ids_exact": true,
+        "tokens": 10,
+        "max_logit_relative_rms": 0.08619669141420498,
+        "min_logit_cosine": 0.9963898414050836,
+        "checkpoints": 22,
+        "bounds": {
+          "max_abs": 2.977287173271179,
+          "relative_rms": 0.15149625684956985,
+          "cosine": 0.9942768631809471
+        }
+      },
+      {
+        "name": "standard-auto-parity",
+        "ids_exact": true,
+        "tokens": 10,
+        "max_logit_relative_rms": 0.07718169207790766,
+        "min_logit_cosine": 0.9972238418571927,
+        "checkpoints": 22,
+        "bounds": {
+          "max_abs": 2.977287173271179,
+          "relative_rms": 0.15149625684956985,
+          "cosine": 0.9942768631809471
+        }
+      },
+      {
+        "name": "interleave-cpu-parity",
+        "ids_exact": true,
+        "tokens": 18,
+        "max_logit_relative_rms": 0.11466403716398701,
+        "min_logit_cosine": 0.9934250301082427,
+        "checkpoints": 30,
+        "bounds": {
+          "max_abs": 4.955624580383301,
+          "relative_rms": 0.2,
+          "cosine": 0.9852752324815957
+        }
+      },
+      {
+        "name": "interleave-auto-parity",
+        "ids_exact": true,
+        "tokens": 18,
+        "max_logit_relative_rms": 0.13462535427192987,
+        "min_logit_cosine": 0.9919321178882541,
+        "checkpoints": 30,
+        "bounds": {
+          "max_abs": 4.955624580383301,
+          "relative_rms": 0.2,
+          "cosine": 0.9852752324815957
+        }
+      }
+    ],
+    "calibration": "Same independent native-NEON pinned Oracle and repacked baseline artifacts, with unchanged gates. Exact IDs/structure; bounded lossy values.",
+    "cpu_previous_payloads": [
+      {
+        "name": "standard-cpu",
+        "checkpoint_payloads_exact": 22,
+        "compared_to": "target/hy-main-2026-11-04/standard-cpu"
+      },
+      {
+        "name": "interleave-cpu",
+        "checkpoint_payloads_exact": 30,
+        "compared_to": "target/hy-main-2026-11-04/interleave-cpu"
+      }
+    ],
+    "ordinary_vulkan_entry_checks": [
+      {
+        "name": "standard-real-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 70.31s"
+        ]
+      },
+      {
+        "name": "standard-cli-auto",
+        "text_matches": true,
+        "vulkan_reports": 555,
+        "submissions": 568,
+        "peak_allocation_bytes": 2168470528
+      },
+      {
+        "name": "standard-http-auto",
+        "json_matches": true,
+        "multipart_matches": true,
+        "jev": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404,
+          "/v1/jev/image_grouped": 404
+        }
+      },
+      {
+        "name": "interleave-real-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 66.92s"
+        ]
+      },
+      {
+        "name": "interleave-cli-auto",
+        "text_matches": true,
+        "vulkan_reports": 150,
+        "submissions": 163,
+        "peak_allocation_bytes": 1325069760
+      },
+      {
+        "name": "interleave-http-auto",
+        "json_matches": true,
+        "multipart_matches": true,
+        "jev": {
+          "/v1/jev/score": 404,
+          "/v1/jev/grouped": 404,
+          "/v1/jev/image": 404,
+          "/v1/jev/image_grouped": 404
+        }
+      }
+    ],
+    "ordinary_environment": "RMI_SCALAR and RMI_PARITY_TRACE cleared",
+    "checks": [
+      {
+        "name": "scalar-hy",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 1692 filtered out; finished in 0.01s"
+        ],
+        "failed": []
+      },
+      {
+        "name": "scalar-dots",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1715 filtered out; finished in 0.00s"
+        ],
+        "failed": []
+      },
+      {
+        "name": "scalar-linear",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1715 filtered out; finished in 0.00s"
+        ],
+        "failed": []
+      },
+      {
+        "name": "full-default",
+        "exit_code": 101,
+        "summaries": [
+          "test result: FAILED. 1377 passed; 21 failed; 89 ignored; 0 measured; 0 filtered out; finished in 11.68s"
+        ],
+        "failed": [
+          "app::media::tests::stereo_uploads_are_refused",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+        ]
+      },
+      {
+        "name": "parity-build",
+        "exit_code": 0,
+        "summaries": [],
+        "failed": []
+      },
+      {
+        "name": "final-full-vulkan",
+        "exit_code": 101,
+        "summaries": [
+          "test result: FAILED. 1484 passed; 25 failed; 207 ignored; 0 measured; 0 filtered out; finished in 13.30s"
+        ],
+        "failed": [
+          "app::media::tests::stereo_uploads_are_refused",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+          "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+          "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+          "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+          "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+          "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+          "ops::argmax::tests::all_negative",
+          "ops::argmax::tests::large_random",
+          "ops::argmax::tests::middle_max",
+          "ops::argmax::tests::tail_handles_non_aligned_lengths",
+          "ops::argmax::tests::ties_pick_lowest_index",
+          "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+          "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+        ]
+      },
+      {
+        "name": "final-device-runtime",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1706 filtered out; finished in 0.84s"
+        ],
+        "failed": []
+      },
+      {
+        "name": "final-device-linear",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1710 filtered out; finished in 0.41s"
+        ],
+        "failed": []
+      },
+      {
+        "name": "normal-contract-entries",
+        "exit_code": 0,
+        "summaries": [
+          "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+          "test result: ok. 2 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ],
+        "failed": []
+      },
+      {
+        "name": "normal-build",
+        "exit_code": 0,
+        "summaries": [],
+        "failed": []
+      }
+    ],
+    "baseline_comparisons": [
+      {
+        "configuration": "default",
+        "before": {
+          "name": "default",
+          "exit_code": 101,
+          "summaries": [
+            "test result: FAILED. 1369 passed; 21 failed; 89 ignored; 0 measured; 0 filtered out; finished in 12.84s"
+          ],
+          "failed": [
+            "app::media::tests::stereo_uploads_are_refused",
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+          ]
+        },
+        "after": {
+          "name": "full-default",
+          "exit_code": 101,
+          "summaries": [
+            "test result: FAILED. 1377 passed; 21 failed; 89 ignored; 0 measured; 0 filtered out; finished in 11.68s"
+          ],
+          "failed": [
+            "app::media::tests::stereo_uploads_are_refused",
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+          ]
+        },
+        "added_failures": [],
+        "removed_failures": []
+      },
+      {
+        "configuration": "vulkan",
+        "before": {
+          "name": "vulkan",
+          "exit_code": 101,
+          "summaries": [
+            "test result: oktest models::diffusion::z_image::dit::tests::compact_rope_rotates_interleaved_values_once ... ok",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1702 filtered out; finished in 0.36s",
+            "test result: FAILED. 1474 passed; 25 failed; 204 ignored; 0 measured; 0 filtered out; finished in 13.73s"
+          ],
+          "failed": [
+            "app::media::tests::stereo_uploads_are_refused",
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+            "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+            "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+          ]
+        },
+        "after": {
+          "name": "final-full-vulkan",
+          "exit_code": 101,
+          "summaries": [
+            "test result: FAILED. 1484 passed; 25 failed; 207 ignored; 0 measured; 0 filtered out; finished in 13.30s"
+          ],
+          "failed": [
+            "app::media::tests::stereo_uploads_are_refused",
+            "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+            "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+            "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+            "models::clm::tests::matches_reference_golden_vectors",
+            "models::clm::tests::rejects_wrong_embedding_width",
+            "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+            "models::diffusion::z_image::dit::tests::silu_mul_inplace_matches_ggml_neon_activation_dit",
+            "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+            "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+            "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+            "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+            "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+            "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+            "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+            "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+            "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+            "ops::argmax::tests::all_negative",
+            "ops::argmax::tests::large_random",
+            "ops::argmax::tests::middle_max",
+            "ops::argmax::tests::tail_handles_non_aligned_lengths",
+            "ops::argmax::tests::ties_pick_lowest_index",
+            "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+            "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+          ]
+        },
+        "added_failures": [],
+        "removed_failures": []
+      }
+    ],
+    "hy_mt2_fixture": {
+      "source": "https://modelscope.cn/models/Tencent-Hunyuan/Hy-MT2-1.8B",
+      "tokenizer_sha256": "b475bbef1b0b2fd57dcb865332b546475bd1ede2deb3bb91bafd0c047a8a530a",
+      "oracle": "tokenizers 0.23.2 Tokenizer::from_file, encode(text, false)",
+      "cases": 7,
+      "vocabulary_entries": 418,
+      "original_merge_ranks": 176
+    },
+    "f16_matmul_probe": {
+      "source": "f16_matmul_probe.cpp",
+      "result": "F16xF32=-1.14203799 F16xF16=-1.14203799 F32xF32=-1.1419822 explicit_rounding_exact=true",
+      "exit_code": 0
+    },
+    "shader_checks": [
+      {
+        "name": "shader-check",
+        "exit_code": 1,
+        "last_lines": [
+          "shaders/glsl/host_libm.glsl: OK",
+          "shaders/glsl/silu_exp.glsl: OK",
+          "/var/folders/n0/bhbd38jx06x1sq_jnx64nbzc0000gn/T/tmp.zb1J8MAvkb/softmax.spv /Users/gouzi/.codex/worktrees/857c/rust-model-inference/shaders/bin/softmax.spv differ: char 13, line 1"
+        ]
+      },
+      {
+        "name": "shader-main-check",
+        "exit_code": 1,
+        "last_lines": [
+          "shaders/glsl/host_libm.glsl: OK",
+          "shaders/glsl/silu_exp.glsl: OK",
+          "/var/folders/n0/bhbd38jx06x1sq_jnx64nbzc0000gn/T/tmp.GKoe5DXzz7/softmax.spv /Users/gouzi/.codex/worktrees/857c/rust-model-inference/target/hy-main-2026-11-04/main-src/shaders/bin/softmax.spv differ: char 13, line 1"
+        ]
+      },
+      {
+        "name": "all-spirv-val",
+        "count": 54,
+        "exit_code": 0
+      }
+    ],
+    "comparison_checker_tests": "....\n----------------------------------------------------------------------\nRan 4 tests in 0.009s\n\nOK",
+    "standard_peak_device_allocation_bytes": {
+      "before": 2631209472,
+      "after": 2168470528,
+      "saved": 462738944
+    },
+    "not_rerun": [
+      "Other complete quantizations",
+      "Long audio",
+      "NVIDIA/AMD hardware",
+      "Controlled speed benchmarks"
+    ],
+    "unchanged_boundaries": [
+      "Interleave Auto uses GPU audio and CPU decoder",
+      "Hy JEV unsupported",
+      "16 kHz mono PCM16 WAV required; no resampling",
+      "Local byte rebuild differs at unchanged softmax.spv on both main and branch; all 54 SPIR-V validation checks pass"
+    ],
+    "local_artifacts": "target/hy-review-2026-11-04/"
+  }
+}

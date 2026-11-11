@@ -39,6 +39,9 @@ impl MediaKind {
 pub enum ProjectorFamily {
     Qwen3VlMerger,
     Qwen25Omni,
+    /// RADIOv4-H tower plus a ReLU-squared MLP head, as shipped by
+    /// ZDTaichu5.0-9B. See `models::zdt::vision`.
+    NemotronV2Vl,
     /// MiniCPM-V 4.7: a SigLIP tower whose `vit_merger` is spliced in at
     /// `wa_layer_indexes[0]`, plus two 2x2 merges and per-tile separator rows
     /// from `v.tok_embd_sep`.
@@ -50,6 +53,13 @@ pub fn validate_mmproj_capabilities(
     mmproj: &dyn TensorSource,
     media: MediaKind,
 ) -> Result<ProjectorFamily, String> {
+    if llm_arch == "sensenova_loop" {
+        if media != MediaKind::Image {
+            return Err("SenseNova Loop currently supports one image, without audio/video".into());
+        }
+        crate::models::sensenova_loop::validate_projector(mmproj)?;
+        return Ok(ProjectorFamily::Qwen3VlMerger);
+    }
     // Which projector family to use is decided by `clip.projector_type` when
     // the mmproj declares one, not by the language tower's architecture.
     //
@@ -63,6 +73,7 @@ pub fn validate_mmproj_capabilities(
     let family = match declared.as_deref() {
         Some("qwen3vl_merger") => ProjectorFamily::Qwen3VlMerger,
         Some("qwen2.5o" | "qwen2.5vl_merger") => ProjectorFamily::Qwen25Omni,
+        Some("nemotron_v2_vl") => ProjectorFamily::NemotronV2Vl,
         Some(other) if other == crate::models::minicpmv::PROJECTOR_TYPE => {
             ProjectorFamily::MiniCpmV47
         }
@@ -77,11 +88,23 @@ pub fn validate_mmproj_capabilities(
             other => return Err(format!("Unsupported multimodal architecture: {other}")),
         },
     };
+    // The RADIO projector is only wired to the Qwen3.5 tower it was
+    // converted with; do not let it attach to an unrelated one.
+    if family == ProjectorFamily::NemotronV2Vl && llm_arch != "qwen35" {
+        return Err(format!(
+            "clip.projector_type nemotron_v2_vl is not supported with architecture {llm_arch}"
+        ));
+    }
     if !matches!(
         llm_arch,
         "qwen3vl" | "qwen3vlmoe" | "qwen2vl" | "qwen35" | "qwen35moe"
     ) {
         return Err(format!("Unsupported multimodal architecture: {llm_arch}"));
+    }
+    if family == ProjectorFamily::NemotronV2Vl && media != MediaKind::Image {
+        return Err(format!(
+            "clip.projector_type nemotron_v2_vl does not support {media:?} input"
+        ));
     }
     if llm_arch == "qwen3vl" && media == MediaKind::Audio {
         return Err("Qwen3-VL does not support audio input".into());
@@ -270,14 +293,13 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
 
     let bytes = std::fs::read(path)
         .map_err(|error| format!("Failed to read audio {}: {error}", path.display()))?;
-    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(&bytes)
-        .map_err(|error| {
-            format!(
-                "Pure-Rust audio decode failed for {}: {:?}",
-                path.display(),
-                error
-            )
-        })?;
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(&bytes).map_err(|error| {
+        format!(
+            "Pure-Rust audio decode failed for {}: {:?}",
+            path.display(),
+            error
+        )
+    })?;
     if decoded.channels != 1 {
         return Err(format!(
             "Audio {} has {} channels; Omni requires mono. Install ffmpeg to mix-down.",
@@ -289,6 +311,93 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
         return Err(format!(
             "Audio {} has {} Hz; Omni requires 16000 Hz. Install ffmpeg to resample.",
             path.display(),
+            decoded.sample_rate
+        ));
+    }
+    Ok(decoded.samples)
+}
+
+/// Decode audio that is already in memory (HTTP uploads), mirroring
+/// [`decode_audio`] for callers that hold the encoded bytes instead of a
+/// path.
+///
+/// ffmpeg reads the upload from stdin, so the same mix-down and resample
+/// applies; without ffmpeg the pure-Rust WAV decoder handles 16 kHz mono
+/// PCM16 input.
+pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return decode_audio_bytes_pure_rust(bytes);
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(bytes) {
+            let _ = child.kill();
+            return Err(format!("failed to pipe the upload to ffmpeg: {error}"));
+        }
+    }
+    let decoded = child
+        .wait_with_output()
+        .map_err(|error| format!("ffmpeg failed for the upload: {error}"))?;
+    if !decoded.status.success() {
+        return Err(format!(
+            "ffmpeg failed for the upload: {}",
+            String::from_utf8_lossy(&decoded.stderr).trim()
+        ));
+    }
+    if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
+        return Err("ffmpeg returned invalid F32 audio".into());
+    }
+    let samples = decoded
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect::<Vec<_>>();
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err("ffmpeg returned non-finite audio".into());
+    }
+    Ok(samples)
+}
+
+/// The pure-Rust half of [`decode_audio_bytes`]: 16 kHz mono PCM16 WAV only.
+fn decode_audio_bytes_pure_rust(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(bytes)
+        .map_err(|error| format!("Pure-Rust audio decode failed for the upload: {error:?}"))?;
+    if decoded.channels != 1 {
+        return Err(format!(
+            "The uploaded audio has {} channels; AuK requires mono. Install ffmpeg to mix-down.",
+            decoded.channels
+        ));
+    }
+    if decoded.sample_rate != 16_000 {
+        return Err(format!(
+            "The uploaded audio has {} Hz; AuK requires 16000 Hz. Install ffmpeg to resample.",
             decoded.sample_rate
         ));
     }
@@ -347,6 +456,53 @@ mod tests {
     use super::*;
     use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
     use std::sync::Arc;
+
+    /// A 16 kHz PCM16 WAV with the given samples.
+    fn pcm16_wav(samples: &[i16], channels: u16) -> Vec<u8> {
+        let data = samples.len() * 2;
+        let block_align = channels * 2;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(16_000 * u32::from(block_align)).to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data as u32).to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// An uploaded WAV must decode to the same samples as the file path
+    /// variant, because the AuK reference audio takes both. The decoder
+    /// returns the samples normalized to `[-1, 1]`.
+    #[test]
+    fn uploaded_audio_bytes_decode_to_mono_16k() {
+        let samples: Vec<i16> = (0..160).map(|index| index as i16 * 100).collect();
+        let wav = pcm16_wav(&samples, 1);
+        let decoded = decode_audio_bytes(&wav).expect("decode the upload");
+        assert_eq!(decoded.len(), samples.len());
+        for (got, want) in decoded.iter().zip(samples.iter()) {
+            let want = *want as f32 / 32_768.0;
+            assert!((got - want).abs() < 1e-6, "{got} != {want}");
+        }
+    }
+
+    /// A stereo upload is refused with a message that names the reason.
+    #[test]
+    fn stereo_uploads_are_refused() {
+        let wav = pcm16_wav(&[0; 16], 2);
+        let error = decode_audio_bytes(&wav).expect_err("stereo must be refused");
+        assert!(error.contains("mono"), "{error}");
+    }
 
     /// A mmproj stub exposing only the metadata and tensors a test names.
     struct Stub {
@@ -428,6 +584,43 @@ mod tests {
         assert_eq!(family, ProjectorFamily::Qwen3VlMerger);
     }
 
+    #[test]
+    fn sensenova_requires_its_own_image_projector() {
+        let matching = Stub::with(
+            vec![
+                ("general.architecture", MetaValue::String("clip".into())),
+                (
+                    "clip.projector_type",
+                    MetaValue::String("qwen3vl_merger".into()),
+                ),
+                ("clip.vision.projection_dim", MetaValue::Uint32(4096)),
+                (
+                    "sensenova_loop.source_config_sha256",
+                    MetaValue::String(crate::models::sensenova_loop::SOURCE_CONFIG_SHA256.into()),
+                ),
+            ],
+            &["mm.2.weight"],
+        );
+        assert_eq!(
+            validate_mmproj_capabilities("sensenova_loop", matching.as_ref(), MediaKind::Image)
+                .unwrap(),
+            ProjectorFamily::Qwen3VlMerger
+        );
+        assert!(validate_mmproj_capabilities(
+            "sensenova_loop",
+            matching.as_ref(),
+            MediaKind::Video
+        )
+        .is_err());
+        assert!(validate_mmproj_capabilities(
+            "sensenova_loop",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .unwrap_err()
+        .contains("matching"));
+    }
+
     /// MiniCPM-V 4.7 ships as two towers: 1B is `qwen35`, 35B-A3B is
     /// `qwen35moe`. Both carry the same `minicpmv4_7` mmproj, and the projector
     /// resolves from `clip.projector_type` regardless -- so the arch allowlist
@@ -507,5 +700,59 @@ mod tests {
             &[],
         );
         assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
+
+    /// ZDTaichu5.0-9B pairs a `qwen3_5_text` tower with a `nemotron_v2_vl`
+    /// projector (a RADIOv4-H vision tower plus a ReLU-squared MLP head).
+    #[test]
+    fn nemotron_v2_vl_is_its_own_projector_family() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert_eq!(
+            validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Image).unwrap(),
+            ProjectorFamily::NemotronV2Vl
+        );
+    }
+
+    /// The pairing has to be checked, not inferred from the tower: a
+    /// `qwen3vl` tower with the RADIO projector is not a combination either
+    /// side supports.
+    #[test]
+    fn nemotron_v2_vl_does_not_pair_with_an_unrelated_tower() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
+
+    /// `nemotron_v2_vl` is an image projector; audio is a different path.
+    #[test]
+    fn nemotron_v2_vl_is_not_an_audio_projector() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_audio_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Audio).is_err());
     }
 }

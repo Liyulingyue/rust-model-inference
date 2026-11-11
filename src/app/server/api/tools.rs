@@ -31,7 +31,7 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
-        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" => Ok(false),
+        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" | "mage_vl" => Ok(false),
         // Mellum 2.1 ships ChatML (`<|im_start|>role\n … <|im_end|>\n`) with
         // the same `# Tools` preamble as Qwen3, so it rides the Qwen3
         // renderer.
@@ -47,7 +47,13 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // LFM3 has its own Jinja input template and the same plain-text
         // output parser. Neither architecture has a tool-call or vision path.
         "dory" | "lfm3" => Ok(false),
-        "qwen35" | "qwen35moe" => Ok(true),
+        // Nemotron-3 Nano is ChatML too, but it has its own renderer: the
+        // CLI encodes the built-in ChatML text with `add_special: true` and
+        // without the empty think block, so the qwen renderer would give
+        // the server a different prompt than the CLI. See
+        // `build_nemotron_chat_prompt`.
+        "nemotron_h" | "nemotron_h_moe" => Ok(false),
+        "qwen35" | "qwen35moe" | "sensenova_loop" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
         // prompting. They are accepted here so `build_prompt` returns Ok
@@ -58,7 +64,7 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // chat template and additionally does post-attention / post-FFN
         // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
         "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
-        | "mistral3" => Ok(false),
+        | "mistral3" | "spark2_5" => Ok(false),
         _ => Err(format!(
             "Tool/chat template is unsupported for architecture {arch}"
         )),
@@ -109,6 +115,104 @@ pub fn build_prompt(
     // re-resolving keeps a server request from recompiling the template.
     compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    if arch == "mage_vl" {
+        validate_tools(tools, choice)?;
+        if messages.is_empty() {
+            return Err("No messages provided".into());
+        }
+        let mut turns = Vec::new();
+        let mut images = Vec::new();
+        for m in messages {
+            if !matches!(
+                m.role.as_str(),
+                "system" | "developer" | "user" | "assistant" | "tool"
+            ) {
+                return Err(format!("Unsupported message role: {}", m.role));
+            }
+            if m.role != "assistant" && !m.calls.is_empty() {
+                return Err("Only assistant messages may contain tool calls".into());
+            }
+            if m.role == "tool" && m.call_id.is_none() {
+                return Err("Tool results need a call ID".into());
+            }
+            if m.role != "tool" && m.call_id.is_some() {
+                return Err("Only tool results may contain a call ID".into());
+            }
+            for call in &m.calls {
+                tag_name(&call.name)?;
+                if !call.arguments.is_object() {
+                    return Err("Tool call arguments must be a JSON object".into());
+                }
+            }
+            if !m.images.is_empty() && m.role != "user" {
+                return Err("Mage-VL images require a user turn".into());
+            }
+            let mut content = Vec::new();
+            let mut offset = 0;
+            for image in &m.images {
+                let end = image.text_offset.unwrap_or(0);
+                let text = m
+                    .text
+                    .get(offset..end)
+                    .ok_or("invalid image/text content ordering")?;
+                if !text.is_empty() {
+                    content.push(json!({"type":"text","text":text}));
+                }
+                content.push(json!({"type":"image"}));
+                images.push(image.bytes.clone());
+                offset = end;
+            }
+            content.push(json!({"type":"text","text":&m.text[offset..]}));
+            let calls: Vec<_> = m.calls.iter().map(|c| json!({"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect();
+            turns.push(json!({"role":if m.role=="developer" {"system"} else {&m.role},"content":content,"tool_calls":calls}));
+        }
+        let instruction = match choice {
+            ToolChoice::Auto => None,
+            ToolChoice::None if tools.is_empty() => None,
+            ToolChoice::None => Some("Do not call functions.".into()),
+            ToolChoice::Required => Some("Call at least one of the provided functions.".into()),
+            ToolChoice::Named(name) => Some(format!("Call only the function {name}.")),
+        };
+        if let Some(instruction) = instruction {
+            if turns[0]["role"] == "system" {
+                turns[0]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"type":"text","text":format!("\n{instruction}")}));
+            } else {
+                turns.insert(0, json!({"role":"system","content":instruction}));
+            }
+        }
+        let tools: Vec<_> = tools
+            .iter()
+            .map(|t| {
+                let mut function = json!({"name":t.name});
+                if let Some(description) = &t.description {
+                    function["description"] = json!(description);
+                }
+                function["parameters"] = t.parameters.clone();
+                json!({"type":"function","function":function})
+            })
+            .collect();
+        let owned;
+        let template = if let Some(t) = compiled_jinja {
+            t
+        } else {
+            owned = crate::prompt::jinja::template_from_source(&|k| source.metadata(k).cloned())
+                .ok_or("missing Mage-VL chat template")??;
+            &owned
+        };
+        return Ok((
+            crate::models::mage_vl::prompt_tokens(
+                tokenizer,
+                template,
+                &json!(turns),
+                &json!(tools),
+                enable_thinking.unwrap_or(true),
+            )?,
+            images,
+        ));
+    }
     let lfm3_jinja;
     let jinja = if arch == "lfm3" {
         if !tools.is_empty()
@@ -176,6 +280,54 @@ pub fn build_prompt(
     if arch == "lfm3" {
         return Err("LFM3 requires its GGUF chat template or --chat-template-file".into());
     }
+    // Spark 2.5 uses a custom chat template (`<|Bot|>`, `<|User|>`, `<|System|>`)
+    // that is neither ChatML nor llama-style. Use the GGUF's Jinja template via
+    // `single_turn_text` when available, falling back to the hand-transcribed
+    // format that matches `run_inference` in the Spark trunk.
+    if arch == "spark2_5" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Spark 2.5 text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Spark 2.5 text generation".into());
+        }
+        let user_text = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.text.as_str())
+            .unwrap_or("");
+        let enable_thinking = enable_thinking.unwrap_or(false);
+        let sos = "<｜start▁of▁sentence｜>";
+        let eos = "<｜end▁of▁sentence｜>";
+        let rendered = crate::prompt::jinja::single_turn_text(
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            sos,
+            eos,
+            user_text,
+            enable_thinking,
+        )?
+        .unwrap_or_else(|| {
+            let bot_suffix = if enable_thinking {
+                "<think>"
+            } else {
+                "</think>"
+            };
+            format!(
+                "{sos}<|System|>\nyou are a helpful assistant.{eos}\
+                 {sos}<|User|>{user_text}{eos}\
+                 {sos}<|Bot|>{bot_suffix}"
+            )
+        });
+        let ids = tokenizer.encode(
+            &rendered,
+            crate::core::tokenizer::EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        return Ok((ids, Vec::new()));
+    }
     let qwen35 = is_qwen35(arch)?;
     // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
     // them with qwen ChatML happens to work (the model copes) but diverges
@@ -242,6 +394,45 @@ pub fn build_prompt(
         arch,
         "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" | "mistral3"
     );
+    // Nemotron-3 Nano (4B and the 30B-A3B MoE) is ChatML, but it has to be
+    // rendered the way the CLI renders it: the CLI encodes the built-in
+    // ChatML text with `add_special: true` (so the prompt carries the BOS
+    // the GGUF's pre-tokenizer asks for) and without the empty think block
+    // the qwen builder appends. Routing it through `build_qwen_chat_prompt`
+    // gave the server a different prompt than the CLI -- 19 tokens against
+    // 15 for the same message -- and therefore a different answer.
+    let nemotron_family = matches!(arch, "nemotron_h" | "nemotron_h_moe");
+    if nemotron_family {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for the Nemotron-3 Nano family".into());
+        }
+        if messages.iter().any(|message| !message.images.is_empty()) {
+            return Err("Image input is unsupported for the Nemotron-3 Nano family".into());
+        }
+        let last_user = messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .ok_or_else(|| "Nemotron chat needs a user message".to_string())?;
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        let ids = crate::prompt::build_nemotron_chat_prompt(&tokenizer, &turns)?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
+        return Ok((ids, images));
+    }
     if llama_family {
         if !tools.is_empty() {
             return Err("Function tools are unsupported for llama-family architectures".into());
@@ -288,6 +479,15 @@ pub fn build_prompt(
     if messages.is_empty() {
         return Err("No messages provided".into());
     }
+    let last_user = messages.iter().rposition(|m| m.role == "user");
+    if matches!(arch, "qwen35" | "qwen35moe" | "sensenova_loop")
+        && messages
+            .iter()
+            .enumerate()
+            .any(|(index, message)| !message.images.is_empty() && Some(index) != last_user)
+    {
+        return Err("Image input is supported only in the final user message".into());
+    }
     // Collect the attached images up front: the `turns` flattening below keeps
     // only (role, text), and the local `messages` binding is later shadowed by
     // the `QwenMessage` view. Dropping them here would silently degrade an
@@ -296,7 +496,6 @@ pub fn build_prompt(
         .iter()
         .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
         .collect();
-    let last_user = messages.iter().rposition(|m| m.role == "user");
     if qwen35 && last_user.is_none() {
         return Err("Qwen35 needs a user query in messages".into());
     }
@@ -1209,6 +1408,136 @@ mod tests {
             call_id: None,
             images: vec![],
         }]
+    }
+
+    #[test]
+    fn mage_template_keeps_images_in_each_turn_and_validates_history() {
+        let template = crate::prompt::jinja::JinjaChatTemplate::compile(
+            include_str!("../../../../tests/fixtures/mage_vl/chat_template.jinja")
+                .trim_end_matches('\n'),
+            "Mage fixture",
+        )
+        .unwrap();
+        let source = source();
+        let tokenizer = tokenizer();
+        let mut messages = user_message();
+        messages[0]
+            .images
+            .push(super::super::image_input::ImageRef::new(vec![1], "first"));
+        messages[0].images[0].text_offset = Some(4);
+        messages.push(Message {
+            role: "assistant".into(),
+            text: "earlier".into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        });
+        let mut second = user_message().remove(0);
+        second.text = "later".into();
+        second
+            .images
+            .push(super::super::image_input::ImageRef::new(vec![2], "second"));
+        messages.push(second);
+        let render = |messages: &[Message]| {
+            build_prompt(
+                source.as_ref(),
+                &tokenizer,
+                "mage_vl",
+                messages,
+                &[],
+                &ToolChoice::None,
+                Some(false),
+                &Default::default(),
+                Some(&template),
+            )
+        };
+        let mut single = user_message();
+        single[0]
+            .images
+            .push(super::super::image_input::ImageRef::new(vec![1], "single"));
+        let cli_ids = crate::prompt::jinja::render_tokens(
+            &tokenizer,
+            &template,
+            &[crate::prompt::jinja::ChatMessage {
+                role: "user".into(),
+                content: json!([{"type":"image"},{"type":"text","text":single[0].text}]),
+            }],
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(render(&single).unwrap().0, cli_ids);
+        let (ids, images) = render(&messages).unwrap();
+        assert_eq!(images, vec![vec![1], vec![2]]);
+        let text = tokenizer.decode(&ids, true);
+        assert_eq!(text.matches("<|image_pad|>").count(), 2);
+        assert!(text.contains("ques<|vision_start|><|image_pad|><|vision_end|>tion"));
+        assert!(text.find("earlier").unwrap() < text.find("later").unwrap());
+        assert!(text.ends_with("<think>\n\n</think>\n\n"));
+        messages[0].role = "unknown".into();
+        assert!(render(&messages).is_err());
+        messages[0].role = "user".into();
+        messages[0].call_id = Some("bad".into());
+        assert!(render(&messages).is_err());
+    }
+
+    #[test]
+    fn hybrid_images_stay_in_the_final_user_turn() {
+        let tokenizer = tokenizer();
+        let mut messages: Vec<Message> = [
+            ("system", "instructions"),
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "followup"),
+        ]
+        .into_iter()
+        .map(|(role, text)| Message {
+            role: role.into(),
+            text: text.into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        })
+        .collect();
+        let image = super::super::image_input::ImageRef::new(vec![1], "test image");
+        for arch in ["qwen35", "qwen35moe", "sensenova_loop"] {
+            for index in 0..3 {
+                messages[index].images.push(image.clone());
+                assert!(build_prompt(
+                    source().as_ref(),
+                    &tokenizer,
+                    arch,
+                    &messages,
+                    &[],
+                    &ToolChoice::Auto,
+                    None,
+                    &crate::prompt::jinja::Options::default(),
+                    None,
+                )
+                .unwrap_err()
+                .contains("only in the final user message"));
+                messages[index].images.clear();
+            }
+            messages[3].images.push(image.clone());
+            let (ids, images) = build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                arch,
+                &messages,
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(images, vec![image.bytes.clone()]);
+            let text = tokenizer.decode(&ids, true);
+            for content in ["instructions", "first question", "first answer", "followup"] {
+                assert!(text.contains(content), "{text}");
+            }
+            messages[3].images.clear();
+        }
     }
 
     #[test]

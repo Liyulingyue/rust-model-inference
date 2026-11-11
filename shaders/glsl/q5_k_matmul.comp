@@ -40,11 +40,13 @@ void main() {
         }
         if (valid_row) {
             uint offset = row * pc.blocks_per_row * 176u + block * 176u;
-            // Read header words 0-3 (bytes 0-15).
-            uint h0 = weight_word(slot, offset);
-            uint h1 = weight_word(slot, offset + 1u);
-            uint h2 = weight_word(slot, offset + 2u);
-            uint h3 = weight_word(slot, offset + 3u);
+            // Read header words 0-3 (bytes 0-15). `offset` is a byte offset;
+            // divide by 4 to get the word index.
+            uint base_word = offset >> 2u;
+            uint h0 = weight_word(slot, base_word);
+            uint h1 = weight_word(slot, base_word + 1u);
+            uint h2 = weight_word(slot, base_word + 2u);
+            uint h3 = weight_word(slot, base_word + 3u);
             precise float q5_scale = f16_decode(h0 & 0xffffu);
             precise float q5_min = f16_decode(h0 >> 16u);
             // Extract scale/minimum bytes from pre-loaded words.
@@ -82,11 +84,11 @@ void main() {
                 uint gm = group_minimum[group];
                 uint pair = group >> 1u;
                 uint nibble_shift = (group & 1u) * 4u;
-                uint lo_word_base = offset + 12u + pair * 8u; // word offset for low nibbles
+                uint lo_word_base = (offset >> 2u) + 12u + pair * 8u; // word index for low nibbles
                 for (uint j = 0u; j < 32u; ++j) {
                     uint local = group * 32u + j;
                     // High bit: byte at offset+16+j, bit at position `group`
-                    uint hi_word_idx = offset + 4u + (j >> 2u);
+                    uint hi_word_idx = (offset >> 2u) + 4u + (j >> 2u);
                     uint hi_word = weight_word(slot, hi_word_idx);
                     uint hi_byte = (hi_word >> ((j & 3u) * 8u)) & 0xffu;
                     uint high = (hi_byte >> group) & 1u;

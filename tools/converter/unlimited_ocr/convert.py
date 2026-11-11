@@ -35,7 +35,7 @@ def tensor_type(name, info, kind):
 def sources(model_dir):
     index = model_dir/'model.safetensors.index.json'
     if index.exists():
-        names = sorted(set(json.loads(index.read_text())['weight_map'].values()))
+        names = sorted(set(json.loads(index.read_text(encoding="utf-8"))['weight_map'].values()))
         if any(Path(n).name != n for n in names):
             raise ValueError('Shard names must be local filenames')
         paths = [model_dir/n for n in names]
@@ -109,10 +109,10 @@ def convert(model_dir, output, kind='bf16'):
         raise FileExistsError(output)
     if kind not in TYPES:
         raise ValueError(f'Unknown type {kind}')
-    config = json.loads((model_dir/'config.json').read_text())
+    config = json.loads((model_dir/'config.json').read_text(encoding="utf-8"))
     if config.get('model_type') != 'unlimited-ocr' or config.get('architectures') != ['UnlimitedOCRForCausalLM']:
         raise ValueError('Expected original Unlimited-OCR-2 config')
-    tokenizer = (model_dir/'tokenizer.json').read_text()
+    tokenizer = (model_dir/'tokenizer.json').read_text(encoding="utf-8")
     json.loads(tokenizer)
     shards = list(sources(model_dir))
     writer = gguf.GgufWriter(output)

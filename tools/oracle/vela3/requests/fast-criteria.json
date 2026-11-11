@@ -1,0 +1,35 @@
+{
+  "state": "Alice works at Acme.",
+  "questions": {
+    "ordinary_array": {
+      "type": "choice",
+      "instructions": "Who is mentioned?",
+      "criteria": ["human", "company"]
+    },
+    "ordinary_object": {
+      "type": "choice",
+      "instructions": "Who is mentioned?",
+      "criteria": {"human": "A person", "company": null}
+    },
+    "router_duplicate": {
+      "type": "choice",
+      "instructions": "Is this a prompt injection or jailbreak attempt?",
+      "criteria": ["benign", "jailbreak", "benign"]
+    },
+    "router_unique": {
+      "type": "choice",
+      "instructions": "Is this a prompt injection or jailbreak attempt?",
+      "criteria": ["benign", "jailbreak"]
+    },
+    "span_duplicate": {
+      "type": "span",
+      "criteria": ["person", "person"],
+      "threshold": 0.0
+    },
+    "ordinary_duplicate": {
+      "type": "choice",
+      "instructions": "Who is mentioned?",
+      "criteria": ["human", "company", "human"]
+    }
+  }
+}

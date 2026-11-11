@@ -1,3 +1,4 @@
+use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
@@ -28,10 +29,10 @@ pub struct Linear<'a> {
 impl<'a> Linear<'a> {
     pub fn from_weight(weight: Weight<'a>, bias: Option<Vec<f32>>) -> Result<Self, String> {
         if weight.n_in == 0 || weight.n_out == 0 {
-            return Err("DreamX linear dimensions must be non-zero".into());
+            return Err("linear dimensions must be non-zero".into());
         }
         if bias.as_ref().is_some_and(|bias| bias.len() != weight.n_out) {
-            return Err("DreamX linear bias width mismatch".into());
+            return Err("linear bias width mismatch".into());
         }
         Ok(Self { weight, bias })
     }
@@ -74,7 +75,7 @@ impl<'a> Linear<'a> {
             | GGMLType::Q4_1
             | GGMLType::Q4K
             | GGMLType::Q5K => {}
-            other => return Err(format!("Unsupported DreamX linear type {other:?}")),
+            other => return Err(format!("Unsupported linear type {other:?}")),
         }
         let bytes = source
             .tensor_slice(weight_name)
@@ -103,6 +104,18 @@ impl<'a> Linear<'a> {
         Self::from_weight(weight, bias)
     }
 
+    /// The weight as a native row-major `[n_out][n_in]` f32 matrix, when the
+    /// kernel stores one. Lets a caller keep a bit-exact scalar path instead of
+    /// going through the shared matmul.
+    pub(crate) fn f32_weight(&self) -> Option<&[f32]> {
+        self.weight.kernel.f32_slice()
+    }
+
+    /// The bias vector, when the projection has one.
+    pub(crate) fn bias(&self) -> Option<&[f32]> {
+        self.bias.as_deref()
+    }
+
     pub fn n_in(&self) -> usize {
         self.weight.n_in
     }
@@ -111,9 +124,49 @@ impl<'a> Linear<'a> {
         self.weight.n_out
     }
 
+    pub(crate) fn binding(&self) -> LinearBinding<'_, 'a> {
+        LinearBinding {
+            weight: &self.weight,
+            mode: LinearMode::Prepared,
+        }
+    }
+
+    pub(crate) fn forward_group<const N: usize>(
+        linears: [&Self; N],
+        executor: &mut LinearExecutor<'_, 'a>,
+        input: &[f32],
+        rows: usize,
+    ) -> Result<[Vec<f32>; N], String> {
+        let mut outputs: [Vec<f32>; N] = std::array::from_fn(|_| Vec::new());
+        let mut ids = Vec::with_capacity(N);
+        for (linear, output) in linears.iter().zip(&mut outputs) {
+            output.resize(
+                checked_len("linear group output", &[rows, linear.n_out()])?,
+                0.0,
+            );
+            ids.push(executor.id_for(&linear.weight).map_err(|e| e.to_string())?);
+        }
+        executor
+            .run_group(
+                ids.try_into().unwrap(),
+                input,
+                rows,
+                outputs.each_mut().map(|output| output.as_mut_slice()),
+            )
+            .map_err(|e| e.to_string())?;
+        for (linear, output) in linears.iter().zip(&mut outputs) {
+            if let Some(bias) = &linear.bias {
+                for row in output.chunks_exact_mut(linear.n_out()) {
+                    vec_add_into(bias, row);
+                }
+            }
+        }
+        Ok(outputs)
+    }
+
     pub fn embedding_lookup(&self, token_id: u32, output: &mut [f32]) -> Result<(), String> {
         if token_id as usize >= self.n_out() || output.len() != self.n_in() {
-            return Err("Invalid DreamX embedding lookup".into());
+            return Err("Invalid embedding lookup".into());
         }
         self.weight.embedding_lookup(token_id, output);
         Ok(())
@@ -152,10 +205,10 @@ impl<'a> Linear<'a> {
         rows: usize,
         verify: bool,
     ) -> Result<Vec<f32>, String> {
-        if rows == 0 || input.len() != checked_len("DreamX linear input", &[rows, self.n_in()])? {
-            return Err("Invalid DreamX linear input shape".into());
+        if rows == 0 || input.len() != checked_len("linear input", &[rows, self.n_in()])? {
+            return Err("Invalid linear input shape".into());
         }
-        let mut output = vec![0.0; checked_len("DreamX linear output", &[rows, self.n_out()])?];
+        let mut output = vec![0.0; checked_len("linear output", &[rows, self.n_out()])?];
         #[cfg(feature = "vulkan")]
         if self.weight.try_vulkan_rows(input, &mut output, rows) {
             // `RMI_GPU_CPU_CHECK=1` compares every GPU projection with the CPU
@@ -442,11 +495,7 @@ pub fn load_float_values(
             .chunks_exact(2)
             .map(|bytes| crate::ops::bf16_to_f32(u16::from_le_bytes(bytes.try_into().unwrap())))
             .collect(),
-        other => {
-            return Err(format!(
-                "Unsupported DreamX float tensor type {other:?}: {name}"
-            ))
-        }
+        other => return Err(format!("Unsupported float tensor type {other:?}: {name}")),
     };
     if values.len() != expected_len {
         return Err(format!("Invalid tensor data length for {name}"));
@@ -653,11 +702,11 @@ pub fn rms_norm_rows(
     let width = weight.len();
     if rows == 0
         || width == 0
-        || input.len() != checked_len("DreamX RMSNorm input", &[rows, width])?
+        || input.len() != checked_len("RMSNorm input", &[rows, width])?
         || !epsilon.is_finite()
         || epsilon < 0.0
     {
-        return Err("Invalid DreamX RMSNorm tensors".into());
+        return Err("Invalid RMSNorm tensors".into());
     }
     let mut output = vec![0.0; input.len()];
     for row in 0..rows {
@@ -689,16 +738,16 @@ pub fn layer_norm_rows(
     let width = weight
         .map(<[f32]>::len)
         .or_else(|| bias.map(<[f32]>::len))
-        .ok_or("DreamX LayerNorm requires a weight or bias")?;
+        .ok_or("LayerNorm requires a weight or bias")?;
     if rows == 0
         || width == 0
         || weight.is_some_and(|values| values.len() != width)
         || bias.is_some_and(|values| values.len() != width)
-        || input.len() != checked_len("DreamX LayerNorm input", &[rows, width])?
+        || input.len() != checked_len("LayerNorm input", &[rows, width])?
         || !epsilon.is_finite()
         || epsilon < 0.0
     {
-        return Err("Invalid DreamX LayerNorm tensors".into());
+        return Err("Invalid LayerNorm tensors".into());
     }
     let mut output = vec![0.0; input.len()];
     for row in 0..rows {
@@ -748,15 +797,15 @@ pub fn group_norm_ncthw(
         || channels % groups != 0
         || weight.len() != channels
         || bias.len() != channels
-        || input.len() != checked_len("DreamX GroupNorm input", &shape)?
+        || input.len() != checked_len("GroupNorm input", &shape)?
         || !epsilon.is_finite()
         || epsilon < 0.0
     {
-        return Err("Invalid DreamX GroupNorm tensors".into());
+        return Err("Invalid GroupNorm tensors".into());
     }
-    let plane = checked_len("DreamX GroupNorm plane", &[depth, height, width])?;
+    let plane = checked_len("GroupNorm plane", &[depth, height, width])?;
     let channels_per_group = channels / groups;
-    let values_per_group = checked_len("DreamX GroupNorm group", &[channels_per_group, plane])?;
+    let values_per_group = checked_len("GroupNorm group", &[channels_per_group, plane])?;
     let mut output = vec![0.0; input.len()];
     for group in 0..groups {
         let start = group * values_per_group;
@@ -816,18 +865,18 @@ impl AttentionSpec {
             || !self.scale.is_finite()
             || query.len()
                 != checked_len(
-                    "DreamX attention query",
+                    "attention query",
                     &[self.query_tokens, self.query_heads, self.head_dim],
                 )?
             || key.len()
                 != checked_len(
-                    "DreamX attention key",
+                    "attention key",
                     &[self.key_tokens, self.key_value_heads, self.head_dim],
                 )?
             || value.len() != key.len()
             || (self.causal && self.query_tokens > self.key_tokens)
         {
-            return Err("Invalid DreamX attention tensors".into());
+            return Err("Invalid attention tensors".into());
         }
         Ok(())
     }
@@ -971,11 +1020,11 @@ fn attention_scalar_with_bias(
     }
     if let Some(bias) = bias {
         let expected = checked_len(
-            "DreamX attention bias",
+            "attention bias",
             &[spec.query_heads, spec.query_tokens, spec.key_tokens],
         )?;
         if bias.len() != expected {
-            return Err("Invalid DreamX attention bias shape".into());
+            return Err("Invalid attention bias shape".into());
         }
     }
     let mut output = vec![0.0; query.len()];
@@ -1099,11 +1148,11 @@ pub fn attention_online_with_bias(
     spec.validate(query, key, value)?;
     if bias.len()
         != checked_len(
-            "DreamX attention bias",
+            "attention bias",
             &[spec.query_heads, spec.query_tokens, spec.key_tokens],
         )?
     {
-        return Err("Invalid DreamX attention bias shape".into());
+        return Err("Invalid attention bias shape".into());
     }
     let mut output = vec![0.0; query.len()];
     let group_size = spec.query_heads / spec.key_value_heads;
@@ -1207,10 +1256,10 @@ pub fn conv3d_with_options(
         || spec.stride.contains(&0)
         || spec.dilation.contains(&0)
         || bias.is_some_and(|bias| bias.len() != output_channels)
-        || input.len() != checked_len("DreamX Conv3D input", &input_shape)?
-        || weight.len() != checked_len("DreamX Conv3D weight", &weight_shape)?
+        || input.len() != checked_len("Conv3D input", &input_shape)?
+        || weight.len() != checked_len("Conv3D weight", &weight_shape)?
     {
-        return Err("Invalid DreamX Conv3D tensors".into());
+        return Err("Invalid Conv3D tensors".into());
     }
     let output_depth = conv_output(
         depth,
@@ -1234,7 +1283,7 @@ pub fn conv3d_with_options(
         spec.dilation[2],
     )?;
     let output_shape = [output_channels, output_depth, output_height, output_width];
-    let output_len = checked_len("DreamX Conv3D output", &output_shape)?;
+    let output_len = checked_len("Conv3D output", &output_shape)?;
     let mut output = vec![0.0; output_len];
     #[cfg(feature = "vulkan")]
     if crate::ops::kernel::vulkan::try_conv3d(
@@ -1346,7 +1395,7 @@ fn conv3d_matches_cpu(
     output_shape: [usize; 4],
     spec: Conv3dSpec,
 ) -> bool {
-    let output_len = match checked_len("DreamX Conv3D output", &output_shape) {
+    let output_len = match checked_len("Conv3D output", &output_shape) {
         Ok(len) => len,
         Err(_) => return false,
     };
@@ -1481,7 +1530,7 @@ fn conv3d_cpu(
     let [output_channels, weight_channels, kernel_depth, kernel_height, kernel_width] =
         weight_shape;
     let [_, output_depth, output_height, output_width] = output_shape;
-    let output_len = checked_len("DreamX Conv3D output", &output_shape).unwrap_or(0);
+    let output_len = checked_len("Conv3D output", &output_shape).unwrap_or(0);
     let output_address = output.as_mut_ptr() as usize;
     let output_channels_per_group = output_channels / spec.groups;
     let strict = crate::ops::scalar_mode();
@@ -1691,7 +1740,7 @@ pub fn conv_transpose3d(
         weight_shape;
     let output_channels = output_channels_per_group
         .checked_mul(spec.groups)
-        .ok_or("DreamX transposed-convolution channel overflow")?;
+        .ok_or("transposed-convolution channel overflow")?;
     if spec.groups == 0
         || input_channels != weight_input_channels
         || input_channels % spec.groups != 0
@@ -1703,10 +1752,10 @@ pub fn conv_transpose3d(
             .zip(spec.stride)
             .any(|(&output_padding, stride)| output_padding >= stride)
         || bias.is_some_and(|bias| bias.len() != output_channels)
-        || input.len() != checked_len("DreamX ConvTranspose3D input", &input_shape)?
-        || weight.len() != checked_len("DreamX ConvTranspose3D weight", &weight_shape)?
+        || input.len() != checked_len("ConvTranspose3D input", &input_shape)?
+        || weight.len() != checked_len("ConvTranspose3D weight", &weight_shape)?
     {
-        return Err("Invalid DreamX ConvTranspose3D tensors".into());
+        return Err("Invalid ConvTranspose3D tensors".into());
     }
     let output_depth = conv_transpose_output(
         depth,
@@ -1733,7 +1782,7 @@ pub fn conv_transpose3d(
         spec.dilation[2],
     )?;
     let output_shape = [output_channels, output_depth, output_height, output_width];
-    let output_len = checked_len("DreamX ConvTranspose3D output", &output_shape)?;
+    let output_len = checked_len("ConvTranspose3D output", &output_shape)?;
     let mut output = vec![0.0; output_len];
     let output_address = output.as_mut_ptr() as usize;
     let input_channels_per_group = input_channels / spec.groups;
@@ -1816,13 +1865,13 @@ fn conv_output(
     let effective_kernel = dilation
         .checked_mul(kernel.saturating_sub(1))
         .and_then(|value| value.checked_add(1))
-        .ok_or("DreamX convolution kernel overflow")?;
+        .ok_or("convolution kernel overflow")?;
     let padded = padding
         .checked_mul(2)
         .and_then(|padding| input.checked_add(padding))
-        .ok_or("DreamX convolution padding overflow")?;
+        .ok_or("convolution padding overflow")?;
     if kernel == 0 || stride == 0 || dilation == 0 || padded < effective_kernel {
-        return Err("Invalid DreamX convolution geometry".into());
+        return Err("Invalid convolution geometry".into());
     }
     Ok((padded - effective_kernel) / stride + 1)
 }
@@ -1836,18 +1885,18 @@ fn conv_transpose_output(
     dilation: usize,
 ) -> Result<usize, String> {
     if input == 0 || kernel == 0 || stride == 0 || dilation == 0 || output_padding >= stride {
-        return Err("Invalid DreamX transposed-convolution geometry".into());
+        return Err("Invalid transposed-convolution geometry".into());
     }
     let length = (input - 1)
         .checked_mul(stride)
         .and_then(|value| value.checked_add(dilation.checked_mul(kernel - 1)?))
         .and_then(|value| value.checked_add(output_padding))
         .and_then(|value| value.checked_add(1))
-        .ok_or("DreamX transposed-convolution shape overflow")?;
+        .ok_or("transposed-convolution shape overflow")?;
     length
-        .checked_sub(padding.checked_mul(2).ok_or("DreamX padding overflow")?)
+        .checked_sub(padding.checked_mul(2).ok_or("padding overflow")?)
         .filter(|&length| length > 0)
-        .ok_or_else(|| "Invalid DreamX transposed-convolution output shape".into())
+        .ok_or_else(|| "Invalid transposed-convolution output shape".into())
 }
 
 fn transpose_input_index(

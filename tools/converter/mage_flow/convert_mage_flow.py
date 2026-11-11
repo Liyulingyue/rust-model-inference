@@ -40,7 +40,7 @@ VARIANTS = {
 def _validate_config(root: Path) -> dict:
     path = root / "transformer" / "config.json"
     try:
-        config = json.loads(path.read_text())
+        config = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid transformer/config.json: {exc}") from exc
     expected = {
@@ -239,7 +239,7 @@ def _vae_shapes():
 
 
 def convert_vae(model_dir: Path, out_dir: Path) -> Path:
-    config=json.loads((model_dir/"vae/config.json").read_text())
+    config=json.loads((model_dir/"vae/config.json").read_text(encoding="utf-8"))
     if config != {"_class_name":"MageVAE", "latent_channels":128, "downsample_factor":16, "sample_posterior":False}:
         raise ValueError("Unsupported MageVAE config (deterministic posterior mode required)")
     source=open_safetensors(model_dir/"vae/diffusion_pytorch_model.safetensors")

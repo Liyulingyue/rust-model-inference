@@ -1,6 +1,6 @@
 use super::{linear, trace, vector, HIDDEN};
-use crate::models::diffusion::dreamx::kernels::{layer_norm_rows, load_float_values, Linear};
 use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::nn::{layer_norm_rows, load_float_values, Linear};
 use crate::{ComputePool, GGMLType, TensorSource};
 use rayon::prelude::*;
 use std::path::Path;

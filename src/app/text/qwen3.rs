@@ -17,6 +17,50 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Shared runtime entry for image ChatML models; the model owns image semantics.
+pub fn run_chat_runtime(
+    options: super::RuntimeOptions,
+    prompt: &str,
+    image: Option<&std::path::Path>,
+    max_tokens: usize,
+    temperature: f32,
+    repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
+    let mut jinja = jinja.clone();
+    jinja.jinja = true;
+    let template = jinja
+        .resolve(&|k| options.source.metadata(k).cloned())?
+        .ok_or("image model requires a chat template")?;
+    let ids = crate::prompt::jinja::render_tokens(
+        options.tokenizer.as_ref(),
+        &template,
+        &[crate::prompt::jinja::ChatMessage {
+            role: "user".into(),
+            content: if image.is_some() {
+                serde_json::json!([{"type":"image"},{"type":"text","text":prompt}])
+            } else {
+                serde_json::json!(prompt)
+            },
+        }],
+        true,
+        true,
+    )?;
+    let arch = crate::app::arch_of(options.source.as_ref());
+    let mut request = crate::ops::generation_runtime::GenerationRequest::new(ids, max_tokens);
+    if let Some(image) = image {
+        request
+            .images
+            .push(std::fs::read(image).map_err(|e| e.to_string())?);
+    }
+    request.sampling.temperature = temperature;
+    request.sampling.repetition_penalty = repetition_penalty;
+    let mut runtime = super::build_text_runtime(&arch, options)?;
+    runtime.generate(&request, &mut crate::ops::generation_runtime::StdoutSink)?;
+    println!();
+    Ok(())
+}
+
 pub fn run_qwen3_inference(
     source: Arc<dyn TensorSource>,
     prompt: &str,
@@ -32,6 +76,11 @@ pub fn run_qwen3_inference(
     repetition_penalty: f32,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
+    let mut jinja = jinja.clone();
+    if crate::app::arch_of(source.as_ref()) == "mage_vl" {
+        jinja.jinja = true;
+    }
+    let thinking = thinking || crate::app::arch_of(source.as_ref()) == "mage_vl";
     let input_tokens = {
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;

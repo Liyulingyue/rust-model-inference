@@ -247,7 +247,7 @@ class PublishedCheckpointTest(unittest.TestCase):
     """Pin the transcription to the real checkpoint's published settings."""
 
     def setUp(self):
-        self.config = json.loads((BASE_V1 / "config.json").read_text())
+        self.config = json.loads((BASE_V1 / "config.json").read_text(encoding="utf-8"))
         self.settings = boundary_settings_metadata(self.config["boundary_head"])
 
     def test_the_published_block_transcribes(self):
@@ -288,7 +288,7 @@ class PublishedStateDictTest(unittest.TestCase):
             length = struct.unpack("<Q", stream.read(8))[0]
             header = json.loads(stream.read(length))
         cls.shapes = {k: tuple(v["shape"]) for k, v in header.items() if k != "__metadata__"}
-        config = json.loads((BASE_V1 / "config.json").read_text())
+        config = json.loads((BASE_V1 / "config.json").read_text(encoding="utf-8"))
         cls.settings = boundary_settings_metadata(config["boundary_head"])
 
     def test_the_pair_scorer_shapes_agree(self):

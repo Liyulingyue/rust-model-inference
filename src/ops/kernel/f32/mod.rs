@@ -15,10 +15,12 @@
 //! `matmul_f32_vs_f32_simd` core across BF16/F16/F32.
 
 use super::Kernel;
+use std::borrow::Cow;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+pub mod ggml;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 #[cfg(target_arch = "aarch64")]
@@ -26,23 +28,47 @@ pub mod neon_q8;
 pub mod scalar;
 
 #[derive(Debug, Clone)]
-pub struct F32Kernel {
-    weight: Vec<f32>,
+pub struct F32Kernel<'a> {
+    weight: Cow<'a, [f32]>,
     n_in: usize,
     n_out: usize,
 }
 
-impl F32Kernel {
+impl<'a> F32Kernel<'a> {
     pub fn new(weight: Vec<f32>, n_in: usize, n_out: usize) -> Self {
         Self {
-            weight,
+            weight: Cow::Owned(weight),
             n_in,
             n_out,
         }
     }
+
+    pub fn from_le_bytes(bytes: &'a [u8], n_in: usize, n_out: usize) -> Option<Self> {
+        if bytes.len() != n_in.checked_mul(n_out)?.checked_mul(4)? {
+            return None;
+        }
+        let weight = if cfg!(target_endian = "little") {
+            bytemuck::try_cast_slice(bytes).ok().map(Cow::Borrowed)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            Cow::Owned(
+                bytes
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect(),
+            )
+        });
+        Some(Self {
+            weight,
+            n_in,
+            n_out,
+        })
+    }
 }
 
-impl Kernel for F32Kernel {
+impl Kernel for F32Kernel<'_> {
     fn f32_slice(&self) -> Option<&[f32]> {
         Some(&self.weight)
     }
@@ -129,6 +155,42 @@ impl Kernel for F32Kernel {
             forward_f32_rows_dispatch(&self.weight, input_f32, output, n_in, n_out, ith, nth);
         } else {
             self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+        }
+    }
+
+    /// ggml-parity path: same input as `forward_prepared`, but the F32 dot
+    /// uses `ggml_vec_dot_f32`'s four-accumulator NEON reduction. Only the
+    /// Nemotron trunk opts in; every other caller keeps the default F32
+    /// contract (single scalar accumulator, left-to-right).
+    fn forward_prepared_ggml(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if input_f32.len() >= n_in {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if start < end {
+                ggml::forward_f32_rows_ggml(&self.weight, input_f32, output, n_in, start, end);
+            }
+        } else {
+            self.forward_prepared(
+                input_f32,
+                input_q8,
+                input_scales,
+                q8_k,
+                output,
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
         }
     }
 
@@ -281,6 +343,35 @@ mod tests {
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [140.0, 320.0]);
+    }
+
+    #[test]
+    fn borrowed_f32_preserves_owned_kernel_bits_without_copying() {
+        let values: Vec<f32> = (0..64).map(|i| (i as f32 - 23.) / 7.).collect();
+        let le_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = if cfg!(target_endian = "little") {
+            bytemuck::cast_slice(&values)
+        } else {
+            &le_bytes
+        };
+        let borrowed = F32Kernel::from_le_bytes(bytes, 16, 4).unwrap();
+        if cfg!(target_endian = "little") {
+            assert_eq!(borrowed.f32_slice().unwrap().as_ptr(), values.as_ptr());
+        }
+        let owned = F32Kernel::new(values.clone(), 16, 4);
+        let input = vec![0.3; 32];
+        let (mut actual, mut expected) = (vec![0.; 8], vec![0.; 8]);
+        borrowed.forward_batched(&input, &mut actual, 16, 4);
+        owned.forward_batched(&input, &mut expected, 16, 4);
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert!(F32Kernel::from_le_bytes(&bytes[..bytes.len() - 1], 16, 4).is_none());
+        let mut unaligned = vec![0];
+        unaligned.extend_from_slice(bytes);
+        let fallback = F32Kernel::from_le_bytes(&unaligned[1..], 16, 4).unwrap();
+        assert_eq!(fallback.f32_slice().unwrap(), values);
     }
 
     #[test]

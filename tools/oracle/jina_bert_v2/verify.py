@@ -26,7 +26,7 @@ def run(command, trace, scalar=False):
         env["RMI_SCALAR"] = "1"
     with trace.with_suffix(".log").open("w") as log:
         subprocess.run(command, env=env, stdout=log, stderr=log, check=True)
-    return [json.loads(line) for line in trace.read_text().splitlines()]
+    return [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
 
 
 def main():

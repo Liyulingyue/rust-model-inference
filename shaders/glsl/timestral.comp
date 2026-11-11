@@ -8,6 +8,7 @@ layout(push_constant) uniform PC {
     uint mode;
     uint a; uint b; uint c; uint d; uint e; uint f;
     uint rows; uint enc; uint seq; uint context; uint covariates; uint time;
+    uint d_model; uint num_heads; uint hd; uint mlp_hidden_dim;
 } pc;
 
 float load(uint i) { return uintBitsToFloat(arena.data[i]); }
@@ -39,57 +40,86 @@ void main() {
     uint lane = gl_LocalInvocationID.x;
     uint index = group*64u + lane;
     uint count = pc.rows*pc.seq;
+    uint d = pc.d_model;
+    uint heads = pc.num_heads;
+    uint head_dim = pc.hd;
+    uint qkv_stride = 3u * d;
+    uint v_offset = 2u * d;
+    uint rope_hd_half = head_dim / 2u;
+    uint rope_coeffs = head_dim / 2u;
+
     if (pc.mode == 0u) {
-        if (index >= count*768u) return;
-        uint token = index/768u, head = (index%768u)/64u, dim = index%64u;
-        uint src = token*2304u + dim*12u + head;
-        float q = load(pc.a+src), k = load(pc.a+src+768u);
-        if (pc.time != 0u && (dim < 16u || (dim >= 32u && dim < 48u))) {
-            uint i = dim%32u, other = dim < 32u ? dim+32u : dim-32u;
-            uint coeff = pc.e+(token%pc.seq)*32u+i*2u;
+        // QKV projection: read fused [n, 3*d], write Q/K/V separate [n, d] each.
+        // Fused layout: [token, dim_in_head, head] for Q, then K, then V.
+        // All heads' dim 0 first, then all heads' dim 1, etc.
+        // src = token * (3*d) + dim_in_head * heads + head
+        if (index >= count*d) return;
+        uint token = index / d;
+        uint dim_in_d = index % d;
+        uint head = dim_in_d / head_dim;
+        uint dim = dim_in_d % head_dim;
+        uint src = token * qkv_stride + dim * heads + head;
+        float q = load(pc.a+src), k = load(pc.a+src+d);
+        // Apply RoPE to the first hd/4 dims paired with dims hd/2..hd/2+hd/4,
+        // matching the CPU rotate() which loops i in 0..hd/4.
+        uint rope_quarter = head_dim / 4u;
+        if (pc.time != 0u && (dim < rope_quarter || (dim >= head_dim/2u && dim < head_dim/2u + rope_quarter))) {
+            uint i = dim < rope_quarter ? dim : dim - head_dim/2u;
+            uint other = dim < rope_quarter ? dim + rope_hd_half : dim - rope_hd_half;
+            uint coeff = pc.e + (token % pc.seq) * rope_coeffs + i * 2u;
             float cos = load(coeff), sin = load(coeff+1u);
-            float sign = dim < 32u ? -1.0 : 1.0;
-            uint pair = token*2304u+other*12u+head;
-            q = q*cos + sign*load(pc.a+pair)*sin;
-            k = k*cos + sign*load(pc.a+pair+768u)*sin;
+            float sign = dim < rope_hd_half ? -1.0 : 1.0;
+            uint pair_src = token * qkv_stride + other * heads + head;
+            q = q*cos + sign*load(pc.a+pair_src)*sin;
+            k = k*cos + sign*load(pc.a+pair_src+d)*sin;
         }
-        store(pc.b+index, q); store(pc.c+index, k); store(pc.d+index, load(pc.a+src+1536u));
+        store(pc.b+index, q);
+        store(pc.c+index, k);
+        store(pc.d+index, load(pc.a+src+v_offset));
     } else if (pc.mode == 1u) {
-        // One workgroup per query/head; online softmax keeps memory linear in context.
-        if (group >= count*12u) return;
-        uint token = group/12u, head = group%12u, row = token/pc.seq, slot = token%pc.seq;
+        // Attention: one workgroup per query/head
+        if (group >= count*heads) return;
+        uint token = group / heads;
+        uint head = group % heads;
+        uint row = token / pc.seq;
+        uint slot = token % pc.seq;
         uint keys = pc.time != 0u ? pc.seq : pc.rows;
-        float query = load(pc.a+token*768u+head*64u+lane);
+        float query = load(pc.a + token*d + head*head_dim + lane);
         float value = 0.0;
         if (lane == 0u) { maximum = -1.0/0.0; denominator = 0.0; }
         barrier();
         for (uint j=0u; j<keys; j++) {
             if (!allowed(row,slot,j)) continue;
             uint key = pc.time != 0u ? row*pc.seq+j : j*pc.seq+slot;
-            partial[lane] = query*load(pc.b+key*768u+head*64u+lane);
+            partial[lane] = query * load(pc.b + key*d + head*head_dim + lane);
             barrier();
             for (uint step=32u; step>0u; step>>=1u) {
                 if (lane<step) partial[lane] += partial[lane+step];
                 barrier();
             }
             if (lane == 0u) {
-                float score = partial[0]/8.0;
-                float next = max(maximum,score);
-                alpha = exp_accurate(maximum-next); beta = exp_accurate(score-next);
-                denominator = denominator*alpha+beta; maximum=next;
+                float score = partial[0] / sqrt(float(head_dim));
+                float next = max(maximum, score);
+                alpha = exp_accurate(maximum-next);
+                beta = exp_accurate(score-next);
+                denominator = denominator*alpha + beta;
+                maximum = next;
             }
             barrier();
-            value = value*alpha + beta*load(pc.c+key*768u+head*64u+lane);
+            value = value*alpha + beta * load(pc.c + key*d + head*head_dim + lane);
             barrier();
         }
-        store(pc.d+token*768u+head*64u+lane, value/denominator);
+        store(pc.d + token*d + head*head_dim + lane, value/denominator);
     } else if (pc.mode == 2u) {
-        if (index >= count*768u) return;
+        // Gate: sigmoid(attn) * gate
+        if (index >= count*d) return;
         store(pc.a+index, load(pc.a+index)/(1.0+exp_accurate(-load(pc.b+index))));
     } else {
-        if (index >= count*2048u) return;
-        uint src = (index/2048u)*4096u+index%2048u;
-        float up = load(pc.a+src+2048u);
+        // SwiGlu: gate * up * sigmoid(up)
+        uint ffn = pc.mlp_hidden_dim;
+        if (index >= count*ffn) return;
+        uint src = (index/ffn) * (2u*ffn) + index%ffn;
+        float up = load(pc.a+src+ffn);
         store(pc.b+index, load(pc.a+src)*(up/(1.0+exp_accurate(-up))));
     }
 }
