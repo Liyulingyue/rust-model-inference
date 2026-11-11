@@ -56,7 +56,7 @@ def main():
         str(adapter_path), base_path=str(model_path), device="cpu", batch_size=1,
         verify="none", local_files_only=True,
     )
-    request = json.loads(args.request.read_text())
+    request = json.loads(args.request.read_text(encoding="utf-8"))
     rt = model.runtime
     decisions = {k: q for k, q in request["questions"].items()
                  if not isinstance(q, dict) or q.get("type") != "span"}
@@ -110,7 +110,7 @@ def main():
         model=str(model_path), adapter=str(adapter_path), torch=torch.__version__,
         transformers=transformers.__version__, threads=args.threads, sources=sources,
         executed_source_modules=executed_sources, environment={"D3_FAST": os.environ["D3_FAST"]},
-        vela_config=json.loads((adapter_path / "vela3_config.json").read_text()),
+        vela_config=json.loads((adapter_path / "vela3_config.json").read_text(encoding="utf-8")),
     ))
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n")

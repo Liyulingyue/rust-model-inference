@@ -78,7 +78,7 @@ def copy_tensor(writer, tensors, source_name, name):
 
 
 def convert_dit(root, out):
-    validate_config(json.loads((root / 'config.json').read_text()))
+    validate_config(json.loads((root / 'config.json').read_text(encoding="utf-8")))
     tensors = open_safetensors(root / 'model.safetensors')
     expected = dit_shapes()
     actual = {k: tuple(v['shape']) for k, v in tensors.header.items() if k != '__metadata__'}
@@ -165,7 +165,7 @@ def vae_shapes():
 
 
 def add_tokenizer(writer, root):
-    tok = json.loads((root / 'tokenizer.json').read_text())
+    tok = json.loads((root / 'tokenizer.json').read_text(encoding="utf-8"))
     if tok['model']['type'] != 'BPE' or tok['normalizer'] != {'type': 'NFC'}:
         raise ValueError('expected Qwen BPE with NFC normalization')
     if any(not isinstance(rule, str) or len(rule.split(' ')) != 2 for rule in tok['model']['merges']):
@@ -189,7 +189,7 @@ def add_tokenizer(writer, root):
 
 def convert_text(root, out):
     root = root / 'text_encoder'
-    cfg = json.loads((root / 'config.json').read_text())['text_config']
+    cfg = json.loads((root / 'config.json').read_text(encoding="utf-8"))['text_config']
     expected = dict(hidden_size=2560, num_hidden_layers=36, num_attention_heads=32,
                     num_key_value_heads=8, head_dim=128, intermediate_size=9728,
                     rope_theta=5000000, vocab_size=151936, rms_norm_eps=1e-6, hidden_act='silu', attention_bias=False)

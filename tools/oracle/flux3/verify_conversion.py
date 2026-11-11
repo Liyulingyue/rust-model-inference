@@ -46,7 +46,7 @@ def verify(root, output):
             assert metadata.get('qwen3vl.rope.freq_base')==5000000.0
             assert metadata.get('qwen3vl.rope.dimension_sections')==[24,20,20,0]
             assert np.float32(metadata.get('qwen3vl.attention.layer_norm_rms_epsilon'))==np.float32(1e-6)
-            tokenizer=json.loads((root/'text_encoder/tokenizer.json').read_text())
+            tokenizer=json.loads((root/'text_encoder/tokenizer.json').read_text(encoding="utf-8"))
             assert metadata.get('tokenizer.ggml.merges')==tokenizer['model']['merges']
             assert metadata.get('tokenizer.ggml.normalizer.nfc') is True
             tokens=metadata['tokenizer.ggml.tokens']

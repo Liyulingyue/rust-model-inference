@@ -257,7 +257,7 @@ pub(super) fn python_method(
                 Some(found) => Ok(found),
                 // Python's `.get(key, default)` only applies the default on a
                 // miss; a present key returns the value even if it is falsy.
-                None if let Some(default) = default => Ok(default.clone()),
+                None if default.is_some() => Ok(default.unwrap().clone()),
                 // `Value::from(())` is a genuine None. minijinja's `none` is a
                 // test, not a value, so it cannot be used for this.
                 None => Ok(Value::from(())),

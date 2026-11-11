@@ -248,8 +248,8 @@ def validate_trace(rows, scope):
 
 def compare(oracle, rust, output, scope="all"):
     import numpy as np
-    a = [json.loads(x) for x in oracle.read_text().splitlines()]
-    b = [json.loads(x) for x in rust.read_text().splitlines()]
+    a = [json.loads(x) for x in oracle.read_text(encoding="utf-8").splitlines()]
+    b = [json.loads(x) for x in rust.read_text(encoding="utf-8").splitlines()]
     # Route traces are optional diagnostics, independently verified by the primitive fixture.
     b = [x for x in b if x["name"] not in {"uocr.routes", "uocr.moe_gate"}]
     for rows in [a, b]:
@@ -309,7 +309,7 @@ def main():
             primitives(mod, args.model_root, args.output)
         else:
             run(mod, args.model_root, args.output, args.images or [], args.max_tokens, args.threads,
-                args.instruction.read_text() if args.instruction else "Multi page parsing.", args.prefill_only)
+                args.instruction.read_text(encoding="utf-8") if args.instruction else "Multi page parsing.", args.prefill_only)
 
 
 if __name__ == "__main__":

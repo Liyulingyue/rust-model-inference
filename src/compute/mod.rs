@@ -87,8 +87,45 @@ impl ComputePolicy {
     /// The others still run under `--compute vulkan`: the flag asks for a
     /// real device, and a model offloads what it can. This list is where
     /// the caller learns that only part of the graph qualifies.
+    ///
+    /// `nemotron_h` is the dense Nemotron-3 Nano 4B: its Mamba-2 SSM
+    /// layers have device kernels, so all 42 layers run on the device.
+    /// The mixture-of-experts variant (`nemotron_h_moe`, the 30B-A3B) is
+    /// on this list too: its routed experts run on the device as well,
+    /// and the routing stays there (the chosen expert ids are written
+    /// into the arena, so a layer does not synchronise with the host).
     pub fn has_complete_device_path(arch: &str) -> bool {
-        matches!(arch, "llama" | "qwen3" | "qwen35" | "qwen35moe" | "dory")
+        matches!(
+            arch,
+            "llama"
+                | "qwen3"
+                | "qwen35"
+                | "qwen35moe"
+                | "dory"
+                | "nemotron_h"
+                | "nemotron_h_moe"
+                | "sensenova_loop"
+        )
+    }
+
+    /// Architectures whose text runtime implements the vision path.
+    ///
+    /// These are the only archs that can take `--mmproj`/`--image` at all.
+    /// The other text runtimes have no image branch, so they would answer a
+    /// text-only prompt and drop the media; the request is rejected instead.
+    pub fn supports_vision(arch: &str) -> bool {
+        matches!(
+            arch,
+            "qwen3"
+                | "qwen3vl"
+                | "qwen2vl"
+                | "qwen3vlmoe"
+                | "mage_vl"
+                | "qwen35"
+                | "qwen35moe"
+                | "edge0"
+                | "sensenova_loop"
+        )
     }
 
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
@@ -100,7 +137,7 @@ impl ComputePolicy {
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "compute requested=Vulkan backend=partial arch={arch} \
-                     note=no complete device path for this architecture; only the \
+                     note=no complete device path for this architecture; any \
                      offloadable parts run on the device"
                 );
             }
@@ -230,7 +267,7 @@ mod tests {
             assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
         }
         assert_eq!(ComputePolicy::legacy(), original);
-        for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
+        for arch in ["gemma4", "edge0", "qwen3vl", "mage_vl", "auk", "unknown"] {
             // `--compute vulkan` asks for a real device, not for a
             // particular device path, so an architecture without a
             // complete one is allowed and reported instead.
@@ -238,7 +275,14 @@ mod tests {
             assert!(ComputePolicy::Auto.validate_text_arch(arch).is_ok());
             assert!(!ComputePolicy::has_complete_device_path(arch));
         }
-        for arch in ["llama", "qwen3", "qwen35", "qwen35moe", "dory"] {
+        for arch in [
+            "llama",
+            "qwen3",
+            "qwen35",
+            "qwen35moe",
+            "dory",
+            "nemotron_h_moe",
+        ] {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
             assert!(ComputePolicy::has_complete_device_path(arch));
         }

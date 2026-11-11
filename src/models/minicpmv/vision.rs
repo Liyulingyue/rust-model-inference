@@ -30,9 +30,14 @@
 
 use super::config::MiniCpmV47Config;
 use super::weights::{MiniCpmV47Weights, ViTLayer};
+use crate::compute::linear::LinearExecutor;
+use crate::compute::ComputePolicy;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::activation::{gelu_erf, gelu_ggml_f32};
+use crate::ops::nn::Linear;
 use std::sync::Arc;
+
+use super::weights::Projection;
 
 /// Reusable buffers so `encode_tile` does not reallocate per call.
 #[derive(Default)]
@@ -65,51 +70,68 @@ impl MiniCpmV47Scratch {
     }
 }
 
-/// `W: [n_out][n_in]` times `input: [tokens][n_in]`, plus optional bias.
-fn linear(
+/// Project `input: [rows][n_in]` into `output: [rows][n_out]`.
+///
+/// The CPU path is the tower's original scalar loop: the vision tower is
+/// pinned bit-for-bit to the llama.cpp oracle, so it must not be re-routed
+/// through the shared matmul, whose summation order differs in the last bits.
+/// A device policy submits the same projection to the shared linear executor
+/// instead; attention, norms and slicing stay on the CPU.
+fn project(
+    linear: &Projection,
+    executor: &mut Option<LinearExecutor<'_, 'static>>,
     pool: &ComputePool,
-    w: &[f32],
-    bias: Option<&[f32]>,
     input: &[f32],
     output: &mut [f32],
-    tokens: usize,
-    n_in: usize,
-    n_out: usize,
-) {
+    rows: usize,
+) -> Result<(), String> {
+    if let Some(executor) = executor.as_mut() {
+        let projected = Linear::forward_group([linear], executor, input, rows)?;
+        output.copy_from_slice(&projected[0]);
+        return Ok(());
+    }
+    let weight = linear
+        .f32_weight()
+        .ok_or("MiniCPM-V vision projection is not an f32 matrix")?;
+    let bias = linear.bias();
+    let n_in = linear.n_in();
+    let n_out = linear.n_out();
     let b = bias.unwrap_or(&[]);
-    if tokens * n_out < 256 {
-        for token in 0..tokens {
-            let src = &input[token * n_in..(token + 1) * n_in];
+    if rows * n_out < 256 {
+        for row in 0..rows {
+            let src = &input[row * n_in..(row + 1) * n_in];
             for out in 0..n_out {
-                let value = crate::ops::dot_f32(&w[out * n_in..(out + 1) * n_in], src, n_in);
-                output[token * n_out + out] = if b.is_empty() { value } else { value + b[out] };
+                let value = crate::ops::dot_f32(&weight[out * n_in..(out + 1) * n_in], src, n_in);
+                output[row * n_out + out] = if b.is_empty() { value } else { value + b[out] };
             }
         }
-        return;
+        return Ok(());
     }
-    let w_ptr = w.as_ptr();
-    let in_ptr = input.as_ptr();
-    let out_ptr = output.as_mut_ptr();
+    let weight_ptr = weight.as_ptr();
+    let input_ptr = input.as_ptr();
+    let output_ptr = output.as_mut_ptr();
     let bias_ptr = b.as_ptr();
     let pool = pool.clone();
     pool.compute(move |ith, nth| {
-        let (start, end) = crate::ops::kernel::f32::scalar::row_range(tokens, ith, nth);
-        for token in start..end {
-            let src = unsafe { std::slice::from_raw_parts(in_ptr.add(token * n_in), n_in) };
+        let (start, end) = crate::ops::kernel::f32::scalar::row_range(rows, ith, nth);
+        for row in start..end {
+            let src = unsafe { std::slice::from_raw_parts(input_ptr.add(row * n_in), n_in) };
             for out in 0..n_out {
-                let row = unsafe { std::slice::from_raw_parts(w_ptr.add(out * n_in), n_in) };
-                let value = crate::ops::dot_f32(row, src, n_in);
+                let weight_row =
+                    unsafe { std::slice::from_raw_parts(weight_ptr.add(out * n_in), n_in) };
+                let value = crate::ops::dot_f32(weight_row, src, n_in);
                 let bias = if bias_ptr.is_null() {
                     0.0
                 } else {
                     unsafe { *bias_ptr.add(out) }
                 };
                 unsafe {
-                    *out_ptr.add(token * n_out + out) = value + bias;
+                    *output_ptr.add(row * n_out + out) = value + bias;
                 }
             }
         }
     });
+    Ok(())
 }
 
 /// In-place softmax over one row.
@@ -209,10 +231,11 @@ fn vit_block(
     cfg: &MiniCpmV47Config,
     scratch: &mut MiniCpmV47Scratch,
     pool: &ComputePool,
+    executor: &mut Option<LinearExecutor<'_, 'static>>,
     layer: &ViTLayer,
     hidden: &mut [f32],
     nx: usize,
-) {
+) -> Result<(), String> {
     let tokens = hidden.len() / cfg.n_embd;
     let dim = cfg.n_embd;
     scratch.fit(tokens, dim, cfg.n_ff);
@@ -235,48 +258,12 @@ fn vit_block(
         &mut scratch.attn[..tokens * dim],
         &mut scratch.scores[..tokens * tokens],
     );
-    linear(
-        pool,
-        &layer.q_w,
-        Some(&layer.q_b),
-        normed,
-        q,
-        tokens,
-        dim,
-        dim,
-    );
-    linear(
-        pool,
-        &layer.k_w,
-        Some(&layer.k_b),
-        normed,
-        k,
-        tokens,
-        dim,
-        dim,
-    );
-    linear(
-        pool,
-        &layer.v_w,
-        Some(&layer.v_b),
-        normed,
-        v,
-        tokens,
-        dim,
-        dim,
-    );
+    project(&layer.q, executor, pool, normed, q, tokens)?;
+    project(&layer.k, executor, pool, normed, k, tokens)?;
+    project(&layer.v, executor, pool, normed, v, tokens)?;
     attention(cfg, scores, q, k, v, attn, tokens, nx, false);
     let mut proj = vec![0.0f32; tokens * dim];
-    linear(
-        pool,
-        &layer.o_w,
-        Some(&layer.o_b),
-        attn,
-        &mut proj,
-        tokens,
-        dim,
-        dim,
-    );
+    project(&layer.o, executor, pool, attn, &mut proj, tokens)?;
     // residual is added onto `input`, not the normed copy
     for i in 0..tokens * dim {
         hidden[i] += proj[i];
@@ -294,33 +281,16 @@ fn vit_block(
         );
     }
     let ff = &mut scratch.ff[..tokens * cfg.n_ff];
-    linear(
-        pool,
-        &layer.ff_up_w,
-        Some(&layer.ff_up_b),
-        normed,
-        ff,
-        tokens,
-        dim,
-        cfg.n_ff,
-    );
+    project(&layer.ff_up, executor, pool, normed, ff, tokens)?;
     for value in ff.iter_mut() {
         *value = gelu_ggml_f32(*value);
     }
     let mut out = vec![0.0f32; tokens * dim];
-    linear(
-        pool,
-        &layer.ff_down_w,
-        Some(&layer.ff_down_b),
-        ff,
-        &mut out,
-        tokens,
-        cfg.n_ff,
-        dim,
-    );
+    project(&layer.ff_down, executor, pool, ff, &mut out, tokens)?;
     for i in 0..tokens * dim {
         hidden[i] += out[i];
     }
+    Ok(())
 }
 
 /// Gather indices for a 2x2 downsample over a `nx * ny` grid.
@@ -350,36 +320,71 @@ pub fn encode_tile(
     let tokens = nx * ny;
     scratch.fit(tokens, dim, cfg.n_ff);
 
-    // patch embedding: gather 3*ps*ps patches, project, add bias
+    // The projections are the tower's bulk of the work; a device policy hands
+    // them to the shared linear executor while attention, norms and slicing
+    // stay on the CPU.
+    let policy = ComputePolicy::legacy();
+    let mut executor = if policy == ComputePolicy::Cpu {
+        None
+    } else {
+        let bindings = std::iter::once(weights.patch_embd.binding())
+            .chain(weights.layers.iter().flat_map(|layer| {
+                [
+                    layer.q.binding(),
+                    layer.k.binding(),
+                    layer.v.binding(),
+                    layer.o.binding(),
+                    layer.ff_up.binding(),
+                    layer.ff_down.binding(),
+                ]
+            }))
+            .chain([
+                weights.merger.q.binding(),
+                weights.merger.k.binding(),
+                weights.merger.v.binding(),
+                weights.merger.o.binding(),
+                weights.merger.ds_up.binding(),
+                weights.merger.ds_down.binding(),
+                weights.projector.up.binding(),
+                weights.projector.down.binding(),
+            ])
+            .collect();
+        Some(
+            LinearExecutor::new(policy, bindings, tokens, pool.clone())
+                .map_err(|error| error.to_string())?,
+        )
+    };
+
+    // Patch embedding: gather the `3*ps*ps` patches into one matrix and
+    // project it in a single call, so the device can take it too.
     let ps = cfg.patch_size;
     let patch_dim = 3 * ps * ps;
-    let mut hidden = vec![0.0f32; tokens * dim];
+    let mut patches = vec![0.0f32; tokens * patch_dim];
     for ty in 0..ny {
         for tx in 0..nx {
             let token = ty * nx + tx;
-            let mut patch = Vec::with_capacity(patch_dim);
+            let slot = &mut patches[token * patch_dim..(token + 1) * patch_dim];
             for c in 0..3 {
                 for y in 0..ps {
                     for x in 0..ps {
                         let px = tx * ps + x;
                         let py = ty * ps + y;
                         let idx = (py * nx * ps + px) * 3 + c;
-                        patch.push(pixels.get(idx).copied().unwrap_or(0.0));
+                        slot[c * ps * ps + y * ps + x] = pixels.get(idx).copied().unwrap_or(0.0);
                     }
                 }
             }
-            for (out, slot) in hidden[token * dim..(token + 1) * dim]
-                .iter_mut()
-                .enumerate()
-            {
-                *slot = crate::ops::dot_f32(
-                    &weights.patch_embd_w[out * patch_dim..(out + 1) * patch_dim],
-                    &patch,
-                    patch_dim,
-                ) + weights.patch_embd_b[out];
-            }
         }
     }
+    let mut hidden = vec![0.0f32; tokens * dim];
+    project(
+        &weights.patch_embd,
+        &mut executor,
+        pool,
+        &patches,
+        &mut hidden,
+        tokens,
+    )?;
     // + learned positional embedding. The table is 70x70, so each axis is
     // bucketed into 70 slots with `floor(70 * i / pos)` before the row index is
     // formed — this is not a raster walk of the table.
@@ -410,7 +415,15 @@ pub fn encode_tile(
 
     let insert = cfg.insert_layer_id;
     for il in 0..=insert.min(cfg.n_layer - 1) {
-        vit_block(cfg, scratch, pool, &weights.layers[il], &mut hidden, nx);
+        vit_block(
+            cfg,
+            scratch,
+            pool,
+            &mut executor,
+            &weights.layers[il],
+            &mut hidden,
+            nx,
+        )?;
     }
 
     // --- vit_merger: window attention + residual
@@ -435,49 +448,41 @@ pub fn encode_tile(
             &mut scratch.attn[..tokens * dim],
             &mut scratch.scores[..tokens * tokens],
         );
-        linear(
+        project(
+            &merger.q,
+            &mut executor,
             pool,
-            &merger.q_w,
-            Some(&merger.q_b),
             &scratch.normed[..tokens * dim],
             q,
             tokens,
-            dim,
-            dim,
-        );
-        linear(
+        )?;
+        project(
+            &merger.k,
+            &mut executor,
             pool,
-            &merger.k_w,
-            Some(&merger.k_b),
             &scratch.normed[..tokens * dim],
             k,
             tokens,
-            dim,
-            dim,
-        );
-        linear(
+        )?;
+        project(
+            &merger.v,
+            &mut executor,
             pool,
-            &merger.v_w,
-            Some(&merger.v_b),
             &scratch.normed[..tokens * dim],
             v,
             tokens,
-            dim,
-            dim,
-        );
+        )?;
         attention(cfg, scores, q, k, v, attn, tokens, nx, true);
     }
     let mut proj = vec![0.0f32; tokens * dim];
-    linear(
+    project(
+        &merger.o,
+        &mut executor,
         pool,
-        &merger.o_w,
-        Some(&merger.o_b),
         &scratch.attn[..tokens * dim],
         &mut proj,
         tokens,
-        dim,
-        dim,
-    );
+    )?;
     for i in 0..tokens * dim {
         hidden[i] += proj[i];
     }
@@ -505,7 +510,7 @@ pub fn encode_tile(
             scratch.mean[base + 3 * dim + i] = scratch.mean[base + i];
         }
     }
-    let ds_hidden = merger.ds_up_w.len() / merged_width;
+    let ds_hidden = merger.ds_up.n_out();
     for qi in 0..merged {
         crate::ops::norm::layer_norm(
             &scratch.merged[qi * merged_width..(qi + 1) * merged_width],
@@ -516,30 +521,26 @@ pub fn encode_tile(
         );
     }
     scratch.ff.resize(merged * ds_hidden, 0.0);
-    linear(
+    project(
+        &merger.ds_up,
+        &mut executor,
         pool,
-        &merger.ds_up_w,
-        Some(&merger.ds_up_b),
         &scratch.normed[..merged * merged_width],
         &mut scratch.ff[..merged * ds_hidden],
         merged,
-        merged_width,
-        ds_hidden,
-    );
+    )?;
     for value in scratch.ff[..merged * ds_hidden].iter_mut() {
         *value = gelu_ggml_f32(*value);
     }
     let mut merged_out = vec![0.0f32; merged * dim];
-    linear(
+    project(
+        &merger.ds_down,
+        &mut executor,
         pool,
-        &merger.ds_down_w,
-        Some(&merger.ds_down_b),
         &scratch.ff[..merged * ds_hidden],
         &mut merged_out,
         merged,
-        ds_hidden,
-        dim,
-    );
+    )?;
     for i in 0..merged * dim {
         merged_out[i] += scratch.mean[i];
     }
@@ -551,10 +552,11 @@ pub fn encode_tile(
             cfg,
             scratch,
             pool,
+            &mut executor,
             &weights.layers[il],
             &mut merged_out,
             mnx,
-        );
+        )?;
     }
 
     // --- post_ln
@@ -591,32 +593,28 @@ pub fn encode_tile(
         );
     }
     let proj = &weights.projector;
-    let up_hidden = proj.up_w.len() / merged_width;
+    let up_hidden = proj.up.n_out();
     scratch.ff.resize(n_out * up_hidden, 0.0);
-    linear(
+    project(
+        &proj.up,
+        &mut executor,
         pool,
-        &proj.up_w,
-        Some(&proj.up_b),
         &scratch.normed[..n_out * merged_width],
         &mut scratch.ff[..n_out * up_hidden],
         n_out,
-        merged_width,
-        up_hidden,
-    );
+    )?;
     for value in scratch.ff[..n_out * up_hidden].iter_mut() {
         *value = gelu_erf(*value);
     }
     let mut out = vec![0.0f32; n_out * cfg.n_embd_text];
-    linear(
+    project(
+        &proj.down,
+        &mut executor,
         pool,
-        &proj.down_w,
-        Some(&proj.down_b),
         &scratch.ff[..n_out * up_hidden],
         &mut out,
         n_out,
-        up_hidden,
-        cfg.n_embd_text,
-    );
+    )?;
     Ok(out)
 }
 
@@ -667,6 +665,71 @@ pub fn suffix_plan(grid_x: usize, grid_y: usize) -> Vec<&'static [usize]> {
         }
     }
     plan
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod device_tests {
+    use super::*;
+    use crate::compute::ComputePolicy;
+
+    /// The vision tower's projections must reach the device and stay inside
+    /// the same error band as the CPU kernel.
+    #[test]
+    #[ignore = "requires hardware Vulkan; run alone with --test-threads=1"]
+    fn vision_projection_submits_and_matches_the_cpu_kernel() {
+        let n_in = 24usize;
+        let n_out = 16usize;
+        let rows = 8usize;
+        let mut rows_weight = vec![0.0f32; n_in * n_out];
+        for row in 0..n_out {
+            for col in 0..n_in {
+                rows_weight[row * n_in + col] = ((row * 7 + col * 3) % 11) as f32 / 11.0 - 0.5;
+            }
+        }
+        let bias: Vec<f32> = (0..n_out).map(|row| row as f32 / 32.0).collect();
+        let linear = Projection::from_weight(
+            super::super::weights::linear_from_rows(rows_weight, n_in, n_out),
+            Some(bias),
+        )
+        .unwrap();
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|index| ((index * 5) % 13) as f32 / 13.0 - 0.5)
+            .collect();
+        let pool = Arc::new(ComputePool::new(2));
+
+        let expected = linear.forward(&pool, &input, rows).unwrap();
+        let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+        let before = context.compute_stats();
+        let mut executor = LinearExecutor::new(
+            ComputePolicy::Vulkan,
+            vec![linear.binding()],
+            rows,
+            pool.clone(),
+        )
+        .unwrap();
+        let mut actual = vec![0.0f32; rows * n_out];
+        project(
+            &linear,
+            &mut Some(executor),
+            &pool,
+            &input,
+            &mut actual,
+            rows,
+        )
+        .unwrap();
+        let submissions = context.compute_stats().submissions - before.submissions;
+        assert!(submissions >= 1, "the projection never reached the device");
+
+        let max_abs = expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs < 1e-5,
+            "device projection differs from the CPU kernel: max_abs={max_abs}"
+        );
+    }
 }
 
 #[cfg(test)]

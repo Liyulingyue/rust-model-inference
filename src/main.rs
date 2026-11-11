@@ -90,7 +90,7 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{USAGE}\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <base-directory> --system-one-request <request.json|-> [--adapter <vela3-package>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout");
+        println!("{USAGE}\n\nAudio enhancement: --enhance --model <RE-USE directory or model.safetensors> --audio input.wav --out output.wav [--compute cpu|auto] [--overwrite] | PCM16 WAV, 8-48 kHz\n\nWeVisOne-VL: --model text.gguf --mmproj vision.gguf --wevisone-decoder decoder.gguf --wevisone-request request.json [--output result.json]\n\nTimestral-209M: --model <timestral-F32.gguf> --timestral-request <series.json> [--threads N] [--compute cpu|auto|vulkan] | time-series forecasting; JSON context and prediction_length in, 21 quantiles out\n\nSystem One (Vela3): --model <base-directory> --system-one-request <request.json|-> [--adapter <vela3-package>] [--threads N] [--compute cpu] | JSON request from a file or stdin; one JSON response to stdout\n\nTHX-02 decisions: --model <thx02.gguf> --decision-request <request.json|-> [--decision-thinker <thinker.gguf>] [--max-context N] [--compute cpu|auto|vulkan] | joint choice/noul/score JSON decisions; --jev supports text and --image; server exposes /v1/decide and /v1/decide/batch");
         return;
     }
     // \n\nGLiNER2 boundary mode: --jev --gliner2-boundary --model <gliner2.5-boundary.gguf> --jev-context <text> --gliner2-schema <json> | span extraction; the schema is {\"entities\":[\"person\",\"location\"],\"entity_descriptions\":{...}} (the dict form {\"entities\":{\"person\":[...]}} is also accepted). Output is (start, end) word spans per field; --jev-output json for machine-readable.\n\nServer mode: --serve delegates to app::server::run_server which has its
@@ -99,7 +99,7 @@ fn main() {
         && !args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--timestral-request" | "--system-one-request" | "--adapter"
+                "--timestral-request" | "--system-one-request" | "--adapter" | "--decision-request"
             )
         })
     {
@@ -110,10 +110,22 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2);
     });
+    if options.enhance {
+        app::run_or_exit(app::validate_cli_options(&options));
+        app::run_or_exit(options.validate_compute_mode());
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        app::init_rayon_global_pool(app::resolve_thread_count(options.threads, available));
+        app::run_or_exit(app::audio::run_enhancement(&options));
+        return;
+    }
     // Reject mixed JSON/task modes before any early media route can run.
     if options.timestral_request.is_some()
         || options.system_one_request.is_some()
         || options.adapter.is_some()
+        || options.decision_request.is_some()
+        || options.decision_thinker.is_some()
     {
         app::run_or_exit(app::validate_cli_options(&options));
     }
@@ -130,6 +142,11 @@ fn main() {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    if options.decision_request.is_some() {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::decision::run_cli(&options, n_threads));
+        return;
+    }
     if options.system_one_request.is_some() {
         app::init_rayon_global_pool(n_threads);
         app::run_or_exit(app::system_one::run_cli(&options, n_threads));
@@ -145,6 +162,26 @@ fn main() {
         app::init_rayon_global_pool(n_threads);
         app::run_or_exit(rust_model_inference::models::unlimited_ocr::run_cli(
             &options, n_threads,
+        ));
+        return;
+    }
+    // A native JEV model must validate its flags before another task loads components.
+    let early_jev_source: Option<Arc<dyn TensorSource>> = if options.jev {
+        open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .map(Arc::from)
+    } else {
+        None
+    };
+    if let Some(source) = early_jev_source
+        .as_ref()
+        .filter(|source| app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH)
+    {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::decision::jev::run_jev_cli(
+            source.clone(),
+            &options,
+            n_threads,
         ));
         return;
     }
@@ -186,23 +223,24 @@ fn main() {
     }
 
     // Select Mage before Z-Image's shared-component validation rejects edit inputs.
-    let early_source: Option<Arc<dyn TensorSource>> = if dispatch_mode(&options)
-        == DispatchMode::Model
-        && !options.model.as_os_str().is_empty()
-        && (options.qwen_image_turbo
-            || options.text_encoder.is_some()
-            || options.vae.is_some()
-            || options.out.is_some()
-            || options.width.is_some()
-            || options.height.is_some()
-            || options.cfg.is_some()
-            || options.noise.is_some()
-            || !options.references.is_empty())
-    {
-        Some(Arc::from(open_or_exit(&options.model, ComponentRole::Llm)))
-    } else {
-        None
-    };
+    let early_source: Option<Arc<dyn TensorSource>> = early_jev_source.or_else(|| {
+        if dispatch_mode(&options) == DispatchMode::Model
+            && !options.model.as_os_str().is_empty()
+            && (options.qwen_image_turbo
+                || options.text_encoder.is_some()
+                || options.vae.is_some()
+                || options.out.is_some()
+                || options.width.is_some()
+                || options.height.is_some()
+                || options.cfg.is_some()
+                || options.noise.is_some()
+                || !options.references.is_empty())
+        {
+            Some(Arc::from(open_or_exit(&options.model, ComponentRole::Llm)))
+        } else {
+            None
+        }
+    });
     if options.qwen_image_turbo
         && early_source
             .as_ref()
@@ -593,6 +631,20 @@ fn main() {
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
+    if app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH {
+        app::run_or_exit(app::decision::jev::run_jev_cli(
+            source.clone(),
+            &options,
+            n_threads,
+        ));
+        return;
+    }
+    if options.decision_thinker.is_some() {
+        app::run_or_exit(Err(
+            "--decision-thinker requires a THX-02 decision model".into()
+        ));
+        return;
+    }
     app::run_or_exit(
         options.validate_compute_model(
             source
@@ -688,18 +740,33 @@ fn main() {
 
     if options.embedding && (image.is_some() || video.is_some() || audio.is_some()) {
         let started = std::time::Instant::now();
-        let embedding = match app::run_omni_embedding(
-            source.as_ref(),
-            explicit_mmproj.unwrap_or_else(|| {
-                eprintln!("media embedding requires --mmproj");
-                std::process::exit(1);
-            }),
-            image,
-            video,
-            audio,
-            prompt,
-            options.threads,
-        ) {
+        let result = if app::arch_of(source.as_ref()) == "gemma4-embedding" {
+            if video.is_some() {
+                Err("EmbeddingGemma video embedding is not implemented".into())
+            } else {
+                rust_model_inference::models::embeddinggemma2::compute_media_embedding(
+                    source.clone(),
+                    image,
+                    audio,
+                    prompt,
+                    options.threads,
+                )
+            }
+        } else {
+            app::run_omni_embedding(
+                source.as_ref(),
+                explicit_mmproj.unwrap_or_else(|| {
+                    eprintln!("media embedding requires --mmproj");
+                    std::process::exit(1);
+                }),
+                image,
+                video,
+                audio,
+                prompt,
+                options.threads,
+            )
+        };
+        let embedding = match result {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("Inference error: {error}");
@@ -832,7 +899,48 @@ fn main() {
         }
     }
 
-    if arch == "gemma4" && !options.jev {
+    if arch == "mage_vl" && !options.jev {
+        if video.is_some()
+            || audio.is_some()
+            || prompt.is_empty()
+            || options.embedding
+            || options.bench
+            || options.profile
+            || options.dump_logits
+            || options.chat_template.is_some()
+        {
+            app::run_or_exit(Err("Mage-VL-Cowork requires --prompt with text/image generation; video, audio, embedding, bench/profile, dump-logits and built-in template presets are unsupported".into()));
+            return;
+        }
+        let mmproj = explicit_mmproj.map(|p| Arc::from(open_or_exit(p, ComponentRole::Mmproj)));
+        let tokenizer = Arc::new(
+            rust_model_inference::BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1)
+                }),
+        );
+        let runtime_options = app::text::RuntimeOptions::from_model(
+            Arc::clone(&source),
+            Arc::new(rust_model_inference::ComputePool::new(n_threads)),
+            tokenizer,
+        )
+        .with_compute(options.compute_policy())
+        .with_mmproj(mmproj)
+        .with_threads(n_threads)
+        .with_kv_format(options.kv_format)
+        .with_max_context(options.effective_max_context())
+        .with_prefill_batch_size(prefill_batch_size);
+        app::run_or_exit(app::text::run_chat_runtime(
+            runtime_options,
+            prompt,
+            image,
+            max_tokens,
+            temperature,
+            options.effective_repetition_penalty(),
+            &jinja_options,
+        ));
+    } else if arch == "gemma4" && !options.jev {
         app::run_or_exit(app::run_multimodal_with_video(
             Arc::clone(&source),
             model_path,
@@ -1021,6 +1129,20 @@ fn main() {
             Err(e) => app::run_or_exit(Err(e)),
         }
     } else if options.jev {
+        if arch == "mage_vl" {
+            if let Some(path) = explicit_mmproj {
+                app::run_or_exit(
+                    open_model_source(path, ComponentRole::Mmproj)
+                        .map_err(|e| e.to_string())
+                        .and_then(|vision| {
+                            rust_model_inference::models::mage_vl::validate_components(
+                                source.as_ref(),
+                                vision.as_ref(),
+                            )
+                        }),
+                );
+            }
+        }
         match app::build_jev_inputs(&options) {
             Ok(Some(app::JevInputs::Grouped {
                 context,
@@ -1042,6 +1164,7 @@ fn main() {
                     prefill_batch_size,
                     options.jev_output_json,
                     jinja_options.clone(),
+                    options.effective_max_context(),
                 ));
             }
             Ok(Some(app::JevInputs::Single {
@@ -1060,6 +1183,7 @@ fn main() {
                     explicit_mmproj,
                     image,
                     jinja_options.clone(),
+                    options.effective_max_context(),
                 ));
             }
             Ok(None) => {}
@@ -1082,7 +1206,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             app::run_or_exit(app::run_multimodal_with_video(
                 Arc::clone(&source),
                 model_path,
@@ -1193,7 +1317,7 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
-        if matches!(arch, "qwen35" | "qwen35moe" | "edge0") {
+        if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),
                 model_path,

@@ -19,12 +19,12 @@ use crate::models::qwen3::vision::{
     VisionScratchpad as VisionScratchpad3vl,
 };
 use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen35::build_qwen35_positions;
 use crate::models::qwen35::trunk::HybridSession;
 use crate::models::qwen35::vision::{
     qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
     VisionScratchpad as VisionScratchpad35,
 };
-use crate::models::qwen35::{build_qwen35_positions, Qwen35Model, Qwen35Session};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
 use std::io::{self, Write};
 use std::path::Path;
@@ -715,11 +715,36 @@ pub fn run_qwen3_family_multimodal_logits(
     // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
     // endpoints leave it `None` to keep Qwen's default system text.
     system_prompt: Option<&str>,
+    max_context: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
     use crate::app::media::{frame_pairs, normalize_resized_image};
     use crate::core::scratchpad::{KvFormat as Qwen3KvFormat, KvLifecycle};
     use crate::models::qwen3::Qwen3Session;
 
+    if crate::app::arch_of(llm_source) == "mage_vl" {
+        if video_path.is_some() || audio_path.is_some() {
+            return Err("Mage-VL-Cowork supports image/text input only".into());
+        }
+        let vision =
+            open_model_source(mmproj_path, ComponentRole::Mmproj).map_err(|e| e.to_string())?;
+        let image = decode_image(image_path.ok_or("Mage-VL JEV requires --image")?)?;
+        let threads = resolve_thread_count(
+            n_threads_arg,
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        );
+        return crate::models::mage_vl::image_logits(
+            model_source,
+            vision.as_ref(),
+            image,
+            prompt,
+            system_prompt,
+            threads,
+            prefill_batch_size,
+            max_context,
+        );
+    }
     validate_single_qwen_media(
         image_path.is_some(),
         video_path.is_some(),
@@ -1026,8 +1051,6 @@ pub fn run_qwen35_family_multimodal_logits(
         qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
         VisionScratchpad as VisionScratchpad35,
     };
-    use crate::models::qwen35::{Qwen35Model, Qwen35Session};
-
     if audio_path.is_some() {
         return Err(format!(
             "Only gemma4 architecture is supported for multimodal audio, got: qwen35"
@@ -1053,7 +1076,24 @@ pub fn run_qwen35_family_multimodal_logits(
         return Err("qwen35 multimodal requires --image or --video".into());
     };
     let is_video = video_path.is_some();
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    if arch == crate::models::sensenova_loop::ARCH {
+        crate::app::media::validate_mmproj_capabilities(
+            arch,
+            mmproj.as_ref(),
+            if is_video {
+                crate::app::media::MediaKind::Video
+            } else {
+                crate::app::media::MediaKind::Image
+            },
+        )?;
+    }
 
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     // Video and image use different pad tokens, so all three ids follow the
     // media kind. Hardcoding `image_pad` here made the Jinja path expand
     // looking for a token the template never emitted (it emits `video_pad` for
@@ -1129,6 +1169,7 @@ pub fn run_qwen35_family_multimodal_logits(
         }
         (grid, vis_embeddings)
     };
+    drop(vision_cpu);
     let n_vis_tokens = grid.token_count();
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
@@ -1210,21 +1251,21 @@ pub fn run_qwen35_family_multimodal_logits(
         .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
         .collect::<Result<_, _>>()?;
 
-    let mut llm = Qwen35Model::from_source(llm_source)
+    let mut llm = HybridTextModel::from_source(llm_source)
         .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
     let max_seq = (prompt_tokens.len() + 1)
-        .min(llm.config.n_ctx)
+        .min(llm.trunk().config.n_ctx)
         .min(max_context);
     let prompt_embd = inject_vision_embeddings(
-        &llm,
+        llm.trunk(),
         &prompt_tokens,
         Some(image_token_id_i32),
         &vis_embeddings,
         n_vis_tokens,
-        llm.config.n_embd,
+        llm.trunk().config.n_embd,
     )?;
     let t0 = std::time::Instant::now();
-    let mut session = Qwen35Session::new_with_prefill_batch_size(
+    let mut session = HybridSession::new_with_prefill_batch_size(
         &mut llm,
         max_seq,
         prefill_batch_size,
@@ -1342,6 +1383,9 @@ pub(super) fn run_multimodal_with_video_ref(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     validate_gemma4_temperature(arch, temperature)?;
+    if arch == crate::models::sensenova_loop::ARCH && video_path.is_some() {
+        return Err("SenseNova Loop multimodal generation does not support --video".into());
+    }
     if arch == "gemma4" {
         if video_path.is_some() {
             return Err("Gemma4 multimodal generation does not support --video".into());
@@ -1409,7 +1453,12 @@ pub(super) fn run_multimodal_with_video_ref(
     if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
         return Err("Edge0-35B preview contains no vision weights; text input only".into());
     }
-    if arch != "qwen35" && arch != "qwen35moe" && arch != "qwen3vl" && arch != "edge0" {
+    if arch != "qwen35"
+        && arch != "qwen35moe"
+        && arch != "qwen3vl"
+        && arch != "edge0"
+        && arch != "sensenova_loop"
+    {
         return Err(format!(
             "Only qwen35, qwen35moe, qwen3vl, and edge0 architectures are supported \
              for multimodal, got: {arch}"
@@ -1420,6 +1469,8 @@ pub(super) fn run_multimodal_with_video_ref(
     // MiniCPM-V 4.7 lays its tiles on one 2D canvas, so its M-RoPE positions
     // come from `canvas_positions` instead of the anyres grid builder.
     let mut canvas_positions: Option<Vec<[usize; 4]>> = None;
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
     let (image_grid, vis_embeddings_vec) = if let Some(image_path) = image_path {
         let projector_path = mmproj_path.unwrap_or(model_path);
         println!("Loading mmproj {} ...", projector_path.display());
@@ -1559,6 +1610,7 @@ pub(super) fn run_multimodal_with_video_ref(
     } else {
         (None, Vec::new())
     };
+    drop(vision_cpu);
     let n_vis_tokens = image_grid.map(|g| g.token_count()).unwrap_or(0);
     let vis_embeddings = &vis_embeddings_vec[..];
     if image_grid.is_some() {
@@ -1654,6 +1706,36 @@ pub(super) fn run_multimodal_with_video_ref(
                 }
             }
             ids
+        }
+        (false, Some(marker)) if arch == crate::models::sensenova_loop::ARCH => {
+            let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+            crate::prompt::jinja::media_conversation_tokens(
+                &tokenizer,
+                template.as_ref(),
+                marker,
+                &[crate::prompt::jinja::MediaPart::image(n_vis_tokens)],
+                prompt,
+                None,
+                false,
+            )?
+            .ok_or("SenseNova image generation requires --jinja")?
+        }
+        (false, None) if arch == crate::models::sensenova_loop::ARCH => {
+            match crate::prompt::jinja::single_turn_tokens(
+                &tokenizer,
+                jinja,
+                &|k| llm_source.metadata(k).cloned(),
+                prompt,
+                false,
+            )? {
+                Some(ids) => ids,
+                None => {
+                    let mut ids = Vec::new();
+                    append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+                    append_qwen_assistant_prefix(&mut ids, &tokenizer, false)?;
+                    ids
+                }
+            }
         }
         _ => {
             let mut ids = Vec::new();
@@ -1784,7 +1866,9 @@ pub(super) fn run_multimodal_with_video_ref(
     // the session has to be sized by rows, not by tokens.
     let n_prompt = prompt_tokens.len();
     let prompt_rows = prompt_embd.len() / n_embd_row;
-    let max_seq = (prompt_rows + max_tokens).min(config.n_ctx);
+    let max_seq = (prompt_rows + max_tokens)
+        .min(config.n_ctx)
+        .min(max_context);
     let mut all_tokens = prompt_tokens.clone();
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
@@ -1959,4 +2043,50 @@ pub(super) fn run_multimodal_with_video_ref(
         tok_s
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensenova_video_is_rejected_before_loading_media() {
+        struct Source(crate::core::tensor::MetaValue);
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+                (key == "general.architecture").then_some(&self.0)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+        }
+        let source = Source(crate::core::tensor::MetaValue::String(
+            "sensenova_loop".into(),
+        ));
+        let error = run_multimodal_with_video_ref(
+            &source,
+            Path::new("missing-model.gguf"),
+            Some(Path::new("missing-mmproj.gguf")),
+            None,
+            Some(Path::new("missing-video.mp4")),
+            None,
+            "describe",
+            1,
+            0.0,
+            1,
+            1,
+            64,
+            1.0,
+            None,
+            &crate::prompt::jinja::Options::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "SenseNova Loop multimodal generation does not support --video"
+        );
+    }
 }

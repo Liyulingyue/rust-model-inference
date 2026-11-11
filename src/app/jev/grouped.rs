@@ -263,7 +263,7 @@ fn build_jev_token_ids_for_arch(
         }
         // `qwen35moe` (MiniCPM-V 4.7 35B-A3B) shares this arm: same ChatML
         // message tokens, same assistant prefix, same `qwen35` grouped scorer.
-        "qwen35" | "qwen35moe" => {
+        "qwen35" | "qwen35moe" | "sensenova_loop" => {
             let mut token_ids = Vec::new();
             append_qwen_message_tokens(
                 &mut token_ids,
@@ -463,7 +463,7 @@ fn build_jev_token_ids_for_arch(
             }
             Ok(token_ids)
         }
-        "nemotron_h" => {
+        "nemotron_h" | "nemotron_h_moe" => {
             let prompt = format!("{system}\n\n{payload}\n\nAnswer:");
             Ok(tokenizer.encode(
                 &prompt,
@@ -603,6 +603,7 @@ pub fn run_jev_grouped_decision_data(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let prepared = prepare_jev_grouped_questions(questions, mode)?;
     let arch = source
@@ -612,7 +613,7 @@ pub fn run_jev_grouped_decision_data(
     eprintln!("JEV grouped: arch = {:?}, mode = {:?}", arch, mode);
 
     let results = match &*arch {
-        "qwen3" | "qwen3vl" => qwen3::run_jev_grouped_qwen3(
+        "qwen3" | "qwen3vl" | "mage_vl" => qwen3::run_jev_grouped_qwen3(
             source.clone(),
             context,
             &prepared,
@@ -620,8 +621,9 @@ pub fn run_jev_grouped_decision_data(
             prefill_batch_size,
             false,
             jinja.clone(),
+            max_context,
         )?,
-        "qwen35" | "qwen35moe" => qwen35::run_jev_grouped_qwen35(
+        "qwen35" | "qwen35moe" | "sensenova_loop" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
             context,
             &prepared,
@@ -685,7 +687,7 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
-        "nemotron_h" => nemotron_h::run_jev_grouped_nemotron_h(
+        "nemotron_h" | "nemotron_h_moe" => nemotron_h::run_jev_grouped_nemotron_h(
             source.clone(),
             context,
             &prepared,
@@ -744,6 +746,7 @@ pub fn run_jev_grouped_decision(
     prefill_batch_size: usize,
     output_json: bool,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_grouped_decision_data(
@@ -754,6 +757,7 @@ pub fn run_jev_grouped_decision(
         n_threads_arg,
         prefill_batch_size,
         jinja,
+        max_context,
     )?;
 
     if output_json {

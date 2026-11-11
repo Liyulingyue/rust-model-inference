@@ -71,8 +71,8 @@ def tensor_contracts(encoder, agent):
 def convert(model_dir: Path, output: Path):
     if output.exists():
         raise FileExistsError(output)
-    encoder = json.loads((model_dir / "encoder/config.json").read_text())
-    agent = json.loads((model_dir / "rl_agent_config.json").read_text())
+    encoder = json.loads((model_dir / "encoder/config.json").read_text(encoding="utf-8"))
+    agent = json.loads((model_dir / "rl_agent_config.json").read_text(encoding="utf-8"))
     validate_config(encoder, agent)
     source = open_safetensors(model_dir / "model.safetensors")
     contracts = tensor_contracts(encoder, agent)
@@ -84,7 +84,7 @@ def convert(model_dir: Path, output: Path):
         size = {"F16": 2, "F32": 4}.get(info["dtype"])
         if tuple(info["shape"]) != shape or size is None or b-a != math.prod(shape)*size or a < 0 or source.data_offset+b > source.file_size:
             raise ValueError(f"Invalid tensor {name}: {info}")
-    tokenizer = (model_dir / "tokenizer/tokenizer.json").read_text()
+    tokenizer = (model_dir / "tokenizer/tokenizer.json").read_text(encoding="utf-8")
     json.loads(tokenizer)
     writer = GgufWriter(output)
     writer.add_meta("general.architecture", "laya")

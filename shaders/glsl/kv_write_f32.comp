@@ -1,0 +1,53 @@
+#version 450
+
+// KV cache write that keeps K and V in F32.
+//
+// `kv_write.comp` rounds both tensors to F16 on the way into the cache, which
+// matches llama.cpp's default KV cache type. Nemotron-3 Nano does not: its
+// reference harness runs with an F32 KV cache, and the F16 rounding shows up
+// as a relative error of about 5e-4 in every cached value. The Mamba-2 SSM
+// layers that sit between the attention layers amplify that error by roughly
+// four orders of magnitude before the final logits, so the cache has to keep
+// the values the CPU path would have kept.
+//
+// The push constant block is identical to `kv_write.comp`; only the two
+// rounding conversions are gone.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint k_word;
+    uint v_word;
+    uint cache_k_word;
+    uint cache_v_word;
+    uint delta_k_word;
+    uint delta_v_word;
+    uint layer;
+    uint base_position;
+    uint capacity;
+    uint kv_count;
+    uint rows;
+    /// Distance between the first element of consecutive source rows. A QKV
+    /// projection puts q, k and v side by side in every row, so its k and v
+    /// halves sit `q_heads * head_dim` apart in memory rather than `kv_count`
+    /// apart. Equal to `kv_count` for the contiguous KV projections.
+    uint source_stride;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.kv_count) return;
+    uint cache_index = (pc.layer * pc.capacity + pc.base_position + row) * pc.kv_count + index;
+    uint delta_index = (pc.layer * pc.rows + row) * pc.kv_count + index;
+    uint source_index = row * pc.source_stride + index;
+    uint key = arena.data[pc.k_word + source_index];
+    uint value = arena.data[pc.v_word + source_index];
+    arena.data[pc.cache_k_word + cache_index] = key;
+    arena.data[pc.cache_v_word + cache_index] = value;
+    arena.data[pc.delta_k_word + delta_index] = key;
+    arena.data[pc.delta_v_word + delta_index] = value;
+}
