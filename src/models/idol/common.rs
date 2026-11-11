@@ -40,7 +40,44 @@ pub(super) fn tensor(
             .chunks_exact(2)
             .map(|b| half::bf16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).to_f32())
             .collect(),
-        _ => return Err(format!("Idol tensor {name} must be F32/F16/BF16")),
+        kind @ (GGMLType::Q8_0
+        | GGMLType::Q4_0
+        | GGMLType::Q4_1
+        | GGMLType::Q4K
+        | GGMLType::Q5K
+        | GGMLType::Q6K) => {
+            if shape.len() != 2 || shape.contains(&0) {
+                return Err(format!(
+                    "Idol block-quantized tensor {name} must be a matrix"
+                ));
+            }
+            let count = usize::try_from(
+                info.checked_n_elements()
+                    .ok_or("Idol tensor size overflow")?,
+            )
+            .map_err(|_| "Idol tensor size does not fit usize")?;
+            let columns = shape[1];
+            let row_bytes = kind.nbytes(columns);
+            let mut values = vec![0.; count];
+            // Decode storage once; the existing graph retains its component precision boundaries.
+            values
+                .par_chunks_mut(columns)
+                .zip(bytes.par_chunks_exact(row_bytes))
+                .for_each(|(out, row)| {
+                    if kind == GGMLType::Q4_1 {
+                        crate::ops::embedding::embedding_lookup_q4_1(row, 0, columns, out);
+                    } else {
+                        crate::ops::embedding::embedding_lookup(row, 0, columns, kind, out);
+                    }
+                });
+            values
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported Idol tensor type {:?} for {name}",
+                info.ggml_type
+            ))
+        }
     };
     finite(&values, name)?;
     Ok(values)
@@ -181,6 +218,78 @@ pub(super) fn trace(name: &str, shape: &[usize], x: &[f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct WeightSource {
+        info: crate::core::tensor::TensorInfo,
+        data: Vec<u8>,
+    }
+    impl TensorSource for WeightSource {
+        fn metadata(&self, _: &str) -> Option<&crate::core::tensor::MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.info.name).then_some(self.data.as_slice())
+        }
+    }
+    #[test]
+    fn gguf_block_weights_decode_and_reject_truncated_payloads() {
+        for kind in [
+            GGMLType::Q8_0,
+            GGMLType::Q4_0,
+            GGMLType::Q4_1,
+            GGMLType::Q4K,
+            GGMLType::Q5K,
+            GGMLType::Q6K,
+        ] {
+            let info = crate::core::tensor::TensorInfo {
+                name: "weight".into(),
+                dims: vec![256, 2],
+                ggml_type: kind,
+                offset: 0,
+            };
+            let mut source = WeightSource {
+                data: vec![0; info.checked_nbytes().unwrap() as usize],
+                info,
+            };
+            assert_eq!(tensor(&source, "weight", &[2, 256]).unwrap(), vec![0.; 512]);
+            source.data.pop();
+            assert!(tensor(&source, "weight", &[2, 256]).is_err());
+        }
+    }
+    #[test]
+    fn gguf_q4_weight_rows_keep_low_then_high_nibble_order() {
+        for kind in [GGMLType::Q4_0, GGMLType::Q4_1] {
+            let mut data = Vec::new();
+            for scale in [0.5f32, 2.] {
+                data.extend(half::f16::from_f32(scale).to_bits().to_le_bytes());
+                if kind == GGMLType::Q4_1 {
+                    data.extend(half::f16::from_f32(-1.).to_bits().to_le_bytes());
+                }
+                data.extend([0xf0; 16]);
+            }
+            let source = WeightSource {
+                info: crate::core::tensor::TensorInfo {
+                    name: "weight".into(),
+                    dims: vec![32, 2],
+                    ggml_type: kind,
+                    offset: 0,
+                },
+                data,
+            };
+            let values = tensor(&source, "weight", &[2, 32]).unwrap();
+            for (row, scale) in [0.5f32, 2.].into_iter().enumerate() {
+                let (low, high) = if kind == GGMLType::Q4_0 {
+                    (-8. * scale, 7. * scale)
+                } else {
+                    (-1., 15. * scale - 1.)
+                };
+                assert_eq!(&values[row * 32..row * 32 + 16], &[low; 16]);
+                assert_eq!(&values[row * 32 + 16..row * 32 + 32], &[high; 16]);
+            }
+        }
+    }
     #[test]
     fn rejects_nonfinite_and_rounds_storage() {
         assert!(finite(&[f32::NAN], "input").is_err());

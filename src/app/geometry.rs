@@ -4,11 +4,14 @@ use crate::models::idol::{Model, Options};
 use std::path::{Path, PathBuf};
 
 pub fn selected(o: &CliOptions) -> bool {
-    o.image_to_3d || crate::models::idol::matches_directory(&o.model)
+    o.image_to_3d || crate::models::idol::matches_path(&o.model)
 }
 pub fn validate_options(o: &CliOptions) -> Result<(), String> {
     if o.model.as_os_str().is_empty() {
         return Err("--image-to-3d requires --model <Idol directory>".into());
+    }
+    if o.model.is_file() && o.components.is_some() {
+        return Err("Self-contained Idol GGUF does not accept external --components".into());
     }
     o.validate_compute_mode()?;
     o.compute_policy().check_build()?;

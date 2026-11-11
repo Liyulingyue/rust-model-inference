@@ -1,9 +1,10 @@
-//! Idol image-to-3D Gaussian splats, using the released safetensors components.
+//! Idol image-to-3D Gaussian splats, using safetensors or a self-contained GGUF bundle.
 mod background;
 mod common;
 mod conditioning;
 mod decoder;
 mod denoiser;
+mod gguf;
 mod gpu;
 mod preprocess;
 #[cfg(test)]
@@ -116,9 +117,21 @@ pub fn matches_directory(root: &Path) -> bool {
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
             .is_some_and(|c| c["denoiser"]["name"] == "LatentSeqMMFlowModel")
 }
+/// Detect the explicit Idol architecture without routing other GGUFs into this backend.
+pub fn matches_path(root: &Path) -> bool {
+    matches_directory(root)
+        || (root.is_file()
+            && crate::core::loader::GGUFLoader::from_file(root).is_ok_and(|source| {
+                matches!(source.metadata("general.architecture"), Some(crate::core::tensor::MetaValue::String(arch)) if arch == "idol")
+            }))
+}
+
+fn expected_config() -> Value {
+    json!({"denoiser":{"name":"LatentSeqMMFlowModel","args":{"q_token_length":8192,"in_channels":16,"cam_channels":5,"model_channels":1024,"cond_channels":1280,"cond2_channels":128,"num_blocks":24,"num_refiner_blocks":2,"num_heads":16,"mlp_ratio":4}},"decoder":{"name":"OctreeProbabilityFixedlenDecoder","args":{"model_channels":1024,"cond_channels":16,"num_blocks":4,"num_heads":16,"mlp_ratio":4}},"decoder_gs":{"name":"GaussianFixedlenDecoder","args":{"in_channels":3,"model_channels":1024,"cond_channels":16,"num_blocks":16,"num_heads":16,"mlp_ratio":4,"representation_config":{"num_gaussians":32,"lr":{"_xyz":1.0,"_features_dc":1.0,"_opacity":1.0,"_scaling":1.0,"_rotation":0.1},"perturbe_size":1.5,"3d_filter_kernel_size":0.0009,"scaling_bias":0.004,"opacity_bias":0.1}}},"image_size":1024,"max_voxel_level":8,"image_encoders":{"dinov3":"facebook/dinov3-vith16plus-pretrain-lvd1689m","flux2_vae":"black-forest-labs/FLUX.2-dev"}})
+}
+
 fn validate_config(cfg: &Value) -> Result<(), String> {
-    let expected = json!({"denoiser":{"name":"LatentSeqMMFlowModel","args":{"q_token_length":8192,"in_channels":16,"cam_channels":5,"model_channels":1024,"cond_channels":1280,"cond2_channels":128,"num_blocks":24,"num_refiner_blocks":2,"num_heads":16,"mlp_ratio":4}},"decoder":{"name":"OctreeProbabilityFixedlenDecoder","args":{"model_channels":1024,"cond_channels":16,"num_blocks":4,"num_heads":16,"mlp_ratio":4}},"decoder_gs":{"name":"GaussianFixedlenDecoder","args":{"in_channels":3,"model_channels":1024,"cond_channels":16,"num_blocks":16,"num_heads":16,"mlp_ratio":4,"representation_config":{"num_gaussians":32,"lr":{"_xyz":1.0,"_features_dc":1.0,"_opacity":1.0,"_scaling":1.0,"_rotation":0.1},"perturbe_size":1.5,"3d_filter_kernel_size":0.0009,"scaling_bias":0.004,"opacity_bias":0.1}}},"image_size":1024,"max_voxel_level":8,"image_encoders":{"dinov3":"facebook/dinov3-vith16plus-pretrain-lvd1689m","flux2_vae":"black-forest-labs/FLUX.2-dev"}});
-    if cfg != &expected {
+    if cfg != &expected_config() {
         return Err("Unsupported Idol configuration: expected the released speridlabs/idol 1024px/8192-token contract".into());
     }
     Ok(())
@@ -129,15 +142,26 @@ fn component_config(path: &Path, expected: Value) -> Result<(), String> {
         &std::fs::read(path).map_err(|e| format!("Read {}: {e}", path.display()))?,
     )
     .map_err(|e| format!("Parse {}: {e}", path.display()))?;
+    check_component_config(&path.display().to_string(), &config, expected)
+}
+
+fn check_component_config(name: &str, config: &Value, expected: Value) -> Result<(), String> {
     for (key, value) in expected.as_object().unwrap() {
         if config.get(key) != Some(value) {
             return Err(format!(
-                "Unsupported Idol component {}: {key} must be {value}",
-                path.display()
+                "Unsupported Idol component {name}: {key} must be {value}"
             ));
         }
     }
     Ok(())
+}
+
+fn expected_dino_config() -> Value {
+    json!({"model_type":"dinov3_vit","hidden_size":1280,"intermediate_size":5120,"num_hidden_layers":32,"num_attention_heads":20,"num_register_tokens":4,"patch_size":16,"num_channels":3,"hidden_act":"silu","use_gated_mlp":true,"key_bias":false,"query_bias":true,"value_bias":true,"proj_bias":true,"mlp_bias":true,"layer_norm_eps":1e-5,"rope_theta":100.0,"pos_embed_rescale":2.0,"pos_embed_shift":null,"pos_embed_jitter":null})
+}
+
+fn expected_vae_config() -> Value {
+    json!({"_class_name":"AutoencoderKLFlux2","act_fn":"silu","in_channels":3,"latent_channels":32,"block_out_channels":[128,256,512,512],"down_block_types":["DownEncoderBlock2D","DownEncoderBlock2D","DownEncoderBlock2D","DownEncoderBlock2D"],"layers_per_block":2,"norm_num_groups":32,"mid_block_add_attention":true,"use_quant_conv":true,"patch_size":[2,2],"batch_norm_eps":0.0001})
 }
 
 pub struct Model {
@@ -173,6 +197,9 @@ impl Model {
         let compute = ComputePolicy::Cpu;
         eprintln!("compute requested={requested:?} backend={} arch=idol scope=projection_attention_convolution",
             if compute == ComputePolicy::Cpu { "Cpu" } else { "Vulkan" });
+        if root.is_file() {
+            return gguf::Bundle::open(root)?.load(compute);
+        }
         let cfg: Value = serde_json::from_slice(
             &std::fs::read(root.join("config.json"))
                 .map_err(|e| format!("Read Idol config: {e}"))?,
@@ -181,11 +208,11 @@ impl Model {
         validate_config(&cfg)?;
         component_config(
             &components.join("dinov3-vith16plus/config.json"),
-            json!({"model_type":"dinov3_vit","hidden_size":1280,"intermediate_size":5120,"num_hidden_layers":32,"num_attention_heads":20,"num_register_tokens":4,"patch_size":16,"num_channels":3,"hidden_act":"silu","use_gated_mlp":true,"key_bias":false,"query_bias":true,"value_bias":true,"proj_bias":true,"mlp_bias":true,"layer_norm_eps":1e-5,"rope_theta":100.0,"pos_embed_rescale":2.0,"pos_embed_shift":null,"pos_embed_jitter":null}),
+            expected_dino_config(),
         )?;
         component_config(
             &components.join("FLUX.2-dev/vae/config.json"),
-            json!({"_class_name":"AutoencoderKLFlux2","act_fn":"silu","in_channels":3,"latent_channels":32,"block_out_channels":[128,256,512,512],"down_block_types":["DownEncoderBlock2D","DownEncoderBlock2D","DownEncoderBlock2D","DownEncoderBlock2D"],"layers_per_block":2,"norm_num_groups":32,"mid_block_add_attention":true,"use_quant_conv":true,"patch_size":[2,2],"batch_norm_eps":0.0001}),
+            expected_vae_config(),
         )?;
         let source = |path: std::path::PathBuf| SafetensorSource::open(&[path]);
         let denoiser = source(root.join("denoiser.safetensors"))?;

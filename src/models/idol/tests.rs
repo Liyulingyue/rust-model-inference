@@ -4,12 +4,24 @@ use super::{
     background::Background, common, conditioning::Conditioning, decoder::Decoder,
     denoiser::Denoiser, preprocess,
 };
+use crate::core::tensor::TensorSource;
 use crate::format::safetensors::SafetensorSource;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 fn source(root: &Path, relative: &str) -> Result<SafetensorSource, String> {
     SafetensorSource::open(&[root.join(relative)])
+}
+fn component<'a>(
+    root: &Path,
+    bundle: &'a Option<super::gguf::Bundle>,
+    role: &'static str,
+    relative: &str,
+) -> Result<Box<dyn TensorSource + 'a>, String> {
+    match bundle {
+        Some(bundle) => Ok(Box::new(bundle.component(role))),
+        None => Ok(Box::new(source(root, relative)?)),
+    }
 }
 fn bytes(values: Vec<f32>) -> Result<Vec<u8>, String> {
     if values
@@ -56,6 +68,29 @@ fn same_input_oracle_probe() -> Result<(), String> {
     if metadata["oracle_commit"] != "4702a7f00850e34b6e83a2170cc123c3e9570744" {
         return Err("Unpinned Idol fixture oracle".into());
     }
+    let bundle = if let Some(path) = std::env::var_os("IDOL_GGUF") {
+        use std::io::Read;
+        let path = PathBuf::from(path);
+        let mut input = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0u8; 8 * 1024 * 1024];
+        loop {
+            let length = input.read(&mut buffer).map_err(|e| e.to_string())?;
+            if length == 0 {
+                break;
+            }
+            digest.update(&buffer[..length]);
+        }
+        if metadata["gguf"]["sha256"].as_str() != Some(&format!("{:x}", digest.finalize())) {
+            return Err("Idol GGUF differs from the same-weight oracle fixture".into());
+        }
+        Some(super::gguf::Bundle::open(&path)?)
+    } else {
+        if !metadata["gguf"].is_null() {
+            return Err("GGUF oracle fixtures require IDOL_GGUF".into());
+        }
+        None
+    };
     for (name, key) in [
         ("inputs.safetensors", "inputs_sha256"),
         ("oracle.jsonl", "trace_sha256"),
@@ -108,7 +143,15 @@ fn same_input_oracle_probe() -> Result<(), String> {
     let latent = common::tensor(&inputs, "latent", &[1, 32, 16])?;
     let points = common::tensor(&inputs, "points", &[1, 12, 3])?;
     if contains("denoiser") {
-        let denoiser = Denoiser::load(&source(&model_root, "idol/denoiser.safetensors")?)?;
+        let denoiser = Denoiser::load(
+            component(
+                &model_root,
+                &bundle,
+                "denoiser",
+                "idol/denoiser.safetensors",
+            )?
+            .as_ref(),
+        )?;
         let camera = common::tensor(&inputs, "camera", &[1, 1, 5])?;
         let feature1 = common::tensor(&inputs, "feature1", &[1, 9, 1280])?;
         let feature2 = common::tensor(&inputs, "feature2", &[1, 9, 128])?;
@@ -116,8 +159,14 @@ fn same_input_oracle_probe() -> Result<(), String> {
     }
     if contains("decoder") {
         let decoder = Decoder::load(
-            &source(&model_root, "idol/decoder.safetensors")?,
-            &source(&model_root, "idol/decoder_gs.safetensors")?,
+            component(&model_root, &bundle, "octree", "idol/decoder.safetensors")?.as_ref(),
+            component(
+                &model_root,
+                &bundle,
+                "gaussian",
+                "idol/decoder_gs.safetensors",
+            )?
+            .as_ref(),
         )?;
         let _ = decoder.octree_logits(&points, 16., &latent)?;
         let _ = decoder.gaussian_features(&points, &latent)?;
@@ -129,11 +178,20 @@ fn same_input_oracle_probe() -> Result<(), String> {
     }
     if contains("conditioning") {
         let model = Conditioning::load(
-            &source(&model_root, "dinov3-vith16plus/model.safetensors")?,
-            &source(
+            component(
                 &model_root,
+                &bundle,
+                "dino",
+                "dinov3-vith16plus/model.safetensors",
+            )?
+            .as_ref(),
+            component(
+                &model_root,
+                &bundle,
+                "vae",
                 "FLUX.2-dev/vae/diffusion_pytorch_model.safetensors",
-            )?,
+            )?
+            .as_ref(),
         )?;
         let pixels = bytes(common::tensor(&inputs, "pixels", &[64, 64, 3])?)?;
         let noise = common::tensor(&inputs, "vae_noise", &[1, 32, 8, 8])?;
@@ -141,7 +199,15 @@ fn same_input_oracle_probe() -> Result<(), String> {
         let _ = model.vae_tokens(&pixels, 64, &noise)?;
     }
     if contains("background") {
-        let model = Background::load(&source(&model_root, "idol/birefnet.safetensors")?)?;
+        let model = Background::load(
+            component(
+                &model_root,
+                &bundle,
+                "background",
+                "idol/birefnet.safetensors",
+            )?
+            .as_ref(),
+        )?;
         let image = common::tensor(&inputs, "background_normalized", &[1, 64, 64, 3])?;
         let _ = model.forward_fixture(&image, 64)?;
     }
