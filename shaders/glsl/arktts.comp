@@ -1,0 +1,285 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W { float data[]; } w;
+layout(std430, binding = 2) readonly buffer V { float data[]; } v;
+layout(push_constant) uniform PC {
+    uint op; uint a; uint b; uint c; uint n; uint width;
+    uint p0; uint p1; uint p2; uint p3; uint p4; uint p5; uint p6;
+} pc;
+float get(uint i) { return uintBitsToFloat(arena.data[i]); }
+void put(uint i, float x) { arena.data[i] = floatBitsToUint(x); }
+shared float partial[64];
+shared uint ids[64];
+shared float scores[2048];
+shared float scale;
+shared float mean;
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint lane = gl_LocalInvocationID.x;
+    uint i = group * 64u + lane;
+    if (pc.op == 7u) {
+        if (group >= pc.n) return;
+        uint base = pc.a + group * pc.width;
+        float sum = 0.0;
+        for (uint d = lane; d < pc.width; d += 64u) sum += get(base + d);
+        partial[lane] = sum;
+        barrier();
+        for (uint s = 32u; s > 0u; s >>= 1u) {
+            if (lane < s) partial[lane] += partial[lane + s];
+            barrier();
+        }
+        if (lane == 0u) mean = partial[0] / float(pc.width);
+        barrier();
+        sum = 0.0;
+        for (uint d = lane; d < pc.width; d += 64u) {
+            float x = get(base + d) - mean;
+            sum += x * x;
+        }
+        partial[lane] = sum;
+        barrier();
+        for (uint s = 32u; s > 0u; s >>= 1u) {
+            if (lane < s) partial[lane] += partial[lane + s];
+            barrier();
+        }
+        if (lane == 0u) scale = inverse_sqrt_f32(partial[0] / float(pc.width) + 1e-6);
+        barrier();
+        for (uint d = lane; d < pc.width; d += 64u) {
+            precise float x = (get(base + d) - mean) * scale * w.data[d] + v.data[d];
+            put(pc.b + group * pc.width + d, x);
+        }
+        return;
+    }
+    if (pc.op == 9u) {
+        if (group >= pc.n * pc.width) return;
+        uint row = group / pc.width;
+        uint head = group % pc.width;
+        uint time = pc.p1 + row;
+        uint first = pc.p3 == 0u ? 0u : (time + 1u > pc.p3 ? time + 1u - pc.p3 : 0u);
+        uint kh = head / (pc.width / pc.p0);
+        float maximum = -1.0 / 0.0;
+        for (uint t = first + lane; t <= time; t += 64u) {
+            precise vec4 dot4 = vec4(0.0);
+            for (uint d = 0u; d < 64u; d += 4u) {
+                uint q = pc.a + group * 64u + d;
+                uint k = pc.b + (t * pc.p0 + kh) * 64u + d;
+                dot4 += vec4(get(q),get(q+1u),get(q+2u),get(q+3u))
+                    * vec4(get(k),get(k+1u),get(k+2u),get(k+3u));
+            }
+            float score = ((dot4.x + dot4.y) + (dot4.z + dot4.w)) * 0.125;
+            scores[t - first] = score;
+            maximum = max(maximum, score);
+        }
+        partial[lane] = maximum;
+        barrier();
+        for (uint s = 32u; s > 0u; s >>= 1u) {
+            if (lane < s) partial[lane] = max(partial[lane],partial[lane+s]);
+            barrier();
+        }
+        maximum = partial[0];
+        // All subgroups must consume the maximum before lane 0 reuses partial[0].
+        barrier();
+        float sum = 0.0;
+        for (uint t = first + lane; t <= time; t += 64u) {
+            float value = exp(scores[t-first] - maximum);
+            scores[t-first] = value;
+            sum += value;
+        }
+        partial[lane] = sum;
+        barrier();
+        for (uint s = 32u; s > 0u; s >>= 1u) {
+            if (lane < s) partial[lane] += partial[lane+s];
+            barrier();
+        }
+        float denominator = partial[0];
+        precise float out_value = 0.0;
+        for (uint t = first; t <= time; ++t) {
+            float probability = scores[t-first] / denominator;
+            out_value += probability * get(pc.c + (t * pc.p0 + kh) * 64u + lane);
+        }
+        put(pc.p4 + group * 64u + lane, out_value);
+        return;
+    }
+    if (pc.op == 14u) {
+        if (group >= pc.n) return;
+        float row[8];
+        float square = 0.0;
+        for (uint d = 0u; d < 8u; ++d) {
+            row[d] = get(pc.a + group * 8u + d);
+            square += row[d] * row[d];
+        }
+        float norm = max(sqrt_f32(square), 1e-12);
+        square = 0.0;
+        for (uint d = 0u; d < 8u; ++d) {
+            row[d] /= norm;
+            square += row[d] * row[d];
+        }
+        float best = 1.0 / 0.0;
+        uint best_id = 0xffffffffu;
+        for (uint id = lane; id < pc.width; id += 64u) {
+            precise vec4 products = vec4(0.0);
+            float code_square = 0.0;
+            for (uint d = 0u; d < 8u; ++d) {
+                float value = w.data[id * 8u + d];
+                products[d % 4u] += row[d] * value;
+                code_square += value * value;
+            }
+            precise float distance = square - 2.0 * ((products.x + products.y) + (products.z + products.w)) + code_square;
+            if (distance < best || (distance == best && id < best_id)) { best = distance; best_id = id; }
+        }
+        partial[lane] = best;
+        ids[lane] = best_id;
+        barrier();
+        for (uint s = 32u; s > 0u; s >>= 1u) {
+            if (lane < s && (partial[lane+s] < partial[lane]
+                || (partial[lane+s] == partial[lane] && ids[lane+s] < ids[lane]))) {
+                partial[lane] = partial[lane+s]; ids[lane] = ids[lane+s];
+            }
+            barrier();
+        }
+        if (lane == 0u) arena.data[pc.b + group * 10u + pc.p0] = ids[0];
+        if (lane < 8u) {
+            float projected = get(pc.a + group * 8u + lane);
+            precise float value = projected + (v.data[ids[0] * 8u + lane] - projected);
+            put(pc.c + group * 8u + lane, value);
+        }
+        return;
+    }
+    if (pc.op == 16u) {
+        if (i != 0u) return;
+        float maximum = get(pc.b);
+        float denominator = 0.0;
+        uint status = 0u;
+        for (uint j = 0u; j < pc.n; ++j) {
+            float value = get(pc.b+j);
+            if (isnan(value) || isinf(value)) status = 1u;
+            denominator += exp(value - maximum);
+        }
+        uint best = arena.data[pc.a];
+        uint used = 0u;
+        float temperature = uintBitsToFloat(pc.p1);
+        if (temperature > 0.0) {
+            float cumulative = 0.0;
+            float best_score = -1.0 / 0.0;
+            for (uint j = 0u; j < pc.n; ++j) {
+                float logit = get(pc.b+j);
+                cumulative += exp(logit - maximum) / denominator;
+                if (j > 0u && (j >= pc.width || cumulative > uintBitsToFloat(pc.p2))) break;
+                float u = max(get(pc.c+j), 1.17549435e-38);
+                float score = (logit - maximum) / max(temperature,1e-5) - log(-log(u));
+                ++used;
+                if (score > best_score) { best_score = score; best = arena.data[pc.a+j]; }
+            }
+        }
+        arena.data[pc.p0] = best;
+        arena.data[pc.p0+1u] = used;
+        arena.data[pc.p0+2u] = status;
+        return;
+    }
+    if (i >= pc.n) return;
+    if (pc.op == 0u) arena.data[pc.b+i] = arena.data[pc.a+i];
+    else if (pc.op == 1u) {
+        precise float value = get(pc.a+i) + get(pc.b+i) * (pc.p0 == 0u ? 1.0 : w.data[i % pc.width]);
+        put(pc.a+i,value);
+    } else if (pc.op == 2u) put(pc.a+i,get(pc.a+i)+w.data[i % pc.width]);
+    else if (pc.op == 3u) {
+        float x = get(pc.a+i);
+        put(pc.a+i,x / (1.0+exp(-x)) * get(pc.b+i));
+    } else if (pc.op == 4u) {
+        float x = get(pc.a+i);
+        float sine = sin(w.data[i % pc.width] * x);
+        precise float value = x + v.data[i % pc.width] * (sine * sine);
+        put(pc.a+i,value);
+    } else if (pc.op == 5u) {
+        // Abramowitz-Stegun 7.1.26, maximum erf error below 1.5e-7.
+        float x = get(pc.a+i);
+        float z = abs(x) * 0.7071067811865476;
+        float t = 1.0 / (1.0 + 0.3275911 * z);
+        float erf_value = 1.0 - (((((1.061405429*t-1.453152027)*t)+1.421413741)*t-0.284496736)*t+0.254829592)*t*exp(-z*z);
+        put(pc.a+i,0.5*x*(1.0+sign(x)*erf_value));
+    } else if (pc.op == 6u) put(pc.a+i,tanh(get(pc.a+i)));
+    else if (pc.op == 8u) {
+        uint pairs = (pc.p0 + pc.p1) * 32u;
+        uint row = i / pairs;
+        uint h = (i % pairs) / 32u;
+        uint d = (i % 32u) * 2u;
+        uint time = pc.p2 + row;
+        uint input_base = pc.a + row * pc.width + h * 64u + d;
+        float x = get(input_base), y = get(input_base+1u);
+        float cosine = w.data[time*64u+d], sine = w.data[time*64u+d+1u];
+        uint output_base = h < pc.p0 ? pc.p4 + (row*pc.p0+h)*64u+d
+            : pc.b + (time*pc.p1+h-pc.p0)*64u+d;
+        precise float rx = x*cosine-y*sine;
+        precise float ry = y*cosine+x*sine;
+        put(output_base,rx); put(output_base+1u,ry);
+        if (h < pc.p1) {
+            uint vb = pc.a+row*pc.width+(pc.p0+pc.p1+h)*64u+d;
+            uint cb = pc.c+(time*pc.p1+h)*64u+d;
+            put(cb,get(vb)); put(cb+1u,get(vb+1u));
+        }
+    } else if (pc.op == 10u) {
+        uint time = i / pc.p0, oc = i % pc.p0;
+        uint in_group = pc.width / pc.p4;
+        uint group_in = (oc / (pc.p0 / pc.p4)) * in_group;
+        int padding = int((pc.p1-1u)*pc.p3+1u-pc.p2);
+        precise vec4 sums = vec4(0.0);
+        for (uint ic = 0u; ic < in_group; ++ic) {
+            for (uint tap = 0u; tap < pc.p1; ++tap) {
+                int t = int(time*pc.p2+tap*pc.p3)-padding;
+                if (pc.p6 != 0u) t = clamp(t,0,int(pc.p5)-1);
+                if (t >= 0 && t < int(pc.p5)) {
+                    uint r = ic*pc.p1+tap;
+                    sums[r%4u] += get(pc.a+uint(t)*pc.width+group_in+ic) * w.data[(oc*in_group+ic)*pc.p1+tap];
+                }
+            }
+        }
+        put(pc.b+i,((sums.x+sums.y)+(sums.z+sums.w))+v.data[oc]);
+    } else if (pc.op == 11u) {
+        uint time = i / pc.p0, oc = i % pc.p0;
+        uint first = (max(time+1u,pc.p1)-pc.p1+pc.p2-1u)/pc.p2;
+        uint last = min(time/pc.p2,pc.p3-1u);
+        precise float total = 0.0;
+        for (uint t = first; t <= last; ++t) {
+            uint tap = time-t*pc.p2;
+            precise vec4 sums = vec4(0.0);
+            for (uint ic = 0u; ic < pc.width; ++ic)
+                sums[ic%4u] += get(pc.a+t*pc.width+ic)*w.data[(ic*pc.p0+oc)*pc.p1+tap];
+            total += (sums.x+sums.y)+(sums.z+sums.w);
+        }
+        put(pc.b+i,total+v.data[oc]);
+    } else if (pc.op == 12u) {
+        uint row = i / pc.width, d = i % pc.width;
+        uint id = min(arena.data[pc.a+row*pc.p1+pc.p2],pc.p0-1u);
+        put(pc.b+i,w.data[id*pc.width+d]);
+    } else if (pc.op == 13u) {
+        uint row = i / pc.width, d = i % pc.width;
+        uint id = arena.data[pc.a+row*11u];
+        float hidden = w.data[id*pc.width+d];
+        if (id >= pc.p0 && id < pc.p0+4096u) {
+            precise float sum = 0.0;
+            for (uint j = 0u; j < 10u; ++j)
+                sum += v.data[(arena.data[pc.a+row*11u+j+1u]+j*4096u)*pc.width+d];
+            hidden += sum;
+        }
+        put(pc.b+i,hidden);
+    } else if (pc.op == 15u) {
+        uint id = pc.p0 == 0u ? i : (i == 0u ? pc.p2 : pc.p1+i-1u);
+        float value = get(pc.a+id);
+        uint rank = 0u;
+        for (uint j = 0u; j < pc.n; ++j) {
+            uint other = pc.p0 == 0u ? j : (j == 0u ? pc.p2 : pc.p1+j-1u);
+            float ov = get(pc.a+other);
+            // A total order also gives invalid logits distinct output slots.
+            uint key = floatBitsToUint(value), ok = floatBitsToUint(ov);
+            key = (key & 0x80000000u) != 0u ? ~key : key ^ 0x80000000u;
+            ok = (ok & 0x80000000u) != 0u ? ~ok : ok ^ 0x80000000u;
+            if (ok > key || (ok == key && other < id)) ++rank;
+        }
+        arena.data[pc.b+rank] = id;
+        put(pc.c+rank,value);
+    } else if (pc.op == 17u) put(pc.a+i,get(pc.a+i)-get(pc.b+i));
+    else if (pc.op == 18u) put(pc.a+i,0.0);
+}

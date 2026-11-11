@@ -20,6 +20,7 @@ mod transformer;
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::ops::kernel::{Kernel, Weight};
 pub use codec::BreezeCodec;
+pub(crate) use codec::Conv as CausalConv;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use transformer::{linear, matrix, Cache, Kind, Transformer};

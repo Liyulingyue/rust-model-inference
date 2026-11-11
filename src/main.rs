@@ -664,6 +664,12 @@ fn main() {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
+    if matches!(arch, "arktts" | "arktts_codec") {
+        app::run_or_exit(Err(
+            "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
+        ));
+        return;
+    }
     if arch == "mage_flow" {
         app::run_or_exit(app::run_mage_flow_cli(source, &options, n_threads));
         return;
