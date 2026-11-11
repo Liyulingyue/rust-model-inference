@@ -279,7 +279,33 @@ pub(crate) struct Conv {
     replicate: bool,
 }
 
+/// Read-only geometry and weights for a device recorder sharing this loaded convolution.
+pub(crate) struct ConvView<'a> {
+    pub weight: &'a [f32],
+    pub bias: &'a [f32],
+    pub input: usize,
+    pub output: usize,
+    pub kernel: usize,
+    pub stride: usize,
+    pub dilation: usize,
+    pub groups: usize,
+    pub replicate: bool,
+}
+
 impl Conv {
+    pub(crate) fn view(&self) -> ConvView<'_> {
+        ConvView {
+            weight: &self.weight,
+            bias: &self.bias,
+            input: self.input,
+            output: self.output,
+            kernel: self.kernel,
+            stride: self.stride,
+            dilation: self.dilation,
+            groups: self.groups,
+            replicate: self.replicate,
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn load(
         source: &dyn TensorSource,

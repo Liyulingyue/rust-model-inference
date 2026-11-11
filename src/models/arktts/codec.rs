@@ -7,6 +7,8 @@ use crate::models::breeze::CausalConv;
 use crate::models::qwen3::tts::codec::conv::{conv_transpose1d_causal, ConvTranspose1dState};
 use crate::models::qwen3::tts::codec::snake::snake1d_inplace;
 use rayon::prelude::*;
+#[cfg(feature = "vulkan")]
+mod device;
 
 fn tensor(source: &dyn TensorSource, name: &str, shape: &[u64]) -> Result<Vec<f32>, String> {
     require_tensor_type(source, name, shape, &[GGMLType::F32])?;
@@ -493,13 +495,23 @@ impl<'a> Codec<'a> {
     }
 
     pub fn encode(&self, audio: &[f32]) -> Result<Vec<Frame>, String> {
-        let _scope = self.compute.cpu_scope();
         if audio.is_empty()
             || audio.len() > CONTEXT * SAMPLES_PER_FRAME
             || audio.iter().any(|v| !v.is_finite())
         {
             return Err("ArkTTS codec requires finite nonempty mono 44100 Hz audio within 2048 codec frames".into());
         }
+        #[cfg(feature = "vulkan")]
+        if let Some(context) = super::device::Graph::context(self.compute)? {
+            match self.encode_device(context, audio) {
+                Ok(frames) => return Ok(frames),
+                Err(error) if self.compute == ComputePolicy::Auto => eprintln!(
+                    "compute requested=Auto backend=Cpu reason=ArkTTS codec graph: {error}"
+                ),
+                Err(error) => return Err(error),
+            }
+        }
+        let _scope = ComputePolicy::Cpu.cpu_scope();
         let matrices = self
             .encoder
             .transformer
@@ -507,7 +519,7 @@ impl<'a> Codec<'a> {
             .chain(self.pre.matrices())
             .chain(self.down.iter().flat_map(|(_, n)| [&n.first, &n.second]))
             .collect();
-        let mut linear = super::linear(matrices, self.compute, self.threads)?;
+        let mut linear = super::linear(matrices, ComputePolicy::Cpu, self.threads)?;
         let mut x = self.encoder.apply(audio, &mut linear)?;
         trace(
             "arktts.codec.encoder",
@@ -541,19 +553,29 @@ impl<'a> Codec<'a> {
     }
 
     pub fn decode(&self, frames: &[Frame]) -> Result<Vec<f32>, String> {
-        let _scope = self.compute.cpu_scope();
         if frames.len() > CONTEXT {
             return Err("ArkTTS codec exceeds 2048 frames".into());
         }
         if frames.is_empty() {
             return Ok(Vec::new());
         }
+        #[cfg(feature = "vulkan")]
+        if let Some(context) = super::device::Graph::context(self.compute)? {
+            match self.decode_device(context, frames) {
+                Ok(waveform) => return Ok(waveform),
+                Err(error) if self.compute == ComputePolicy::Auto => eprintln!(
+                    "compute requested=Auto backend=Cpu reason=ArkTTS codec graph: {error}"
+                ),
+                Err(error) => return Err(error),
+            }
+        }
+        let _scope = ComputePolicy::Cpu.cpu_scope();
         let matrices = self
             .post
             .matrices()
             .chain(self.up.iter().flat_map(|(_, n)| [&n.first, &n.second]))
             .collect();
-        let mut linear = super::linear(matrices, self.compute, self.threads)?;
+        let mut linear = super::linear(matrices, ComputePolicy::Cpu, self.threads)?;
         let mut x = vec![0.0; frames.len() * 1024];
         for (index, codebook) in self.codebooks.iter().enumerate() {
             let codes = frames.iter().map(|frame| frame[index]).collect::<Vec<_>>();

@@ -26,8 +26,8 @@ def encode_tensor(name, raw, kind, dims, precision):
     # Convolutions, norms/biases and 8-wide codebooks keep their original contract.
     # ConvNeXt pointwise projections surround resampling; QDQ bin flips amplify into waveform error.
     preserve_resampling = name.startswith(("quantizer.upsample.", "quantizer.downsample."))
-    # Q4_1 decoder QDQ bin flips exceeded the fixed waveform gate on x86; retain its F32 source.
-    preserve_decoder = precision == "q4_1" and name.startswith("quantizer.post_module.")
+    # Q4 decoder QDQ bin flips exceeded the fixed CPU/GPU waveform gate; retain its F32 source.
+    preserve_decoder = precision in {"q4_0", "q4_1"} and name.startswith("quantizer.post_module.")
     if len(dims) != 2 or name.endswith(".codebook.weight") or preserve_resampling or preserve_decoder:
         return kind, raw
     if precision == "f32":

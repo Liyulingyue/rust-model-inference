@@ -3,6 +3,9 @@ use crate::compute::linear::LinearExecutor;
 use crate::core::tensor::TensorSource;
 use rayon::prelude::*;
 
+#[cfg(feature = "vulkan")]
+pub(super) mod device;
+
 pub(super) struct Layer<'a> {
     norm1: Vec<f32>,
     norm2: Vec<f32>,

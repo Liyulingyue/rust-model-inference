@@ -84,15 +84,33 @@ def run(root, binaries, formats, computes, output_dir=None):
                     server.terminate()
                     server.wait(timeout=10)
             logs = "\n".join(path.read_text() for path in folder.glob("*.log"))
-            row["gpu_linear_calls"] = logs.count("backend=Vulkan")
-            row["cpu_linear_calls"] = logs.count("backend=Cpu")
+            row["gpu_linear_calls"] = len(re.findall(r"compute requested=\w+ scope=host_linear backend=Vulkan", logs))
+            row["cpu_linear_calls"] = len(re.findall(r"compute requested=\w+ scope=host_linear backend=Cpu", logs))
+            row["device_graphs"] = [dict(re.findall(r"(\w+)=(\S+)", line))
+                                    for line in logs.splitlines() if line.startswith("arktts-device ")]
+            row["device_operators"] = [dict(re.findall(r"(\w+)=(\S+)", line))
+                                       for line in logs.splitlines() if line.startswith("arktts-operators ")]
             row["last_device_counters"] = re.findall(r"ComputeStats \{[^\n]+", logs)[-1:]
             if compute != "cpu":
-                assert row["gpu_linear_calls"] > 0, "Auto fallback is not GPU verification"
-                if compute == "vulkan":
-                    assert row["cpu_linear_calls"] == 0, "strict Vulkan must not fall back to host linear"
+                assert row["last_device_counters"] and all(
+                    re.search(rf"\b{key}: [1-9]\d*", row["last_device_counters"][0])
+                    for key in ("submissions", "static_upload_bytes", "host_read_bytes")
+                ), "GPU verification requires actual submissions and transfers"
+                assert {x["stage"] for x in row["device_graphs"]} == {"generate", "codec_encode", "codec_decode"}
+                assert all(int(x["graph_ops"]) > 0 for x in row["device_graphs"])
+                operators = {stage: [x for x in row["device_operators"] if x["stage"] == stage]
+                             for stage in ("generate", "codec_encode", "codec_decode")}
+                assert all(operators.values()) and len(row["device_graphs"]) == len(row["device_operators"])
+                assert all(int(x["attention"]) > 0 and int(x["norm"]) > 0
+                           and int(x["rope_kv"]) > 0 for rows in operators.values() for x in rows)
+                assert all(int(x["convolution"]) > 0 for stage in ("codec_encode", "codec_decode") for x in operators[stage])
+                assert all(int(x["codebook_search"]) == 10 for x in operators["codec_encode"])
+                assert all(int(x["sampling"]) > 0 for x in operators["generate"])
+                assert all(int(x["trace_read_bytes"]) == 0 for x in row["device_operators"])
+                assert "backend=Cpu reason=" not in logs, "Auto fallback is not GPU verification"
+                assert row["cpu_linear_calls"] == 0, "resident graph must not fall back to host linear"
             else:
-                assert row["gpu_linear_calls"] == 0
+                assert not row["device_graphs"] and row["gpu_linear_calls"] == 0
             rows.append(row)
             (evidence / "results.json").write_text(json.dumps(rows, indent=2))
             print(fmt, compute, "CLI/HTTP WAV/PCM + clone passed", flush=True)

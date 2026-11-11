@@ -1,6 +1,10 @@
 //! Audio8-TTS-Realistic-Air (official ArkTTS DualAR and 44.1 kHz codec).
 
 pub mod codec;
+#[cfg(feature = "vulkan")]
+mod device;
+#[cfg(feature = "vulkan")]
+mod generation_device;
 mod transformer;
 
 use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
@@ -449,12 +453,22 @@ impl<'a> Model<'a> {
             "arktts.prompt_ids",
             &prompt.iter().map(|c| c[0]).collect::<Vec<_>>(),
         )?;
+        #[cfg(feature = "vulkan")]
+        if let Some(context) = device::Graph::context(self.compute)? {
+            match self.generate_device(context, &prompt, max_frames, sampling, history) {
+                Ok(frames) => return Ok(frames),
+                Err(error) if self.compute == ComputePolicy::Auto => {
+                    eprintln!("compute requested=Auto backend=Cpu reason=ArkTTS graph: {error}");
+                }
+                Err(error) => return Err(error),
+            }
+        }
         self.pool.install(|| {
-            let _scope = self.compute.cpu_scope();
+            let _scope = ComputePolicy::Cpu.cpu_scope();
             let mut matrices = vec![&self.embeddings, &self.fast_output];
             matrices.extend(self.slow.matrices());
             matrices.extend(self.fast.matrices());
-            let mut linear = linear(matrices, self.compute, self.threads)?;
+            let mut linear = linear(matrices, ComputePolicy::Cpu, self.threads)?;
             let mut rng = rand::rngs::StdRng::seed_from_u64(sampling.seed);
             let mut cache = Cache::default();
             let mut hidden = self

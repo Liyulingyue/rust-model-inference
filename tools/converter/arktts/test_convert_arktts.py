@@ -35,16 +35,16 @@ class ConverterTests(unittest.TestCase):
         torch.testing.assert_close(out["b.weight"], torch.tensor([[[0.0, 5.0]]]))
         self.assertEqual(out["a.bias"].item(), 0.25)
 
-    def test_affine_q4_decoder_preserves_source_precision(self):
+    def test_q4_decoder_preserves_source_precision(self):
         import numpy as np
         raw = np.ones((2, 256), dtype="<f4").tobytes()
         for suffix in ("attention.wqkv", "attention.wo", "feed_forward.w1",
                        "feed_forward.w2", "feed_forward.w3"):
             name = f"quantizer.post_module.layers.2.{suffix}.weight"
-            self.assertEqual(encode_tensor(name, raw, 0, (256, 2), "q4_1"), (0, raw))
-            self.assertEqual(encode_tensor(name.replace("post_module", "pre_module"),
-                                           raw, 0, (256, 2), "q4_1")[0], 3)
-            self.assertEqual(encode_tensor(name, raw, 0, (256, 2), "q4_0")[0], 2)
+            for precision, kind in (("q4_0", 2), ("q4_1", 3)):
+                self.assertEqual(encode_tensor(name, raw, 0, (256, 2), precision), (0, raw))
+                self.assertEqual(encode_tensor(name.replace("post_module", "pre_module"),
+                                               raw, 0, (256, 2), precision)[0], kind)
 
     def test_wrong_architecture_and_missing_components_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "model_type"):

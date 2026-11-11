@@ -35,10 +35,14 @@ BIN=target/release-fast/rust-model-inference
 语言由文本决定，`--language`、指令、CFG、编辑、JEV、聊天模板和文本/KV 调节参数明确拒绝。
 该模型的 `--tts-model/--tts-mmproj` 文本后处理桥也可使用，参考声音克隆请使用独立 `--tts` 入口。
 
-`--compute cpu` 使用 CPU；`--compute auto` 在本机有 Vulkan 时实际提交可卸载的 dense
-projection，无设备时回退 CPU；`--compute vulkan` 要求可用设备并严格拒绝静默回退。
-ArkTTS 的设备路径是混合执行：dense projection 在 GPU，attention/KV、norm、RoPE、卷积、
-codebook 和采样仍在 CPU。
+使用 GPU 时先加 `--features vulkan` 构建。`--compute cpu` 使用 CPU SIMD；`--compute auto`
+执行设备驻留计算图，设备不可用或设备图失败时将该阶段从头在 CPU 执行；`--compute vulkan`
+要求可用设备，失败直接返回错误。Transformer、F32 KV、norm/RoPE、attention、codec 卷积、
+激活、codebook 搜索、embedding lookup 和采样都已接入 GPU；host 保留 tokenizer、seeded RNG、
+生成循环和 WAV 序列化。只读 embedding 表在加载时解码为 F32，dense projection 保留原生权重格式。
+中间激活不逐算子读回，parity trace 的额外同步另计。`RMI_COMPUTE_TRACE=1` 输出
+`arktts-device`、`arktts-operators` 和实际 `ComputeStats`；严格模式不会把 CPU 回退算成 GPU 支持。
+工作区使用 checked allocation，超过设备显存或 storage-buffer 上限时严格模式明确失败。
 
 ## HTTP
 
@@ -96,7 +100,27 @@ Tokenizer/prompt IDs 与形状契约精确比较；原精度基线核对 codec �
 大幅残差激活可超过 10000，统一的固定绝对阈值不适合中间层；先前 `5e-3` 的绝对检查会在
 相对 RMSE 为 `6.73e-6` 的层误报，因而改用上述尺度相关检查，并保留 logits/波形的绝对约束。
 
-## GPU 与多精度矩阵（2026-11-11）
+## 当前设备驻留矩阵（2026-11-11）
+
+M3 Max 和 Linux EPYC 9334 / RADV NAVI31 各自完成九档 × CPU/Auto/严格 Vulkan 的 27 组验证：
+每组 1053 个固定历史检查点、自由 greedy、CLI 普通/克隆、HTTP 普通/克隆 WAV/PCM。
+两机各 108 个 HTTP 响应与对应 CLI 字节相同。GPU 图包含 attention/KV、norm/RoPE、卷积、
+码本和采样，检查真实提交与传输、无 host linear fallback、无 trace 读回。
+
+Q4_0/Q4_1 的 codec decoder Transformer 保留 F32，主模型和编码器继续量化；
+这是避免 activation QDQ 放大波形误差的精度策略。其余适用格式与冻结误差门槛保持不变。
+F16/块量化自由码流仍可分叉，主观音质保持 Experimental。
+另通过两机三后端 129 帧 F32 codec 跨窗口、BF16 默认随机采样与无 ICD 回退/严格拒绝检查。
+
+逐项矩阵、失败修复和文件身份见 [当前验证记录](validation.md#设备驻留数值图2026-11-11当前最终实现)，
+同机 CPU / Auto / Vulkan / Oracle CPU 时间见 [`performance.json`](performance.json) 的 `resident_graph`。
+旧 dense-only 测量保留在下节和 JSON 的 `historical_projection_only`，其主机算子分工已被替代。
+
+
+## GPU 与多精度矩阵（2026-11-11，历史 dense-only 基线）
+
+本节保留 `c4b07899e` 的历史测量。当前实现已用设备驻留计算图替代其中的混合执行；
+新的逐算子与逐格式证据见 [validation.md](validation.md)，旧 dense-call 数不能作为新路径证明。
 
 转换器和 loader 覆盖九档配对格式：`F32`、`F16`、`BF16`、`Q8_0`、`Q4_0`、`Q4_1`、
 `Q4_K`、`Q5_K`、`Q6_K`。每档均用同一量化 GGUF 通过独立 gguf-py 反量化 + 官方模型

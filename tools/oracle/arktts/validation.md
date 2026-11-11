@@ -1,5 +1,8 @@
 # Audio8-TTS-Realistic-Air 验证记录
 
+本文件保留各阶段历史证据；当前设备驻留实现与最终矩阵见下方「设备驻留数值图」记录。
+历史 dense-only 表格中的主机 attention/codec 分工已被替代，不代表当前 GPU 支持范围。
+
 2026-11-04，macOS 27.0.1 arm64，CPU 4 线程，`release-fast`。
 官方 ModelScope 仓库：`Edge0/Audio8-TTS-Realistic-Air`，记录的 HEAD 为
 `2af90384f7c0d38070f688483dd5344265601e2b`。
@@ -111,7 +114,7 @@ PR 的 Rustfmt、x86 dispatch regressions、Vulkan compile and shaders 三项 CI
 9. P1，x86 Q4_1 codec 在冻结波形门槛失败；定位到解码 Transformer 的 activation QDQ 分叉，
    仅保留 `quantizer.post_module.*` 的 F32 源精度，新增行为用例并在两台机器完成三后端数值和入口复验，详见下方 Linux 记录。
 
-## GPU 与多精度复验（2026-11-11）
+## GPU 与多精度复验（2026-11-11，历史 dense-only 基线）
 
 上面的 2026-11-04 记录保留为原始 BF16/F32 基线；它当时写着「未实现量化和 Vulkan」，
 随着本次 PR 的 dense executor 接入已被下面实测结果替代。模型文件和逐项 JSON 证据在
@@ -189,7 +192,7 @@ Q4_1 行已更新为解码 Transformer 保留 F32 的修订导出：原 max_abs/
 修订后固定码流波形与原精度 Oracle 相同，但主模型的自由生成仍有精度损失。
 新证据在 `remote-20261111/macos-reviewed-results.json`，旧记录保留在原目录。
 
-## 覆盖矩阵与改动边界
+## 历史 dense-only 覆盖矩阵与改动边界
 
 以下每行同时覆盖 `arktts` 主模型、`arktts_codec` 的 encode/decode，以及普通 TTS 和参考声音克隆。
 CLI 为普通/克隆两条命令，HTTP 为普通/克隆各自的 WAV/PCM 请求；命令和请求体由 `entries.py` 写入 JSON。
@@ -287,7 +290,7 @@ Q4_0 的 CPU/Auto/Vulkan CLI/HTTP 普通与克隆重新运行通过；禁用 ICD
 `multiq/review-20261111/{entries,fallback}/`。新 Oracle 与既有 27 份固定历史 trace 再比较，
 每份 1053 个检查点仍全部通过；记录在 `review-20261111/fixed-history-results.json`。
 
-## Linux x86_64 / RADV NAVI31 复验（2026-11-11）
+## Linux x86_64 / RADV NAVI31 复验（2026-11-11，历史 dense-only 基线）
 
 使用独立目录 `/workspace/rust-model-inference-arktts-20261111`，Linux 6.8.0-79-generic x86_64，
 AMD EPYC 9334、AMD Radeon Graphics（RADV NAVI31，VRAM 51,522,830,336 字节）。
@@ -392,9 +395,163 @@ JSON 的 `binary_path` 保留远端绝对地址，在原远端目录可直接复
 归档不重复下载远端 GGUF；本机最终模型文件仍位于用户指定的 `MODEL_DIR`。
 计时来自共享机器、并发验证中的单次 `release-fast` 观察，未作隔离吞吐 benchmark，也未测完整 release 性能。
 
+## 设备驻留数值图（2026-11-11，当前最终实现）
+
+此前 `c4b07899e` 只卸载 dense projection，attention/KV、norm/RoPE、卷积、码本和采样还在 CPU。
+本轮补齐这些 GPU 算子：生成、codec encode/decode 各有设备驻留图，中间激活/KV 不逐算子往返主机。
+RMS 和原生格式矩阵乘复用共享设备算子，其余差异放在 ArkTTS 私有 shader/recorder；没有新二进制或外部加速依赖。
+Host 保留 tokenizer、输入校验、seeded RNG、控制循环和 WAV 序列化；只读 embedding 表初始化时展开 F32，
+投影保持原生 GGUF 存储与 Prepared 激活契约。`auto` 失败时从头重跑该阶段的 CPU 图，严格 `vulkan` 返回错误。
+设备 storage-buffer/显存和 checked arena 容量不足也明确失败。
+
+同一模型/revision、三文本、四帧、固定历史和线程沿用前述 pin，误差门槛未改。
+每机九档 × CPU/Auto/Vulkan 共 27 组，各 1053 检查点；每组还分别执行两个 CLI 和四个 HTTP 请求。
+最终缩短 GPU 提交批次后，18 个 Auto/Vulkan 组合全部重跑；CPU 实现未变，沿用本轮此前的九组 CPU 记录，
+最终目录的 CPU 子目录链接到其原始证据。旧 Mac lossy fixture 只补当前 Oracle 的 `exact_generated_codes:false` 元数据，
+浮点 payload 与波形门槛未改；F32/BF16 的生成 IDs 仍精确检查，固定历史比较器逐档执行更严格的冻结门槛。
+
+### 当前入口与后端矩阵
+
+每行同时覆盖主模型、codec encode/decode、普通 TTS 和参考声音克隆；CLI/HTTP 两列为 Mac / Linux。
+
+| 格式 | 请求后端 | CLI 普通/克隆 | HTTP 普通/克隆 WAV/PCM | 实际数值后端 | 实现 / 验证 |
+| --- | --- | --- | --- | --- | --- |
+| F32 | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| F32 | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| F32 | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| BF16 | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| BF16 | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| BF16 | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| F16 | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| F16 | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| F16 | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q8_0 | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| Q8_0 | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q8_0 | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q4_0 | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| Q4_0 | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q4_0 | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q4_1 | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| Q4_1 | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q4_1 | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q4_K | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| Q4_K | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q4_K | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q5_K | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| Q5_K | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q5_K | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q6_K | cpu | 通过 / 通过 | 通过 / 通过 | CPU SIMD | 已实现 / 通过 |
+| Q6_K | auto | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+| Q6_K | vulkan | 通过 / 通过 | 通过 / 通过 | Vulkan 驻留图；host linear=0 | 已实现 / 通过 |
+
+每机 54 个 CLI 输出和 108 个 HTTP 响应；所有 HTTP WAV/PCM 与同后端对应 CLI 字节相同。
+`entries.py` 要求 generate/encode/decode 图都存在、attention/norm/RoPE/卷积等计数为正、encode 有 10 次码本搜索、
+无 CPU fallback、无 trace 读回，并检查实际 `ComputeStats` submissions/上传/读回均非零。
+
+### 数值结果
+
+下表每项取该格式三个后端的最差值；max_abs/RMSE 为固定码流的同权重实现误差，未混入量化相对原始权重的损失。
+
+| 格式 | Mac relative RMSE | Linux relative RMSE | Mac 波形 max / RMSE | Linux 波形 max / RMSE |
+| --- | ---: | ---: | --- | --- |
+| F32 | 3.269e-05 | 9.353e-06 | 1.606e-06 / 2.005e-07 | 9.751e-07 / 1.375e-07 |
+| BF16 | 2.796e-05 | 9.353e-06 | 1.654e-06 / 2.231e-07 | 1.095e-06 / 1.587e-07 |
+| F16 | 5.208e-03 | 2.015e-03 | 2.115e-04 / 2.983e-05 | 2.132e-04 / 2.934e-05 |
+| Q8_0 | 6.544e-02 | 1.136e-01 | 1.501e-03 / 1.730e-04 | 3.593e-03 / 3.932e-04 |
+| Q4_0 | 7.871e-02 | 8.982e-02 | 1.606e-06 / 2.005e-07 | 9.751e-07 / 1.375e-07 |
+| Q4_1 | 8.691e-02 | 8.803e-02 | 1.606e-06 / 2.005e-07 | 9.751e-07 / 1.375e-07 |
+| Q4_K | 5.854e-02 | 5.585e-02 | 1.846e-06 / 2.720e-07 | 1.113e-06 / 1.739e-07 |
+| Q5_K | 6.386e-02 | 1.004e-01 | 1.345e-06 / 1.864e-07 | 9.127e-07 / 1.400e-07 |
+| Q6_K | 7.045e-02 | 5.282e-02 | 1.253e-03 / 1.822e-04 | 1.360e-06 / 1.903e-07 |
+
+| 格式 | Mac 自由 greedy 相同 ID / 120（CPU / Auto / Vulkan） | Linux（同左） |
+| --- | --- | --- |
+| F32 | 120 / 120 / 120 | 120 / 120 / 120 |
+| BF16 | 120 / 120 / 120 | 120 / 120 / 120 |
+| F16 | 119 / 120 / 120 | 120 / 120 / 120 |
+| Q8_0 | 62 / 52 / 52 | 56 / 98 / 98 |
+| Q4_0 | 31 / 46 / 46 | 62 / 53 / 53 |
+| Q4_1 | 87 / 72 / 72 | 35 / 39 / 39 |
+| Q4_K | 77 / 43 / 43 | 55 / 43 / 43 |
+| Q5_K | 72 / 84 / 84 | 81 / 54 / 54 |
+| Q6_K | 95 / 57 / 57 | 74 / 86 / 86 |
+
+自由 greedy 的原始 ID 和首个分叉在逐组 `greedy.log` 及汇总 JSON；低精度分叉仍为已知限制，
+固定历史通过不等于主观音质/说话人相似度已验证。性能按无 trace 的同机阶段记录，见 `performance.json` 的
+`resident_graph`；`historical_projection_only` 保留旧混合实现的数据，不能用它描述当前计算分工。
+
+### 驻留与传输证据
+
+以 F32 无 trace 的四帧生成、三帧解码和 6145 点参考编码为例，两机记录相同逻辑算子数：
+
+| 阶段 | 图操作 | attention / norm / RoPE | 卷积 | 码本搜索 / 采样 | host 输入 / 输出字节 |
+| --- | ---: | --- | ---: | --- | --- |
+| generate（英文） | 3368 | 256 / 552 / 256 | 0 | 0 / 40 | 1420 / 480 |
+| codec_decode | 230 | 8 / 19 / 8 | 44 | 0 / 0 | 120 / 24576 |
+| codec_encode（含补零） | 287 | 12 / 28 / 12 | 54 | 10 / 0 | 32768 / 160 |
+
+表中不含初始化权重上传；完整上传/分配/提交计数保存在同一日志的 `ComputeStats`，其值是设备上下文累计值。
+GPU parity trace 会按检查点额外读回，性能与传输表使用 `trace_read_bytes=0` 的独立运行。
+
+### 本轮自查修复
+
+1. M3 的 64 线程 attention 跨两个 subgroup：softmax 最大值尚未被后一组读取就被前一组覆盖。
+   加 workgroup barrier 后，F32 的首次超限检查点恢复通过；真实 GPU 测试覆盖 31/32/33 和 128/512 窗口边界。
+2. 新驻留路径下旧 Q4_0 codec 在 M3 波形 max_abs=0.0086856708、RMSE=0.0009986057，超过冻结 max<0.006。
+   投影输入约 1e-7 的差异跨越 decoder 的 activation QDQ bin，逐层放大；没有改共享 kernel 或门槛。
+   让 Q4_0 与此前 Q4_1 一样，仅将 `quantizer.post_module.*` 保留 F32；主模型和 60 个 codec encoder 投影仍量化，
+   codec 为 395 F32 + 60 Q4_0。新增 red/green 转换用例，重新导出、建立同权重 Oracle 并在两机三后端复验。
+3. 129 帧长音频在 RADV 的大批次提交触发 guilty hard recovery / device-lost；插入 trace 同步后 decode 可通过，
+   encode 的长批次仍失败。将每批图操作上限由 64 降至 8 后，无 trace 的 CPU/Vulkan/Auto 长用例通过，
+   保留原失败日志；不以 Auto 回退掩盖严格设备失败。
+
+Q4_0 修订主模型与原文件相同；codec 为 787327968 字节，当前身份：
+
+| 主机 | codec SHA-256 |
+| --- | --- |
+| macos | `9dcef55c16220f2e31f8ad161e8587bead2fec796672990fb5d498aa377c5504` |
+| linux | `6fa66811537a21f914579f6248883680c66819054cdf62f5ce3ba61f524ea596` |
+
+Mac 修订资产为 `MODEL_DIR/multiq-device/q4_0/`，Q4_1 仍为 `multiq-reviewed/q4_1/`；
+其余格式复用 `multiq/<format>/`。两机主模型哈希相同，codec 的跨平台 weight-norm 展开差异沿用前述容差解释。
+
+### 长音频、随机采样、回退与回归
+
+独立官方 F32 fixture：129 帧固定解码、264192 点参考编码（约 6 秒），跨 decoder 128 和 encoder 512 窗口；
+三个后端均检查完整输出、冻结 float 波形门槛与参考编码的精确 IDs。结果：
+
+| 主机 | 后端 | 波形 max_abs | 波形 RMSE |
+| --- | --- | ---: | ---: |
+| macos | cpu | 4.923e-06 | 2.291e-07 |
+| macos | auto | 1.022e-05 | 3.001e-07 |
+| macos | vulkan | 1.022e-05 | 3.001e-07 |
+| linux | cpu | 3.967e-06 | 1.492e-07 |
+| linux | auto | 3.964e-06 | 1.673e-07 |
+| linux | vulkan | 3.964e-06 | 1.673e-07 |
+
+两机各自的 BF16 默认 temperature=0.8、seed=42，在三后端重复运行 CLI/HTTP 普通/克隆 WAV/PCM，
+同后端字节相同；真实 GPU 原语测试还检查与 CPU 的 top-k/top-p/Gumbel 结果及 RNG 消耗。
+两机禁用 ICD 后，Q4_0 CLI/HTTP Auto 与 CPU WAV/PCM 字节相同，严格 CLI/server 拒绝；没有设备提交。
+
+本轮检查：ArkTTS 9 passed / 4 ignored；两个 ignored GPU 原语用例显式运行通过，连同 arena 为 3 passed（两机）。
+Python 10 项通过（两机），`cargo check --features vulkan,parity-trace`、Rustfmt、diff/checksum 检查通过。
+当次全库 lib 前后均为 1555 passed / 13 failed / 100 ignored，13 个失败名逐条相同；保留完整基线和结果，未当作全绿。
+Breeze Conv 仅新增只读 view，旧 forward 与本轮改动前源文本逐字节相同；ComputePolicy 清单只增加 ArkTTS 两个架构。
+旧模型没有新的数值分支；此前 FP64 Nemotron router 的实模回归仍未运行，不以本模型通过代替。
+
+当前原始证据：
+
+- `device-20261111-final-macos/`：27 组 done/metrics/replay/greedy；CPU 链接到本轮原始 CPU 目录。
+- `entries-device-final-macos/`：27 组真实 CLI/HTTP 请求、日志和 WAV；`stochastic-device-final-macos/`、`fallback-device-final-macos/` 是额外检查。
+- `device-20261111-remote/`：相同 Linux 目录及 `host/` 的脚本、失败/通过日志、源码与资产身份；归档不下载远端 GGUF 或 trace 浮点 payload。
+- `device-20261111-results.json`：两机完整指标、首个分叉、命令/请求、提交计数与资产身份；远端绝对路径保留，使用本机归档需映射路径。
+
+没有扩展流式或 JEV：该纯 TTS 契约不提供这些能力；默认构建产物仍为原 9 个 binary targets。
+
+
 ## 仍未覆盖
 
 未验证完整发布构建的性能峰值、除已记录 ARM64/x86_64 配置外的真实模型推理、官方原生 BF16 激活语义、
-2048 位置上限与跨 codec 滑动窗口的长音频、全部 23 种语言、主观音质/声音相似度指标，
+2048 位置上限、F16/量化长音频、全部 23 种语言、主观音质/声音相似度指标，
 以及完整多模态文本后处理桥。参考 WAV 重采样沿用现有 sinc 实现，未声称和官方前端一致；
 采样 RNG 与 PyTorch 不同，固定 seed 只保证 Rust 自身复现。

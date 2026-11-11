@@ -11,14 +11,25 @@ the same bundle ID. Two dimensional dense projections use the shared `LinearExec
 lossless source precision. Q4/Q5/Q6_K keep 896-wide rows in BF16 and quantize compatible 4864-wide
 FFN down projections; codec resampling ConvNeXt projections remain F32 because activation QDQ
 there can amplify small bin changes into waveform drift.
-Q4_1 also retains the codec's `quantizer.post_module.*` decoder transformer in F32. Its main
-model and 60 encoder projections remain Q4_1; this avoids a waveform-gate failure on x86.
+Q4_0 and Q4_1 also retain the codec's `quantizer.post_module.*` decoder transformer in F32.
+Their main model and 60 encoder projections remain quantized; this avoids calibrated
+waveform-gate failures on x86 CPU and M3 GPU without changing the shared kernels or tolerances.
 
-Vulkan is deliberately hybrid. Dense projections submit to the existing Vulkan matmul kernels;
-norms, RoPE, attention/KV state, causal convolutions, codebook search and sampling remain on the
-host. `cpu` disables GPU matmul, `auto` uses the device when available and falls back to CPU, and
-strict `vulkan` requires a usable device. A strict request never silently falls back. The code does
-not claim that the whole ArkTTS graph is on the GPU.
+Vulkan now runs the numerical graph on the device. Native-format projections reuse the shared
+prepared matmul kernels. RMS/LayerNorm, BF16-rounded interleaved RoPE, F32 KV, causal/windowed
+attention, residual/FFN updates, embedding lookup, top-k/top-p/Gumbel selection, codec causal/grouped
+and transposed convolution, Snake/GELU/tanh and residual codebook search all execute on Vulkan.
+`arktts-device` and `arktts-operators` logs report the graph, operator counts and transfer bytes;
+`ComputeStats` supplies actual device submission counters. Intermediate activations and KV stay
+in the arena; parity tracing deliberately adds checkpoint readbacks and reports those separately.
+
+The host retains tokenization, request validation, seeded RNG, generation control and WAV encoding.
+Immutable embedding lookup tables are decoded once to F32 during graph setup, while projection
+weights retain their native GGUF storage and activation contract. `cpu` uses the existing SIMD
+implementation, `auto` attempts each complete device graph and retries that stage on CPU after a
+device failure, and strict `vulkan` returns the failure. Device allocations use checked arithmetic;
+requests exceeding the device's storage-buffer/workspace or memory limits fail explicitly in strict
+mode. This replaces the projection-only implementation described in the historical measurements below.
 
 ## Verification
 
@@ -26,7 +37,8 @@ On 2026-11-11, both an Apple M3 Max (ARM64) and an AMD EPYC 9334 / RADV NAVI31 h
 (Linux x86_64) ran all nine formats across CPU, Auto and strict Vulkan with four inference threads.
 The held-out suite compared 1053 fixed-history checkpoints against independent gguf-py
 dequantization and the unmodified official Python model. Every format/backend passed its frozen
-precision profile; strict Vulkan recorded 4308 dense device calls per run. The real-entry suite
+precision profile; Auto and strict Vulkan recorded resident generation, encode and decode graphs,
+non-linear device operators and actual submissions with zero host-linear fallback. The real-entry suite
 also passed CLI plain/clone and HTTP WAV/PCM plain/clone for all 27 combinations, with HTTP bytes
 equal to the corresponding CLI output.
 
@@ -46,11 +58,62 @@ cargo test --locked --profile release-fast --features vulkan,parity-trace --lib 
 
 The [complete matrix commands](../../tools/oracle/arktts/README.md#完整矩阵复现) include conversion,
 the same-weight Oracle, fixed-history traces, free-running greedy, projections, and CLI/HTTP.
-Evidence is kept outside Git under `MODEL_DIR/multiq/` and `MODEL_DIR/remote-20261111/`;
-the corrected Q4_1 pair uses `MODEL_DIR/multiq-reviewed/q4_1/`. Weights are intentionally not in Git.
+Current evidence is kept outside Git under `MODEL_DIR/device-20261111-final-macos/`,
+`MODEL_DIR/entries-device-final-macos/` and the corresponding Linux archive in
+`MODEL_DIR/device-20261111-remote/`. The corrected Q4_0 pair uses `MODEL_DIR/multiq-device/q4_0/`;
+Q4_1 uses `MODEL_DIR/multiq-reviewed/q4_1/`. Weights are intentionally not in Git.
 `tools/oracle/arktts/performance.json` separates request-level observations from phase timings
 that exclude loading and trace I/O. All timings use `release-fast`, four threads and four frames.
-A release build and longer-context performance run remain separate work.
+A release throughput benchmark remains separate work.
+
+## Resident-graph same-host observations
+
+Same GGUF and prompts, three four-frame generation cases, three fixed decode frames and 6145 encode samples. No parity trace I/O; Rust phases include graph setup and static uploads. CPU code is unchanged by the final GPU submission bound and retains this round's previous CPU evidence. Same-host Oracle CPU timings reuse the explicitly matched no-trace phase observations from earlier on the same date, except fresh Q4_0/Q4_1 fixtures where available. Resources were shared; these are observations, not release-throughput benchmarks.
+
+### Apple M3 Max
+
+Generation seconds (median of three texts, each four frames):
+
+| Format | CPU | Auto | Vulkan | Same-weight Oracle CPU |
+| --- | ---: | ---: | ---: | ---: |
+| F32 | 3.178 | 2.861 | 1.477 | 0.427 |
+| BF16 | 1.064 | 1.037 | 1.001 | 0.623 |
+| F16 | 0.419 | 0.967 | 1.418 | 1.004 |
+| Q8_0 | 0.216 | 0.752 | 0.901 | 1.192 |
+| Q4_0 | 0.843 | 0.658 | 0.728 | 0.586 |
+| Q4_1 | 0.224 | 0.657 | 0.700 | 0.549 |
+| Q4_K | 0.833 | 0.750 | 0.772 | 0.457 |
+| Q5_K | 0.831 | 0.761 | 0.762 | 0.456 |
+| Q6_K | 0.847 | 0.831 | 0.962 | 0.453 |
+
+Codec phase times are recorded in `performance.json`. Projection setup/uploads and short sequences
+can dominate GPU time; attention, convolution and other numerical operators no longer fall back to CPU.
+The reference here is the official CPU implementation with independent same-weight dequantization/QDQ.
+
+### AMD EPYC 9334 / RADV NAVI31
+
+Generation seconds (median of three texts, each four frames):
+
+| Format | CPU | Auto | Vulkan | Same-weight Oracle CPU |
+| --- | ---: | ---: | ---: | ---: |
+| F32 | 0.638 | 2.475 | 2.504 | 7.077 |
+| BF16 | 0.426 | 1.683 | 1.753 | 7.145 |
+| F16 | 0.544 | 2.458 | 2.450 | 7.007 |
+| Q8_0 | 0.338 | 1.305 | 1.367 | 7.227 |
+| Q4_0 | 0.432 | 1.362 | 1.368 | 6.936 |
+| Q4_1 | 0.367 | 1.370 | 1.378 | 7.201 |
+| Q4_K | 0.374 | 1.645 | 1.725 | 6.885 |
+| Q5_K | 0.359 | 1.714 | 1.752 | 7.324 |
+| Q6_K | 0.322 | 1.877 | 1.869 | 7.034 |
+
+Codec phase times are recorded in `performance.json`. Projection setup/uploads and short sequences
+can dominate GPU time; attention, convolution and other numerical operators no longer fall back to CPU.
+The reference here is the official CPU implementation with independent same-weight dequantization/QDQ.
+
+
+## Historical projection-only observations
+
+The following tables preserve the `c4b07899e` implementation and do not describe the current graph.
 
 Apple M3 Max generation phase (seconds, median over the three four-frame texts):
 
@@ -73,7 +136,7 @@ The JSON also records matched fixed-code decode and reference encode phases. Per
 synchronization and host attention/codec work can make this hybrid Vulkan path slower than CPU.
 Resources were not isolated; some Oracle timing overlapped compilation.
 
-## Linux same-host observations
+### Historical Linux same-host observations
 
 AMD EPYC 9334, Linux 6.8.0-79-generic x86_64, AMD Radeon Graphics (RADV NAVI31),
 four inference threads, container CPU quota 16 and memory limit 55 GiB. The host was shared
