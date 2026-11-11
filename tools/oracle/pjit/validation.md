@@ -1,105 +1,94 @@
 # P-JiT 21K validation — 2026-11-11
 
-Status: **Experimental / partial adaptation**, not ready for a verified-model check mark.
-The remaining work includes real numerical failures, not only missing test runs.
+Status: **Experimental / partial adaptation**. Quantized end-to-end numerical gates and the missing resident GPU caption-feature API prevent a verified-model check mark.
 
-## Inputs and boundaries
+## Contract, assets and execution
 
-Pins, source hash and commands are in [README.md](README.md). The DiT safetensors
-SHA256 was verified on the remote host. All nine DiT exports completed there;
-text F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q6_K exports completed. Text Q4_K/Q5_K were still
-converting at the last successful observation. Exported GGUF hashes were not
-collected before the connection was lost; source hashes do not substitute for
-them. No model weights were downloaded onto the Mac.
+The official/model/llama.cpp revisions and direct-download/streaming relay commands are pinned in [README.md](README.md). All ten source files were downloaded directly onto the third authorized Linux host; their exact revision/size/SHA256 match [source_hashes.json](source_hashes.json). All nine DiT and nine caption GGUF exports completed. [gguf_hashes.json](gguf_hashes.json) records each exported file hash, size, architecture, file type and tensor type counts. Weights and raw F32 traces stayed remote; only small JSON/log/PNG evidence was copied onto the Mac.
 
-On the replacement host, all source files were downloaded again directly on
-Linux, and their size/revision/SHA256 manifest was retrieved to
-[source_hashes.json](source_hashes.json). The final rebased code passed 8 targeted
-tests (3 asset-dependent tests ignored). DiT F32/F16/BF16/Q8_0/Q4_0/Q4_1 and text
-F32/F16/BF16/Q8_0 export completion was observed; later conversion completion is
-unknown. A remote-only parallel scheduler reused the shared quantizers, with
-all six formats first checked for exact full-tensor versus tiled payload bytes
-on a 257×2560 BF16 fixture. The replacement endpoint subsequently returned
-`Connection refused` too. No successful final release build, completed transport
-matrix or post-fix sampler result was observed there.
+Host: AMD EPYC 9334, 128 reported logical CPUs, AMD RADV NAVI31/gfx1100, 48 exposed CUs and 51,522,830,336 VRAM bytes. The container is limited to **16 CPUs and 55 GiB RAM**, despite the host reporting about 500 GiB RAM. Rust 1.94.1; PyTorch ROCm 2.9.1, HIP 7.2. Dependencies/builds stayed in repository-local environments; the Rust runtime uses no external acceleration library. Our heavy GPU validation jobs were serialized; other workloads still shared the host.
 
-Runtime changes are confined to the new model module, necessary architecture
-registration, CLI orchestration and an image-generation HTTP capability. Shared
-kernels and other model implementations are unchanged. Cargo metadata confirms
-all nine existing binary target names/paths remain unchanged. The branch was
-rebased onto upstream `d16dc16d96126351b10c13c8458f968c5c57b2e7` before submission;
-recorded historical/full-suite baselines refer to the starting commit in plan.md.
-The existing x86 CI job also runs the new model/CLI and HTTP validation tests.
+Runtime changes stay in `models/diffusion/pjit` plus necessary CLI/HTTP/architecture wiring. Shared kernels and other model implementations are unchanged. Cargo metadata retained all nine original binary target names/paths. The branch base is `d16dc16d96126351b10c13c8458f968c5c57b2e7`; historical suite baselines refer to the starting commit in [plan.md](plan.md).
 
-The authorized Linux host reported EPYC 9334 (128 logical CPUs), approximately
-500 GB host memory, RADV gfx1100, 48 exposed CUs and approximately 48 GB VRAM.
-Rust used project-local toolchains/dependencies; no external acceleration library
-was added to the Rust runtime. Official references used PyTorch ROCm.
+Storage formats: F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. K-unaligned rows retain float storage, recorded in the manifest. Arithmetic uses the shared storage-specific F32-accumulating kernels, including their activation rounding/quantization; this is not native BF16 activation execution. Caption KV is F32. DiT inputs, caption features and APG momentum are BF16-rounded at the official boundaries.
 
-## Acceptance and observed results
+## Numerical acceptance
 
-Predeclared gates: discrete token IDs/shapes exact; F32 DiT max_abs ≤ 0.002 and
-cosine ≥ 0.99999; lossy same-weight reference NRMSE ≤ 0.02 and cosine ≥ 0.999.
-These gates were not relaxed after measurement. Native BF16 activation results,
-weight-only quantization quality and runtime implementation error are separate.
+Predeclared gates were unchanged: discrete shapes/token IDs exact; F32 DiT max_abs ≤ 0.002 and cosine ≥ 0.99999; lossy same-weight NRMSE ≤ 0.02 and cosine ≥ 0.999. Weight-only quantization quality is measured separately from runtime implementation error. No bitwise floating-point acceptance is imposed on lossy paths.
 
-The single-forward fixture is 33×35, timestep 750, 18 caption tokens, identical
-BF16-rounded image/text inputs. F32 CPU max_abs is 1.88947e-5, NRMSE 1.07669e-5;
-Vulkan max_abs is 1.10865e-5, NRMSE 7.83528e-6. Both pass. CPU intermediate
-checkpoints are below NRMSE 1e-4. F16 and BF16 passed all three requested backends
-in the recorded DiT matrix. GPU evidence for F32 is 244 submissions: 218 linear
-projections plus 26 attention operations. This is a hybrid pipeline: text
-encoding, norms, RoPE, elementwise work and sampler remain on CPU.
+Single-forward fixture: 33×35, timestep 750, 18 text tokens, identical BF16-rounded image/text. Quantized references run the official model on ROCm, independently decode the same GGUF, and model the CPU prepared-kernel activation QDQ contract. Vulkan comparisons retain this CPU-QDQ reference limitation; same-input device projection replay tests the individual operations separately. All measured metrics and reference commands are in [matrix_results.json](matrix_results.json); raw tensor values stay remote.
 
-Caption BF16 same-GGUF independent decoding gives NRMSE 0.00579369 / cosine
-0.99998337. Rust versus the official native BF16 encoder gives 0.0162553 /
-0.99986889. Original F32 versus native BF16 itself differs by NRMSE 0.0136496.
-F32 caption same-GGUF reference gives NRMSE 0.000111326 / cosine 0.999999994.
-The tokenizer matched the original chat template exactly for empty, Unicode,
-NFC, emoji, whitespace, special-token and 256-token truncation cases.
+| DiT storage | CPU NRMSE / gate | Auto NRMSE / gate | Vulkan NRMSE / gate |
+| --- | --- | --- | --- |
+| F32 | 1.2946124e-05 / Pass | 1.0935635e-05 / Pass | 1.1299469e-05 / Pass |
+| F16 | 0.00081502589 / Pass | 0.0016752153 / Pass | 0.00096704771 / Pass |
+| BF16 | 6.0414086e-06 / Pass | 8.5494247e-06 / Pass | 7.7380653e-06 / Pass |
+| Q8_0 | 0.05142132 / Fail | 0.03935427 / Fail | 0.03935427 / Fail |
+| Q4_0 | 0.040798267 / Fail | 0.04466361 / Fail | 0.039428394 / Fail |
+| Q4_1 | 0.0418282 / Fail | 0.043201844 / Fail | 0.043201844 / Fail |
+| Q4_K | 0.03095753 / Fail | 0.041085753 / Fail | 0.034642739 / Fail |
+| Q5_K | 0.044037838 / Fail | 0.038663027 / Fail | 0.049144319 / Fail |
+| Q6_K | 0.044340449 / Fail | 0.056909299 / Fail | 0.047473897 / Fail |
 
-Quantized DiT full-forward checks **fail** the 0.02 NRMSE gate. A weight-only
-reference initially measured about 0.03–0.054 runtime-to-reference difference; that
-reference omits the shared kernels' dynamic activation quantization. Independent
-CPU activation-QDQ was then added. Q8 still measures NRMSE 0.0601911 / cosine
-0.9981898 and fails. Its patch checkpoint matches to NRMSE 6.8e-7, first image
-refiner to 0.000162742, block 21 to 0.0313247. This locates gradual divergence;
-it does not prove every shared kernel is correct. The same-input projection
-replay was subsequently completed for Q8 on the replacement host: all **217
-projections passed**, with worst NRMSE **5.40955e-7** and cosine
-**0.999999999999854**. Each reference receives the exact traced Rust projection
-input, independently decodes the same GGUF weights and applies NumPy activation
-QDQ. This rules out a large local projection error for that fixture and supports
-propagation across quantization boundaries as the source of the full-forward
-drift; it does not make the failing end-to-end gate pass. Only its terminal
-summary was retrieved before the second disconnect. Q4/K projection replay,
-activation-QDQ and quantized caption references remain
-unverified. Do not describe the weight-only comparison as full kernel alignment.
-Weight-only quality loss versus F32 is reported separately in
-[results_snapshot.json](results_snapshot.json), including large Q4 degradation.
+F32 per-backend max_abs/cosine are preserved in [results_snapshot.json](results_snapshot.json). Float single-forward passes do not certify the quantized rows. Quantized divergence propagates across discrete activation-quantization boundaries; neither local operation success nor quantization quality loss turns a failing full-forward gate into a pass.
 
-A seven-step F32 DiT/APG replay used identical Rust caption features and initial
-noise with the official implementation. First-step NRMSE is 6.78698e-7; final
-NRMSE is 0.0321500 / cosine 0.9994857 and **fails**. This was before the final APG
-cast-order repair. The final chain must be rerun, and divergence at BF16 state
-boundaries must be investigated; no successful post-fix chain is claimed.
+| Caption storage | Same-GGUF NRMSE / gate | Reference device |
+| --- | --- | --- |
+| F32 | 0.00011132561 / Pass | ROCm |
+| F16 | 0.00118355 / Pass | ROCm |
+| BF16 | 0.0057936852 / Pass | ROCm |
+| Q8_0 | 0.019844337 / Pass | ROCm |
+| Q4_0 | 0.021210382 / Fail | ROCm |
+| Q4_1 | 0.022507903 / Fail | ROCm |
+| Q4_K | 0.049956631 / Fail | ROCm |
+| Q5_K | 0.047343279 / Fail | ROCm |
+| Q6_K | 0.044786469 / Fail | ROCm |
 
-Raw traces/results remain in remote `target/`. Only terminal-observed results
-were captured in the committed snapshot; no fabricated raw fixture or completed
-image is included. The connection was closed before SSH authentication during
-final validation. No completed 1024×1024 / 50-step output was observed (the CPU
-run had reached step 7). Default-size image quality is unverified.
+Historical BF16 caption comparisons: same-GGUF NRMSE 0.00579369 / cosine 0.99998337; original native BF16 encoder 0.0162553 / 0.99986889. The original F32-vs-native-BF16 reference itself differs by 0.0136496 NRMSE. These are distinct precision contracts. Fresh tokenizer checks passed all eight cases (empty, Unicode/NFC/NFD, emoji, whitespace, special tokens and truncation); exact expected IDs are committed in [tokenizer_cases.json](tokenizer_cases.json).
 
-## Coverage matrix
+Same-input quantized projection replay independently decodes the exact GGUF and supplies each operation with its traced Rust input. This isolates local projection error from accumulated divergence:
 
-Each row distinguishes implementation from recorded validation. All transport
-records below predate the last review fixes; the final remote regression is
-pending. “Pass” for CLI/HTTP means exit 0 / HTTP 200 and decoded 33×35 PNG, one
-step, seed 42, prompt `猫`; it does not imply the numerical gate passed. Each
-HTTP run also rejected blank prompt, n=2, unknown model and invalid size with
-400. Requested Auto/Vulkan caption rows still execute on CPU.
+| Storage / backend | Projections | Failed | Worst NRMSE |
+| --- | --- | --- | --- |
+| q4_0-cpu | 217 | 0 | 5.3591882e-07 |
+| q4_0-vulkan | 217 | 0 | 5.3468231e-07 |
+| q4_1-cpu | 217 | 0 | 0.0013139778 |
+| q4_1-vulkan | 217 | 0 | 0.0013172824 |
+| q4_k-cpu | 217 | 0 | 5.5903191e-07 |
+| q4_k-vulkan | 217 | 0 | 1.0102545e-06 |
+| q5_k-cpu | 217 | 0 | 5.8091466e-07 |
+| q5_k-vulkan | 217 | 0 | 1.0098292e-06 |
+| q6_k-cpu | 217 | 0 | 5.6734297e-07 |
+| q6_k-vulkan | 217 | 0 | 1.0111968e-06 |
+| q8_0-cpu | 217 | 0 | 5.4095469e-07 |
+| q8_0-vulkan | 217 | 0 | 5.4095469e-07 |
 
-Command templates (substitute FORMAT and BACKEND for each row):
+### Official reference sensitivity
+
+Duplicating identical inputs from batch one to batch two changes the GEMM accumulation shape without changing weights, inputs, activation QDQ or the official code/device. This is an independent diagnostic, not a replacement acceptance gate. Every failing runtime row above remains failed.
+
+| Storage | Official DiT batch drift NRMSE | Official caption batch drift NRMSE |
+| --- | --- | --- |
+| F32 | Not run | 2.6782743e-05 |
+| F16 | Not run | 2.2049606e-05 |
+| BF16 | Not run | 2.6782743e-05 |
+| Q8_0 | 0.047618916 | 0.010330463 |
+| Q4_0 | 0.048850647 | 0.0120772 |
+| Q4_1 | 0.039171112 | 0.012342825 |
+| Q4_K | 0.045442063 | 0.021298324 |
+| Q5_K | 0.043408121 | 0.018563758 |
+| Q6_K | 0.052311885 | 0.021197768 |
+
+All six quantized DiT reference self-drifts exceed the unchanged 2% gate (3.92–5.23%); caption K-format drift is also material. Together with same-input projection replays, this supports sensitivity at discrete activation-quantization boundaries. It does not establish complete runtime correctness or certify task quality. Commands and per-checkpoint metrics are in `matrix_results.json`.
+
+
+The earlier Q8 CPU replay also passed 217/217 projections (worst NRMSE 5.40955e-7); only its terminal summary survived the second host disconnect. Fresh per-operation summaries above replace missing evidence where available.
+
+The **post-APG-fix seven-step F32 Vulkan chain passes all seven gates**: final NRMSE 0.019726344, cosine 0.999806538752. First-step NRMSE 5.3991954e-07. Same-input DiT max_abs stays below 1.85e-5 and independent Euler/APG replay below 4.77e-7. BF16 input differences grow across the chain (0, 2, 15, 278, 787, 2175, 2779 elements). [sampler_7_steps.json](sampler_7_steps.json) retains every step and diagnostic. This supersedes the pre-fix 0.03215 failure; the old result remains in the historical snapshot.
+
+## Real CLI and HTTP matrix
+
+All 27 requested backend/storage combinations have real CLI/HTTP transport evidence. CLI/HTTP verification means exit 0 / HTTP 200, decoded 33×35 PNG, one step, seed 42, prompt `猫`; four malformed requests return 400. This is transport coverage, independent of the numerical gate above. CLI and HTTP PNG bytes also match for every completed row. Detailed commands, request bodies, timings and observed device submissions are in [matrix_results.json](matrix_results.json).
 
 ```sh
 target/release-fast/rust-model-inference --model models/pjit-21k/pjit-FORMAT.gguf \
@@ -111,120 +100,99 @@ target/release-fast/rust-model-server --model models/pjit-21k/pjit-FORMAT.gguf \
 # {"prompt":"猫","width":33,"height":35,"steps":1,"seed":42,"response_format":"b64_json"}
 ```
 
-Evidence per transport: remote `target/pjit-transport/FORMAT-BACKEND.json`,
-`-cli.log`, `-http.log`, `-cli.png`, `-http.png` and `-response.json`.
-DiT metrics: `target/pjit-matrix/results.json`; QDQ traces:
-`target/pjit-q8-cpu.jsonl` and `target/pjit-ref-q8-qdq-cpu/`.
-Text metrics: `target/pjit-text-matrix/results.json`, plus BF16 checks described
-above. Missing final files after the disconnect must be checked, not assumed.
-
-| Component | Storage format | Requested backend | Implementation | CLI | HTTP | Numerical validation | Actual execution |
+| Component | Storage | Requested backend | Implementation | CLI | HTTP | Numerical validation | Actual execution |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| DiT | F32 | cpu | Implemented | Pass | Pass | Pass (single forward) | CPU SIMD/pool |
-| DiT | F32 | auto | Implemented | Pass | Pass | Pass (single forward) | Vulkan projections/attention + host |
-| DiT | F32 | vulkan | Implemented | Not verified | Not verified | Pass (single forward) | Vulkan projections/attention + host |
-| DiT | F16 | cpu | Implemented | Pass | Pass | Pass (single forward) | CPU SIMD/pool |
-| DiT | F16 | auto | Implemented | Pass | Pass | Pass (single forward) | Vulkan projections/attention + host |
-| DiT | F16 | vulkan | Implemented | Not verified | Not verified | Pass (single forward) | Vulkan projections/attention + host |
-| DiT | BF16 | cpu | Implemented | Pass | Pass | Pass (single forward) | CPU SIMD/pool |
-| DiT | BF16 | auto | Implemented | Pass | Pass | Pass (single forward) | Vulkan projections/attention + host |
-| DiT | BF16 | vulkan | Implemented | Not verified | Not verified | Pass (single forward) | Vulkan projections/attention + host |
-| DiT | Q8_0 | cpu | Implemented | Pass | Pass | Fail (CPU QDQ and weight-only) | CPU SIMD/pool |
-| DiT | Q8_0 | auto | Implemented | Pass | Pass | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q8_0 | vulkan | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q4_0 | cpu | Implemented | Pass | Pass | Fail (weight-only); QDQ pending | CPU SIMD/pool |
-| DiT | Q4_0 | auto | Implemented | Pass | Pass | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q4_0 | vulkan | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q4_1 | cpu | Implemented | Pass | Pass | Fail (weight-only); QDQ pending | CPU SIMD/pool |
-| DiT | Q4_1 | auto | Implemented | Pass | Pass | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q4_1 | vulkan | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q4_K | cpu | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | CPU SIMD/pool |
-| DiT | Q4_K | auto | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q4_K | vulkan | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q5_K | cpu | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | CPU SIMD/pool |
-| DiT | Q5_K | auto | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q5_K | vulkan | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q6_K | cpu | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | CPU SIMD/pool |
-| DiT | Q6_K | auto | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| DiT | Q6_K | vulkan | Implemented | Not verified | Not verified | Fail (weight-only); QDQ pending | Vulkan projections/attention + host |
-| Caption | F32 | cpu | Implemented (CPU) | Pass | Pass | Pass on CPU | CPU prefixes 8/16/28 |
-| Caption | F32 | auto | GPU raw features not implemented; CPU used | Pass | Pass | Pass on CPU | CPU prefixes 8/16/28 |
-| Caption | F32 | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Pass on CPU | CPU prefixes 8/16/28 |
-| Caption | F16 | cpu | Implemented (CPU) | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | F16 | auto | GPU raw features not implemented; CPU used | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | F16 | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | BF16 | cpu | Implemented (CPU) | Pass | Pass | Pass on CPU | CPU prefixes 8/16/28 |
-| Caption | BF16 | auto | GPU raw features not implemented; CPU used | Pass | Pass | Pass on CPU | CPU prefixes 8/16/28 |
-| Caption | BF16 | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Pass on CPU | CPU prefixes 8/16/28 |
-| Caption | Q8_0 | cpu | Implemented (CPU) | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q8_0 | auto | GPU raw features not implemented; CPU used | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q8_0 | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_0 | cpu | Implemented (CPU) | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_0 | auto | GPU raw features not implemented; CPU used | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_0 | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_1 | cpu | Implemented (CPU) | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_1 | auto | GPU raw features not implemented; CPU used | Pass | Pass | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_1 | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_K | cpu | Implemented (CPU) | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_K | auto | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q4_K | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q5_K | cpu | Implemented (CPU) | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q5_K | auto | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q5_K | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q6_K | cpu | Implemented (CPU) | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q6_K | auto | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
-| Caption | Q6_K | vulkan | GPU raw features not implemented; CPU used | Not verified | Not verified | Not verified | CPU prefixes 8/16/28 |
+| DiT | F32 | cpu | Implemented | Pass | Pass | 1.2946124e-05 / Pass | CPU SIMD/pool; F32 KV |
+| DiT | F32 | auto | Implemented | Pass | Pass | 1.0935635e-05 / Pass | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | F32 | vulkan | Implemented | Pass | Pass | 1.1299469e-05 / Pass | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | F16 | cpu | Implemented | Pass | Pass | 0.00081502589 / Pass | CPU SIMD/pool; F32 KV |
+| DiT | F16 | auto | Implemented | Pass | Pass | 0.0016752153 / Pass | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | F16 | vulkan | Implemented | Pass | Pass | 0.00096704771 / Pass | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | BF16 | cpu | Implemented | Pass | Pass | 6.0414086e-06 / Pass | CPU SIMD/pool; F32 KV |
+| DiT | BF16 | auto | Implemented | Pass | Pass | 8.5494247e-06 / Pass | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | BF16 | vulkan | Implemented | Pass | Pass | 7.7380653e-06 / Pass | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | Q8_0 | cpu | Implemented | Pass | Pass | 0.05142132 / Fail | CPU SIMD/pool; F32 KV |
+| DiT | Q8_0 | auto | Implemented | Pass | Pass | 0.03935427 / Fail | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | Q8_0 | vulkan | Implemented | Pass | Pass | 0.03935427 / Fail | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | Q4_0 | cpu | Implemented | Pass | Pass | 0.040798267 / Fail | CPU SIMD/pool; F32 KV |
+| DiT | Q4_0 | auto | Implemented | Pass | Pass | 0.04466361 / Fail | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | Q4_0 | vulkan | Implemented | Pass | Pass | 0.039428394 / Fail | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | Q4_1 | cpu | Implemented | Pass | Pass | 0.0418282 / Fail | CPU SIMD/pool; F32 KV |
+| DiT | Q4_1 | auto | Implemented | Pass | Pass | 0.043201844 / Fail | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | Q4_1 | vulkan | Implemented | Pass | Pass | 0.043201844 / Fail | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | Q4_K | cpu | Implemented | Pass | Pass | 0.03095753 / Fail | CPU SIMD/pool; F32 KV |
+| DiT | Q4_K | auto | Implemented | Pass | Pass | 0.041085753 / Fail | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | Q4_K | vulkan | Implemented | Pass | Pass | 0.034642739 / Fail | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | Q5_K | cpu | Implemented | Pass | Pass | 0.044037838 / Fail | CPU SIMD/pool; F32 KV |
+| DiT | Q5_K | auto | Implemented | Pass | Pass | 0.038663027 / Fail | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | Q5_K | vulkan | Implemented | Pass | Pass | 0.049144319 / Fail | Vulkan projections/attention + host; 487 cumulative submissions |
+| DiT | Q6_K | cpu | Implemented | Pass | Pass | 0.044340449 / Fail | CPU SIMD/pool; F32 KV |
+| DiT | Q6_K | auto | Implemented | Pass | Pass | 0.056909299 / Fail | Vulkan projections/attention + host; 349 cumulative submissions |
+| DiT | Q6_K | vulkan | Implemented | Pass | Pass | 0.047473897 / Fail | Vulkan projections/attention + host; 487 cumulative submissions |
+| Caption features | F32 | cpu | Implemented | Pass | Pass | 0.00011132561 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | F32 | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.00011132561 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | F32 | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.00011132561 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | F16 | cpu | Implemented | Pass | Pass | 0.00118355 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | F16 | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.00118355 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | F16 | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.00118355 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | BF16 | cpu | Implemented | Pass | Pass | 0.0057936852 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | BF16 | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.0057936852 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | BF16 | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.0057936852 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | Q8_0 | cpu | Implemented | Pass | Pass | 0.019844337 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | Q8_0 | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.019844337 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | Q8_0 | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.019844337 / Pass | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_0 | cpu | Implemented | Pass | Pass | 0.021210382 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_0 | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.021210382 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_0 | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.021210382 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_1 | cpu | Implemented | Pass | Pass | 0.022507903 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_1 | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.022507903 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_1 | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.022507903 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_K | cpu | Implemented | Pass | Pass | 0.049956631 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_K | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.049956631 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q4_K | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.049956631 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q5_K | cpu | Implemented | Pass | Pass | 0.047343279 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q5_K | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.047343279 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q5_K | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.047343279 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q6_K | cpu | Implemented | Pass | Pass | 0.044786469 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q6_K | auto | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.044786469 / Fail | CPU SIMD/pool; F32 KV |
+| Caption features | Q6_K | vulkan | CPU composition implemented; device extraction unimplemented | Pass | Pass | CPU only: 0.044786469 / Fail | CPU SIMD/pool; F32 KV |
 
-IQ and other decoder-only formats are not new export formats: the existing
-shared exporter exposes only the nine formats above (including no Q5_0/Q5_1
-encoder). Unsupported tensor types are explicitly rejected by this loader. JEV and
-streaming are not applicable to still-image generation without probability or
-incremental-output semantics. Video, image editing, VAE input and remote prompt
-upsampling are not capabilities of this adapter.
+Caption device extraction remains **not implemented (shared capability pending)** for all nine formats in Auto/Vulkan. The rows above describe the implemented CPU composition under those requested policies, rather than full GPU caption execution. The existing resident Qwen API exposes normalized final states/logits, not raw block 7/15/27 features; prefix recomputation stays local to P-JiT. DiT device kernels run while caption, norms, RoPE, elementwise work and sampling stay on CPU. A single-forward F32 device counter is 244 including one warmup, 217 projection submissions and 26 attention submissions (243 actual-forward submissions). This corrects the old classification of the warmup as an extra projection.
 
-## Checks and review
+No-device checks: Auto F16 CLI and HTTP pass with an invalid ICD path and CPU execution. Strict Vulkan CLI and server both exit 2 with a device initialization error; no output image is created. Error/fallback handling does not count as device execution. JEV/probability scoring and generation streaming are not applicable to this pixel-image contract. IQ exports are not applicable because the repository has no corresponding quantization encoder.
 
-- Final local (rebased) `cargo test --locked --profile release-fast --lib pjit --features vulkan,parity-trace`:
-  8 passed, 3 real-weight checks explicitly ignored without assets; the HTTP
-  request-validation test also passed separately with the same features.
-- Remote Vulkan-enabled targeted tests: 7 passed, 3 ignored before the last CLI
-  review repair. Both existing binaries built with Vulkan before that repair.
-- Final local existing inference/server binary build passed.
-- Python converter/oracle helper checks: 7 passed, including failure cleanup and
-  racing-output overwrite protection. No Torch installation is needed for these.
-- Recorded full library suite: 1651 passed / 47 failed / 230 ignored; base:
-  1642 passed / 51 failed / 228 ignored. All 47 failure names exist in the base;
-  four additional base-only failures are Gemma4 Vulkan tests. A final Vulkan-enabled
-  pre-rebase suite recorded 1667 passed / 35 failed / 231 ignored, with no failure
-  names absent from the starting-base list. See [regression.json](regression.json).
-- Clippy is blocked by ten deny-level lint errors in unchanged ERNIE, Pig,
-  FunASR, Qwen vision, YuE2 and torch28 files. Those files match the base commit.
-- Touched-file rustfmt and `git diff --check` passed.
+## Default-size output and performance
 
-Self-review repaired integer timestep generation (torch.linspace FMA/endpoints),
-APG F64 projection cast order, negative seed handling, incompatible CLI flags,
-request validation, permit lifetime across HTTP cancellation, converter payload
-validation and atomic no-overwrite publication. CPU attention partitions heads
-through the existing pool; a 23-head ordering test matches the shared CPU
-operation exactly with one and four threads. No old model/shared compute code
-was changed to force parity.
+The real default-size **1024×1024 / 50-step F16 DiT + BF16 caption CPU CLI completed** in 5428.649 s on eight threads (contended host, tracing enabled). Visual inspection found a recognizable red cube on a white table. This is one prompt, not a formal perceptual-quality evaluation.
+The independent official same-GGUF replay completed all 50 steps: **all step gates pass**, final NRMSE 0.0196753612, cosine 0.999806970603. It starts with the identical traced Rust caption features and initial noise, decodes the stored F16 GGUF into F32, and checks DiT and Euler/APG again on each exact traced input. It does not certify native BF16 autocast or an independent caption-to-image pipeline.
 
-## Remaining work and ownership
+| Step | Chain NRMSE | Cosine | Gate | Official batch-one/two NRMSE |
+| --- | --- | --- | --- | --- |
+| 1 | 5.4773456e-07 | 1 | Pass | 1.2846482e-08 |
+| 10 | 6.3399517e-06 | 0.99999999998 | Pass | 4.8511185e-07 |
+| 20 | 0.00028678923 | 0.999999958885 | Pass | 6.5584969e-06 |
+| 30 | 0.0017389791 | 0.999998488694 | Pass | 4.3944902e-05 |
+| 40 | 0.0052227453 | 0.999986385588 | Pass | 0.00012439797 |
+| 50 | 0.019675361 | 0.999806970603 | Pass | 0.0004635121 |
 
-1. Adapter owner: restore remote access, collect export hashes and raw artifacts,
-   finish K text and strict Vulkan CLI/HTTP checks, verify Auto fallback with no
-   device and strict failure, rerun final code against real weights.
-2. Adapter numerical owner: extend the successful Q8 same-input projection replay
-   to Q4/K formats and complete every
-   activation-QDQ reference; fix a demonstrated local defect if found. Shared
-   compute owner must handle any demonstrated prepared-kernel discrepancy with
-   old-model baselines before changing shared arithmetic. All failing rows stay
-   Experimental until the existing gates pass or a new, independently calibrated
-   contract is agreed before a new validation run.
-3. Shared compute/Qwen owner (follow-up layer): expose raw multi-layer device
-   features, then validate caption CPU/Auto/Vulkan separately. Current CPU prefix
-   composition is deliberate and does not claim full GPU text support.
-4. Adapter owner: finish 1024×1024 / 50-step task output, visual review and matched
-   multi-step comparison; run clean warm release CPU/Vulkan/official benchmarks
-   on the same host. See [performance.json](performance.json) for diagnostic
-   numbers and their incompatible timing scopes.
+Same-input DiT worst NRMSE 0.0014341983; independent same-input Euler/APG worst max_abs 9.5367432e-07. The original append-only trace also contained three interrupted runs. Only the final complete 153-record invocation was selected (2 captions, noise, 100 predictions, 50 states), without modifying raw tensor values. The selection manifest and all 50 metrics are retained in `matrix_results.json`.
+
+Decoded final PNG comparison: 699894 / 1048576 pixels differ; RGB RMSE 1.1592347 on the 0–255 scale, max_abs 53, PSNR 46.8474 dB. These are observed pixel diagnostics, not a bitwise image acceptance gate.
+
+Warm same-host release measurements for the identical F32 33×35 / 18-token / batch-one forward (one resident session, four repeats, median of the final three): CPU **0.771232 s**, Vulkan **3.058170 s**, official PyTorch ROCm **0.197731 s**. The timed official forwards have no checkpoint hooks or disk writes. Cold first samples and host-contention limits are explicit in [performance.json](performance.json). Vulkan remains slower; synchronous per-projection device transfers/submits and CPU work are part of this hybrid path. These are a performance reference, not a speed acceptance threshold.
+
+The model-local projection chunk was increased from 64 to 256 rows to reduce synchronous device round trips at 1024px; shared kernels/API were not changed. A preserved real 1024×1024 first-forward fixture compares old/new chunking using identical F16 weights/text/noise. Its verification and the final default-size output are reported in the matrix snapshot. F32 default generation was interrupted after four steps because of its measured multi-minute step time; no completed F32 default image is claimed.
+
+## Checks, review and remaining ownership
+
+- Remote final model/CLI tests: 9 passed, 3 asset-dependent tests ignored; real asset tests are recorded separately above. Final inference/server release-fast and full release builds passed (7m51s / 18m25s); final F16 Auto CLI/HTTP smoke passed with equal PNG bytes and 349 observed device submissions. Four CLI-only server flags were rejected before loading components (exit 1, the existing backend-build error convention).
+- Python converter/oracle helper checks: 7 passed, including cleanup and racing-output protection; touched Rust formatting and diff checks passed.
+- Historical full library suite: 1651 passed / 47 failed / 230 ignored versus starting-base 1642 / 51 / 228. All failure names existed at that base. Final pre-rebase Vulkan suite: 1667 / 35 / 231, again no new failure names; [regression.json](regression.json) retains the lists.
+- Clippy has ten deny-level errors in unchanged ERNIE/Pig/FunASR/Qwen-vision/YuE2/torch28 sources matching the starting base.
+- CI on preceding runtime commit `4e4df7719`: all three checks passed. Final runtime `80ce7199f` also passed all three checks; re-check the docs/evidence head before merge.
+
+Self-review repaired torch.linspace endpoint/FMA timestep rounding, APG F64 projection cast order, negative seeds/ignored CLI flags, HTTP request validation and cancellation permit lifetime, converter tensor payload validation and atomic no-overwrite publication, and 23-head CPU attention ordering. The Oracle now copies decoded parameters in place and rejects incomplete GGUF inventories; same-weight sampling can reload a GGUF without holding duplicate full-model states.
+
+Remaining numerical owner: keep failing quantized full-forward/caption rows Experimental, inspect the first divergence and independent projection replays. Any demonstrated shared prepared-kernel defect requires a shared-compute follow-up with real old-model baselines; no shared arithmetic was altered here. Do not loosen thresholds after observing these failures.
+
+Shared compute/Qwen owner, follow-up layer: expose raw multi-layer resident device features, validate all nine caption formats under CPU/Auto/Vulkan, then remove local three-prefix recomputation. This is the specific shared API gap preventing full-device adaptation.
