@@ -43,6 +43,7 @@ pub mod nemotron_h;
 pub mod nemotron_reuse;
 pub mod occamy;
 pub mod phi3;
+pub mod pivo;
 pub mod qwen3;
 pub mod qwen35;
 pub mod qwen_drive;

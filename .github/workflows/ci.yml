@@ -48,6 +48,8 @@ jobs:
       - run: RMI_SCALAR=1 cargo test --locked --lib hy_
       - run: 'cargo test --locked --lib ops::audio::'
       - run: cargo test --locked --lib unlimited_ocr
+      - run: cargo test --locked --lib pivo
+      - run: cargo test --locked --test pivo_cli
       - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'
       - run: cargo test --locked --test unlimited_ocr_cli
       - run: cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

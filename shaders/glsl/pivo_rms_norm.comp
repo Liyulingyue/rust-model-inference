@@ -1,0 +1,74 @@
+#version 450
+
+// RMS normalisation for the PiVo acoustic network.
+//
+// The sum of squares uses the same Kahan chain and the same 64 lane tree
+// reduction as the shared `rms_norm` kernel, so the device result keeps the
+// rounding of the host path. The difference is where the weight comes from:
+// PiVo keeps its weights in the arena, so the norm weights do not need a
+// descriptor set of their own.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint weight_word; uint output_word;
+    uint count; uint vectors; float eps;
+    uint input_stride; uint output_stride;
+} pc;
+
+shared float partial[64];
+shared float partial_correction[64];
+shared float inverse_rms;
+
+void main() {
+    uint vector_index = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (vector_index >= pc.vectors) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint base = vector_index * pc.input_stride;
+    uint output_base = vector_index * pc.output_stride;
+
+    precise float sum = 0.0;
+    precise float correction = 0.0;
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        float square = value * value;
+        precise float next = sum + square;
+        correction += sum >= square
+            ? (sum - next) + square
+            : (square - next) + sum;
+        sum = next;
+    }
+    partial[lane] = sum;
+    partial_correction[lane] = correction;
+    barrier();
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) {
+            precise float high = partial[lane];
+            precise float low = partial_correction[lane];
+            precise float other_high = partial[lane + step];
+            precise float other_low = partial_correction[lane + step];
+            precise float total = high + other_high;
+            precise float other_virtual = total - high;
+            precise float error =
+                (high - (total - other_virtual)) + (other_high - other_virtual);
+            error += low + other_low;
+            partial[lane] = total + error;
+            partial_correction[lane] = error - (partial[lane] - total);
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        precise float mean_square = (partial[0] + partial_correction[0]) / float(pc.count)
+            + pc.eps;
+        inverse_rms = inversesqrt(mean_square);
+    }
+    barrier();
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        float scale = uintBitsToFloat(arena.data[pc.weight_word + index]);
+        precise float normalized = value * inverse_rms * scale;
+        arena.data[pc.output_word + output_base + index] = floatBitsToUint(normalized);
+    }
+}

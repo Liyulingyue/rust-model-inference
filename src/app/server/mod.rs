@@ -5,6 +5,7 @@ mod decision;
 mod forecast;
 mod prediction;
 mod rerank;
+mod speech;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -89,6 +90,9 @@ enum Backend {
     Audio8(Audio8Backend),
     AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
     Tts(TtsBackend),
+    /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
+    /// text frontend, the acoustic decoder and the bundled vocoder.
+    Pivo(speech::PivoBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -1171,6 +1175,26 @@ fn build_backend(
         })));
     }
     if options.tts {
+        if crate::models::pivo::matches_model(&options.model) {
+            let defaults = crate::app::tts::pivo_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+            let model = Arc::new(crate::models::pivo::Model::from_source(
+                source.as_ref(),
+                options.compute_policy(),
+            )?);
+            if let Some(notice) = crate::app::tts::pivo_format_notice(model.format) {
+                eprintln!("{notice}");
+            }
+            return Ok(Arc::new(Backend::Pivo(speech::PivoBackend {
+                model,
+                defaults,
+            })));
+        }
+        if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+            return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
+        }
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
@@ -1991,7 +2015,7 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() {
+        if options.max_tokens.is_none() && !crate::models::pivo::matches_model(&options.model) {
             options.max_tokens = Some(128);
         }
     }
@@ -2054,7 +2078,7 @@ pub fn run_server() {
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::AudioEnhancement(_) => "audio-enhancement",
-        Backend::Tts(_) => "tts",
+        Backend::Tts(_) | Backend::Pivo(_) => "tts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
@@ -2101,6 +2125,7 @@ pub fn run_server() {
             "/v1/audio/enhancements",
             post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
+        Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),

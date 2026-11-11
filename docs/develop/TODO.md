@@ -740,6 +740,7 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 "Microsoft BitNet b1.58 I2_S extension; not upstream ggml"。`docs/usage/bitnet_embedding.md` 第一节
 "已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
 
+
 - [ ] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** —
       `src/app/cli/parse.rs` 的主循环统一解析所有 flag（`--gpu` 在第 389 行），
       但每个模式在解析之后另有一段手写白名单，声明该模式接受哪些 flag，并对带值
@@ -770,6 +771,13 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       这是**语义决策而非 bug**：把回落升级成错误，等于承诺严格档的每次投影都在设备上，
       而小投影留在 CPU 正是当前设计意图。
       详见 [TODO-066](#todo-066-严格-vulkan-抓不到投影静默回落-cpu)。
+
+- [ ] **PiVo 编码器的投影换用共享的 F32 分块 GEMM** — 手写的 `pivo_linear` 是
+      「一 lane 一输出列」的朴素版，边际成本 0.126 ms/token，比宿主的 0.071 ms/token
+      还贵 1.8×；共享层已有 `float_matmul_tiled`（分块 + 合并读 + FMA，三组权重
+      一次 dispatch），换过去**不需要新 shader**。**不要做块级融合**：融合只砍固定
+      开销、边际成本不变，仍慢于宿主，而 92% 的时间在声码器（上不了设备）。详见
+      [TODO-067](#todo-067-pivo-编码器的投影换用共享的-f32-分块-gemm不是融合)。
 
 ## Low Priority
 
@@ -4957,3 +4965,79 @@ llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，
 **关联**：`src/ops/kernel/vulkan.rs`（`try_matmul`、
 `min_gpu_matmul_outputs`）、`src/compute/mod.rs`（`context`）、
 `src/models/vela3/mod.rs`（严格档事后检查）。
+
+---
+
+### TODO-067: PiVo 编码器的投影换用共享的 F32 分块 GEMM（不是融合）
+
+**状态**：📌 待办，未开工。设备路径已经接线且数值等价（帧数与宿主完全相同，
+波形在 oracle 门限内），本条只处理它的性能，**不阻塞任何交付**。
+
+**问题**：`shaders/glsl/pivo_linear.comp` 是手写的朴素投影——每个 lane 负责一个
+输出列，权重按列跨步读，既不合并读也不分块。结果是**边际成本比宿主还贵**：
+
+| 量 | 设备 | 宿主 |
+| --- | --- | --- |
+| 编码器边际成本 | 0.126 ms/token | 0.071 ms/token |
+| 编码器固定开销（≈70 次 dispatch × ≈50 µs） | ≈3.7 ms | — |
+| 编码器，34 token | 8.01 ms | 2.63 ms |
+| 编码器，100 token | 14.54 ms | 8.54 ms |
+| 编码器，200 token | 17.10 ms | 14.37 ms |
+| 端到端 HTTP 请求，短（21 token） | 78.3 ms | 75.8 ms |
+| 端到端 HTTP 请求，长（≈130 token） | 630.7 ms | 561.7 ms |
+
+（Intel Core Ultra 5 125H + Intel(R) Graphics (MTL) 核显，`release-fast`，
+HTTP 请求中位数。）
+
+**做法**：直接复用共享层已有的 F32 分块路径，**不写新 shader**：
+
+- `src/vulkan/ops.rs` 的 `record_transposed_float_matmul_rows` 走
+  `shaders/glsl/float_matmul_tiled.comp`（64 lane、32 token 暂存、权重 vec4
+  合并读、FMA），小形状走 `float_matmul_small`。
+- **权重布局**：该 kernel 按 `[in][out]` 取权重，PiVo 的 GGUF 是 `[out][in]` →
+  用 `src/vulkan/dense.rs` 已有的 `upload_f32_transposed` /
+  `transpose_f32_weights` 在加载时转置一次（编码器权重约 1.6 MB，一次性）。
+- **权重来源**：该 kernel 从 binding（w0/w1/w2）读权重，不走 arena → PiVo 运行时
+  改成「权重常驻独立 buffer」，而不是现在的「常驻 arena」。
+- **一次 dispatch 三组权重**：q/k/v（以及 gate/up）合并成一次，kernel 支持 3 个
+  slot，每个 attention block 因此少 2 次 dispatch。
+- **激活值布局**：输入 `[token][in]`、输出 `[token][out]` 行主序 = PiVo 原生布局，
+  不需要转置。
+- **没有 bias**：PiVo 编码器的 43 个张量里没有 bias，与该 kernel 一致（它不支持
+  bias）。
+- `n_in % 2 == 0` 的要求对 PiVo 成立（96 / 192 / 24）。
+
+**不要做的**：**不要做块级融合**（把整个 attention block 融成一个 shader）。
+收益分析：融合只砍固定开销（≈70 → ≈7 次 dispatch，省 ≈3.3 ms），边际成本不变，
+融合后 34 token 约 4.7 ms、200 token 约 25 ms，**仍慢于宿主**。而融合会让三件事
+变复杂：barrier 纪律（barrier 前不得有 lane 相关退出——本条实现时已经踩过一次
+死锁）、寄存器与共享内存压力（分数暂存 512 float + Kahan 归约 128 float）、
+以及校验结构（要从算子级改成块级）。仓库里融合真正划算的先例是 Z-Image 的 VAE
+（1477 次提交 → 39 次，GPU 时间 −56%），PiVo 的 ≈70 次不在那个量级；而且 92% 的
+时间在声码器（FARGAN 严格顺序递归，上不了设备），编码器最多占 3–12%，融合最多
+换来 2–8%。
+
+**校验要求**：
+
+1. **帧数必须与宿主完全相同**（否则音频长度会变）。现在的余量：编码器相对误差
+   4.61e-7、对数时长误差 4.77e-7，最短 oracle 用例的帧数舍入余量是 0.0024 帧
+   （约 650× 余量）。
+2. `src/vulkan/ops.rs` 里现有的算子级测试要覆盖新核（对 PiVo 的形状做宿主参照）；
+   `src/models/pivo/tests.rs` 的帧数对比继续作为端到端门禁。
+3. 若换核后 `pivo_linear.comp` 退役，先把它降级为**设备侧参照实现**，用「新核 ==
+   旧核，逐位相同」验收，而不是只对宿主。
+
+**待办**：
+
+1. 换核后实测编码器的边际成本与 dispatch 次数，再决定要不要块级融合。
+2. 权重常驻位置从 arena 改到独立 buffer 后，`PivoRuntime` 的权重指纹、容量核算
+   与 `upload_weight` 要跟着改。
+3. 在 AVX2 与标量主机、以及独显上各验收一次（本机只有核显）。
+4. 若将来 PiVo 支持批量合成，固定开销与边际成本会被摊薄，届时 GPU 才可能真正
+   赢过宿主——比融合更值得等。
+
+**关联**：`shaders/glsl/float_matmul_tiled.comp`、`shaders/glsl/float_matmul_small.comp`、
+`src/vulkan/ops.rs`（`record_transposed_float_matmul_rows`、`FLOAT_MATMUL_TILED`、
+`PivoRuntime::linear`）、`src/vulkan/dense.rs`（`upload_f32_transposed`、
+`transpose_f32_weights`）、`src/models/pivo/gpu.rs`、`shaders/glsl/pivo_linear.comp`、
+[PiVo validation](../../tools/oracle/pivo/validation.md)。

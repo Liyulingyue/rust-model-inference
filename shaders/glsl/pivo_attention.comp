@@ -1,0 +1,104 @@
+#version 450
+
+// Grouped-query attention for the PiVo acoustic network.
+//
+// `out[t][h][d] = sum_s softmax_s(q[t][h] . k[s][h / 2]) * v[s][h / 2][d]`
+//
+// PiVo's heads are 24 wide, four query heads share two key/value heads, and
+// the encoder attends over the whole utterance while the decoder attends over
+// a 64 frame causal window. One workgroup handles one (row, head) pair.
+//
+// The softmax follows the host kernel: the maximum is subtracted, the
+// exponentials are F32, the sum accumulates in F64 and the normalisation
+// multiplies in F32.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint q_word; uint k_word; uint v_word; uint out_word;
+    uint rows; uint q_heads; uint kv_heads; uint head_dim;
+    uint window; uint causal; uint q_stride; uint kv_stride; uint out_stride;
+    float scale;
+} pc;
+
+const uint MAX_WINDOW = 512u;
+
+shared float scores[MAX_WINDOW];
+shared float reduction[64];
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    uint row = gl_WorkGroupID.y;
+    uint lane = gl_LocalInvocationID.x;
+    if (head >= pc.q_heads || row >= pc.rows) return;
+
+    uint kv_head = head / (pc.q_heads / pc.kv_heads);
+    uint start = 0u;
+    uint end = pc.rows;
+    if (pc.causal != 0u) {
+        start = row > pc.window - 1u ? row - (pc.window - 1u) : 0u;
+        end = row + 1u;
+    }
+    uint count = end - start;
+    if (count > MAX_WINDOW) count = MAX_WINDOW;
+
+    uint q_base = pc.q_word + row * pc.q_stride + head * pc.head_dim;
+    uint kv_base = kv_head * pc.head_dim;
+
+    for (uint s = lane; s < count; s += 64u) {
+        uint k_base = pc.k_word + (start + s) * pc.kv_stride + kv_base;
+        float dot = 0.0;
+        for (uint d = 0u; d < pc.head_dim; d++) {
+            dot += uintBitsToFloat(arena.data[q_base + d])
+                * uintBitsToFloat(arena.data[k_base + d]);
+        }
+        scores[s] = dot / pc.scale;
+    }
+    barrier();
+
+    float local_max = -3.402823466e+38;
+    for (uint s = lane; s < count; s += 64u) {
+        local_max = max(local_max, scores[s]);
+    }
+    reduction[lane] = local_max;
+    barrier();
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) {
+            reduction[lane] = max(reduction[lane], reduction[lane + step]);
+        }
+        barrier();
+    }
+    float maximum = reduction[0];
+    barrier();
+
+    double local_sum = 0.0;
+    for (uint s = lane; s < count; s += 64u) {
+        float value = exp(scores[s] - maximum);
+        scores[s] = value;
+        local_sum += double(value);
+    }
+    reduction[lane] = float(local_sum);
+    barrier();
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) {
+            reduction[lane] += reduction[lane + step];
+        }
+        barrier();
+    }
+    float total = reduction[0];
+    float normalisation = 1.0 / total;
+    barrier();
+
+    for (uint d = lane; d < pc.head_dim; d += 64u) {
+        float sum = 0.0;
+        for (uint s = 0u; s < count; s++) {
+            sum += scores[s]
+                * uintBitsToFloat(
+                    arena.data[pc.v_word + (start + s) * pc.kv_stride + kv_base + d]);
+        }
+        arena.data[pc.out_word + row * pc.out_stride + head * pc.head_dim + d] =
+            floatBitsToUint(sum * normalisation);
+    }
+}
