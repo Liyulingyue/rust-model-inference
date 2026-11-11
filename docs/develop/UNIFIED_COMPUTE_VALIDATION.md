@@ -10,6 +10,35 @@
 当成所有 GPU 数值与模型均已通过。历史 AMD Qwen3 Q8 的确定性长输入曾通过自动分发，
 本次新的 Q8 kernel 仅在本机复验，不代表 AMD、其他驱动或 Z-Image 全链路已经通过。
 
+## Vulkan 上的图像门禁改为能力判定（2026-11-10）
+
+**改动**：`src/app/text/runtime.rs` 的图像门禁从"完整设备路径架构一律拒绝"改为
+"`ComputePolicy::supports_vision(arch)` 才放行"（`src/compute/mod.rs`）。有视觉路径的
+架构（qwen3/qwen3vl/qwen2vl/qwen3vlmoe/mage_vl/qwen35/qwen35moe/edge0/sensenova_loop）
+在 `--compute vulkan` 下现在可以带 `--mmproj`/`--image`；没有视觉路径的架构仍然拒绝，
+报错从 "full Vulkan runtime supports text input only" 改成
+"<arch> has no vision path; --mmproj/--image are not supported"。
+
+**动机**：旧规则按设备路径拒绝图像，但它保护不了新东西 —— 设备 Q8_0 kernel 与 CPU 本来
+就不逐位一致（TODO-046），而这套漂移在这些架构的纯文本路径上已经被接受。实测也确认
+图像路径的差异与文本路径同源（见下），所以"拒绝图像"只是把一个已存在的漂移藏起来。
+
+**实测**（2026-11-10，本机 Linux x86_64 + NVIDIA L20，`release-fast --features vulkan`，
+8 线程，F16 KV）：
+
+| 请求 | CPU | Vulkan | 说明 |
+|---|---|---|---|
+| Qwen3.5-0.8B Q8_0 + Qwen3.5-0.8B-mmproj-F16 + 448×448 图，8 tokens | 这张图片展示了一个简洁的几何图形 | 这张图片展示了一个简约的图形设计 | 都能出连贯描述；前缀 8 token 内 1–2 个词不同 |
+| 同上，视觉 embedding 前 5 值 | `-1.6644864, 0.0800025, 0.13018638, 0.3386622, 0.32162872` | 完全相同 | 视觉塔两档都在 CPU，逐位一致 |
+| 纯文本（无图），12 tokens | 你好！我是一名由**阿里巴巴集团旗下的通义实验室 | 你好！我是 Qwen3.5，由阿里巴巴集团 | **分歧与图像无关**：同一模型纯文本在 CPU/设备就不同 |
+
+结论：图像路径在 Vulkan 上可用，其数值差异与同模型纯文本路径的差异同量级（量化 kernel
+漂移），不是图像注入独有的问题。设备侧算子级 parity 检查（attention 归约、量化tie）
+在设备上全部通过。
+
+**未覆盖**：其它权重格式（BF16/F32）在 Vulkan 上的图像路径未测；其它有视觉路径的架构
+（qwen3vl/mage_vl/edge0/sensenova_loop）在本机没有可用权重，只有上游/本分支既有的证据。
+
 ## Q8 单 token 内核优化（2026-10-12，合并 main 后）
 
 本轮继续处理 GPU 单 token decode 热点。A/B 基线为已合并 main 的

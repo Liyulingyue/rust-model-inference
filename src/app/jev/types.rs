@@ -1,3 +1,4 @@
+#[derive(serde::Deserialize)]
 pub struct JevQuestionInput {
     pub text: String,
     pub options: Vec<String>,
@@ -55,13 +56,13 @@ pub struct JevGroupedOption {
     pub description: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct JevGroupInput {
     pub label: String,
     pub options: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct JevGroupedQuestionInput {
     pub text: String,
     pub groups: Vec<JevGroupInput>,

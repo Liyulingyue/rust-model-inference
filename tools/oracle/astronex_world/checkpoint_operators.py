@@ -18,7 +18,7 @@ from trace_official import CONTRACT_COMMIT, REPO, _guard_reference
 
 def tensor(root, name, rows=None):
     index = root / "model.safetensors.index.json"
-    file = root / json.loads(index.read_text())["weight_map"][name] if index.exists() else root / "diffusion_pytorch_model.safetensors"
+    file = root / json.loads(index.read_text(encoding="utf-8"))["weight_map"][name] if index.exists() else root / "diffusion_pytorch_model.safetensors"
     with file.open("rb") as stream:
         size = struct.unpack("<Q", stream.read(8))[0]
         header = json.loads(stream.read(size))[name]

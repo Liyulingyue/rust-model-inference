@@ -370,6 +370,41 @@ pub struct VisionEncoder<'a> {
     pub mm_2_bias: Option<&'a [u8]>,
     pub precomputed: Option<VisionPrecomputed>,
     preserve_f32: bool,
+    /// The device-side ViT attention, built on first use. `None` until then
+    /// and after a device failure, in which case the CPU path runs.
+    #[cfg(feature = "vulkan")]
+    device: std::cell::RefCell<Option<DeviceAttention>>,
+}
+
+/// The device-side attention for the ViT layers.
+///
+/// The vision tower attends over every patch in both directions, so the
+/// runtime is driven with `causal: false` and the usual `1/sqrt(head_dim)`
+/// scale. The device wants the `[tokens, heads, head_dim]` layout while the
+/// ViT keeps `[heads, tokens, head_dim]`, so the caller repacks both ways.
+#[cfg(feature = "vulkan")]
+struct DeviceAttention {
+    runtime: crate::vulkan::ops::AttentionRuntime,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl DeviceAttention {
+    fn new(tokens: usize, heads: usize, head_dim: usize) -> Option<Self> {
+        let context = crate::ops::get_vulkan_context()?;
+        let width = heads * head_dim;
+        let runtime =
+            crate::vulkan::ops::AttentionRuntime::new(context, (tokens * width, tokens * width))
+                .ok()?;
+        Some(Self {
+            runtime,
+            tokens,
+            heads,
+            head_dim,
+        })
+    }
 }
 
 pub struct VisionPrecomputed {
@@ -620,6 +655,8 @@ impl<'a> VisionEncoder<'a> {
             precomputed: None,
             preserve_f32: source.metadata("wevisone_vl.source_revision").is_some(),
             pool,
+            #[cfg(feature = "vulkan")]
+            device: std::cell::RefCell::new(None),
         })
     }
 
@@ -1160,6 +1197,91 @@ impl<'a> VisionEncoder<'a> {
         }
     }
 
+    /// Run the ViT attention on the device. `false` means the caller should
+    /// use the CPU path.
+    ///
+    /// The ViT attends over every patch in both directions, so the runtime
+    /// is driven with `causal: false`.
+    #[cfg(feature = "vulkan")]
+    fn device_attention(
+        &self,
+        attn_buf: &[f32],
+        out_buf: &mut [f32],
+        packed_qkv: &mut [f32],
+        packed_out: &mut [f32],
+        n_tokens: usize,
+        n_head: usize,
+        d_head: usize,
+        scale: f32,
+    ) -> bool {
+        if n_tokens == 0 || n_head == 0 || d_head == 0 {
+            return false;
+        }
+        // The cached runtime must not outlive the policy that created it: a
+        // CPU scope has to stay on the CPU even though the arena is warm.
+        if !crate::ops::gpu_requested()
+            || crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu
+        {
+            return false;
+        }
+        let width = n_head * d_head;
+        let mut cell = self.device.borrow_mut();
+        let stale = cell.as_ref().is_none_or(|device| {
+            device.tokens != n_tokens || device.heads != n_head || device.head_dim != d_head
+        });
+        if stale {
+            *cell = DeviceAttention::new(n_tokens, n_head, d_head);
+        }
+        let Some(device) = cell.as_mut() else {
+            return false;
+        };
+        // The ViT keeps [head, token, dim]; the device wants [token, head, dim].
+        for part in 0..3usize {
+            let head_base = part * n_head * n_tokens * d_head;
+            let part_base = part * n_tokens * width;
+            for head in 0..n_head {
+                let source_base = head_base + head * n_tokens * d_head;
+                for token in 0..n_tokens {
+                    let dst = part_base + token * width + head * d_head;
+                    let src = source_base + token * d_head;
+                    packed_qkv[dst..dst + d_head].copy_from_slice(&attn_buf[src..src + d_head]);
+                }
+            }
+        }
+        let spec = crate::ops::nn::AttentionSpec {
+            query_tokens: n_tokens,
+            key_tokens: n_tokens,
+            query_heads: n_head,
+            key_value_heads: n_head,
+            head_dim: d_head,
+            causal: false,
+            scale,
+        };
+        let plane = n_tokens * width;
+        if device
+            .runtime
+            .forward(
+                &packed_qkv[..plane],
+                &packed_qkv[plane..2 * plane],
+                &packed_qkv[2 * plane..3 * plane],
+                packed_out,
+                spec,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        // Back to [head, token, dim].
+        for head in 0..n_head {
+            for token in 0..n_tokens {
+                let src = token * width + head * d_head;
+                let dst = head * n_tokens * d_head + token * d_head;
+                out_buf[dst..dst + d_head].copy_from_slice(&packed_out[src..src + d_head]);
+            }
+        }
+        true
+    }
+
     fn forward_vit_layer(
         &self,
         il: usize,
@@ -1340,74 +1462,93 @@ impl<'a> VisionEncoder<'a> {
         let scale = 1.0 / (d_head as f32).sqrt();
         let attn_buf = &scratch.attn_buf[..3 * n_head * n_tokens * d_head];
 
-        let scores = scratch.score_buf.as_mut_ptr();
-        let out_buf = scratch.attn_out_buf.as_mut_ptr();
+        // The attention is the whole cost of a ViT layer (the projections
+        // together are a few percent), so it runs on the device.
+        #[cfg(feature = "vulkan")]
+        let device_used = {
+            let out = &mut scratch.attn_out_buf[..n_head * n_tokens * d_head];
+            let packed = &mut scratch.device_qkv[..];
+            let packed_out = &mut scratch.device_out[..];
+            self.device_attention(
+                attn_buf, out, packed, packed_out, n_tokens, n_head, d_head, scale,
+            )
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let device_used = false;
 
-        struct PtrWrap(*mut f32);
-        unsafe impl Sync for PtrWrap {}
-        unsafe impl Send for PtrWrap {}
-        impl PtrWrap {
-            unsafe fn slice(&self, offset: usize, len: usize) -> &mut [f32] {
-                std::slice::from_raw_parts_mut(self.0.add(offset), len)
+        if !device_used {
+            let scores = scratch.score_buf.as_mut_ptr();
+            let out_buf = scratch.attn_out_buf.as_mut_ptr();
+
+            struct PtrWrap(*mut f32);
+            unsafe impl Sync for PtrWrap {}
+            unsafe impl Send for PtrWrap {}
+            impl PtrWrap {
+                unsafe fn slice(&self, offset: usize, len: usize) -> &mut [f32] {
+                    std::slice::from_raw_parts_mut(self.0.add(offset), len)
+                }
             }
-        }
 
-        let sw = PtrWrap(scores);
-        let ow = PtrWrap(out_buf);
-        let ggml_f16 = self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16);
+            let sw = PtrWrap(scores);
+            let ow = PtrWrap(out_buf);
+            let ggml_f16 = self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16);
 
-        // Head-partitioned attention: each `h` writes a disjoint score row
-        // band and a disjoint output band, so the same partition is exact
-        // under ComputePool as it was under rayon's into_par_iter.
-        // Replaces `(0..n_head).into_par_iter().for_each(...)` so the ViT
-        // no longer depends on rayon's lazily-built global pool (which the
-        // server never sizes — see src/core/thread_pool.rs).
-        let pool = self.pool.clone();
-        pool.compute(move |ith, nth| {
-            let per_worker = n_head.div_ceil(nth);
-            let h_start = (ith * per_worker).min(n_head);
-            let h_end = (h_start + per_worker).min(n_head);
-            for h in h_start..h_end {
-                let q_base = h * n_tokens * d_head;
-                let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
-                let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
-                let score_off = h * n_tokens * n_tokens;
-                unsafe {
-                    let score_slice = sw.slice(score_off, n_tokens * n_tokens);
-                    let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
-                    for t in 0..n_tokens {
-                        let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
-                        for s in 0..n_tokens {
-                            let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
-                            let sum = if ggml_f16 {
-                                crate::ops::dot_f32(
-                                    std::slice::from_raw_parts(q_ptr, d_head),
-                                    std::slice::from_raw_parts(k_ptr, d_head),
-                                    d_head,
-                                )
-                            } else {
-                                (0..d_head)
-                                    .map(|i| *q_ptr.add(i) * *k_ptr.add(i))
-                                    .sum::<f32>()
-                            };
-                            score_slice[t * n_tokens + s] = sum * scale;
-                        }
-                        softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
+            // Head-partitioned attention: each `h` writes a disjoint score row
+            // band and a disjoint output band, so the same partition is exact
+            // under ComputePool as it was under rayon's into_par_iter.
+            // Replaces `(0..n_head).into_par_iter().for_each(...)` so the ViT
+            // no longer depends on rayon's lazily-built global pool (which the
+            // server never sizes — see src/core/thread_pool.rs).
+            let pool = self.pool.clone();
+            pool.compute(move |ith, nth| {
+                let per_worker = n_head.div_ceil(nth);
+                let h_start = (ith * per_worker).min(n_head);
+                let h_end = (h_start + per_worker).min(n_head);
+                for h in h_start..h_end {
+                    let q_base = h * n_tokens * d_head;
+                    let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
+                    let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
+                    let score_off = h * n_tokens * n_tokens;
+                    unsafe {
+                        let score_slice = sw.slice(score_off, n_tokens * n_tokens);
+                        let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
+                        for t in 0..n_tokens {
+                            let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
+                            for s in 0..n_tokens {
+                                let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
+                                let sum = if ggml_f16 {
+                                    crate::ops::dot_f32(
+                                        std::slice::from_raw_parts(q_ptr, d_head),
+                                        std::slice::from_raw_parts(k_ptr, d_head),
+                                        d_head,
+                                    )
+                                } else {
+                                    (0..d_head)
+                                        .map(|i| *q_ptr.add(i) * *k_ptr.add(i))
+                                        .sum::<f32>()
+                                };
+                                score_slice[t * n_tokens + s] = sum * scale;
+                            }
+                            softmax_inplace(
+                                &mut score_slice[t * n_tokens..t * n_tokens + n_tokens],
+                            );
 
-                        for d in 0..d_head {
-                            let products = (0..n_tokens).map(|s| {
-                                score_slice[t * n_tokens + s] * attn_buf[v_base + s * d_head + d]
-                            });
-                            out_slice[t * d_head + d] = if ggml_f16 {
-                                products.map(f64::from).sum::<f64>() as f32
-                            } else {
-                                products.sum::<f32>()
-                            };
+                            for d in 0..d_head {
+                                let products = (0..n_tokens).map(|s| {
+                                    score_slice[t * n_tokens + s]
+                                        * attn_buf[v_base + s * d_head + d]
+                                });
+                                out_slice[t * d_head + d] = if ggml_f16 {
+                                    products.map(f64::from).sum::<f64>() as f32
+                                } else {
+                                    products.sum::<f32>()
+                                };
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
         t_attn = t_attn_start.elapsed().as_secs_f64();
 
         let t_attn_out_start = std::time::Instant::now();
@@ -2019,6 +2160,11 @@ pub struct VisionScratchpad {
     pub pos_embd_buf: Vec<f32>,
     pub qkv_buf: Vec<f32>,
     pub attn_buf: Vec<f32>,
+    /// The device attention's [tokens, heads, head_dim] staging buffers.
+    #[cfg(feature = "vulkan")]
+    device_qkv: Vec<f32>,
+    #[cfg(feature = "vulkan")]
+    device_out: Vec<f32>,
     pub attn_out_buf: Vec<f32>,
     pub score_buf: Vec<f32>,
     pub proj_buf: Vec<f32>,
@@ -2045,6 +2191,10 @@ impl VisionScratchpad {
             pos_embd_buf: Vec::new(),
             qkv_buf: Vec::new(),
             attn_buf: Vec::new(),
+            #[cfg(feature = "vulkan")]
+            device_qkv: Vec::new(),
+            #[cfg(feature = "vulkan")]
+            device_out: Vec::new(),
             attn_out_buf: Vec::new(),
             score_buf: Vec::new(),
             proj_buf: Vec::new(),
@@ -2091,6 +2241,11 @@ impl VisionScratchpad {
         self.residual.resize(n_tokens * n_embd, 0.0);
         self.qkv_buf.resize(n_tokens * n_embd * 3, 0.0);
         self.attn_buf.resize(3 * n_head * n_tokens * d_head, 0.0);
+        #[cfg(feature = "vulkan")]
+        {
+            self.device_qkv.resize(3 * n_tokens * n_head * d_head, 0.0);
+            self.device_out.resize(n_tokens * n_head * d_head, 0.0);
+        }
         self.attn_out_buf.resize(n_head * n_tokens * d_head, 0.0);
         self.score_buf.resize(n_head * n_tokens * n_tokens, 0.0);
         self.proj_buf.resize(n_tokens * n_embd, 0.0);

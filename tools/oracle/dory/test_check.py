@@ -47,12 +47,12 @@ class TraceChecks(unittest.TestCase):
         rust.write_text("")
         self.assertFalse(check.compare(oracle, rust)["passed"])
         rust = self.manifest("rust")
-        oracle_rows, rust_rows = oracle.read_text().splitlines(), rust.read_text().splitlines()
+        oracle_rows, rust_rows = oracle.read_text(encoding="utf-8").splitlines(), rust.read_text(encoding="utf-8").splitlines()
         oracle.write_text("\n".join(oracle_rows[:-1]))
         rust.write_text("\n".join(rust_rows[:-1]))
         self.assertFalse(check.compare(oracle, rust)["passed"])
         oracle, rust = self.manifest("oracle"), self.manifest("rust")
-        rust.write_text(rust.read_text() + "\n" + rust.read_text().splitlines()[-1])
+        rust.write_text(rust.read_text(encoding="utf-8") + "\n" + rust.read_text(encoding="utf-8").splitlines()[-1])
         with self.assertRaisesRegex(ValueError, "duplicate"):
             check.compare(oracle, rust)
 
@@ -69,7 +69,7 @@ class TraceChecks(unittest.TestCase):
         paths = []
         for side in ("oracle", "rust"):
             path = self.manifest(side)
-            old = list(map(json.loads, path.read_text().splitlines()))
+            old = list(map(json.loads, path.read_text(encoding="utf-8").splitlines()))
             records = [dict(name="prompt_ids", token_ids=[1, 2]),
                        dict(name="generated_ids", token_ids=[]),
                        dict(name="prefill_batches", token_ids=[2])]
@@ -79,7 +79,7 @@ class TraceChecks(unittest.TestCase):
             path.write_text("\n".join(map(json.dumps, records)))
             paths.append(path)
         self.assertTrue(check.compare(*paths)["passed"])
-        rows = paths[1].read_text().splitlines()
+        rows = paths[1].read_text(encoding="utf-8").splitlines()
         paths[1].write_text("\n".join(rows[:5] + rows[6:]))
         self.assertFalse(check.compare(*paths)["passed"])
 

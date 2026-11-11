@@ -105,6 +105,28 @@ pub fn embedding_lookup_q4_0(weight: &[u8], token_id: u32, n_embd: usize, out: &
     }
 }
 
+/// Q4_1 embedding row lookup.
+///
+/// The Q4_1 kernel dequantizes a nibble `q` as `d * q + m` with `q` read as
+/// an unsigned 0..15 value, so the row carries its minimum in the `m` field
+/// instead of folding it into the scale.
+pub fn embedding_lookup_q4_1(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let blocks_per_row = n_embd / 32;
+    let row_off = token_id as usize * blocks_per_row * 20;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * 20;
+        let d = super::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+        let m = super::f16_to_f32(u16::from_le_bytes([weight[off + 2], weight[off + 3]]));
+        for j in 0..16usize {
+            let q = weight[off + 4 + j];
+            let q0 = (q & 0x0F) as f32 * d + m;
+            let q1 = (q >> 4) as f32 * d + m;
+            out[b * 32 + j] = q0;
+            out[b * 32 + j + 16] = q1;
+        }
+    }
+}
+
 pub fn embedding_lookup_q4_k(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
     let row_bytes = n_embd / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
     let row_start = token_id as usize * row_bytes;

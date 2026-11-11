@@ -108,6 +108,26 @@ impl ComputePolicy {
         )
     }
 
+    /// Architectures whose text runtime implements the vision path.
+    ///
+    /// These are the only archs that can take `--mmproj`/`--image` at all.
+    /// The other text runtimes have no image branch, so they would answer a
+    /// text-only prompt and drop the media; the request is rejected instead.
+    pub fn supports_vision(arch: &str) -> bool {
+        matches!(
+            arch,
+            "qwen3"
+                | "qwen3vl"
+                | "qwen2vl"
+                | "qwen3vlmoe"
+                | "mage_vl"
+                | "qwen35"
+                | "qwen35moe"
+                | "edge0"
+                | "sensenova_loop"
+        )
+    }
+
     pub fn validate_text_arch(self, arch: &str) -> Result<(), String> {
         if self == Self::Vulkan && !Self::has_complete_device_path(arch) {
             // One line per process: the arch is checked at more than one
@@ -247,7 +267,7 @@ mod tests {
             assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
         }
         assert_eq!(ComputePolicy::legacy(), original);
-        for arch in ["gemma4", "edge0", "qwen3vl", "auk", "unknown"] {
+        for arch in ["gemma4", "edge0", "qwen3vl", "mage_vl", "auk", "unknown"] {
             // `--compute vulkan` asks for a real device, not for a
             // particular device path, so an architecture without a
             // complete one is allowed and reported instead.
