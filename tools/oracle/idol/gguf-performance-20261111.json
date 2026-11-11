@@ -19,7 +19,17 @@
     "output_bytes": 2228639,
     "output_sha256": "68f715eb0bc38a4882d03a6f06918e64141ba663c3e2b3109cf249f7cb320220"
   },
-  "oracle": {"checkpoints": 144, "cpu_passed": 144, "cpu_elapsed_seconds": 31.50},
+  "oracle": {
+    "checkpoints": 144,
+    "cpu_passed": 144,
+    "cpu_elapsed_seconds": 31.50,
+    "q8_0": {
+      "bytes": 2245184832,
+      "sha256": "eb72ed5dc4fbbcb4a5d5063ec9b78320bc56ccd2644cb839ec195ccc0ede6598",
+      "cpu_passed": 144,
+      "cpu_elapsed_seconds": 18.96
+    }
+  },
   "gpu_oracle": {
     "auto_submissions": 1273,
     "vulkan_submissions": 1273,
