@@ -2962,10 +2962,185 @@
       "result": "target/sophon/thinker-fullprefix-33367/bf16-oracle-f32/result.json",
       "rust_trace": "target/sophon/thinker-precisions-33367/bf16-rust.jsonl",
       "rust_cli_adoption": "target/sophon/thinker-precisions-33367/bf16-rust-adoption.json"
+    },
+    {
+      "precision": "Q4_K",
+      "activation": "f32",
+      "reference_execution": "full-prefix",
+      "strict_pass": false,
+      "numerical_pass": false,
+      "greedy_pass": true,
+      "numerical_failures": 7,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": 1,
+      "first_greedy_failure_step": null,
+      "max_relative_rmse": 0.1109426146917798,
+      "max_abs": 1.3261288404464722,
+      "minimum_cosine": 0.9964535648902527,
+      "minimum_greedy_margin": 0.46527671813964844,
+      "gguf_sha256": "0f297f963c998e4a283973d5f6c167cfa0859dfeb291c7050ffac1ed74ffbd35",
+      "gguf_file_type": 15,
+      "actual_tensor_types": {
+        "F32": 257,
+        "Q4_K": 450
+      },
+      "prompt_ids": [
+        151644,
+        872,
+        198,
+        108386,
+        37945,
+        98237,
+        99534,
+        100157,
+        99283,
+        1773,
+        151645,
+        198,
+        151644,
+        77091,
+        198
+      ],
+      "reference_greedy_ids": [
+        108386,
+        3837,
+        104198,
+        99473,
+        44729,
+        3837,
+        15469,
+        111895
+      ],
+      "records": [
+        {
+          "step": 0,
+          "greedy_id": 108386,
+          "greedy_margin": 1.3510513305664062,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.792789876461029,
+            "rmse": 0.1344067222397644,
+            "relative_rmse": 0.02030726070961167,
+            "cosine": 0.9997939202649736
+          },
+          "rust_greedy_id": 108386,
+          "numerical_gate_pass": true,
+          "greedy_match": true
+        },
+        {
+          "step": 1,
+          "greedy_id": 3837,
+          "greedy_margin": 2.563945770263672,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 1.3261288404464722,
+            "rmse": 0.45301600794272917,
+            "relative_rmse": 0.1109426146917798,
+            "cosine": 0.9964535648902527
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 2,
+          "greedy_id": 104198,
+          "greedy_margin": 0.46527671813964844,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.9878983497619629,
+            "rmse": 0.2725977751072392,
+            "relative_rmse": 0.07749983083355476,
+            "cosine": 0.9975598852036193
+          },
+          "rust_greedy_id": 104198,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 3,
+          "greedy_id": 99473,
+          "greedy_margin": 2.015279769897461,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 1.1034317016601562,
+            "rmse": 0.16913112631516128,
+            "relative_rmse": 0.05320587418714826,
+            "cosine": 0.9987397335716036
+          },
+          "rust_greedy_id": 99473,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 4,
+          "greedy_id": 44729,
+          "greedy_margin": 7.067558288574219,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.792216420173645,
+            "rmse": 0.15668274136589264,
+            "relative_rmse": 0.04513370416468227,
+            "cosine": 0.99902885472004
+          },
+          "rust_greedy_id": 44729,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 5,
+          "greedy_id": 3837,
+          "greedy_margin": 4.502109527587891,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.8041412830352783,
+            "rmse": 0.16233088389538974,
+            "relative_rmse": 0.06080058059288634,
+            "cosine": 0.9981501798403803
+          },
+          "rust_greedy_id": 3837,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 6,
+          "greedy_id": 15469,
+          "greedy_margin": 0.7666110992431641,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.7088942527770996,
+            "rmse": 0.13765933307553072,
+            "relative_rmse": 0.051759168770862105,
+            "cosine": 0.9986603229210845
+          },
+          "rust_greedy_id": 15469,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        },
+        {
+          "step": 7,
+          "greedy_id": 111895,
+          "greedy_margin": 3.609487533569336,
+          "seconds": null,
+          "rust_metrics": {
+            "max_abs": 0.8404459953308105,
+            "rmse": 0.17285741242616814,
+            "relative_rmse": 0.05725206151282904,
+            "cosine": 0.9984140866516497
+          },
+          "rust_greedy_id": 111895,
+          "numerical_gate_pass": false,
+          "greedy_match": true
+        }
+      ],
+      "reference_forward_seconds": 355.26991385035217,
+      "result": "target/sophon/thinker-fullprefix-33367/q4_k-oracle-f32/result.json",
+      "rust_trace": "target/sophon/thinker-fullprefix-33367/q4_k-rust.jsonl",
+      "rust_cli_wall_seconds": 23.35903277248144
     }
   ],
   "pending": [
-    "Q4_K CPU and independent reference",
+    "Q4_K runtime-QDQ diagnostic; baseline numerical fails7/8 rows while greedy passes8/8",
     "F16 CPU and independent reference",
     "Q4_0 CPU and independent reference",
     "Q4_1 CPU and independent reference",
@@ -3013,7 +3188,7 @@
     "CPU precision passes do not imply GPU, multimodal or HTTP acceptance.",
     "No source weights, GGUFs or activation binaries are copied to the Mac."
   ],
-  "coordination": "Parent granted one Q4_K job window. Q4_K Rust completed exit0 with matching greedy IDs; one full-prefix/f32-activation Oracle baseline runs as PID302179. Orchestration manager282827 is paused, so Q4_K runtime and F16 cannot launch before parent releases the next window.",
+  "coordination": "Q4_K baseline naturally exited1 because original numerical gates failed; all8 greedy IDs match. Its anonymous scratch was released (process fd0). Manager282827 remains paused with Q4_K runtime/F16 not started; parent owns final entrypoint validation window.",
   "continuation_evidence_root": "target/sophon/thinker-fullprefix-33367",
   "full_prefix_validation": {
     "status": "tiny model and real F32 8-row calibration passed",
@@ -3430,26 +3605,7 @@
       "conclusion": "A uniform logit shift explains about50% of baseline step7 and85% of runtime step1 squared error, but runtime step7 retains centered relative RMSE0.03222268. Shifts do not explain all failures; original raw-logit gates remain failed."
     }
   },
-  "rust_execution_only": [
-    {
-      "precision": "Q4_K",
-      "exit_code": 0,
-      "wall_seconds": 23.35903277248144,
-      "greedy_ids": [
-        108386,
-        3837,
-        104198,
-        99473,
-        44729,
-        3837,
-        15469,
-        111895
-      ],
-      "matches_f32_ids": true,
-      "rust_trace": "target/sophon/thinker-fullprefix-33367/q4_k-rust.jsonl",
-      "numerical_reference": "running; no numerical acceptance claimed"
-    }
-  ],
+  "rust_execution_only": [],
   "scratch_lifetime": {
     "semantics": "One TemporaryFile per process; mappings share its single unlinked inode. The inode is reclaimed after the last mmap/fd disappears at process exit. No original weights, GGUFs or metrics are removed.",
     "source": [
@@ -3466,6 +3622,19 @@
       "completed_bf16_fd_count": 0,
       "artifact": "target/sophon/thinker-fullprefix-33367/scratch-live-lifetime.json"
     },
-    "q4k_exit_recovery": "pending natural completion observation"
+    "q4k_exit_recovery": {
+      "q4k_pid": 302179,
+      "state": "Z",
+      "fd_count": 0,
+      "filesystem_free_bytes": 1035594571776,
+      "manager_state": "T",
+      "time": 1794401689.7357833,
+      "exit_code": 1,
+      "linux_wait_status": 256,
+      "natural_completion": true,
+      "artifact": "target/sophon/thinker-fullprefix-33367/scratch-q4k-exit-lifetime.json",
+      "free_bytes_increase": 129285865472,
+      "limit": "Other concurrent builds also write files; free-space delta is not an isolated benchmark. The exited process has zero fd and its unlinked scratch inode is no longer retained."
+    }
   }
 }
