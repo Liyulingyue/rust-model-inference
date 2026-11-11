@@ -5041,3 +5041,82 @@ HTTP 请求中位数。）
 `PivoRuntime::linear`）、`src/vulkan/dense.rs`（`upload_f32_transposed`、
 `transpose_f32_weights`）、`src/models/pivo/gpu.rs`、`shaders/glsl/pivo_linear.comp`、
 [PiVo validation](../../tools/oracle/pivo/validation.md)。
+
+### TODO-069: MTP / DSpark 投机解码 —— 契约已查清，代码一行没写
+
+**状态**：⚠️ 调研完成（2026-11-11），未实现。
+
+**背景**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 是 2026-09-23 的设计稿。
+按上游 llama.cpp 的 pin `b96806d` 重新核对了一遍契约，并盘点了真实模型里
+到底哪些带这些头（unsloth 名下 354 个 `-GGUF` 仓库，逐个读 GGUF 头部）。
+
+**上游契约**（`common/speculative.cpp::common_speculative_types_from_gguf` 自动识别）：
+
+| 类型 | 识别条件 | draft 是什么 |
+|---|---|---|
+| `draft-mtp` | arch 不是 `dflash`，且有 `blk.{block_count-1}.nextn.eh_proj.weight` | 主模型里多出来的 MTP block |
+| `draft-dflash` | arch 是 `dflash`，且没有 `markov_w1.weight` | 独立的 DFlash 小模型 |
+| `draft-dspark` | arch 是 `dflash`，且有 `markov_w1.weight` | DFlash + Markov 头（+ 可选 Confidence 头） |
+| `draft-eagle3` | 独立的小 EAGLE3 模型 | |
+
+- **MTP 计算**（`src/models/deepseek4.cpp::graph_mtp`）：
+  `concat(RMSNorm(embed(next_token), nextn.enorm), RMSNorm(h_last, nextn.hnorm))`
+  → `eh_proj` → 一层普通 block → `shared_head_head(shared_head_norm(out))`。
+  张量：`blk.%d.nextn.{eh_proj,embed_tokens,enorm,hnorm,shared_head_head,shared_head_norm}`；
+  metadata：`<arch>.nextn_predict_layers`。
+- **DSpark 计算**（`src/models/dflash.cpp`）：DFlash 小模型读主模型若干层的
+  hidden state（`target_layers`），内部 conv + selector；**Markov 头**按「上一个
+  已提交的 token」给每个位置的 draft logits 加偏置
+  （`logits[i] = base[i] + markov_w2 @ markov_w1[prev(i)]`，链式），
+  **Confidence 头**预测每个位置的接受概率
+  （`sigmoid(conf_proj · [embd[i]; markov_w1[prev(i)]] + b)`）。
+- **sidecar 约定**：上游下载器认 draft repo 里的 `MTP/`、`dflash/`、`dspark/`、
+  `eagle3/` 子目录（`dspark` 优先于 `dflash`）。
+
+**真实模型**（unsloth 的发布就是按这个约定）：
+
+| 模型 | sidecar | arch / 备注 |
+|---|---|---|
+| Gemma-4 全系（E2B/E4B/12B/26B-A4B/31B，含 qat 变体） | `MTP/` 0.06–0.95 GB | `gemma4-assistant`，`nextn_predict_layers = 4`，形状不同（`nextn.pre_projection` / `post_projection`） |
+| Qwen3.8-27B | `MTP/` 1.37 GB (Q4_0) | `qwen35`，`nextn_predict_layers = 1` |
+| Qwen3.8-Flash-Next | `MTP/` 2.79–7.77 GB | `qwen4exp`，带 mHC 头（`nextn.hc_head_{up,down,norm}`） |
+| DeepSeek-V4-Flash-0731 / V4.1-Flash-1017 | `dspark/` 8.5–11.3 GB | `dflash`，3 个 DSV4 block，128 专家 top-3，`target_layers=[37,38,39]`，`block_size=5` |
+| Mistral-Large-4-1T-A52B | `dspark/` 4.21 GB | `dflash` |
+| MiniMax-M3.1-Flash | 根目录 `dspark-*.gguf` 2.09 GB | `dflash` |
+
+**本仓库现状**：
+
+- `xing4_0` **已经解析**了 MTP block 的六个张量（`nextn_eh_proj` /
+  `nextn_embed_tokens` / `nextn_enorm` / `nextn_hnorm` /
+  `nextn_shared_head_head` / `nextn_shared_head_norm`，与上游 `blk.N.nextn.*`
+  契约一致），但**没有任何 forward 用它们**。
+- `qwen35` 的 config 有 `n_nextn`，并且**把 MTP 层排除在 trunk 之外**
+  （`n_layer_impl = n_layer - n_nextn`）。**Qwen3.8-27B 的主 GGUF 自带
+  `qwen35.nextn_predict_layers = 1` 与 `blk.64.nextn.*`**，所以它的 MTP 头现在
+  是**被静默忽略**的。
+- verify 侧的前向**已经够了**：`ChunkedPrefill::prefill` + per-row kernel
+  能一次算 `P + K` 个位置；缺的是 `forward_chunk` 的返回值要保留**全部**
+  `P + K` 行 logits（现在只留最后一行），以及接受循环。
+- 接受测试的形状有现成样板：`run_jev_grouped_decision` 的 per-group softmax。
+
+**建议的第一步**：
+
+1. **先做 MTP，不做 DSpark。** MTP 只要主模型最后一层的 hidden state + 一层
+   block，不需要第二个模型、不需要新架构，`xing4_0` / `qwen35` 的权重已经在
+   仓库里了；DSpark 要整个第二模型 + Markov 链 + Confidence 头。
+2. **先量 verify 侧的收益。** 把 `forward_chunk` 扩成返回全部行，然后测
+   `P + K` 一次批量 prefill 相比 `K` 次单 token 到底省多少。收益小的话，
+   任何 draft 策略都回不了本 —— 这与设计稿里「先上 NGRAM 量基线」是同一条
+   推理。
+3. **hidden state 必须先可信。** draft 头吃的是主模型的最后一层 hidden
+   state，它继承主模型的误差；仓库现成的逐位对拍基础设施
+   （`RMI_PARITY_TRACE`、`tools/oracle/*`）正是用来查这件事的 —— 一个建在
+   未验证 hidden state 上的 draft 头，比没有 draft 头更糟。
+4. **首个目标选 Gemma-4**：本仓库已有 `gemma4` trunk，MTP sidecar 只有
+   0.06–0.95 GB，整个实验（头 + verify + 接受率测量）一个 gigabyte 就够。
+   但它的 MTP 形状（`pre_projection` / `post_projection`）与 DeepSeek 系不同，
+   设计通用 MTP 路径之前要先把上游 Gemma-4 的 draft 代码读一遍。
+
+**关联**：`docs/develop/SPECULATIVE_DECODING.md`、
+`src/models/xing4_0/trunk/weights.rs`、`src/models/qwen35/trunk/config.rs`、
+`src/core/prefill.rs`、`src/app/jev/grouped.rs`。
