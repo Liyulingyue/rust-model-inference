@@ -7440,11 +7440,7 @@ fn matmul_rows_push(
     let format = bindings.weight_format(outputs.len())?;
     format.with_mode(bindings.weight_mode).validate()?;
     let (block_elements, block_bytes, _) = format.layout();
-    if n_in == 0
-        || n_in % block_elements != 0
-        || input_stride < n_in
-        || (format == GpuWeightFormat::Q8_0 && n_in > 16_384)
-    {
+    if n_in == 0 || n_in % block_elements != 0 || input_stride < n_in {
         return Err(VulkanError::UnsupportedShape(
             "invalid Vulkan matmul input width/stride".into(),
         ));
@@ -11135,6 +11131,100 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a Vulkan device; compares wide Q8 matmul to the production CPU kernel"]
+    fn vulkan_q8_wide_dot_and_prepared_match_cpu() {
+        use super::{BatchedLinearLayout, BatchedLinearRuntime, GpuWeightFormat::Q8_0};
+        const WIDTH: usize = 25_600;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 33;
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weight = super::synthetic_q8_weight(WIDTH, OUTPUTS, 7);
+        let input: Vec<_> = (0..ROWS * WIDTH)
+            .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        let mut expected = vec![0.0; ROWS * OUTPUTS];
+        let mut q8 = vec![0; WIDTH];
+        let mut scales = vec![0.0; WIDTH / 32];
+        for (input, expected) in input
+            .chunks_exact(WIDTH)
+            .zip(expected.chunks_exact_mut(OUTPUTS))
+        {
+            crate::ops::quantize_q8_0_into(input, WIDTH, &mut q8, &mut scales);
+            crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                &weight, &q8, &scales, expected, WIDTH, 0, OUTPUTS,
+            );
+        }
+        // Exercise the prequantized dot recorder as well as the runtime's
+        // activation preparation. Q8_0 does not use the float-only Dot mode.
+        {
+            let layout = BatchedLinearLayout::new(1, WIDTH, OUTPUTS).unwrap();
+            let mut ops = super::Qwen3Ops::new_with_size(context, layout.size, 2).unwrap();
+            let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+            let bindings = ops.bind_weight_buffers(&[buffer], &[Q8_0]).unwrap();
+            crate::ops::quantize_q8_0_into(&input[..WIDTH], WIDTH, &mut q8, &mut scales);
+            let packed: Vec<_> = q8
+                .chunks_exact(4)
+                .map(|word| f32::from_ne_bytes(word.try_into().unwrap()))
+                .collect();
+            ops.write_f32(layout.q8, &packed).unwrap();
+            ops.write_f32(layout.scales, &scales).unwrap();
+            ops.write_f32(layout.output, &vec![f32::NAN; OUTPUTS])
+                .unwrap();
+            let before = context.submission_count();
+            let commands = super::TokenCommands::begin(context).unwrap();
+            ops.record_q8_matvec_group(
+                &commands,
+                bindings,
+                layout.q8,
+                layout.scales,
+                &[(layout.output, OUTPUTS)],
+                WIDTH,
+                None,
+            )
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(context.submission_count(), before + 1);
+            super::check_close(
+                "q8_wide_dot",
+                ops.read_f32(layout.output, OUTPUTS).unwrap(),
+                &expected[..OUTPUTS],
+                2e-4,
+                2e-5,
+            )
+            .unwrap();
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+        }
+        let mut runtime = BatchedLinearRuntime::new(context, ROWS, WIDTH, OUTPUTS, 2).unwrap();
+        // Include decode, small prefill and a partial second 32-token tile.
+        for rows in [1, 3, ROWS] {
+            let mut actual = vec![f32::NAN; rows * OUTPUTS];
+            let before = context.submission_count();
+            runtime
+                .matmul_rows(
+                    &weight,
+                    Q8_0,
+                    &input[..rows * WIDTH],
+                    rows,
+                    WIDTH,
+                    OUTPUTS,
+                    &mut actual,
+                )
+                .unwrap();
+            assert_eq!(context.submission_count(), before + 1);
+            // Allow FP32 reduction roundoff across 800 blocks, without
+            // changing the existing bitwise Q8 reduction tests.
+            super::check_close(
+                &format!("q8_wide_prepared_rows_{rows}"),
+                &actual,
+                &expected[..rows * OUTPUTS],
+                2e-4,
+                2e-5,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
     #[ignore = "requires a Vulkan device; checks ordinary GPU fallback for unavailable tiling"]
     fn vulkan_q8_tiled_falls_back_to_ordinary_gpu() {
         use super::*;
@@ -13078,6 +13168,38 @@ mod tests {
                 regions[0].offset = usize::MAX - 3;
                 assert!(prepare(&regions).is_err());
             }
+        }
+    }
+
+    #[test]
+    fn batched_matmul_accepts_wide_q8() {
+        use super::{BatchedLinearLayout, GpuWeightFormat::Q8_0};
+        const WIDTH: usize = 25_600;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 33;
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: u32::MAX,
+            max_compute_work_group_count: [65535; 3],
+            ..Default::default()
+        };
+        let layout = BatchedLinearLayout::new(ROWS, WIDTH, OUTPUTS).unwrap();
+        let weight_len = WIDTH / 32 * 34 * OUTPUTS;
+        for rows in [1, 3, ROWS] {
+            assert_eq!(
+                layout
+                    .validate(
+                        &limits,
+                        weight_len,
+                        Q8_0,
+                        rows * WIDTH,
+                        rows,
+                        WIDTH,
+                        OUTPUTS,
+                        rows * OUTPUTS,
+                    )
+                    .unwrap(),
+                rows * OUTPUTS,
+            );
         }
     }
 

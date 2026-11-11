@@ -306,9 +306,12 @@ pub(crate) fn encode_qwen3vl_image_dynamic(
         &mut scratch,
     )?;
 
-    let mut media = scratch.projected.clone();
-    let n_embd = encoder.config.n_embd;
-    let rows = if n_embd == 0 { 0 } else { media.len() / n_embd };
+    let media = scratch.projected.clone();
+    let width = encoder.config.projection_dim;
+    if width == 0 || media.len() % width != 0 {
+        return Err("Vision output is not aligned to its projected width".into());
+    }
+    let rows = media.len() / width;
     let deepstack_layers = encoder
         .config
         .has_deepstack_layers
@@ -332,13 +335,44 @@ pub(crate) fn encode_qwen3vl_image_dynamic(
     if rows == 0 {
         return Err("Vision encoder produced zero image tokens".into());
     }
-    media.truncate(rows * n_embd);
     let _ = n_threads_arg; // encode_pair is single-threaded; pool not needed
     Ok(Qwen3VlImage {
         media,
         deepstack_layers: deepstack_layers_out,
         grid_shapes: vec![(grid.grid_h, grid.grid_w)],
     })
+}
+
+#[cfg(test)]
+mod qwen3vl_image_tests {
+    #[test]
+    #[ignore = "requires the remote pinned Sophon vision GGUF"]
+    fn real_projected_width_preserves_all_image_and_deepstack_rows() {
+        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+        let source = crate::core::loader::GGUFLoader::from_file(
+            &std::env::var("RMI_SOPHON_VISION").unwrap(),
+        )
+        .unwrap();
+        let config =
+            crate::models::qwen3::vision::clip_config::ClipVisionConfig::from_source(&source)
+                .unwrap();
+        assert_ne!(config.n_embd, config.projection_dim);
+        let expected_rows = crate::models::qwen3::vision::qwen_smart_resize(32, 32, &config)
+            .unwrap()
+            .token_count();
+        let encoded =
+            super::encode_qwen3vl_image_dynamic(&source, &image::DynamicImage::new_rgb8(32, 32), 4)
+                .unwrap();
+        assert_eq!(encoded.media.len(), expected_rows * config.projection_dim);
+        assert_eq!(
+            encoded.deepstack_layers.len(),
+            config.has_deepstack_layers.iter().filter(|&&v| v).count()
+        );
+        for layer in &encoded.deepstack_layers {
+            assert_eq!(layer.len(), encoded.media.len());
+        }
+        assert!(encoded.media.iter().all(|v| v.is_finite()));
+    }
 }
 
 /// Splice a whole span of media embeddings over a **single** marker token.

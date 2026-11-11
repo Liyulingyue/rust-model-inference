@@ -38,6 +38,32 @@
       "internal_seconds": 77.825,
       "evidence": "target/sophon/tts-f32-cli-initial-33367/result.json",
       "limit": "Initial binary before subsequent streaming/ownership/entrypoint fixes; standalone nonstream result only"
+    },
+    {
+      "component": "tts CLI final main integration",
+      "format": "F32 talker / F32 flow / F32 HiFT",
+      "policy": "cpu",
+      "threads": 4,
+      "speech_tokens": 77,
+      "samples": 73920,
+      "sample_rate": 24000,
+      "wall_seconds": 59.75901228748262,
+      "binary_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+      "evidence": "target/sophon/tts-cli-main-integrated-33367/result.json",
+      "condition": "release-fast; shared remote host, concurrent validation; not capacity or speedup evidence"
+    },
+    {
+      "component": "tts HTTP final main integration",
+      "format": "F32 talker / F32 flow / F32 HiFT",
+      "policy": "cpu",
+      "threads": 4,
+      "samples": 73920,
+      "batch_wav_seconds": 63.64015396311879,
+      "batch_pcm_seconds": 57.7631556764245,
+      "stream_seconds": 278.828524004668,
+      "binary_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+      "evidence": "target/sophon/speech-http-main-integrated-33367/result.json",
+      "condition": "release-fast; shared remote host, concurrent validation; not capacity or speedup evidence"
     }
   ],
   "gpu": {

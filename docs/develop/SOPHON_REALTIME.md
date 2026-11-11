@@ -52,7 +52,7 @@ $BIN --model "$MODELS/thinker-F32.gguf" --mmproj "$MODELS/audio-F32.gguf" \
   --compute cpu --temperature 0 --max-tokens 32 --threads 4
 $BIN --model "$MODELS/thinker-F32.gguf" --mmproj "$MODELS/audio-F32.gguf" \
   --audio input.wav --jev --jev-context '判断音频。' --jev-question '是否有人讲话？' \
-  --jev-option 是 --jev-option 否 --jev-output-json --compute cpu --threads 4
+  --jev-option 是 --jev-option 否 --jev-output json --compute cpu --threads 4
 ```
 
 Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均支持 `--jev-multi` / `--jev-block`，并复用已配置的 resident runtime、KV 和上下文限制；HTTP 音频 JEV 保持单模式协议。`--tts-model` 与 `--tts-mmproj` 必须成对。语音理解输入统一为 mono 16 kHz；输出为 mono 24 kHz WAV/PCM。speech-to-speech 当前先完成文本生成，再合成语音，尚无双工会话调度。流式 TTS 每十个 speech token 推进，固定提交旧 mel，EOS 释放尾部。
