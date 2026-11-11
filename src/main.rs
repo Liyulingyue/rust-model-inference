@@ -558,16 +558,25 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
-            // The DiT's projections go through the shared kernel, which hands
-            // a whole batch of rows to the device in one dispatch. The device
-            // declines a shape it will not take and the CPU path then runs the
-            // same per-row loop, so `--compute cpu` and `--compute auto` both
-            // work here.
+            // ERNIE-Image's published DiT is a mix of BF16 and K-quant
+            // weights, and the device has no advantage for those formats:
+            // the repository's hand-written K-quant kernels beat the device
+            // path by a wide margin (TODO-032), and ERNIE's own Q4_K_M DiT
+            // measures 2.2x slower on the device than on the CPU
+            // (TODO-067). The whole model therefore runs under the exact CPU
+            // scope, which also keeps the K-quant dispatch inside the shared
+            // kernel off the device.
+            let _cpu = rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope();
             let turbo = options
                 .model
                 .to_string_lossy()
                 .to_lowercase()
                 .contains("turbo");
+            if options.compute_policy() != rust_model_inference::compute::ComputePolicy::Cpu {
+                eprintln!(
+                    "compute scope=ernie_image backend=Cpu reason=kquant_weights_slower_on_device"
+                );
+            }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
                     .text_encoder

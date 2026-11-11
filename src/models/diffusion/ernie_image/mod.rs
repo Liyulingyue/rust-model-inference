@@ -23,7 +23,6 @@ use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
 
 pub(crate) mod dit;
-pub(crate) mod gpu;
 pub(crate) mod text;
 mod vae;
 
@@ -534,16 +533,12 @@ pub(crate) fn linear_into_rows(
     output: &mut [f32],
     q8: &mut Q8Scratch,
     pool: &ComputePool,
-    gpu: &mut Option<gpu::ErnieGpuProjections>,
 ) -> Result<(), String> {
     if rows == 0
         || input.len() != n_in.checked_mul(rows).unwrap_or(usize::MAX)
         || output.len() != n_out.checked_mul(rows).unwrap_or(usize::MAX)
     {
         return Err(format!("Invalid {name} batch shape"));
-    }
-    if try_device_rows(source, name, n_in, n_out, rows, input, output, gpu) {
-        return Ok(());
     }
     for row in 0..rows {
         linear_into_scaled_impl(
@@ -559,80 +554,6 @@ pub(crate) fn linear_into_rows(
         )?;
     }
     Ok(())
-}
-
-/// Hand the whole batch to the device, and report whether it took it.
-#[cfg(feature = "vulkan")]
-fn try_device_rows(
-    source: &dyn TensorSource,
-    name: &str,
-    n_in: usize,
-    n_out: usize,
-    rows: usize,
-    input: &[f32],
-    output: &mut [f32],
-    gpu: &mut Option<gpu::ErnieGpuProjections>,
-) -> bool {
-    let Some(info) = source.tensor_info(name) else {
-        return false;
-    };
-    if info.dims != [n_in as u64, n_out as u64] {
-        return false;
-    }
-    // F16 carries the activation scale that the shared device path does not
-    // apply, so it stays on the CPU.
-    if info.ggml_type == GGMLType::F16 {
-        return false;
-    }
-    let Some(bytes) = source.tensor_slice(name) else {
-        return false;
-    };
-    let Ok(format) = crate::vulkan::ops::GpuWeightFormat::from_ggml_type(info.ggml_type) else {
-        return false;
-    };
-    // BF16 rounds the activation before the wide dot, which is the contract
-    // the CPU kernel keeps for it.
-    let spec = if info.ggml_type == GGMLType::BF16 {
-        format.with_mode(crate::vulkan::ops::GpuMatmulMode::RoundedBf16)
-    } else {
-        format.with_mode(crate::vulkan::ops::GpuMatmulMode::Prepared)
-    };
-    if gpu.is_none() {
-        *gpu = match gpu::ErnieGpuProjections::new(
-            rows.max(1),
-            n_in.max(12288),
-            n_out.max(12288),
-            512,
-        ) {
-            Ok(runtime) => runtime,
-            Err(_) => None,
-        };
-    }
-    let Some(runtime) = gpu.as_mut() else {
-        return false;
-    };
-    let result = runtime.run(bytes, spec, input, rows, n_in, n_out, output);
-    if std::env::var_os("RMI_ERNIE_GPU_TRACE").is_some() {
-        eprintln!(
-            "[ernie-gpu] {name} rows={rows} n_in={n_in} n_out={n_out} -> {:?}",
-            result.as_ref().err()
-        );
-    }
-    result.is_ok()
-}
-
-#[cfg(not(feature = "vulkan"))]
-fn try_device_rows(
-    _source: &dyn TensorSource,
-    _name: &str,
-    _n_in: usize,
-    _n_out: usize,
-    _rows: usize,
-    _input: &[f32],
-    _output: &mut [f32],
-    _gpu: &mut Option<gpu::ErnieGpuProjections>,
-) -> bool {
-    false
 }
 
 #[allow(clippy::too_many_arguments)]

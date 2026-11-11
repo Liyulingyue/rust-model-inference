@@ -4972,13 +4972,13 @@ llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，
 
 **状态**：⚠️ 已知缺口，未排期。2026-11-11 实测。
 
-**现象**：ERNIE-Image 的 DiT 投影改成整批上设备之后，结果是**正确但更慢**。
+**现象**：把 ERNIE-Image 的 DiT 投影整批交给设备之后，结果是**正确但更慢**。
 Q4_K_M DiT、256×256 / 8 步 / CFG 5 / seed 42 / 16 线程：
 
 | 路径 | denoise | 总计 |
 |---|---|---|
 | CPU | 251.8 s | 256.6 s |
-| GPU（`--gpu`） | 559.5 s | 562.0 s |
+| 设备（`--gpu`） | 559.5 s | 562.0 s |
 
 设备路径慢 **2.2 倍**。64×64 / 1 步时同样落后（1.4 s → 4.7 s）。
 
@@ -4989,29 +4989,45 @@ Q4_K_M DiT、256×256 / 8 步 / CFG 5 / seed 42 / 16 线程：
   同一进程内指针稳定，缓存命中。
 - **不是形状没批**：整批 20 / 260 行一次 dispatch，252 次投影全部走到设备
   （`RMI_ERNIE_GPU_TRACE=1` 逐条可见，无失败）。
-- **不是数值错误**：GPU 与 CPU 的 PNG 差异 PSNR **41.3 dB**（max_abs 5/255），
+- **不是数值错误**：设备与 CPU 的 PNG 差异 PSNR **41.3 dB**（max_abs 5/255），
   感知无损；差异来自设备侧的 K-quant 激活量化与求和顺序。
 - **不是不确定**：同一 seed 连跑 3 次，PNG **逐位相同**。这与 TODO-044 的
-  门禁判据不同 —— ERNIE 的设备路径是可复现的，慢是慢，但不会给出坏图。
+  门禁判据不同 —— 设备的路径是可复现的，慢是慢，但不会给出坏图。
 
-**指向**：仓库的 CPU 侧有手写的 K-quant 内核（Q4_K / Q5_K / Q6_K），
-设备侧的 K-quant 路径没有同等优化。同一台机器上 Q8_0 权重的 Z-Image
-是 **6.2 倍**加速（TODO 见 `docs/develop/ZIMAGE_STATUS.md`），差距就在
-权重量化格式上。
+**真正的成因**：**K-quant 的设备 dispatch 不在模型里，而在共享内核里**。
+`src/ops/kernel/q4_k.rs` 的 `forward_prepared` 自带一条设备路径，只要
+`ops::gpu_matmul_active()` 为真就会走它（109 行）。模型层拦不住它 ——
+本条最初就是在模型层加了一道「只给 Q8_0 走设备」的门控之后，仍然测到
+`--gpu` 让 denoise 从 0.9 s 变成 3.4 s：拦截的是模型自己发起的投影，
+共享内核自己发起的那条没被拦到。
+
+这与 **TODO-032** 记的是同一件事：Q4_K/Q5_K/Q6_K 在设备上没有 DP4A
+kernel，8B Q4_K_M 比 CPU 慢 17.6 倍。ERNIE 的 2.2 倍落在同一个方向上，
+只是模型更小、投影形状更规整，所以没有 TODO-032 记的那么极端。
+
+**因此的处置**：ERNIE-Image 回到**精确 CPU 范围**（`main.rs` 的
+`ernie_image` 分支），`--gpu` 不再改变它的结果，也不让它变慢 —— 实测
+`--gpu` 与纯 CPU 的 PNG **逐位相同**，`--gpu` 的输出与改造前也**逐位相同**。
+留在仓库里的是**批行重构**：投影按整批调用而不是逐 token 调用，这是设备
+路径需要的形状，也是以后把设备路径接回来时的前提。
 
 **方向**（未定）：
 
-1. 量一下设备侧 K-quant 内核与 CPU 侧手写内核在同一形状上的差距，确认
-   是不是内核本身慢，而不是调度或传输慢。
-2. 若确认是内核慢，K-quant 权重的文生图模型就不该把设备路径当作加速
-   手段 —— 要么给 K-quant 写设备内核，要么在调度上按权重量化格式选后端。
-3. ERNIE 另有一条路：Q8_0 的 DiT 走设备的 int8 点积路径，那里 Z-Image
-   已经拿到 6.2 倍。Q8_0 的 ERNIE 权重更大（8.7 GB vs 5.0 GB），CPU 侧会
-   更慢，设备侧的优势可能更大 —— 但需要实测，不能推断。
+1. 要么给 K-quant 写设备内核（DP4A 那条 TODO-032 已经量过工程量），
+   要么在调度上**按权重量化格式选后端** —— 设备只接 Q8_0 / F16 / BF16，
+   K-quant 留在 CPU。这是与本条一致的做法，仓库里也已有按 dtype 分流的先例。
+2. **ERNIE 另有一条路没有量过**：Q8_0 的 DiT 走设备的 int8 点积路径，
+   同一台机器上 Z-Image 的 Q8_0 权重拿到 **6.2 倍**加速。Q8_0 的 ERNIE
+   权重更大（8.7 GB vs 5.0 GB），CPU 侧会更慢，设备侧的优势可能更大 ——
+   但**必须实测**，本机到 ModelScope 的带宽只有约 20 MB/s，8.7 GB 的
+   权重这次没有下完，所以这条仍是推断，不是测量。
+3. 模型层要能拦住共享内核自己发起的设备 dispatch，得有一个**按权重格式**
+   的开关，而不是只有一个全局的 `gpu_matmul_active()`。
 
 **验收**：同一个模型同一份 prompt，设备路径要么比 CPU 快，要么明确说明
 它在哪种权重量化格式下才有意义。
 
-**关联**：`src/models/diffusion/ernie_image/gpu.rs`、
+**关联**：`src/ops/kernel/q4_k.rs`（共享 K-quant 设备 dispatch）、
+`src/models/diffusion/ernie_image/dit.rs`（批行重构）、
 `src/models/diffusion/ernie_image/mod.rs`（`linear_into_rows`）、
 `src/vulkan/ops.rs`（`BatchedLinearRuntime`、`ensure_weight`）。

@@ -469,7 +469,6 @@ impl ErnieImageDit {
                 &mut scratch.mlp_out,
                 &mut scratch.q8,
                 self.pool.as_ref(),
-                &mut scratch.gpu,
                 layer_index,
             )?;
             super::super::common::require_finite(&scratch.joint, "ERNIE-Image block output")?;
@@ -737,8 +736,6 @@ pub(crate) struct ErnieScratch {
     rope: Vec<f32>,
     /// Per-tensor Q8 staging, plus per-thread F16 staging.
     q8: Q8Scratch,
-    /// Device-side projections, built on the first device call.
-    gpu: Option<super::gpu::ErnieGpuProjections>,
 }
 
 impl ErnieScratch {
@@ -763,7 +760,6 @@ impl ErnieScratch {
             modulation: Vec::new(),
             rope: Vec::new(),
             q8: Q8Scratch::new(FFN_WIDTH.max(HIDDEN)),
-            gpu: None,
         })
     }
 
@@ -916,7 +912,6 @@ fn run_block(
     mlp_out: &mut [f32],
     q8: &mut Q8Scratch,
     pool: &ComputePool,
-    gpu: &mut Option<super::gpu::ErnieGpuProjections>,
     layer_index: usize,
 ) -> Result<(), String> {
     // 1. attention branch
@@ -959,7 +954,6 @@ fn run_block(
                 &mut part,
                 q8,
                 pool,
-                gpu,
             )?;
             for token in 0..total_tokens {
                 let row = token * 3 * INNER_DIM + offset;
@@ -1062,7 +1056,6 @@ fn run_block(
             mlp_out,
             q8,
             pool,
-            gpu,
         )?;
         for token in 0..total_tokens {
             let out = &mlp_out[token * HIDDEN..(token + 1) * HIDDEN];
@@ -1109,7 +1102,6 @@ fn run_block(
         ffn_buf,
         q8,
         pool,
-        gpu,
     )?;
     linear_into_rows(
         source,
@@ -1121,7 +1113,6 @@ fn run_block(
         ffn_up,
         q8,
         pool,
-        gpu,
     )?;
     // gelu(gate) * up -> linear_fc2. Result lands in `mlp_out`.
     for token in 0..total_tokens {
@@ -1146,7 +1137,6 @@ fn run_block(
         mlp_out,
         q8,
         pool,
-        gpu,
     )?;
     // residual add with gate_mlp
     for token in 0..total_tokens {
