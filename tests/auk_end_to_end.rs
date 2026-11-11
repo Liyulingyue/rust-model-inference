@@ -96,6 +96,9 @@ fn pipeline_runs_end_to_end_producing_a_finite_mono_audio_buffer() {
         seed: 42,
         guidance_scale: 2.0,
         instruct: None,
+        // The AuK-Base recipe: the upstream default sway, no pinned grid.
+        sway_sampling_coef: Some(-1.0),
+        time_grid: None,
     };
     let audio = pipeline
         .generate_audio("Hi", &options)

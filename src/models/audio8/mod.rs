@@ -966,11 +966,8 @@ impl Audio8Encoder {
             }
             audio_rms_norm(&hidden, &layer.norm2, &mut normed, 1e-5);
             // Batch gate/up into one GPU submit (2 matmuls, same input).
-            let (mut gate, up) = linear.run_gate_up(
-                &format!("audio_tower.layers.{index}"),
-                &normed,
-                AUDIO_FFN,
-            )?;
+            let (mut gate, up) =
+                linear.run_gate_up(&format!("audio_tower.layers.{index}"), &normed, AUDIO_FFN)?;
             for (gate, up) in gate.iter_mut().zip(up) {
                 *gate = silu(*gate) * up;
             }

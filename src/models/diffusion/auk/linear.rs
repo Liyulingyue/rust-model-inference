@@ -6,10 +6,19 @@ use crate::ops::kernel::Weight;
 use crate::ComputePool;
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
+/// Rows carried by a single linear submission.
+///
+/// Every AuK projection is applied to a whole token stream, so one
+/// submission carries the entire stream instead of one token at a time.
+/// The cap bounds the device-side staging buffers; longer streams are split
+/// into chunks of this size.
+pub(super) const LINEAR_ROWS: usize = 256;
+
 /// Borrowed weight bindings and their uploads live only for this render.
 pub(super) struct AukLinearSession<'model, 'weights> {
     executor: Option<RefCell<LinearExecutor<'model, 'weights>>>,
     ids: HashMap<&'model str, LinearId>,
+    dims: HashMap<&'model str, (usize, usize)>,
     scaled: RefCell<Vec<f32>>,
 }
 
@@ -32,7 +41,7 @@ impl<'model, 'weights> AukLinearSession<'model, 'weights> {
                             mode: LinearMode::Prepared,
                         })
                         .collect(),
-                    1,
+                    LINEAR_ROWS,
                     pool,
                 )
                 .map_err(|e| e.to_string())?,
@@ -46,9 +55,14 @@ impl<'model, 'weights> AukLinearSession<'model, 'weights> {
                 .collect(),
             None => HashMap::new(),
         };
+        let dims = weights
+            .iter()
+            .map(|(name, weight)| (name.as_str(), (weight.n_in, weight.n_out)))
+            .collect();
         Ok(Self {
             executor: executor.map(RefCell::new),
             ids,
+            dims,
             scaled: RefCell::new(Vec::new()),
         })
     }
@@ -84,6 +98,69 @@ impl<'model, 'weights> AukLinearSession<'model, 'weights> {
             for value in output {
                 *value *= inverse;
             }
+        }
+        Ok(true)
+    }
+
+    /// Apply a projection to `rows` token rows at once.
+    ///
+    /// The AuK DiT applies every projection to a whole token stream, so the
+    /// rows are handed to the device in one submission instead of one
+    /// submission per token. Streams longer than the executor's row
+    /// capacity are split into chunks; the chunk boundaries do not change
+    /// the result because each output element only depends on its own row.
+    ///
+    /// Returns `false` when the weight is not bound to this session, so the
+    /// caller can fall back to the generic CPU path.
+    pub(super) fn run_rows(
+        &self,
+        name: &str,
+        input: &[f32],
+        rows: usize,
+        output: &mut [f32],
+        scale: f32,
+    ) -> Result<bool, String> {
+        let Some(&id) = self.ids.get(name) else {
+            return Ok(false);
+        };
+        let Some(&(n_in, n_out)) = self.dims.get(name) else {
+            return Err(format!("Unbound AuK projection dimensions: {name}"));
+        };
+        if !scale.is_finite() || scale == 0.0 {
+            return Err("invalid AuK linear scale".into());
+        }
+        if rows == 0
+            || input.len() != rows.saturating_mul(n_in)
+            || output.len() != rows.saturating_mul(n_out)
+        {
+            return Err(format!("Invalid {name} linear shape"));
+        }
+        let mut executor = self.executor.as_ref().unwrap().borrow_mut();
+        let chunk = executor.max_rows().min(rows);
+        let mut offset = 0usize;
+        while offset < rows {
+            let count = chunk.min(rows - offset);
+            let input = &input[offset * n_in..(offset + count) * n_in];
+            let output = &mut output[offset * n_out..(offset + count) * n_out];
+            if scale == 1.0 {
+                executor
+                    .run(id, input, count, output)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let mut scaled = self.scaled.borrow_mut();
+                scaled.resize(input.len(), 0.0);
+                for (to, from) in scaled.iter_mut().zip(input) {
+                    *to = *from * scale;
+                }
+                executor
+                    .run(id, &scaled, count, output)
+                    .map_err(|e| e.to_string())?;
+                let inverse = scale.recip();
+                for value in output {
+                    *value *= inverse;
+                }
+            }
+            offset += count;
         }
         Ok(true)
     }

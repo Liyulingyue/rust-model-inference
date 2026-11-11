@@ -82,7 +82,9 @@ impl Audio8GpuCompute {
             return Err("Audio8 GPU RMS norm: weight length mismatch".into());
         }
         let _ = eps;
-        self.ops.write_f32(self.norm_input, input).map_err(|e| e.to_string())?;
+        self.ops
+            .write_f32(self.norm_input, input)
+            .map_err(|e| e.to_string())?;
         // Cache key: weight data pointer (stable for the model's lifetime).
         let key = weight.as_ptr() as usize;
         let bindings = if let Some((_buffer, bindings)) = self.norm_bindings_cache.get(&key) {
@@ -91,17 +93,20 @@ impl Audio8GpuCompute {
             let weight_buffer = unsafe {
                 let weight_bytes: Vec<u8> =
                     weight.iter().flat_map(|w| f32::to_le_bytes(*w)).collect();
-                self.ops.context().upload_static(&weight_bytes).map_err(|e| e.to_string())?
+                self.ops
+                    .context()
+                    .upload_static(&weight_bytes)
+                    .map_err(|e| e.to_string())?
             };
             let bindings = self
                 .ops
                 .bind_buffers(&[weight_buffer])
                 .map_err(|e| e.to_string())?;
-            self.norm_bindings_cache.insert(key, (weight_buffer, bindings));
+            self.norm_bindings_cache
+                .insert(key, (weight_buffer, bindings));
             bindings
         };
-        let commands =
-            TokenCommands::begin(self.ops.context()).map_err(|e| e.to_string())?;
+        let commands = TokenCommands::begin(self.ops.context()).map_err(|e| e.to_string())?;
         self.ops
             .record_rms_norm_rows(
                 &commands,
@@ -117,7 +122,9 @@ impl Audio8GpuCompute {
             .map_err(|e| e.to_string())?;
         commands.submit_and_wait().map_err(|e| e.to_string())?;
         output.copy_from_slice(
-            self.ops.read_f32(self.norm_output, count).map_err(|e| e.to_string())?,
+            self.ops
+                .read_f32(self.norm_output, count)
+                .map_err(|e| e.to_string())?,
         );
         Ok(())
     }
@@ -128,15 +135,21 @@ impl Audio8GpuCompute {
         if gate.len() != up.len() {
             return Err("Audio8 GPU SiLU: dimension mismatch".into());
         }
-        self.ops.write_f32(self.silu_gate, gate).map_err(|e| e.to_string())?;
-        self.ops.write_f32(self.silu_up, up).map_err(|e| e.to_string())?;
+        self.ops
+            .write_f32(self.silu_gate, gate)
+            .map_err(|e| e.to_string())?;
+        self.ops
+            .write_f32(self.silu_up, up)
+            .map_err(|e| e.to_string())?;
         let commands = TokenCommands::begin(self.ops.context()).map_err(|e| e.to_string())?;
         self.ops
             .record_silu_mul_rows(&commands, self.silu_gate, self.silu_up, count, 1)
             .map_err(|e| e.to_string())?;
         commands.submit_and_wait().map_err(|e| e.to_string())?;
         gate.copy_from_slice(
-            self.ops.read_f32(self.silu_gate, count).map_err(|e| e.to_string())?,
+            self.ops
+                .read_f32(self.silu_gate, count)
+                .map_err(|e| e.to_string())?,
         );
         Ok(())
     }
@@ -150,7 +163,7 @@ impl Audio8GpuCompute {
         position: usize,
         output: &mut [f32],
     ) -> Result<(), String> {
-        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
+        use crate::ops::nn::AttentionSpec;
         let spec = AttentionSpec {
             query_tokens: 1,
             key_tokens: position + 1,
@@ -165,7 +178,6 @@ impl Audio8GpuCompute {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-
 }
 
 fn f32_region(cursor: &mut usize, elements: usize) -> Result<ArenaRegion, VulkanError> {

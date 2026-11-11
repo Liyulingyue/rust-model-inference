@@ -35,8 +35,10 @@ BIN=target/release-fast/rust-model-inference
 语言由文本决定，`--language`、指令、CFG、编辑、JEV、聊天模板和文本/KV 调节参数明确拒绝。
 该模型的 `--tts-model/--tts-mmproj` 文本后处理桥也可使用，参考声音克隆请使用独立 `--tts` 入口。
 
-`--compute cpu` 使用 CPU；`--compute auto` / `--gpu` 明确报告并使用 CPU fallback。
-强制 `--compute vulkan` 拒绝运行；未宣称 GPU 加速或 GPU 数值通过。
+`--compute cpu` 使用 CPU；`--compute auto` 在本机有 Vulkan 时实际提交可卸载的 dense
+projection，无设备时回退 CPU；`--compute vulkan` 要求可用设备并严格拒绝静默回退。
+ArkTTS 的设备路径是混合执行：dense projection 在 GPU，attention/KV、norm、RoPE、卷积、
+codebook 和采样仍在 CPU。
 
 ## HTTP
 
@@ -92,3 +94,37 @@ token IDs、prompt packing、codec 离散码和 greedy 帧精确比较；浮点�
 比较器还检查完整检查点数量、顺序、name/layer/step/shape、数据长度和有限值，并报告 cosine。
 大幅残差激活可超过 10000，统一的固定绝对阈值不适合中间层；先前 `5e-3` 的绝对检查会在
 相对 RMSE 为 `6.73e-6` 的层误报，因而改用上述尺度相关检查，并保留 logits/波形的绝对约束。
+
+## GPU 与多精度矩阵（2026-11-11）
+
+转换器和 loader 覆盖九档配对格式：`F32`、`F16`、`BF16`、`Q8_0`、`Q4_0`、`Q4_1`、
+`Q4_K`、`Q5_K`、`Q6_K`。每档均用同一量化 GGUF 通过独立 gguf-py 反量化 + 官方模型
+进行 1053 个固定历史检查点，再在 CPU/Auto/严格 Vulkan 各跑一次。结果目录为
+`/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-TTS-Realistic-Air/multiq/`。
+
+| 格式 | CPU / Auto / Vulkan | 最差 checkpoint relative RMSE | 固定码流 waveform max_abs | 严格 Vulkan dense calls |
+| --- | --- | ---: | ---: | ---: |
+| F32 | 通过 / 通过 / 通过 | 3.27e-5 | 1.58e-6 | 4308 |
+| F16 | 通过 / 通过 / 通过 | 5.00e-3 | 2.06e-4 | 4308 |
+| BF16 | 通过 / 通过 / 通过 | 2.97e-5 | 1.46e-6 | 4308 |
+| Q8_0 | 通过 / 通过 / 通过 | 5.85e-2 | 1.50e-3 | 4308 |
+| Q4_0 | 通过 / 通过 / 通过 | 7.87e-2 | 5.99e-3 | 4308 |
+| Q4_1 | 通过 / 通过 / 通过 | 8.69e-2 | 2.93e-3 | 4308 |
+| Q4_K | 通过 / 通过 / 通过 | 5.85e-2 | 1.55e-6 | 4308 |
+| Q5_K | 通过 / 通过 / 通过 | 6.28e-2 | 1.35e-6 | 4308 |
+| Q6_K | 通过 / 通过 / 通过 | 6.60e-2 | 8.93e-4 | 4308 |
+
+量化门槛在 held-out suite 前冻结为 relative RMSE ≤ 0.2、normalized max_abs ≤ 0.15、
+logits max_abs ≤ 5、waveform max_abs < 0.006 且 RMSE < 0.001；F16 使用
+0.01 / 0.01 / 0.25 / 0.001 / 0.0001；F32/BF16 使用上表前的浮点门槛。它们是数值
+容差，不是逐位比较；块量化和半精度的舍入会改变激活量化 bin，greedy 码流也可能分叉。
+
+真实入口矩阵也已完成：九档 × `cpu/auto/vulkan` 均分别通过 CLI 普通生成、CLI 参考音频
+克隆、HTTP WAV、HTTP 裸 PCM；每个 HTTP WAV/PCM 与对应 CLI 输出逐字节相等。每个 Auto
+组合记录 1188 次 Vulkan dense calls + 7548 次主机 linear calls，严格 Vulkan 记录 8736
+次设备 calls、0 次主机 linear calls（卷积等非 linear host 操作仍存在）。证据由
+`tools/oracle/arktts/entries.py`、`projections.py`、`same_weight.py` 生成。
+
+性能记录见 [`performance.json`](performance.json) 和 `docs/develop/ARKTTS.md`。当前数字是
+同一台 M3 Max 上 `release-fast`、4 线程、4 帧短样例参考，不是发布构建吞吐承诺；端到端
+速度仍受主机 codec/attention 占比影响。

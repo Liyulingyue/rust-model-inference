@@ -1,4 +1,4 @@
-"""Pack Audio8-TTS-Realistic-Air into native BF16 main / F32 codec GGUFs."""
+"""Pack paired Audio8 TTS GGUFs using the shared float and block quantizers."""
 from __future__ import annotations
 
 import argparse
@@ -13,9 +13,24 @@ import torch
 from tools.converter.utils.gguf import (
     GGML_BF16, GGML_F32, GgufWriter, _read_gguf, gguf_dims, open_safetensors,
 )
+from tools.converter.utils.quantize_gguf import BLOCK_FORMATS, FILE_TYPES, _decode_f32, quantize_tensor
 
 
 CONTRACT = json.loads((Path(__file__).resolve().parents[3] / "src/models/arktts/contract.json").read_text())
+FORMATS = ("f32", *BLOCK_FORMATS)
+
+
+def encode_tensor(name, raw, kind, dims, precision):
+    if precision not in FORMATS:
+        raise ValueError(f"unsupported ArkTTS precision {precision}")
+    # Convolutions, norms/biases and 8-wide codebooks keep their original contract.
+    # ConvNeXt pointwise projections surround resampling; QDQ bin flips amplify into waveform error.
+    preserve_resampling = name.startswith(("quantizer.upsample.", "quantizer.downsample."))
+    if len(dims) != 2 or name.endswith(".codebook.weight") or preserve_resampling:
+        return kind, raw
+    if precision == "f32":
+        return GGML_F32, _decode_f32(raw, kind).astype("<f4").tobytes()
+    return quantize_tensor(name, raw, kind, dims, precision)
 
 
 def validate_main(config, header):
@@ -91,7 +106,7 @@ def file_chunks(path, offset, length):
             length -= len(block)
 
 
-def verify_main(source, packed):
+def verify_main(source, packed, precision="bf16"):
     _, tensors = _read_gguf(packed)
     with packed.open("rb") as stream:
         for name, info in source.header.items():
@@ -99,15 +114,17 @@ def verify_main(source, packed):
                 continue
             start, end = info["data_offsets"]
             kind, dims, length, offset = tensors[name]
-            if (kind, dims, length) != (GGML_BF16, gguf_dims(tuple(info["shape"])), end - start):
+            expected_dims = gguf_dims(tuple(info["shape"]))
+            raw = b"".join(file_chunks(source.path, source.data_offset + start, end - start))
+            expected_kind, payload = encode_tensor(name, raw, GGML_BF16, expected_dims, precision)
+            if (kind, dims, length) != (expected_kind, expected_dims, len(payload)):
                 raise ValueError(f"packed tensor contract differs: {name}")
             stream.seek(offset)
-            for block in file_chunks(source.path, source.data_offset + start, end - start):
-                if stream.read(len(block)) != block:
-                    raise ValueError(f"packed BF16 bytes differ: {name}")
+            if stream.read(length) != payload:
+                raise ValueError(f"packed main bytes differ: {name}")
 
 
-def convert(model_dir: Path, out_dir: Path):
+def convert(model_dir: Path, out_dir: Path, precision="bf16", codec_precision="f32"):
     config = json.loads((model_dir / "config.json").read_text())
     source = open_safetensors(model_dir / "model.safetensors")
     validate_main(config, source.header)
@@ -132,7 +149,8 @@ def convert(model_dir: Path, out_dir: Path):
         if name not in codec or tuple(codec[name].shape) != shape:
             raise ValueError(f"invalid codec tensor contract: {name}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    main_path, codec_path = [out_dir / f"Audio8-TTS-Realistic-Air-{suffix}.gguf" for suffix in ("BF16", "codec-F32")]
+    main_path, codec_path = [out_dir / f"Audio8-TTS-Realistic-Air-{suffix}.gguf"
+                             for suffix in (precision.upper(), "codec-" + codec_precision.upper())]
     if main_path.exists() or codec_path.exists():
         raise FileExistsError("output already exists")
     with tempfile.TemporaryDirectory(prefix=".arktts-", dir=out_dir) as temporary:
@@ -140,6 +158,7 @@ def convert(model_dir: Path, out_dir: Path):
         main = GgufWriter(temporary / main_path.name)
         main.add_meta("general.architecture", "arktts")
         main.add_meta("general.name", "Audio8-TTS-Realistic-Air")
+        main.add_meta("general.file_type", FILE_TYPES[precision])
         main.add_meta("arktts.bundle_id", bundle)
         main.add_meta("arktts.config_json", json.dumps(config, sort_keys=True))
         main.add_meta("arktts.tokenizer_json", tokenizer)
@@ -147,30 +166,38 @@ def convert(model_dir: Path, out_dir: Path):
             if name == "__metadata__":
                 continue
             start, end = info["data_offsets"]
-            main.add_tensor_chunks(name, GGML_BF16, gguf_dims(tuple(info["shape"])), end - start,
-                                   lambda a=start, b=end: file_chunks(source.path, source.data_offset + a, b - a))
+            dims = gguf_dims(tuple(info["shape"]))
+            raw = b"".join(file_chunks(source.path, source.data_offset + start, end - start))
+            kind, payload = encode_tensor(name, raw, GGML_BF16, dims, precision)
+            main.add_tensor(name, kind, dims, payload)
         main.write()
-        verify_main(source, main.path)
+        verify_main(source, main.path, precision)
         audio = GgufWriter(temporary / codec_path.name)
         audio.add_meta("general.architecture", "arktts_codec")
+        audio.add_meta("general.file_type", FILE_TYPES[codec_precision])
         audio.add_meta("arktts.bundle_id", bundle)
         audio.add_meta("arktts_codec.config_json", json.dumps(config, sort_keys=True))
         for name, value in sorted(codec.items()):
-            audio.add_tensor(name, GGML_F32, gguf_dims(tuple(value.shape)), value.numpy().tobytes())
+            dims = gguf_dims(tuple(value.shape))
+            kind, payload = encode_tensor(name, value.numpy().tobytes(), GGML_F32, dims, codec_precision)
+            audio.add_tensor(name, kind, dims, payload)
         audio.write()
         _, tensors = _read_gguf(audio.path)
         with audio.path.open("rb") as stream:
             for name, value in codec.items():
-                stream.seek(tensors[name][3])
-                if stream.read(value.numel() * 4) != value.numpy().tobytes():
-                    raise ValueError(f"packed F32 codec bytes differ: {name}")
+                kind, payload = encode_tensor(name, value.numpy().tobytes(), GGML_F32,
+                                               gguf_dims(tuple(value.shape)), codec_precision)
+                stored_kind, _, length, offset = tensors[name]
+                stream.seek(offset)
+                if stored_kind != kind or stream.read(length) != payload:
+                    raise ValueError(f"packed codec bytes differ: {name}")
         os.link(main.path, main_path)
         try:
             os.link(audio.path, codec_path)
         except Exception:
             main_path.unlink()
             raise
-    print(f"verified {len(source.header) - 1} BF16 main tensors / {len(codec)} F32 codec tensors")
+    print(f"verified {len(source.header) - 1} {precision} main tensors / {len(codec)} {codec_precision} codec tensors")
     return main_path, codec_path
 
 
@@ -178,5 +205,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model_dir", type=Path)
     parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--format", choices=FORMATS, default="bf16")
+    parser.add_argument("--codec-format", choices=FORMATS, default="f32")
     args = parser.parse_args()
-    print("\n".join(map(str, convert(args.model_dir, args.out_dir or args.model_dir))))
+    print("\n".join(map(str, convert(args.model_dir, args.out_dir or args.model_dir, args.format, args.codec_format))))

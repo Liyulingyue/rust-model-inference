@@ -76,6 +76,65 @@ pub fn encode_wav_pcm16_channels(
     Ok(bytes)
 }
 
+/// Encode F64 samples as a RIFF/WAVE PCM16 file.
+///
+/// The AuK decoder produces `f64` samples in `[-1, 1]`. This uses the same
+/// scaling as the AuK CLI writer (x32768, clamped to the full i16 range), so
+/// the HTTP route and the CLI produce the same bytes for the same audio.
+pub fn encode_wav_pcm16_f64(
+    samples: &[f64],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<Vec<u8>, String> {
+    if samples.is_empty() {
+        return Err("WAV input has zero samples".into());
+    }
+    if sample_rate == 0 {
+        return Err("sample rate must be nonzero".into());
+    }
+    if channels == 0 {
+        return Err("channel count must be nonzero".into());
+    }
+    let data_bytes = samples
+        .len()
+        .checked_mul(2)
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| "WAV data exceeds RIFF limits".to_string())?;
+    let chunk_size = 36u32
+        .checked_add(data_bytes)
+        .ok_or_else(|| "RIFF chunk size overflow".to_string())?;
+    let block_align = channels
+        .checked_mul(2)
+        .ok_or_else(|| "block alignment overflow".to_string())?;
+    let byte_rate = sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(|| "byte rate overflow".to_string())?;
+    let capacity = 44usize
+        .checked_add(data_bytes as usize)
+        .ok_or_else(|| "WAV allocation overflow".to_string())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|error| format!("WAV allocation failed: {error}"))?;
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&chunk_size.to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    for &sample in samples {
+        let scaled = (sample * 32_768.0).clamp(-32_768.0, 32_767.0) as i16;
+        bytes.extend_from_slice(&scaled.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

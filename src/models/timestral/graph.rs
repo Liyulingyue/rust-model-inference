@@ -20,7 +20,7 @@
 //! widening that shared vocabulary would distort it. The numeric kernels
 //! themselves are not defined here; they stay in `crate::ops`.
 
-use super::{D, F};
+use super::{Config, D, F};
 
 /// Intermediate activation slots.
 ///
@@ -142,7 +142,7 @@ pub(crate) enum TimestralOpKind {
     Add { input: Slot, output: Slot },
 }
 
-/// Number of transformer layers in the published Timestral-209M checkpoint.
+/// Number of transformer layers (legacy constant, prefer `config.num_layers`).
 pub(crate) const LAYERS: usize = 24;
 
 /// Every fourth layer adds a variate attention axis next to the time axis.
@@ -167,7 +167,8 @@ impl TimestralOpKind {
 }
 
 /// The op list for one attention axis of one transformer layer.
-fn attention_ops(layer: usize, axis: usize, time: bool) -> Vec<TimestralOp> {
+fn attention_ops(config: &Config, layer: usize, axis: usize, time: bool) -> Vec<TimestralOp> {
+    let d = config.d_model;
     let layer_scope = format!("transformer.layers.{layer}");
     let attn_scope = format!("{layer_scope}.attns.{axis}");
     let label = format!("layer.{layer}.attn.{axis}");
@@ -185,8 +186,8 @@ fn attention_ops(layer: usize, axis: usize, time: bool) -> Vec<TimestralOp> {
                 input: Slot::Norm,
                 weight: format!("{attn_scope}.wQKV.weight"),
                 output: Slot::Fused,
-                n_in: D,
-                n_out: 3 * D,
+                n_in: d,
+                n_out: 3 * d,
             },
             trace: Vec::new(),
         },
@@ -222,8 +223,8 @@ fn attention_ops(layer: usize, axis: usize, time: bool) -> Vec<TimestralOp> {
                 input: Slot::Norm,
                 weight: format!("{attn_scope}._gate.weight"),
                 output: Slot::Gate,
-                n_in: D,
-                n_out: D,
+                n_in: d,
+                n_out: d,
             },
             trace: Vec::new(),
         },
@@ -240,8 +241,8 @@ fn attention_ops(layer: usize, axis: usize, time: bool) -> Vec<TimestralOp> {
                 input: Slot::Attn,
                 weight: format!("{attn_scope}.wO.weight"),
                 output: Slot::Projection,
-                n_in: D,
-                n_out: D,
+                n_in: d,
+                n_out: d,
             },
             trace: vec![(format!("{label}.output"), Slot::Projection)],
         },
@@ -256,7 +257,9 @@ fn attention_ops(layer: usize, axis: usize, time: bool) -> Vec<TimestralOp> {
 }
 
 /// The op list for the MLP part of one transformer layer.
-fn mlp_ops(layer: usize) -> Vec<TimestralOp> {
+fn mlp_ops(config: &Config, layer: usize) -> Vec<TimestralOp> {
+    let d = config.d_model;
+    let f = config.mlp_hidden_dim;
     let layer_scope = format!("transformer.layers.{layer}");
     vec![
         TimestralOp {
@@ -272,8 +275,8 @@ fn mlp_ops(layer: usize) -> Vec<TimestralOp> {
                 input: Slot::Norm,
                 weight: format!("{layer_scope}.mlp.w12.weight"),
                 output: Slot::Fused,
-                n_in: D,
-                n_out: 2 * F,
+                n_in: d,
+                n_out: 2 * f,
             },
             trace: Vec::new(),
         },
@@ -289,8 +292,8 @@ fn mlp_ops(layer: usize) -> Vec<TimestralOp> {
                 input: Slot::Hidden,
                 weight: format!("{layer_scope}.mlp.w3.weight"),
                 output: Slot::Projection,
-                n_in: F,
-                n_out: D,
+                n_in: f,
+                n_out: d,
             },
             trace: Vec::new(),
         },
@@ -309,14 +312,14 @@ fn mlp_ops(layer: usize) -> Vec<TimestralOp> {
 /// The grouping is what lets the Vulkan executor flush its command buffer
 /// at the same layer boundaries the original implementation used, without
 /// the graph being described twice.
-pub(crate) fn transformer_layer_ops() -> Vec<Vec<TimestralOp>> {
-    let mut layers = Vec::with_capacity(LAYERS);
-    for layer in 0..LAYERS {
+pub(crate) fn transformer_layer_ops(config: &Config) -> Vec<Vec<TimestralOp>> {
+    let mut layers = Vec::with_capacity(config.num_layers);
+    for layer in 0..config.num_layers {
         let mut ops = Vec::new();
         for axis in 0..axes_for_layer(layer) {
-            ops.extend(attention_ops(layer, axis, axis == 0));
+            ops.extend(attention_ops(config, layer, axis, axis == 0));
         }
-        ops.extend(mlp_ops(layer));
+        ops.extend(mlp_ops(config, layer));
         layers.push(ops);
     }
     layers
@@ -336,9 +339,9 @@ pub(crate) fn final_norm_op() -> TimestralOp {
 
 /// The full op list for the transformer: every layer, every attention axis,
 /// then the final RMSNorm.
-pub(crate) fn transformer_ops() -> Vec<TimestralOp> {
-    let mut ops = Vec::with_capacity(LAYERS * 13 + 1);
-    for layer in transformer_layer_ops() {
+pub(crate) fn transformer_ops(config: &Config) -> Vec<TimestralOp> {
+    let mut ops = Vec::with_capacity(config.num_layers * 13 + 1);
+    for layer in transformer_layer_ops(config) {
         ops.extend(layer);
     }
     ops.push(final_norm_op());

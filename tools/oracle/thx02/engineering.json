@@ -1,0 +1,453 @@
+{
+  "base_commit": "1dd27a12ca534c1f4730bece6aa97149f76987cb",
+  "host": "Apple M3 Max / macOS arm64",
+  "profile": "release-fast",
+  "lib_baseline": {
+    "passed": 1475,
+    "failed": 21,
+    "ignored": 96
+  },
+  "lib_final": {
+    "passed": 1499,
+    "failed": 21,
+    "ignored": 98,
+    "after_opt_in_f32_gelu": true,
+    "failure_names_match_baseline": true
+  },
+  "preexisting_failures": [
+    "app::media::tests::stereo_uploads_are_refused",
+    "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+    "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+    "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+    "models::clm::tests::matches_reference_golden_vectors",
+    "models::clm::tests::rejects_wrong_embedding_width",
+    "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+    "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+    "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+    "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+    "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+    "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+    "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+    "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+    "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+    "ops::argmax::tests::all_negative",
+    "ops::argmax::tests::large_random",
+    "ops::argmax::tests::middle_max",
+    "ops::argmax::tests::tail_handles_non_aligned_lengths",
+    "ops::argmax::tests::ties_pick_lowest_index",
+    "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+  ],
+  "new_failures": [],
+  "fixed_failures": [],
+  "focused_vulkan_core": {
+    "passed": 14,
+    "ignored": 2
+  },
+  "focused_vulkan_app": {
+    "passed": 12
+  },
+  "cli_integration": {
+    "passed": 9,
+    "failed": 0,
+    "stream_rejection": "RED to GREEN before asset loading"
+  },
+  "converter_oracle_focused": {
+    "passed": 51,
+    "converter": 23,
+    "oracle": 28
+  },
+  "comparison_contract_tests": {
+    "passed": 3
+  },
+  "binary_targets_before": [
+    {
+      "name": "codec_test",
+      "path": "src/bin/codec_test.rs"
+    },
+    {
+      "name": "dump_dims",
+      "path": "src/bin/dump_dims.rs"
+    },
+    {
+      "name": "dump_emb",
+      "path": "src/bin/dump_emb.rs"
+    },
+    {
+      "name": "dump_meta",
+      "path": "src/bin/dump_meta.rs"
+    },
+    {
+      "name": "dump_tensors",
+      "path": "src/bin/dump_tensors.rs"
+    },
+    {
+      "name": "ggufrs",
+      "path": "src/bin/ggufrs.rs"
+    },
+    {
+      "name": "micro-bench",
+      "path": "src/bin/micro_bench.rs"
+    },
+    {
+      "name": "rust-model-inference",
+      "path": "src/main.rs"
+    },
+    {
+      "name": "rust-model-server",
+      "path": "src/bin/server.rs"
+    }
+  ],
+  "binary_targets_after": [
+    {
+      "name": "codec_test",
+      "path": "src/bin/codec_test.rs"
+    },
+    {
+      "name": "dump_dims",
+      "path": "src/bin/dump_dims.rs"
+    },
+    {
+      "name": "dump_emb",
+      "path": "src/bin/dump_emb.rs"
+    },
+    {
+      "name": "dump_meta",
+      "path": "src/bin/dump_meta.rs"
+    },
+    {
+      "name": "dump_tensors",
+      "path": "src/bin/dump_tensors.rs"
+    },
+    {
+      "name": "ggufrs",
+      "path": "src/bin/ggufrs.rs"
+    },
+    {
+      "name": "micro-bench",
+      "path": "src/bin/micro_bench.rs"
+    },
+    {
+      "name": "rust-model-inference",
+      "path": "src/main.rs"
+    },
+    {
+      "name": "rust-model-server",
+      "path": "src/bin/server.rs"
+    }
+  ],
+  "unchanged_binary_targets": true,
+  "old_model_boundary": "Two Qwen3.5 helpers have visibility-only changes; shared vision adds opt-in F32 GELU while old image/pair default uses original F16-rounded GELU. Legacy Qwen3.5-0.8B BF16 + F16 mmproj CPU input IDs and printed first five visual values match; sampled generation is not a deterministic regression, and full legacy visual arrays/logits and all shared callers were not compared.",
+  "logs": [
+    {
+      "path": "/tmp/thx02-baseline-tests.log",
+      "sha256": "a40219c0e284519c1e623cd12acfe651d4136ad10b55a0184008f5de2ab38a0c"
+    },
+    {
+      "path": "/tmp/thx02-final-lib-tests.log",
+      "sha256": "18a03a15a87286d14197dc5aaabeb0a39e475f40e0048cc217c85cdc28bbb73f"
+    },
+    {
+      "path": "/tmp/thx02-final-binaries-build-v2.log",
+      "sha256": "bd91918446fe6e86516424b911b4967dc75307a9540493abc6252715c8565fc8"
+    },
+    {
+      "path": "/tmp/thx02-final-core-tests-v2.log",
+      "sha256": "968dc1120a8e9462fc56b68830aa93bf5f4cd44405517d0cae255b06a6a84aeb"
+    },
+    {
+      "path": "/tmp/thx02-final-app-tests-v2.log",
+      "sha256": "9a5a5cca38989df292d6a434f9546f07f5da049a6684c921eb7095a89e78b385"
+    },
+    {
+      "path": "/tmp/thx02-final-cli-tests-v2.log",
+      "sha256": "496eedddf7916f61a98fca11ac3615f65de490e3ef6411bbfc35607377f5a98a"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-post-gelu-lib-tests.log",
+      "sha256": "053a57d97e827517194206cb54ef504ed27a4381d0e8eca7c601189e862d3c07"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-final-decision-tests.log",
+      "sha256": "cd4cad0082119a77f62b7963750e38dc994232cb8b109c2cb6ecd99b9fc0e7d7"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-stream-red.log",
+      "sha256": "ed4ab1a8c98fbfe7e4bf7848a61745266e12846cf3c5f70cce7ba8e8c2211716"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-stream-green-cli.log",
+      "sha256": "2d43a21ee22651e3504f03ec6b340f651be0cd68147c8d5437449260db7ede75"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-final-entry-binaries.log",
+      "sha256": "7b08cda60711c3017b53400dafd9fd17670ba97ef026d96ae6b66a113e5c2f1f"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-f32-gelu-vision-tests.log",
+      "sha256": "05e5967db4982c4bfbd7710a0d96d56f614ea053e3bcfeddbd83841dd4f5b4a5"
+    },
+    {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-engineering-logs/thx02-f32-gelu-python-tests.log",
+      "sha256": "e6059dbe859f33ce20dfd452800347c19bdaa08125bcdaf53be20362064b557e"
+    }
+  ],
+  "limits": [
+    "No Linux/other-device CI claimed",
+    "Full lib has the same 21 preexisting failures",
+    "Ignored real-weight probes were separately executed"
+  ],
+  "lib_final_before_f32_gelu": {
+    "passed": 1499,
+    "failed": 21,
+    "ignored": 98
+  },
+  "focused_decision_lib": {
+    "passed": 15,
+    "failed": 0,
+    "filter": "decision",
+    "features": [
+      "vulkan",
+      "parity-trace"
+    ]
+  },
+  "shared_vision_tests_after_f32_gelu": {
+    "passed": 22,
+    "ignored": 1,
+    "failed": 0
+  },
+  "old_model_evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/qwen35-vision-regression/after.json",
+  "binary_inventory_rechecked_after_f32_gelu": true,
+  "python_total": {
+    "passed": 54,
+    "failed": 0
+  },
+  "documentation_validation": {
+    "python_ast": "passed",
+    "json": "passed",
+    "coverage_rows": 153,
+    "unique_coverage_keys": 153,
+    "documents_checked": 8,
+    "valid_relative_links": 154,
+    "new_broken_relative_links": 0,
+    "unchanged_broken_relative_links_in_model_catalogs": 11,
+    "link_scope": "New THX-02 docs and modified model/backend catalogs; preexisting broken catalog links compared with HEAD and preserved."
+  },
+  "post_test_cache_cleanup": {
+    "evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-public-entries/cargo-cache-cleanup.json",
+    "utc": "2026-11-07T20:30:01.594046+00:00",
+    "removed_regenerable_cache": "/Users/gouzi/.codex/worktrees/b5f9/rust-model-inference/target/release-fast/deps",
+    "file_count": 23093,
+    "free_bytes_before": 5838118912,
+    "binary_sha256_before": {
+      "rust-model-inference": "ce9f42947ab302700f82f7cce21c6f115522247ceb15e5601af7404e66645292",
+      "rust-model-server": "f3432388fa02a4843bb32f267c248bf54dc7a9f13443753c7e81f4f97b526d60"
+    },
+    "free_bytes_after": 9201471488,
+    "binary_sha256_after": {
+      "rust-model-inference": "ce9f42947ab302700f82f7cce21c6f115522247ceb15e5601af7404e66645292",
+      "rust-model-server": "f3432388fa02a4843bb32f267c248bf54dc7a9f13443753c7e81f4f97b526d60"
+    },
+    "preserved": "All model assets, numerical evidence, logs and both public executable binaries; only this worktree Cargo deps cache removed."
+  },
+  "final_public_entry_validation": {
+    "evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-validation-integrity.json",
+    "sha256": "f81887deb45985139871cee94c7e308ee193cc5d5678304e3d1d168cc8bd8795",
+    "checked_utc": "2026-11-07T21:25:53.699204+00:00",
+    "passed": true,
+    "main_combinations": 24,
+    "main_command_records": 192,
+    "thinker_combinations": 3,
+    "thinker_command_records": 21,
+    "auto_thought_generated_in_all_three_compute_modes": true,
+    "comparison_counts": {
+      "public_same_weight_probability_comparisons": 54,
+      "public_backend_probability_differences": 32,
+      "public_thinker_backend_comparisons": 8
+    },
+    "source_and_binary_hashes_match": true
+  },
+  "continuation_bf16": {
+    "format": "BF16",
+    "status": "BF16 thinker exported and real-entry validated; eight-step numerical gates pass for the recorded cases.",
+    "recorded_at": "2026-11-08T17:39:03.153942+00:00",
+    "artifact": {
+      "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/THX-02-Thinker-BF16.gguf",
+      "size": 9122447712,
+      "sha256": "6b52560957c379b92dbda2035d5bc94659e28c57db24d022b72a4482a783be38",
+      "metadata": {
+        "general.architecture": "qwen35",
+        "general.file_type": 32,
+        "thx02.source_revision": "f17dca262dcd1d115e591424ce9cd012b51fc0db",
+        "thx02.component": "thinker",
+        "thx02.text_storage": "bf16",
+        "thx02.vision_storage": "bf16",
+        "thx02.float_storage": "f32",
+        "thx02.model_sha256": "2e6585fe35a7c00afde5407b813f60f13cb7dbe0262a7a40e93bff12fb78976a",
+        "thx02.thinker_adapter_sha256": "b5b77ac8e10529f50eecb4e0f7b2cedb4f86605c85ed5bd792cbee365cfa2daa",
+        "thx02.attention_mode": "causal",
+        "thx02.recurrent_head_layout": "qwen35-modulo-v1"
+      },
+      "tensor_types": {
+        "30": 349,
+        "0": 375
+      },
+      "tensors": 724,
+      "free_bytes": 35517087744,
+      "recorded_at": "2026-11-08T11:27:58.380038+00:00"
+    },
+    "public_entries": [
+      {
+        "backend": "cpu",
+        "passed": true,
+        "evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/thinking-validation/BF16-cpu-20261108T112628Z",
+        "auto_generated_thought": true,
+        "direct_thinking_text_and_image": true
+      },
+      {
+        "backend": "auto",
+        "passed": true,
+        "evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/thinking-validation/BF16-auto-20261108T165726Z",
+        "auto_generated_thought": true,
+        "direct_thinking_text_and_image": true
+      },
+      {
+        "backend": "vulkan",
+        "passed": true,
+        "evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/thinking-validation/BF16-vulkan-20261108T171402Z",
+        "auto_generated_thought": true,
+        "direct_thinking_text_and_image": true
+      }
+    ],
+    "numerical_checks": [
+      {
+        "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/continuation-bf16/compare-auto.json",
+        "passed": true,
+        "format": "BF16",
+        "limits": {
+          "logits_max_abs": 0.1,
+          "logits_rmse": 0.025
+        },
+        "exact": {
+          "prompt": true,
+          "input_ids": true,
+          "positions": true,
+          "generated_ids": true
+        },
+        "first_greedy_divergence": null,
+        "max_step_max_abs": 5.340576171875e-05,
+        "max_step_rmse": 6.5800004054072934e-06,
+        "device_stats": {
+          "submissions": 272,
+          "static_uploads": 201,
+          "host_read_bytes": 497434624,
+          "host_write_bytes": 396787712
+        }
+      },
+      {
+        "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/continuation-bf16/compare-cpu-edge.json",
+        "passed": true,
+        "format": "BF16",
+        "limits": {
+          "logits_max_abs": 0.1,
+          "logits_rmse": 0.025
+        },
+        "exact": {
+          "prompt": true,
+          "input_ids": true,
+          "positions": true,
+          "generated_ids": true
+        },
+        "first_greedy_divergence": null,
+        "max_step_max_abs": 3.618001937866211e-05,
+        "max_step_rmse": 7.683345000700506e-06,
+        "device_stats": null
+      },
+      {
+        "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/continuation-bf16/compare-cpu-image.json",
+        "passed": true,
+        "format": "BF16",
+        "limits": {
+          "logits_max_abs": 0.1,
+          "logits_rmse": 0.025
+        },
+        "exact": {
+          "prompt": true,
+          "input_ids": true,
+          "positions": true,
+          "generated_ids": true
+        },
+        "first_greedy_divergence": null,
+        "max_step_max_abs": 0.0012860298156738281,
+        "max_step_rmse": 0.00021375604426860251,
+        "device_stats": null
+      },
+      {
+        "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/continuation-bf16/compare-cpu.json",
+        "passed": true,
+        "format": "BF16",
+        "limits": {
+          "logits_max_abs": 0.1,
+          "logits_rmse": 0.025
+        },
+        "exact": {
+          "prompt": true,
+          "input_ids": true,
+          "positions": true,
+          "generated_ids": true
+        },
+        "first_greedy_divergence": null,
+        "max_step_max_abs": 4.1544437408447266e-05,
+        "max_step_rmse": 8.276152795742066e-06,
+        "device_stats": null
+      },
+      {
+        "path": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/continuation-bf16/compare-vulkan.json",
+        "passed": true,
+        "format": "BF16",
+        "limits": {
+          "logits_max_abs": 0.1,
+          "logits_rmse": 0.025
+        },
+        "exact": {
+          "prompt": true,
+          "input_ids": true,
+          "positions": true,
+          "generated_ids": true
+        },
+        "first_greedy_divergence": null,
+        "max_step_max_abs": 5.340576171875e-05,
+        "max_step_rmse": 6.5800004054072934e-06,
+        "device_stats": {
+          "submissions": 272,
+          "static_uploads": 201,
+          "host_read_bytes": 497434624,
+          "host_write_bytes": 396787712
+        }
+      }
+    ],
+    "oracle": "oracle.json contains three 8-step cases; Rust CPU covers text, edge text and image; Auto/Vulkan cover the text case with device submissions.",
+    "evidence": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/continuation-bf16/summary.json"
+  },
+  "continuation_validation": {
+    "python_tests": {
+      "command": "/Users/gouzi/Documents/git/rust-model-inference/.venv/bin/python -m unittest tools.oracle.thx02.test_oracle tools.converter.thx02.test_convert_thx02 tools.oracle.thx02.test_compare tools.oracle.thx02.test_verify_thinking",
+      "passed": 58,
+      "failed": 0
+    },
+    "rust_tests": {
+      "decision_lib": {
+        "passed": 15,
+        "failed": 0
+      },
+      "decision_cli": {
+        "passed": 9,
+        "failed": 0
+      }
+    },
+    "cargo_fmt_check": "passed",
+    "cargo_metadata_targets_equal": true,
+    "cargo_metadata_target_count": 219,
+    "git_diff_check": "passed",
+    "worktree_diagnostic_files": []
+  }
+}

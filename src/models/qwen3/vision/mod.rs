@@ -1,11 +1,10 @@
 pub mod clip_config;
 pub mod media;
 
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{optional_f32_tensor_bytes, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
-    gelu_inplace, rope_mrope_interleaved, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add,
-    vec_add_into,
+    gelu_inplace, rope_vision, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add, vec_add_into,
 };
 use clip_config::ClipVisionConfig;
 use std::sync::Arc;
@@ -311,7 +310,7 @@ fn matmul_f16_weight(
     });
 }
 
-fn matmul_f32_weight(
+pub(crate) fn matmul_f32_weight(
     pool: &ComputePool,
     weight: &[f32],
     input: &[f32],
@@ -371,6 +370,41 @@ pub struct VisionEncoder<'a> {
     pub mm_2_bias: Option<&'a [u8]>,
     pub precomputed: Option<VisionPrecomputed>,
     preserve_f32: bool,
+    /// The device-side ViT attention, built on first use. `None` until then
+    /// and after a device failure, in which case the CPU path runs.
+    #[cfg(feature = "vulkan")]
+    device: std::cell::RefCell<Option<DeviceAttention>>,
+}
+
+/// The device-side attention for the ViT layers.
+///
+/// The vision tower attends over every patch in both directions, so the
+/// runtime is driven with `causal: false` and the usual `1/sqrt(head_dim)`
+/// scale. The device wants the `[tokens, heads, head_dim]` layout while the
+/// ViT keeps `[heads, tokens, head_dim]`, so the caller repacks both ways.
+#[cfg(feature = "vulkan")]
+struct DeviceAttention {
+    runtime: crate::vulkan::ops::AttentionRuntime,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl DeviceAttention {
+    fn new(tokens: usize, heads: usize, head_dim: usize) -> Option<Self> {
+        let context = crate::ops::get_vulkan_context()?;
+        let width = heads * head_dim;
+        let runtime =
+            crate::vulkan::ops::AttentionRuntime::new(context, (tokens * width, tokens * width))
+                .ok()?;
+        Some(Self {
+            runtime,
+            tokens,
+            heads,
+            head_dim,
+        })
+    }
 }
 
 pub struct VisionPrecomputed {
@@ -522,35 +556,39 @@ impl<'a> VisionEncoder<'a> {
         let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
         let position_embd = source.tensor_slice("v.position_embd.weight");
         let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = source.tensor_slice("v.post_ln.bias");
-        let patch_bias = source.tensor_slice("v.patch_embd.bias");
+        let post_ln_bias = optional_f32_tensor_bytes(source, "v.post_ln.bias")?;
+        let patch_bias = optional_f32_tensor_bytes(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             let ln1_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = source.tensor_slice(&format!("v.blk.{}.ln1.bias", i));
+            let ln1_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln1.bias", i))?;
             let ln2_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = source.tensor_slice(&format!("v.blk.{}.ln2.bias", i));
+            let ln2_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln2.bias", i))?;
             let qkv_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_qkv.weight", i))?;
-            let qkv_bias = source.tensor_slice(&format!("v.blk.{}.attn_qkv.bias", i));
+            let qkv_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
             let out_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias = source.tensor_slice(&format!("v.blk.{}.attn_out.bias", i));
+            let out_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_out.bias", i))?;
             let ffn_up_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias = source.tensor_slice(&format!("v.blk.{}.ffn_up.bias", i));
+            let ffn_up_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_up.bias", i))?;
             let ffn_down_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias = source.tensor_slice(&format!("v.blk.{}.ffn_down.bias", i));
+            let ffn_down_bias =
+                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_down.bias", i))?;
             let deepstack = if config.has_deepstack_layers.get(i).copied().unwrap_or(false) {
                 let tensor = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
@@ -558,13 +596,18 @@ impl<'a> VisionEncoder<'a> {
                         .tensor_slice(&name)
                         .ok_or_else(|| format!("Missing {name}"))
                 };
+                let bias = |suffix: &str| {
+                    let name = format!("v.deepstack.{i}.{suffix}");
+                    optional_f32_tensor_bytes(source, &name)?
+                        .ok_or_else(|| format!("Missing {name}"))
+                };
                 Some(DeepstackWeights {
                     norm_weight: tensor("norm.weight")?,
-                    norm_bias: tensor("norm.bias")?,
+                    norm_bias: bias("norm.bias")?,
                     fc1_weight: tensor("fc1.weight")?,
-                    fc1_bias: tensor("fc1.bias")?,
+                    fc1_bias: bias("fc1.bias")?,
                     fc2_weight: tensor("fc2.weight")?,
-                    fc2_bias: tensor("fc2.bias")?,
+                    fc2_bias: bias("fc2.bias")?,
                 })
             } else {
                 None
@@ -590,11 +633,11 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source
             .tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = source.tensor_slice("mm.0.bias");
+        let mm_0_bias = optional_f32_tensor_bytes(source, "mm.0.bias")?;
         let mm_2_weight = source
             .tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = source.tensor_slice("mm.2.bias");
+        let mm_2_bias = optional_f32_tensor_bytes(source, "mm.2.bias")?;
 
         Ok(Self {
             config,
@@ -612,6 +655,8 @@ impl<'a> VisionEncoder<'a> {
             precomputed: None,
             preserve_f32: source.metadata("wevisone_vl.source_revision").is_some(),
             pool,
+            #[cfg(feature = "vulkan")]
+            device: std::cell::RefCell::new(None),
         })
     }
 
@@ -1152,6 +1197,91 @@ impl<'a> VisionEncoder<'a> {
         }
     }
 
+    /// Run the ViT attention on the device. `false` means the caller should
+    /// use the CPU path.
+    ///
+    /// The ViT attends over every patch in both directions, so the runtime
+    /// is driven with `causal: false`.
+    #[cfg(feature = "vulkan")]
+    fn device_attention(
+        &self,
+        attn_buf: &[f32],
+        out_buf: &mut [f32],
+        packed_qkv: &mut [f32],
+        packed_out: &mut [f32],
+        n_tokens: usize,
+        n_head: usize,
+        d_head: usize,
+        scale: f32,
+    ) -> bool {
+        if n_tokens == 0 || n_head == 0 || d_head == 0 {
+            return false;
+        }
+        // The cached runtime must not outlive the policy that created it: a
+        // CPU scope has to stay on the CPU even though the arena is warm.
+        if !crate::ops::gpu_requested()
+            || crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu
+        {
+            return false;
+        }
+        let width = n_head * d_head;
+        let mut cell = self.device.borrow_mut();
+        let stale = cell.as_ref().is_none_or(|device| {
+            device.tokens != n_tokens || device.heads != n_head || device.head_dim != d_head
+        });
+        if stale {
+            *cell = DeviceAttention::new(n_tokens, n_head, d_head);
+        }
+        let Some(device) = cell.as_mut() else {
+            return false;
+        };
+        // The ViT keeps [head, token, dim]; the device wants [token, head, dim].
+        for part in 0..3usize {
+            let head_base = part * n_head * n_tokens * d_head;
+            let part_base = part * n_tokens * width;
+            for head in 0..n_head {
+                let source_base = head_base + head * n_tokens * d_head;
+                for token in 0..n_tokens {
+                    let dst = part_base + token * width + head * d_head;
+                    let src = source_base + token * d_head;
+                    packed_qkv[dst..dst + d_head].copy_from_slice(&attn_buf[src..src + d_head]);
+                }
+            }
+        }
+        let spec = crate::ops::nn::AttentionSpec {
+            query_tokens: n_tokens,
+            key_tokens: n_tokens,
+            query_heads: n_head,
+            key_value_heads: n_head,
+            head_dim: d_head,
+            causal: false,
+            scale,
+        };
+        let plane = n_tokens * width;
+        if device
+            .runtime
+            .forward(
+                &packed_qkv[..plane],
+                &packed_qkv[plane..2 * plane],
+                &packed_qkv[2 * plane..3 * plane],
+                packed_out,
+                spec,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        // Back to [head, token, dim].
+        for head in 0..n_head {
+            for token in 0..n_tokens {
+                let src = token * width + head * d_head;
+                let dst = head * n_tokens * d_head + token * d_head;
+                out_buf[dst..dst + d_head].copy_from_slice(&packed_out[src..src + d_head]);
+            }
+        }
+        true
+    }
+
     fn forward_vit_layer(
         &self,
         il: usize,
@@ -1287,61 +1417,43 @@ impl<'a> VisionEncoder<'a> {
             }
         }
 
-        if self.precomputed.as_ref().is_some_and(|pc| pc.lossless) {
-            for h in 0..n_head {
-                for t in 0..n_tokens {
-                    for base in [0, n_head * n_tokens * d_head] {
-                        let row = &mut scratch.attn_buf[base + h * n_tokens * d_head + t * d_head
-                            ..base + h * n_tokens * d_head + (t + 1) * d_head];
-                        for pair in 0..d_head / 2 {
-                            let axis = pair / (d_head / 4);
-                            let exponent =
-                                if self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16) {
-                                    let dim = (d_head / 2) as f32;
-                                    let step = ((dim - 2.0) / dim) / (d_head / 4 - 1) as f32;
-                                    (pair % (d_head / 4)) as f32 * step
-                                } else {
-                                    (2 * (pair % (d_head / 4))) as f32 / (d_head / 2) as f32
-                                };
-                            let freq = 1.0 / 10000.0f32.powf(exponent);
-                            let angle = mrope_positions[t][axis] as f32 * freq;
-                            let (a, b) = (row[pair], row[pair + d_head / 2]);
-                            let (cos, sin) = crate::ops::rope_sin_cos(angle);
-                            row[pair] = a * cos + (-b) * sin;
-                            row[pair + d_head / 2] = b * cos + a * sin;
-                        }
-                    }
-                }
-            }
-        } else {
-            let mrope_sections: [i32; 4] = [
-                (d_head / 4) as i32,
-                (d_head / 4) as i32,
-                (d_head / 4) as i32,
-                (d_head / 4) as i32,
-            ];
-            let freq_base = 10000.0f32;
-            for h in 0..n_head {
-                let q_base = h * n_tokens * d_head;
-                let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
-                for t in 0..n_tokens {
-                    rope_mrope_interleaved(
-                        &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
-                        mrope_positions[t],
-                        mrope_sections,
-                        d_head,
-                        freq_base,
-                        d_head / 2,
-                    );
-                    rope_mrope_interleaved(
-                        &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
-                        mrope_positions[t],
-                        mrope_sections,
-                        d_head,
-                        freq_base,
-                        d_head / 2,
-                    );
-                }
+        // One rotation for every path. The lossless branch used to carry its
+        // own hand-rolled copy of this, and the two drifted: the copy was
+        // right, the shared operator was not, so the wrong axis assignment
+        // only reached the models that quantize their weights (the production
+        // path). See `tools/oracle/physbrain/README.md`.
+        let mrope_sections: [i32; 4] = [
+            (d_head / 4) as i32,
+            (d_head / 4) as i32,
+            (d_head / 4) as i32,
+            (d_head / 4) as i32,
+        ];
+        let freq_base = 10000.0f32;
+        for h in 0..n_head {
+            let q_base = h * n_tokens * d_head;
+            let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
+            for t in 0..n_tokens {
+                // The axis assignment is the vision tower's own: contiguous
+                // sectors, the same as llama.cpp's `GGML_ROPE_TYPE_VISION`.
+                // The text tower uses the interleaved assignment instead
+                // (`GGML_ROPE_TYPE_IMROPE`, HF `apply_interleaved_mrope`), so
+                // the two towers must not share an operator.
+                rope_vision(
+                    &mut scratch.attn_buf[q_base + t * d_head..q_base + t * d_head + d_head],
+                    mrope_positions[t],
+                    mrope_sections,
+                    d_head,
+                    freq_base,
+                    d_head / 2,
+                );
+                rope_vision(
+                    &mut scratch.attn_buf[k_base + t * d_head..k_base + t * d_head + d_head],
+                    mrope_positions[t],
+                    mrope_sections,
+                    d_head,
+                    freq_base,
+                    d_head / 2,
+                );
             }
         }
         t_rope = t_rope_start.elapsed().as_secs_f64();
@@ -1350,74 +1462,93 @@ impl<'a> VisionEncoder<'a> {
         let scale = 1.0 / (d_head as f32).sqrt();
         let attn_buf = &scratch.attn_buf[..3 * n_head * n_tokens * d_head];
 
-        let scores = scratch.score_buf.as_mut_ptr();
-        let out_buf = scratch.attn_out_buf.as_mut_ptr();
+        // The attention is the whole cost of a ViT layer (the projections
+        // together are a few percent), so it runs on the device.
+        #[cfg(feature = "vulkan")]
+        let device_used = {
+            let out = &mut scratch.attn_out_buf[..n_head * n_tokens * d_head];
+            let packed = &mut scratch.device_qkv[..];
+            let packed_out = &mut scratch.device_out[..];
+            self.device_attention(
+                attn_buf, out, packed, packed_out, n_tokens, n_head, d_head, scale,
+            )
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let device_used = false;
 
-        struct PtrWrap(*mut f32);
-        unsafe impl Sync for PtrWrap {}
-        unsafe impl Send for PtrWrap {}
-        impl PtrWrap {
-            unsafe fn slice(&self, offset: usize, len: usize) -> &mut [f32] {
-                std::slice::from_raw_parts_mut(self.0.add(offset), len)
+        if !device_used {
+            let scores = scratch.score_buf.as_mut_ptr();
+            let out_buf = scratch.attn_out_buf.as_mut_ptr();
+
+            struct PtrWrap(*mut f32);
+            unsafe impl Sync for PtrWrap {}
+            unsafe impl Send for PtrWrap {}
+            impl PtrWrap {
+                unsafe fn slice(&self, offset: usize, len: usize) -> &mut [f32] {
+                    std::slice::from_raw_parts_mut(self.0.add(offset), len)
+                }
             }
-        }
 
-        let sw = PtrWrap(scores);
-        let ow = PtrWrap(out_buf);
-        let ggml_f16 = self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16);
+            let sw = PtrWrap(scores);
+            let ow = PtrWrap(out_buf);
+            let ggml_f16 = self.precomputed.as_ref().is_some_and(|pc| pc.ggml_f16);
 
-        // Head-partitioned attention: each `h` writes a disjoint score row
-        // band and a disjoint output band, so the same partition is exact
-        // under ComputePool as it was under rayon's into_par_iter.
-        // Replaces `(0..n_head).into_par_iter().for_each(...)` so the ViT
-        // no longer depends on rayon's lazily-built global pool (which the
-        // server never sizes — see src/core/thread_pool.rs).
-        let pool = self.pool.clone();
-        pool.compute(move |ith, nth| {
-            let per_worker = n_head.div_ceil(nth);
-            let h_start = (ith * per_worker).min(n_head);
-            let h_end = (h_start + per_worker).min(n_head);
-            for h in h_start..h_end {
-                let q_base = h * n_tokens * d_head;
-                let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
-                let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
-                let score_off = h * n_tokens * n_tokens;
-                unsafe {
-                    let score_slice = sw.slice(score_off, n_tokens * n_tokens);
-                    let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
-                    for t in 0..n_tokens {
-                        let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
-                        for s in 0..n_tokens {
-                            let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
-                            let sum = if ggml_f16 {
-                                crate::ops::dot_f32(
-                                    std::slice::from_raw_parts(q_ptr, d_head),
-                                    std::slice::from_raw_parts(k_ptr, d_head),
-                                    d_head,
-                                )
-                            } else {
-                                (0..d_head)
-                                    .map(|i| *q_ptr.add(i) * *k_ptr.add(i))
-                                    .sum::<f32>()
-                            };
-                            score_slice[t * n_tokens + s] = sum * scale;
-                        }
-                        softmax_inplace(&mut score_slice[t * n_tokens..t * n_tokens + n_tokens]);
+            // Head-partitioned attention: each `h` writes a disjoint score row
+            // band and a disjoint output band, so the same partition is exact
+            // under ComputePool as it was under rayon's into_par_iter.
+            // Replaces `(0..n_head).into_par_iter().for_each(...)` so the ViT
+            // no longer depends on rayon's lazily-built global pool (which the
+            // server never sizes — see src/core/thread_pool.rs).
+            let pool = self.pool.clone();
+            pool.compute(move |ith, nth| {
+                let per_worker = n_head.div_ceil(nth);
+                let h_start = (ith * per_worker).min(n_head);
+                let h_end = (h_start + per_worker).min(n_head);
+                for h in h_start..h_end {
+                    let q_base = h * n_tokens * d_head;
+                    let k_base = n_head * n_tokens * d_head + h * n_tokens * d_head;
+                    let v_base = 2 * n_head * n_tokens * d_head + h * n_tokens * d_head;
+                    let score_off = h * n_tokens * n_tokens;
+                    unsafe {
+                        let score_slice = sw.slice(score_off, n_tokens * n_tokens);
+                        let out_slice = ow.slice(h * n_tokens * d_head, n_tokens * d_head);
+                        for t in 0..n_tokens {
+                            let q_ptr = attn_buf.as_ptr().add(q_base + t * d_head);
+                            for s in 0..n_tokens {
+                                let k_ptr = attn_buf.as_ptr().add(k_base + s * d_head);
+                                let sum = if ggml_f16 {
+                                    crate::ops::dot_f32(
+                                        std::slice::from_raw_parts(q_ptr, d_head),
+                                        std::slice::from_raw_parts(k_ptr, d_head),
+                                        d_head,
+                                    )
+                                } else {
+                                    (0..d_head)
+                                        .map(|i| *q_ptr.add(i) * *k_ptr.add(i))
+                                        .sum::<f32>()
+                                };
+                                score_slice[t * n_tokens + s] = sum * scale;
+                            }
+                            softmax_inplace(
+                                &mut score_slice[t * n_tokens..t * n_tokens + n_tokens],
+                            );
 
-                        for d in 0..d_head {
-                            let products = (0..n_tokens).map(|s| {
-                                score_slice[t * n_tokens + s] * attn_buf[v_base + s * d_head + d]
-                            });
-                            out_slice[t * d_head + d] = if ggml_f16 {
-                                products.map(f64::from).sum::<f64>() as f32
-                            } else {
-                                products.sum::<f32>()
-                            };
+                            for d in 0..d_head {
+                                let products = (0..n_tokens).map(|s| {
+                                    score_slice[t * n_tokens + s]
+                                        * attn_buf[v_base + s * d_head + d]
+                                });
+                                out_slice[t * d_head + d] = if ggml_f16 {
+                                    products.map(f64::from).sum::<f64>() as f32
+                                } else {
+                                    products.sum::<f32>()
+                                };
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
         t_attn = t_attn_start.elapsed().as_secs_f64();
 
         let t_attn_out_start = std::time::Instant::now();
@@ -2029,6 +2160,11 @@ pub struct VisionScratchpad {
     pub pos_embd_buf: Vec<f32>,
     pub qkv_buf: Vec<f32>,
     pub attn_buf: Vec<f32>,
+    /// The device attention's [tokens, heads, head_dim] staging buffers.
+    #[cfg(feature = "vulkan")]
+    device_qkv: Vec<f32>,
+    #[cfg(feature = "vulkan")]
+    device_out: Vec<f32>,
     pub attn_out_buf: Vec<f32>,
     pub score_buf: Vec<f32>,
     pub proj_buf: Vec<f32>,
@@ -2055,6 +2191,10 @@ impl VisionScratchpad {
             pos_embd_buf: Vec::new(),
             qkv_buf: Vec::new(),
             attn_buf: Vec::new(),
+            #[cfg(feature = "vulkan")]
+            device_qkv: Vec::new(),
+            #[cfg(feature = "vulkan")]
+            device_out: Vec::new(),
             attn_out_buf: Vec::new(),
             score_buf: Vec::new(),
             proj_buf: Vec::new(),
@@ -2101,6 +2241,11 @@ impl VisionScratchpad {
         self.residual.resize(n_tokens * n_embd, 0.0);
         self.qkv_buf.resize(n_tokens * n_embd * 3, 0.0);
         self.attn_buf.resize(3 * n_head * n_tokens * d_head, 0.0);
+        #[cfg(feature = "vulkan")]
+        {
+            self.device_qkv.resize(3 * n_tokens * n_head * d_head, 0.0);
+            self.device_out.resize(n_tokens * n_head * d_head, 0.0);
+        }
         self.attn_out_buf.resize(n_head * n_tokens * d_head, 0.0);
         self.score_buf.resize(n_head * n_tokens * n_tokens, 0.0);
         self.proj_buf.resize(n_tokens * n_embd, 0.0);

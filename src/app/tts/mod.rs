@@ -225,7 +225,7 @@ pub(crate) fn arktts_sampling(
 }
 
 pub(crate) fn reference_wav_at_rate(bytes: &[u8], rate: u32) -> Result<Vec<f32>, String> {
-    let decoded = crate::models::qwen3::asr::audio_processor::decode_pcm16_wav_any(bytes)
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(bytes)
         .map_err(|e| format!("invalid reference PCM16 WAV: {e:?}"))?;
     // Bound the sinc phase table before constructing it for untrusted WAV metadata.
     if ![
@@ -277,8 +277,8 @@ fn run_arktts_cli(
         std::thread::available_parallelism().map_or(1, |n| n.get()),
     );
     crate::models::arktts::validate_pair(source, codec_source)?;
-    let model = Model::from_source(source, threads)?;
-    let codec = Codec::from_source(codec_source)?;
+    let model = Model::from_source_with_compute(source, threads, options.compute_policy())?;
+    let codec = Codec::from_source_with_compute(codec_source, threads, options.compute_policy())?;
     let reference = options
         .ref_audio
         .as_deref()

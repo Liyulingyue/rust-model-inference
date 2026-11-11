@@ -1,0 +1,92 @@
+{
+  "date": "2026-11-08",
+  "host": {
+    "hardware": "Apple M3 Max",
+    "memory_gib": 64,
+    "cpu_cores": 16,
+    "os": "macOS-27.2-arm64-arm-64bit",
+    "device": "MoltenVK 1.4.2 / Vulkan Apple M3 Max"
+  },
+  "profile": "release-fast; Vulkan feature; shared Rust SIMD/ComputePool",
+  "policy": "observed same-host reference, not a performance acceptance gate",
+  "cases": [
+    {
+      "case": 0,
+      "tokens": 165,
+      "images": 0,
+      "threads": 4,
+      "format": "Q8_0",
+      "rust_cpu_seconds": 11.96605725,
+      "rust_vulkan_seconds": 11.414609917,
+      "official_cpu_fp32_same_weight_native_qdq_seconds": 4.574508291989332,
+      "gpu_submissions": 608,
+      "cache": "cold text"
+    },
+    {
+      "case": 1,
+      "tokens": 151,
+      "images": 0,
+      "threads": 4,
+      "format": "Q8_0",
+      "rust_cpu_seconds": 6.278755667,
+      "rust_vulkan_seconds": 3.721279625,
+      "official_cpu_fp32_same_weight_native_qdq_seconds": 4.135241125011817,
+      "gpu_submissions": 608,
+      "cache": "warm text"
+    },
+    {
+      "case": 2,
+      "tokens": 123,
+      "images": 0,
+      "threads": 4,
+      "format": "Q8_0",
+      "rust_cpu_seconds": 4.4103868330000005,
+      "rust_vulkan_seconds": 2.874881875,
+      "official_cpu_fp32_same_weight_native_qdq_seconds": 3.9593439169984777,
+      "gpu_submissions": 408,
+      "cache": "warm text"
+    },
+    {
+      "case": 3,
+      "tokens": 168,
+      "images": 1,
+      "threads": 4,
+      "format": "Q8_0",
+      "rust_cpu_seconds": 6.39875675,
+      "rust_vulkan_seconds": 15.949614958,
+      "official_cpu_fp32_same_weight_native_qdq_seconds": 7.416358582995599,
+      "gpu_submissions": 26084,
+      "cache": "warm text / cold vision",
+      "version": "historical: before opt-in F32 GELU correction"
+    }
+  ],
+  "limitations": [
+    "Functional validation and model conversions overlapped some timings; these are observed baselines, not isolated benchmark claims.",
+    "Probe timings exclude Engine/source construction. First Rust calls fault mmap pages and upload device weights; PyTorch weights are loaded before its timer.",
+    "Warm probes retain loaded Weight/GPU wrappers; production decide rebuilds borrowed trunk wrappers and may upload again. Public entrypoint timings are in canonical entry-validation/*/commands.json.",
+    "GPU is a mixed graph: projections/verified attention on device; gated-delta scan, norms and small projections on CPU; shared attention may verify/fall back.",
+    "Q8_0 vision made 26084 submissions on the image sample and was slower than CPU, indicating shared vision dispatch/transfer overhead.",
+    "Q8_0 fixed logit gates currently fail; these performance measurements do not establish numerical acceptance."
+  ],
+  "evidence": {
+    "rust_cpu": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/rust-q8_0-cpu-readouts.json",
+    "rust_vulkan": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/rust-q8_0-vulkan-readouts.json",
+    "official": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/oracle-q8_0-native-qdq.json"
+  },
+  "corrected_image_observation": {
+    "format": "Q8_0",
+    "tokens": 168,
+    "images": 1,
+    "threads": 4,
+    "rust_cpu_seconds": 8.945179625,
+    "rust_vulkan_seconds": 16.259757166,
+    "official_cpu_fp32_same_weight_native_qdq_seconds": 7.416358582995599,
+    "gpu_submissions": 26084,
+    "cache": "first case in separate processes; cold vision",
+    "cpu_evidence": "f32-gelu-correction/q8_0-image-cpu.json",
+    "vulkan_evidence": "f32-gelu-correction/q8_0-image-vulkan.json",
+    "oracle_evidence": "oracle-q8_0-native-qdq.json",
+    "limitations": "Nonisolated real-run observation; different process/cache state from the historical warm-text run; excludes Engine construction and is not HTTP latency."
+  },
+  "corrected_public_entries": "/Users/gouzi/Documents/git/rust-model-inference/models/THX-02/final-public-entries/summary.json"
+}

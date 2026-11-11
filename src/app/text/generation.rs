@@ -98,6 +98,9 @@ pub fn run_inference(
         source
     };
 
+    if arch == "hy_v3" {
+        return Err("Hy-SimulMT requires --audio with a mono 16 kHz PCM16 WAV; use --language for the target language".into());
+    }
     if arch == "hunyuan-dense" {
         crate::app::text::run_hunyuan_inference(
             source.clone(),
@@ -176,6 +179,19 @@ pub fn run_inference(
             thinking,
             jinja,
         )
+    } else if arch == "qwen35moe" {
+        crate::models::occamy::run::run_inference(
+            source.clone(),
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            kv_format,
+            max_context,
+            repetition_penalty,
+            jinja,
+        )
     } else if arch == "xing4_0" {
         crate::models::xing4_0::trunk::run::run_inference(
             source.as_ref(),
@@ -204,7 +220,7 @@ pub fn run_inference(
             kv_format,
             jinja,
         )
-    } else if arch == "nemotron_h" {
+    } else if arch == "nemotron_h" || arch == "nemotron_h_moe" {
         crate::models::nemotron_h::trunk::run_inference(
             source.clone(),
             prompt,

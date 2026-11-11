@@ -5,6 +5,7 @@
 
 ```rust
 fn build_backend(options: &CliOptions) -> Result<Arc<Backend>, String> {
+    if arch == "thx02"             { return ... Backend::Decision ...; }
     if options.tts                  { return Ok(Arc::new(Backend::Tts(build_tts(options)?))); }
     if options.audio.is_some()      { return Ok(Arc::new(Backend::Asr(build_asr(options)?))); }
     if options.embedding            { ... Backend::Embedding ... }
@@ -39,6 +40,7 @@ handler。
 | `Gliner2` | `--gliner2-decide` | arch 是 `gliner2`，`--model` 本身就唯一；用 flag 是为了和 CLM 对齐、避免再造一个探测函数 |
 | `Gliner2Boundary` | `--gliner2-boundary` | 同上，**且** `gliner2.variant = "boundary"`；flag 选模式，权重确认变体 |
 | `Timestral` | **元数据探测** `is_timestral_gguf()` | arch 是 `timestral`，`--model` 本身就唯一。预测模式与聊天模式的请求体完全不同，命令行无从区分，所以按 arch 探测 |
+| `Decision` | 显式 `general.architecture=thx02` | THX-02 自带决策 head 和视觉组件，必须进入 joint decision pipeline；启动时拒绝生成和其它任务 flags，不能落入 causal text backend |
 
 ### 为什么 rerank 必须探测而 gliner2 不必
 
@@ -143,3 +145,30 @@ tokenizer 的做法一致，因此不需要 `'static` 泄漏。
 未列出的路由由 axum 直接 404。**这是模型能力边界，不是接口缺功能**——例如
 `/v1/jev/grouped` 对 Clm/Gliner2 返回 404，因为 per-group softmax 在 cosine 打分
 和"每头独立归一化"里没有对应物。
+
+## Hy-SimulMT bundled speech backend
+
+`--serve --audio sample.wav --model Hy-SimulMT-*.gguf` 先探测
+`general.architecture=hy_v3`，进入独立 `HySimulMt` 后端；未命中才继续
+Audio8/Qwen ASR 的既有选择。内置音频塔，因此拒绝额外 `--mmproj`。
+
+它挂载 `/v1/audio/transcriptions` 和 `/v1/audio/transcriptions_json`，
+不提供聊天、JEV 或 TTS 路由。
+转写请求复用一个模型线程池，因此整个推理持有同一个 generation permit；
+并发转写返回 429，客户端取消也会等 blocking worker 结束才释放许可。
+用法和精度范围见 [Hy-SimulMT](../usage/hy-simulmt.md)。
+
+## THX-02 decision backend
+
+`general.architecture=thx02` 先于其它 backend 分支选择 `Decision`，并验证
+CLI flags 与实际任务一致。`--decision-thinker` 只用于同一 revision 的 merged
+thinker checkpoint；缺失或不匹配组件由模型构造器拒绝。原有模型的 flag 优先级
+不变。`--decision-request` 是 CLI 文件/stdin 输入，服务器通过请求体接收输入，
+因此服务器拒绝该 flag。
+
+该 backend 只挂载 `/v1/decide`、`/v1/decide/batch`，以及适用的
+`/v1/jev/score`、`/v1/jev/grouped`、`/v1/jev/image`、`/v1/jev/image_grouped`。
+JEV 把既有 typed question/options 映射到同一个 `models::thx02::Engine`，
+不经过 causal generation；全部问题/readout 在一次 native 请求内联合编码。
+HTTP 图片先经过既有解码和远程访问校验，再以 data URL 交给模型；本地文件
+只允许 CLI 访问。用法及验证范围见 [THX-02](../usage/thx02.md)。

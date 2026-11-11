@@ -68,19 +68,18 @@ Rust 1.99.1 工具链；原始 BF16 权重提升为 F32 计算，对照官方 CP
 
 ## 自动检查与自查
 
-- `cargo test --locked --profile release-fast --lib arktts`：7 passed。
+- `cargo test --locked --profile release-fast --features vulkan,parity-trace --lib arktts`：8 passed，2 ignored。
 - `cargo test --locked --profile release-fast --lib audio_speech`：1 passed。
-- Python converter/comparator 单测：5 passed。
+- Python same-weight/converter/comparator 单测：9 passed。
 - `cargo build --locked --profile release-fast --features parity-trace --bin rust-model-inference --bin rust-model-server`：通过。
-- `cargo check --locked --profile release-fast --features vulkan --lib --bin rust-model-inference --bin rust-model-server`：通过；仅证明 feature 编译，不代表 GPU 运行或对齐。
-- 真实权重集成测试：默认 SIMD 完整三组和标量短三组均通过。
+- `cargo check --locked --profile release-fast --features vulkan --lib --bin rust-model-inference --bin rust-model-server`：通过；真实 GPU 运行另由下方 Vulkan 矩阵和 4308 次 dense device calls 证明。
+- 真实权重集成测试：原始 BF16/F32 CPU 三组短历史通过；九档 held-out CPU/Auto/Vulkan 全部通过。
 - `git diff --check`：通过。
-- 全库 lib 回归：1338 passed / 20 failed / 88 ignored；变更前为 1330 / 20 / 88，20 个失败名称完全相同，无新增失败。
+- 全库 lib 回归（不启用 Vulkan feature）：1553 passed / 13 failed / 100 ignored；当次基线为 1552 / 14 / 99，失败名单仍是原有平台/合同用例，没有新增 ArkTTS 失败。
 
 既有失败位于：Breeze 的 3 个 dtype 契约用例、CLM 的 2 个 golden/embedding 用例、
-Z-Image 的 3 个 NEON 逐位用例、FunASR 的 2 个 NEON 逐位用例、Gemma4 的 4 个 trunk 用例、
-argmax 的 5 个用例和 matmul 的 1 个 NEON softmax 用例。本次未修改这些计算行为；
-Breeze 仅开放已有 causal convolution 的 crate 内可见性。
+Z-Image 的 3 个 NEON 逐位用例、FunASR 的 2 个 NEON 逐位用例、Gemma4 的 1 个 trunk 用例、
+app media 的 1 个平台用例和 matmul 的 1 个 NEON softmax 用例。本次未修改这些计算行为。
 
 PR #200 的初次 CI：`x86 dispatch regressions` 通过；Rustfmt 与 Vulkan job 失败。
 后者在 `bash scripts/vulkan-shaders.sh check` 的 8 个 GLSL/SPIR-V checksum 上失败，尚未进入 Rust 编译。
@@ -97,9 +96,38 @@ shader 输出逐字节相同，失败文件为 q4_k/q5_k/q6_k/f16 matmul 的源�
 4. P2，`src/app/tts/mod.rs:214`、`src/main.rs:592`：对不支持的 CLI/HTTP 控制和文本/JEV 模式明确报错；修正文本后处理桥的固定 Qwen3/24 kHz 描述；两种二进制的拒绝入口已实测。
 5. P2，`src/models/arktts/mod.rs:461`：文本清洗补齐 Python 视为空白的 U+001C–U+001F；温度下限与官方 `1e-5` 一致；单测与 Oracle 通过。
 
-## 未覆盖范围
+## GPU 与多精度复验（2026-11-11）
 
-仅验证上述官方发布版本及 BF16 主模型 / F32 codec。未实现 Q4/Q8 等量化导出和已校准的 Vulkan 路径；
-未验证 Vulkan 设备运行/数值及完整发布构建、其他 CPU 架构的真实模型推理、官方原生 BF16 激活、2048 位置上限、跨 codec 滑动窗口的长音频、
-全部 23 种语言、主观音质、声音相似度指标、完整多模态文本后处理桥或性能基准。参考 WAV 重采样沿用现有 sinc 实现，未声称与官方前端一致。
-采样 RNG 与 PyTorch 不同；随机生成的 seed 不保证跨实现复现。
+上面的 2026-11-04 记录保留为原始 BF16/F32 基线；它当时写着「未实现量化和 Vulkan」，
+随着本次 PR 的 dense executor 接入已被下面实测结果替代。模型文件和逐项 JSON 证据在
+`/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-TTS-Realistic-Air/multiq/`。
+
+| 格式 | CPU / Auto / Vulkan | 最差 relative RMSE | 固定码流 waveform max_abs | Vulkan device calls |
+|---|---|---:|---:|---:|
+| F32 | 通过 / 通过 / 通过 | 3.27e-5 | 1.58e-6 | 4308 |
+| F16 | 通过 / 通过 / 通过 | 5.00e-3 | 2.06e-4 | 4308 |
+| BF16 | 通过 / 通过 / 通过 | 2.97e-5 | 1.46e-6 | 4308 |
+| Q8_0 | 通过 / 通过 / 通过 | 5.85e-2 | 1.50e-3 | 4308 |
+| Q4_0 | 通过 / 通过 / 通过 | 7.87e-2 | 5.99e-3 | 4308 |
+| Q4_1 | 通过 / 通过 / 通过 | 8.69e-2 | 2.93e-3 | 4308 |
+| Q4_K | 通过 / 通过 / 通过 | 5.85e-2 | 1.55e-6 | 4308 |
+| Q5_K | 通过 / 通过 / 通过 | 6.28e-2 | 1.35e-6 | 4308 |
+| Q6_K | 通过 / 通过 / 通过 | 6.60e-2 | 8.93e-4 | 4308 |
+
+held-out suite 前冻结了分精度门槛：量化为 relative ≤ 0.2、normalized ≤ 0.15、logits
+max_abs ≤ 5、waveform max_abs < 0.006/RMSE < 0.001；F16 为 0.01/0.01/0.25/
+0.001/0.0001；F32/BF16 使用上面的浮点门槛。量化和半精度不做逐位验收：激活量化
+bin 的边界舍入会放大为中间层差异，固定 greedy history 用于把实现误差与离散码流分叉分开。
+
+实现是混合 Vulkan 路径：所有二维 dense projection 有真实 device submission；norm、RoPE、
+attention/KV、卷积、codebook、采样仍在主机。每个 Auto 组合记录 1188 次 device dense
+calls + 7548 次 host linear calls；严格 Vulkan 记录 8736 次 device calls、0 次 host
+linear calls。CPU/Auto/严格 Vulkan 的每个格式都分别通过 CLI 普通、CLI 克隆、HTTP WAV 和
+HTTP PCM，HTTP 字节与 CLI 字节相等；对应入口证据在 `multiq/entries-v2-results.json`。
+
+## 仍未覆盖
+
+未验证完整发布构建的性能峰值、其他 CPU 架构的真实模型推理、官方原生 BF16 激活语义、
+2048 位置上限与跨 codec 滑动窗口的长音频、全部 23 种语言、主观音质/声音相似度指标，
+以及完整多模态文本后处理桥。参考 WAV 重采样沿用现有 sinc 实现，未声称和官方前端一致；
+采样 RNG 与 PyTorch 不同，固定 seed 只保证 Rust 自身复现。

@@ -38,10 +38,11 @@ fn rejects_architecture_config_and_wrong_shape_with_same_element_count() {
         .unwrap()
         .contains("architecture"));
     let s = BadSource::new("timestral", "{}", None);
-    assert!(TimestralModel::from_source(&s)
-        .err()
-        .unwrap()
-        .contains("configuration"));
+    let err = TimestralModel::from_source(&s).err().unwrap();
+    assert!(
+        err.contains("d_model") || err.contains("num_layers") || err.contains("block_schedule"),
+        "unexpected error: {err}"
+    );
     let s = BadSource::new(
         "timestral",
         CONFIG_JSON,
@@ -59,8 +60,14 @@ fn rejects_architecture_config_and_wrong_shape_with_same_element_count() {
 }
 #[test]
 fn contract_has_exact_parameter_count() {
+    let config = Config {
+        d_model: D,
+        num_heads: HEADS,
+        mlp_hidden_dim: F,
+        num_layers: 24,
+    };
     assert_eq!(
-        tensor_contracts()
+        tensor_contracts(&config)
             .iter()
             .map(|(_, contract)| contract.elements())
             .sum::<u64>(),

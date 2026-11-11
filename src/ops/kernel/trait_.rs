@@ -103,6 +103,37 @@ pub trait Kernel: Send + Sync {
         self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 
+    /// ggml-parity variant of `forward_prepared`.
+    ///
+    /// Defaults to the ordinary path. Kernels whose ggml reference kernel
+    /// uses a different reduction order (F32, Q8_0) override this so a
+    /// model that wants bit-exact oracle parity can opt in without changing
+    /// the arithmetic contract for every other model.
+    fn forward_prepared_ggml(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        self.forward_prepared(
+            input_f32,
+            input_q8,
+            input_scales,
+            q8_k,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
+    }
+
     /// Strict F16×F16 single-row matmul: caller passes f32 activations and
     /// receives f32 output. The kernel internally quantises activations to
     /// F16 and accumulates in f64 (matches llama.cpp's mtmd-audio embedding

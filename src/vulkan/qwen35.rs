@@ -1,6 +1,6 @@
 use super::ops::{
     required_activation_contracts, ArenaRegion, ExpertSelection, GpuMatmulSpec, GpuWeightFormat,
-    OperatorBindings, Qwen3Ops, TokenCommands,
+    MhcRegions, MhcShape, OperatorBindings, Qwen3Ops, TokenCommands,
 };
 use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
@@ -216,6 +216,11 @@ struct Qwen35ArenaLayout {
     kv_delta_v: ArenaRegion,
     conv_state: ArenaRegion,
     ssm_state: ArenaRegion,
+    mhc_residual: ArenaRegion,
+    mhc_normed: ArenaRegion,
+    mhc_logits: ArenaRegion,
+    mhc_post: ArenaRegion,
+    mhc_mix: ArenaRegion,
     total_size: usize,
 }
 
@@ -229,6 +234,15 @@ impl Qwen35ArenaLayout {
     }
 
     fn new_rows(config: &Qwen35Config, capacity: usize, rows: usize) -> Result<Self, VulkanError> {
+        Self::new_rows_with_streams(config, capacity, rows, 0)
+    }
+
+    fn new_rows_with_streams(
+        config: &Qwen35Config,
+        capacity: usize,
+        rows: usize,
+        streams: usize,
+    ) -> Result<Self, VulkanError> {
         let layer_count = config.n_layer_impl();
         let head_dim = config.n_embd_head();
         let value_heads = config.ssm_dt_rank;
@@ -354,6 +368,24 @@ impl Qwen35ArenaLayout {
         let kv_delta_v = qwen35_f32_region(&mut cursor, kv_delta)?;
         let conv_state = qwen35_f32_region(&mut cursor, conv_state)?;
         let ssm_state = qwen35_f32_region(&mut cursor, ssm_state)?;
+        let mhc_residual = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("mHC residual", &[rows, streams, config.n_embd])?,
+        )?;
+        let mhc_normed = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("mHC norm", &[rows, streams, config.n_embd])?,
+        )?;
+        let mhc_logits = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("mHC logits", &[rows, streams * (2 + streams)])?,
+        )?;
+        let mhc_post =
+            qwen35_f32_region(&mut cursor, qwen35_product("mHC post", &[rows, streams])?)?;
+        let mhc_mix = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("mHC mix", &[rows, streams, streams])?,
+        )?;
         Ok(Self {
             x,
             normed,
@@ -394,6 +426,11 @@ impl Qwen35ArenaLayout {
             kv_delta_v,
             conv_state,
             ssm_state,
+            mhc_residual,
+            mhc_normed,
+            mhc_logits,
+            mhc_post,
+            mhc_mix,
             total_size: cursor,
         })
     }
@@ -443,6 +480,16 @@ fn fill_mrope(
     sections: [i32; 4],
     freq_base: f32,
 ) -> Result<(), String> {
+    fill_mrope_layout(coefficients, positions, sections, freq_base, false)
+}
+
+fn fill_mrope_layout(
+    coefficients: &mut [f32],
+    positions: [usize; 4],
+    sections: [i32; 4],
+    freq_base: f32,
+    interleaved: bool,
+) -> Result<(), String> {
     if coefficients.is_empty()
         || coefficients.len() % 2 != 0
         || sections.iter().any(|&section| section < 0)
@@ -466,7 +513,15 @@ fn fill_mrope(
             0
         } else {
             let sector = index % section_count;
-            if sector < boundaries[0] {
+            if interleaved {
+                if sector % 3 == 1 && sector < 3 * sections[1] as usize {
+                    1
+                } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
+                    2
+                } else {
+                    0
+                }
+            } else if sector < boundaries[0] {
                 0
             } else if sector < boundaries[1] {
                 1
@@ -545,6 +600,20 @@ struct LayerBindings {
     ffn: FfnBindings,
 }
 
+#[derive(Clone, Copy)]
+struct MhcRouterBindings {
+    projection: OperatorBindings,
+    bias: OperatorBindings,
+}
+
+struct MhcBindings {
+    start: usize,
+    end: usize,
+    shape: MhcShape,
+    norm: OperatorBindings,
+    routers: Vec<[MhcRouterBindings; 2]>,
+}
+
 pub(crate) struct Qwen35GpuChunkResult<'a> {
     pub(crate) logits: &'a [f32],
     pub(crate) k_delta: &'a [f32],
@@ -558,6 +627,8 @@ pub(crate) struct Qwen35VulkanSession {
     ops: Qwen3Ops<'static>,
     _buffers: UploadedBuffers,
     layers: Vec<LayerBindings>,
+    plan: Vec<usize>,
+    mhc: Option<MhcBindings>,
     output_norm: OperatorBindings,
     output: OperatorBindings,
     layout: Qwen35ArenaLayout,
@@ -590,11 +661,26 @@ impl Qwen35VulkanSession {
         max_rows: usize,
         context: &'static VulkanContext,
     ) -> Result<Option<Self>, VulkanError> {
+        Self::try_new_rows_with_routing(model, capacity, max_rows, context, None)
+    }
+
+    pub(crate) fn try_new_rows_with_routing(
+        model: &Qwen35Model<'_>,
+        capacity: usize,
+        max_rows: usize,
+        context: &'static VulkanContext,
+        routing: Option<crate::models::sensenova_loop::StreamRouting<'_, '_>>,
+    ) -> Result<Option<Self>, VulkanError> {
+        let plan = routing
+            .as_ref()
+            .map_or_else(|| (0..model.layers.len()).collect(), |r| r.plan.to_vec());
+        let physical_types =
+            physical_layer_types(model, &plan).map_err(VulkanError::UnsupportedShape)?;
         if let Err(reason) = check_device_eligibility(context.supports_shader_float16()) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
         }
-        let facts = eligibility_facts(model);
+        let facts = eligibility_facts_with_plan(model, &plan);
         if let Err(reason) = check_eligibility(&facts) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
@@ -603,9 +689,12 @@ impl Qwen35VulkanSession {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
         }
-        context
-            .validate_qwen3_core_contract()
-            .map_err(VulkanError::UnsupportedShape)?;
+        // Loop uses the F32 hybrid attention shader, not the Qwen3 F16 attention chain.
+        if routing.is_none() {
+            context
+                .validate_qwen3_core_contract()
+                .map_err(VulkanError::UnsupportedShape)?;
+        }
         let contracts = required_activation_contracts(&facts.weight_formats)
             .map_err(VulkanError::UnsupportedShape)?;
         if contracts.q8_0 {
@@ -621,7 +710,9 @@ impl Qwen35VulkanSession {
 
         let config = model.config.clone();
         let layer_count = config.n_layer_impl();
-        let layout = Qwen35ArenaLayout::new_rows(&config, capacity, max_rows)?;
+        let streams = routing.as_ref().map_or(0, |r| r.settings.streams);
+        let layout =
+            Qwen35ArenaLayout::new_rows_with_streams(&config, capacity, max_rows, streams)?;
         let descriptor_capacity = model.layers.iter().try_fold(3usize, |count, layer| {
             let experts = layer
                 .moe
@@ -634,6 +725,9 @@ impl Qwen35VulkanSession {
                 .and_then(|n| count.checked_add(n))
                 .ok_or(VulkanError::OutOfMemory)
         })?;
+        let descriptor_capacity = descriptor_capacity
+            .checked_add(routing.as_ref().map_or(0, |r| 1 + r.routers.len() * 4))
+            .ok_or(VulkanError::OutOfMemory)?;
         // Host routing reads between recordings; keep its arena mapped.
         let host_routed = model
             .layers
@@ -646,13 +740,13 @@ impl Qwen35VulkanSession {
             Qwen3Ops::new_device_local_with_size(context, layout.total_size(), descriptor_capacity)?
         };
         let mut buffers = UploadedBuffers::new(context);
-        let mut layers = Vec::with_capacity(layer_count);
+        let mut layers = Vec::with_capacity(model.layers.len());
 
         for (layer_index, layer) in model.layers.iter().enumerate() {
             let attention_norm_buffer = buffers.upload_f32(&layer.attn_norm)?;
             let attention_norm = ops.bind_buffers(&[attention_norm_buffer])?;
 
-            let attention = if config.is_recurrent[layer_index] {
+            let attention = if physical_types[layer_index] {
                 let wqkv = required_weight(layer.wqkv.as_ref(), layer_index, "attn_qkv")?;
                 let gate = required_weight(layer.wqkv_gate.as_ref(), layer_index, "attn_gate")?;
                 let beta = required_weight(layer.ssm_beta.as_ref(), layer_index, "ssm_beta")?;
@@ -835,6 +929,45 @@ impl Qwen35VulkanSession {
             });
         }
 
+        let mhc = if let Some(routing) = routing {
+            let m = routing.settings;
+            if config.moe.is_some()
+                || m.start >= m.end
+                || m.end > model.layers.len()
+                || routing.routers.len() != m.end - m.start
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "invalid Loop stream routing layout".into(),
+                ));
+            }
+            let norm_buffer = buffers.upload_f32(&vec![1.; config.n_embd * m.streams])?;
+            let norm = ops.bind_buffers(&[norm_buffer])?;
+            let mut routers = Vec::with_capacity(routing.routers.len());
+            for pair in routing.routers {
+                let mut bind_router = |r: &crate::models::sensenova_loop::Router<'_>| -> Result<MhcRouterBindings, VulkanError> {
+                    let projection = bind_weight(&mut ops, &mut buffers, &r.weight, "Loop mHC router")?;
+                    let bias_buffer = buffers.upload_f32(&r.bias)?;
+                    Ok(MhcRouterBindings { projection, bias: ops.bind_buffers(&[bias_buffer])? })
+                };
+                routers.push([bind_router(&pair.0)?, bind_router(&pair.1)?]);
+            }
+            Some(MhcBindings {
+                start: m.start,
+                end: m.end,
+                norm,
+                routers,
+                shape: MhcShape {
+                    width: config.n_embd,
+                    streams: m.streams,
+                    iterations: m.iterations,
+                    fixed_identity: m.fixed_identity,
+                    pre_scale: m.pre_scale,
+                },
+            })
+        } else {
+            None
+        };
+
         let output_norm_buffer = buffers.upload_f32(&model.output_norm)?;
         let output_norm = ops.bind_buffers(&[output_norm_buffer])?;
         let output = bind_weight(
@@ -868,6 +1001,8 @@ impl Qwen35VulkanSession {
             ops,
             _buffers: buffers,
             layers,
+            plan,
+            mhc,
             output_norm,
             output,
             layout,
@@ -1156,6 +1291,79 @@ impl Qwen35VulkanSession {
         Ok(())
     }
 
+    #[cfg(feature = "parity-trace")]
+    fn trace_rows(
+        &self,
+        name: &str,
+        layer: Option<usize>,
+        region: ArenaRegion,
+        rows: usize,
+        width: usize,
+    ) -> Result<(), VulkanError> {
+        let mut values = vec![0.; rows * width];
+        self.ops.read_f32_into(region, &mut values)?;
+        crate::parity_trace::report(crate::parity_trace::checkpoint_rows(
+            name,
+            layer,
+            &[rows, width],
+            &values,
+        ));
+        Ok(())
+    }
+
+    fn mhc_regions(&self, branch: ArenaRegion) -> MhcRegions {
+        MhcRegions {
+            branch,
+            residual: self.layout.mhc_residual,
+            logits: self.layout.mhc_logits,
+            post: self.layout.mhc_post,
+            mix: self.layout.mhc_mix,
+        }
+    }
+
+    fn record_mhc_route(
+        &self,
+        commands: &TokenCommands<'_>,
+        mhc: &MhcBindings,
+        router: MhcRouterBindings,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let width = mhc.shape.width * mhc.shape.streams;
+        self.ops.record_rms_norm_rows(
+            commands,
+            mhc.norm,
+            self.layout.mhc_residual,
+            self.layout.mhc_normed,
+            width,
+            1e-6,
+            rows,
+            width,
+            width,
+        )?;
+        let outputs = 2 * mhc.shape.streams
+            + if mhc.shape.fixed_identity {
+                0
+            } else {
+                mhc.shape.streams * mhc.shape.streams
+            };
+        self.record_weights(
+            commands,
+            router.projection,
+            self.layout.mhc_normed,
+            &[(self.layout.mhc_logits, outputs)],
+            width,
+            rows,
+        )?;
+        self.ops.record_mhc(
+            commands,
+            router.bias,
+            1,
+            self.mhc_regions(self.layout.x),
+            mhc.shape,
+            rows,
+        )
+    }
+
     fn forward_chunk_inner(
         &mut self,
         input: &[f32],
@@ -1215,12 +1423,13 @@ impl Qwen35VulkanSession {
             None => None,
         };
         for (row, &position) in positions.iter().enumerate() {
-            fill_mrope(
+            fill_mrope_layout(
                 &mut self.rope
                     [row * config.rope_dimension_count..(row + 1) * config.rope_dimension_count],
                 position,
                 config.rope_dimension_sections,
                 config.rope_freq_base,
+                self.mhc.is_some(),
             )
             .map_err(VulkanError::UnsupportedShape)?;
         }
@@ -1228,6 +1437,15 @@ impl Qwen35VulkanSession {
             self.layout.rope,
             &self.rope[..rows * config.rope_dimension_count],
         )?;
+        #[cfg(feature = "parity-trace")]
+        if self.mhc.is_some() {
+            crate::parity_trace::report(crate::parity_trace::checkpoint_rows(
+                "loop.embedding",
+                None,
+                &[rows, config.n_embd],
+                input,
+            ));
+        }
         let mut commands = TokenCommands::begin(self.context)?;
 
         // Flush once a chunk reaches this many dispatches. Recording every layer
@@ -1237,10 +1455,28 @@ impl Qwen35VulkanSession {
         // submission short enough for the drivers to honour every dispatch.
         const MAX_DISPATCHES_PER_CHUNK: usize = 16;
         let mut chunk_start = self.ops.recorded_dispatch_count();
-        for (layer_index, bindings) in self.layers.iter().enumerate() {
+        for (layer_index, &physical) in self.plan.iter().enumerate() {
+            let bindings = &self.layers[physical];
+            let routed = self
+                .mhc
+                .as_ref()
+                .filter(|m| (m.start..m.end).contains(&physical));
             if self.ops.recorded_dispatch_count() - chunk_start >= MAX_DISPATCHES_PER_CHUNK {
                 commands = commands.flush()?;
                 chunk_start = self.ops.recorded_dispatch_count();
+            }
+            if let Some(m) = routed {
+                if physical == m.start {
+                    self.ops.record_mhc(
+                        &commands,
+                        m.norm,
+                        0,
+                        self.mhc_regions(self.layout.x),
+                        m.shape,
+                        rows,
+                    )?;
+                }
+                self.record_mhc_route(&commands, m, m.routers[physical - m.start][0], rows)?;
             }
             self.ops.record_rms_norm_rows(
                 &commands,
@@ -1361,7 +1597,7 @@ impl Qwen35VulkanSession {
                         config.norm_eps,
                         scan_rows,
                     )?;
-                    self.ops.record_qwen35_recurrent_ssm(
+                    self.ops.record_qwen35_recurrent_ssm_layout(
                         &commands,
                         recurrent.ssm,
                         self.layout.q,
@@ -1379,9 +1615,13 @@ impl Qwen35VulkanSession {
                         recurrent_head_dim,
                         config.norm_eps,
                         scan_rows,
+                        self.mhc.is_some(),
                     )?;
                     #[cfg(feature = "parity-trace")]
-                    if rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
+                    if self.mhc.is_none()
+                        && rows == 1
+                        && std::env::var_os("RMI_PARITY_TRACE").is_some()
+                    {
                         commands.submit_and_wait()?;
                         for (name, region, count) in [
                             ("q_conv_predelta", self.layout.q, key_dim),
@@ -1416,13 +1656,25 @@ impl Qwen35VulkanSession {
                     )?;
                 }
             }
-            self.ops.record_add_rows(
-                &commands,
-                self.layout.x,
-                self.layout.projection,
-                config.n_embd,
-                rows,
-            )?;
+            if let Some(m) = routed {
+                self.ops.record_mhc(
+                    &commands,
+                    m.norm,
+                    2,
+                    self.mhc_regions(self.layout.projection),
+                    m.shape,
+                    rows,
+                )?;
+                self.record_mhc_route(&commands, m, m.routers[physical - m.start][1], rows)?;
+            } else {
+                self.ops.record_add_rows(
+                    &commands,
+                    self.layout.x,
+                    self.layout.projection,
+                    config.n_embd,
+                    rows,
+                )?;
+            }
             self.ops.record_rms_norm_rows(
                 &commands,
                 bindings.post_attention_norm,
@@ -1435,7 +1687,7 @@ impl Qwen35VulkanSession {
                 config.n_embd,
             )?;
             #[cfg(feature = "parity-trace")]
-            if rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
+            if self.mhc.is_none() && rows == 1 && std::env::var_os("RMI_PARITY_TRACE").is_some() {
                 commands.submit_and_wait()?;
                 for (name, region) in [
                     ("attn_residual", self.layout.x),
@@ -1485,17 +1737,53 @@ impl Qwen35VulkanSession {
                         config.n_ff,
                         rows,
                     )?;
-                    self.ops.record_add_rows(
+                    if let Some(m) = routed {
+                        self.ops.record_mhc(
+                            &commands,
+                            m.norm,
+                            2,
+                            self.mhc_regions(self.layout.down),
+                            m.shape,
+                            rows,
+                        )?;
+                    } else {
+                        self.ops.record_add_rows(
+                            &commands,
+                            self.layout.x,
+                            self.layout.down,
+                            config.n_embd,
+                            rows,
+                        )?;
+                    }
+                }
+            }
+            if let Some(m) = routed {
+                if physical + 1 == m.end {
+                    self.ops.record_mhc(
                         &commands,
-                        self.layout.x,
-                        self.layout.down,
-                        config.n_embd,
+                        m.norm,
+                        3,
+                        self.mhc_regions(self.layout.x),
+                        m.shape,
                         rows,
                     )?;
                 }
             }
             #[cfg(feature = "parity-trace")]
-            if std::env::var_os("RMI_PARITY_TRACE").is_some() {
+            if self.mhc.is_some() {
+                let name = format!("loop.visit.{layer_index}");
+                if crate::parity_trace::enabled(&name) {
+                    commands = commands.flush()?;
+                    let (region, width) = routed
+                        .filter(|m| physical + 1 != m.end)
+                        .map_or((self.layout.x, config.n_embd), |m| {
+                            (self.layout.mhc_residual, config.n_embd * m.shape.streams)
+                        });
+                    self.trace_rows(&name, None, region, rows, width)?;
+                }
+            }
+            #[cfg(feature = "parity-trace")]
+            if self.mhc.is_none() && std::env::var_os("RMI_PARITY_TRACE").is_some() {
                 if rows != 1 {
                     return Err(VulkanError::UnsupportedShape(
                         "Vulkan parity tracing requires single-token chunks".into(),
@@ -1552,14 +1840,9 @@ impl Qwen35VulkanSession {
             #[cfg(feature = "parity-trace")]
             {
                 let name = format!("l_out-{layer_index}");
-                if crate::parity_trace::enabled(&name) {
+                if self.mhc.is_none() && crate::parity_trace::enabled(&name) {
                     commands = commands.flush()?;
-                    crate::parity_trace::report(crate::parity_trace::checkpoint_rows(
-                        &name,
-                        Some(layer_index),
-                        &[rows, config.n_embd],
-                        self.ops.read_f32(self.layout.x, rows * config.n_embd)?,
-                    ));
+                    self.trace_rows(&name, Some(layer_index), self.layout.x, rows, config.n_embd)?;
                 }
             }
         }
@@ -1569,14 +1852,33 @@ impl Qwen35VulkanSession {
             offset: self.layout.x.offset + last_offset,
             size: self.layout.x.size - last_offset,
         };
-        self.ops.record_rms_norm(
-            &commands,
-            self.output_norm,
-            last,
-            self.layout.normed,
-            config.n_embd,
-            config.norm_eps,
-        )?;
+        let head_input = if self.mhc.is_some() {
+            self.ops.record_rms_norm_rows(
+                &commands,
+                self.output_norm,
+                self.layout.x,
+                self.layout.normed,
+                config.n_embd,
+                config.norm_eps,
+                rows,
+                config.n_embd,
+                config.n_embd,
+            )?;
+            ArenaRegion {
+                offset: self.layout.normed.offset + last_offset,
+                size: self.layout.normed.size - last_offset,
+            }
+        } else {
+            self.ops.record_rms_norm(
+                &commands,
+                self.output_norm,
+                last,
+                self.layout.normed,
+                config.n_embd,
+                config.norm_eps,
+            )?;
+            self.layout.normed
+        };
         commands.submit_and_wait()?;
         #[cfg(feature = "parity-trace")]
         self.trace_region(
@@ -1587,11 +1889,15 @@ impl Qwen35VulkanSession {
             config.n_embd,
             false,
         )?;
+        #[cfg(feature = "parity-trace")]
+        if self.mhc.is_some() && crate::parity_trace::enabled("loop.norm") {
+            self.trace_rows("loop.norm", None, self.layout.normed, rows, config.n_embd)?;
+        }
         let commands = TokenCommands::begin(self.context)?;
         self.record_weights(
             &commands,
             self.output,
-            self.layout.normed,
+            head_input,
             &[(self.layout.logits, config.vocab_size)],
             config.n_embd,
             1,
@@ -1609,6 +1915,16 @@ impl Qwen35VulkanSession {
         )?;
         self.ops
             .read_f32_into(self.layout.logits, &mut self.logits)?;
+        #[cfg(feature = "parity-trace")]
+        if self.mhc.is_some() {
+            crate::parity_trace::report(crate::parity_trace::checkpoint_row(
+                rows - 1,
+                "loop.logits",
+                None,
+                &[1, self.logits.len()],
+                &self.logits,
+            ));
+        }
         let delta_count = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
         self.ops
             .read_f32_into(self.layout.kv_delta_k, &mut self.k_delta[..delta_count])?;
@@ -1836,7 +2152,32 @@ fn validate_moe(moe: &Qwen35MoeWeights<'_>, cfg: &Qwen35Moe, width: usize) -> Re
     Ok(())
 }
 
+fn physical_layer_types(model: &Qwen35Model<'_>, plan: &[usize]) -> Result<Vec<bool>, String> {
+    if plan.len() != model.config.n_layer_impl() || model.config.is_recurrent.len() != plan.len() {
+        return Err("Loop visit count does not match cache layout".into());
+    }
+    let mut types = vec![None; model.layers.len()];
+    for (&physical, &recurrent) in plan.iter().zip(&model.config.is_recurrent) {
+        let ty = types
+            .get_mut(physical)
+            .ok_or("Loop physical layer index out of range")?;
+        if ty.is_some_and(|previous| previous != recurrent) {
+            return Err("Loop visits disagree on physical attention type".into());
+        }
+        *ty = Some(recurrent);
+    }
+    types
+        .into_iter()
+        .map(|ty| ty.ok_or_else(|| "Loop plan omits physical layer".into()))
+        .collect()
+}
+
+#[cfg(test)]
 fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
+    eligibility_facts_with_plan(model, &(0..model.layers.len()).collect::<Vec<_>>())
+}
+
+fn eligibility_facts_with_plan(model: &Qwen35Model<'_>, plan: &[usize]) -> EligibilityFacts {
     let mut facts = EligibilityFacts {
         architecture: if model.config.moe.is_some() {
             "qwen35moe"
@@ -1847,11 +2188,13 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
         weight_formats: vec![model.output_weight.ggml_type],
         unrecorded_operations: Vec::new(),
     };
-    let layer_count = model.config.n_layer_impl();
-    if model.layers.len() != layer_count || model.config.is_recurrent.len() < layer_count {
-        facts.unrecorded_operations.push("layer_layout");
-        return facts;
-    }
+    let physical_types = match physical_layer_types(model, plan) {
+        Ok(types) => types,
+        Err(_) => {
+            facts.unrecorded_operations.push("layer_layout");
+            return facts;
+        }
+    };
     for (layer_index, layer) in model.layers.iter().enumerate() {
         if let Some(cfg) = &model.config.moe {
             if let Some(moe) = &layer.moe {
@@ -1893,7 +2236,7 @@ fn eligibility_facts(model: &Qwen35Model<'_>) -> EligibilityFacts {
                     .map(|weight| weight.ggml_type),
             );
         }
-        if model.config.is_recurrent[layer_index] {
+        if physical_types[layer_index] {
             let weights = [
                 layer.wqkv.as_ref(),
                 layer.wqkv_gate.as_ref(),
@@ -1987,6 +2330,39 @@ mod tests {
     fn qwen35_product_rejects_size_overflow() {
         let error = qwen35_product("test", &[usize::MAX, 2]).unwrap_err();
         assert!(error.to_string().contains("size overflows usize"));
+    }
+
+    #[test]
+    fn loop_physical_layer_types_validate_every_visit_and_physical_layer() {
+        let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+        model
+            .layers
+            .extend(crate::models::qwen35::trunk::tests::tiny_dense_session_model().layers);
+        model.config.n_layer = 4;
+        model.config.is_recurrent = vec![true, false, true, false];
+        let plan = [1, 0, 1, 0];
+        assert_eq!(
+            super::physical_layer_types(&model, &plan).unwrap(),
+            [false, true]
+        );
+        model.config.is_recurrent[2] = false;
+        assert!(super::physical_layer_types(&model, &plan)
+            .unwrap_err()
+            .contains("disagree on physical attention type"));
+        model.config.is_recurrent.fill(false);
+        assert!(super::physical_layer_types(&model, &[0, 0, 0, 0])
+            .unwrap_err()
+            .contains("omits physical layer"));
+        assert!(super::physical_layer_types(&model, &[0, 1, 2, 1])
+            .unwrap_err()
+            .contains("physical layer index out of range"));
+        assert!(super::physical_layer_types(&model, &[0, 1, 0])
+            .unwrap_err()
+            .contains("visit count does not match cache layout"));
+        model.config.is_recurrent.pop();
+        assert!(super::physical_layer_types(&model, &plan)
+            .unwrap_err()
+            .contains("visit count does not match cache layout"));
     }
 
     #[test]
@@ -2997,6 +3373,89 @@ mod tests {
             assert_eq!(layout.down.size, rows.max(9) * config.n_embd * 4);
             assert!(layout.ffn_gate.end() <= layout.ffn_up.offset);
             assert!(layout.ffn_up.end() <= layout.down.offset);
+        }
+    }
+
+    #[test]
+    fn loop_stream_arena_keeps_routing_branch_and_visit_caches_disjoint() {
+        let config = layout_config();
+        for rows in [1, 3] {
+            let ordinary = Qwen35ArenaLayout::new_rows(&config, 7, rows).unwrap();
+            assert_eq!(ordinary.mhc_residual.size, 0);
+            for streams in [2, 4] {
+                let layout =
+                    Qwen35ArenaLayout::new_rows_with_streams(&config, 7, rows, streams).unwrap();
+                assert_eq!(layout.mhc_residual.size, rows * streams * config.n_embd * 4);
+                assert_eq!(layout.mhc_normed.size, layout.mhc_residual.size);
+                assert_eq!(layout.mhc_logits.size, rows * streams * (2 + streams) * 4);
+                assert_eq!(layout.mhc_post.size, rows * streams * 4);
+                assert_eq!(layout.mhc_mix.size, rows * streams * streams * 4);
+                assert_eq!(layout.kv_k.size, ordinary.kv_k.size);
+                assert_eq!(layout.kv_delta_k.size, ordinary.kv_delta_k.size);
+                assert_eq!(layout.conv_state.size, ordinary.conv_state.size);
+                assert_eq!(layout.ssm_state.size, ordinary.ssm_state.size);
+                let regions = [
+                    layout.x,
+                    layout.normed,
+                    layout.projection,
+                    layout.down,
+                    layout.kv_k,
+                    layout.kv_v,
+                    layout.kv_delta_k,
+                    layout.kv_delta_v,
+                    layout.conv_state,
+                    layout.ssm_state,
+                    layout.mhc_residual,
+                    layout.mhc_normed,
+                    layout.mhc_logits,
+                    layout.mhc_post,
+                    layout.mhc_mix,
+                ];
+                for (index, region) in regions.iter().enumerate() {
+                    assert_eq!(region.offset % 16, 0);
+                    assert!(region.size > 0 && region.end() <= layout.total_size());
+                    for previous in &regions[..index] {
+                        assert!(region.end() <= previous.offset || previous.end() <= region.offset);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interleaved_mrope_coefficients_match_cpu_axes_for_unequal_positions() {
+        for scalar in [false, true] {
+            let _scope = crate::ops::ScalarDispatchScope::new(scalar);
+            for dim in [16, 32, 64, 128] {
+                for sections in [[2, 3, 1, 0], [16, 24, 24, 0]] {
+                    for positions in [[0; 4], [7, 11, 13, 17], [211, 3, 997, 17]] {
+                        let mut coefficients = vec![0.0; dim];
+                        super::fill_mrope_layout(
+                            &mut coefficients,
+                            positions,
+                            sections,
+                            1_000_000.0,
+                            true,
+                        )
+                        .unwrap();
+                        let mut expected = vec![0.0; dim];
+                        expected[..dim / 2].fill(1.0);
+                        crate::ops::rope_mrope_interleaved(
+                            &mut expected,
+                            positions,
+                            sections,
+                            dim,
+                            1_000_000.0,
+                            dim,
+                        );
+                        assert_eq!(
+                            coefficients.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "scalar={scalar} dim={dim} sections={sections:?} positions={positions:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

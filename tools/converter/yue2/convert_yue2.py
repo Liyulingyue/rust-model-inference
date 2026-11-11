@@ -127,7 +127,7 @@ def tokenizer_metadata(merge_file: Path) -> dict[str, object]:
 
 def _load_json(path: Path) -> dict[str, object]:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ValueError(f"{path}: invalid JSON") from error
     if not isinstance(value, dict):

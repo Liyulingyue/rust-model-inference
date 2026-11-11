@@ -18,7 +18,7 @@ from tools.converter.utils.gguf import (
 
 
 def source_contract(model_dir: Path):
-    config = json.loads((model_dir / "config.json").read_text())
+    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     if (config.get("model_type"), config.get("weight_format_version")) != (
         "audio8_asr_infinite", 2
     ):
@@ -27,7 +27,7 @@ def source_contract(model_dir: Path):
         raise ValueError("expected Voxtral Realtime audio tower")
     if config["text_config"]["model_type"] != "qwen2":
         raise ValueError("this exporter requires the supplied Qwen2 text decoder")
-    index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    index = json.loads((model_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
     if set(index.values()) != {"model.safetensors", "semantic_vad_heads.safetensors"}:
         raise ValueError("unexpected safetensors components")
     sources = {name: open_safetensors(model_dir / name) for name in set(index.values())}
@@ -96,7 +96,7 @@ def gguf_name(name: str) -> str:
 
 
 def tokenizer_metadata(writer: GgufWriter, model_dir: Path, vocab_size: int) -> None:
-    tokenizer = json.loads((model_dir / "tokenizer.json").read_text())
+    tokenizer = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8"))
     if tokenizer["model"]["type"] != "BPE" or tokenizer["normalizer"] != {"type": "NFC"}:
         raise ValueError("expected Qwen2 BPE tokenizer with NFC normalization")
     tokens = [None] * vocab_size

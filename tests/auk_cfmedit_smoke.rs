@@ -81,6 +81,9 @@ fn cfmedit_zero_audio_conditioning_produces_finite_output() {
         seed: 42,
         guidance_scale: 2.0,
         instruct: None,
+        // The AuK-Base recipe: the upstream default sway, no pinned grid.
+        sway_sampling_coef: Some(-1.0),
+        time_grid: None,
     };
     let audio = pipeline
         .generate_audio_with_audio("Hi", &audio_conditioning, audio_tokens, &options)

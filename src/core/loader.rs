@@ -416,19 +416,23 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     if !matches!(
         prefix,
         "qwen2"
+            | "mage_vl"
             | "qwen2vl"
             | "qwen3"
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
             | "qwen35moe"
+            | "thx02"
             | "edge0"
+            | "sensenova_loop"
             | "qwen3tts"
             | "llama"
             | "exaone"
             | "k2-horizon"
             | "granite"
             | "hunyuan-dense"
+            | "hy_v3"
             | "pig"
             | "lfm2"
             | "lfm2moe"
@@ -436,6 +440,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
+            | "nemotron_h_moe"
             | "falcon-h1"
             | "phi3"
             | "glm4"
@@ -527,14 +532,19 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     // hand back a placeholder ModelConfig so the generic loader can pass
     // through; the trunk's own config loader (see models::nemotron_h)
     // re-reads the metadata with array awareness.
-    if arch == "nemotron_h" {
+    //
+    // `nemotron_h_moe` is the 30B-A3B mixture-of-experts variant; it
+    // shares the trunk and only differs in the metadata prefix (GGUF
+    // namespaces every architecture-specific key under the architecture
+    // name) and in the expert metadata the trunk reads separately.
+    if arch == "nemotron_h" || arch == "nemotron_h_moe" {
         let n_embd = source
-            .metadata("nemotron_h.embedding_length")
+            .metadata(&format!("{arch}.embedding_length"))
             .and_then(MetaValue::to_u64)
             .map(|v| v as usize)
             .unwrap_or(0);
         let n_layer = source
-            .metadata("nemotron_h.block_count")
+            .metadata(&format!("{arch}.block_count"))
             .and_then(MetaValue::to_u64)
             .map(|v| v as usize)
             .unwrap_or(0);
@@ -544,7 +554,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             .map(Vec::len)
             .unwrap_or(0);
         let n_ctx = source
-            .metadata("nemotron_h.context_length")
+            .metadata(&format!("{arch}.context_length"))
             .and_then(MetaValue::to_u64)
             .map(|v| v as usize)
             .unwrap_or(0);
@@ -660,9 +670,12 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     };
     let n_embd_head = if arch == "qwen35"
         || arch == "qwen35moe"
+        || arch == "thx02"
         || arch == "edge0"
+        || arch == "sensenova_loop"
         || arch == "nanbeige"
         || arch == "mellum"
+        || arch == "hy_v3"
     {
         if n_head == 0 {
             return Err(format!(
@@ -926,6 +939,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
     if !matches!(
         arch.as_str(),
         "qwen2"
+            | "mage_vl"
             | "qwen2vl"
             | "qwen3"
             | "qwen3vl"
@@ -942,7 +956,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let has_qk_norm = matches!(
         arch.as_str(),
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
+        "qwen3" | "mage_vl" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
     );
     let has_qkv_bias = arch == "qwen2vl";
 
@@ -964,6 +978,8 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let allowed_dimensions = if arch == "qwen3vl" {
         Some(KNOWN_QWEN3VL_DIMENSIONS)
+    } else if arch == "mage_vl" {
+        Some(KNOWN_QWEN3VL_4B_DIMENSIONS)
     } else {
         None
     };

@@ -33,6 +33,7 @@ pub mod q4_0;
 pub mod q4_1;
 pub mod q4_k;
 pub mod q5_0;
+pub mod q5_1;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
@@ -328,6 +329,20 @@ pub struct Weight<'a> {
 }
 
 impl<'a> Weight<'a> {
+    pub fn from_f32_bytes(bytes: &'a [u8], n_in: usize, n_out: usize) -> Option<Self> {
+        let kernel: Box<dyn Kernel + 'a> =
+            Box::new(f32::F32Kernel::from_le_bytes(bytes, n_in, n_out)?);
+        let ggml_type = crate::core::tensor::GGMLType::F32;
+        #[cfg(feature = "vulkan")]
+        let kernel = vulkan::VulkanKernel::wrap(kernel, ggml_type);
+        Some(Self {
+            kernel,
+            ggml_type,
+            n_in,
+            n_out,
+        })
+    }
+
     pub fn from_quantized(tensor: QuantizedTensor<'a>) -> Self {
         let ggml_type = tensor.ggml_type();
         let n_in = tensor.n_in();
@@ -371,6 +386,7 @@ impl<'a> Weight<'a> {
             crate::core::tensor::GGMLType::Q4_0
                 | crate::core::tensor::GGMLType::Q4_1
                 | crate::core::tensor::GGMLType::Q5_0
+                | crate::core::tensor::GGMLType::Q5_1
                 | crate::core::tensor::GGMLType::Q8_0
                 | crate::core::tensor::GGMLType::Q1_0
         )

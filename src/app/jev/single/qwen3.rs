@@ -28,6 +28,7 @@ pub(crate) fn run_jev_decision_qwen3(
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -48,9 +49,16 @@ pub(crate) fn run_jev_decision_qwen3(
             output_json,
             mmproj_path,
             image_path.expect("image_path is Some"),
+            max_context,
         );
     }
-    let mut scorer = Qwen3JevScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
+    let mut scorer = Qwen3JevScorer::new(
+        source.clone(),
+        n_threads,
+        prefill_batch_size,
+        &jinja,
+        max_context,
+    )?;
     if !output_json {
         eprintln!("compute pool: {} threads", scorer.pool().n_threads());
     }
@@ -68,11 +76,17 @@ fn run_jev_decision_qwen3_visual(
     output_json: bool,
     mmproj_path: &Path,
     image_path: &Path,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     use super::run_jev_decision_core;
     use super::JevScorer;
 
-    let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())?;
+    // `compute_jev_result` encodes the A/B/C label chars through this
+    // tokenizer to find their logits, so the visual scorer needs one even
+    // though it never tokenizes the prompt itself. The labels live in the
+    // text GGUF, which is the same source the multimodal helper loads.
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
     verify_label_tokens_single(&tokenizer)?;
     let mut scorer = Qwen3VisualJevScorer {
         tokenizer,
@@ -80,6 +94,7 @@ fn run_jev_decision_qwen3_visual(
         pending: None,
         mmproj_path: mmproj_path.to_path_buf(),
         image_path: image_path.to_path_buf(),
+        max_context,
         n_threads,
         prefill_batch_size,
     };
@@ -92,6 +107,7 @@ fn run_jev_decision_qwen3_visual(
 /// JEV scorer backed by the shared qwen3 multimodal logits helper, so the two
 /// projector families and their deepstack wiring stay in one place.
 struct Qwen3VisualJevScorer {
+    /// Only used to encode the candidate label chars for logit lookup.
     tokenizer: BPETokenizer,
     /// Rendered `(system, payload)` for the question being scored. `build_prompt`
     /// fills it and `forward_logits` consumes it; `run_jev_decision_core` calls
@@ -99,6 +115,7 @@ struct Qwen3VisualJevScorer {
     pending: Option<(String, String)>,
     mmproj_path: PathBuf,
     image_path: PathBuf,
+    max_context: usize,
     source: Arc<dyn TensorSource>,
     n_threads: usize,
     prefill_batch_size: usize,
@@ -142,6 +159,7 @@ impl JevScorer for Qwen3VisualJevScorer {
             self.n_threads,
             self.prefill_batch_size,
             Some(&system),
+            self.max_context,
         )
     }
 
@@ -156,6 +174,7 @@ impl JevScorer for Qwen3VisualJevScorer {
 pub(crate) struct Qwen3JevScorer {
     pub(crate) model: crate::models::qwen3::Qwen3Model,
     pub(crate) prefill_batch_size: usize,
+    max_context: usize,
     /// `--jinja` template, resolved once in `new()`.
     pub(crate) jinja: Option<crate::prompt::jinja::JinjaChatTemplate>,
 }
@@ -166,9 +185,11 @@ impl Qwen3JevScorer {
         n_threads: usize,
         prefill_batch_size: usize,
         jinja: &crate::prompt::jinja::Options,
+        max_context: usize,
     ) -> Result<Self, String> {
         let mut jinja = jinja.clone();
         jinja.jinja |= source.metadata("wevisone_vl.source_revision").is_some();
+        jinja.jinja |= crate::app::arch_of(source.as_ref()) == "mage_vl";
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
             .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
@@ -182,6 +203,7 @@ impl Qwen3JevScorer {
         Ok(Self {
             model,
             prefill_batch_size,
+            max_context,
             jinja,
         })
     }
@@ -216,8 +238,19 @@ impl JevScorer for Qwen3JevScorer {
         &mut self,
         token_ids: Vec<u32>,
     ) -> Result<(Vec<f32>, std::time::Duration), String> {
+        crate::models::qwen3::trunk::util::checked_session_capacity(
+            token_ids.len(),
+            0,
+            self.max_context.min(self.model.config().n_ctx),
+        )?;
         let mut session = crate::models::qwen3::Qwen3Session::new_with_kv_state(
             &self.model,
+            // Size the KV cache to this prompt, not to the model's whole
+            // context. `new_with_compute` preallocates
+            // `n_layer * capacity * kv_stride` bytes up front, so a model
+            // advertising a 262144-token context asked for a 15 GB
+            // allocation to score one short prompt and the HTTP server died
+            // with "memory allocation of 15032385536 bytes failed".
             token_ids.len(),
             KvFormat::F16,
             crate::core::scratchpad::KvLifecycle::Ephemeral,

@@ -135,6 +135,10 @@ pub trait HybridTrunkModel<'m> {
     }
     #[cfg(feature = "vulkan")]
     fn supports_vulkan(&self) -> bool;
+    #[cfg(feature = "vulkan")]
+    fn stream_routing(&self) -> Option<crate::models::sensenova_loop::StreamRouting<'_, 'm>> {
+        None
+    }
 }
 
 impl<'m> HybridTrunkModel<'m> for HybridTrunk<'m> {
@@ -274,11 +278,12 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         } else {
             None
         } {
-            Some(context) => match Qwen35VulkanSession::try_new_rows(
+            Some(context) => match Qwen35VulkanSession::try_new_rows_with_routing(
                 model.trunk(),
                 capacity,
                 capacity.min(prefill_batch_size),
                 context,
+                model.stream_routing(),
             ) {
                 Ok(None) if compute_policy == ComputePolicy::Vulkan => {
                     return Err("Qwen3.5 configuration is unsupported for full-model Vulkan".into());

@@ -30,6 +30,7 @@ import numpy as np
 GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
+GGML_Q4_1 = 3
 GGML_Q8_0 = 8
 GGML_Q4K = 12
 GGML_Q5K = 13
@@ -299,11 +300,65 @@ def quantize_q4_0(values: np.ndarray) -> bytes:
     return out.tobytes()
 
 
+def quantize_q4_1(values: np.ndarray) -> bytes:
+    """GGML Q4_1: 32 values per block with a 20-byte layout.
+
+    Layout per block:
+      * f16 scale (the block range divided by 15)
+      * f16 min (the block minimum)
+      * 16 bytes of int4 nibbles (low nibble = element i, high nibble =
+        element 16 + i)
+
+    The repository's Q4_1 kernel (`ops::kernel::q4_1`) dequantizes a nibble
+    ``q`` as ``d * q + m`` with ``q`` read as an unsigned 0..15 value, so the
+    block keeps its minimum in ``m`` and spreads the range over the 15 steps
+    between ``m`` and ``m + 15 * d``. The scale and the minimum are rounded to
+    F16 *before* the payload is quantized, so the values the runtime sees are
+    the ones the grid was built from.
+    """
+    Q4_BLOCK = 32
+    Q4_BLOCK_BYTES = 20  # f16 scale + f16 min + 16 nibble-bytes
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    if flat.size % Q4_BLOCK:
+        raise ValueError(
+            f"q4_1 payload {flat.size} elements is not a multiple of block size {Q4_BLOCK}"
+        )
+    blocks = flat.reshape(-1, Q4_BLOCK)
+    minimum = blocks.min(axis=1)
+    maximum = blocks.max(axis=1)
+    scale = ((maximum - minimum) / 15.0).astype(np.float16)
+    scale_f32 = scale.astype(np.float32)
+    min_f16 = minimum.astype(np.float16)
+    min_f32 = min_f16.astype(np.float32)
+    inverse = np.zeros_like(scale_f32)
+    nonzero = scale_f32 != 0.0
+    inverse[nonzero] = 1.0 / scale_f32[nonzero]
+    scaled = (blocks - min_f32[:, None]) * inverse[:, None]
+    # ``roundf`` in the reference converter rounds halfway cases away from
+    # zero; ``np.rint`` would use ties-to-even instead.
+    rounded = np.where(scaled >= 0.0, np.floor(scaled + 0.5), np.ceil(scaled - 0.5))
+    q_int = rounded.clip(0.0, 15.0).astype(np.uint8)
+    # GGML stores the first and second 16-element halves in the low and high
+    # nibbles of each byte, the same layout the Q4_0 payload uses.
+    low = q_int[:, :16]
+    high = q_int[:, 16:]
+    packed = (high << 4) | low
+    out = np.empty((blocks.shape[0], Q4_BLOCK_BYTES), dtype=np.uint8)
+    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
+    out[:, 2:4] = min_f16.view(np.uint8).reshape(-1, 2)
+    out[:, 4:] = packed
+    return out.tobytes()
+
+
 def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
     words = np.frombuffer(raw_bf16, dtype="<u2")
     f32 = np.empty(words.size, dtype=np.float32)
     for i, bits in enumerate(words):
-        f32[i] = struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+        # Convert to a Python int first: numpy 2 keeps the uint16 dtype for
+        # `<<`, so `bits << 16` overflows to 0 and every weight decodes as
+        # zero.
+        b = int(bits)
+        f32[i] = struct.unpack("<f", struct.pack("<I", b << 16))[0]
     return quantize_q8_0(f32)
 
 
@@ -358,6 +413,22 @@ def _gguf_meta_value(value) -> bytes:
     raise TypeError(f"unsupported metadata value: {value!r}")
 
 
+def model_metadata_value(value):
+    """Use llama.cpp's model metadata types, preserving explicitly typed values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return MetaScalar(_T_UINT32 if value >= 0 else _T_INT32, value)
+    if isinstance(value, float):
+        return MetaScalar(_T_FLOAT32, value)
+    if isinstance(value, list) and value:
+        if all(type(item) is int for item in value):
+            return MetaArray(_T_INT32, tuple(value))
+        if all(type(item) is float for item in value):
+            return MetaArray(_T_FLOAT32, tuple(value))
+    return value
+
+
 def _gguf_array(values: list) -> bytes:
     if all(isinstance(value, str) for value in values):
         payload = b"".join(_gguf_str(value) for value in values)
@@ -384,6 +455,11 @@ def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
         if n % 32 != 0:
             raise ValueError(f"Q4_0 tensor with {n} elements not divisible by 32")
         return (n // 32) * 18
+    if ggml_type == GGML_Q4_1:
+        n = math.prod(dims)
+        if n % 32 != 0:
+            raise ValueError(f"Q4_1 tensor with {n} elements not divisible by 32")
+        return (n // 32) * 20
     block_bytes = _K_BLOCK_BYTES.get(ggml_type)
     if block_bytes is not None:
         n = math.prod(dims)

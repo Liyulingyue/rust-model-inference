@@ -87,6 +87,9 @@ fn flash_distilled_4_step_zero_guidance_produces_finite_output() {
         seed: 42,
         guidance_scale: 0.0,
         instruct: None,
+        // The distilled AuK-Flash recipe: the pinned time grid, no sway.
+        sway_sampling_coef: None,
+        time_grid: Some(rust_model_inference::models::diffusion::auk::FLASH_TIME_GRID.to_vec()),
     };
     let audio = pipeline
         .generate_audio("Hi", &options)

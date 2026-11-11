@@ -224,7 +224,7 @@ def _load_indexed_state(weights: Path, model: torch.nn.Module) -> tuple[int, int
     index = weights / "model.safetensors.index.json"
     if not index.is_file():
         raise RuntimeError(f"missing model.safetensors.index.json under {weights}")
-    index_data = json.loads(index.read_text())
+    index_data = json.loads(index.read_text(encoding="utf-8"))
     weight_map = index_data.get("weight_map", {})
     if not weight_map:
         raise RuntimeError("empty model weight map")
@@ -491,7 +491,7 @@ def _read_trace(root: Path) -> list[dict]:
     path = root / "trace.jsonl"
     if not path.is_file():
         raise RuntimeError(f"missing trace: {path}")
-    records = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+    records = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     if not records:
         raise RuntimeError(f"empty trace: {path}")
     seen = set()

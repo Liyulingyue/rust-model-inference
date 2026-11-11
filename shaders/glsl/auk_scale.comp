@@ -1,0 +1,24 @@
+#version 450
+
+// Elementwise scale for the AuK VAE residual sum.
+//
+// `out[i] = in[i] * scale`, with the input and the output allowed to be the
+// same region: every thread touches one element, so the update is safe.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint output_word; uint count; uint scale_bits;
+} pc;
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+
+    float value = uintBitsToFloat(arena.data[pc.input_word + index]);
+    arena.data[pc.output_word + index] =
+        floatBitsToUint(value * uintBitsToFloat(pc.scale_bits));
+}

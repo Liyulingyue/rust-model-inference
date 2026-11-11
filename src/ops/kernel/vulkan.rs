@@ -9,6 +9,27 @@ use crate::vulkan::ops::{
 };
 use std::sync::Mutex;
 
+static ATTENTION_RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
+    std::sync::OnceLock::new();
+static CONV3D_RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn release_shared_runtimes() -> Result<(), crate::vulkan::VulkanError> {
+    if let Some(slot) = ATTENTION_RUNTIME.get() {
+        slot.lock()
+            .map_err(|_| crate::vulkan::VulkanError::InitFailed("attention cache poisoned".into()))?
+            .take();
+    }
+    if let Some(slot) = CONV3D_RUNTIME.get() {
+        slot.lock()
+            .map_err(|_| {
+                crate::vulkan::VulkanError::InitFailed("convolution cache poisoned".into())
+            })?
+            .take();
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub(crate) struct GpuLinear {
     state: Mutex<Option<LinearState>>,
@@ -37,7 +58,7 @@ struct LinearState {
 /// matmuls (millions of output elements per call) are unaffected.
 ///
 /// Override with `RUST_GPU_MIN_OUTPUTS=0` to restore the old behaviour.
-fn min_gpu_matmul_outputs() -> usize {
+pub(crate) fn min_gpu_matmul_outputs() -> usize {
     std::env::var("RUST_GPU_MIN_OUTPUTS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -46,7 +67,7 @@ fn min_gpu_matmul_outputs() -> usize {
 
 pub(crate) fn offload_enabled() -> bool {
     // Tracing observes the requested backend; CPU/scalar scopes select exact CPU paths.
-    crate::ops::gpu_requested()
+    crate::compute::ComputePolicy::legacy() != crate::compute::ComputePolicy::Cpu
         && !crate::ops::scalar_mode()
         && !crate::core::thread_pool::gpu_matmul_disabled()
         && !crate::vulkan::gpu_broken()
@@ -171,15 +192,16 @@ pub(crate) fn try_attention(
     query: &[f32],
     key: &[f32],
     value: &[f32],
-    spec: crate::models::diffusion::dreamx::kernels::AttentionSpec,
+    spec: crate::ops::nn::AttentionSpec,
 ) -> Option<Vec<f32>> {
     if !offload_enabled() || spec.head_dim > 1024 {
         return None;
     }
-    static RUNTIME: std::sync::OnceLock<Mutex<Option<AttentionRuntime>>> =
-        std::sync::OnceLock::new();
     let context = crate::ops::get_vulkan_context()?;
-    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let mut state = ATTENTION_RUNTIME
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap();
     let mut output = vec![0.0; query.len()];
     let result = (|| {
         if state.as_ref().is_none_or(|runtime| {
@@ -204,9 +226,7 @@ pub(crate) fn try_attention(
             // kernel before it is used. A retry of the same call usually
             // returns the right numbers, and a retry keeps the bits of a
             // healthy run.
-            if crate::models::diffusion::dreamx::kernels::attention_matches_cpu(
-                query, key, value, &output, spec,
-            ) {
+            if crate::ops::nn::attention_matches_cpu(query, key, value, &output, spec) {
                 return Some(output);
             }
             let mut attempts = 0;
@@ -223,9 +243,7 @@ pub(crate) fn try_attention(
                 if !retry.iter().all(|v| v.is_finite()) {
                     break;
                 }
-                if crate::models::diffusion::dreamx::kernels::attention_matches_cpu(
-                    query, key, value, &retry, spec,
-                ) {
+                if crate::ops::nn::attention_matches_cpu(query, key, value, &retry, spec) {
                     return Some(retry);
                 }
             }
@@ -233,7 +251,7 @@ pub(crate) fn try_attention(
             // agree with, so the attention is computed on the CPU.
             let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
             let mut cpu = vec![0.0; query.len()];
-            if crate::models::diffusion::dreamx::kernels::attention_on_cpu(query, key, value, spec)
+            if crate::ops::nn::attention_on_cpu(query, key, value, spec)
                 .map(|values| cpu.copy_from_slice(&values))
                 .is_err()
             {
@@ -269,7 +287,7 @@ pub(crate) fn try_conv3d(
     input_shape: [usize; 4],
     weight_shape: [usize; 5],
     output_shape: [usize; 4],
-    spec: crate::models::diffusion::dreamx::kernels::Conv3dSpec,
+    spec: crate::ops::nn::Conv3dSpec,
 ) -> bool {
     if !offload_enabled() || spec.groups != 1 {
         return false;
@@ -277,8 +295,7 @@ pub(crate) fn try_conv3d(
     let Some(context) = crate::ops::get_vulkan_context() else {
         return false;
     };
-    static RUNTIME: std::sync::OnceLock<Mutex<Option<Conv3dRuntime>>> = std::sync::OnceLock::new();
-    let mut state = RUNTIME.get_or_init(Mutex::default).lock().unwrap();
+    let mut state = CONV3D_RUNTIME.get_or_init(Mutex::default).lock().unwrap();
     let needed = [input.len(), weight.len(), output.len(), output_shape[0]];
     let result = (|| {
         if state
@@ -414,6 +431,25 @@ impl GpuConv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offload_enabled_tracks_explicit_policy_scopes() {
+        use crate::compute::ComputePolicy;
+        let original = ComputePolicy::legacy();
+        {
+            let _auto = ComputePolicy::Auto.enter_legacy_scope();
+            let available = !crate::ops::scalar_mode() && !crate::vulkan::gpu_broken();
+            assert_eq!(offload_enabled(), available);
+            {
+                let _cpu = ComputePolicy::Cpu.enter_legacy_scope();
+                assert!(!offload_enabled());
+            }
+            assert_eq!(offload_enabled(), available);
+            let _scalar = crate::ops::float::ScalarDispatchScope::new(true);
+            assert!(!offload_enabled());
+        }
+        assert_eq!(ComputePolicy::legacy(), original);
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]
@@ -651,7 +687,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
     fn bf16_prepared_after_attention_is_reproducible() {
-        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
+        use crate::ops::nn::AttentionSpec;
         use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
         crate::ops::float::enable_gpu();
         if crate::ops::get_vulkan_context().is_none() {
@@ -745,7 +781,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Vulkan device and the real Mage-Flow GGUFs"]
     fn bf16_prepared_after_attention_projection_is_reproducible() {
-        use crate::models::diffusion::dreamx::kernels::AttentionSpec;
+        use crate::ops::nn::AttentionSpec;
         use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
         crate::ops::float::enable_gpu();
         if crate::ops::get_vulkan_context().is_none() {
@@ -1049,7 +1085,7 @@ mod tests {
         for index in 0..rows * n_out {
             let row = index / n_out;
             let column = index % n_out;
-            cpu[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+            cpu[index] = crate::ops::nn::dot_bf16_f32(
                 &bytes[column * n_in * 2..(column + 1) * n_in * 2],
                 &input[row * n_in..(row + 1) * n_in],
             );
@@ -1140,7 +1176,7 @@ mod tests {
         for index in 0..rows * n_out {
             let row = index / n_out;
             let column = index % n_out;
-            reference[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+            reference[index] = crate::ops::nn::dot_bf16_f32(
                 &bytes[column * n_in * 2..(column + 1) * n_in * 2],
                 &input[row * n_in..(row + 1) * n_in],
             );
@@ -1210,14 +1246,10 @@ mod tests {
                     let column = index % n_out;
                     let weight = &bytes[column * n_in * 2..(column + 1) * n_in * 2];
                     let input = &input[row * n_in..(row + 1) * n_in];
-                    first_half[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
-                        &weight[..half * 2],
-                        &input[..half],
-                    );
-                    second_half[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
-                        &weight[half * 2..],
-                        &input[half..],
-                    );
+                    first_half[index] =
+                        crate::ops::nn::dot_bf16_f32(&weight[..half * 2], &input[..half]);
+                    second_half[index] =
+                        crate::ops::nn::dot_bf16_f32(&weight[half * 2..], &input[half..]);
                 }
                 let mut matches_first = 0usize;
                 let mut matches_second = 0usize;
@@ -1297,7 +1329,7 @@ mod tests {
             for index in 0..rows * n_out {
                 let row = index / n_out;
                 let column = index % n_out;
-                reference[index] = crate::models::diffusion::dreamx::kernels::dot_bf16_f32(
+                reference[index] = crate::ops::nn::dot_bf16_f32(
                     &bytes[column * n_in * 2..(column + 1) * n_in * 2],
                     &input[row * n_in..(row + 1) * n_in],
                 );
@@ -1402,7 +1434,7 @@ mod tests {
                     ));
                 }
             }
-            let caught = crate::models::diffusion::dreamx::kernels::projection_matches_cpu(
+            let caught = crate::ops::nn::projection_matches_cpu(
                 &crate::core::thread_pool::ComputePool::new(1),
                 bytes,
                 &input,
@@ -1700,7 +1732,7 @@ mod tests {
             &[0.0; 8],
             &[0.0; 8],
             &[1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0, 6.0],
-            crate::models::diffusion::dreamx::kernels::AttentionSpec {
+            crate::ops::nn::AttentionSpec {
                 query_tokens: 2,
                 key_tokens: 2,
                 query_heads: 1,
