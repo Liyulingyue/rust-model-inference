@@ -201,37 +201,37 @@
     {
       "format": "q4_1",
       "cpu": {
-        "generate_seconds_median": 0.209497791,
-        "codec_decode_seconds": 0.385991042,
-        "codec_encode_seconds": 0.299265042,
+        "generate_seconds_median": 0.174140666,
+        "codec_decode_seconds": 0.370487291,
+        "codec_encode_seconds": 0.181354958,
         "same_weight_oracle_greedy_ids_equal": 87,
         "greedy_ids_total": 120
       },
       "auto": {
-        "generate_seconds_median": 0.303194667,
-        "codec_decode_seconds": 0.435078875,
-        "codec_encode_seconds": 0.270107208,
+        "generate_seconds_median": 0.28348575,
+        "codec_decode_seconds": 0.443976875,
+        "codec_encode_seconds": 0.264216,
         "same_weight_oracle_greedy_ids_equal": 87,
         "greedy_ids_total": 120
       },
       "vulkan": {
-        "generate_seconds_median": 0.770507541,
-        "codec_decode_seconds": 0.494201625,
-        "codec_encode_seconds": 0.352888416,
+        "generate_seconds_median": 0.729162709,
+        "codec_decode_seconds": 0.825776833,
+        "codec_encode_seconds": 0.3316345,
         "same_weight_oracle_greedy_ids_equal": 87,
         "greedy_ids_total": 120
       },
       "official_cpu": {
-        "generate_seconds_median": 0.5798567500314675,
-        "codec_decode_seconds": 0.09926554100820795,
-        "codec_encode_seconds": 0.19119475001934916
+        "generate_seconds_median": 0.5489359589992091,
+        "codec_decode_seconds": 0.08641116600483656,
+        "codec_encode_seconds": 0.19236233294941485
       },
       "quantization_vs_original": {
         "oracle_greedy_ids_equal_original": 18,
         "oracle_greedy_ids_total": 120,
-        "original_vs_same_weight_oracle_waveform_max_abs": 0.12903404980897903,
-        "original_vs_same_weight_oracle_waveform_rmse": 0.015008776785999415,
-        "original_vs_same_weight_oracle_waveform_cosine": 0.9073280464039379
+        "original_vs_same_weight_oracle_waveform_max_abs": 0.0,
+        "original_vs_same_weight_oracle_waveform_rmse": 0.0,
+        "original_vs_same_weight_oracle_waveform_cosine": 1.0
       }
     },
     {
@@ -342,5 +342,295 @@
         "original_vs_same_weight_oracle_waveform_cosine": 0.9915689344544554
       }
     }
-  ]
+  ],
+  "reviewed_q4_1_evidence": "models/Audio8-TTS-Realistic-Air/remote-20261111/macos-reviewed-results.json",
+  "linux": {
+    "date": "2026-11-11",
+    "host": "AMD EPYC 9334, Linux 6.8.0-79-generic x86_64; AMD Radeon Graphics (RADV NAVI31)",
+    "threads": 4,
+    "profile": "release-fast",
+    "cpu_quota": 16,
+    "memory_limit_bytes": 59055800320,
+    "gpu_vram_bytes": 51522830336,
+    "source": {
+      "python": "3.12.3 (main, Mar  3 2026, 12:15:18) [GCC 13.3.0]",
+      "dependencies": {
+        "torch": "2.9.1+gitff65f5b",
+        "transformers": "4.57.3",
+        "numpy": "2.5.4",
+        "safetensors": "0.8.0",
+        "soundfile": "0.14.0",
+        "gguf": "0.17.1"
+      },
+      "source_commit": "9f607fbcbd7fb03bcc6361b3b903740e3748680f",
+      "source_tree": "c340f88be312c4fdfe425aa584d8b24a1ced67d0",
+      "tracked_files_verified": 1656,
+      "runtime_build_commit": "154ec0c330c435517c13da77513f2d76870b80bb"
+    },
+    "evidence": "models/Audio8-TTS-Realistic-Air/remote-20261111/remote-results.json",
+    "limits": "Same phase definitions as the macOS rows. Shared host, single observations, and validation jobs ran concurrently; not an isolated benchmark or release-performance claim. Official CPU means the same-GGUF CPU Oracle with independent dequantization and activation QDQ, not a native quantized PyTorch kernel.",
+    "rows": [
+      {
+        "format": "f32",
+        "cpu": {
+          "generate_seconds_median": 0.531435027,
+          "codec_decode_seconds": 0.504272736,
+          "codec_encode_seconds": 0.249834541,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 3.611677237,
+          "codec_decode_seconds": 0.579806724,
+          "codec_encode_seconds": 0.600529773,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 4.554853496,
+          "codec_decode_seconds": 1.214805123,
+          "codec_encode_seconds": 1.445095302,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.0773935709148645,
+          "codec_decode_seconds": 0.4379304237663746,
+          "codec_encode_seconds": 0.9484363049268723
+        }
+      },
+      {
+        "format": "bf16",
+        "cpu": {
+          "generate_seconds_median": 0.482326931,
+          "codec_decode_seconds": 0.66885832,
+          "codec_encode_seconds": 0.299744815,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 3.118126427,
+          "codec_decode_seconds": 0.739384701,
+          "codec_encode_seconds": 0.642498192,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 4.821668959,
+          "codec_decode_seconds": 1.3192322,
+          "codec_encode_seconds": 1.382021481,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.144919607788324,
+          "codec_decode_seconds": 0.36340618692338467,
+          "codec_encode_seconds": 0.9480301085859537
+        }
+      },
+      {
+        "format": "f16",
+        "cpu": {
+          "generate_seconds_median": 0.610676984,
+          "codec_decode_seconds": 0.651543188,
+          "codec_encode_seconds": 0.362452847,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 3.919935114,
+          "codec_decode_seconds": 0.67803088,
+          "codec_encode_seconds": 0.697625492,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 4.807230882,
+          "codec_decode_seconds": 0.864440968,
+          "codec_encode_seconds": 0.575448799,
+          "same_weight_oracle_greedy_ids_equal": 120,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.007409729063511,
+          "codec_decode_seconds": 0.4495709799230099,
+          "codec_encode_seconds": 0.90400156006217
+        }
+      },
+      {
+        "format": "q8_0",
+        "cpu": {
+          "generate_seconds_median": 0.375011378,
+          "codec_decode_seconds": 0.722006528,
+          "codec_encode_seconds": 0.313110217,
+          "same_weight_oracle_greedy_ids_equal": 56,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 1.596765836,
+          "codec_decode_seconds": 0.92176542,
+          "codec_encode_seconds": 0.512736416,
+          "same_weight_oracle_greedy_ids_equal": 56,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 2.565510787,
+          "codec_decode_seconds": 1.075055856,
+          "codec_encode_seconds": 0.485509058,
+          "same_weight_oracle_greedy_ids_equal": 56,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.2265866212546825,
+          "codec_decode_seconds": 0.4195570033043623,
+          "codec_encode_seconds": 0.8805313352495432
+        }
+      },
+      {
+        "format": "q4_0",
+        "cpu": {
+          "generate_seconds_median": 0.570952935,
+          "codec_decode_seconds": 0.670580855,
+          "codec_encode_seconds": 0.369586636,
+          "same_weight_oracle_greedy_ids_equal": 62,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 2.159985587,
+          "codec_decode_seconds": 0.804529017,
+          "codec_encode_seconds": 0.42095301,
+          "same_weight_oracle_greedy_ids_equal": 39,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 2.277347435,
+          "codec_decode_seconds": 1.375033722,
+          "codec_encode_seconds": 0.715622537,
+          "same_weight_oracle_greedy_ids_equal": 43,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.2901292741298676,
+          "codec_decode_seconds": 0.4370298199355602,
+          "codec_encode_seconds": 0.8906643874943256
+        }
+      },
+      {
+        "format": "q4_1",
+        "cpu": {
+          "generate_seconds_median": 0.329398833,
+          "codec_decode_seconds": 0.565187134,
+          "codec_encode_seconds": 0.283882866,
+          "same_weight_oracle_greedy_ids_equal": 35,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 2.128363211,
+          "codec_decode_seconds": 0.631408283,
+          "codec_encode_seconds": 0.348056498,
+          "same_weight_oracle_greedy_ids_equal": 35,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 2.443883218,
+          "codec_decode_seconds": 1.077853205,
+          "codec_encode_seconds": 0.480225147,
+          "same_weight_oracle_greedy_ids_equal": 35,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.201498420909047,
+          "codec_decode_seconds": 0.3896407335996628,
+          "codec_encode_seconds": 0.8562024645507336
+        }
+      },
+      {
+        "format": "q4_k",
+        "cpu": {
+          "generate_seconds_median": 0.329101134,
+          "codec_decode_seconds": 0.640100053,
+          "codec_encode_seconds": 0.291598295,
+          "same_weight_oracle_greedy_ids_equal": 55,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 4.683682691,
+          "codec_decode_seconds": 0.634565119,
+          "codec_encode_seconds": 0.354386178,
+          "same_weight_oracle_greedy_ids_equal": 40,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 3.169589008,
+          "codec_decode_seconds": 0.926577349,
+          "codec_encode_seconds": 1.393972523,
+          "same_weight_oracle_greedy_ids_equal": 73,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 6.88471401296556,
+          "codec_decode_seconds": 0.42741139233112335,
+          "codec_encode_seconds": 0.885053776204586
+        }
+      },
+      {
+        "format": "q5_k",
+        "cpu": {
+          "generate_seconds_median": 0.326597564,
+          "codec_decode_seconds": 0.606229321,
+          "codec_encode_seconds": 0.271367509,
+          "same_weight_oracle_greedy_ids_equal": 81,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 2.404121842,
+          "codec_decode_seconds": 0.63618129,
+          "codec_encode_seconds": 0.356758432,
+          "same_weight_oracle_greedy_ids_equal": 44,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 3.391211814,
+          "codec_decode_seconds": 0.775075098,
+          "codec_encode_seconds": 0.459086491,
+          "same_weight_oracle_greedy_ids_equal": 51,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.323670724406838,
+          "codec_decode_seconds": 0.3899758066982031,
+          "codec_encode_seconds": 0.8609016370028257
+        }
+      },
+      {
+        "format": "q6_k",
+        "cpu": {
+          "generate_seconds_median": 0.301015307,
+          "codec_decode_seconds": 0.592639425,
+          "codec_encode_seconds": 0.268521841,
+          "same_weight_oracle_greedy_ids_equal": 74,
+          "greedy_ids_total": 120
+        },
+        "auto": {
+          "generate_seconds_median": 2.891102823,
+          "codec_decode_seconds": 0.679950905,
+          "codec_encode_seconds": 0.461843405,
+          "same_weight_oracle_greedy_ids_equal": 83,
+          "greedy_ids_total": 120
+        },
+        "vulkan": {
+          "generate_seconds_median": 3.364262248,
+          "codec_decode_seconds": 0.864455909,
+          "codec_encode_seconds": 0.450575889,
+          "same_weight_oracle_greedy_ids_equal": 63,
+          "greedy_ids_total": 120
+        },
+        "official_cpu": {
+          "generate_seconds_median": 7.034045033156872,
+          "codec_decode_seconds": 0.4230227302759886,
+          "codec_encode_seconds": 0.8614114709198475
+        }
+      }
+    ]
+  }
 }

@@ -81,7 +81,8 @@ RAYON_NUM_THREADS=4 RMI_ARKTTS_MODEL_DIR="$MODEL_DIR" \
 ```
 
 Oracle 输出目录必须不存在，避免混入旧检查点。真实权重测试默认 ignored，需要显式执行。
-token IDs、prompt packing、codec 离散码和 greedy 帧精确比较；浮点计算使用数值容差，
+Tokenizer/prompt IDs 与形状契约精确比较；原精度基线核对 codec 离散码和 greedy 帧，
+半精度/量化另记录码流分歧。浮点计算使用数值容差，
 不要求矩阵乘、归一化、激活、注意力或 codec 逐位一致。
 
 | 浮点检查 | 门槛 |
@@ -99,7 +100,7 @@ token IDs、prompt packing、codec 离散码和 greedy 帧精确比较；浮点�
 
 转换器和 loader 覆盖九档配对格式：`F32`、`F16`、`BF16`、`Q8_0`、`Q4_0`、`Q4_1`、
 `Q4_K`、`Q5_K`、`Q6_K`。每档均用同一量化 GGUF 通过独立 gguf-py 反量化 + 官方模型
-进行 1053 个固定历史检查点，再在 CPU/Auto/严格 Vulkan 各跑一次。结果目录为
+进行 1053 个固定历史检查点，再在 CPU/Auto/严格 Vulkan 各跑一次。以下为 M3 Max ARM64 结果，目录为
 `/Users/gouzi/Documents/git/rust-model-inference/models/Audio8-TTS-Realistic-Air/multiq/`。
 
 | 格式 | CPU / Auto / Vulkan | 最差 checkpoint relative RMSE | 固定码流 waveform max_abs | 严格 Vulkan dense calls |
@@ -109,7 +110,7 @@ token IDs、prompt packing、codec 离散码和 greedy 帧精确比较；浮点�
 | BF16 | 通过 / 通过 / 通过 | 2.97e-5 | 1.46e-6 | 4308 |
 | Q8_0 | 通过 / 通过 / 通过 | 5.85e-2 | 1.50e-3 | 4308 |
 | Q4_0 | 通过 / 通过 / 通过 | 7.87e-2 | 5.99e-3 | 4308 |
-| Q4_1 | 通过 / 通过 / 通过 | 8.69e-2 | 2.93e-3 | 4308 |
+| Q4_1 | 通过 / 通过 / 通过 | 8.69e-2 | 1.58e-6 | 4308 |
 | Q4_K | 通过 / 通过 / 通过 | 5.85e-2 | 1.55e-6 | 4308 |
 | Q5_K | 通过 / 通过 / 通过 | 6.28e-2 | 1.35e-6 | 4308 |
 | Q6_K | 通过 / 通过 / 通过 | 6.60e-2 | 8.93e-4 | 4308 |
@@ -128,6 +129,17 @@ logits max_abs ≤ 5、waveform max_abs < 0.006 且 RMSE < 0.001；F16 使用
 完整的逐组合状态与证据路径见 [validation.md](validation.md#覆盖矩阵与改动边界)。
 导出格式集合来自共享 `quantize_gguf.BLOCK_FORMATS` 加 F32；没有为 ArkTTS 新增量化算法。
 K 格式保留不满足 256 元素块宽的主模型行和 codec 1216 宽行，不能把这些混合文件描述为全图低比特。
+Q4_1 的最终导出另外保留 codec `quantizer.post_module.*` 解码 Transformer 为 F32，
+其主模型和 60 个 codec 编码器投影仍为 Q4_1。初版在 x86 固定码流波形超限，未放宽门槛；
+修正后已在 M3 Max 和 RADV NAVI31 的 CPU/Auto/Vulkan 数值及 CLI/HTTP 矩阵复验通过。
+Q4_1 新资产与原始失败证据分别保存在 `multiq-reviewed/q4_1/` 和原 `multiq/q4_1/`；
+最终文件身份见 `final-inventory-20261111.json` 和 [validation.md](validation.md)。
+
+同日 Linux x86_64 的 AMD EPYC 9334 / RADV NAVI31 也完成了最终九档 × 三后端矩阵：
+27 组各 1053 个固定历史检查点、同输入 projection，以及 CLI/HTTP 普通/克隆 WAV/PCM
+全部通过。禁用 ICD 时 Q4_0 Auto 输出与 CPU 相同，严格 Vulkan 的两个入口均拒绝启动。
+远端证据已归档到 `MODEL_DIR/remote-20261111/`；详细指标、环境和 codec 哈希差异见
+[Linux 复验记录](validation.md#linux-x86_64--radv-navi31-复验2026-11-11)。
 
 ### 完整矩阵复现
 

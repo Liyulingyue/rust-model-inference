@@ -27,6 +27,10 @@ Q4/Q5/Q6_K 仅量化能整除块宽的 FFN down projection，896 宽的 attentio
 其余二维 dense projection 按所选格式导出。这样每个配对文件仍是原生块量化格式，同时避免
 重采样通道的激活量化误差被放大到波形。
 
+Q4_1 还将 `quantizer.post_module.*` 解码 Transformer 保留为 F32：x86 上的 affine
+activation QDQ 分叉曾使固定码流波形超过既定误差门槛。Q4_1 主模型和 codec 编码器仍量化；
+codec 为 60 个 Q4_1 + 395 个 F32 张量，文件约 798 MB。此策略对所有平台和后端一致。
+
 每个输出都写入相同的 `arktts.bundle_id`，并在发布前完成目录、shape、payload 和回读校验。
 例如默认输出为：
 
