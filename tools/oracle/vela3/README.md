@@ -12,6 +12,26 @@ Vela3 使用现有 `rust-model-inference --system-one-request FILE|-`；`--model
 
 2026-11-02 入口修复验证：Cargo 的 9 个 binary targets 与 main 基线一致；主程序与相关 CLI 共 38 项测试通过，包含 6 项 System One 回归。fast（stdin）、lite（独立底座）和 fast-vision 文本入口共 29 问与已有固定 Oracle fixture 对照通过，完整 JSON 也与原 native 记录一致。全库仍为 1360 通过、20 失败、94 忽略，20 项失败名称与修复前完全相同。其他模型和图像逐层记录未重跑。
 
+## 混合 Vulkan 投影（2026-11-06）
+
+此前入口的 CPU-only 限制已解除。`--compute auto|vulkan` 和 `--gpu` 经共享 `ComputePolicy` 进入 F32/F16/BF16 投影分发；默认 CLI 和原 `system_one` Rust API 保持 CPU。显式 Rust API 为 `system_one_with_policy`。自动标签定义生成固定使用 CPU，避免改写 span 提示词；attention、递归状态与解码仍含 CPU 步骤，未实现完整设备常驻图，也没有新增 binary、依赖或共享 kernel 改动。
+
+```bash
+cargo +1.98.1 build --locked --profile release-fast --features vulkan --bin rust-model-inference
+RMI_COMPUTE_TRACE=1 target/release-fast/rust-model-inference \
+  --model models/vela3-fast --system-one-request tools/oracle/vela3/requests/fast.json \
+  --threads 4 --compute vulkan > models/vela3-fast-vulkan.json
+.venv/bin/python tools/oracle/vela3/compare_requests.py \
+  models/vela3-fast-response.json models/vela3-fast-vulkan.json \
+  --atol 5e-4 --rtol 5e-4 --out models/vela3-fast-vulkan-comparison.json
+cargo +1.98.1 test --locked --profile release-fast --features vulkan --lib \
+  gpu_projection_and_lora_match_cpu_for_all_float_formats -- --ignored --nocapture
+```
+
+Oracle 响应文件按下方 Fast 命令生成。将 `vulkan` 换成 `cpu`、`auto` 可对照策略；`--gpu` 等同 `auto`。macOS 需先配置可用 Vulkan loader / MoltenVK ICD，仅对测试子进程设置路径；设备缺失时 Auto 回退，严格 Vulkan 在加载权重前报错。trace 的 `scope=linear backend=Vulkan` 与实际提交增量证明投影上设备，软件 ICD 不计为物理 GPU 证据。
+
+具体主机、逐请求数值/计数、回归基线和未验证范围见 [GPU 实测记录](gpu-2026-11-06.md) 与 `verification.json` 的 `gpu_2026_11_06`。本次不放宽已有概率、BF16 或内部激活门槛。原 #193 合并后，GPU 增量另基于最新 main 创建后续 PR；集成后的基线与 GPU 冒烟检查单列在同一报告，未冒充 57 问全量复跑。
+
 ## 便携检查
 
 以下检查不需要权重或 Python 推理依赖。验证机器使用 Rust 1.98.1、macOS arm64；普通测试跳过需要本地 fixture 的检查。
@@ -222,7 +242,7 @@ Checkpoint Oracle 检查名称、顺序、shape、次数、Token IDs、mRoPE 和
 - flash：真实三问公开请求的 choice、noul、两个非空 NER span 和 usage 一致，浮点最大误差 `0.003435`；grafted head 的四步 greedy IDs 均为 `[2838, 369, 264, 4314]`。base/span/decision 的 F32 激活诊断共 297 个 checkpoint 均通过 `atol=5e-4, rtol=1e-4`，最大绝对误差分别 `0.000488/0.000854/0.000977`。BF16 短 trace 三条路由的 logits 满足既定容差且 argmax 一致，但内部 activation 最大误差 `1.5/2.5/4.0` 超过固定门槛，仍记为失败；差异集中在稀疏的大幅值 channel，尚未隔离具体算子。
 - d3 图像：75 个展开 tokens 和三轴位置精确一致。F32 视觉塔相对官方 F32 投影 max `0.005106`、RMSE `0.000204`；对官方默认 BF16 塔则扩大为最终 hidden max `2.03125`、RMSE `0.10997`、logits max `0.08461`。样本 argmax 一致，但 **BF16 逐层门槛未通过**，未放宽门槛将其记为通过。
 
-mini/turbo 的当前 ModelScope 底座与 Vela 固定版本不一致，不能用当前镜像冒充固定 checkpoint。两者均按授权使用官方固定 HF 权重，通过官方 HF 接口或 hf-mirror 定位固定版本的官方 CDN 地址，实际数据从官方 CDN 传输并校验完整 SHA；执行的 d3 源码 SHA 与固定 manifest 匹配，未使用目录中的新版 wrapper。mini/flash/turbo 的非因果 BF16 内部激活门槛以及 d3 图像门槛仍未通过；真实请求与 F32 诊断的通过结论不能替代这些失败记录。GPU、GGUF、HTTP server、视频、长上下文性能、跨平台与完整公开基准均未执行。
+mini/turbo 的当前 ModelScope 底座与 Vela 固定版本不一致，不能用当前镜像冒充固定 checkpoint。两者均按授权使用官方固定 HF 权重，通过官方 HF 接口或 hf-mirror 定位固定版本的官方 CDN 地址，实际数据从官方 CDN 传输并校验完整 SHA；执行的 d3 源码 SHA 与固定 manifest 匹配，未使用目录中的新版 wrapper。mini/flash/turbo 的非因果 BF16 内部激活门槛以及 d3 图像门槛仍未通过；真实请求与 F32 诊断的通过结论不能替代这些失败记录。该早期记录未执行 GPU、GGUF、HTTP server、视频、长上下文性能、跨平台与完整公开基准；2026-11-06 补充的 GPU 范围见 [GPU 实测记录](gpu-2026-11-06.md)。
 
 
 ## 2026-11-05 review 修复复核

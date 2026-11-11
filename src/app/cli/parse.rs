@@ -744,7 +744,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 "--threads" => {
                     required_usize_value(args, &mut index, "--threads")?;
                 }
-                "--adapter" | "--system-one-request" | "--compute" => {}
+                "--adapter" | "--system-one-request" | "--compute" | "--gpu" => {}
                 flag => {
                     return Err(format!(
                         "--system-one-request cannot be combined with {flag}"
