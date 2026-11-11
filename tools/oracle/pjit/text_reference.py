@@ -98,7 +98,7 @@ def main():
     output = encoder([a.prompt])[0].float().cpu().numpy()
     a.output.parent.mkdir(parents=True, exist_ok=True)
     output.astype('<f4').tofile(a.output)
-    a.output.with_suffix('.json').write_text(json.dumps(dict(gguf=str(a.gguf), tensors=len(loaded), shape=list(output.shape)), indent=2))
+    a.output.with_suffix('.json').write_text(json.dumps(dict(gguf=str(a.gguf), tensors=len(loaded), shape=list(output.shape), device='cuda', activation_quant=a.activation_quant, oracle_commit=PIN), indent=2))
 
 
 if __name__ == '__main__':
