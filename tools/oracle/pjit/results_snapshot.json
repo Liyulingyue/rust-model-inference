@@ -137,5 +137,58 @@
     "linear_submissions": 218,
     "attention_submissions": 26,
     "caption_backend": "CPU"
+  },
+  "replacement_host_validation": {
+    "code_commit": "6e67c0cfb0b23d94323b69e80298e78c11cce1b1",
+    "date": "2026-11-11",
+    "source_hash_manifest": "source_hashes.json",
+    "targeted_tests": {
+      "passed": 8,
+      "failed": 0,
+      "ignored": 3
+    },
+    "dit_exports_observed": [
+      "f32",
+      "f16",
+      "bf16",
+      "q8_0",
+      "q4_0",
+      "q4_1"
+    ],
+    "text_exports_observed": [
+      "f32",
+      "f16",
+      "bf16",
+      "q8_0"
+    ],
+    "shared_quantizer_tiled_self_check": {
+      "formats": [
+        "q8_0",
+        "q4_0",
+        "q4_1",
+        "q4_k",
+        "q5_k",
+        "q6_k"
+      ],
+      "shape": [
+        257,
+        2560
+      ],
+      "row_tile": 31,
+      "comparison": "exact bytes",
+      "passed": true
+    },
+    "q8_cpu_same_input_projection_replay": {
+      "count": 217,
+      "failed": 0,
+      "threshold_nrmse": 0.02,
+      "threshold_cosine": 0.999,
+      "worst_nrmse": 5.409546853506644e-07,
+      "worst_name": "image_refiner.1.attn.o",
+      "note": "Observed terminal summary; raw per-projection records were not retrieved before the replacement SSH endpoint refused connections. This is local projection validation, not an end-to-end pass.",
+      "cosine_at_worst_nrmse": 0.9999999999998538
+    },
+    "release_build": "interrupted; no successful completion observed",
+    "connection": "SSH endpoint subsequently returned Connection refused; remote final matrices and images unavailable"
   }
 }
