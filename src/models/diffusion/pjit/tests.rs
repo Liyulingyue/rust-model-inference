@@ -1,5 +1,31 @@
 use super::*;
 #[test]
+fn rope_shares_spatial_phases_and_leaves_text_positions_unchanged() {
+    let mut input: Vec<_> = (0..5 * HIDDEN).map(|i| (i % 2 == 0) as u8 as f32).collect();
+    dit::rope(&mut input, (2, 2, 4));
+    for token in 0..5 {
+        for head in input[token * HIDDEN..(token + 1) * HIDDEN].chunks_exact(128) {
+            for (start, position) in [
+                (0, 0.),
+                (44, (token / 2) as f64 * 0.5),
+                (86, (token % 2) as f64 * 0.5),
+            ] {
+                let pairs = if start == 0 { 22 } else { 21 };
+                for pair in 0..pairs {
+                    let angle = if token == 4 {
+                        0.
+                    } else {
+                        position / 10000f64.powf(pair as f64 / pairs as f64)
+                    };
+                    let (s, c) = angle.sin_cos();
+                    assert!((head[start + 2 * pair] - c as f32).abs() < 1e-7);
+                    assert!((head[start + 2 * pair + 1] - s as f32).abs() < 1e-7);
+                }
+            }
+        }
+    }
+}
+#[test]
 fn loader_rejects_invalid_contract_shape_type_and_payload() {
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo};
     struct Source {

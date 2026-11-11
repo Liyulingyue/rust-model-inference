@@ -374,21 +374,35 @@ pub(super) fn cpu_attention(
     }
     Ok(output)
 }
-fn rope(x: &mut [f32], grid: (usize, usize, usize)) {
+pub(super) fn rope(x: &mut [f32], grid: (usize, usize, usize)) {
+    // Spatial coordinates share the same phases across all tokens and 23 heads.
+    let phases: Vec<Vec<_>> = (0..grid.0.max(grid.1))
+        .map(|position| {
+            (0..21)
+                .map(|pair| {
+                    let angle = position as f64 * 0.5 / 10000f64.powf(pair as f64 / 21.);
+                    let (s, c) = angle.sin_cos();
+                    (s as f32, c as f32)
+                })
+                .collect()
+        })
+        .collect();
     for (token, row) in x.chunks_exact_mut(HIDDEN).enumerate() {
         if token >= grid.2 {
             continue;
         }
         for head in row.chunks_exact_mut(128) {
             for (start, pairs, pos) in [
-                (0, 22, 0.),
-                (44, 21, (token / grid.1) as f64 * 0.5),
-                (86, 21, (token % grid.1) as f64 * 0.5),
+                (0, 22, 0),
+                (44, 21, token / grid.1),
+                (86, 21, token % grid.1),
             ] {
                 for pair in 0..pairs {
-                    let angle = pos / 10000f64.powf(pair as f64 / pairs as f64);
-                    let (s, c) = angle.sin_cos();
-                    let (s, c) = (s as f32, c as f32);
+                    let (s, c) = if start == 0 {
+                        (0., 1.)
+                    } else {
+                        phases[pos][pair]
+                    };
                     let i = start + pair * 2;
                     let (a, b) = (head[i], head[i + 1]);
                     head[i] = a * c - b * s;

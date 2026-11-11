@@ -48,6 +48,7 @@ def main():
     p.add_argument('--gguf', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--activation-quant', action='store_true')
+    p.add_argument('--batch-size', type=int, choices=(1, 2), default=1)
     p.add_argument('--prompt', default='A red cube on a white table.')
     a = p.parse_args()
     if subprocess.check_output(['git', '-C', str(a.oracle), 'rev-parse', 'HEAD'], text=True).strip() != PIN:
@@ -95,10 +96,10 @@ def main():
             tensor=tensors.get(mapped)
             if isinstance(module,torch.nn.Linear) and tensor is not None and int(tensor.tensor_type) in (2,3,8,12,13,14):
                 module.register_forward_pre_hook(quantize(int(tensor.tensor_type),name.endswith('.linear_attn.out_proj')))
-    output = encoder([a.prompt])[0].float().cpu().numpy()
+    output = encoder([a.prompt] * a.batch_size)[0].float().cpu().numpy()
     a.output.parent.mkdir(parents=True, exist_ok=True)
     output.astype('<f4').tofile(a.output)
-    a.output.with_suffix('.json').write_text(json.dumps(dict(gguf=str(a.gguf), tensors=len(loaded), shape=list(output.shape), device='cuda', activation_quant=a.activation_quant, oracle_commit=PIN), indent=2))
+    a.output.with_suffix('.json').write_text(json.dumps(dict(gguf=str(a.gguf), tensors=len(loaded), shape=list(output.shape), device='cuda', batch_size=a.batch_size, activation_quant=a.activation_quant, oracle_commit=PIN), indent=2))
 
 
 if __name__ == '__main__':
