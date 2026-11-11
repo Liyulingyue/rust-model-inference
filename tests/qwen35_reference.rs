@@ -430,7 +430,9 @@ fn qwen38_matches_pinned_llama_cpp_at_lossless_checkpoints() {
     let llama = required_path("RMI_LLAMA_CPP");
     assert_eq!(git_head(&llama), LLAMA_PIN);
     let artifacts = unique_temp_dir("rmi-qwen38-parity");
-    let oracle = build_oracle(&llama, &artifacts);
+    let oracle = std::env::var_os("RMI_QWEN35_ORACLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| build_oracle(&llama, &artifacts));
     let scalar_trace = run_rust(&model, "你好", 4, &artifacts, 1, false);
     let rust_trace = run_rust(&model, "你好", 4, &artifacts, 64, false);
     compare_qwen35_traces(&scalar_trace, &rust_trace, true).unwrap_or_else(|error| {
