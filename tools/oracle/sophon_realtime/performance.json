@@ -255,6 +255,44 @@
         "no_legacy_binary_fallback": true
       },
       "condition": "Reference: one 22-token causal Transformers F32 forward (15 prompt + 7 teacher tokens), selecting eight prediction rows after runtime activation-QDQ. Rust: 15-token prefill plus seven cached continuations with optimized quantized kernels. Native reference SiLU differs from production approximate SiLU. Shared-host release-fast validation timings, not an equal-batching throughput or capacity comparison."
+    },
+    {
+      "component": "resumed-31344 Q6_K CPU validation",
+      "format": "Q6_K",
+      "policy": "cpu",
+      "kv": "F32",
+      "threads": 4,
+      "prompt_tokens": 15,
+      "compared_steps": 8,
+      "rust_cli_wall_seconds": 14.523229643702507,
+      "reference_forward_seconds": 362.3475832939148,
+      "reference_wall_seconds": 661.5266095660627,
+      "numerical_pass": false,
+      "greedy_pass": true,
+      "evidence": "target/sophon/thinker-resumed-31344-v3/q6_k-oracle-runtime/result.json",
+      "binary_provenance": {
+        "path": "target/sophon/q6-resumed-31344-cli",
+        "sha256": "54c1792d4e63791df6f9bbbfdf41475fd9c2114a064a0c35f1b0adc60f494233",
+        "size": 41077552,
+        "build_report": "target/sophon/q6-resumed-31344-build.json",
+        "build_report_sha256": "0fbdeccc86023f3944d385e093eb6051e26c8d58f6f12986c536c964e33b7206",
+        "build_source_manifest": "target/sophon/q6-resumed-31344-source-manifest.json",
+        "build_source_manifest_sha256": "4dc5815b9e82efdf6fa228154a4344dd0ec53b80d1042ab93e664594497d988b",
+        "source_file_count": 618,
+        "source_matches_fallback_reviewed": true,
+        "source_unchanged_after_build": true,
+        "source_matches_before_inference": true,
+        "features": [
+          "parity-trace"
+        ],
+        "default_features": false,
+        "profile": "release-fast",
+        "vulkan_enabled": false,
+        "coverage_limit": "New replacement-host CPU CLI binary; no claim for HTTP, Auto, Vulkan or other precision rows.",
+        "source_matches_after_cli": true,
+        "cli_sha256_after_inference": "54c1792d4e63791df6f9bbbfdf41475fd9c2114a064a0c35f1b0adc60f494233"
+      },
+      "condition": "Reference: one 22-token causal Transformers F32 forward (15 prompt + 7 teacher tokens), selecting eight prediction rows after runtime activation-QDQ. Rust: 15-token prefill plus seven cached continuations with optimized quantized kernels. Native reference SiLU differs from production approximate SiLU. Shared-host release-fast validation timings, not an equal-batching throughput or capacity comparison."
     }
   ],
   "gpu": {

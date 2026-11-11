@@ -78,6 +78,8 @@ Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均
 
 Tokenizer、shape、控制 token、版本和 stream ordering 精确检查。F32/SIMD/F16/BF16/量化以事先固定的 rRMSE、cosine、max_abs 等指标比较，不要求有损路径逐位相同。原始 FP8 激活损失、导出精度损失和同文件实现误差分别报告。
 
+九种 thinker 导出均有 CPU/F32-KV 数值记录，分别绑定其实际二进制和主机：F32/F16/BF16 通过，Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 均未过原块量化门槛。替换机 31344 上的新 Q6_K 比较有 7/8 行失败，最大 rRMSE `0.1524552110`、最低 cosine `0.9883425540`；同文件 greedy 8/8 一致。旧机 33367 的最后一项 Q6 结果仍为未知，不能用新运行倒推旧进程结果。CPU 数值记录不代替 HTTP、F16 KV 或 GPU 验证，详见 [thinker-results.json](../../tools/oracle/sophon_realtime/thinker-results.json)。
+
 CPU 走仓库线程池与 SIMD/量化算子。Auto 复用现有分发，须按真实 backend/submission 证据判断；回退 CPU 不代表 GPU 通过。现有 Qwen3-VL resident decoder 已实现 interleaved M-RoPE/DeepStack，设备路径要求 F16 KV 和可用权重格式。最新 Q8_0 文本实测有 714 次设备提交，但未过现有 CPU/GPU 数值门槛；不能宣称完整 GPU 支持。音频 block attention/frontend、causal convolution 和 HiFT spectral 的严格设备路径尚缺共享算子，明确拒绝。后续共享层及顺序见 validation；未以没 GPU 硬件掩盖缺 kernel。
 
 Q8_0 thinker 配 F16 KV 的 CPU 文本、图像及单/分组 JEV 已跑通，CLI/HTTP 概率差为 0；图像记录使用历史 F32 存储、内部 Q8 预打包视觉路径，不能冒充纯 F32 数值对齐。量化音频/Flow 存在未过原门槛的结果；F16 talker 有极小 margin 的 greedy 分歧，部分 K talker 在 128-token 边界未 EOS。长 HiFT 的中间检查点仍有失败，尽管最终 waveform 门槛通过。没有广泛听感、任务准确率或真实 full-duplex 质量结论。

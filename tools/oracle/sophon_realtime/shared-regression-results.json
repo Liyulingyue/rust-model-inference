@@ -1618,5 +1618,38 @@
       "exit_code": 0
     },
     "scope": "Replacement-host CPU+parity-trace CLI only. The build and one CPU replay fixture pass; this is not a new full-library, HTTP, Auto, Vulkan or model numerical acceptance result. Historical protected binaries keep their own identities."
+  },
+  "ci_recovery_checkpoint": {
+    "status": "PASS",
+    "head": "3e9b227c2054196da5a5bacd556eca143b8f1658",
+    "workflow": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115",
+    "source_reference": "fallback_reviewed_source_identity",
+    "source_hashes_unchanged": true,
+    "captured_report": "target/sophon/ci-3e9b227c2.json",
+    "captured_report_sha256": "02635ff3d996c7fbc04a7de426a2e7a909e14cd3df58d06dbabaf3b059e5a85f",
+    "jobs": [
+      {
+        "name": "Rustfmt",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115/job/130668395344",
+        "successful_steps": 6,
+        "failed_steps": []
+      },
+      {
+        "name": "Vulkan compile and shaders",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115/job/130668395710",
+        "successful_steps": 20,
+        "failed_steps": []
+      },
+      {
+        "name": "x86 dispatch regressions",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115/job/130668395848",
+        "successful_steps": 27,
+        "failed_steps": []
+      }
+    ],
+    "scope": "All three CI jobs pass on the evidence checkpoint with unchanged Rust/Cargo source. This subsequent run reaches QEMU and Vulkan compile/shader/device-regression steps that the earlier apt DNS failure prevented. CI success is separate from real-model numerical acceptance; failed thinker/GPU gates remain failed."
   }
 }

@@ -4,6 +4,8 @@
 
 Read-only references: Sophon `541d83c29ca68dd5235d2e344a2b72d29e6299c2` and DuplexJev `b851ea57ba48b351bb9381d6c16d6d10619a9d6b`. ModelScope file identities are in [modelscope-files.json](modelscope-files.json), revision `990d6a74bbf15c1765a6f7736fa839f423fd5b59`.
 
+All nine thinker exports have CPU/F32-KV numerical records with separately identified artifacts: F32/F16/BF16 pass; Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K fail the original block gates. The replacement-host Q6_K run has greedy agreement 8/8 but seven numerical failures, max rRMSE 0.1524552110 and minimum cosine 0.9883425540. This fresh result does not determine the retired host's uncollected Q6 outcome, or establish HTTP/device acceptance for those formats.
+
 ## Remote assets
 
 Download on the inference host. The source supports direct remote ModelScope HTTPS downloads, so neither a Mac model cache nor an intermediate Mac weight file is necessary. Check the filesystem backing `models/`, not just `/`: the validation host's workspace has a separate capacity cap, so GGUF exports use a `models/` symlink backed by its larger remote filesystem.
