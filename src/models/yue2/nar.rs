@@ -918,18 +918,55 @@ fn project_qkv_rows(
     // regions per row, i.e. 258 * 3 barriers per layer per NAR velocity, and the
     // pool is a pure spin-barrier design where each region costs a full
     // all-thread SeqCst handshake.
-    weights
-        .q
-        .matmul_rows(input, q, &model.pool, &mut scratch.rows, None)
-        .expect("q projection shape is fixed by the NAR layout");
-    weights
-        .k
-        .matmul_rows(input, k, &model.pool, &mut scratch.rows, None)
-        .expect("k projection shape is fixed by the NAR layout");
-    weights
-        .v
-        .matmul_rows(input, v, &model.pool, &mut scratch.rows, None)
-        .expect("v projection shape is fixed by the NAR layout");
+    // q/k/v share one input, so one executor submission covers all three instead
+    // of three round trips.
+    #[cfg(feature = "vulkan")]
+    let batched = {
+        let policy = crate::compute::ComputePolicy::legacy();
+        if policy == crate::compute::ComputePolicy::Cpu {
+            false
+        } else {
+            use crate::compute::linear::LinearExecutor;
+            let rows = input.len() / config.hidden;
+            match LinearExecutor::new(
+                policy,
+                vec![
+                    weights.q.binding(),
+                    weights.k.binding(),
+                    weights.v.binding(),
+                ],
+                rows,
+                model.pool.clone(),
+            ) {
+                Ok(mut executor) => {
+                    let ids = [
+                        executor.id_for(weights.q.weight()).expect("q binding"),
+                        executor.id_for(weights.k.weight()).expect("k binding"),
+                        executor.id_for(weights.v.weight()).expect("v binding"),
+                    ];
+                    let mut outputs: [&mut [f32]; 3] = [&mut *q, &mut *k, &mut *v];
+                    executor.run_group(ids, input, rows, outputs).is_ok()
+                }
+                Err(_) => false,
+            }
+        }
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let batched = false;
+    if !batched {
+        weights
+            .q
+            .matmul_rows(input, q, &model.pool, &mut scratch.rows, None)
+            .expect("q projection shape is fixed by the NAR layout");
+        weights
+            .k
+            .matmul_rows(input, k, &model.pool, &mut scratch.rows, None)
+            .expect("k projection shape is fixed by the NAR layout");
+        weights
+            .v
+            .matmul_rows(input, v, &model.pool, &mut scratch.rows, None)
+            .expect("v projection shape is fixed by the NAR layout");
+    }
     for row in 0..input.len() / config.hidden {
         let q_row = &mut q[row * q_width..(row + 1) * q_width];
         let k_row = &mut k[row * kv_width..(row + 1) * kv_width];

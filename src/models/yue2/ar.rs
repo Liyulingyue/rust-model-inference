@@ -30,6 +30,20 @@ impl YuE2Weight {
     pub(crate) fn ggml_type(&self) -> GGMLType {
         self.fast.ggml_type
     }
+
+    /// The underlying weight, for callers that drive the shared linear executor.
+    pub(crate) fn weight(&self) -> &Weight<'static> {
+        &self.fast
+    }
+
+    /// A binding for the shared linear executor, so several projections that
+    /// share an input can be submitted together.
+    pub(crate) fn binding(&self) -> crate::compute::linear::LinearBinding<'_, 'static> {
+        crate::compute::linear::LinearBinding {
+            weight: &self.fast,
+            mode: crate::compute::linear::LinearMode::Prepared,
+        }
+    }
 }
 
 /// GGML types the YuE2 converter can emit for a 2-D projection.
