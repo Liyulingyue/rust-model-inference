@@ -13,7 +13,7 @@
 > of models that actually ship these heads is in "Which models ship them",
 > and the status of the three pieces this repository already has is in
 > "What this repository already has". Nothing here is implemented yet:
-> the whole feature is tracked as TODO-064.
+> the whole feature is tracked as TODO-069.
 
 ## Why
 
@@ -426,7 +426,7 @@ publishers follow that convention: `unsloth/Qwen3.8-Flash-Next-GGUF` ships an
   already computes "K independent evaluations in one forward via per-group
   softmax".
 
-What is missing is the draft side and the loop. See TODO-064.
+What is missing is the draft side and the loop. See TODO-069.
 
 ## Which models ship them
 
