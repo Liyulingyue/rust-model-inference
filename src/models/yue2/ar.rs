@@ -2351,7 +2351,7 @@ mod performance_tests {
 
     #[cfg(feature = "vulkan")]
     #[test]
-    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    #[ignore = "requires a Vulkan device and RUST_GPU_MIN_OUTPUTS=0: the shapes below are smaller than the default 16K output threshold, so the device declines them unless the threshold is lowered"]
     fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");

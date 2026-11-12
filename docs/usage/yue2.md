@@ -185,7 +185,39 @@ NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致�
 [YuE2 Vulkan 优化记录](../develop/VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
 
 这些优化不更换权重、不减少扩散步数，也不修改采样参数。可用以下回归检查
-逐位一致性及中间 logits 的省略行为（不需要下载模型）：
+逐位一致性及中间 logits 的省略行为（不需要下载模型）。
+
+### 3.4 VAE 卷积的设备路径
+
+`--compute auto|vulkan` 下，VAE 的**普通卷积**（patch embedding、残差块、输出卷积）
+走共享 `try_conv3d` 上设备；**转置卷积没有设备内核**，始终留在 CPU。CPU 路径
+（`--compute cpu`，也是默认）完全不变 —— 它有多条按规模选择的实现，并且是
+逐位对齐 reference 的那一条。
+
+设备路径不经过 `ops::nn::conv3d_with_options` 的 CPU 复核（那一层会重算一遍
+卷积，等于把设备收益吃掉），而是直接调用 `try_conv3d`，失败时回落到 CPU。
+
+实测（2026-11-12，本机 Linux x86_64 + NVIDIA L20，`--steps 1`，256 latent 帧 /
+10.24 s 音频，8 线程）：
+
+| 阶段 | CPU | Vulkan |
+|---|---:|---:|
+| ABC 采样 | 76.3 s | 124.8 s |
+| semantic 采样 | 116.1 s | 133.6 s |
+| NAR（含 prefix prefill） | 46.2 s | 67.1 s |
+| **VAE 解码** | **77.0 s** | **24.7 s（3.1x）** |
+| 合计 | 315.6 s | 350.2 s |
+
+VAE 快 3.1 倍，但 AR/NAR 在设备上更慢，所以整链仍比 CPU 慢 11%。设备路径的
+VAE 输出与 CPU 的差异为 **最多 1 个 PCM16 档位**（982,912 个采样中 6,573 个
+不同，0.67%，最大绝对差 1/32768）—— 不是逐位一致，但对音频而言是舍入量级。
+若要把整链做成正的 GPU 收益，需要先解决 AR/NAR 的设备开销（见
+[TODO](../develop/TODO.md)）。
+
+实机 GPU 回归 `vulkan_yue2_bf16_rounds_after_bias_across_tiles` 用的规模小于
+`RUST_GPU_MIN_OUTPUTS` 默认门槛（16K 输出），设备会拒绝这些投影，所以运行它需要
+`RUST_GPU_MIN_OUTPUTS=0`（2026-11-11 在本机 NVIDIA L20 上实测：默认门槛下该测试因
+"GPU BF16 projection declined" 失败，设为 0 后通过）。
 
 ```bash
 cargo test --profile release-fast --lib models::yue2::ar::performance_tests
