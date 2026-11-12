@@ -308,13 +308,13 @@ impl LongCatTextSource {
             "visual.merger.mlp.0.weight",
             &[VISION * 4, VISION * 4],
         )?;
-        source.alias("mm.0.bias", "visual.merger.mlp.0.bias", &[VISION * 4])?;
+        source.alias_f32("mm.0.bias", "visual.merger.mlp.0.bias", &[VISION * 4])?;
         source.alias(
             "mm.2.weight",
             "visual.merger.mlp.2.weight",
             &[VISION * 4, HIDDEN],
         )?;
-        source.alias("mm.2.bias", "visual.merger.mlp.2.bias", &[HIDDEN])?;
+        source.alias_f32("mm.2.bias", "visual.merger.mlp.2.bias", &[HIDDEN])?;
         for layer in 0..VISION_LAYERS {
             let gguf = format!("v.blk.{layer}");
             let hf = format!("visual.blocks.{layer}");
@@ -348,11 +348,21 @@ impl LongCatTextSource {
                 ),
                 ("ffn_down.bias", "mlp.down_proj.bias", vec![VISION]),
             ] {
-                source.alias(
-                    &format!("{gguf}.{target}"),
-                    &format!("{hf}.{original}"),
-                    &dims,
-                )?;
+                // The tower reads its biases through the shared F32 contract,
+                // and this checkpoint stores them in BF16.
+                if target.ends_with(".bias") {
+                    source.alias_f32(
+                        &format!("{gguf}.{target}"),
+                        &format!("{hf}.{original}"),
+                        &dims,
+                    )?;
+                } else {
+                    source.alias(
+                        &format!("{gguf}.{target}"),
+                        &format!("{hf}.{original}"),
+                        &dims,
+                    )?;
+                }
             }
         }
         Ok(source)
@@ -416,6 +426,65 @@ impl LongCatTextSource {
         let mut info = info.clone();
         info.name = target.into();
         self.aliases.insert(target.into(), (original.into(), info));
+        Ok(())
+    }
+
+    /// Alias a bias, decoding it to F32.
+    ///
+    /// The vision tower reads its biases through the shared F32 contract,
+    /// and the Qwen2.5-VL checkpoint that LongCat ships stores every one of
+    /// its tensors in BF16. The weights do not need this: the tower decodes
+    /// them from their own bytes. The biases do, because the shared helper
+    /// that reads them refuses a tensor that is not F32.
+    ///
+    /// The bias is a short vector, so decoding it once at load time costs
+    /// nothing and keeps the shared contract intact for every other model.
+    fn alias_f32(&mut self, target: &str, original: &str, dims: &[u64]) -> Result<(), String> {
+        let info = self
+            .weights
+            .tensor_info(original)
+            .ok_or_else(|| format!("LongCat encoder missing {original}"))?;
+        if info.dims != dims {
+            return Err(format!(
+                "LongCat encoder invalid {original}: {:?}",
+                info.dims
+            ));
+        }
+        let bytes = self
+            .weights
+            .tensor_slice(original)
+            .ok_or_else(|| format!("LongCat encoder missing {original}"))?;
+        let values = match info.ggml_type {
+            GGMLType::F32 => bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect::<Vec<f32>>(),
+            GGMLType::BF16 => bytes
+                .chunks_exact(2)
+                .map(|c| crate::core::tensor::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+                .collect::<Vec<f32>>(),
+            other => {
+                return Err(format!(
+                    "LongCat encoder invalid {original}: unsupported type {other:?}"
+                ))
+            }
+        };
+        let mut encoded = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            encoded.extend_from_slice(&value.to_le_bytes());
+        }
+        self.extra.insert(
+            target.into(),
+            (
+                TensorInfo {
+                    name: target.into(),
+                    dims: dims.to_vec(),
+                    ggml_type: GGMLType::F32,
+                    offset: 0,
+                },
+                encoded,
+            ),
+        );
         Ok(())
     }
 }
