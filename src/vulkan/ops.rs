@@ -1710,25 +1710,27 @@ impl BatchedLinearRuntime {
         // whole tile of rows as one run either way, and the transpose
         // would be pure overhead there.
         let buffer = if layout == GpuWeightLayout::Transposed {
-            // The layout is written straight into the device buffer: a
+            // The layout is written straight into the staging buffer: a
             // 240 MB weight would otherwise be staged in a second
             // buffer and copied over.
             let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
             unsafe {
-                self.ops.context.upload_static_filled(size, |bytes| {
-                    crate::vulkan::q8_layout::transpose_q8_0_weight_into(
-                        bytes,
-                        weight_bytes,
-                        n_in,
-                        n_out,
-                    );
-                })?
+                self.ops
+                    .context
+                    .upload_device_static_filled(size, |bytes| {
+                        crate::vulkan::q8_layout::transpose_q8_0_weight_into(
+                            bytes,
+                            weight_bytes,
+                            n_in,
+                            n_out,
+                        );
+                    })?
             }
         } else {
             unsafe {
                 self.ops
                     .context
-                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                    .upload_device_static(transposed.as_deref().unwrap_or(weight_bytes))?
             }
         };
         let bindings =
