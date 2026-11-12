@@ -1838,6 +1838,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::AudioEnhancement(_) => "audio-enhancement",
         Backend::Tts(_) | Backend::Pivo(_) => "tts",
         Backend::Auk(_) => "auk",
+        Backend::Pjit(_) => "pjit",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",

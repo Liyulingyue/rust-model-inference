@@ -1,0 +1,921 @@
+{
+  "date": "2026-11-11",
+  "status": "experimental-partial",
+  "matrix": "matrix_results.json",
+  "gguf_manifest": "gguf_hashes.json",
+  "source_manifest": "source_hashes.json",
+  "runtime_commit": "80ce7199f87a627d521d1b7ef6ad990c99d9d434",
+  "validation_lineage": {
+    "initial_matrix_revision": "5d3459ed7bde66ed3472f11a110d60c79967b3e3",
+    "projection_chunk_revision": "4e4df77196b6c2fa9e742a76a7e8524641cc5fad",
+    "final_runtime_revision": "80ce7199f87a627d521d1b7ef6ad990c99d9d434",
+    "scope": "Long-running matrices span these revisions; they are not all reruns of the final binary. Final runtime adds model-local 256-row chunking, cached spatial RoPE and HTTP startup guards. The preserved real 1024px F16 fixture is exactly unchanged by chunk/RoPE changes; final entry smoke tests the final binary."
+  },
+  "oracle_batch_sensitivity": {
+    "dit": [
+      {
+        "format": "q8_0",
+        "nrmse": 0.0476189163399222,
+        "cosine": 0.9990101267231585,
+        "exceeds_existing_runtime_gate": true
+      },
+      {
+        "format": "q4_0",
+        "nrmse": 0.048850646989034775,
+        "cosine": 0.9988078302717177,
+        "exceeds_existing_runtime_gate": true
+      },
+      {
+        "format": "q4_1",
+        "nrmse": 0.03917111202628548,
+        "cosine": 0.9992417046143615,
+        "exceeds_existing_runtime_gate": true
+      },
+      {
+        "format": "q4_k",
+        "nrmse": 0.04544206310617574,
+        "cosine": 0.9993285514256924,
+        "exceeds_existing_runtime_gate": true
+      },
+      {
+        "format": "q5_k",
+        "nrmse": 0.04340812111361689,
+        "cosine": 0.9992951425585329,
+        "exceeds_existing_runtime_gate": true
+      },
+      {
+        "format": "q6_k",
+        "nrmse": 0.05231188500367573,
+        "cosine": 0.9987189045439254,
+        "exceeds_existing_runtime_gate": true
+      }
+    ],
+    "caption": [
+      {
+        "format": "f32",
+        "returncode": 0,
+        "nrmse": 2.678274271212694e-05,
+        "cosine": 0.9999999996413501,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "f16",
+        "returncode": 0,
+        "nrmse": 2.204960600949731e-05,
+        "cosine": 0.9999999997569077,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "bf16",
+        "returncode": 0,
+        "nrmse": 2.678274271212694e-05,
+        "cosine": 0.9999999996413501,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "q8_0",
+        "returncode": 0,
+        "nrmse": 0.010330463359768262,
+        "cosine": 0.9999466426204435,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "q4_0",
+        "returncode": 0,
+        "nrmse": 0.01207719956602206,
+        "cosine": 0.999927068096744,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "q4_1",
+        "returncode": 0,
+        "nrmse": 0.01234282462408696,
+        "cosine": 0.99992387154573,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "q4_k",
+        "returncode": 0,
+        "nrmse": 0.02129832440393266,
+        "cosine": 0.9997736975942356,
+        "exceeds_existing_runtime_gate": true
+      },
+      {
+        "format": "q5_k",
+        "returncode": 0,
+        "nrmse": 0.018563758465661967,
+        "cosine": 0.9998278264442821,
+        "exceeds_existing_runtime_gate": false
+      },
+      {
+        "format": "q6_k",
+        "returncode": 0,
+        "nrmse": 0.02119776830979135,
+        "cosine": 0.999775316989504,
+        "exceeds_existing_runtime_gate": true
+      }
+    ],
+    "detail": "matrix_results.json"
+  },
+  "large_fixture": {
+    "input": {
+      "width": 1024,
+      "height": 1024,
+      "timestep": 1000
+    },
+    "verification": {
+      "command": [
+        "target/release-fast/deps/rust_model_inference-06ef2980a1c6a2c6",
+        "pjit_released_dit_matches_fixture",
+        "--ignored",
+        "--nocapture"
+      ],
+      "returncode": 0,
+      "chunk_rows": 256,
+      "previous_chunk_rows": 64,
+      "max_abs": 0.0,
+      "rmse": 0.0,
+      "nrmse": 0.0,
+      "cosine": 1.0000000000000018,
+      "passed": true,
+      "seconds_samples": [
+        66.727919,
+        65.790261
+      ]
+    },
+    "cpu-verification": {
+      "max_abs": 0.00034186244010925293,
+      "rmse": 6.807980199751511e-05,
+      "nrmse": 0.0006304420029053589,
+      "cosine": 0.9999998023549509,
+      "seconds_samples": [
+        39.095268
+      ]
+    },
+    "rope-verification": {
+      "command": [
+        "target/release-fast/deps/rust_model_inference-06ef2980a1c6a2c6",
+        "pjit_released_dit_matches_fixture",
+        "--ignored",
+        "--nocapture"
+      ],
+      "returncode": 0,
+      "chunk_rows": 256,
+      "previous_chunk_rows": 64,
+      "optimization": "cache spatial RoPE phases and batch 256 rows",
+      "max_abs": 0.0,
+      "rmse": 0.0,
+      "nrmse": 0.0,
+      "cosine": 1.0000000000000018,
+      "passed": true,
+      "seconds_samples": [
+        95.174674,
+        84.527502
+      ]
+    }
+  },
+  "final_smoke": {
+    "transport": {
+      "format": "f16",
+      "backend": "auto",
+      "cli_command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "/workspace/rmi-pjit/models/pjit-21k/pjit-f16.gguf",
+        "--text-encoder",
+        "/workspace/rmi-pjit/models/Qwen3.5-4B/text-f16.gguf",
+        "--threads",
+        "8",
+        "--compute",
+        "auto",
+        "--prompt",
+        "猫",
+        "--width",
+        "33",
+        "--height",
+        "35",
+        "--steps",
+        "1",
+        "--seed",
+        "42",
+        "--out",
+        "/workspace/rmi-pjit/target/pjit-final-smoke/f16-auto-cli.png",
+        "--overwrite"
+      ],
+      "cli_rc": 0,
+      "cli_wall_seconds": 45.39696002006531,
+      "cli_size": [
+        33,
+        35
+      ],
+      "http_status": 200,
+      "http_command": [
+        "target/release-fast/rust-model-server",
+        "--model",
+        "/workspace/rmi-pjit/models/pjit-21k/pjit-f16.gguf",
+        "--text-encoder",
+        "/workspace/rmi-pjit/models/Qwen3.5-4B/text-f16.gguf",
+        "--threads",
+        "8",
+        "--compute",
+        "auto",
+        "--port",
+        "51939"
+      ],
+      "http_request": {
+        "prompt": "猫",
+        "width": 33,
+        "height": 35,
+        "steps": 1,
+        "seed": 42,
+        "response_format": "b64_json"
+      },
+      "http_wall_seconds": 29.503230810165405,
+      "http_size": [
+        33,
+        35
+      ],
+      "http_bad_request_codes": [
+        400,
+        400,
+        400,
+        400
+      ],
+      "cli_http_png_equal": true,
+      "device_submissions": 349,
+      "observed_vulkan": true,
+      "passed": true
+    },
+    "startup_rejections": [
+      {
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "models/pjit-21k/pjit-f16.gguf",
+          "--text-encoder",
+          "models/Qwen3.5-4B/text-bf16.gguf",
+          "--noise",
+          "target/nonexistent-noise.f32"
+        ],
+        "returncode": 1,
+        "output": "Failed to build model backend: HTTP image generation does not accept --prompt, --noise, --out or --overwrite; supply prompts per request\n"
+      },
+      {
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "models/pjit-21k/pjit-f16.gguf",
+          "--text-encoder",
+          "models/Qwen3.5-4B/text-bf16.gguf",
+          "--out",
+          "target/should-not-exist.png"
+        ],
+        "returncode": 1,
+        "output": "Failed to build model backend: HTTP image generation does not accept --prompt, --noise, --out or --overwrite; supply prompts per request\n"
+      },
+      {
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "models/pjit-21k/pjit-f16.gguf",
+          "--text-encoder",
+          "models/Qwen3.5-4B/text-bf16.gguf",
+          "--prompt",
+          "cat"
+        ],
+        "returncode": 1,
+        "output": "Failed to build model backend: HTTP image generation does not accept --prompt, --noise, --out or --overwrite; supply prompts per request\n"
+      },
+      {
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "models/pjit-21k/pjit-f16.gguf",
+          "--text-encoder",
+          "models/Qwen3.5-4B/text-bf16.gguf",
+          "--overwrite"
+        ],
+        "returncode": 1,
+        "output": "Failed to build model backend: HTTP image generation does not accept --prompt, --noise, --out or --overwrite; supply prompts per request\n"
+      }
+    ]
+  },
+  "builds": {
+    "release_fast": {
+      "passed": true,
+      "completion_lines": [
+        "Finished `release-fast` profile [optimized + debuginfo] target(s) in 7m 51s"
+      ]
+    },
+    "release": {
+      "passed": true,
+      "completion_lines": [
+        "Finished `release` profile [optimized + debuginfo] target(s) in 18m 25s"
+      ]
+    }
+  },
+  "final_source_sha256": {
+    "src/models/diffusion/pjit/dit.rs": "c5d85928ed627c39fdf61010167acec4259b3d3de8c2ea9a135f4b0212c26006",
+    "src/models/diffusion/pjit/mod.rs": "2eb2c60b7d0b21d1a2b7d91a5862f93a0342ac0747b41d650381376dc39fab4d",
+    "src/models/diffusion/pjit/tests.rs": "6e39f789ff82882b717e8d101e97098dbd59ac297decb6e3a3213476cae6b88d",
+    "src/app/diffusion.rs": "e71dd2ea886d829392d93b0640b64841de67a1afc4352585518dec5553373c9a",
+    "src/app/server/image_generation.rs": "db3d70f80f40a0dac3f49da316e6de5ad257ddd2b815b4b8041baa56543fd311",
+    "tools/oracle/pjit/reference.py": "923c17c7dae8d9c559c693b8d31bdeeb1cd1ff2ecffc716e1e19c0fa39359193",
+    "tools/oracle/pjit/text_reference.py": "c36572d8895a85491b16eb706c4a63c7622f3660dcd5b4117acdd7e8db28fef6",
+    "tools/oracle/pjit/sample_reference.py": "a62870445dc6e0af6b27b1d25c461749c07e0721c6fa98cd0bbe374d04dd2cf7"
+  },
+  "arithmetic": "F32 shared storage-specific kernels; BF16-rounded DiT inputs/caption/momentum, F32 caption KV; no native BF16 activation equivalence claim",
+  "acceptance": {
+    "f32_max_abs": 0.002,
+    "f32_min_cosine": 0.99999,
+    "lossy_max_nrmse": 0.02,
+    "lossy_min_cosine": 0.999
+  },
+  "dit_f32": {
+    "cpu": {
+      "component": "dit",
+      "format": "f32",
+      "backend": "cpu",
+      "returncode": 0,
+      "wall_seconds": 183.7427372932434,
+      "quantization_vs_f32": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "nrmse": 0.0,
+        "cosine": 1.0000000000000004
+      },
+      "reference": "/workspace/rmi-pjit/target/pjit-matrix/ref-f32",
+      "log": "/workspace/rmi-pjit/target/pjit-matrix/f32-cpu.log",
+      "weight_only_reference": {
+        "max_abs": 2.2351741790771484e-05,
+        "rmse": 4.661430710345256e-06,
+        "nrmse": 1.2946123810485042e-05,
+        "cosine": 0.9999999999163254
+      },
+      "max_abs": 2.2351741790771484e-05,
+      "rmse": 4.661430710345256e-06,
+      "nrmse": 1.2946123810485042e-05,
+      "cosine": 0.9999999999163254,
+      "passed": true
+    },
+    "auto": {
+      "component": "dit",
+      "format": "f32",
+      "backend": "auto",
+      "returncode": 0,
+      "wall_seconds": 567.7202920913696,
+      "quantization_vs_f32": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "nrmse": 0.0,
+        "cosine": 1.0000000000000004
+      },
+      "reference": "/workspace/rmi-pjit/target/pjit-matrix/ref-f32",
+      "log": "/workspace/rmi-pjit/target/pjit-matrix/f32-auto.log",
+      "weight_only_reference": {
+        "max_abs": 1.6927719116210938e-05,
+        "rmse": 3.937526399981648e-06,
+        "nrmse": 1.0935634883102287e-05,
+        "cosine": 0.9999999999402627
+      },
+      "max_abs": 1.6927719116210938e-05,
+      "rmse": 3.937526399981648e-06,
+      "nrmse": 1.0935634883102287e-05,
+      "cosine": 0.9999999999402627,
+      "passed": true
+    },
+    "vulkan": {
+      "component": "dit",
+      "format": "f32",
+      "backend": "vulkan",
+      "returncode": 0,
+      "wall_seconds": 980.0759019851685,
+      "quantization_vs_f32": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "nrmse": 0.0,
+        "cosine": 1.0000000000000004
+      },
+      "reference": "/workspace/rmi-pjit/target/pjit-matrix/ref-f32",
+      "log": "/workspace/rmi-pjit/target/pjit-matrix/f32-vulkan.log",
+      "weight_only_reference": {
+        "max_abs": 1.609325408935547e-05,
+        "rmse": 4.068529942964128e-06,
+        "nrmse": 1.129946912036756e-05,
+        "cosine": 0.9999999999364277
+      },
+      "max_abs": 1.609325408935547e-05,
+      "rmse": 4.068529942964128e-06,
+      "nrmse": 1.129946912036756e-05,
+      "cosine": 0.9999999999364277,
+      "passed": true
+    }
+  },
+  "caption": {
+    "f32": {
+      "passed": true,
+      "nrmse": 0.00011132561216848114,
+      "cosine": 0.999999993803442,
+      "max_abs": 0.0078125,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "f16": {
+      "passed": true,
+      "nrmse": 0.0011835499655533641,
+      "cosine": 0.9999992996878632,
+      "max_abs": 0.03125,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "bf16": {
+      "passed": true,
+      "nrmse": 0.005793685170493253,
+      "cosine": 0.9999833712103313,
+      "max_abs": 0.5,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "q8_0": {
+      "passed": true,
+      "nrmse": 0.019844337116264262,
+      "cosine": 0.9998031469891725,
+      "max_abs": 0.203125,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "q4_0": {
+      "passed": false,
+      "nrmse": 0.02121038180957572,
+      "cosine": 0.9997751741932459,
+      "max_abs": 0.375,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "q4_1": {
+      "passed": false,
+      "nrmse": 0.022507903082391704,
+      "cosine": 0.9997466767863211,
+      "max_abs": 0.875,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "q4_k": {
+      "passed": false,
+      "nrmse": 0.0499566311450581,
+      "cosine": 0.9987518411303788,
+      "max_abs": 0.75,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "q5_k": {
+      "passed": false,
+      "nrmse": 0.04734327924469661,
+      "cosine": 0.9988787565018541,
+      "max_abs": 2.125,
+      "reference_rc": 0,
+      "rust_rc": 0
+    },
+    "q6_k": {
+      "passed": false,
+      "nrmse": 0.04478646942398149,
+      "cosine": 0.9989967610766471,
+      "max_abs": 1.75,
+      "reference_rc": 0,
+      "rust_rc": 0
+    }
+  },
+  "sampler_7_steps_f32_same_features_noise": {
+    "first_step_nrmse": 5.399195404249602e-07,
+    "final_nrmse": 0.019726344012857455,
+    "final_cosine": 0.999806538751779,
+    "passed": true,
+    "worst_same_input_dit_max_abs": 1.8477439880371094e-05,
+    "worst_same_input_sampler_max_abs": 4.76837158203125e-07,
+    "evidence": "sampler_7_steps.json"
+  },
+  "transport_verified_formats": {
+    "cpu": [
+      "f32",
+      "f16",
+      "bf16",
+      "q8_0",
+      "q4_0",
+      "q4_1",
+      "q4_k",
+      "q5_k",
+      "q6_k"
+    ],
+    "auto": [
+      "f32",
+      "f16",
+      "bf16",
+      "q8_0",
+      "q4_0",
+      "q4_1",
+      "q4_k",
+      "q5_k",
+      "q6_k"
+    ],
+    "vulkan": [
+      "f32",
+      "f16",
+      "bf16",
+      "q8_0",
+      "q4_0",
+      "q4_1",
+      "q4_k",
+      "q5_k",
+      "q6_k"
+    ]
+  },
+  "projection_replays": [
+    {
+      "file": "q4_0-cpu-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.359188241405521e-07,
+      "lowest_cosine": 0.9999999999998569
+    },
+    {
+      "file": "q4_0-vulkan-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.346823129915325e-07,
+      "lowest_cosine": 0.9999999999998576
+    },
+    {
+      "file": "q4_1-cpu-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 0.001313977789236226,
+      "lowest_cosine": 0.9999991367387084
+    },
+    {
+      "file": "q4_1-vulkan-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 0.001317282407365201,
+      "lowest_cosine": 0.9999991323871769
+    },
+    {
+      "file": "q4_k-cpu-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.590319109009706e-07,
+      "lowest_cosine": 0.999999999999844
+    },
+    {
+      "file": "q4_k-vulkan-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 1.0102545226128286e-06,
+      "lowest_cosine": 0.9999999999994805
+    },
+    {
+      "file": "q5_k-cpu-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.809146615481645e-07,
+      "lowest_cosine": 0.9999999999998321
+    },
+    {
+      "file": "q5_k-vulkan-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 1.0098292033356266e-06,
+      "lowest_cosine": 0.9999999999994809
+    },
+    {
+      "file": "q6_k-cpu-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.673429725406389e-07,
+      "lowest_cosine": 0.9999999999998395
+    },
+    {
+      "file": "q6_k-vulkan-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 1.0111967684445672e-06,
+      "lowest_cosine": 0.9999999999994796
+    },
+    {
+      "file": "q8_0-cpu-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.409546853506644e-07,
+      "lowest_cosine": 0.9999999999998542
+    },
+    {
+      "file": "q8_0-vulkan-linears.json",
+      "count": 217,
+      "failed": 0,
+      "worst_nrmse": 5.409546853506644e-07,
+      "lowest_cosine": 0.9999999999998542
+    }
+  ],
+  "gpu_evidence": {
+    "submissions_including_warmup": 244,
+    "warmup_submissions": 1,
+    "linear_projections": 217,
+    "attention_submissions": 26,
+    "note": "Corrects earlier classification of the warmup submission as a projection; actual single-forward delta is 243."
+  },
+  "default_f16": {
+    "command": [
+      "target/release-fast/rust-model-inference",
+      "--model",
+      "models/pjit-21k/pjit-f16.gguf",
+      "--text-encoder",
+      "models/Qwen3.5-4B/text-bf16.gguf",
+      "--prompt",
+      "A red cube on a white table.",
+      "--width",
+      "1024",
+      "--height",
+      "1024",
+      "--steps",
+      "50",
+      "--seed",
+      "42",
+      "--threads",
+      "8",
+      "--compute",
+      "cpu",
+      "--out",
+      "target/pjit-default1024-f16.png",
+      "--overwrite"
+    ],
+    "returncode": 0,
+    "seconds": 5428.649304276332,
+    "size": [
+      1024,
+      1024
+    ],
+    "png_sha256": "7b4df2b465a657e8edcdd607d214acb571a4e23e2a06d06b1ef3fd71f4850b0d",
+    "visual_sanity_check": "Recognizable red cube on a white table; one-prompt inspection only, not a formal perceptual-quality evaluation."
+  },
+  "default_f16_oracle": {
+    "command": [
+      ".venv/bin/python",
+      "tools/oracle/pjit/sample_reference.py",
+      "--oracle",
+      "target/pjit-oracle",
+      "--weights",
+      "models/pjit-21k",
+      "--gguf",
+      "models/pjit-21k/pjit-f16.gguf",
+      "--trace",
+      "target/pjit-default1024-f16-final.jsonl",
+      "--output",
+      "target/pjit-default1024-f16-metrics.json",
+      "--batch-one-baseline"
+    ],
+    "returncode": 0,
+    "seconds": 405.65913602523506
+  },
+  "historical_before_final_host": {
+    "date": "2026-11-11",
+    "status": "experimental-partial",
+    "raw_artifacts": "remote target/; unavailable after SSH disconnected before authentication; only observed results are transcribed here",
+    "fixture": {
+      "width": 33,
+      "height": 35,
+      "timestep": 750,
+      "text_tokens": 18,
+      "dit": "F32",
+      "activations": "F32; input and caption rounded BF16"
+    },
+    "dit_f32": {
+      "cpu": {
+        "max_abs": 1.889467239e-05,
+        "nrmse": 1.0766928895e-05,
+        "cosine": 0.9999999999432
+      },
+      "vulkan": {
+        "max_abs": 1.108646393e-05,
+        "nrmse": 7.8352833e-06,
+        "cosine": 0.9999999999702
+      }
+    },
+    "caption_bf16": {
+      "same_gguf_f32_reference": {
+        "nrmse": 0.0057936852,
+        "cosine": 0.9999833712
+      },
+      "original_native_bf16_reference": {
+        "nrmse": 0.0162552791,
+        "cosine": 0.9998688879
+      },
+      "original_f32_vs_native_bf16": {
+        "nrmse": 0.0136496463,
+        "cosine": 0.9999071765
+      }
+    },
+    "caption_f32_same_gguf": {
+      "nrmse": 0.00011132561216848114,
+      "cosine": 0.999999993803442,
+      "max_abs": 0.0078125
+    },
+    "dit_quantized_weight_only_reference_nrmse": {
+      "q8_0": {
+        "cpu": 0.0501553,
+        "auto": 0.04009912897351756,
+        "vulkan": 0.04009912897351756
+      },
+      "q4_0": {
+        "cpu": 0.04050737163535897,
+        "auto": 0.03621732436107068,
+        "vulkan": 0.03241577782518964
+      },
+      "q4_1": {
+        "cpu": 0.04272015725638685,
+        "auto": 0.05000051944687914,
+        "vulkan": 0.05000051944687914
+      },
+      "q4_k": {
+        "cpu": 0.03196570155932541,
+        "auto": 0.03781477321891936,
+        "vulkan": 0.042094451798384926
+      },
+      "q5_k": {
+        "cpu": 0.04831453335154839,
+        "auto": 0.05349240956398889,
+        "vulkan": 0.04521926366566711
+      },
+      "q6_k": {
+        "cpu": 0.04256663948274021,
+        "auto": 0.04023898735264254,
+        "vulkan": 0.03988526423892407
+      }
+    },
+    "dit_weight_only_quantization_vs_f32_nrmse": {
+      "bf16": 0.008965526420869525,
+      "q8_0": 0.029485346094229894,
+      "q4_0": 0.4769200924306304,
+      "q4_1": 0.3845208961959025,
+      "q4_k": 0.17414302717724625,
+      "q5_k": 0.09339843980991605,
+      "q6_k": 0.052812049469783795
+    },
+    "q8_cpu_activation_qdq_reference": {
+      "nrmse": 0.060191091,
+      "cosine": 0.998189786,
+      "max_abs": 0.116278235,
+      "first_patch_nrmse": 6.8e-07,
+      "first_refiner_nrmse": 0.000162742,
+      "block21_nrmse": 0.031324698,
+      "passed": false
+    },
+    "sampler_7_steps_f32_same_features_noise": {
+      "final_nrmse": 0.03214996092673659,
+      "final_cosine": 0.9994856665229676,
+      "final_max_abs": 0.10665181279182434,
+      "first_step_nrmse": 6.786981062057717e-07,
+      "passed": false,
+      "note": "recorded before final APG cast-order correction; final chain rerun blocked by SSH loss"
+    },
+    "transport": {
+      "cpu_verified_formats": [
+        "f32",
+        "f16",
+        "bf16",
+        "q8_0",
+        "q4_0",
+        "q4_1"
+      ],
+      "auto_verified_formats": [
+        "f32",
+        "f16",
+        "bf16",
+        "q8_0",
+        "q4_0",
+        "q4_1"
+      ],
+      "strict_vulkan_verified_formats": [],
+      "cli_exit": 0,
+      "http_status": 200,
+      "shape": [
+        33,
+        35
+      ],
+      "steps": 1,
+      "invalid_http_codes": [
+        400,
+        400,
+        400,
+        400
+      ]
+    },
+    "gpu_evidence": {
+      "format": "f32",
+      "dit_submissions": 244,
+      "linear_submissions": 218,
+      "attention_submissions": 26,
+      "caption_backend": "CPU"
+    },
+    "replacement_host_validation": {
+      "code_commit": "6e67c0cfb0b23d94323b69e80298e78c11cce1b1",
+      "date": "2026-11-11",
+      "source_hash_manifest": "source_hashes.json",
+      "targeted_tests": {
+        "passed": 8,
+        "failed": 0,
+        "ignored": 3
+      },
+      "dit_exports_observed": [
+        "f32",
+        "f16",
+        "bf16",
+        "q8_0",
+        "q4_0",
+        "q4_1"
+      ],
+      "text_exports_observed": [
+        "f32",
+        "f16",
+        "bf16",
+        "q8_0"
+      ],
+      "shared_quantizer_tiled_self_check": {
+        "formats": [
+          "q8_0",
+          "q4_0",
+          "q4_1",
+          "q4_k",
+          "q5_k",
+          "q6_k"
+        ],
+        "shape": [
+          257,
+          2560
+        ],
+        "row_tile": 31,
+        "comparison": "exact bytes",
+        "passed": true
+      },
+      "q8_cpu_same_input_projection_replay": {
+        "count": 217,
+        "failed": 0,
+        "threshold_nrmse": 0.02,
+        "threshold_cosine": 0.999,
+        "worst_nrmse": 5.409546853506644e-07,
+        "worst_name": "image_refiner.1.attn.o",
+        "note": "Observed terminal summary; raw per-projection records were not retrieved before the replacement SSH endpoint refused connections. This is local projection validation, not an end-to-end pass.",
+        "cosine_at_worst_nrmse": 0.9999999999998538
+      },
+      "release_build": "interrupted; no successful completion observed",
+      "connection": "SSH endpoint subsequently returned Connection refused; remote final matrices and images unavailable"
+    }
+  },
+  "default_f16_sampling": {
+    "complete": true,
+    "steps": 50,
+    "all_step_gates_passed": true,
+    "trace_selection": {
+      "source": "target/pjit-default1024-f16.jsonl",
+      "source_record_count": 174,
+      "selected_first_record": 21,
+      "selected_record_count": 153,
+      "selected_counts": {
+        "pjit.text": 2,
+        "pjit.initial_noise": 1,
+        "pjit.prediction": 100,
+        "pjit.euler": 50
+      },
+      "source_sha256": "531128e0426e52ec915ae17f4e147738391a6ff1bddd2197cc18ffa03a144538",
+      "selected_trace": "target/pjit-default1024-f16-final.jsonl",
+      "selected_sha256": "e6e035b38578f7e1b157d7aeffc868525152c906f97819250c82515d5bc5ac3b",
+      "note": "Original append-only trace also contains three earlier interrupted runs. Select the final complete invocation; raw tensor files are unchanged."
+    },
+    "final": {
+      "nrmse": 0.01967536123506796,
+      "cosine": 0.9998069706030526,
+      "max_abs": 0.4142538160085678,
+      "passed": true
+    },
+    "worst_nrmse": 0.01967536123506796,
+    "worst_same_input_dit_nrmse": 0.0014341982507868538,
+    "worst_same_input_dit_max_abs": 0.002132624387741089,
+    "worst_same_input_sampler_max_abs": 9.5367431640625e-07,
+    "oracle_batch_one_vs_two_final": {
+      "max_abs": 0.006517171859741211,
+      "rmse": 0.00020159467045743722,
+      "nrmse": 0.00046351209862638426,
+      "cosine": 0.9999998926263803
+    }
+  },
+  "default_rgb_comparison": {
+    "rust_png": "target/pjit-default1024-f16.png",
+    "oracle_png": "target/pjit-default1024-f16-metrics.png",
+    "rust_png_sha256": "7b4df2b465a657e8edcdd607d214acb571a4e23e2a06d06b1ef3fd71f4850b0d",
+    "oracle_png_sha256": "673ce44c4d85ad6f9fea8951aa8621d9081fc7977534883d00090260ca59f797",
+    "pixels_with_any_difference": 699894,
+    "rgb_components_different": 1211329,
+    "rgb_rmse_0_255": 1.1592346709702732,
+    "rgb_max_abs_0_255": 53,
+    "psnr_db": 46.84737637360071,
+    "note": "Observed pixel diagnostics only; no bitwise image acceptance gate."
+  }
+}

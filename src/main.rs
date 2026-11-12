@@ -254,6 +254,14 @@ fn main() {
     if let Some(source) = early_source.as_ref().filter(|s| {
         s.metadata("general.architecture")
             .and_then(MetaValue::to_string_val)
+            == Some("pjit")
+    }) {
+        app::run_or_exit(app::run_pjit_cli(source.clone(), &options, n_threads));
+        return;
+    }
+    if let Some(source) = early_source.as_ref().filter(|s| {
+        s.metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
             == Some("flux3")
     }) {
         app::run_or_exit(app::run_flux3_cli(source.clone(), &options, n_threads));

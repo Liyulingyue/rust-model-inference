@@ -3,6 +3,7 @@ mod audio;
 mod auk;
 mod decision;
 mod forecast;
+mod image_generation;
 mod prediction;
 mod rerank;
 mod speech;
@@ -79,6 +80,7 @@ fn hy_transcription_task<T: Send + 'static>(
 
 enum Backend {
     Text(TextBackend),
+    Pjit(image_generation::PjitBackend),
     /// A WeVisOne text model: a Qwen3-VL release with a coordinate
     /// vocabulary and a separate pixel decoder. It serves the ordinary
     /// text routes and adds the image prediction route.
@@ -1145,6 +1147,15 @@ fn build_backend(
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
             .filter(|source| crate::app::arch_of(source.as_ref()) == crate::models::thx02::ARCH);
+    let image_source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+        .ok()
+        .filter(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    if let Some(source) = image_source {
+        return Ok(Arc::new(Backend::Pjit(image_generation::build(
+            options,
+            Arc::from(source),
+        )?)));
+    }
     if let Some(source) = decision_source {
         let available = std::thread::available_parallelism()
             .map(usize::from)
@@ -2025,7 +2036,16 @@ pub fn run_server() {
     // invocation, so they are skipped for it, exactly like the main binary
     // does.
     let auk_source = auk::probe_invocation(&options);
-    if auk_source.is_some() {
+    let pjit_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    if pjit_invocation {
+        if let Err(error) = crate::app::diffusion::pjit_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if auk_source.is_some() {
         if let Err(error) = auk::validate_server_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
@@ -2080,6 +2100,7 @@ pub fn run_server() {
         Backend::AudioEnhancement(_) => "audio-enhancement",
         Backend::Tts(_) | Backend::Pivo(_) => "tts",
         Backend::Auk(_) => "auk",
+        Backend::Pjit(_) => "pjit",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -2105,6 +2126,9 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::Pjit(_) => {
+            router.route("/v1/images/generations", post(image_generation::generate))
+        }
         Backend::WeVisOne(_) => router.merge(api::routes()).route(
             "/v1/prediction",
             post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
