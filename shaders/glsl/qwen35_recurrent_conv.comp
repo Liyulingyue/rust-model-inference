@@ -93,8 +93,11 @@ void main() {
                     : (k_square - k_next) + k_sum;
                 k_sum = k_next;
             }
-            inverse_q = inverse_sqrt_f32((q_sum + q_correction) / float(pc.head_dim) + pc.eps / float(pc.head_dim));
-            inverse_k = inverse_sqrt_f32((k_sum + k_correction) / float(pc.head_dim) + pc.eps / float(pc.head_dim));
+            // Upstream's `ggml_l2_norm`: the scale is 1 / max(sqrt(sum), eps),
+            // so the epsilon floors the norm instead of being added inside the
+            // square root.
+            inverse_q = min(inverse_sqrt_f32(q_sum + q_correction), 1.0 / pc.eps);
+            inverse_k = min(inverse_sqrt_f32(k_sum + k_correction), 1.0 / pc.eps);
         }
         barrier();
 
@@ -103,10 +106,10 @@ void main() {
                 uint source_q = pc.q_word + row * pc.key_dim + head * pc.head_dim + index;
                 uint source_k = pc.k_word + row * pc.key_dim + head * pc.head_dim + index;
                 arena.data[pc.q_word + row * pc.key_dim + head * pc.head_dim + index] = floatBitsToUint(
-                    (uintBitsToFloat(arena.data[source_q]) * inverse_q) * inverse_sqrt_f32(float(pc.head_dim))
+                    uintBitsToFloat(arena.data[source_q]) * inverse_q
                 );
                 arena.data[pc.k_word + row * pc.key_dim + head * pc.head_dim + index] = floatBitsToUint(
-                    (uintBitsToFloat(arena.data[source_k]) * inverse_k) * inverse_sqrt_f32(float(pc.head_dim))
+                    uintBitsToFloat(arena.data[source_k]) * inverse_k
                 );
             }
         }

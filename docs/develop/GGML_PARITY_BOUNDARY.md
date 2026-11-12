@@ -81,6 +81,40 @@ NEON 实现（默认 dispatch 就走它）。它们之所以长成 ggml 的样�
 **aarch64 上两者等价**（都走 `dot_f32_neon` 的 4 累加器结构）；**x86 上不等价**
 （前者 4 个 256-bit 累加器 + pairwise reduce，后者单累加器）。
 
+## GDN 归一化：两代 llama.cpp 的两个公式
+
+这不是 `_ggml` 函数，但属于同一类问题：**上游改了结构，仓库必须选一个**，
+所以登记在这里。
+
+llama.cpp 的 GDN q/k 归一化换过公式：
+
+| llama.cpp | 结构 | 公式 |
+| --- | --- | --- |
+| `11fe0215` 及更早 | `build_gdn_l2_norm` = `ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n))` | `x / sqrt(sum(x²) + eps)` |
+| `b96806d` 起 | `ggml_l2_norm` | `x / max(sqrt(sum(x²)), eps)` |
+
+差在 epsilon 的位置：旧公式把 `eps` 加进平方和里，新公式让它当下限。
+`eps = 1e-5`、GDN q/k 范数约 0.14 时，两者相差 `eps / (2 * sum) ≈ 2.4e-6`
+相对——正好是 Qwen3.8 对拍在 `q_conv_predelta-0` 上分叉的位置。
+
+**默认取新公式**（`src/models/qwen35/trunk/util.rs` 的 `l2_norm`）：
+
+- 仓库所有模型的**转换**都 pin 在 `b96806d`；
+- `b96806d` 是较新的上游，新公式是上游当前行为，也是模型语义本身
+  （HF 参考实现用新公式，旧的 llama.cpp 是近似）；
+- `4a2ac0b`（Holo4 合并）曾把公式换成旧的，导致与 `b96806d` 对齐的
+  Qwen3.8 / Holo4 / Sage-A1.5 / NeoHorse / MiniCPM-V 35B 全部失去对齐。
+
+**唯一例外**：OvisOCR3 的**运行时** Oracle 还 pin 在 `11fe0215`，那个 Oracle
+的数值只有用它自己的公式才能复现。因此保留旧公式作为逃生口：
+
+- `RMI_QWEN35_GDN_LEGACY_NORM=1` 切回旧公式（仅供对拍使用）；
+- 对应的 TODO：把 OvisOCR3 的运行时 Oracle 重新 pin 到 `b96806d` 并重跑，
+  之后删掉这个开关和 `l2_norm_legacy`。
+
+Vulkan 侧的 `shaders/glsl/qwen35_recurrent_conv.comp` 与 CPU 默认保持一致
+（新公式）；旧公式只在 CPU 上按上面的开关选择。
+
 ## 未来改动的收口方向
 
 - **新增代码不得再引入 `_ggml` 函数**，除非命中上表四种情况之一。

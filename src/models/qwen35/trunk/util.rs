@@ -33,9 +33,42 @@ pub fn f16_bits_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// GDN normalization: x / sqrt(sum(x²) + eps), as RMSNorm then scale in
-/// llama.cpp's `build_gdn_l2_norm` (11fe0215, models/models.h).
+/// GDN normalization, matching llama.cpp's `ggml_l2_norm`
+/// (`ggml_compute_forward_l2_norm_f32`).
+///
+/// The sum of squares accumulates in `ggml_float` (a double), and the scale
+/// is `1 / max(sqrt(sum), eps)`: the epsilon **floors** the norm, it is not
+/// added inside the square root.
+///
+/// The other formula -- `x / sqrt(sum(x²) + eps)`, written as an RMSNorm
+/// followed by a scale -- comes from llama.cpp's older `build_gdn_l2_norm`
+/// (`11fe0215`, `models/models.h`). Upstream has since moved to
+/// `ggml_l2_norm`, and the two disagree whenever the norm is small: the old
+/// one adds `eps` to the sum of squares, the new one compares `sqrt(sum)`
+/// against `eps`. With `eps = 1e-5` and a GDN q/k norm around 0.14 that is
+/// `eps / (2 * sum) = 2.4e-6` relative -- which is exactly where the Qwen3.8
+/// parity run against the pinned llama.cpp diverged.
 pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
+    let mut sum = 0.0f64;
+    for &v in x.iter() {
+        sum += f64::from(v * v);
+    }
+    // `sqrtf` takes a float, so the double accumulator is narrowed first --
+    // `(sum as f32).sqrt()` -- rather than summed in f32.
+    let scale = 1.0f32 / (sum as f32).sqrt().max(eps);
+    for v in x.iter_mut() {
+        *v *= scale;
+    }
+}
+
+/// The GDN normalization of llama.cpp before `b96806d`:
+/// `x / sqrt(sum(x²) + eps)`, built as `build_gdn_l2_norm` does it --
+/// `ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n))`.
+///
+/// Kept for the models whose *runtime* Oracle is an older llama.cpp: the
+/// Oracle's own numbers only reproduce with the formula it was built from.
+/// See [`legacy_gdn_norm`].
+pub(crate) fn l2_norm_legacy(x: &mut [f32], eps: f32) {
     let mut sum = 0.0f64;
     for &v in x.iter() {
         sum += f64::from(v * v);
@@ -46,6 +79,34 @@ pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
     let head_scale = 1.0f32 / n.sqrt();
     for v in x.iter_mut() {
         *v = (*v * rms_scale) * head_scale;
+    }
+}
+
+/// Whether the GDN normalization follows llama.cpp before `b96806d`.
+///
+/// Upstream moved the GDN q/k normalization from `build_gdn_l2_norm` (the
+/// epsilon inside the square root) to `ggml_l2_norm` (the epsilon floors the
+/// denominator) between `11fe0215` and `b96806d`. The repository follows
+/// upstream, which is also the commit every model's *conversion* is pinned
+/// to.
+///
+/// `RMI_QWEN35_GDN_LEGACY_NORM=1` restores the older formula. It exists for
+/// the models whose runtime Oracle is still an older llama.cpp -- OvisOCR3
+/// is pinned to `11fe0215` -- because that Oracle's numbers only reproduce
+/// with the formula it was built from. Drop the switch once that Oracle is
+/// re-pinned to `b96806d`.
+fn legacy_gdn_norm() -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEGACY.get_or_init(|| std::env::var_os("RMI_QWEN35_GDN_LEGACY_NORM").is_some())
+}
+
+/// The GDN normalization the model runs with: upstream's by default, the
+/// older llama.cpp formula when [`legacy_gdn_norm`] selects it.
+pub(crate) fn gdn_l2_norm(x: &mut [f32], eps: f32) {
+    if legacy_gdn_norm() {
+        l2_norm_legacy(x, eps);
+    } else {
+        l2_norm(x, eps);
     }
 }
 
