@@ -90,13 +90,11 @@ pub(crate) fn l2_norm_legacy(x: &mut [f32], eps: f32) {
 ///
 /// `RMI_QWEN35_GDN_LEGACY_NORM=1` selects the older formula. It is a
 /// diagnostic switch, not a per-model code path: it lets a comparison
-/// against a pre-`b96806d` Oracle -- OvisOCR3's runtime Oracle is still
-/// `11fe0215` -- reproduce that Oracle's own arithmetic, and it lets the
-/// size of the formula difference be measured on the CPU. The Vulkan path
-/// always uses upstream's formula; only the CPU honours the switch.
-///
-/// TODO-068 tracks re-pinning that Oracle, after which the switch has no
-/// user left.
+/// against a pre-`b96806d` Oracle reproduce that Oracle's own arithmetic,
+/// and it lets the size of the formula difference be measured on the CPU.
+/// No Oracle needs it any more -- OvisOCR3's runtime Oracle was re-pinned
+/// to `b96806d` -- so it stays only as a diagnostic. The Vulkan path always
+/// uses upstream's formula; only the CPU honours the switch.
 fn legacy_gdn_norm() -> bool {
     static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *LEGACY.get_or_init(|| std::env::var_os("RMI_QWEN35_GDN_LEGACY_NORM").is_some())
