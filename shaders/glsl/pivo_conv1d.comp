@@ -1,0 +1,72 @@
+#version 450
+
+// Dilated 1D convolution for the PiVo acoustic network.
+//
+// `out[frame][o] = bias[o] + sum_c sum_j window[c][j] * weight[o][c][j]`
+//
+// PiVo keeps its activations frame major and its convolution weight as
+// `[out][in][tap]` with the tap fastest, and it pads the window on both
+// sides. The window of one output frame is built in shared memory, so the
+// input is read once per tap instead of once per output channel.
+//
+// The host kernel builds the same window and contracts it with the same
+// order, so the two agree to the last bits the F32 arithmetic allows.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint weight_word; uint bias_word; uint output_word;
+    uint in_channels; uint out_channels; uint frames; uint out_frames;
+    uint kernel; uint dilation; uint padding;
+} pc;
+
+const uint CHUNK = 32u;
+
+shared float stage[CHUNK];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    // The lanes past the last output channel clamp onto it instead of
+    // leaving: the reduction below has a barrier, and a lane that returned
+    // early would leave the others waiting forever.
+    uint column = min(gl_WorkGroupID.x * 64u + lane, pc.out_channels - 1u);
+    uint frame = gl_WorkGroupID.y;
+    if (frame >= pc.out_frames) return;
+
+    float acc = 0.0;
+    for (uint tap = 0u; tap < pc.kernel; tap++) {
+        int shift = int(tap) * int(pc.dilation) - int(pc.padding);
+        for (uint base = 0u; base < pc.in_channels; base += CHUNK) {
+            uint count = min(CHUNK, pc.in_channels - base);
+            for (uint i = lane; i < CHUNK; i += 64u) {
+                float value = 0.0;
+                if (i < count) {
+                    int x = int(frame) + shift;
+                    if (x >= 0 && x < int(pc.frames)) {
+                        value = uintBitsToFloat(
+                            arena.data[pc.input_word + uint(x) * pc.in_channels + base + i]);
+                    }
+                }
+                stage[i] = value;
+            }
+            barrier();
+            // PiVo keeps the convolution weight as `[out][in][tap]`, with the
+            // tap the fastest axis.
+            uint weight_base = column * (pc.in_channels * pc.kernel)
+                + base * pc.kernel + tap;
+            for (uint i = 0u; i < count; i++) {
+                float weight = uintBitsToFloat(
+                    arena.data[pc.weight_word + weight_base + i * pc.kernel]);
+                acc += stage[i] * weight;
+            }
+            barrier();
+        }
+    }
+    float bias = pc.bias_word == 0xffffffffu
+        ? 0.0
+        : uintBitsToFloat(arena.data[pc.bias_word + column]);
+    arena.data[pc.output_word + frame * pc.out_channels + column] =
+        floatBitsToUint(acc + bias);
+}
