@@ -5031,3 +5031,47 @@ kernel，8B Q4_K_M 比 CPU 慢 17.6 倍。ERNIE 的 2.2 倍落在同一个方向
 `src/models/diffusion/ernie_image/dit.rs`（批行重构）、
 `src/models/diffusion/ernie_image/mod.rs`（`linear_into_rows`）、
 `src/vulkan/ops.rs`（`BatchedLinearRuntime`、`ensure_weight`）。
+
+### TODO-068: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读
+
+**状态**：⚠️ 已知缺口，未排期。2026-11-11 定位。
+
+**现象**：`src/models/qwen3/vision/mod.rs` 的 `decode_linear_weight` **不看张量自己声明的
+格式**，而是看字节长度：
+
+- 每元素 4 字节 → F32
+- 每元素 2 字节 → **F16**
+- `n_out * (n_in / 32) * 34` → Q8_0
+
+⇒ **F16 与 BF16 都是每元素 2 字节** ✓✓ —— **长度分不出两者** ✓✓，而两者解出来的值
+不同：1.0 的 BF16 位模式按 F16 读出来是 **1.875** ✓✓。
+
+**为什么现在没炸**：目前走 qwen3 视觉塔的模型，视觉权重都是 F32
+（Mage-Flow 的 `mmproj-mage-flow-F32.gguf` 全部 314 个张量都是 F32）——F32 是
+4 字节，猜得对 ✓✓。**一旦有一个 BF16 的视觉塔进这个路径，就是静默的错值** ✓✓：
+不报错、不崩，只是每个权重都读错 ✓✓。
+
+**对照**：qwen35 的视觉塔**已经是对的** ✓✓ —— 它的 `load_source_weight` 按
+`ggml_type` 分派（F32 / F16 / BF16 / Q8_0 ✓✓），而不是靠长度猜 ✓✓ ✓✓。
+qwen3 塔是这一族里剩下的那个例外 ✓✓。
+
+**为什么没有直接改**：qwen3 塔的 `VisionLayer` 每个权重字段是 `&[u8]` ✓✓，
+**同一个层里的不同权重可以是不同格式** ✓✓（比如 BF16 的主干 + F32 的 norm ✓✓），
+所以要修就得给每个字段各记一个 dtype ✓✓ —— 那是 `VisionLayer` 的结构变更 ✓✓，
+会牵动所有构造它的调用方（zdt ✓✓、wevisone_vl ✓✓、mage_flow ✓✓）✓✓。
+
+**方向**（未定）：
+
+1. 在 `core::tensor` 加一个按声明格式取矩阵的共享入口
+   （`load_f32_matrix` 已经在 `4c77690f` 里加好了 ✓✓ —— 它就是给这一类用的 ✓✓）✓✓，
+   然后把 qwen3 塔的权重路径换成它 ✓✓ —— 顺带把「按格式取」这件事收进 core ✓✓，
+   符合 §6 的单一事实源原则 ✓✓。
+2. 或者把 qwen3 塔的 `VisionLayer` 权重字段从 `&[u8]` 改成解码后的值 ✓✓，
+   跟刚修完的 bias 一样 ✓✓ —— 代价是所有构造方都要跟 ✓✓。
+
+**验收**：给 qwen3 塔一个 BF16 的视觉塔，权重解码结果与按声明格式解码的结果
+逐位相同 ✓✓。
+
+**关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
+`src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
+`src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
