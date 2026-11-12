@@ -341,6 +341,9 @@ fn compare_qwen35_traces(
         .find(|record| record["name"] == "qwen35.layer_is_recurrent")
         .and_then(|record| record["bool_values"].as_array())
         .and_then(|layers| layers.len().checked_sub(1));
+    // Report what the drift actually was, so a later run can tell whether the
+    // numbers moved and by how much.
+    let mut drift: std::collections::BTreeMap<String, f64> = Default::default();
     for (record_index, (got, expected)) in rust.iter().zip(&llama).enumerate() {
         for field in ["name", "layer", "step", "occurrence"] {
             if got.get(field) != expected.get(field) {
@@ -403,6 +406,8 @@ fn compare_qwen35_traces(
         }
         if !lossless && GDN_CHECKPOINTS.contains(&name) {
             let error = relative_l2(&got_words, &expected_words);
+            let entry = drift.entry(name.to_owned()).or_default();
+            *entry = entry.max(error);
             if error > QUANTIZED_GDN_RELATIVE_L2 {
                 return Err(format!(
                     "checkpoint {name} occurrence {occurrence:?}: relative L2 {error} exceeds {QUANTIZED_GDN_RELATIVE_L2}"
@@ -415,11 +420,19 @@ fn compare_qwen35_traces(
             // per-element contract of the lossless tier would only measure
             // that drift. The functional gate is the token agreement, which
             // the exact-value records above already compare.
+            let error = relative_l2(&got_words, &expected_words);
+            let entry = drift.entry(name.to_owned()).or_default();
+            *entry = entry.max(error);
             continue;
         }
         let mut max_abs = 0.0f32;
         let mut max_rel = 0.0f32;
         let mut first_mismatch = None;
+        {
+            let error = relative_l2(&got_words, &expected_words);
+            let entry = drift.entry(name.to_owned()).or_default();
+            *entry = entry.max(error);
+        }
         for (index, (&got_bits, &expected_bits)) in
             got_words.iter().zip(&expected_words).enumerate()
         {
@@ -448,6 +461,9 @@ fn compare_qwen35_traces(
                 "checkpoint {name} index {index}: Rust={got} llama.cpp={expected} exceeds abs={abs_tol} rel={rel_tol}; record max_abs={max_abs} max_rel={max_rel}"
             ));
         }
+    }
+    for (name, error) in &drift {
+        eprintln!("Qwen3.8 drift {name}: relative L2={error:.6e}");
     }
     Ok(())
 }
