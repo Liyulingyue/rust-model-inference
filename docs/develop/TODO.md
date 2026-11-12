@@ -5102,11 +5102,23 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
 近平局，Oracle 的构建决定翻到哪一边；中文输入各机一致）。AMD 性能记录与
 gfx1100 上的物理设备复测仍未重跑。
 
-仍未复测：**MiniCPM-V 35B**（`qwen35moe`，本仓库新增架构；它自己的 Oracle
-pin 在 `69f201a2`，本机没有该 checkout，也没有 GitHub 出网）。架构层面由
-Sage-A1.5 覆盖（同一 `qwen35moe`，1,100 个检查点逐位一致）；它的**权重**已经在
-设备上跑过（2026-11-12，Q4_K_M，8 步 greedy token 与 CPU 逐个相同，logits
-相对 L2 `0.0313`），但 CPU 侧与 pinned Oracle 的文本对拍还没做。
+**MiniCPM-V 4.7 35B-A3B**（`qwen35moe`）也复测了（2026-11-12）：Q4_K_M 档，
+Oracle 用 pinned `b96806d` 的标量构建（`tools/oracle/sage_a15/build_oracle.sh`，
+`--no-repack`），Rust 侧用 `tests/minicpmv_reference.rs::dump_qwen35moe_logits`
+并喂 Oracle 自己 tokenize 出来的 id，新的 `tools/oracle/minicpmv/compare_text.py`
+做比较：**437 个检查点逐位一致**（layer 0/3/39 的路由 logits、probs、选中的
+专家 id、路由权重、归一化权重、MoE 输出、shared expert 输出各 57 个，外加
+`result_norm` 与最终 logits 各 19 个）。它的**权重**也在设备上跑过：8 步 greedy
+token 与 CPU 逐个相同，logits 相对 L2 `0.0313`。
+
+这个模型文档里 pin 的 Oracle 是 `69f201a2`（比 `b96806d` 新，带
+`minicpmv4_7` 的视觉支持）；本机没有那个 checkout 也没有 GitHub 出网，所以
+文本对拍用的是 `b96806d`——两者的 GDN 公式相同，差别只在视觉侧。逐层的
+`l_out`、attention 检查点与 GDN 递推 state 不在这个 harness 里（MiniCPM-V 的
+dump 路径不发这些），同一架构由 Sage-A1.5 覆盖。
+
+至此，共享 GDN 归一化的影响面里，Qwen3.8、Holo4、OvisOCR3、NeoHorse、
+Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
 
 **影响面**：只影响 OvisOCR3 一个模型的数值验证，不影响任何模型的推理
 正确性——两个公式相差 2.4e-6 相对，模型行为不变。

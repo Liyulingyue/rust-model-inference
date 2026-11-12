@@ -108,7 +108,8 @@ llama.cpp 的 GDN q/k 归一化换过公式：
   `1.1e-7`（旧公式 `4.7e-5`）；NeoHorse-1-4B 的 **BF16 档与 llama.cpp 逐位
   一致**，量化档的 GDN checkpoint `8.9e-8`…`5.4e-7`（旧公式 `8.6e-5`）；
   Sage-A1.5（`qwen35moe`）的全量对拍 **1,100 个检查点逐位一致**（最大相对 L2
-  与最大绝对误差都是 0）。
+  与最大绝对误差都是 0）；MiniCPM-V 4.7 35B-A3B（同一 `qwen35moe` 架构）的
+  路由与 logits **437 个检查点逐位一致**。
 
 **旧公式保留为开关，默认关闭**：`RMI_QWEN35_GDN_LEGACY_NORM=1`
 （`src/models/qwen35/trunk/util.rs` 的 `legacy_gdn_norm`）。它是**诊断工具**，
