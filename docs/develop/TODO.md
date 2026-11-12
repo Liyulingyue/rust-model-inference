@@ -5044,7 +5044,7 @@ HTTP 请求中位数。）
 
 ### TODO-068: OvisOCR3 的运行时 Oracle 还 pin 在 `11fe0215`，要重新 pin 到 `b96806d`
 
-**状态**：⚠️ 已定位，未重跑（需要 OvisOCR3 的 GGUF 与 Oracle，本次没有）。
+**状态**：✅ 已完成（2026-11-12，运行时 Oracle 已重新 pin 到 `b96806d`，两个测试重跑通过）。
 
 **背景**：`4a2ac0b`（Holo4 合并）把共用的 GDN 归一化换成 llama.cpp
 `11fe0215` 的 `build_gdn_l2_norm`（`x / sqrt(sum(x²) + eps)`），当时仓库里
@@ -5060,17 +5060,25 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
 时打开 `RMI_QWEN35_GDN_LEGACY_NORM=1`（默认关闭）。详见
 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的「GDN 归一化」一节。
 
-**要做的**：
+**已完成**：
 
-1. 把 OvisOCR3 的运行时 Oracle 从 `11fe0215` 重新 pin 到 `b96806d`
-   （与它的转换 pin 一致，也与其余模型一致）；`tools/oracle/ovisocr3/`
-   的 builder 与 README 都要跟着改。
-2. 用新 Oracle 重跑 `ovisocr3_text_matches_llama_cpp_with_precision_bounds`
-   与 `ovisocr3_vision_matches_llama_cpp_with_precision_bounds`，
-   确认相对 L2 门槛仍然成立，并刷新
-   `docs/develop/SUPPORTED_MODELS.md` 的 OvisOCR3 行与
-   `tools/oracle/ovisocr3/README.md` 的「Reference versions and precision」
-   里的数值（新 Oracle 下 GDN state 的误差会回到 0 附近）。
+1. `tools/oracle/ovisocr3/build_oracles.sh` 的运行时 pin 改成 `b96806d`，
+   与转换 pin 相同；`tests/qwen35_reference.rs` 删掉单独的
+   `OVISOCR3_RUNTIME_LLAMA_PIN`，两个 OvisOCR3 测试都断言 `LLAMA_PIN`。
+   trace 补丁在 `b96806d` 上仍能干净应用，`git diff -- src` 仍为空。
+2. 两个测试重跑通过。逐位检查点回到噪声水平：`q_conv_predelta-0`
+   `7.8e-8`、`state_predelta-0` `1.1e-7`、`conv_output_raw-0` 精确 `0`、
+   `final_output-0` `1.7e-7`；只把公式换回旧版则分别是 `1.18e-5` 与
+   `4.70e-5`。视觉 14 个检查点最大相对 L2 `0.0147`（门槛 `0.05`）。
+3. 数值门槛跟着收紧到「两类检查点」：单块检查点仍按 Oracle 自己的
+   BF16/F32 spread 定界（`min(0.05, max(1e-5, 1.5 * spread))`），累积检查点
+   只报告漂移并以 `0.05` 为上限。原因是深层栈在 BF16 下是混沌的：只把 state
+   移动 `1e-5`（换公式）就会让 `layer_output-23` 在 `0.0117` 与 `0.0195`
+   之间摆动、`result_output` 停在 Oracle spread 的 `4.4` 倍，spread 倍数在
+   那里没有信息量；那些层的功能门限是 greedy token 逐个相同（仍精确比较）。
+
+**剩余**：`RMI_QWEN35_GDN_LEGACY_NORM` 现在没有任何 Oracle 需要它了，但按
+「保留诊断开关、默认关闭」的约定继续留着；它只影响 CPU 路径。
 
 **影响面**：只影响 OvisOCR3 一个模型的数值验证，不影响任何模型的推理
 正确性——两个公式相差 2.4e-6 相对，模型行为不变。

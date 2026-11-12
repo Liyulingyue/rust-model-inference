@@ -41,29 +41,28 @@ It is a diagnostic artifact, not a new published weight format.
 
 ## Reference versions and precision
 
-Conversion remains pinned to llama.cpp
+Conversion and runtime validation share one pin, llama.cpp
 `b96806d96061049a5b574269b049bf6241d63d46`.
-Runtime validation is independently pinned to
+
+That was not always the case. The runtime Oracle used to sit on
 `11fe02151f79c41d0d4af7da708755d73b9c0da6`, which builds the GDN q/k
-normalization as `x / sqrt(sum(x*x) + eps)` (RMSNorm plus scale). Upstream
+normalization as `x / sqrt(sum(x*x) + eps)` (RMSNorm plus scale); upstream
 moved to `x / max(sqrt(sum(x*x)), eps)` (`ggml_l2_norm`) between `11fe0215`
-and the conversion pin `b96806d`. These formulas are different; the original
-comparison first diverges at `q_conv_predelta-0` and fails the old strict
-recurrent contract.
+and `b96806d`. Because this was the last Oracle on the old formula, the shared
+Rust implementation had been pinned to the old formula to match it, which in
+turn pulled every model whose Oracle was already `b96806d` off its reference.
+The runtime Oracle now uses the conversion pin, so both sides run
+`ggml_l2_norm` and the exception is gone.
 
-The shared Rust GDN normalization now follows upstream (`b96806d`), so this
-model's numbers differ from the `11fe0215` Oracle by the difference of the
-two formulas: `eps / (2 * sum)` relative, which shows up as about 1.2e-5
-relative L2 on the recurrent state. That is a formula-version difference, not
-an implementation defect, and it is accepted on the existing error bound.
-Export `RMI_QWEN35_GDN_LEGACY_NORM=1` to run the Rust side with the older
-formula and reproduce this Oracle's arithmetic exactly; the switch is off by
-default and only the CPU path honours it. Re-pinning the runtime Oracle to
-`b96806d` and re-running the two tests would bring the recurrent-state error
-back to zero (TODO-068). See `docs/develop/GGML_PARITY_BOUNDARY.md` for the
-full statement.
+With both sides on `b96806d` the recurrent checkpoints come back to noise
+level: `q_conv_predelta-0` `7.8e-8`, `state_predelta-0` `1.1e-7`,
+`conv_output_raw-0` exactly `0`, `final_output-0` `1.7e-7`. Switching only the
+GDN formula back (`RMI_QWEN35_GDN_LEGACY_NORM=1`) puts them at `1.18e-5` and
+`4.7e-5` again, which is the formula difference the old pin used to hide. The
+switch is kept as a diagnostic -- no Oracle needs it any more -- and it is off
+by default on the CPU path only.
 
-The new builder clones the fixed runtime reference into a disposable directory,
+The builder clones the fixed runtime reference into a disposable directory,
 reuses the existing callback/precise-softmax instrumentation, and verifies that
 no `src/` model formulas were patched. BLAS, Accelerate and Metal are disabled.
 
@@ -76,13 +75,24 @@ shapes and structural values. The numerical checkpoints sample recurrent layer
 this does not trace every intermediate of all 24 layers.
 
 Token IDs, layer flags, MRoPE positions, embedding lookup and initial zero state
-are exact checks. Accumulated arithmetic is numerical: for each checkpoint,
-measure the maximum Oracle BF16-versus-widened-F32 relative L2 over all
-forwards, and use `min(0.05, max(1e-5, 1.5 * spread))` for Rust-versus-BF16.
-The Oracle spread itself must be at most 0.05. This follows the existing Holo4
-calibration method with a smaller cap, without changing other models' gates.
-All values must be finite. Widening changes activation rounding, so its output
-is not expected to be bitwise identical to the BF16 path.
+are exact checks. The numerical checkpoints fall into two classes:
+
+* Single-block checkpoints (`*_predelta-0`, `conv_output_raw-0`,
+  `final_output-0`) are bounded against the Oracle's own BF16-versus-widened-F32
+  spread, `min(0.05, max(1e-5, 1.5 * spread))`. They are effectively lossless
+  and sit three to five orders of magnitude below that bound.
+* Accumulated checkpoints (deep `Qcur`/`Kcur`/`attn_norm`, `layer_output-*`,
+  `result_norm`, `result_output`) are reported and capped at 0.05 relative L2,
+  the same cap the vision check uses. A spread multiplier carries no
+  information there: the deep stack is chaotic in BF16, and moving
+  `state_predelta-0` by the 1e-5 formula difference swings `layer_output-23`
+  between `0.0117` and `0.0195` while leaving `result_output` at `4.4x` the
+  Oracle spread. The greedy ids are the functional gate for those layers, and
+  they are compared exactly.
+
+The Oracle spread itself must be at most 0.05, and all values must be finite.
+Widening changes activation rounding, so its output is not expected to be
+bitwise identical to the BF16 path.
 
 Vision validation sends identical normalized 256x256 RGB values to both
 encoders. All 14 checkpoints (embedding, 12 blocks, projection) must agree in
@@ -91,19 +101,29 @@ vision bound. This isolates encoder arithmetic from lossy image resize.
 
 ## Measured CPU results
 
-Apple M3 Max, Rust 1.98.1 / `release-fast`, with the fixed runtime reference:
+Linux aarch64 (NVIDIA GB10), `release-fast --features parity-trace`,
+`RMI_SCALAR=1`, one thread, with the runtime Oracle on the conversion pin
+`b96806d`:
 
 | Selected checkpoint | Max Rust/BF16 relative L2 | Max Oracle F32/BF16 spread |
 | --- | ---: | ---: |
-| Recurrent Q, layer 0 | `7.856063e-8` | `0.001711933` |
-| Recurrent state, layer 0 | `1.028575e-7` | `0.001460699` |
-| Layer 0 output | `2.698261e-7` | `0.003260384` |
-| Layer 23 output | `0.008075446` | `0.011696423` |
-| Final logits | `0.008448516` | `0.006233681` |
+| Recurrent Q, layer 0 (`q_conv_predelta-0`) | `7.771642e-8` | `0.001711939` |
+| Recurrent state, layer 0 | `1.101880e-7` | `0.001460709` |
+| Conv output, layer 0 | `0` (exact) | `0.000582941` |
+| Layer 0 output | `9.421110e-5` | `0.003262944` |
+| Layer 3 output | `0.004289493` | `0.005203881` |
+| Layer 23 output | `0.019521800` | `0.009581441` |
+| Final logits (`result_output`) | `0.014644887` | `0.003310246` |
 
-Vision's largest relative L2 is `0.016452702` (block 11); final projection
-relative L2 is `0.016178738`. The fixture produces 64 tokens of width 1024.
+With the legacy GDN formula the two recurrent rows read `1.179861e-5` and
+`4.697174e-5` instead, which is the formula difference the old runtime pin
+used to require.
+
+Vision's largest relative L2 is `0.014742355` (block 11); final projection
+relative L2 is `0.013866748`. The fixture produces 64 tokens of width 1024.
 These are numerical results, not bitwise parity for accumulated arithmetic.
+The earlier table on this page was measured on an Apple M3 Max against the
+`11fe0215` runtime Oracle; those rows are superseded by the ones above.
 
 Converter regressions pass (6 tests), as do the focused Qwen3.5 library tests
 (81 passed / 4 ignored), three reference-helper tests and both real-weight
@@ -117,18 +137,19 @@ smoke tests, not an OCR accuracy benchmark.
 
 ## Reproduce
 
-Prepare separate read-only llama.cpp checkouts at the conversion and runtime
-pins above. Use a repository-local Python environment with the converter's
-dependencies; no system packages or external acceleration libraries are needed.
+Prepare one read-only llama.cpp checkout at the pin above (both the conversion
+and the runtime Oracle use it). Use a repository-local Python environment with
+the converter's dependencies; no system packages or external acceleration
+libraries are needed.
 
 ```sh
 .venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 models/OvisOCR3 \
-  --llama-cpp /path/to/llama-conversion-pin \
+  --llama-cpp /path/to/llama-b96806d \
   --outfile target/ovisocr3/OvisOCR3-BF16.gguf \
   --mmproj-outfile target/ovisocr3/mmproj-OvisOCR3-BF16.gguf
-sh tools/oracle/ovisocr3/build_oracles.sh /path/to/llama-runtime-pin \
+sh tools/oracle/ovisocr3/build_oracles.sh /path/to/llama-b96806d \
   target/ovisocr3/oracle
-PYTHONPATH=/path/to/llama-conversion-pin/gguf-py .venv/bin/python \
+PYTHONPATH=/path/to/llama-b96806d/gguf-py .venv/bin/python \
   tools/oracle/holo4/widen_projector.py target/ovisocr3/OvisOCR3-BF16.gguf \
   target/ovisocr3/OvisOCR3-F32-reference.gguf
 

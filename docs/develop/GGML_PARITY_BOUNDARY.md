@@ -111,12 +111,12 @@ llama.cpp 的 GDN q/k 归一化换过公式：
 
 - 对拍是**排 bug** 的手段，不是逐模型对齐的目标——误差合理就算过，所以默认
   走上游的新公式；
-- 需要复现某个旧 Oracle 自己的算术（OvisOCR3 的运行时 Oracle 还 pin 在
-  `11fe0215`），或者要在 CPU 上量一量两个公式差多少时，再打开这个开关；
-- 打开后 OvisOCR3 与旧 Oracle 的差异回到 0；不打开则带着 `eps / (2 * sum)`
-  相对（GDN 递推 state 上约 1.2e-5 相对 L2）的**公式版本差**，按误差界接受。
-- TODO-068 记录了把那个 Oracle 重新 pin 到 `b96806d`（与它的转换 pin 一致）
-  的后续动作，届时这个开关就没有使用者了。
+- 要在 CPU 上量一量两个公式差多少时再打开：只换这一处，OvisOCR3 的
+  `state_predelta-0` 就从 `1.1e-7` 变成 `4.7e-5`（`q_conv_predelta-0` 从
+  `7.8e-8` 变成 `1.18e-5`），是这类公式差最干净的观测点；
+- 仓库里已经没有 Oracle 需要它了：OvisOCR3 的运行时 Oracle 已随 TODO-068
+  重新 pin 到 `b96806d`，与它的转换 pin 一致，所以默认路径不再带
+  `eps / (2 * sum)` 的**公式版本差**。
 
 Vulkan 侧的 `shaders/glsl/qwen35_recurrent_conv.comp` 始终用上游的新公式；
 开关只作用于 CPU 路径。
