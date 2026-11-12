@@ -108,8 +108,12 @@ impl GpuLinear {
         rows: usize,
     ) -> bool {
         let spec = spec.into();
+        // A single row is a GEMV, and the device's per-workgroup dispatch costs far
+        // more than the CPU kernel for one row (measured on the YuE2 lm_head:
+        // 2048x184704 takes ~70 ms on the device vs ~8 ms on the CPU). Require a
+        // few rows so the tiling batches them; batched shapes stay on the device.
         if !offload_enabled()
-            || rows == 0
+            || rows < 4
             || n_in == 0
             || n_out == 0
             || rows.checked_mul(n_in) != Some(input.len())

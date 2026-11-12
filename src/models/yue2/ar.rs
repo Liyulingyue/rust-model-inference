@@ -2351,6 +2351,89 @@ mod performance_tests {
 
     #[cfg(feature = "vulkan")]
     #[test]
+    #[ignore = "requires a Vulkan device; times the lm_head projection and its host post-processing"]
+    fn vulkan_lm_head_per_call_cost() {
+        use std::time::Instant;
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let n_in = 2048usize;
+        let n_out = 184704usize;
+        let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+        let weight = YuE2Weight {
+            fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                bytes,
+                GGMLType::BF16,
+                n_in,
+                n_out,
+            )),
+            bf16: Some(bytes),
+            gpu_bf16: Default::default(),
+            n_in,
+            n_out,
+        };
+        let input = vec![0.01f32; n_in];
+        let mut output = vec![0.0f32; n_out];
+        let spec = crate::vulkan::ops::GpuWeightFormat::BF16
+            .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot);
+        assert!(
+            weight
+                .gpu_bf16
+                .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, 1),
+            "device declined"
+        );
+        let calls = 60u32;
+        for rows in [1u32, 2, 4, 8, 16, 32, 64] {
+            let input: Vec<f32> = (0..rows as usize * n_in)
+                .map(|index| ((index * 5) % 13) as f32 / 13.0 - 0.5)
+                .collect();
+            let mut output = vec![0.0f32; rows as usize * n_out];
+            assert!(weight.gpu_bf16.try_matmul(
+                bytes,
+                spec,
+                &input,
+                &mut output,
+                n_in,
+                n_out,
+                rows as usize
+            ));
+            let started = Instant::now();
+            for _ in 0..calls {
+                weight.gpu_bf16.try_matmul(
+                    bytes,
+                    spec,
+                    &input,
+                    &mut output,
+                    n_in,
+                    n_out,
+                    rows as usize,
+                );
+            }
+            eprintln!("rows={rows}: device {:?}", started.elapsed() / calls);
+        }
+        let calls = 200u32;
+        let started = Instant::now();
+        for _ in 0..calls {
+            weight
+                .gpu_bf16
+                .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, 1);
+        }
+        let device = started.elapsed() / calls;
+        let bias = [0.001953125f32, -0.001953125f32];
+        let started = Instant::now();
+        for _ in 0..calls {
+            for row in output.chunks_exact_mut(n_out) {
+                for (column, value) in row.iter_mut().enumerate() {
+                    let sum = *value + bias[column % 2];
+                    *value = half::bf16::from_f32(sum).to_f32();
+                }
+            }
+        }
+        let host = started.elapsed() / calls;
+        eprintln!("lm_head n_out={n_out}: device call {device:?}, host bias+bf16 {host:?}");
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
     #[ignore = "requires a Vulkan device and RUST_GPU_MIN_OUTPUTS=0: the shapes below are smaller than the default 16K output threshold, so the device declines them unless the threshold is lowered"]
     fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
         crate::ops::enable_gpu();

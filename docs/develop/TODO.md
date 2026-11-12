@@ -13,6 +13,15 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
+      2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
+      整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
+      NAR 63.9 s。原因：AR 逐 token 调用一次 lm_head（rows=1 的 GEMV，设备 ~70 ms vs CPU
+      ~8 ms，已用 rows>=4 门禁挡掉），NAR 每步两次全模型前向（每次 28 层投影，rows=256
+      时设备与 CPU 持平）。下一步按review 提示做**融合 / 批提交 / 避免 host↔device 往返**：
+      把每层的多个投影合成一次提交（共享 linear executor 已有 `run_group`），以及把
+      NAR 的 prefix+velocity 两次前向的合成一次提交；设备侧 GEMV 的效率也需要单独看
+      （每 workgroup 64 输出通道 × 32 帧的 tiling 对 rows=1 是否合适）。
 - [ ] **共享卷积的设备路径无复核门槛，YuE2 VAE 设备化后被它吃掉收益** —
       `ops::nn::conv3d_with_options` 在设备成功后**无条件**用 CPU kernel 复核
       （`conv3d_matches_cpu`，不符就重试、再不符退回 CPU 重算），而线性路径的复核是

@@ -202,17 +202,23 @@ NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致�
 
 | 阶段 | CPU | Vulkan |
 |---|---:|---:|
-| ABC 采样 | 76.3 s | 124.8 s |
-| semantic 采样 | 116.1 s | 133.6 s |
-| NAR（含 prefix prefill） | 46.2 s | 67.1 s |
-| **VAE 解码** | **77.0 s** | **24.7 s（3.1x）** |
-| 合计 | 315.6 s | 350.2 s |
+| ABC 采样 | 76.3 s | 74.8 s |
+| semantic 采样 | 116.1 s | 113.6 s |
+| NAR（含 prefix prefill） | 46.2 s | 63.9 s |
+| VAE 解码 | 77.0 s | 25.6 s（3.0x） |
+| **合计** | **315.6 s** | **277.9 s（-12%）** |
 
-VAE 快 3.1 倍，但 AR/NAR 在设备上更慢，所以整链仍比 CPU 慢 11%。设备路径的
-VAE 输出与 CPU 的差异为 **最多 1 个 PCM16 档位**（982,912 个采样中 6,573 个
-不同，0.67%，最大绝对差 1/32768）—— 不是逐位一致，但对音频而言是舍入量级。
-若要把整链做成正的 GPU 收益，需要先解决 AR/NAR 的设备开销（见
-[TODO](../develop/TODO.md)）。
+VAE 快 3 倍，AR/NAR 回到 CPU 路径（见下），所以**整链现在比 CPU 快 12%**。
+设备路径的输出与 CPU 的差异为**最多 1 个 PCM16 档位**（982,912 个采样中
+6,573 个不同，0.67%，最大绝对差 1/32768）—— 不是逐位一致，但对音频是舍入量级。
+
+### 3.5 单行投影不上设备
+
+`GpuLinear::try_matmul` 现在要求 **rows >= 4**：单行是 GEMV，设备侧每个 workgroup
+的派发开销远超 CPU kernel。实测 YuE2 的 lm_head（2048x184704）在设备上
+**~70 ms/次**（rows=1），而 CPU 只需 ~8 ms —— 所以 AR 的逐 token lm_head 现在
+留在 CPU（这也是上面 AR 阶段追平 CPU 的原因）。rows>=4 的批量形状（例如 NAR 的
+256 帧 velocity）仍然在设备上。
 
 实机 GPU 回归 `vulkan_yue2_bf16_rounds_after_bias_across_tiles` 用的规模小于
 `RUST_GPU_MIN_OUTPUTS` 默认门槛（16K 输出），设备会拒绝这些投影，所以运行它需要
