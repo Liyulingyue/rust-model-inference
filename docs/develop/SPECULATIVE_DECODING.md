@@ -6,6 +6,14 @@
 > (MTP module, `graph_mtp`), `references/llama.cpp/common/speculative.{h,cpp}`
 > (main loop + acceptance test), `references/llama.cpp/src/llama-context.cpp`
 > (`llama_set_embeddings_layer_inp` hook).
+>
+> **Refreshed 2026-11-11** against the pinned `llama.cpp b96806d` (the same
+> commit this repository's Qwen3.5 / Qwen3.8 oracle uses). The upstream
+> contract is now spelled out in "The upstream contract" below, the survey
+> of models that actually ship these heads is in "Which models ship them",
+> and the status of the three pieces this repository already has is in
+> "What this repository already has". Nothing here is implemented yet:
+> the whole feature is tracked as TODO-069.
 
 ## Why
 
@@ -323,6 +331,153 @@ Phase 2  (acceptance / verification hardening)
   - Speculative + tool-call integration
   - Speculative + multi-sequence (n_parallel > 1)
 ```
+
+## The upstream contract (llama.cpp `b96806d`)
+
+Upstream ships **four** draft types side by side and can infer which one a
+GGUF is from its metadata alone (`common/speculative.cpp::common_speculative_types_from_gguf`):
+
+| type | auto-detected when | the draft is |
+|---|---|---|
+| `draft-mtp` | arch is not `dflash` **and** `blk.{block_count-1}.nextn.eh_proj.weight` exists | an extra MTP block that lives inside the main model (DeepSeek-V3 / V4 style) |
+| `draft-dflash` | arch is `dflash` **and** `markov_w1.weight` does not exist | a separate small DFlash model |
+| `draft-dspark` | arch is `dflash` **and** `markov_w1.weight` exists | DFlash plus a Markov head (and an optional confidence head) |
+| `draft-eagle3` | a separate small EAGLE3 model | |
+
+### MTP (`src/models/deepseek4.cpp::graph_mtp`)
+
+The MTP block takes two inputs: the **main model's last-layer hidden state**
+`h` and the **token it has to predict**. Then:
+
+```
+tok_embd = embed_tokens(tokens)                 # falls back to the main token_embd
+h_norm   = RMSNorm(h,     nextn.hnorm)
+e_norm   = RMSNorm(tok_embd, nextn.enorm)
+inpL     = eh_proj(concat(e_norm, h_norm))      # 2*n_embd -> n_embd
+...                                             # then it is an ordinary layer
+logits   = shared_head_head(shared_head_norm(out))   # falls back to output_norm + output
+```
+
+Tensor names (`src/llama-arch.cpp`): `blk.%d.nextn.eh_proj`, `.embed_tokens`,
+`.enorm`, `.hnorm`, `.shared_head_head`, `.shared_head_norm`. Metadata:
+`<arch>.nextn_predict_layers` (how many MTP layers) and `<arch>.block_count`
+(the total, MTP included).
+
+Upstream also supports a **standalone GGUF that contains only the MTP block**
+(`mtp_only`: no `blk.0.attn_norm.weight`) -- that is exactly the kind of file
+that ships in an `MTP/` directory.
+
+### DSpark (`src/models/dflash.cpp`)
+
+DFlash is a small model that reads the main model's hidden state at a set of
+layers (`target_layers`) and runs conv + selector stages:
+
+- tensors: `blk.%d.attn_conv_base`, `.attn_conv_proj`, `.ffn_conv_base`,
+  `.ffn_conv_proj`, `selector_predecessor`, `selector_successor`,
+  `selector_hidden`
+- metadata: `<arch>.target_layers`, `.block_size`, `.conv_kernel_size`,
+  `.conv_group_size`, `.selector_rank`, `.selector_top_k`
+
+**DSpark = DFlash + a Markov head (+ an optional confidence head)**, and both
+heads are corrections *on top of* the draft logits:
+
+```
+# Markov head: bias the draft logits at position i by the previously committed token
+w1_prev   = markov_w1[prev_token]                # [R]
+bias      = markov_w2 @ w1_prev                   # [n_vocab]
+logits[i] = base_logits[i] + bias                # chained: position i-1's argmax is position i's prev
+
+# confidence head: predict the acceptance probability of each position
+conf[i]   = sigmoid(conf_proj . [embd[i]; markov_w1[prev(i)]] + conf_proj_bias)
+```
+
+Tensors: `markov_w1` [R, n_vocab], `markov_w2` [R, n_vocab_draft],
+`markov_w2.scale`, `conf_proj.weight` [n_embd+R, 1], `conf_proj.bias` [1].
+Metadata: `dflash.block_size`, `dflash.sample_from_anchor` (slot 0 is a bonus
+anchor, not a prediction slot).
+
+### The sidecar convention
+
+Upstream's downloader looks for `MTP/`, `dflash/`, `dspark/` and `eagle3/`
+sub-directories inside a draft repo (`common/arg.cpp`), with `dspark` ranking
+above `dflash` because it carries the extra Markov head. The weights
+publishers follow that convention: `unsloth/Qwen3.8-Flash-Next-GGUF` ships an
+`MTP/` directory and `unsloth/DeepSeek-V4.1-Flash-1017-GGUF` ships a
+`dspark/` one.
+
+## What this repository already has
+
+- **`xing4_0` already parses an MTP block.** `src/models/xing4_0/trunk/weights.rs`
+  loads `nextn_eh_proj`, `nextn_embed_tokens`, `nextn_enorm`, `nextn_hnorm`,
+  `nextn_shared_head_head` and `nextn_shared_head_norm` -- byte for byte the
+  same six tensors as the upstream `blk.N.nextn.*` contract above (the
+  GLM-4.5 shape). They are loaded and then **not used**: no forward code
+  reads them.
+- **`qwen35` knows about MTP layers and excludes them.** `Qwen35Config` has
+  `n_nextn` and computes `n_layer_impl = n_layer - n_nextn`, so a Qwen3.5 /
+  Qwen3.8 GGUF that ships MTP blocks runs its trunk without them
+  (`SUPPORTED_MODELS.md` says "excludes MTP" for Sage-A1.5 and Holo4-27B).
+- **The verify-stage forward already exists.** `ChunkedPrefill::prefill` walks
+  chunks of `rows` tokens and `forward_chunk` knows `is_last`; a
+  `prefix ∪ draft` sequence of `P + K` tokens is one batched prefill, which is
+  what the verify stage needs. The missing part is only that the return value
+  keeps **all** `P + K` rows of logits instead of the last one.
+- **The acceptance test has a shape to copy.** `run_jev_grouped_decision`
+  already computes "K independent evaluations in one forward via per-group
+  softmax".
+
+What is missing is the draft side and the loop. See TODO-069.
+
+## Which models ship them
+
+Survey of the 354 `-GGUF` repositories under the `unsloth` ModelScope owner
+(names as of 2026-11-11). The interesting ones are the repositories that
+carry a **sidecar** directory, because that is how the heads are shipped:
+
+| repository (ModelScope, owner `unsloth`) | sidecar | size | what the sidecar is |
+|---|---|---|---|
+| `gemma-4-E2B-it-GGUF`, `gemma-4-E4B-it-GGUF`, `gemma-4-12b-it-GGUF`, `gemma-4-26B-A4B-it-GGUF`, `gemma-4-31B-it-GGUF` (plus the `-qat` and `-qat-mobile` variants) | `MTP/` | 0.06-0.95 GB | arch `gemma4-assistant`, `nextn_predict_layers = 4`, and a different MTP shape: `nextn.pre_projection` / `nextn.post_projection` instead of `eh_proj` |
+| `Qwen3.8-27B-GGUF` | `MTP/` | 1.37 GB (Q4_0) | arch `qwen35`, `nextn_predict_layers = 1`, 18 tensors: `blk.64.nextn.{eh_proj,enorm,hnorm,shared_head_norm}` plus the main model's `token_embd` / `output` |
+| `Qwen3.8-Flash-Next-GGUF` | `MTP/` | 2.79-7.77 GB | arch `qwen4exp`, `nextn_predict_layers = 1`, and a hyper-connection head: `blk.48.nextn.hc_head_{up,down,norm}` plus `blk.48.hc_attn_*` |
+| `DeepSeek-V4-Flash-0731-GGUF` | `dspark/` | 11.31 GB (BF16) | arch `dflash`, 3 DeepSeek-V4 blocks, 128 experts top-3 + 1 shared, `markov_w1` / `markov_w2` / `conf_proj` |
+| `DeepSeek-V4.1-Flash-1017-GGUF` | `dspark/` | 8.51 GB (BF16) | same shape; `dflash.target_layers = [37, 38, 39]`, `dflash.block_size = 5`, `dflash.has_confidence_head = true` |
+| `Mistral-Large-4-1T-A52B-GGUF` | `dspark/` | 4.21 GB (BF16) | arch `dflash` |
+| `MiniMax-M3.1-Flash-GGUF` | root-level `dspark-*.gguf` | 2.09 GB (Q8_0) | arch `dflash` |
+
+Two things worth drawing out of that table:
+
+- **The MTP head is often inside the main model, not only in a sidecar.**
+  The Qwen3.8-27B GGUF itself carries `qwen35.nextn_predict_layers = 1` and the
+  four `blk.64.nextn.*` tensors, while its main stack is blocks 0-63. This
+  repository's `qwen35` trunk already knows that split -- `n_layer_impl` is
+  `n_layer - n_nextn` -- so **the Qwen3.8 MTP head is currently ignored
+  silently**: the weights are in the file, the config knows about them, and
+  no forward pass reads them. The same is true of `xing4_0`, which parses the
+  full set of six `nextn` tensors and never uses them.
+- **Gemma-4 is the cheapest first target.** This repository already has the
+  `gemma4` trunk, and the MTP sidecars are 0.06-0.95 GB, so the whole
+  experiment (head + verify loop + acceptance measurement) fits in a
+  gigabyte of weights. The Gemma-4 MTP is also a *different shape* from
+  DeepSeek's (`pre_projection` / `post_projection` instead of `eh_proj`), so
+  it is worth reading the upstream Gemma-4 draft code before designing the
+  generic MTP path.
+
+## What to build first
+
+1. **MTP, not DSpark.** MTP needs the main model's last-layer hidden state
+   and one block; it needs no second model and no new architecture, and
+   `xing4_0` has already parsed its weights. DSpark needs a whole second
+   model (a DFlash backbone), a Markov chain and a confidence head.
+2. **The verify side first, and measure it.** Extend `forward_chunk` to
+   return every row of logits, then measure how much a `P + K` batched
+   prefill actually saves over `K` single-token steps. If the answer is
+   small, no draft strategy can pay for itself -- that is the same order of
+   reasoning the "NGRAM first" recommendation in this document already makes.
+3. **The hidden state has to be trustworthy.** A draft head consumes the main
+   model's last-layer hidden state, so it inherits that model's error. The
+   existing bitwise/parity infrastructure (`RMI_PARITY_TRACE`, the
+   `tools/oracle/*` harnesses) is what makes that checkable -- a draft head
+   built on an unverified hidden state is worse than no draft head.
 
 ## See also
 
