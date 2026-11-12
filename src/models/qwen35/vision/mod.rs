@@ -506,13 +506,13 @@ pub struct VisionEncoder<'a> {
     pub patch_embd_weight_1: Option<&'a [u8]>,
     pub position_embd: Option<&'a [u8]>,
     pub post_ln_weight: Option<&'a [u8]>,
-    pub post_ln_bias: Option<&'a [u8]>,
-    pub patch_bias: Option<&'a [u8]>,
+    pub post_ln_bias: Option<Vec<f32>>,
+    pub patch_bias: Option<Vec<f32>>,
     pub layers: Vec<VisionLayer<'a>>,
     pub mm_0_weight: &'a [u8],
-    pub mm_0_bias: Option<&'a [u8]>,
+    pub mm_0_bias: Option<Vec<f32>>,
     pub mm_2_weight: &'a [u8],
-    pub mm_2_bias: Option<&'a [u8]>,
+    pub mm_2_bias: Option<Vec<f32>>,
     pub precomputed: Option<VisionPrecomputed<'a>>,
 }
 
@@ -820,25 +820,25 @@ impl<'a> VisionPrecomputed<'a> {
 
 pub struct VisionLayer<'a> {
     pub ln1_weight: &'a [u8],
-    pub ln1_bias: Option<&'a [u8]>,
+    pub ln1_bias: Option<Vec<f32>>,
     pub ln2_weight: &'a [u8],
-    pub ln2_bias: Option<&'a [u8]>,
+    pub ln2_bias: Option<Vec<f32>>,
     pub qkv_weight: Option<&'a [u8]>,
-    pub qkv_bias: Option<&'a [u8]>,
+    pub qkv_bias: Option<Vec<f32>>,
     pub q_weight: Option<&'a [u8]>,
-    pub q_bias: Option<&'a [u8]>,
+    pub q_bias: Option<Vec<f32>>,
     pub k_weight: Option<&'a [u8]>,
-    pub k_bias: Option<&'a [u8]>,
+    pub k_bias: Option<Vec<f32>>,
     pub v_weight: Option<&'a [u8]>,
-    pub v_bias: Option<&'a [u8]>,
+    pub v_bias: Option<Vec<f32>>,
     pub out_weight: &'a [u8],
-    pub out_bias: Option<&'a [u8]>,
+    pub out_bias: Option<Vec<f32>>,
     pub ffn_up_weight: &'a [u8],
-    pub ffn_up_bias: Option<&'a [u8]>,
+    pub ffn_up_bias: Option<Vec<f32>>,
     pub ffn_gate_weight: Option<&'a [u8]>,
-    pub ffn_gate_bias: Option<&'a [u8]>,
+    pub ffn_gate_bias: Option<Vec<f32>>,
     pub ffn_down_weight: &'a [u8],
-    pub ffn_down_bias: Option<&'a [u8]>,
+    pub ffn_down_bias: Option<Vec<f32>>,
 }
 
 impl<'a> VisionEncoder<'a> {
@@ -880,22 +880,26 @@ impl<'a> VisionEncoder<'a> {
         let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
         let position_embd = source.tensor_slice("v.position_embd.weight");
         let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = optional_f32_tensor_bytes(source, "v.post_ln.bias")?;
-        let patch_bias = optional_f32_tensor_bytes(source, "v.patch_embd.bias")?;
+        let post_ln_bias = crate::core::tensor::optional_f32_values(source, "v.post_ln.bias")?;
+        let patch_bias = crate::core::tensor::optional_f32_values(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             let ln1_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln1.bias", i))?;
+            let ln1_bias =
+                crate::core::tensor::optional_f32_values(source, &format!("v.blk.{}.ln1.bias", i))?;
             let ln2_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln2.bias", i))?;
+            let ln2_bias =
+                crate::core::tensor::optional_f32_values(source, &format!("v.blk.{}.ln2.bias", i))?;
             let qkv_weight = source.tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i));
-            let qkv_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
+            let qkv_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.attn_qkv.bias", i),
+            )?;
             let (q_weight, q_bias, k_weight, k_bias, v_weight, v_bias) = if qkv_weight.is_none() {
                 (
                     Some(
@@ -903,19 +907,28 @@ impl<'a> VisionEncoder<'a> {
                             .tensor_slice(&format!("v.blk.{}.attn_q.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_q.weight", i))?,
                     ),
-                    optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_q.bias", i))?,
+                    crate::core::tensor::optional_f32_values(
+                        source,
+                        &format!("v.blk.{}.attn_q.bias", i),
+                    )?,
                     Some(
                         source
                             .tensor_slice(&format!("v.blk.{}.attn_k.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_k.weight", i))?,
                     ),
-                    optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_k.bias", i))?,
+                    crate::core::tensor::optional_f32_values(
+                        source,
+                        &format!("v.blk.{}.attn_k.bias", i),
+                    )?,
                     Some(
                         source
                             .tensor_slice(&format!("v.blk.{}.attn_v.weight", i))
                             .ok_or_else(|| format!("Missing v.blk.{}.attn_v.weight", i))?,
                     ),
-                    optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_v.bias", i))?,
+                    crate::core::tensor::optional_f32_values(
+                        source,
+                        &format!("v.blk.{}.attn_v.bias", i),
+                    )?,
                 )
             } else {
                 (None, None, None, None, None, None)
@@ -923,21 +936,29 @@ impl<'a> VisionEncoder<'a> {
             let out_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_out.bias", i))?;
+            let out_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.attn_out.bias", i),
+            )?;
             let ffn_up_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_up.bias", i))?;
+            let ffn_up_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_up.bias", i),
+            )?;
             let ffn_gate_weight = source.tensor_slice(&format!("v.blk.{}.ffn_gate.weight", i));
-            let ffn_gate_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_gate.bias", i))?;
+            let ffn_gate_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_gate.bias", i),
+            )?;
             let ffn_down_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_down.bias", i))?;
+            let ffn_down_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_down.bias", i),
+            )?;
 
             layers.push(VisionLayer {
                 ln1_weight,
@@ -966,7 +987,7 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source
             .tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = optional_f32_tensor_bytes(source, "mm.0.bias")?;
+        let mm_0_bias = crate::core::tensor::optional_f32_values(source, "mm.0.bias")?;
         let mm_2_info = source
             .tensor_info("mm.2.weight")
             .ok_or("Missing tensor info: mm.2.weight")?;
@@ -989,7 +1010,7 @@ impl<'a> VisionEncoder<'a> {
         let mm_2_weight = source
             .tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = optional_f32_tensor_bytes(source, "mm.2.bias")?;
+        let mm_2_bias = crate::core::tensor::optional_f32_values(source, "mm.2.bias")?;
         let precomputed = VisionPrecomputed::from_source(source, &config)?;
 
         Ok(Self {
@@ -1144,8 +1165,8 @@ impl<'a> VisionEncoder<'a> {
                     }
                 }
             }
-        } else if let Some(patch_bias_data) = self.patch_bias {
-            let bias = decode_f32_slice(patch_bias_data);
+        } else if let Some(ref patch_bias_data) = self.patch_bias {
+            let bias = patch_bias_data;
             for token in 0..n_tokens {
                 let offset = token * n_embd;
                 for embd in 0..n_embd {
@@ -1234,10 +1255,10 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
         } else if let (Some(weight_data), Some(bias_data)) =
-            (self.post_ln_weight, self.post_ln_bias)
+            (self.post_ln_weight, self.post_ln_bias.as_ref())
         {
             let weight = decode_f32_slice(weight_data);
-            let bias = decode_f32_slice(bias_data);
+            let bias = bias_data;
             for token in 0..n_tokens {
                 let offset = token * n_embd;
                 layer_norm_with_bias(
@@ -1652,9 +1673,9 @@ impl<'a> VisionEncoder<'a> {
         } else {
             let layer = &self.layers[il];
 
-            if let Some(bias_data) = layer.ln1_bias {
+            if let Some(ref bias_data) = layer.ln1_bias {
                 let w = decode_f32_slice(layer.ln1_weight);
-                let b = decode_f32_slice(bias_data);
+                let b = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     layer_norm_with_bias(&mut scratch.merged[off..off + n_embd], &w, &b, eps);
@@ -1681,8 +1702,8 @@ impl<'a> VisionEncoder<'a> {
                     &scratch.merged[..n_tokens * n_embd],
                     &mut scratch.qkv_buf[..n_tokens * n_embd * 3],
                 );
-                if let Some(bias_data) = layer.qkv_bias {
-                    let bias = decode_f32_slice(bias_data);
+                if let Some(ref bias_data) = layer.qkv_bias {
+                    let bias = bias_data;
                     let qkv_buf_ptr = scratch.qkv_buf.as_mut_ptr();
                     let chunk = n_embd * 3;
                     pool.compute(move |ith, nth| {
@@ -1702,9 +1723,9 @@ impl<'a> VisionEncoder<'a> {
             } else {
                 let input = &scratch.merged[..n_tokens * n_embd];
                 for (weight, bias, output_offset) in [
-                    (layer.q_weight, layer.q_bias, 0usize),
-                    (layer.k_weight, layer.k_bias, n_tokens * n_embd),
-                    (layer.v_weight, layer.v_bias, 2 * n_tokens * n_embd),
+                    (layer.q_weight, layer.q_bias.as_ref(), 0usize),
+                    (layer.k_weight, layer.k_bias.as_ref(), n_tokens * n_embd),
+                    (layer.v_weight, layer.v_bias.as_ref(), 2 * n_tokens * n_embd),
                 ] {
                     matmul_f16_bytes_pooled(
                         pool,
@@ -1715,8 +1736,8 @@ impl<'a> VisionEncoder<'a> {
                         &mut scratch.separate_qkv_buf
                             [output_offset..output_offset + n_tokens * n_embd],
                     );
-                    if let Some(bias_data) = bias {
-                        let bias = decode_f32_slice(bias_data);
+                    if let Some(ref bias_data) = bias {
+                        let bias = bias_data;
                         let output = &mut scratch.separate_qkv_buf
                             [output_offset..output_offset + n_tokens * n_embd];
                         let out_ptr = output.as_mut_ptr();
@@ -1992,8 +2013,8 @@ impl<'a> VisionEncoder<'a> {
                 &scratch.attn_concat[..n_tokens * n_embd],
                 &mut scratch.proj_buf[..n_tokens * n_embd],
             );
-            if let Some(bias_data) = layer.out_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.out_bias {
+                let bias = bias_data;
                 let bias_ptr = bias.as_ptr();
                 let proj_ptr = scratch.proj_buf.as_mut_ptr();
                 pool.compute(move |ith, nth| {
@@ -2112,9 +2133,9 @@ impl<'a> VisionEncoder<'a> {
             }
         } else {
             let layer = &self.layers[il];
-            if let Some(bias_data) = layer.ln2_bias {
+            if let Some(ref bias_data) = layer.ln2_bias {
                 let w = decode_f32_slice(layer.ln2_weight);
-                let b = decode_f32_slice(bias_data);
+                let b = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     layer_norm_with_bias(&mut scratch.merged[off..off + n_embd], &w, &b, eps);
@@ -2152,8 +2173,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.ffn_up_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_up_bias {
+                let bias = bias_data;
                 let ffn_buf_ptr = scratch.ffn_buf.as_mut_ptr();
                 let chunk = cfg.n_ff;
                 pool.compute(move |ith, nth| {
@@ -2168,8 +2189,8 @@ impl<'a> VisionEncoder<'a> {
                     }
                 });
             }
-            if let Some(bias_data) = layer.ffn_gate_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_gate_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * cfg.n_ff;
                     vec_add_into(&bias, &mut scratch.ffn_gate_buf[off..off + cfg.n_ff]);
@@ -2229,8 +2250,8 @@ impl<'a> VisionEncoder<'a> {
                 &mut scratch.proj_buf[..n_tokens * n_embd],
             );
 
-            if let Some(bias_data) = layer.ffn_down_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_down_bias {
+                let bias = bias_data;
                 let proj_buf_ptr = scratch.proj_buf.as_mut_ptr();
                 let chunk = n_embd;
                 pool.compute(move |ith, nth| {
@@ -2320,8 +2341,8 @@ impl<'a> VisionEncoder<'a> {
                 &concat_buf[..n_projected * merged_embd],
                 &mut mm0_out[..n_projected * merged_embd],
             );
-            if let Some(bias_data) = self.mm_0_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = self.mm_0_bias {
+                let bias = bias_data;
                 let mm0_ptr = mm0_out.as_mut_ptr();
                 let bias_len = bias.len().min(merged_embd);
                 pool.compute(move |ith, nth| {
@@ -2371,8 +2392,8 @@ impl<'a> VisionEncoder<'a> {
                 &mm0_out[..n_projected * merged_embd],
                 &mut out[..n_projected * proj_dim],
             );
-            if let Some(bias_data) = self.mm_2_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = self.mm_2_bias {
+                let bias = bias_data;
                 for t in 0..n_projected {
                     for j in 0..proj_dim {
                         out[t * proj_dim + j] += bias[j];
