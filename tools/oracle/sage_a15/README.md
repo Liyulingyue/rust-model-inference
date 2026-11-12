@@ -16,8 +16,9 @@ the selected-probability sum, matching the pinned Oracle's reduction contract.
 The shared GDN normalization now follows upstream's llama.cpp `b96806d`
 `ggml_l2_norm` graph (the epsilon floors the denominator), on both CPU and
 Vulkan; the `11fe0215` RMSNorm(eps/n)-then-scale form it used in between is
-kept only as the `RMI_QWEN35_GDN_LEGACY_NORM=1` escape hatch for OvisOCR3,
-whose runtime Oracle is still pinned to `11fe0215`. The full-model Sage
+gone -- a model compared against a pre-`b96806d` Oracle carries the
+`eps / (2 * sum)` difference of the two formulas and is accepted on an
+error bound. The full-model Sage
 Oracle and performance records below predate the merge and remain historical
 evidence; they do not establish alignment of the merged graph.
 The merge checks cover synthetic CPU/Vulkan prefill and decode for device-routed

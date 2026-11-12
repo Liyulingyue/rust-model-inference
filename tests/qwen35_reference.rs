@@ -1141,18 +1141,10 @@ fn holo4_vision_matches_llama_cpp_with_precision_bounds() {
 }
 
 #[test]
-#[ignore = "requires OvisOCR3 BF16/F32 models, runtime Oracle, RMI_SCALAR=1, RMI_QWEN35_GDN_LEGACY_NORM=1, and --features parity-trace"]
+#[ignore = "requires OvisOCR3 BF16/F32 models, runtime Oracle, RMI_SCALAR=1, and --features parity-trace"]
 fn ovisocr3_text_matches_llama_cpp_with_precision_bounds() {
     assert!(cfg!(feature = "parity-trace"), "enable parity-trace");
     assert_eq!(std::env::var("RMI_SCALAR").as_deref(), Ok("1"));
-    // The runtime Oracle of this model is llama.cpp `11fe0215`, whose GDN
-    // normalization is the older formula. The repository follows upstream
-    // (`b96806d`), so the older formula has to be selected explicitly until
-    // that Oracle is re-pinned -- see TODO-065.
-    assert_eq!(
-        std::env::var("RMI_QWEN35_GDN_LEGACY_NORM").as_deref(),
-        Ok("1")
-    );
     assert_eq!(
         git_head(&required_path("RMI_LLAMA_CPP")),
         OVISOCR3_RUNTIME_LLAMA_PIN

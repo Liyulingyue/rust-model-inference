@@ -65,9 +65,11 @@ pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
 /// `x / sqrt(sum(x²) + eps)`, built as `build_gdn_l2_norm` does it --
 /// `ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n))`.
 ///
-/// Kept for the models whose *runtime* Oracle is an older llama.cpp: the
-/// Oracle's own numbers only reproduce with the formula it was built from.
-/// See [`legacy_gdn_norm`].
+/// Only kept for the tests that pin the formula's arithmetic; the model
+/// always runs [`l2_norm`]. The two differ by `eps / (2 * sum)` relative,
+/// which is the size of the error a model compared against a pre-`b96806d`
+/// Oracle carries.
+#[cfg(test)]
 pub(crate) fn l2_norm_legacy(x: &mut [f32], eps: f32) {
     let mut sum = 0.0f64;
     for &v in x.iter() {
@@ -79,34 +81,6 @@ pub(crate) fn l2_norm_legacy(x: &mut [f32], eps: f32) {
     let head_scale = 1.0f32 / n.sqrt();
     for v in x.iter_mut() {
         *v = (*v * rms_scale) * head_scale;
-    }
-}
-
-/// Whether the GDN normalization follows llama.cpp before `b96806d`.
-///
-/// Upstream moved the GDN q/k normalization from `build_gdn_l2_norm` (the
-/// epsilon inside the square root) to `ggml_l2_norm` (the epsilon floors the
-/// denominator) between `11fe0215` and `b96806d`. The repository follows
-/// upstream, which is also the commit every model's *conversion* is pinned
-/// to.
-///
-/// `RMI_QWEN35_GDN_LEGACY_NORM=1` restores the older formula. It exists for
-/// the models whose runtime Oracle is still an older llama.cpp -- OvisOCR3
-/// is pinned to `11fe0215` -- because that Oracle's numbers only reproduce
-/// with the formula it was built from. Drop the switch once that Oracle is
-/// re-pinned to `b96806d`.
-fn legacy_gdn_norm() -> bool {
-    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *LEGACY.get_or_init(|| std::env::var_os("RMI_QWEN35_GDN_LEGACY_NORM").is_some())
-}
-
-/// The GDN normalization the model runs with: upstream's by default, the
-/// older llama.cpp formula when [`legacy_gdn_norm`] selects it.
-pub(crate) fn gdn_l2_norm(x: &mut [f32], eps: f32) {
-    if legacy_gdn_norm() {
-        l2_norm_legacy(x, eps);
-    } else {
-        l2_norm(x, eps);
     }
 }
 

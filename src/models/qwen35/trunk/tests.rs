@@ -338,6 +338,38 @@ fn qwen35_gdn_norm_floors_the_norm_at_eps() {
 }
 
 #[test]
+fn qwen35_gdn_norm_differs_from_the_pre_b96806d_formula_by_eps_over_two_sum() {
+    // llama.cpp used `build_gdn_l2_norm` (`x / sqrt(sum(x^2) + eps)`) before
+    // `b96806d`. The two formulas differ by `eps / (2 * sum)` relative, so a
+    // model compared against a pre-`b96806d` Oracle carries exactly that
+    // error -- it is a formula-version difference, not an implementation
+    // defect.
+    const EPS: f32 = 1e-5;
+    let input: Vec<f32> = (0..128).map(|index| 0.1 + (index as f32) * 0.001).collect();
+    let sum: f64 = input
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum();
+
+    let mut upstream = input.clone();
+    super::util::l2_norm(&mut upstream, EPS);
+    let mut legacy = input.clone();
+    super::util::l2_norm_legacy(&mut legacy, EPS);
+
+    let expected = EPS as f64 / (2.0 * sum);
+    for (upstream, legacy) in upstream.iter().zip(&legacy) {
+        let relative = ((upstream - legacy) / legacy).abs() as f64;
+        // The difference itself is around 1e-7 of a value near 0.1, so the
+        // f32 resolution of the two results bounds how exactly the relative
+        // difference can be measured.
+        assert!(
+            (relative - expected).abs() <= expected * 0.1,
+            "relative difference {relative} is not the expected {expected}"
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
 fn qwen35moe_single_token_trace() {
     // Runs exactly one token so the MoE checkpoints can be joined against the

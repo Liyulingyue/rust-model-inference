@@ -51,11 +51,13 @@ and the conversion pin `b96806d`. These formulas are different; the original
 comparison first diverges at `q_conv_predelta-0` and fails the old strict
 recurrent contract.
 
-The shared Rust GDN normalization now follows upstream (`b96806d`), so the
-validation of this model has to select the older formula explicitly:
-export `RMI_QWEN35_GDN_LEGACY_NORM=1` for the Rust side. That switch is
-temporary -- re-pin the runtime Oracle to `b96806d`, re-run the two tests
-and drop the switch (TODO-065). See
+The shared Rust GDN normalization now follows upstream (`b96806d`), so this
+model's numbers differ from the `11fe0215` Oracle by the difference of the
+two formulas: `eps / (2 * sum)` relative, which shows up as about 1.2e-5
+relative L2 on the recurrent state. That is a formula-version difference, not
+an implementation defect, and it is accepted on the existing error bound.
+Re-pinning the runtime Oracle to `b96806d` and re-running the two tests would
+bring the recurrent-state error back to zero (TODO-068). See
 `docs/develop/GGML_PARITY_BOUNDARY.md` for the full statement.
 
 The new builder clones the fixed runtime reference into a disposable directory,

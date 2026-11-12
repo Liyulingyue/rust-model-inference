@@ -11,7 +11,7 @@
 
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
-use super::util::{gdn_l2_norm, softplus_f32};
+use super::util::{l2_norm, softplus_f32};
 use super::weights::{Qwen35LayerWeights, Qwen35Model};
 use crate::app::cli::KvFormat;
 use crate::core::scratchpad::KvCache;
@@ -1093,8 +1093,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     normalize_recurrent_qk(q, eps, 1.0 / head_k_dim as f32);
                     normalize_recurrent_qk(k, eps, 1.0 / (head_k_dim as f32).sqrt());
                 } else {
-                    gdn_l2_norm(q, eps);
-                    gdn_l2_norm(k, eps);
+                    l2_norm(q, eps);
+                    l2_norm(k, eps);
                 }
             }
         }

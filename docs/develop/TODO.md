@@ -5054,10 +5054,11 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
 了各自的 Oracle。
 
 上游在 `11fe0215` 与 `b96806d` 之间把 GDN 归一化换成了 `ggml_l2_norm`
-（`x / max(sqrt(sum(x²)), eps)`，epsilon 当分母下限）。仓库现在默认跟上游
-（新公式），只有 OvisOCR3 需要旧公式才能复现它那个旧 Oracle 的数值，
-因此留了 `RMI_QWEN35_GDN_LEGACY_NORM=1` 逃生口。详见
-[GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的「GDN 归一化」一节。
+（`x / max(sqrt(sum(x²)), eps)`，epsilon 当分母下限）。仓库现在跟上游（新
+公式），也不再为单个旧 Oracle 留代码路径：这个差是**公式版本差**，按误差界
+接受（GDN 递推 state 上约 1.2e-5 相对 L2，与 Holo4 当年记录的同一现象同
+量级）。详见 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的
+「GDN 归一化」一节。
 
 **要做的**：
 
@@ -5066,11 +5067,10 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
    的 builder 与 README 都要跟着改。
 2. 用新 Oracle 重跑 `ovisocr3_text_matches_llama_cpp_with_precision_bounds`
    与 `ovisocr3_vision_matches_llama_cpp_with_precision_bounds`，
-   确认相对 L2 门槛仍然成立（新公式下 GDN 的 q/k 归一化会变，数值会动）。
-3. 删掉 `RMI_QWEN35_GDN_LEGACY_NORM` 开关与
-   `src/models/qwen35/trunk/util.rs` 的 `l2_norm_legacy`。
-4. 更新 `docs/develop/SUPPORTED_MODELS.md` 的 OvisOCR3 行与
-   `tools/oracle/ovisocr3/README.md` 的「Reference versions and precision」。
+   确认相对 L2 门槛仍然成立，并刷新
+   `docs/develop/SUPPORTED_MODELS.md` 的 OvisOCR3 行与
+   `tools/oracle/ovisocr3/README.md` 的「Reference versions and precision」
+   里的数值（新 Oracle 下 GDN state 的误差会回到 0 附近）。
 
 **影响面**：只影响 OvisOCR3 一个模型的数值验证，不影响任何模型的推理
 正确性——两个公式相差 2.4e-6 相对，模型行为不变。

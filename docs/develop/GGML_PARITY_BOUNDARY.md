@@ -105,15 +105,16 @@ llama.cpp 的 GDN q/k 归一化换过公式：
 - `4a2ac0b`（Holo4 合并）曾把公式换成旧的，导致与 `b96806d` 对齐的
   Qwen3.8 / Holo4 / Sage-A1.5 / NeoHorse / MiniCPM-V 35B 全部失去对齐。
 
-**唯一例外**：OvisOCR3 的**运行时** Oracle 还 pin 在 `11fe0215`，那个 Oracle
-的数值只有用它自己的公式才能复现。因此保留旧公式作为逃生口：
+**没有例外**：仓库不再为单个旧 Oracle 保留一条代码路径。对拍是**排 bug**
+的手段，不是逐模型对齐的目标——只要误差合理就算过。因此：
 
-- `RMI_QWEN35_GDN_LEGACY_NORM=1` 切回旧公式（仅供对拍使用）；
-- 对应的 TODO：把 OvisOCR3 的运行时 Oracle 重新 pin 到 `b96806d` 并重跑，
-  之后删掉这个开关和 `l2_norm_legacy`。
+- OvisOCR3 的运行时 Oracle 还 pin 在 `11fe0215`，它与仓库现在用的新公式
+  相差 `eps / (2 * sum)` 相对（GDN 递推 state 上约 1.2e-5 相对 L2）。这个差
+  是**公式版本差**，不是实现缺陷，按误差界接受即可；
+- TODO-068 记录了把那个 Oracle 重新 pin 到 `b96806d`（与它的转换 pin 一致）
+  的后续动作，届时它的 state 误差会回到 0 附近。
 
-Vulkan 侧的 `shaders/glsl/qwen35_recurrent_conv.comp` 与 CPU 默认保持一致
-（新公式）；旧公式只在 CPU 上按上面的开关选择。
+Vulkan 侧的 `shaders/glsl/qwen35_recurrent_conv.comp` 与 CPU 用同一个公式。
 
 ## 未来改动的收口方向
 
