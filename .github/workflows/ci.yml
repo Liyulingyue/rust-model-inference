@@ -79,6 +79,11 @@ jobs:
       - run: 'cargo test --locked --features vulkan --lib compute::tests::'
       - run: cargo test --locked --features vulkan --lib legacy_auto_requires_gpu_opt_in_before_initializing
       - run: cargo test --locked --features vulkan --lib batched_linear_layout_
+      # Shape validation only -- no device needed, so it runs here. A Q8_0
+      # projection may be wider than 16384 now that the kernels chunk the
+      # input row; the guard that said otherwise kept Qwen3.8-27B off the
+      # device.
+      - run: cargo test --locked --features vulkan --lib q8_matmul_accepts_a_row_wider
       - name: Grouped linear device regressions on Lavapipe
         run: |
           export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"

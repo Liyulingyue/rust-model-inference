@@ -10,6 +10,55 @@
 当成所有 GPU 数值与模型均已通过。历史 AMD Qwen3 Q8 的确定性长输入曾通过自动分发，
 本次新的 Q8 kernel 仅在本机复验，不代表 AMD、其他驱动或 Z-Image 全链路已经通过。
 
+## Q8_0 宽投影与 Qwen3.8-27B 的设备路径（2026-11-12）
+
+**改动**：设备侧的 Q8_0 matmul 不再限制投影宽度。16384 这个上限来自旧版
+kernel —— 它把整行输入一次性放进 shared memory（`shared uint s_input[4096]`，
+512 个 block）。现在的 kernel 按 64 个 block 分块暂存，shared memory 不再是
+约束，但 host 侧两处守卫（`matmul_rows_push` 与 `matmul_q8_0`）还留着旧上限。
+Qwen3.8-27B 的 MLP down 投影是 17408 宽，`--compute vulkan` 因此在第一个
+matmul 就报 `invalid Vulkan matmul input width/stride`，整个模型上不了设备。
+上限去掉后，宽度只需要是整块（32 个元素）即可。
+
+**实测**（2026-11-12，本机 Linux aarch64 + NVIDIA GB10，
+`release-fast --features "parity-trace,vulkan"`，8 线程，F32 KV，
+`models/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf`，prompt `你好`，16 步 greedy）：
+
+| 项目 | 结果 |
+|---|---|
+| 设备 Q8_0 kernel 对 CPU 归约（宽度 17408） | 逐位一致（`vulkan_q8_matches_cpu_reduction_bits` 新增该宽度） |
+| greedy token（CPU vs 设备） | 15 个 token 逐个相同（含 EOS） |
+| logits（248320 维，CPU vs 设备） | 逐位一致：relative L2 = 0，max abs diff = 0 |
+
+设备路径与 CPU 逐位一致：权重是同一份 Q8_0 字节，激活量化与归约在设备上按
+CPU 的顺序做，所以这条路径上没有量化漂移。
+
+**长行预填**：372 token（`--prefill-batch-size 64`，即 6 个 64 行批次）的
+prefill 也逐位一致：8 个 greedy token 相同，prefill logits（248320 维）
+relative L2 = 0。这说明 64 行的宽投影走的是同一条逐位路径，不是只在单行
+时对上。
+
+**性能**（同样的模型与参数；短 prompt 为 CPU 与设备交替各跑 3 次的中位数，
+长 prompt 为设备 2 次、CPU 1 次）：
+
+| 阶段 | CPU | Vulkan |
+|---|---:|---:|
+| prefill，13 token | 3.19 s | 0.66 s |
+| prefill，372 token | 96.0 s | 8.1 s |
+| decode，14 token | 4.07 s | 5.65 s |
+
+prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍：短 prompt
+里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token 一次提交，且 GDN
+卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs 6.32 s）。
+
+注：同一份长 prompt 的第一次设备运行曾测得 216 s，随后两次都是 8.1 s；
+本机是共享的统一内存机型，那次异常更像内存压力，不是批次大小的问题
+（`--prefill-batch-size 13` 的同一 prompt 是 17.0 s，比 64 行批次更慢，
+符合权重读取摊薄的预期）。
+
+**未覆盖**：图像路径（视觉塔仍在 CPU）、长上下文、AMD/Apple 驱动，
+以及 27B 以外的 Q8_0 宽投影模型。
+
 ## Vulkan 上的图像门禁改为能力判定（2026-11-10）
 
 **改动**：`src/app/text/runtime.rs` 的图像门禁从"完整设备路径架构一律拒绝"改为
