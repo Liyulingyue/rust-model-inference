@@ -15,7 +15,7 @@ const BITWISE: &[&str] = &["qwen35.embedding"];
 /// In a quantized tier the rest of the stack drifts: llama.cpp quantizes the
 /// activations before the projection, so its output is about one ULP away
 /// from the repository's, and the deep stack amplifies that difference to
-/// 6.7% relative L2 by layer 63. These five stay tight because they are
+/// about 7% relative L2 by layer 63. These five stay tight because they are
 /// the ones that would notice a wrong GDN formula.
 const GDN_CHECKPOINTS: &[&str] = &[
     "conv_output_raw-0",
@@ -404,25 +404,21 @@ fn compare_qwen35_traces(
             }
             continue;
         }
-        if !lossless && GDN_CHECKPOINTS.contains(&name) {
-            let error = relative_l2(&got_words, &expected_words);
-            let entry = drift.entry(name.to_owned()).or_default();
-            *entry = entry.max(error);
-            if error > QUANTIZED_GDN_RELATIVE_L2 {
-                return Err(format!(
-                    "checkpoint {name} occurrence {occurrence:?}: relative L2 {error} exceeds {QUANTIZED_GDN_RELATIVE_L2}"
-                ));
-            }
-            continue;
-        }
         if !lossless {
             // A quantized tier drifts through the deep stack, so the
             // per-element contract of the lossless tier would only measure
             // that drift. The functional gate is the token agreement, which
-            // the exact-value records above already compare.
+            // the exact-value records above already compare. The GDN
+            // checkpoints keep a bound of their own: they are the ones that
+            // would notice a wrong GDN formula.
             let error = relative_l2(&got_words, &expected_words);
             let entry = drift.entry(name.to_owned()).or_default();
             *entry = entry.max(error);
+            if GDN_CHECKPOINTS.contains(&name) && error > QUANTIZED_GDN_RELATIVE_L2 {
+                return Err(format!(
+                    "checkpoint {name} occurrence {occurrence:?}: relative L2 {error} exceeds {QUANTIZED_GDN_RELATIVE_L2}"
+                ));
+            }
             continue;
         }
         let mut max_abs = 0.0f32;
