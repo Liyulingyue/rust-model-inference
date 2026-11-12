@@ -1,0 +1,112 @@
+{
+  "model_revision": "d66af5dfc20db53a49f885eb32e7e7f1fcb70af2",
+  "oracle_manifest_sha256": "437d2acf13d38d43df85c74f97a7877d39c4f6bd470ad0ae03e9b3b75e102a7a",
+  "torch": "2.9.1",
+  "method": "Read stored official pre-suppression magnitude/phase checkpoints 33/34, synthesize each chunk with the pinned mag_phase_istft before and after the official >50% zero-bin postprocess; errors are before chunk overlap.",
+  "groups": [
+    {
+      "case": "noisy_8000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "noisy_16000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "noisy_22050",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "noisy_24000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "noisy_32000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "noisy_44100",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "noisy_48000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "silence_8000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 17,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "speech_44100",
+      "group": 0,
+      "suppressed": 0,
+      "total": 21,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "stereo_16000",
+      "group": 0,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "stereo_16000",
+      "group": 1,
+      "suppressed": 0,
+      "total": 14,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    },
+    {
+      "case": "chunked_8000",
+      "group": 0,
+      "suppressed": 1,
+      "total": 401,
+      "max_abs": 0.004820138216018677,
+      "rmse": 0.00022366915072780102
+    },
+    {
+      "case": "chunked_8000",
+      "group": 1,
+      "suppressed": 0,
+      "total": 401,
+      "max_abs": 0.0,
+      "rmse": 0.0
+    }
+  ]
+}

@@ -48,6 +48,7 @@ pub struct CliOptions {
     /// Defaults to one task built from `--jev-question` + `--jev-option`.
     pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
+    pub enhance: bool,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
@@ -133,6 +134,9 @@ pub struct CliOptions {
     pub gpu: bool,
     pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
+    pub voice: Option<String>,
+    pub speed: Option<f32>,
+    pub pronunciations: Option<String>,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
     pub source_text: Option<String>,
@@ -225,7 +229,7 @@ impl CliOptions {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; only the \
+                         note=no complete device path for this mode; any \
                          offloadable parts run on the device"
                     );
                 }

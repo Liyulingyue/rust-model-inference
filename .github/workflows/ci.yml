@@ -38,6 +38,8 @@ jobs:
       - run: 'cargo test --locked --lib models::vela3::'
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
+      - run: 'cargo test --locked --lib models::nemotron_reuse::'
+      - run: cargo test --locked --test nemotron_reuse_cli
       - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
       - run: cargo test --locked --lib ggml_dots_honor_scalar_dispatch
       - run: RMI_SCALAR=1 cargo test --locked --lib ggml_dots_honor_scalar_dispatch
@@ -46,6 +48,8 @@ jobs:
       - run: RMI_SCALAR=1 cargo test --locked --lib hy_
       - run: 'cargo test --locked --lib ops::audio::'
       - run: cargo test --locked --lib unlimited_ocr
+      - run: cargo test --locked --lib pivo
+      - run: cargo test --locked --test pivo_cli
       - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'
       - run: cargo test --locked --test unlimited_ocr_cli
       - run: cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

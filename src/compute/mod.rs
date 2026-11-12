@@ -137,7 +137,7 @@ impl ComputePolicy {
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "compute requested=Vulkan backend=partial arch={arch} \
-                     note=no complete device path for this architecture; only the \
+                     note=no complete device path for this architecture; any \
                      offloadable parts run on the device"
                 );
             }

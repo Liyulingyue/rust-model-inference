@@ -1,0 +1,30 @@
+[
+  {
+    "mode": "cpu",
+    "checks": [
+      "mixed-case MIME; HTTP equals CLI",
+      "malformed WAV: 400",
+      "sample rate: 400",
+      "channels: 400",
+      "short audio: 400",
+      "media type: 400",
+      "text/image JEV and chat: 404",
+      "request cap: 413",
+      "concurrent requests: 200/429"
+    ]
+  },
+  {
+    "mode": "auto",
+    "checks": [
+      "mixed-case MIME; HTTP equals CLI",
+      "malformed WAV: 400",
+      "sample rate: 400",
+      "channels: 400",
+      "short audio: 400",
+      "media type: 400",
+      "text/image JEV and chat: 404",
+      "request cap: 413",
+      "concurrent requests: 200/429"
+    ]
+  }
+]

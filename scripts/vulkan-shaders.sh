@@ -76,6 +76,13 @@ shader_names=(
     nemotron_h_ssm_scan
     nemotron_h_ssm_gate
     nemotron_h_ssm_norm
+    pivo_linear
+    pivo_rope
+    pivo_attention
+    pivo_rms_norm
+    pivo_conv1d
+    pivo_swiglu
+    pivo_silu
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
