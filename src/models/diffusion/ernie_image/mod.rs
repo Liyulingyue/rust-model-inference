@@ -23,6 +23,7 @@ use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
 
 pub(crate) mod dit;
+pub(crate) mod gpu;
 pub(crate) mod text;
 mod vae;
 
@@ -508,7 +509,144 @@ pub(crate) fn linear_into(
     q8: &mut Q8Scratch,
     pool: &ComputePool,
 ) -> Result<(), String> {
+    // One row is not a shape the device can use.
+    //
+    // The shared Q8_0 entry would take a single row to the device, and the
+    // device would upload the weight and fence once for it. A row of work
+    // cannot pay for that: measured on ERNIE's Q8_0 DiT at 256x256 over 8
+    // steps, letting the single-row path reach the device made the denoise
+    // 2.9x slower (218.6 s to 624.6 s), because every token paid its own
+    // fence.
+    //
+    // The scope keeps the parallel CPU path underneath — it is the same
+    // multi-threaded kernel, only the device branch is skipped.
+    #[cfg(feature = "vulkan")]
+    let _one_row_on_cpu = ComputePool::disable_gpu_matmul_for_scope;
     linear_into_scaled_impl(source, name, n_in, n_out, input, output, q8, pool, 1.0)
+}
+
+/// Project a batch of rows with one call.
+///
+/// [`linear_into`] takes a single row, and the DiT used it once per token.
+/// On the device that shape is the one that costs more than it saves: the
+/// weight is uploaded again for every row and the fence has one row of
+/// arithmetic to amortize over. The batch goes to the device as one matrix
+/// instead, so the weight is uploaded once per projection.
+///
+/// The device declines a shape it will not take, a dtype it cannot hold, and
+/// every call made under the exact CPU scope. When it declines, the rows go
+/// through the same single-row loop as before, so the CPU result does not
+/// change.
+pub(crate) fn linear_into_rows(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+    input: &[f32],
+    output: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+    gpu: &mut Option<gpu::ErnieGpuProjections>,
+) -> Result<(), String> {
+    if rows == 0
+        || input.len() != n_in.checked_mul(rows).unwrap_or(usize::MAX)
+        || output.len() != n_out.checked_mul(rows).unwrap_or(usize::MAX)
+    {
+        return Err(format!("Invalid {name} batch shape"));
+    }
+    if try_device_rows(source, name, n_in, n_out, rows, input, output, gpu) {
+        return Ok(());
+    }
+    for row in 0..rows {
+        linear_into_scaled_impl(
+            source,
+            name,
+            n_in,
+            n_out,
+            &input[row * n_in..(row + 1) * n_in],
+            &mut output[row * n_out..(row + 1) * n_out],
+            q8,
+            pool,
+            1.0,
+        )?;
+    }
+    Ok(())
+}
+
+/// The widest row count the device runtime is sized for.
+pub(crate) const ERNIE_MAX_ROWS: usize = 4096;
+/// The widest input the device runtime is sized for.
+pub(crate) const ERNIE_MAX_N_IN: usize = 12288;
+/// The widest output the device runtime is sized for.
+pub(crate) const ERNIE_MAX_N_OUT: usize = 12288;
+/// How many distinct weights the device runtime keeps resident.
+pub(crate) const ERNIE_GPU_WEIGHTS: usize = 512;
+
+/// Hand the whole batch to the device, and report whether it took it.
+#[cfg(feature = "vulkan")]
+fn try_device_rows(
+    source: &dyn TensorSource,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    rows: usize,
+    input: &[f32],
+    output: &mut [f32],
+    gpu: &mut Option<gpu::ErnieGpuProjections>,
+) -> bool {
+    let Some(info) = source.tensor_info(name) else {
+        return false;
+    };
+    if info.dims != [n_in as u64, n_out as u64] {
+        return false;
+    }
+    // Only Q8_0 goes to the device.
+    //
+    // The device's int8 dot-product kernel is the one that pays for itself.
+    // The K-quant family has a single scalar kernel and no vectorized
+    // variant, because its block-scaled int32 accumulation does not fit the
+    // int8 dot product that Q8_0 uses (TODO-032), and a Q4_K_M model
+    // measures 17.6x slower on the device than on the CPU there.
+    if info.ggml_type != GGMLType::Q8_0 {
+        return false;
+    }
+    let Some(bytes) = source.tensor_slice(name) else {
+        return false;
+    };
+    let Ok(format) = crate::vulkan::ops::GpuWeightFormat::from_ggml_type(info.ggml_type) else {
+        return false;
+    };
+    let spec = format.with_mode(crate::vulkan::ops::GpuMatmulMode::Prepared);
+    if gpu.is_none() {
+        *gpu = gpu::ErnieGpuProjections::new(
+            ERNIE_MAX_ROWS,
+            ERNIE_MAX_N_IN.max(n_in),
+            ERNIE_MAX_N_OUT.max(n_out),
+            ERNIE_GPU_WEIGHTS,
+        )
+        .unwrap_or(None);
+    }
+    let Some(runtime) = gpu.as_mut() else {
+        return false;
+    };
+    runtime
+        .run(bytes, spec, input, rows, n_in, n_out, output)
+        .is_ok()
+}
+
+#[cfg(not(feature = "vulkan"))]
+fn try_device_rows(
+    _source: &dyn TensorSource,
+    _name: &str,
+    _n_in: usize,
+    _n_out: usize,
+    _rows: usize,
+    _input: &[f32],
+    _output: &mut [f32],
+    _gpu: &mut Option<gpu::ErnieGpuProjections>,
+) -> bool {
+    false
 }
 
 #[allow(clippy::too_many_arguments)]

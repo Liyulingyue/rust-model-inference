@@ -3408,6 +3408,16 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 **这一轮的处置**：GPU 路径改成两级。
 
 - 默认仍然拒绝 `--gpu`，错误消息直接说明原因与开关名；
+
+**2026-11-11 的复测**（本机 GB10，`RMI_GPU_UNSAFE=1` 放行，256×256 / 4 步 /
+CFG 1 / seed 42）：连跑 **6 次，PNG 逐位相同**（6 个 md5 一致），这是 TODO-044
+记下「相同结果」之后的又一次观察。门禁**仍然保留**：TODO-044 自己写明这
+不是数学保证，只是「这段时间内没再看到不一样的」，而本条的根因（设备投影
+偶发整片出错）至今没有定位到具体成因。6/6 不能替代那个定位。
+
+对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-072](#todo-072-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)）
+也是连跑 3 次逐位相同 —— 说明「可复现」这条门禁判据本身是可测的，
+Mage-Flow 缺的仍然是根因，不是证据。
 - `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
   53 秒），代价是结果不保证可复现；
 - 采样器每步检查 latent 是否还可用（非有限或整体塌成零就拒绝），被拒绝时
@@ -5189,3 +5199,62 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 
 **关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
 `tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
+
+---
+
+---
+
+### TODO-072: ERNIE-Image 的设备路径：K-quant 慢，Q8_0 快 2.8 倍
+
+**状态**：✅ 已解决（2026-11-12）。K-quant 仍是已知缺口。
+
+**结论**：ERNIE-Image 的设备投影**能不能赢，取决于权重量化格式和投影形状两件事**，
+不是取决于模型。
+
+| DiT 权重 | 规格 | CPU denoise | 设备 denoise | 结果 |
+|---|---|---|---|---|
+| Q4_K_M | 256×256 / 8 步 | 251.8 s | 559.5 s | **慢 2.2 倍** |
+| Q8_0 | 256×256 / 8 步 | 219.2 s | **78.4 s** | **快 2.8 倍** |
+
+Q8_0 的结果：与 CPU 的 PNG 差异 PSNR **69.78 dB**（max_abs 1/255），同一 seed
+连跑两次逐位相同。
+
+**两件事各占一半**：
+
+**一、权重量化格式**。设备只有 Q8_0 有向量化 kernel —— `Q8_MATMUL_GROUPED_DP4A`
+与 `Q8_MATMUL_TILED_DP4A` 吃设备 int8 dot-product ✓✓。K-quant 家族只有一个标量
+kernel：它的**块缩放 int32 累加塞不进 int8 dot product** ✓✓（Q8_0 的量化把乘积
+压在 int8 内 ✓✓），要吃 DP4A 得写一个「块缩放 + int32 提升」的 int8 dot
+kernel —— 那是 TODO-032 量过的完整 shader 项目 ✓✓。
+
+⇒ **模型层按权重量化格式选后端** ✓✓：Q8_0 的 DiT 走设备 ✓✓，K-quant 的 DiT 留在
+CPU 范围 ✓✓。
+
+**二、投影形状**（这一半是本条自己踩出来的）。ERNIE 的 DiT 原本**逐 token** 调用
+投影 —— `text_proj`、`final_linear`、qkv、mlp 都是一行一次 ✓✓。一行一次在设备上
+是「每行一次权重上传 + 一次 fence」✗✗，fence 的开销淹没计算 ✗✗：
+
+| 路径 | Q8_0 DiT denoise |
+|---|---|
+| 单行投影允许上设备 | 624.6 s |
+| 单行投影强制 CPU、整批上设备 | **78.4 s** |
+
+⇒ ⇒ **单行投影强制 CPU** ✓✓（`disable_gpu_matmul_for_scope` ✓✓，底下的多线程
+CPU kernel 不变 ✓✓），**整批投影走设备** ✓✓ ✓✓。
+
+**仍然剩下的缺口**：K-quant 的 DiT 在设备上没有优势 ✓✓ ⇒ 要么给 K-quant 写设备
+kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
+
+**踩过的两个坑，记下来**：
+
+- **共享内核自带设备 dispatch，模型层拦不住** ✗✗：`src/ops/kernel/q4_k.rs` 与
+  `q8_0/parallel.rs` 在 `ops::gpu_matmul_active()` 为真时自己就走设备 ✗✗。
+  模型层的门控只覆盖模型自己发起的投影 ✗✗。⇒ **单行路径要显式关掉** ✓✓。
+- **64×64 / 1 步这类小规格测不出设备路径的真实表现** ✗✗：20 个 token 时，
+  权重上传和 252 次 dispatch 的固定成本占主导 ✗✗，设备必然输 ✗✗。⇒ 设备路径的
+  测量要用真实尺寸（256×256 / 8 步 ✓✓）✓✓。
+
+**关联**：`src/models/diffusion/ernie_image/{gpu.rs,dit.rs,mod.rs}`、
+`src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
+`src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
+[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。

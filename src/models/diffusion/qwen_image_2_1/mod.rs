@@ -6,7 +6,7 @@
 //! tensor contract and the config is detected from tensor shapes, matching
 //! the oracle's `QwenImage21Config::detect_from_weights`.
 
-use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
+use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
 
 pub mod dit;
 #[cfg(feature = "vulkan")]
@@ -133,15 +133,59 @@ mod input_tests {
 /// Recognizes this no-metadata DiT family; `validate_dit` then checks the
 /// complete contract and reports a useful error for damaged GGUFs.
 pub fn matches_signature(source: &dyn TensorSource) -> bool {
-    source
-        .tensor_info(&format!("{PREFIX}.txt_in.text_norm.weight"))
-        .is_some()
-        && source
-            .tensor_info(&format!("{PREFIX}.img_in.weight"))
-            .is_some()
-        && source
-            .tensor_info(&format!("{PREFIX}.transformer_blocks.0.attn.norm_q.weight"))
-            .is_some()
+    // The DiT GGUF stores its tensors under their bare names, while the
+    // reference checkpoint used the `model.diffusion_model.` prefix. Both
+    // spellings are in the wild, so the probe takes whichever the file has.
+    for prefix in [PREFIX, ""] {
+        let has = |suffix: &str| {
+            let name = if prefix.is_empty() {
+                suffix.to_string()
+            } else {
+                format!("{prefix}.{suffix}")
+            };
+            source.tensor_info(&name).is_some()
+        };
+        if has("txt_in.text_norm.weight")
+            && has("img_in.weight")
+            && has("transformer_blocks.0.attn.norm_q.weight")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// A source that also answers to the prefixed names.
+///
+/// The model reads the `model.diffusion_model.` prefixed names throughout,
+/// and the DiT GGUF stores them bare. The wrapper answers to both, so the
+/// lookup sites do not have to know which spelling the file uses.
+pub struct PrefixedSource {
+    inner: std::sync::Arc<dyn TensorSource>,
+}
+
+impl PrefixedSource {
+    pub fn new(inner: std::sync::Arc<dyn TensorSource>) -> Self {
+        Self { inner }
+    }
+}
+
+impl TensorSource for PrefixedSource {
+    fn metadata(&self, key: &str) -> Option<&MetaValue> {
+        self.inner.metadata(key)
+    }
+    fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+        self.inner.tensor_info(name).or_else(|| {
+            let bare = name.strip_prefix(PREFIX)?.strip_prefix('.')?;
+            self.inner.tensor_info(bare)
+        })
+    }
+    fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        self.inner.tensor_slice(name).or_else(|| {
+            let bare = name.strip_prefix(PREFIX)?.strip_prefix('.')?;
+            self.inner.tensor_slice(bare)
+        })
+    }
 }
 
 /// Public wrapper for the app layer; the full contract is checked by
@@ -237,71 +281,71 @@ pub fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             config
         ));
     }
-    let mut expected: Vec<(String, [u64; 2], GGMLType)> = Vec::new();
-    let mut matrix = |name: String, dims: [u64; 2], ggml_type: GGMLType| {
-        expected.push((name, dims, ggml_type));
+    let mut expected: Vec<(String, [u64; 2], Vec<GGMLType>)> = Vec::new();
+    let mut matrix = |name: String, dims: [u64; 2], ggml_types: &[GGMLType]| {
+        expected.push((name, dims, ggml_types.to_vec()));
     };
     matrix(
         format!("{PREFIX}.img_in.weight"),
         [config.in_channels as u64, config.hidden_size as u64],
-        GGMLType::BF16,
+        &[GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.txt_in.in_layer.weight"),
         [config.context_dim as u64, config.hidden_size as u64],
-        GGMLType::BF16,
+        &[GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.txt_in.out_layer.weight"),
         [config.hidden_size as u64, config.hidden_size as u64],
-        GGMLType::BF16,
+        &[GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.time_text_embed.timestep_embedder.linear_1.weight"),
         [256, config.hidden_size as u64],
-        GGMLType::Q8_0,
+        &[GGMLType::Q8_0, GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.time_text_embed.timestep_embedder.linear_2.weight"),
         [config.hidden_size as u64, config.hidden_size as u64],
-        GGMLType::Q8_0,
+        &[GGMLType::Q8_0, GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.modulation.1.weight"),
         [config.hidden_size as u64, (4 * config.hidden_size) as u64],
-        GGMLType::Q8_0,
+        &[GGMLType::Q8_0, GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.norm_out.linear.weight"),
         [config.hidden_size as u64, config.hidden_size as u64],
-        GGMLType::F32,
+        &[GGMLType::F32, GGMLType::BF16],
     );
     matrix(
         format!("{PREFIX}.proj_out.weight"),
         [config.hidden_size as u64, config.out_channels as u64],
-        GGMLType::Q8_0,
+        &[GGMLType::Q8_0, GGMLType::BF16],
     );
     for layer in 0..config.num_layers {
         let prefix = format!("{PREFIX}.transformer_blocks.{layer}");
         matrix(
             format!("{prefix}.attn.to_q.weight"),
             [config.hidden_size as u64, config.hidden_size as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0],
         );
         matrix(
             format!("{prefix}.attn.to_k.weight"),
             [config.hidden_size as u64, config.hidden_size as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0],
         );
         matrix(
             format!("{prefix}.attn.to_v.weight"),
             [config.hidden_size as u64, config.hidden_size as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0],
         );
         matrix(
             format!("{prefix}.attn.to_out.0.weight"),
             [config.hidden_size as u64, config.hidden_size as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0],
         );
         matrix(
             format!("{prefix}.img_mlp.gate_up.weight"),
@@ -309,16 +353,16 @@ pub fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
                 config.hidden_size as u64,
                 (2 * config.intermediate_size) as u64,
             ],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0],
         );
         matrix(
             format!("{prefix}.img_mlp.out.weight"),
             [config.intermediate_size as u64, config.hidden_size as u64],
-            GGMLType::Q8_0,
+            &[GGMLType::Q8_0],
         );
     }
-    for (name, dims, ggml_type) in expected {
-        require_tensor(source, &name, &dims, ggml_type)?;
+    for (name, dims, ggml_types) in expected {
+        require_tensor(source, &name, &dims, &ggml_types)?;
     }
     for layer in 0..config.num_layers {
         let prefix = format!("{PREFIX}.transformer_blocks.{layer}");
@@ -326,14 +370,19 @@ pub fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             format!("{prefix}.attn.norm_q.weight"),
             format!("{prefix}.attn.norm_k.weight"),
         ] {
-            require_vector(source, &name, config.head_dim as u64, GGMLType::F32)?;
+            require_vector(
+                source,
+                &name,
+                config.head_dim as u64,
+                &[GGMLType::F32, GGMLType::BF16],
+            )?;
         }
     }
     require_vector(
         source,
         &format!("{PREFIX}.txt_in.text_norm.weight"),
         config.context_dim as u64,
-        GGMLType::BF16,
+        &[GGMLType::BF16, GGMLType::F32],
     )?;
     Ok(())
 }
@@ -342,7 +391,7 @@ fn require_tensor(
     source: &dyn TensorSource,
     name: &str,
     dims: &[u64; 2],
-    ggml_type: GGMLType,
+    ggml_types: &[GGMLType],
 ) -> Result<(), String> {
     let info = source
         .tensor_info(name)
@@ -353,9 +402,9 @@ fn require_tensor(
             info.dims
         ));
     }
-    if info.ggml_type != ggml_type {
+    if !ggml_types.contains(&info.ggml_type) {
         return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
+            "Invalid {name} type: expected one of {ggml_types:?}, got {:?}",
             info.ggml_type
         ));
     }
@@ -366,7 +415,7 @@ fn require_vector(
     source: &dyn TensorSource,
     name: &str,
     len: u64,
-    ggml_type: GGMLType,
+    ggml_types: &[GGMLType],
 ) -> Result<(), String> {
     let info = source
         .tensor_info(name)
@@ -377,9 +426,9 @@ fn require_vector(
             info.dims
         ));
     }
-    if info.ggml_type != ggml_type {
+    if !ggml_types.contains(&info.ggml_type) {
         return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
+            "Invalid {name} type: expected one of {ggml_types:?}, got {:?}",
             info.ggml_type
         ));
     }
@@ -399,4 +448,74 @@ fn require_data(source: &dyn TensorSource, name: &str, info: &TensorInfo) -> Res
         return Err(format!("Invalid {name} byte length"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct BareSource {
+        tensors: HashMap<String, TensorInfo>,
+    }
+
+    impl TensorSource for BareSource {
+        fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.tensors.get(name)
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    fn info(dims: Vec<u64>) -> TensorInfo {
+        TensorInfo {
+            name: String::new(),
+            dims,
+            ggml_type: GGMLType::F32,
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn the_probe_accepts_both_spellings() {
+        let mut tensors = HashMap::new();
+        for suffix in [
+            "txt_in.text_norm.weight",
+            "img_in.weight",
+            "transformer_blocks.0.attn.norm_q.weight",
+        ] {
+            tensors.insert(suffix.to_string(), info(vec![1]));
+        }
+        let bare = BareSource { tensors };
+        assert!(matches_signature(&bare));
+
+        let mut prefixed = HashMap::new();
+        for suffix in [
+            "txt_in.text_norm.weight",
+            "img_in.weight",
+            "transformer_blocks.0.attn.norm_q.weight",
+        ] {
+            prefixed.insert(format!("{PREFIX}.{suffix}"), info(vec![1]));
+        }
+        let with_prefix = BareSource { tensors: prefixed };
+        assert!(matches_signature(&with_prefix));
+    }
+
+    #[test]
+    fn the_wrapper_answers_to_the_prefixed_name() {
+        let mut tensors = HashMap::new();
+        tensors.insert("img_in.weight".to_string(), info(vec![4, 4]));
+        let bare = BareSource { tensors };
+        let inner: Arc<dyn TensorSource> = Arc::new(bare);
+        let wrapped = PrefixedSource::new(Arc::clone(&inner));
+        assert!(wrapped
+            .tensor_info(&format!("{PREFIX}.img_in.weight"))
+            .is_some());
+        assert!(wrapped.tensor_info("img_in.weight").is_some());
+    }
 }
