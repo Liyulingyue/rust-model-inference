@@ -33,19 +33,31 @@ matmul 就报 `invalid Vulkan matmul input width/stride`，整个模型上不了
 设备路径与 CPU 逐位一致：权重是同一份 Q8_0 字节，激活量化与归约在设备上按
 CPU 的顺序做，所以这条路径上没有量化漂移。
 
-**性能**（同样的模型与参数，CPU 与设备交替各跑 3 次，取中位数）：
+**长行预填**：372 token（`--prefill-batch-size 64`，即 6 个 64 行批次）的
+prefill 也逐位一致：8 个 greedy token 相同，prefill logits（248320 维）
+relative L2 = 0。这说明 64 行的宽投影走的是同一条逐位路径，不是只在单行
+时对上。
+
+**性能**（同样的模型与参数；短 prompt 为 CPU 与设备交替各跑 3 次的中位数，
+长 prompt 为设备 2 次、CPU 1 次）：
 
 | 阶段 | CPU | Vulkan |
 |---|---:|---:|
-| prefill（13 token） | 3.19 s | 0.66 s |
-| decode（14 token） | 4.07 s | 5.65 s |
-| 端到端 | 7.26 s | 6.32 s |
+| prefill，13 token | 3.19 s | 0.66 s |
+| prefill，372 token | 96.0 s | 8.1 s |
+| decode，14 token | 4.07 s | 5.65 s |
 
-prefill 快约 4.8 倍，decode 反而慢约 1.4 倍：每个 token 一次提交，且 GDN
-卷积在设备上。端到端略快，**不是数量级的差距**。
+prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍：短 prompt
+里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token 一次提交，且 GDN
+卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs 6.32 s）。
 
-**未覆盖**：batch=64 的长行预填、图像路径（视觉塔仍在 CPU）、长上下文、
-AMD/Apple 驱动，以及 27B 以外的 Q8_0 宽投影模型。
+注：同一份长 prompt 的第一次设备运行曾测得 216 s，随后两次都是 8.1 s；
+本机是共享的统一内存机型，那次异常更像内存压力，不是批次大小的问题
+（`--prefill-batch-size 13` 的同一 prompt 是 17.0 s，比 64 行批次更慢，
+符合权重读取摊薄的预期）。
+
+**未覆盖**：图像路径（视觉塔仍在 CPU）、长上下文、AMD/Apple 驱动，
+以及 27B 以外的 Q8_0 宽投影模型。
 
 ## Vulkan 上的图像门禁改为能力判定（2026-11-10）
 
