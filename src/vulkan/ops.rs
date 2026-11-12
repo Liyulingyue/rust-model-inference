@@ -7922,11 +7922,14 @@ fn matmul_rows_push(
     let format = bindings.weight_format(outputs.len())?;
     format.with_mode(bindings.weight_mode).validate()?;
     let (block_elements, block_bytes, _) = format.layout();
-    if n_in == 0
-        || n_in % block_elements != 0
-        || input_stride < n_in
-        || (format == GpuWeightFormat::Q8_0 && n_in > 16_384)
-    {
+    // The Q8_0 kernels stage the input row into shared memory in chunks of
+    // 64 blocks, so the row width is not bounded by the shared memory any
+    // more. The old 16384 limit came from a kernel that staged the whole
+    // row at once (`shared uint s_input[4096]`, 512 blocks); it outlived
+    // that kernel and kept every model with a projection wider than 16384
+    // -- Qwen3.8-27B has a 17408 wide MLP down projection -- off the
+    // device with "invalid Vulkan matmul input width/stride".
+    if n_in == 0 || n_in % block_elements != 0 || input_stride < n_in {
         return Err(VulkanError::UnsupportedShape(
             "invalid Vulkan matmul input width/stride".into(),
         ));
@@ -11566,7 +11569,7 @@ mod tests {
         context.limits.max_compute_work_group_count[0] = 1;
         let context = Box::leak(Box::new(context));
         // Cover single and multiple 64-block chunks, the width limit and a 2D grid.
-        for width in [1024, 3584, 16384] {
+        for width in [1024, 3584, 16384, 17408] {
             let weight = super::synthetic_weight(Q8_0, width, OUTPUTS);
             let input: Vec<_> = (0..ROWS * width)
                 .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
@@ -13568,6 +13571,69 @@ mod tests {
                 assert!(prepare(&regions).is_err());
             }
         }
+    }
+
+    /// A Q8_0 projection may be wider than 16384.
+    ///
+    /// The limit came from a kernel that staged the whole input row into
+    /// shared memory at once (`shared uint s_input[4096]`, 512 blocks). The
+    /// kernels stage the row in chunks of 64 blocks now, so the shared
+    /// memory is no longer the constraint -- but the host kept the limit,
+    /// and it rejected every model with a projection wider than 16384.
+    /// Qwen3.8-27B has a 17408 wide MLP down projection, so it could not
+    /// run on the device at all: "invalid Vulkan matmul input
+    /// width/stride".
+    #[test]
+    fn q8_matmul_accepts_a_row_wider_than_the_old_shared_memory_limit() {
+        use super::{
+            matmul_rows_push, ArenaRegion, GpuMatmulMode, GpuWeightFormat::Q8_0, GpuWeightLayout,
+            OperatorBindings,
+        };
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [65535; 3],
+            ..Default::default()
+        };
+        // The Qwen3.8-27B MLP down projection: 17408 in, 5120 out.
+        let width = 17_408;
+        let rows = 2;
+        let outputs = 5_120;
+        let arena = 64 << 20;
+        let activation = ArenaRegion {
+            offset: 0,
+            size: rows * width,
+        };
+        let scales = ArenaRegion {
+            offset: 1 << 20,
+            size: rows * (width / 32) * 4,
+        };
+        let output = ArenaRegion {
+            offset: 2 << 20,
+            size: rows * outputs * 4,
+        };
+        let bindings = OperatorBindings {
+            descriptor_set: super::vk::DescriptorSet::null(),
+            // The weight buffer holds the output rows of the projection.
+            sizes: [((width / 32) * 34 * outputs) as u64, 0, 0],
+            weight_formats: [Some(Q8_0); 3],
+            weight_mode: GpuMatmulMode::Prepared,
+            weight_layout: GpuWeightLayout::Native,
+        };
+        let (push, dispatch) = matmul_rows_push(
+            arena,
+            &limits,
+            bindings,
+            activation,
+            scales,
+            None,
+            &[(output, outputs, outputs * 4)],
+            width,
+            rows,
+            width,
+        )
+        .expect("a Q8_0 row wider than the old limit must be accepted");
+        assert_eq!(push[2], width as u32, "the matmul width");
+        assert_eq!(push[3], (width / 32) as u32, "the blocks per row");
+        assert_eq!(dispatch, [80, 1, rows as u32], "the dispatch grid");
     }
 
     #[test]
