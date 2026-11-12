@@ -13,6 +13,28 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
+      2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
+      整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
+      NAR 63.9 s。原因：AR 逐 token 调用一次 lm_head（rows=1 的 GEMV，设备 ~70 ms vs CPU
+      ~8 ms，已用 rows>=4 门禁挡掉），NAR 每步两次全模型前向（每次 28 层投影，rows=256
+      时设备与 CPU 持平）。下一步按review 提示做**融合 / 批提交 / 避免 host↔device 往返**：
+      把每层的多个投影合成一次提交（共享 linear executor 已有 `run_group`），以及把
+      NAR 的 prefix+velocity 两次前向的合成一次提交；设备侧 GEMV 的效率也需要单独看
+      （每 workgroup 64 输出通道 × 32 帧的 tiling 对 rows=1 是否合适）。
+- [ ] **共享卷积的设备路径无复核门槛，YuE2 VAE 设备化后被它吃掉收益** —
+      `ops::nn::conv3d_with_options` 在设备成功后**无条件**用 CPU kernel 复核
+      （`conv3d_matches_cpu`，不符就重试、再不符退回 CPU 重算），而线性路径的复核是
+      门控的（`RMI_GPU_CPU_CHECK`，默认关）。YuE2 的 VAE 设备化如果走 `ops::nn::conv1d`
+      就会因为这次复核变成约 2 倍慢；本分支因此直接调 `ops::kernel::vulkan::try_conv3d`
+      绕过复核，VAE 从 77.0 s 降到 24.7 s（3.1x），输出与 CPU 最多差 1 个 PCM16 档位
+      （0.67% 采样，最大 1/32768）。**但这是一个绕过共享复核的决定**：设备卷积曾经被
+      观测到与 CPU 不一致（代码注释里的原因），绕过意味着 VAE 的设备结果没有逐次复核，
+      只靠端到端对比兜底。要么给卷积复核加一个和线性一样的显式开关（默认关、严格档打开），
+      要么在共享层记录"哪些调用方接受未复核的设备卷积"。
+      另：`src/models/yue2/ar.rs` 的 `vulkan_yue2_bf16_rounds_after_bias_across_tiles`
+      测试规模小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K 输出），默认门槛下设备会拒绝这些
+      投影，必须用 `RUST_GPU_MIN_OUTPUTS=0` 才能跑（已在 2026-11-12 实测确认）。
 - [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
       2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
       vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor

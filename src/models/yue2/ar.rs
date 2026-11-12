@@ -30,6 +30,20 @@ impl YuE2Weight {
     pub(crate) fn ggml_type(&self) -> GGMLType {
         self.fast.ggml_type
     }
+
+    /// The underlying weight, for callers that drive the shared linear executor.
+    pub(crate) fn weight(&self) -> &Weight<'static> {
+        &self.fast
+    }
+
+    /// A binding for the shared linear executor, so several projections that
+    /// share an input can be submitted together.
+    pub(crate) fn binding(&self) -> crate::compute::linear::LinearBinding<'_, 'static> {
+        crate::compute::linear::LinearBinding {
+            weight: &self.fast,
+            mode: crate::compute::linear::LinearMode::Prepared,
+        }
+    }
 }
 
 /// GGML types the YuE2 converter can emit for a 2-D projection.
@@ -373,6 +387,12 @@ impl YuE2Weight {
         #[cfg(feature = "vulkan")]
         if self.gpu_bf16.try_matmul(
             bytes,
+            // The dot mode matches dot_bf16_f32's FMA streams and
+            // horizontal sum, so the device keeps the CPU's token
+            // decisions. The prepared mode accumulates in a different
+            // order: it is faster on paper but its rounding differences
+            // flip sampled tokens in the NAR, which rewrites the whole
+            // waveform.
             crate::vulkan::ops::GpuWeightFormat::BF16
                 .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
             input,
@@ -387,8 +407,41 @@ impl YuE2Weight {
                     *value = half::bf16::from_f32(sum).to_f32();
                 }
             }
+            if std::env::var_os("RMI_YUE2_CHECK_MATMUL").is_some() {
+                let mut reference = vec![0.0f32; output.len()];
+                self.matmul_bf16_cpu(input, bias, &mut reference, pool);
+                let mut worst = 0.0f32;
+                let mut worst_index = 0usize;
+                for (index, (want, got)) in reference.iter().zip(output.iter()).enumerate() {
+                    let difference = (want - got).abs();
+                    if difference > worst {
+                        worst = difference;
+                        worst_index = index;
+                    }
+                }
+                eprintln!(
+                    "[yue2.matmul-check] n_in={} n_out={} rows={} worst={worst} at {worst_index} cpu={} device={}",
+                    self.n_in,
+                    self.n_out,
+                    n_rows,
+                    reference[worst_index],
+                    output[worst_index],
+                );
+            }
             return;
         }
+        self.matmul_bf16_cpu(input, bias, output, pool);
+    }
+
+    fn matmul_bf16_cpu(
+        &self,
+        input: &[f32],
+        bias: Option<&[f32]>,
+        output: &mut [f32],
+        pool: &ComputePool,
+    ) {
+        let bytes = self.bf16.unwrap();
+        let n_rows = input.len() / self.n_in;
         let batched_rows = n_rows / 4 * 4;
         let output_ptr = output.as_mut_ptr();
         pool.compute(|thread, threads| {
@@ -2349,9 +2402,357 @@ mod performance_tests {
         }
     }
 
+    /// Micro-benchmark of the device linear path: the submission overhead, the
+    /// BF16 dot kernel and the tiled float kernel on the shapes the NAR and the
+    /// AR use.
     #[cfg(feature = "vulkan")]
     #[test]
-    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    #[ignore = "requires a Vulkan device; times the device linear path per shape"]
+    fn vulkan_linear_shape_costs() {
+        use std::time::Instant;
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let cases: [(usize, usize, usize); 5] = [
+            (64, 64, 4),
+            (2048, 2048, 256),
+            (2048, 2048, 1),
+            (2048, 184704, 1),
+            (2048, 184704, 4),
+        ];
+        for (n_in, n_out, rows) in cases {
+            let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                gpu_bf16: Default::default(),
+                n_in,
+                n_out,
+            };
+            let input = vec![0.01f32; rows * n_in];
+            let mut output = vec![0.0f32; rows * n_out];
+            for (label, format, mode) in [
+                (
+                    "bf16-dot",
+                    crate::vulkan::ops::GpuWeightFormat::BF16,
+                    crate::vulkan::ops::GpuMatmulMode::Dot,
+                ),
+                (
+                    "bf16-prepared",
+                    crate::vulkan::ops::GpuWeightFormat::BF16,
+                    crate::vulkan::ops::GpuMatmulMode::Prepared,
+                ),
+                (
+                    "f16-prepared",
+                    crate::vulkan::ops::GpuWeightFormat::F16,
+                    crate::vulkan::ops::GpuMatmulMode::Prepared,
+                ),
+            ] {
+                let spec = format.with_mode(mode);
+                if !weight
+                    .gpu_bf16
+                    .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, rows)
+                {
+                    eprintln!("n_in={n_in} n_out={n_out} rows={rows} {label}: declined");
+                    continue;
+                }
+                let calls = 20u32;
+                let started = Instant::now();
+                for _ in 0..calls {
+                    weight
+                        .gpu_bf16
+                        .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, rows);
+                }
+                let each = started.elapsed() / calls;
+                let macs = (n_in * n_out * rows) as f64;
+                eprintln!(
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: {each:?} ({:.2} GFLOP/s)",
+                    2.0 * macs / each.as_secs_f64() / 1e9
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; checks the grouped BF16 projections against the CPU kernel"]
+    fn vulkan_bf16_group_projection_matches_the_cpu_kernel() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = crate::core::thread_pool::ComputePool::new(4);
+        let n_in = 256usize;
+        let rows = 40usize;
+        // The NAR projects q, k and v in one submission and their widths
+        // differ, so the group has to keep the per-slot width.
+        for widths in [[1024usize, 1024, 1024], [1024, 256, 256]] {
+            let mut state = 0x9e37_79b9u32;
+            let mut weights: Vec<&'static [u8]> = Vec::new();
+            for width in widths {
+                let mut bytes = vec![0u8; n_in * width * 2];
+                for chunk in bytes.chunks_exact_mut(2) {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let bits = ((state >> 17) & 0x3f) | 0x3c00;
+                    chunk[0] = (bits & 0xff) as u8;
+                    chunk[1] = (bits >> 8) as u8;
+                }
+                weights.push(Box::leak(bytes.into_boxed_slice()));
+            }
+            let input: Vec<f32> = (0..rows * n_in)
+                .map(|index| ((index % 23) as f32 - 11.0) / 16.0)
+                .collect();
+            let spec = crate::vulkan::ops::GpuWeightFormat::BF16
+                .with_mode(crate::vulkan::ops::GpuMatmulMode::Prepared);
+            let runtime = crate::vulkan::ops::BatchedLinearRuntime::with_output_slots(
+                context,
+                64,
+                n_in,
+                widths.iter().copied().max().unwrap(),
+                16,
+                3,
+            )
+            .expect("group runtime");
+            let mut out0 = vec![0.0f32; rows * widths[0]];
+            let mut out1 = vec![0.0f32; rows * widths[1]];
+            let mut out2 = vec![0.0f32; rows * widths[2]];
+            {
+                let mut slots: [&mut [f32]; 3] = [
+                    out0.as_mut_slice(),
+                    out1.as_mut_slice(),
+                    out2.as_mut_slice(),
+                ];
+                let mut runtime = runtime;
+                runtime
+                    .matmul_rows_group(
+                        &[
+                            (weights[0], spec, n_in, widths[0]),
+                            (weights[1], spec, n_in, widths[1]),
+                            (weights[2], spec, n_in, widths[2]),
+                        ],
+                        &input,
+                        rows,
+                        &mut slots,
+                    )
+                    .expect("group matmul");
+            }
+            let outputs = [out0, out1, out2];
+            for slot in 0..3usize {
+                let width = widths[slot];
+                let mut cpu = vec![0.0f32; rows * width];
+                let weight = YuE2Weight {
+                    fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                        weights[slot],
+                        GGMLType::BF16,
+                        n_in,
+                        width,
+                    )),
+                    bf16: Some(weights[slot]),
+                    gpu_bf16: Default::default(),
+                    n_in,
+                    n_out: width,
+                };
+                weight.matmul_bf16(&input, None, &mut cpu, &pool);
+                let scale = cpu.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+                let worst = cpu
+                    .iter()
+                    .zip(outputs[slot].iter())
+                    .fold(0.0f32, |acc, (want, got)| acc.max((want - got).abs()));
+                eprintln!(
+                    "group widths={widths:?} slot={slot} width={width} scale={scale:.6} max_abs={worst:.6}"
+                );
+                assert!(
+                    worst <= scale * 1e-2 + 1e-3,
+                    "group slot {slot} differs from the CPU kernel: max_abs={worst} scale={scale}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; checks the BF16 device projections against the CPU kernel"]
+    fn vulkan_bf16_projection_matches_the_cpu_kernel() {
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = crate::core::thread_pool::ComputePool::new(4);
+        for (n_in, n_out, rows) in [
+            (64usize, 128usize, 40usize),
+            (256, 512, 96),
+            (2048, 2048, 100),
+            (2048, 6144, 40),
+            (2048, 6144, 100),
+            (2048, 2048, 258),
+            (2048, 6144, 888),
+        ] {
+            let mut state = 0x1234_5678u32;
+            let mut bytes = vec![0u8; n_in * n_out * 2];
+            for chunk in bytes.chunks_exact_mut(2) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                // A finite BF16 pattern with a few mantissa bits set.
+                let bits = ((state >> 17) & 0x3f) | 0x3c00;
+                chunk[0] = (bits & 0xff) as u8;
+                chunk[1] = (bits >> 8) as u8;
+            }
+            let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                gpu_bf16: Default::default(),
+                n_in,
+                n_out,
+            };
+            let input: Vec<f32> = (0..rows * n_in)
+                .map(|index| ((index % 23) as f32 - 11.0) / 16.0)
+                .collect();
+            let mut cpu = vec![0.0f32; rows * n_out];
+            weight.matmul_bf16(&input, None, &mut cpu, &pool);
+            for (label, mode) in [
+                ("dot", crate::vulkan::ops::GpuMatmulMode::Dot),
+                ("prepared", crate::vulkan::ops::GpuMatmulMode::Prepared),
+            ] {
+                let mut device = vec![0.0f32; rows * n_out];
+                let accepted = weight.gpu_bf16.try_matmul(
+                    bytes,
+                    crate::vulkan::ops::GpuWeightFormat::BF16.with_mode(mode),
+                    &input,
+                    &mut device,
+                    n_in,
+                    n_out,
+                    rows,
+                );
+                if !accepted {
+                    eprintln!("n_in={n_in} n_out={n_out} rows={rows} {label}: declined");
+                    continue;
+                }
+                let mut worst = 0.0f32;
+                let mut worst_ratio = 0.0f32;
+                for (index, (want, got)) in cpu.iter().zip(device.iter()).enumerate() {
+                    let difference = (want - got).abs();
+                    let ratio = difference / want.abs().max(1e-6);
+                    if difference > worst {
+                        worst = difference;
+                    }
+                    if ratio > worst_ratio {
+                        worst_ratio = ratio;
+                    }
+                    if index < 3 {
+                        eprintln!(
+                            "n_in={n_in} n_out={n_out} rows={rows} {label} out[{index}] cpu={want} device={got}"
+                        );
+                    }
+                }
+                eprintln!(
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: max_abs={worst:.6} max_rel={worst_ratio:.6}"
+                );
+                // The CPU kernel rounds its output to BF16, so compare
+                // against the magnitude of the whole row instead of each
+                // element: a single element can be near zero.
+                let scale = cpu.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+                eprintln!(
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: scale={scale:.6} max_rel={worst_ratio:.6}"
+                );
+                assert!(
+                    worst <= scale * 1e-2 + 1e-3,
+                    "{label} projection differs from the CPU kernel: max_abs={worst} scale={scale}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; times the lm_head projection and its host post-processing"]
+    fn vulkan_lm_head_per_call_cost() {
+        use std::time::Instant;
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let n_in = 2048usize;
+        let n_out = 184704usize;
+        let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+        let weight = YuE2Weight {
+            fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                bytes,
+                GGMLType::BF16,
+                n_in,
+                n_out,
+            )),
+            bf16: Some(bytes),
+            gpu_bf16: Default::default(),
+            n_in,
+            n_out,
+        };
+        let input = vec![0.01f32; n_in];
+        let mut output = vec![0.0f32; n_out];
+        let spec = crate::vulkan::ops::GpuWeightFormat::BF16
+            .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot);
+        assert!(
+            weight
+                .gpu_bf16
+                .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, 1),
+            "device declined"
+        );
+        let calls = 60u32;
+        for rows in [1u32, 2, 4, 8, 16, 32, 64] {
+            let input: Vec<f32> = (0..rows as usize * n_in)
+                .map(|index| ((index * 5) % 13) as f32 / 13.0 - 0.5)
+                .collect();
+            let mut output = vec![0.0f32; rows as usize * n_out];
+            assert!(weight.gpu_bf16.try_matmul(
+                bytes,
+                spec,
+                &input,
+                &mut output,
+                n_in,
+                n_out,
+                rows as usize
+            ));
+            let started = Instant::now();
+            for _ in 0..calls {
+                weight.gpu_bf16.try_matmul(
+                    bytes,
+                    spec,
+                    &input,
+                    &mut output,
+                    n_in,
+                    n_out,
+                    rows as usize,
+                );
+            }
+            eprintln!("rows={rows}: device {:?}", started.elapsed() / calls);
+        }
+        let calls = 200u32;
+        let started = Instant::now();
+        for _ in 0..calls {
+            weight
+                .gpu_bf16
+                .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, 1);
+        }
+        let device = started.elapsed() / calls;
+        let bias = [0.001953125f32, -0.001953125f32];
+        let started = Instant::now();
+        for _ in 0..calls {
+            for row in output.chunks_exact_mut(n_out) {
+                for (column, value) in row.iter_mut().enumerate() {
+                    let sum = *value + bias[column % 2];
+                    *value = half::bf16::from_f32(sum).to_f32();
+                }
+            }
+        }
+        let host = started.elapsed() / calls;
+        eprintln!("lm_head n_out={n_out}: device call {device:?}, host bias+bf16 {host:?}");
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device and RUST_GPU_MIN_OUTPUTS=0: the shapes below are smaller than the default 16K output threshold, so the device declines them unless the threshold is lowered"]
     fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");

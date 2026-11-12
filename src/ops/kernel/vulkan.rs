@@ -108,8 +108,12 @@ impl GpuLinear {
         rows: usize,
     ) -> bool {
         let spec = spec.into();
+        // A single row is a GEMV, and the device's per-workgroup dispatch costs far
+        // more than the CPU kernel for one row (measured on the YuE2 lm_head:
+        // 2048x184704 takes ~70 ms on the device vs ~8 ms on the CPU). Require a
+        // few rows so the tiling batches them; batched shapes stay on the device.
         if !offload_enabled()
-            || rows == 0
+            || rows < 4
             || n_in == 0
             || n_out == 0
             || rows.checked_mul(n_in) != Some(input.len())
@@ -124,7 +128,17 @@ impl GpuLinear {
                 .checked_mul(n_out)
                 .is_none_or(|outputs| outputs < min_gpu_matmul_outputs())
         {
+            if std::env::var_os("RMI_GPU_TRACE_MATMUL").is_some() {
+                eprintln!("[gpu-matmul] gate-rejected rows={rows} n_in={n_in} n_out={n_out}");
+            }
             return false;
+        }
+        let trace = std::env::var_os("RMI_GPU_TRACE_MATMUL").is_some();
+        if trace {
+            eprintln!(
+                "[gpu-matmul] try rows={rows} n_in={n_in} n_out={n_out} mode={:?}",
+                spec.mode
+            );
         }
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
@@ -178,7 +192,14 @@ impl GpuLinear {
                 }
                 true
             }
-            Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+            Err(crate::vulkan::VulkanError::UnsupportedShape(reason)) => {
+                if trace {
+                    eprintln!(
+                        "[gpu-matmul] declined rows={rows} n_in={n_in} n_out={n_out}: {reason}"
+                    );
+                }
+                false
+            }
             Err(error) => {
                 crate::vulkan::mark_gpu_broken(&error.to_string());
                 *state = None;
@@ -195,6 +216,9 @@ pub(crate) fn try_attention(
     spec: crate::ops::nn::AttentionSpec,
 ) -> Option<Vec<f32>> {
     if !offload_enabled() || spec.head_dim > 1024 {
+        return None;
+    }
+    if std::env::var_os("RMI_GPU_ATTENTION_OFF").is_some() {
         return None;
     }
     let context = crate::ops::get_vulkan_context()?;
@@ -380,6 +404,9 @@ impl GpuConv {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(usize::MAX)
         {
+            if std::env::var_os("RMI_GPU_TRACE_MATMUL").is_some() {
+                eprintln!("[gpu-matmul] attention gate-rejected");
+            }
             return false;
         }
         let Some(context) = crate::ops::get_vulkan_context() else {
