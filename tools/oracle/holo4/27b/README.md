@@ -17,7 +17,7 @@ checkpoints are `9.0e-8` (`conv_output_raw-0`), `1.2e-7` (`q_conv_predelta-0`),
 drifts with the quantization tier: `layer_output-63` is `2.58e-1` against an
 Oracle spread of `2.45e-1` and a bound of `0.35`, i.e. the same size as the
 difference between the Oracle's own native and scalar kernels. All four
-greedy IDs agree (`[109266, 98691, 95815]` after the prompt token). Vulkan
+greedy IDs agree (`[109266, 6115, 98691, 95815]`). Vulkan
 batch-1/64 passes as well (maximum relative-L2 `0.16627160`, bound
 `0.26220751`). Contract/tokenizer and
 vision checks pass on Apple M3 Max. Vulkan batch-1/64 also passes all four
