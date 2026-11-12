@@ -36,7 +36,8 @@ CPU 的顺序做，所以这条路径上没有量化漂移。
 **长行预填**：372 token（`--prefill-batch-size 64`，即 6 个 64 行批次）的
 prefill 也逐位一致：8 个 greedy token 相同，prefill logits（248320 维）
 relative L2 = 0。这说明 64 行的宽投影走的是同一条逐位路径，不是只在单行
-时对上。
+时对上。892 token（14 个批次）同样逐位一致：4 个 greedy token 相同，logits
+relative L2 = 0；这一档的 CPU prefill 是 326 s，设备（不带 trace）是 20.1 s。
 
 **图像路径**：`--mmproj mmproj-F16.gguf --image <png>` 配 `--compute vulkan`
 也跑通，且与 CPU 逐位一致：26 个 prompt token（含 9 个 vision placeholder）
@@ -45,27 +46,36 @@ relative L2 = 0。这说明 64 行的宽投影走的是同一条逐位路径，�
 设备。同一次图像 prefill：CPU 6.0 s，设备 0.85 s（约 7 倍）。
 
 **性能**（同样的模型与参数；短 prompt 为 CPU 与设备交替各跑 3 次的中位数，
-长 prompt 为设备 2 次、CPU 1 次）：
+长 prompt 为设备 2 次、CPU 1 次，都不带 `RMI_PARITY_TRACE`）：
 
 | 阶段 | CPU | Vulkan |
 |---|---:|---:|
 | prefill，13 token | 3.19 s | 0.66 s |
 | prefill，372 token | 96.0 s | 8.1 s |
+| prefill，892 token | 326 s | 20.1 s |
 | decode，14 token | 4.07 s | 5.65 s |
 
-prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍：短 prompt
-里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token 一次提交，且 GDN
-卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs 6.32 s）。
+prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍，892 token
+约 16 倍：短 prompt 里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token
+一次提交，且 GDN 卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs
+6.32 s）。
 
-注：同一份长 prompt 的第一次设备运行曾测得 216 s，随后两次都是 8.1 s；
-图像路径也有同一现象（第一次设备 prefill 13.4 s，随后两次 0.85 s）。本机是
-共享的统一内存机型，跑完 CPU 后端再起设备后端时那一次更像内存压力
-（`--prefill-batch-size 13` 的同一 prompt 是 17.0 s，比 64 行批次更慢，符合权重
-读取摊薄的预期，说明慢的成因不是批次大小）。所以设备侧的耗时都取第二次之后
-的数字。
+注：**对拍时开的 `RMI_PARITY_TRACE` 会让设备路径慢一个数量级以上**，不能用
+来量性能。tracer 的 schema 是 token-major，所以
+`src/models/qwen35/trunk/session.rs` 在「有 trace 且设备可用」时把 prefill
+批次强制成 1 行，逐行记录：
 
-**未覆盖**：视觉塔上设备、长上下文、AMD/Apple 驱动，以及 27B 以外的 Q8_0
-宽投影模型。
+| prompt | 带 trace | 不带 trace |
+|---|---:|---:|
+| 372 token | 216 s | 8.1 s |
+| 892 token | 545 s | 20.1 s |
+| 26 token（图像） | 13.4 s | 0.85 s |
+
+（本机是共享的统一内存机型，早先把这个差记成了内存压力，实际是 trace 把
+64 行批次拆成了逐行 prefill。）上表的设备耗时都取自不带 trace 的运行。
+
+**未覆盖**：视觉塔上设备、更长上下文（892 token 以上）、AMD/Apple 驱动，
+以及 27B 以外的 Q8_0 宽投影模型。
 
 ## Vulkan 上的图像门禁改为能力判定（2026-11-10）
 
