@@ -5078,3 +5078,32 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
 **关联**：`src/models/qwen35/trunk/util.rs`、`tests/qwen35_reference.rs`、
 `tools/oracle/ovisocr3/README.md`、`docs/develop/SUPPORTED_MODELS.md`、
 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
+
+### TODO-070: Qwen3.8-27B 的 Vulkan 路径在 Q8_0 档下不可用（FFN 太宽）
+
+**状态**：⚠️ 已定位，未修（要改 shader，超出「排 bug」的范围）。
+
+**现象**：`--compute vulkan` 跑 `Qwen3.8-27B-Q8_0.gguf` 直接报
+
+```
+Inference error: Unsupported shape: invalid Vulkan matmul input width/stride
+```
+
+**原因**：Vulkan 的 Q8_0 matmul 有 `n_in > 16_384` 的上限
+（`src/vulkan/ops.rs` 的 `matmul_rows_push`）。Qwen3.8-27B 的 MLP down 投影是
+`blk.N.ffn_down.weight` = 17408×5120 的 Q8_0，即 `n_in = 17408`，超限。
+Holo4-27B 同样的 FFN 宽度没问题，因为它是 Q4_K/Q6_K，那个上限只针对 Q8_0。
+
+**与 GDN 归一化无关**：GDN 卷积的 shader 改动只影响归一化那一步，这个错误在
+第一次 matmul 就抛出来了；Holo4 的 Vulkan 文本路径（batch=1/64）在同一份改动
+下依然通过。
+
+**要做的**：
+
+1. 看 Q8_0 matmul 的 16384 上限来自哪（tile 的共享内存？workgroup 的
+   维度？），决定是放宽还是给宽 FFN 走分块路径；
+2. 放宽后重跑 `holo4_vulkan_*`（Q8_0 档的 Holo4 转换）与 Qwen3.8 的设备路径；
+3. 记录设备路径的相对 L2 与 greedy 一致性。
+
+**关联**：`src/vulkan/ops.rs`、`shaders/glsl/q8_matmul*.comp`、
+`docs/develop/SUPPORTED_MODELS.md` 的 Qwen3.8 行。
