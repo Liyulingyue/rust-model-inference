@@ -5159,3 +5159,33 @@ AMD/Apple 驱动，以及 27B 以外的 Q8_0 宽投影模型。
 
 **关联**：#238、`src/vulkan/ops.rs`、`src/vulkan.rs`、
 `docs/develop/SUPPORTED_MODELS.md` 的 Qwen3.8 行。
+
+### TODO-071: qwen35 家族的量化档与 llama.cpp 差约 1 ULP（默认 Q8_0 kernel 的累加顺序）
+
+**状态**：⚠️ 已定位，按误差界接受，未改默认 kernel。
+
+**现象**：量化档（Q8_0 / Q4_K_M）与 pinned llama.cpp 不再逐位一致。以
+NeoHorse-1-4B 为例：GDN checkpoint 的相对 L2 是 `8.9e-8`…`5.4e-7`（门槛
+`1e-5`），greedy token 逐个相同，但深层栈的漂移到 `layer_output-31`
+`5.7e-2`…`1.1e-1`；Qwen3.8 的 Q8_0 档是同一形状（GDN `2.2e-7`…`3.5e-7`、
+第 63 层 `7.4e-2`、logits `5.4e-2`）。
+
+**根因**：仓库默认的 Q8_0 kernel（`dotprod_nrc4` / `neon_nrc1`）把每个 block
+的整数点积先归约成标量再进 F32 乘加；llama.cpp 的
+`ggml_vec_dot_q8_0_q8_0` 对每对 block 保留 4 路累加器、最后才归约。
+per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` 记着这件事，
+并提供了复刻 llama.cpp 算术的入口（`forward_prepared_ggml`），Nemotron 主干在
+用它。
+
+**为什么不改**：qwen35 家族保持默认契约（那个 ggml-exact 入口比默认 kernel
+慢，而 Q8_0 档的验收已经是「GDN checkpoint ≤ 1e-5 + greedy token 逐个相同 +
+漂移报告」）。这是**全局**取舍，不是逐模型的：若要恢复量化档的逐位一致，
+应当给 qwen35 家族一个统一开关（例如 `RMI_QWEN35_Q8_GGML_EXACT=1`），
+并重新测性能与各模型的数值。
+
+**顺带**：MoE 路径（`qwen35moe`）默认走参考归约，所以它与标量 Oracle 逐位
+一致（Sage-A1.5 的 1,100 个检查点、MiniCPM-V 的 437 个检查点都是 0 误差）；
+受影响的只有用默认 Q8_0 SIMD kernel 的稠密路径。
+
+**关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
+`tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
