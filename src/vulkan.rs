@@ -775,12 +775,6 @@ impl VulkanContext {
             .lock()
             .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
         let blocks_per_row = n_in / 32;
-        if blocks_per_row > 512 {
-            // Keep the legacy width contract consistent with the row recorder.
-            return Err(VulkanError::UnsupportedShape(format!(
-                "n_in {n_in} exceeds shader shared-memory capacity"
-            )));
-        }
         debug_assert_eq!(weight.len(), n_out * blocks_per_row * 34);
         debug_assert_eq!(input_q8.len(), n_in);
         debug_assert_eq!(input_scales.len(), blocks_per_row);
