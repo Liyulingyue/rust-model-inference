@@ -72,7 +72,7 @@
 | Zephyr-7B-alpha | 7B | 文本 | llama.cpp | https://www.modelscope.cn/models/HuggingFaceH4/zephyr-7b-beta | https://www.modelscope.cn/models/HuggingFaceH4/zephyr-7b-alpha-GGUF | √ |
 | GLM-4-9B-0414 | 9B | 文本 | llama.cpp | https://www.modelscope.cn/models/THUDM/glm-4-9b-chat | https://www.modelscope.cn/models/unsloth/GLM-4-9B-0414-GGUF | √ |
 | Nanbeige4.2-3B | 3B | 文本 | llama.cpp @ `b96806d` | 待补 | https://www.modelscope.cn/models/Abiray/Nanbeige4.2-3B-GGUF | √（Q8_0 标量/F32、NEON/F32/F16 KV；[验证范围](usage/llama.md#3-nanbeige42-3b)）  |
-| NeoHorse-1 | 4B / 9B | 文本 | llama.cpp @ `b96806d` | https://huggingface.co/TokenRhythm/NeoHorse-1-4B | https://www.modelscope.cn/models/TokenRhythm/NeoHorse-1-4B-GGUF | √ |
+| NeoHorse-1 | 4B / 9B | 文本 | llama.cpp @ `b96806d` | https://huggingface.co/TokenRhythm/NeoHorse-1-4B | https://www.modelscope.cn/models/TokenRhythm/NeoHorse-1-4B-GGUF | √（2026-11-12 复测：4B 的 BF16 档逐位一致；量化档按 GDN checkpoint ≤ 1e-5 与 greedy token 一致验收，漂移报告见[报告](../tools/converter/neohorse/README.md#neohorse-1-4b-官方-gguf-对比)） |
 | Ornith-1.5 | 9B | 文本 | llama.cpp @ `b96806d` | https://www.modelscope.cn/models/ornith/Ornith-1.5-9B | https://www.modelscope.cn/models/ornith/Ornith-1.5-9B-GGUF | √ |
 | Qwen2.5-Omni | 3B | 文本、音频、视频、图像（文本、音频输出） | llama.cpp | https://www.modelscope.cn/models/Qwen/Qwen2.5-Omni-3B | https://www.modelscope.cn/models/unsloth/Qwen2.5-Omni-3B-GGUF | √ |
 | Qwen2.5-VL | 3B | 文本、图像 |  | https://www.modelscope.cn/models/Qwen/Qwen2.5-VL-3B-Instruct | https://www.modelscope.cn/models/unsloth/Qwen2.5-VL-3B-Instruct-GGUF | √ |

@@ -104,6 +104,9 @@ llama.cpp 的 GDN q/k 归一化换过公式：
   （HF 参考实现用新公式，旧的 llama.cpp 是近似）；
 - `4a2ac0b`（Holo4 合并）曾把公式换成旧的，导致与 `b96806d` 对齐的
   Qwen3.8 / Holo4 / Sage-A1.5 / NeoHorse / MiniCPM-V 35B 全部失去对齐。
+- 换回新公式后的复测（2026-11-12）：OvisOCR3 的 `state_predelta-0` 回到
+  `1.1e-7`（旧公式 `4.7e-5`）；NeoHorse-1-4B 的 **BF16 档与 llama.cpp 逐位
+  一致**，量化档的 GDN checkpoint `8.9e-8`…`5.4e-7`（旧公式 `8.6e-5`）。
 
 **旧公式保留为开关，默认关闭**：`RMI_QWEN35_GDN_LEGACY_NORM=1`
 （`src/models/qwen35/trunk/util.rs` 的 `legacy_gdn_norm`）。它是**诊断工具**，

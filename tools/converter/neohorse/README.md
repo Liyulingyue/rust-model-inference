@@ -80,6 +80,34 @@ RMI_LLAMA_CPP=/path/to/llama.cpp \
 
 Q4_K_M / Q5_K_M 的 Rust ARM64 路径已有标量点积。普通 Oracle 启用 CPU 权重重排时，首个 `conv_output_raw-0` 的第二个值出现 `0x3c592303` / `0x3c592302` 差异。量化标量模式使用原有 `*_generic` 点积，并关闭 `GGML_CPU_REPACK` 和 C 自动 FMA 融合；attention softmax 在所有 Oracle 构建中固定为标量参考路径。
 
+### 2026-11-12 复测：契约按档位拆开
+
+上表是 2026-09-10 的结果，当时**所有**档位都记为逐位一致。2026-11-12 用同一批
+文件（SHA 不变）复测后，无损档仍然是逐位一致，量化档不再逐位一致：
+
+| 档位 | 复测结果（2026-11-12，Linux aarch64 / NVIDIA GB10） |
+| --- | --- |
+| BF16（无损） | **逐位一致**：85 条 trace 记录、全部 checkpoint 与 logits 逐位相同，token id 相同 |
+| Q8_0 | GDN checkpoint 相对 L2 `2.2e-7`…`4.1e-7`（门槛 `1e-5`），greedy token 逐个相同；深层栈漂移 `layer_output-3` `1.6e-2`、`layer_output-31` `5.7e-2`、logits `6.4e-2` |
+| Q4_K_M | GDN checkpoint 相对 L2 `8.9e-8`…`5.4e-7`（门槛 `1e-5`），greedy token 逐个相同；深层栈漂移 `layer_output-3` `3.3e-2`、`layer_output-31` `1.1e-1`、logits `9.6e-2` |
+
+F16 与 Q5_K_M 本次没有重跑（未下载这两份文件）。
+
+**为什么量化档不再是逐位一致。** 仓库默认的 Q8_0 kernel（`dotprod_nrc4` /
+`neon_nrc1`）把每个 block 的整数点积先归约成标量再进 F32 乘加，而 llama.cpp 的
+`ggml_vec_dot_q8_0_q8_0` 对每对 block 保留 4 路累加器、最后才归约；per-lane 的
+分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` 记着这件事，并提供了
+复刻 llama.cpp 算术的入口（Nemotron 主干在用）。qwen35 家族保持默认契约，
+所以量化档与 llama.cpp 差约 1 ULP，位置在第一个 conv 之前就已经出现
+（`conv_output_raw-0` 相对 L2 `2.8e-7`）。这与 Qwen3.8 的 Q8_0 档是同一件事，
+不是新引入的偏差。
+
+**这与 GDN 公式无关。** 把 GDN 归一化换回旧公式（`RMI_QWEN35_GDN_LEGACY_NORM=1`）
+后，同一个 Oracle 上 Q8_0 的 `state_predelta-0` 从 `4.1e-7` 变成 `8.6e-5`
+（212 倍），`q_conv_predelta-0` 从 `2.2e-7` 变成 `2.0e-6`；而 `conv_output_raw-0`
+（归一化之前）在两种公式下都是 `2.8e-7`。漂移来自量化投影本身，公式换回旧的
+只会让它更大——BF16 档逐位一致也说明共享的 GDN 归一化没有破坏这个模型。
+
 复现 BF16、F16 或 Q8_0（替换实际路径和文件后缀）：
 
 ```sh

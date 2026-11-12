@@ -5080,6 +5080,24 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
 **剩余**：`RMI_QWEN35_GDN_LEGACY_NORM` 现在没有任何 Oracle 需要它了，但按
 「保留诊断开关、默认关闭」的约定继续留着；它只影响 CPU 路径。
 
+**顺带复测的另一个家族（NeoHorse-1-4B，2026-11-12）**：
+
+- **BF16（无损）档与固定 llama.cpp `b96806d` 逐位一致**（85 条 trace 记录、
+  全部 checkpoint 与 logits 逐位相同，token id 相同）——共享的 GDN 归一化没有
+  破坏这个家族。
+- **量化档（Q8_0 / Q4_K_M）不再逐位一致**：仓库默认 Q8_0 kernel 与 llama.cpp 的
+  per-lane 累加差约 1 ULP（`src/ops/kernel/q8_0/ggml.rs` 记着这件事并提供复刻
+  llama.cpp 算术的入口，qwen35 家族保持默认契约）。GDN checkpoint 相对 L2
+  `8.9e-8`…`5.4e-7`（门槛 `1e-5`）、greedy token 逐个相同，深层栈漂移
+  `layer_output-31` `5.7e-2`…`1.1e-1`。
+- **这与 GDN 公式无关**：把公式换回旧的，同一个 Oracle 上 `state_predelta-0`
+  从 `4.1e-7` 变成 `8.6e-5`（212 倍）；`conv_output_raw-0`（归一化之前）在两种
+  公式下都是 `2.8e-7`，说明漂移来自量化投影本身。
+
+仍未复测：**Sage-A1.5**（37.8 GB 的 Q8_0 权重，1100 个检查点）与
+**MiniCPM-V 35B**（`qwen35moe`，权重未在本机验证）。两者都是各自的容差契约，
+不是新的对齐目标。
+
 **影响面**：只影响 OvisOCR3 一个模型的数值验证，不影响任何模型的推理
 正确性——两个公式相差 2.4e-6 相对，模型行为不变。
 

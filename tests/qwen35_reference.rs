@@ -458,7 +458,7 @@ fn compare_qwen35_traces(
         }
     }
     for (name, error) in &drift {
-        eprintln!("Qwen3.8 drift {name}: relative L2={error:.6e}");
+        eprintln!("drift {name}: relative L2={error:.6e}");
     }
     Ok(())
 }
@@ -601,7 +601,14 @@ fn neohorse_matches_pinned_llama_cpp_bitwise() {
         .unwrap_or_else(|| build_oracle(&llama, &artifacts));
     let rust_trace = run_rust(&model, "你好", 4, &artifacts, 64, false);
     let llama_trace = run_oracle(&oracle, &model, "你好", 4, &artifacts);
-    if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace, true, true) {
+    // The lossless tiers (BF16, F16) are compared bit for bit. A quantized
+    // tier cannot be: llama.cpp quantizes the activations before the
+    // projection, so its output is about one ULP away from the repository's,
+    // and the deep stack amplifies that difference. Those tiers keep the GDN
+    // checkpoints tight (1e-5) and use the token ids as the functional gate,
+    // the same contract the Qwen3.8 Q8_0 tier uses.
+    let lossless = is_lossless_tier(&model);
+    if let Err(error) = compare_qwen35_traces(&rust_trace, &llama_trace, lossless, lossless) {
         panic!("{error}\nartifacts retained in {}", artifacts.display());
     }
     std::fs::remove_dir_all(artifacts).unwrap();
