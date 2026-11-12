@@ -5055,10 +5055,10 @@ pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所
 
 上游在 `11fe0215` 与 `b96806d` 之间把 GDN 归一化换成了 `ggml_l2_norm`
 （`x / max(sqrt(sum(x²)), eps)`，epsilon 当分母下限）。仓库现在跟上游（新
-公式），也不再为单个旧 Oracle 留代码路径：这个差是**公式版本差**，按误差界
-接受（GDN 递推 state 上约 1.2e-5 相对 L2，与 Holo4 当年记录的同一现象同
-量级）。详见 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的
-「GDN 归一化」一节。
+公式）。这个差是**公式版本差**，按误差界接受（GDN 递推 state 上约 1.2e-5
+相对 L2，与 Holo4 当年记录的同一现象同量级）；需要复现旧 Oracle 自己的算术
+时打开 `RMI_QWEN35_GDN_LEGACY_NORM=1`（默认关闭）。详见
+[GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的「GDN 归一化」一节。
 
 **要做的**：
 

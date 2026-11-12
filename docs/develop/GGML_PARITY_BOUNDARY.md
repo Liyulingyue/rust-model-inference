@@ -105,16 +105,21 @@ llama.cpp 的 GDN q/k 归一化换过公式：
 - `4a2ac0b`（Holo4 合并）曾把公式换成旧的，导致与 `b96806d` 对齐的
   Qwen3.8 / Holo4 / Sage-A1.5 / NeoHorse / MiniCPM-V 35B 全部失去对齐。
 
-**没有例外**：仓库不再为单个旧 Oracle 保留一条代码路径。对拍是**排 bug**
-的手段，不是逐模型对齐的目标——只要误差合理就算过。因此：
+**旧公式保留为开关，默认关闭**：`RMI_QWEN35_GDN_LEGACY_NORM=1`
+（`src/models/qwen35/trunk/util.rs` 的 `legacy_gdn_norm`）。它是**诊断工具**，
+不是逐模型代码路径：
 
-- OvisOCR3 的运行时 Oracle 还 pin 在 `11fe0215`，它与仓库现在用的新公式
-  相差 `eps / (2 * sum)` 相对（GDN 递推 state 上约 1.2e-5 相对 L2）。这个差
-  是**公式版本差**，不是实现缺陷，按误差界接受即可；
+- 对拍是**排 bug** 的手段，不是逐模型对齐的目标——误差合理就算过，所以默认
+  走上游的新公式；
+- 需要复现某个旧 Oracle 自己的算术（OvisOCR3 的运行时 Oracle 还 pin 在
+  `11fe0215`），或者要在 CPU 上量一量两个公式差多少时，再打开这个开关；
+- 打开后 OvisOCR3 与旧 Oracle 的差异回到 0；不打开则带着 `eps / (2 * sum)`
+  相对（GDN 递推 state 上约 1.2e-5 相对 L2）的**公式版本差**，按误差界接受。
 - TODO-068 记录了把那个 Oracle 重新 pin 到 `b96806d`（与它的转换 pin 一致）
-  的后续动作，届时它的 state 误差会回到 0 附近。
+  的后续动作，届时这个开关就没有使用者了。
 
-Vulkan 侧的 `shaders/glsl/qwen35_recurrent_conv.comp` 与 CPU 用同一个公式。
+Vulkan 侧的 `shaders/glsl/qwen35_recurrent_conv.comp` 始终用上游的新公式；
+开关只作用于 CPU 路径。
 
 ## 未来改动的收口方向
 

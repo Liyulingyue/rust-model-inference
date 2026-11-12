@@ -18,7 +18,8 @@ The shared GDN normalization now follows upstream's llama.cpp `b96806d`
 Vulkan; the `11fe0215` RMSNorm(eps/n)-then-scale form it used in between is
 gone -- a model compared against a pre-`b96806d` Oracle carries the
 `eps / (2 * sum)` difference of the two formulas and is accepted on an
-error bound. The full-model Sage
+error bound; `RMI_QWEN35_GDN_LEGACY_NORM=1` (off by default, CPU only)
+reproduces the older arithmetic when a comparison needs it. The full-model Sage
 Oracle and performance records below predate the merge and remain historical
 evidence; they do not establish alignment of the merged graph.
 The merge checks cover synthetic CPU/Vulkan prefill and decode for device-routed

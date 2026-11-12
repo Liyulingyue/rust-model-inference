@@ -65,11 +65,10 @@ pub(crate) fn l2_norm(x: &mut [f32], eps: f32) {
 /// `x / sqrt(sum(x²) + eps)`, built as `build_gdn_l2_norm` does it --
 /// `ggml_scale(ggml_rms_norm(x, eps/n), 1/sqrt(n))`.
 ///
-/// Only kept for the tests that pin the formula's arithmetic; the model
-/// always runs [`l2_norm`]. The two differ by `eps / (2 * sum)` relative,
-/// which is the size of the error a model compared against a pre-`b96806d`
-/// Oracle carries.
-#[cfg(test)]
+/// The two formulas differ by `eps / (2 * sum)` relative -- 2.4e-6 for a
+/// GDN q/k norm around 0.14. Upstream moved from this one to [`l2_norm`]
+/// between `11fe0215` and `b96806d`, so this is the arithmetic a model
+/// compared against a pre-`b96806d` Oracle was measured with.
 pub(crate) fn l2_norm_legacy(x: &mut [f32], eps: f32) {
     let mut sum = 0.0f64;
     for &v in x.iter() {
@@ -81,6 +80,35 @@ pub(crate) fn l2_norm_legacy(x: &mut [f32], eps: f32) {
     let head_scale = 1.0f32 / n.sqrt();
     for v in x.iter_mut() {
         *v = (*v * rms_scale) * head_scale;
+    }
+}
+
+/// Whether the GDN normalization follows llama.cpp before `b96806d`.
+///
+/// Off by default: the repository follows upstream (`b96806d`), which is
+/// also the commit every model's *conversion* is pinned to.
+///
+/// `RMI_QWEN35_GDN_LEGACY_NORM=1` selects the older formula. It is a
+/// diagnostic switch, not a per-model code path: it lets a comparison
+/// against a pre-`b96806d` Oracle -- OvisOCR3's runtime Oracle is still
+/// `11fe0215` -- reproduce that Oracle's own arithmetic, and it lets the
+/// size of the formula difference be measured on the CPU. The Vulkan path
+/// always uses upstream's formula; only the CPU honours the switch.
+///
+/// TODO-068 tracks re-pinning that Oracle, after which the switch has no
+/// user left.
+fn legacy_gdn_norm() -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEGACY.get_or_init(|| std::env::var_os("RMI_QWEN35_GDN_LEGACY_NORM").is_some())
+}
+
+/// The GDN normalization the model runs with: upstream's by default, the
+/// older llama.cpp formula when [`legacy_gdn_norm`] selects it.
+pub(crate) fn gdn_l2_norm(x: &mut [f32], eps: f32) {
+    if legacy_gdn_norm() {
+        l2_norm_legacy(x, eps);
+    } else {
+        l2_norm(x, eps);
     }
 }
 
