@@ -44,12 +44,19 @@ It is a diagnostic artifact, not a new published weight format.
 Conversion remains pinned to llama.cpp
 `b96806d96061049a5b574269b049bf6241d63d46`.
 Runtime validation is independently pinned to
-`11fe02151f79c41d0d4af7da708755d73b9c0da6`, matching the existing Rust GDN
-normalization: `x / sqrt(sum(x*x) + eps)`, implemented as RMSNorm plus scale.
-The older version uses `x / max(sqrt(sum(x*x)), eps)`. These formulas are
-different; the original comparison first diverges at `q_conv_predelta-0`
-and fails the old strict recurrent contract. That result remains a failure,
-and the existing Qwen3.5 tests and bounds are unchanged.
+`11fe02151f79c41d0d4af7da708755d73b9c0da6`, which builds the GDN q/k
+normalization as `x / sqrt(sum(x*x) + eps)` (RMSNorm plus scale). Upstream
+moved to `x / max(sqrt(sum(x*x)), eps)` (`ggml_l2_norm`) between `11fe0215`
+and the conversion pin `b96806d`. These formulas are different; the original
+comparison first diverges at `q_conv_predelta-0` and fails the old strict
+recurrent contract.
+
+The shared Rust GDN normalization now follows upstream (`b96806d`), so the
+validation of this model has to select the older formula explicitly:
+export `RMI_QWEN35_GDN_LEGACY_NORM=1` for the Rust side. That switch is
+temporary -- re-pin the runtime Oracle to `b96806d`, re-run the two tests
+and drop the switch (TODO-065). See
+`docs/develop/GGML_PARITY_BOUNDARY.md` for the full statement.
 
 The new builder clones the fixed runtime reference into a disposable directory,
 reuses the existing callback/precise-softmax instrumentation, and verifies that
