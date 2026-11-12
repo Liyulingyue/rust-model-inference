@@ -4257,7 +4257,14 @@ ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think �
   张量类型是否都有设备 kernel —— 12 个档类型齐全，另外 10 个含 i-quant 或
   Q2_K / Q3_K 的档没有对应设备 kernel，整个 session 建不起来
   （`auto` 回退 CPU，`--compute vulkan` 严格报错）。
-  - ✅ **`Q8_0` 档已验证，而且设备路径逐位（2026-11-11）**：该档 401 个张量
+  - **不必做 20 档全量评估**：30B 的 trunk（MoE / SSM / attention 的算术）与
+    量化类型无关，换档只是权重字节不同，每多测一档重复验证的是「已有 kernel
+    在新字节上的表现」；而 10 个 i-quant / Q2_K / Q3_K 档**设备上根本建不起
+    session**，给它们做「设备 vs CPU」评估没有意义。
+  - **按类型家族抽样 3 档即可**（未做）：`Q6_K`（k-quant 家族，设备可跑）、
+    `Q4_0`（无 k-quant 的 4-bit 家族）、`IQ4_XS`（i-quant 家族，CPU-only
+    路径）。其余维持「类型层面的契约」描述。
+  - ✅ **`Q8_0` 档已验证，设备路径实测也是逐位的（2026-11-11）**：该档 401 个张量
     只有 Q8_0（164）与 F32（237），两类设备 kernel 都是逐位的，路由 shader
     用 ggml-exact 的 `exp_reference` + `divide_finite_normal`。实测设备 vs CPU
     的 1 / 2 / 3 token prefill 全部 `relative_l2 = 0`、top-1 token 相同；
