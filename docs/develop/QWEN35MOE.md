@@ -149,6 +149,39 @@ SwiGLU. The MoE variant needs:
    stay behind `Weight` and no call site inspects `ggml_type`.
 5. The shared expert with the nested residual above.
 
+## Re-verification after the GDN change (2026-11-12)
+
+The shared GDN normalization follows upstream's `ggml_l2_norm` again (the
+epsilon floors the denominator). That had left the MiniCPM-V artifacts
+stale, so the 35B-A3B text tower was compared again:
+
+* Model: `MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf` (21,166,255,008 bytes) from
+  `OpenBMB/MiniCPM-V-4.7-35B-A3B-gguf` on ModelScope.
+* Oracle: llama.cpp `b96806d` built by `tools/oracle/sage_a15/build_oracle.sh`
+  (scalar softmax, `-U__ARM_NEON -U__SSE2__`, `-ffp-contract=off`, the qwen35
+  trace, qwen35moe ffn-dump and Sage sequential-trace patches), run with
+  `--no-repack`.
+* Rust: `tests/minicpmv_reference.rs::dump_qwen35moe_logits`, fed the token
+  ids the oracle tokenized the prompt into.
+* Harness: `tools/oracle/minicpmv/compare_text.py`.
+
+**437 checkpoints, all bit-identical**: the router logits, the router
+probabilities, the selected expert ids (`ffn_moe_topk`), the routed weights,
+the normalized weights, the MoE output and the shared-expert gated output at
+layers 0, 3 and 39 (57 checkpoints each over 19 steps), plus `result_norm` and
+`result_output` (the final logits, 19 each).
+
+The expert ids are the checkpoint that can falsify the claim: the same
+experts, in the same order, with the same weights, at every one of the 19
+steps -- not a plausible-looking output.
+
+Still not covered here: the per-layer `l_out` and attention checkpoints and
+the GDN recurrent state (the MiniCPM-V dump path does not emit them; the
+Sage-A1.5 replay covers the same architecture for those), the image path
+(the `minicpmv4_7` projector has to be converted from the source repository),
+and the oracle pin this model documents (`69f201a2`, which carries the same
+GDN formula but needs a newer llama.cpp than this machine can fetch).
+
 ## Comparing against the oracle
 
 `llama-cli` takes `-p` as **raw text**, which tokenizes without the chat

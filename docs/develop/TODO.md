@@ -5041,3 +5041,121 @@ HTTP 请求中位数。）
 `PivoRuntime::linear`）、`src/vulkan/dense.rs`（`upload_f32_transposed`、
 `transpose_f32_weights`）、`src/models/pivo/gpu.rs`、`shaders/glsl/pivo_linear.comp`、
 [PiVo validation](../../tools/oracle/pivo/validation.md)。
+
+### TODO-068: OvisOCR3 的运行时 Oracle 还 pin 在 `11fe0215`，要重新 pin 到 `b96806d`
+
+**状态**：✅ 已完成（2026-11-12，运行时 Oracle 已重新 pin 到 `b96806d`，两个测试重跑通过）。
+
+**背景**：`4a2ac0b`（Holo4 合并）把共用的 GDN 归一化换成 llama.cpp
+`11fe0215` 的 `build_gdn_l2_norm`（`x / sqrt(sum(x²) + eps)`），当时仓库里
+只有 OvisOCR3 的**运行时** Oracle 还 pin 在 `11fe0215`（它的**转换**一直
+pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所有与 `b96806d`
+对齐的模型（Qwen3.8、Holo4、Sage-A1.5、NeoHorse、MiniCPM-V 35B）全部拉离
+了各自的 Oracle。
+
+上游在 `11fe0215` 与 `b96806d` 之间把 GDN 归一化换成了 `ggml_l2_norm`
+（`x / max(sqrt(sum(x²)), eps)`，epsilon 当分母下限）。仓库现在跟上游（新
+公式）。这个差是**公式版本差**，按误差界接受（GDN 递推 state 上约 1.2e-5
+相对 L2，与 Holo4 当年记录的同一现象同量级）；需要复现旧 Oracle 自己的算术
+时打开 `RMI_QWEN35_GDN_LEGACY_NORM=1`（默认关闭）。详见
+[GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的「GDN 归一化」一节。
+
+**已完成**：
+
+1. `tools/oracle/ovisocr3/build_oracles.sh` 的运行时 pin 改成 `b96806d`，
+   与转换 pin 相同；`tests/qwen35_reference.rs` 删掉单独的
+   `OVISOCR3_RUNTIME_LLAMA_PIN`，两个 OvisOCR3 测试都断言 `LLAMA_PIN`。
+   trace 补丁在 `b96806d` 上仍能干净应用，`git diff -- src` 仍为空。
+2. 两个测试重跑通过。逐位检查点回到噪声水平：`q_conv_predelta-0`
+   `7.8e-8`、`state_predelta-0` `1.1e-7`、`conv_output_raw-0` 精确 `0`、
+   `final_output-0` `1.7e-7`；只把公式换回旧版则分别是 `1.18e-5` 与
+   `4.70e-5`。视觉 14 个检查点最大相对 L2 `0.0147`（门槛 `0.05`）。
+3. 数值门槛跟着收紧到「两类检查点」：单块检查点仍按 Oracle 自己的
+   BF16/F32 spread 定界（`min(0.05, max(1e-5, 1.5 * spread))`），累积检查点
+   只报告漂移并以 `0.05` 为上限。原因是深层栈在 BF16 下是混沌的：只把 state
+   移动 `1e-5`（换公式）就会让 `layer_output-23` 在 `0.0117` 与 `0.0195`
+   之间摆动、`result_output` 停在 Oracle spread 的 `4.4` 倍，spread 倍数在
+   那里没有信息量；那些层的功能门限是 greedy token 逐个相同（仍精确比较）。
+
+**剩余**：`RMI_QWEN35_GDN_LEGACY_NORM` 现在没有任何 Oracle 需要它了，但按
+「保留诊断开关、默认关闭」的约定继续留着；它只影响 CPU 路径。
+
+**顺带复测的另一个家族（NeoHorse-1-4B，2026-11-12）**：
+
+- **BF16（无损）档与固定 llama.cpp `b96806d` 逐位一致**（85 条 trace 记录、
+  全部 checkpoint 与 logits 逐位相同，token id 相同）——共享的 GDN 归一化没有
+  破坏这个家族。
+- **量化档（Q8_0 / Q4_K_M）不再逐位一致**：仓库默认 Q8_0 kernel 与 llama.cpp 的
+  per-lane 累加差约 1 ULP（`src/ops/kernel/q8_0/ggml.rs` 记着这件事并提供复刻
+  llama.cpp 算术的入口，qwen35 家族保持默认契约）。GDN checkpoint 相对 L2
+  `8.9e-8`…`5.4e-7`（门槛 `1e-5`）、greedy token 逐个相同，深层栈漂移
+  `layer_output-31` `5.7e-2`…`1.1e-1`。
+- **这与 GDN 公式无关**：把公式换回旧的，同一个 Oracle 上 `state_predelta-0`
+  从 `4.1e-7` 变成 `8.6e-5`（212 倍）；`conv_output_raw-0`（归一化之前）在两种
+  公式下都是 `2.8e-7`，说明漂移来自量化投影本身。
+
+**Sage-A1.5**（`qwen35moe`）也复测了（2026-11-12）：本机 aarch64 用 pinned
+`b96806d` 的标量 Oracle（`--no-repack`、`-U__ARM_NEON`）重跑全量对拍，
+1,100 个检查点**逐位一致**（最大相对 L2 与最大绝对误差都是 0，最小 cosine
+为 1），token id 与 Oracle 相同。原始 `Hello` 输入的 greedy 序列是
+`[11, 353, 1044, 4313]`（早先本机记录是 `[11, 271, 40, 1044]`——那个输入是
+近平局，Oracle 的构建决定翻到哪一边；中文输入各机一致）。AMD 性能记录与
+gfx1100 上的物理设备复测仍未重跑。
+
+**MiniCPM-V 4.7 35B-A3B**（`qwen35moe`）也复测了（2026-11-12）：Q4_K_M 档，
+Oracle 用 pinned `b96806d` 的标量构建（`tools/oracle/sage_a15/build_oracle.sh`，
+`--no-repack`），Rust 侧用 `tests/minicpmv_reference.rs::dump_qwen35moe_logits`
+并喂 Oracle 自己 tokenize 出来的 id，新的 `tools/oracle/minicpmv/compare_text.py`
+做比较：**437 个检查点逐位一致**（layer 0/3/39 的路由 logits、probs、选中的
+专家 id、路由权重、归一化权重、MoE 输出、shared expert 输出各 57 个，外加
+`result_norm` 与最终 logits 各 19 个）。它的**权重**也在设备上跑过：8 步 greedy
+token 与 CPU 逐个相同，logits 相对 L2 `0.0313`。
+
+这个模型文档里 pin 的 Oracle 是 `69f201a2`（比 `b96806d` 新，带
+`minicpmv4_7` 的视觉支持）；本机没有那个 checkout 也没有 GitHub 出网，所以
+文本对拍用的是 `b96806d`——两者的 GDN 公式相同，差别只在视觉侧。逐层的
+`l_out`、attention 检查点与 GDN 递推 state 不在这个 harness 里（MiniCPM-V 的
+dump 路径不发这些），同一架构由 Sage-A1.5 覆盖。
+
+至此，共享 GDN 归一化的影响面里，Qwen3.8、Holo4、OvisOCR3、NeoHorse、
+Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
+
+**影响面**：只影响 OvisOCR3 一个模型的数值验证，不影响任何模型的推理
+正确性——两个公式相差 2.4e-6 相对，模型行为不变。
+
+**关联**：`src/models/qwen35/trunk/util.rs`、`tests/qwen35_reference.rs`、
+`tools/oracle/ovisocr3/README.md`、`docs/develop/SUPPORTED_MODELS.md`、
+[GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
+
+### TODO-070: Qwen3.8-27B 的 Vulkan 路径在 Q8_0 档下不可用（FFN 太宽）
+
+**状态**：✅ 已修（#238）。
+
+**现象**：`--compute vulkan` 跑 `Qwen3.8-27B-Q8_0.gguf` 直接报
+
+```
+Inference error: Unsupported shape: invalid Vulkan matmul input width/stride
+```
+
+**原因**：Vulkan 的 Q8_0 matmul 有 `n_in > 16_384` 的上限
+（`src/vulkan/ops.rs` 的 `matmul_rows_push` 与 `src/vulkan.rs` 的
+`matmul_q8_0`）。Qwen3.8-27B 的 MLP down 投影是 `blk.N.ffn_down.weight` =
+17408×5120 的 Q8_0，即 `n_in = 17408`，超限。Holo4-27B 同样的 FFN 宽度没问题，
+因为它是 Q4_K/Q6_K，那个上限只针对 Q8_0。
+
+**根因是过期的守卫**：16384 来自旧 kernel —— 它把整行输入一次性放进 shared
+memory（`shared uint s_input[4096]`，512 个 block）。#166 起 Q8_0 的 kernel
+都按 64 个 block 分块暂存，shared memory 不再是约束，但 host 侧两处守卫没删。
+所以不需要改 shader，删掉守卫即可。
+
+**结果**（#238，本机 GB10）：设备 Q8_0 kernel 对 CPU 归约（宽度 17408）逐位
+一致；16 步 greedy 的 15 个 token（含 EOS）CPU 与设备逐个相同；logits
+（248320 维）逐位一致（relative L2 = 0）。详见
+[UNIFIED_COMPUTE_VALIDATION.md](UNIFIED_COMPUTE_VALIDATION.md) 的
+「Q8_0 宽投影与 Qwen3.8-27B 的设备路径」一节。
+
+**仍未覆盖**：batch=64 的长行预填、图像路径（视觉塔仍在 CPU）、长上下文、
+AMD/Apple 驱动，以及 27B 以外的 Q8_0 宽投影模型。
+
+**关联**：#238、`src/vulkan/ops.rs`、`src/vulkan.rs`、
+`docs/develop/SUPPORTED_MODELS.md` 的 Qwen3.8 行。

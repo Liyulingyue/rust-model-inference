@@ -6,15 +6,20 @@ Both GGUF files are official prebuilt artifacts downloaded without local convers
 It does not declare a new GGUF architecture. Use `--jinja` to render its embedded
 Hcompany chat template. Weights are published under CC-BY-NC-4.0.
 
-## Integrated branch status (2026-10-26)
+## Integrated branch status (2026-11-12)
 
-The shared decoder on `codex/holo4-35b-a3b` uses the newer GDN RMSNorm/scale
-normalization from the [35B reference](../README.md). The fixed 27B Oracle below
-uses the earlier `ggml_l2_norm` denominator-floor operation. The integrated
-CPU text rerun fails `state_predelta-0`: maximum relative-L2 `1.186765e-5`
-exceeds the unchanged `1e-5` bound. Keep the older Oracle and its bound intact;
-the passing text results below describe the original #185 implementation and
-do not establish alignment of this integrated decoder. Contract/tokenizer and
+The shared decoder follows upstream's llama.cpp `ggml_l2_norm` again -- the
+epsilon floors the denominator -- the same operation the fixed 27B Oracle
+below uses. The integrated CPU text rerun passes: `state_predelta-0` is
+`1.52e-7` relative-L2 against the unchanged `1e-5` bound, and the GDN
+checkpoints are `9.0e-8` (`conv_output_raw-0`), `1.2e-7` (`q_conv_predelta-0`),
+`1.5e-7` (`k_conv_predelta-0`) and `1.8e-7` (`final_output-0`). The deep stack
+drifts with the quantization tier: `layer_output-63` is `2.58e-1` against an
+Oracle spread of `2.45e-1` and a bound of `0.35`, i.e. the same size as the
+difference between the Oracle's own native and scalar kernels. All four
+greedy IDs agree (`[109266, 6115, 98691, 95815]`). Vulkan
+batch-1/64 passes as well (maximum relative-L2 `0.16627160`, bound
+`0.26220751`). Contract/tokenizer and
 vision checks pass on Apple M3 Max. Vulkan batch-1/64 also passes all four
 greedy IDs and final-logit bounds (maximum relative-L2 `0.16732743`, unchanged
 bound `0.31344540`), as does CPU vision with Vulkan decoding. These checks do

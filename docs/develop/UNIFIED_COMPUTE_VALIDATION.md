@@ -36,28 +36,67 @@ CPU 的顺序做，所以这条路径上没有量化漂移。
 **长行预填**：372 token（`--prefill-batch-size 64`，即 6 个 64 行批次）的
 prefill 也逐位一致：8 个 greedy token 相同，prefill logits（248320 维）
 relative L2 = 0。这说明 64 行的宽投影走的是同一条逐位路径，不是只在单行
-时对上。
+时对上。892 token（14 个批次）同样逐位一致：4 个 greedy token 相同，logits
+relative L2 = 0；这一档的 CPU prefill 是 326 s，设备（不带 trace）是 20.1 s。
+
+**图像路径**：`--mmproj mmproj-F16.gguf --image <png>` 配 `--compute vulkan`
+也跑通，且与 CPU 逐位一致：26 个 prompt token（含 9 个 vision placeholder）
+的 id 完全相同，8 步 greedy 的 token 也完全相同。视觉塔仍在 CPU，设备只跑
+文本解码，所以这条路径验证的是「CPU 视觉 + 设备文本」的衔接，不是视觉塔上
+设备。同一次图像 prefill：CPU 6.0 s，设备 0.85 s（约 7 倍）。
 
 **性能**（同样的模型与参数；短 prompt 为 CPU 与设备交替各跑 3 次的中位数，
-长 prompt 为设备 2 次、CPU 1 次）：
+长 prompt 为设备 2 次、CPU 1 次，都不带 `RMI_PARITY_TRACE`）：
 
 | 阶段 | CPU | Vulkan |
 |---|---:|---:|
 | prefill，13 token | 3.19 s | 0.66 s |
 | prefill，372 token | 96.0 s | 8.1 s |
+| prefill，892 token | 326 s | 20.1 s |
 | decode，14 token | 4.07 s | 5.65 s |
 
-prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍：短 prompt
-里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token 一次提交，且 GDN
-卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs 6.32 s）。
+prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍，892 token
+约 16 倍：短 prompt 里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token
+一次提交，且 GDN 卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs
+6.32 s）。
 
-注：同一份长 prompt 的第一次设备运行曾测得 216 s，随后两次都是 8.1 s；
-本机是共享的统一内存机型，那次异常更像内存压力，不是批次大小的问题
-（`--prefill-batch-size 13` 的同一 prompt 是 17.0 s，比 64 行批次更慢，
-符合权重读取摊薄的预期）。
+注：**对拍时开的 `RMI_PARITY_TRACE` 会让设备路径慢一个数量级以上**，不能用
+来量性能。tracer 的 schema 是 token-major，所以
+`src/models/qwen35/trunk/session.rs` 在「有 trace 且设备可用」时把 prefill
+批次强制成 1 行，逐行记录：
 
-**未覆盖**：图像路径（视觉塔仍在 CPU）、长上下文、AMD/Apple 驱动，
+| prompt | 带 trace | 不带 trace |
+|---|---:|---:|
+| 372 token | 216 s | 8.1 s |
+| 892 token | 545 s | 20.1 s |
+| 26 token（图像） | 13.4 s | 0.85 s |
+
+（本机是共享的统一内存机型，早先把这个差记成了内存压力，实际是 trace 把
+64 行批次拆成了逐行 prefill。）上表的设备耗时都取自不带 trace 的运行。
+
+**未覆盖**：视觉塔上设备、更长上下文（892 token 以上）、AMD/Apple 驱动，
 以及 27B 以外的 Q8_0 宽投影模型。
+
+## MiniCPM-V 4.7 35B-A3B 的设备路径（2026-11-12）
+
+`qwen35moe` 的设备路径此前只在 Holo4 上验证过，MiniCPM-V 35B-A3B 的权重
+从没在设备上跑过。Q4_K_M 档（`MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf`，21,166,255,008 B），
+本机 GB10，`--jinja`，prompt `What is 2+2?`，8 步 greedy：
+
+| 项目 | 结果 |
+|---|---|
+| greedy token（CPU vs 设备） | 8 个逐个相同 `[17, 478, 220, 17, 283, 220, 19, 248046]`（含 EOS） |
+| logits 相对 L2 | `0.0313372890132432`（最大绝对差 `0.32964634895324707`） |
+| prefill，19 token | CPU 3.53 s，设备 6.23 s（设备另加 17.3 s 权重上传） |
+| decode，7 token | CPU 1.25 s，设备 2.38 s |
+
+token 逐个相同而 logits 差 3%，与 Holo4 设备路径的量级一致（Holo4 那边整模
+CPU/GPU logits 相对 L2 是 `0.05884`/`0.04931`，设备端单步门槛 `0.262208`），
+所以这是设备路径的正常漂移，不是回归。
+
+**未覆盖**：图像路径（MiniCPM-V 4.7 的 mmproj 需要从源仓库转换，本机没有）、
+AMD/Apple 驱动、以及 CPU 侧与 pinned Oracle 的文本对拍（它的 Oracle pin 在
+`69f201a2`，本机没有该 llama.cpp checkout，也没有 GitHub 出网）。
 
 ## Vulkan 上的图像门禁改为能力判定（2026-11-10）
 
