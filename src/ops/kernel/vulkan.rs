@@ -128,7 +128,17 @@ impl GpuLinear {
                 .checked_mul(n_out)
                 .is_none_or(|outputs| outputs < min_gpu_matmul_outputs())
         {
+            if std::env::var_os("RMI_GPU_TRACE_MATMUL").is_some() {
+                eprintln!("[gpu-matmul] gate-rejected rows={rows} n_in={n_in} n_out={n_out}");
+            }
             return false;
+        }
+        let trace = std::env::var_os("RMI_GPU_TRACE_MATMUL").is_some();
+        if trace {
+            eprintln!(
+                "[gpu-matmul] try rows={rows} n_in={n_in} n_out={n_out} mode={:?}",
+                spec.mode
+            );
         }
         let Some(context) = crate::ops::get_vulkan_context() else {
             return false;
@@ -182,7 +192,14 @@ impl GpuLinear {
                 }
                 true
             }
-            Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => false,
+            Err(crate::vulkan::VulkanError::UnsupportedShape(reason)) => {
+                if trace {
+                    eprintln!(
+                        "[gpu-matmul] declined rows={rows} n_in={n_in} n_out={n_out}: {reason}"
+                    );
+                }
+                false
+            }
             Err(error) => {
                 crate::vulkan::mark_gpu_broken(&error.to_string());
                 *state = None;
@@ -199,6 +216,9 @@ pub(crate) fn try_attention(
     spec: crate::ops::nn::AttentionSpec,
 ) -> Option<Vec<f32>> {
     if !offload_enabled() || spec.head_dim > 1024 {
+        return None;
+    }
+    if std::env::var_os("RMI_GPU_ATTENTION_OFF").is_some() {
         return None;
     }
     let context = crate::ops::get_vulkan_context()?;
@@ -384,6 +404,9 @@ impl GpuConv {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(usize::MAX)
         {
+            if std::env::var_os("RMI_GPU_TRACE_MATMUL").is_some() {
+                eprintln!("[gpu-matmul] attention gate-rejected");
+            }
             return false;
         }
         let Some(context) = crate::ops::get_vulkan_context() else {

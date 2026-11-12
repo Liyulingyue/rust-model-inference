@@ -268,13 +268,37 @@ impl<'model> YuE2NarSession<'model> {
         let mut up = vec![0.0; nar_len * config.ffn];
         let mut down = vec![0.0; nar_len * hidden];
 
+        let timing = std::env::var_os("RMI_YUE2_NAR_TIMING").is_some();
+        let mut phase = [0f64; 6];
+        let mut clock = std::time::Instant::now();
+        let mut lap = |phase: &mut [f64; 6], index: usize, clock: &mut std::time::Instant| {
+            let now = clock.elapsed().as_secs_f64();
+            phase[index] += now - clock.elapsed().as_secs_f64() + now - now;
+            now
+        };
+        let _ = &mut lap;
+        macro_rules! timed {
+            ($index:expr, $body:expr) => {{
+                if timing {
+                    let started = std::time::Instant::now();
+                    let value = $body;
+                    phase[$index] += started.elapsed().as_secs_f64();
+                    value
+                } else {
+                    $body
+                }
+            }};
+        }
         for (layer_index, layer) in self.model.layers.iter().enumerate() {
-            normalize_rows(
-                &x,
-                &layer.nar_attention.norm,
-                &mut normed,
-                hidden,
-                config.rms_eps,
+            timed!(
+                0,
+                normalize_rows(
+                    &x,
+                    &layer.nar_attention.norm,
+                    &mut normed,
+                    hidden,
+                    config.rms_eps,
+                )
             );
             trace(
                 "yue2.nar.attn_norm",
@@ -283,15 +307,18 @@ impl<'model> YuE2NarSession<'model> {
                 &[nar_len, hidden],
                 &normed,
             );
-            project_qkv_rows(
-                self.model,
-                &layer.nar_attention,
-                &normed,
-                self.chunk.ar_tokens.len(),
-                &mut q,
-                &mut k,
-                &mut v,
-                &mut scratch,
+            timed!(
+                1,
+                project_qkv_rows(
+                    self.model,
+                    &layer.nar_attention,
+                    &normed,
+                    self.chunk.ar_tokens.len(),
+                    &mut q,
+                    &mut k,
+                    &mut v,
+                    &mut scratch,
+                )
             );
             trace(
                 "yue2.nar.q",
@@ -314,14 +341,17 @@ impl<'model> YuE2NarSession<'model> {
                 &[nar_len, config.kv_heads, config.head_dim],
                 &v,
             );
-            hybrid_attention(
-                config,
-                &self.model.pool,
-                &q,
-                &self.prefix_kv[layer_index],
-                &k,
-                &v,
-                &mut attention,
+            timed!(
+                2,
+                hybrid_attention(
+                    config,
+                    &self.model.pool,
+                    &q,
+                    &self.prefix_kv[layer_index],
+                    &k,
+                    &v,
+                    &mut attention,
+                )
             );
             trace(
                 "yue2.nar.attn",
@@ -330,14 +360,17 @@ impl<'model> YuE2NarSession<'model> {
                 &[nar_len, q_width],
                 &attention,
             );
-            linear_rows(
-                &layer.nar_attention.output,
-                &attention,
-                &mut projected,
-                q_width,
-                hidden,
-                self.model,
-                &mut scratch,
+            timed!(
+                3,
+                linear_rows(
+                    &layer.nar_attention.output,
+                    &attention,
+                    &mut projected,
+                    q_width,
+                    hidden,
+                    self.model,
+                    &mut scratch,
+                )
             );
 
             trace(
@@ -361,7 +394,10 @@ impl<'model> YuE2NarSession<'model> {
                 &x,
             );
 
-            normalize_rows(&x, &layer.nar_mlp.norm, &mut normed, hidden, config.rms_eps);
+            timed!(
+                0,
+                normalize_rows(&x, &layer.nar_mlp.norm, &mut normed, hidden, config.rms_eps)
+            );
             trace(
                 "yue2.nar.ffn_norm",
                 Some(layer_index),
@@ -369,14 +405,17 @@ impl<'model> YuE2NarSession<'model> {
                 &[nar_len, hidden],
                 &normed,
             );
-            mlp_rows(
-                self.model,
-                &layer.nar_mlp,
-                &normed,
-                &mut gate,
-                &mut up,
-                &mut down,
-                &mut scratch,
+            timed!(
+                4,
+                mlp_rows(
+                    self.model,
+                    &layer.nar_mlp,
+                    &normed,
+                    &mut gate,
+                    &mut up,
+                    &mut down,
+                    &mut scratch,
+                )
             );
 
             trace(
@@ -400,9 +439,11 @@ impl<'model> YuE2NarSession<'model> {
                 &[nar_len, hidden],
                 &down,
             );
-            for (row, update) in x.chunks_exact_mut(hidden).zip(down.chunks_exact(hidden)) {
-                add_in_place(row, update);
-            }
+            timed!(5, {
+                for (row, update) in x.chunks_exact_mut(hidden).zip(down.chunks_exact(hidden)) {
+                    add_in_place(row, update);
+                }
+            });
             trace(
                 "yue2.nar.ffn_residual",
                 Some(layer_index),
@@ -412,6 +453,12 @@ impl<'model> YuE2NarSession<'model> {
             );
         }
 
+        if timing {
+            eprintln!(
+                "[yue2.nar] phases: norm={:.2}s qkv={:.2}s attn={:.2}s o_proj={:.2}s mlp={:.2}s residual={:.2}s",
+                phase[0], phase[1], phase[2], phase[3], phase[4], phase[5]
+            );
+        }
         normalize_rows(
             &x,
             &self.model.final_norm,
@@ -535,34 +582,60 @@ fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     let mut down = vec![0.0; rows * hidden];
     let mut cache = Vec::with_capacity(config.layers);
 
+    let timing = std::env::var_os("RMI_YUE2_NAR_TIMING").is_some();
+    let mut phase = [0f64; 6];
+    macro_rules! timed {
+        ($index:expr, $body:expr) => {{
+            if timing {
+                let started = std::time::Instant::now();
+                let value = $body;
+                phase[$index] += started.elapsed().as_secs_f64();
+                value
+            } else {
+                $body
+            }
+        }};
+    }
     for layer in &model.layers {
-        normalize_rows(
-            &x,
-            &layer.ar_attention.norm,
-            &mut normed,
-            hidden,
-            config.rms_eps,
-        );
-        project_qkv_rows(
-            model,
-            &layer.ar_attention,
-            &normed,
+        timed!(
             0,
-            &mut q,
-            &mut k,
-            &mut v,
-            &mut scratch,
+            normalize_rows(
+                &x,
+                &layer.ar_attention.norm,
+                &mut normed,
+                hidden,
+                config.rms_eps,
+            )
+        );
+        timed!(
+            1,
+            project_qkv_rows(
+                model,
+                &layer.ar_attention,
+                &normed,
+                0,
+                &mut q,
+                &mut k,
+                &mut v,
+                &mut scratch,
+            )
         );
         cache.push((k.clone(), v.clone()));
-        causal_prefix_attention(config, &model.pool, &q, &k, &v, &mut attention);
-        linear_rows(
-            &layer.ar_attention.output,
-            &attention,
-            &mut projected,
-            q_width,
-            hidden,
-            model,
-            &mut scratch,
+        timed!(
+            2,
+            causal_prefix_attention(config, &model.pool, &q, &k, &v, &mut attention)
+        );
+        timed!(
+            3,
+            linear_rows(
+                &layer.ar_attention.output,
+                &attention,
+                &mut projected,
+                q_width,
+                hidden,
+                model,
+                &mut scratch,
+            )
         );
         for (row, update) in x
             .chunks_exact_mut(hidden)
@@ -570,19 +643,31 @@ fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
         {
             add_in_place(row, update);
         }
-        normalize_rows(&x, &layer.ar_mlp.norm, &mut normed, hidden, config.rms_eps);
-        mlp_rows(
-            model,
-            &layer.ar_mlp,
-            &normed,
-            &mut gate,
-            &mut up,
-            &mut down,
-            &mut scratch,
+        timed!(
+            0,
+            normalize_rows(&x, &layer.ar_mlp.norm, &mut normed, hidden, config.rms_eps)
+        );
+        timed!(
+            4,
+            mlp_rows(
+                model,
+                &layer.ar_mlp,
+                &normed,
+                &mut gate,
+                &mut up,
+                &mut down,
+                &mut scratch,
+            )
         );
         for (row, update) in x.chunks_exact_mut(hidden).zip(down.chunks_exact(hidden)) {
             add_in_place(row, update);
         }
+    }
+    if timing {
+        eprintln!(
+            "[yue2.nar.prefix] phases: norm={:.2}s qkv={:.2}s attn={:.2}s o_proj={:.2}s mlp={:.2}s",
+            phase[0], phase[1], phase[2], phase[3], phase[4]
+        );
     }
     cache
 }
