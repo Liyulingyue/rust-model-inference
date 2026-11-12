@@ -77,6 +77,27 @@ prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍�
 **未覆盖**：视觉塔上设备、更长上下文（892 token 以上）、AMD/Apple 驱动，
 以及 27B 以外的 Q8_0 宽投影模型。
 
+## MiniCPM-V 4.7 35B-A3B 的设备路径（2026-11-12）
+
+`qwen35moe` 的设备路径此前只在 Holo4 上验证过，MiniCPM-V 35B-A3B 的权重
+从没在设备上跑过。Q4_K_M 档（`MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf`，21,166,255,008 B），
+本机 GB10，`--jinja`，prompt `What is 2+2?`，8 步 greedy：
+
+| 项目 | 结果 |
+|---|---|
+| greedy token（CPU vs 设备） | 8 个逐个相同 `[17, 478, 220, 17, 283, 220, 19, 248046]`（含 EOS） |
+| logits 相对 L2 | `0.0313372890132432`（最大绝对差 `0.32964634895324707`） |
+| prefill，19 token | CPU 3.53 s，设备 6.23 s（设备另加 17.3 s 权重上传） |
+| decode，7 token | CPU 1.25 s，设备 2.38 s |
+
+token 逐个相同而 logits 差 3%，与 Holo4 设备路径的量级一致（Holo4 那边整模
+CPU/GPU logits 相对 L2 是 `0.05884`/`0.04931`，设备端单步门槛 `0.262208`），
+所以这是设备路径的正常漂移，不是回归。
+
+**未覆盖**：图像路径（MiniCPM-V 4.7 的 mmproj 需要从源仓库转换，本机没有）、
+AMD/Apple 驱动、以及 CPU 侧与 pinned Oracle 的文本对拍（它的 Oracle pin 在
+`69f201a2`，本机没有该 llama.cpp checkout，也没有 GitHub 出网）。
+
 ## Vulkan 上的图像门禁改为能力判定（2026-11-10）
 
 **改动**：`src/app/text/runtime.rs` 的图像门禁从"完整设备路径架构一律拒绝"改为
