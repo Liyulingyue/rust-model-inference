@@ -560,21 +560,40 @@ fn main() {
                 .is_some()
                 && arch_probe.tensor_info("text_proj.weight").is_some());
         if is_ernie_image {
-            // ERNIE-Image's published DiT is a mix of BF16 and K-quant
-            // weights, and the device has no advantage for those formats:
-            // the repository's hand-written K-quant kernels beat the device
-            // path by a wide margin (TODO-032), and ERNIE's own Q4_K_M DiT
-            // measures 2.2x slower on the device than on the CPU
-            // (TODO-067). The whole model therefore runs under the exact CPU
-            // scope, which also keeps the K-quant dispatch inside the shared
-            // kernel off the device.
-            let _cpu = rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope();
+            // The backend follows the weight format.
+            //
+            // The device only has an int8 dot-product kernel for Q8_0. The
+            // K-quant family has one scalar kernel and no vectorized
+            // variant, because its block-scaled int32 accumulation does not
+            // fit the int8 dot product that Q8_0 uses (TODO-032), and a
+            // Q4_K_M model measures 17.6x slower on the device than on the
+            // CPU there. ERNIE's own Q4_K_M DiT measures 2.2x slower
+            // (TODO-068), so it stays on the CPU.
+            //
+            // A Q8_0 DiT is the other case: every projection then takes the
+            // int8 path, which is where the device is at least as fast as
+            // the CPU. That is a different model file, not a different
+            // mode, so the choice is made from the weights themselves.
+            let k_quant = arch_probe
+                .tensor_info("layers.0.mlp.gate_proj.weight")
+                .is_some_and(|info| {
+                    matches!(
+                        info.ggml_type,
+                        rust_model_inference::core::tensor::GGMLType::Q2K
+                            | rust_model_inference::core::tensor::GGMLType::Q3K
+                            | rust_model_inference::core::tensor::GGMLType::Q4K
+                            | rust_model_inference::core::tensor::GGMLType::Q5K
+                            | rust_model_inference::core::tensor::GGMLType::Q6K
+                    )
+                });
+            let _cpu = k_quant
+                .then(|| rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope());
             let turbo = options
                 .model
                 .to_string_lossy()
                 .to_lowercase()
                 .contains("turbo");
-            if options.compute_policy() != rust_model_inference::compute::ComputePolicy::Cpu {
+            if k_quant {
                 eprintln!(
                     "compute scope=ernie_image backend=Cpu reason=kquant_weights_slower_on_device"
                 );

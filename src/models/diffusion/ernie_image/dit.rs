@@ -394,20 +394,18 @@ impl ErnieImageDit {
         if let Some(text_proj) = &self.text_proj_weight {
             let text_tokens = context_tokens;
             let mut projected = vec![0.0_f32; text_tokens * HIDDEN];
-            for token in 0..text_tokens {
-                let input = &context[token * TEXT_IN_DIM..(token + 1) * TEXT_IN_DIM];
-                let output = &mut projected[token * HIDDEN..(token + 1) * HIDDEN];
-                linear_into(
-                    self.source.as_ref(),
-                    text_proj,
-                    TEXT_IN_DIM,
-                    HIDDEN,
-                    input,
-                    output,
-                    &mut scratch.q8,
-                    self.pool.as_ref(),
-                )?;
-            }
+            linear_into_rows(
+                self.source.as_ref(),
+                text_proj,
+                TEXT_IN_DIM,
+                HIDDEN,
+                text_tokens,
+                &context[..text_tokens * TEXT_IN_DIM],
+                &mut projected,
+                &mut scratch.q8,
+                self.pool.as_ref(),
+                &mut scratch.gpu,
+            )?;
             for (dst, src) in scratch
                 .text
                 .chunks_exact_mut(HIDDEN)
@@ -469,6 +467,7 @@ impl ErnieImageDit {
                 &mut scratch.mlp_out,
                 &mut scratch.q8,
                 self.pool.as_ref(),
+                &mut scratch.gpu,
                 layer_index,
             )?;
             super::super::common::require_finite(&scratch.joint, "ERNIE-Image block output")?;
@@ -520,23 +519,26 @@ impl ErnieImageDit {
 
         // final_linear: hidden -> out_channels * patch_area, slice to image tokens.
         let mut patches = vec![0.0_f32; image_token_count * OUT_CHANNELS * PATCH_AREA];
-        for token in 0..image_token_count {
-            let input = &scratch.joint[token * HIDDEN..(token + 1) * HIDDEN];
-            let output = &mut patches
-                [token * OUT_CHANNELS * PATCH_AREA..(token + 1) * OUT_CHANNELS * PATCH_AREA];
-            linear_into(
-                self.source.as_ref(),
-                &self.final_linear_weight,
-                HIDDEN,
-                OUT_CHANNELS * PATCH_AREA,
-                input,
-                output,
-                &mut scratch.q8,
-                self.pool.as_ref(),
-            )?;
+        linear_into_rows(
+            self.source.as_ref(),
+            &self.final_linear_weight,
+            HIDDEN,
+            OUT_CHANNELS * PATCH_AREA,
+            image_token_count,
+            &scratch.joint[..image_token_count * HIDDEN],
+            &mut patches,
+            &mut scratch.q8,
+            self.pool.as_ref(),
+            &mut scratch.gpu,
+        )?;
+        for (token, output) in patches
+            .chunks_exact_mut(OUT_CHANNELS * PATCH_AREA)
+            .enumerate()
+        {
             for (v, b) in output.iter_mut().zip(&self.final_linear_bias) {
                 *v += *b;
             }
+            let _ = token;
         }
 
         // Unpatchify: rearrange [image_token_count, OUT_CHANNELS, PATCH_AREA] ->
@@ -736,6 +738,8 @@ pub(crate) struct ErnieScratch {
     rope: Vec<f32>,
     /// Per-tensor Q8 staging, plus per-thread F16 staging.
     q8: Q8Scratch,
+    /// Device-side projections, built on the first device call.
+    gpu: Option<super::gpu::ErnieGpuProjections>,
 }
 
 impl ErnieScratch {
@@ -760,6 +764,7 @@ impl ErnieScratch {
             modulation: Vec::new(),
             rope: Vec::new(),
             q8: Q8Scratch::new(FFN_WIDTH.max(HIDDEN)),
+            gpu: None,
         })
     }
 
@@ -912,6 +917,7 @@ fn run_block(
     mlp_out: &mut [f32],
     q8: &mut Q8Scratch,
     pool: &ComputePool,
+    gpu: &mut Option<super::gpu::ErnieGpuProjections>,
     layer_index: usize,
 ) -> Result<(), String> {
     // 1. attention branch
@@ -954,6 +960,7 @@ fn run_block(
                 &mut part,
                 q8,
                 pool,
+                gpu,
             )?;
             for token in 0..total_tokens {
                 let row = token * 3 * INNER_DIM + offset;
@@ -1056,6 +1063,7 @@ fn run_block(
             mlp_out,
             q8,
             pool,
+            gpu,
         )?;
         for token in 0..total_tokens {
             let out = &mlp_out[token * HIDDEN..(token + 1) * HIDDEN];
@@ -1102,6 +1110,7 @@ fn run_block(
         ffn_buf,
         q8,
         pool,
+        gpu,
     )?;
     linear_into_rows(
         source,
@@ -1113,6 +1122,7 @@ fn run_block(
         ffn_up,
         q8,
         pool,
+        gpu,
     )?;
     // gelu(gate) * up -> linear_fc2. Result lands in `mlp_out`.
     for token in 0..total_tokens {
@@ -1137,6 +1147,7 @@ fn run_block(
         mlp_out,
         q8,
         pool,
+        gpu,
     )?;
     // residual add with gate_mlp
     for token in 0..total_tokens {

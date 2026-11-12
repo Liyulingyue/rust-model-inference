@@ -272,7 +272,16 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         || options.noise.is_some()
         || !options.references.is_empty()
     {
-        return Err("--width/--height/--cfg/--noise/--reference require a Mage-Flow model".into());
+        // Qwen-Image-2.1 takes the same size and guidance flags, so the
+        // model decides whether they belong to it. Mage-Flow and
+        // Qwen-Image-2.1 are the two models with a size, a step count and
+        // a guidance scale, and they spell the size and the guidance the
+        // same way.
+        if !is_qwen_image_2_1_model(&options.model) {
+            return Err(
+                "--width/--height/--cfg/--noise/--reference require a Mage-Flow model".into(),
+            );
+        }
     }
     if options.qwen_latent_width.is_some_and(|value| value == 0)
         || options.qwen_latent_height.is_some_and(|value| value == 0)
@@ -594,4 +603,17 @@ pub fn transcription_options(
         prompt: options.prompt.clone(),
         max_new_tokens: resolve_cli_generation_options(options).0,
     }
+}
+
+/// Whether the model file is a Qwen-Image-2.1 DiT.
+///
+/// The size and guidance flags are shared with Mage-Flow, so the validator
+/// has to look at the model to decide whether they are allowed. The model
+/// is memory mapped, so this costs a header read.
+fn is_qwen_image_2_1_model(model: &std::path::Path) -> bool {
+    use crate::format::ggufrs::ComponentRole;
+    let Ok(source) = crate::format::ggufrs::open_model_source(model, ComponentRole::Llm) else {
+        return false;
+    };
+    crate::models::diffusion::qwen_image_2_1::matches_signature(source.as_ref())
 }

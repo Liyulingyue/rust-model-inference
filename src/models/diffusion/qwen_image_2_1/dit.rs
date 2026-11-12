@@ -2,7 +2,7 @@
 //! stable-diffusion.cpp oracle's ggml CPU kernels (see tools/oracle/qwen_image_2_1).
 
 use super::{Condition, QwenImage21Config, ReferenceLatent, PREFIX};
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{GGMLType, TensorSource};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -96,6 +96,10 @@ pub(crate) struct QwenImage21Dit {
 
 impl QwenImage21Dit {
     pub(crate) fn load(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
+        // The DiT GGUF stores its tensors bare while the model reads the
+        // `model.diffusion_model.` prefixed names, so the source answers to
+        // both spellings.
+        let source: Arc<dyn TensorSource> = Arc::new(super::PrefixedSource::new(source));
         let config = QwenImage21Config::detect_from_source(source.as_ref())?;
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(n_threads.max(1))
@@ -193,6 +197,27 @@ impl QwenImage21Dit {
                 });
         });
         Ok(())
+    }
+
+    /// A projection whose storage format the tensor decides.
+    ///
+    /// The published Q8_0 DiT is not uniformly Q8_0: the block projections
+    /// are Q8_0, while the input, output and modulation projections and the
+    /// timestep embedder are BF16. Both formats have to work in the same
+    /// model, so the format comes from the tensor rather than from the call
+    /// site.
+    fn linear(
+        &mut self,
+        name: &str,
+        n_in: usize,
+        n_out: usize,
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<(), String> {
+        match self.source.tensor_info(name).map(|info| info.ggml_type) {
+            Some(GGMLType::BF16) => self.bf16_linear(name, n_in, n_out, input, output),
+            _ => self.linear(name, n_in, n_out, input, output),
+        }
     }
 
     /// Linear with BF16 weights: activations are rounded to BF16 once, then
@@ -408,7 +433,7 @@ impl QwenImage21Dit {
         timestep_embedding_row(0.0, &mut time[256..]);
         report("qwen.debug.time", &[256, 2], &time);
         let mut time_embed = vec![0.0f32; hidden * 2];
-        self.q8_linear(
+        self.linear(
             &format!("{PREFIX}.time_text_embed.timestep_embedder.linear_1.weight"),
             256,
             hidden,
@@ -419,7 +444,7 @@ impl QwenImage21Dit {
         crate::ops::silu_approx_inplace(&mut time_embed);
         report("qwen.debug.temb_silu", &[hidden, 2], &time_embed);
         let mut time_hidden = vec![0.0f32; hidden * 2];
-        self.q8_linear(
+        self.linear(
             &format!("{PREFIX}.time_text_embed.timestep_embedder.linear_2.weight"),
             hidden,
             hidden,
@@ -433,7 +458,7 @@ impl QwenImage21Dit {
         crate::ops::silu_approx_inplace(&mut time_embed);
 
         let mut modulation = vec![0.0f32; 4 * hidden * 2];
-        self.q8_linear(
+        self.linear(
             &format!("{PREFIX}.modulation.1.weight"),
             hidden,
             4 * hidden,
@@ -527,7 +552,7 @@ impl QwenImage21Dit {
         report("qwen.norm_out", &[hidden, image_rows], &normed);
 
         let mut out = vec![0.0f32; config.out_channels * image_rows];
-        self.q8_linear(
+        self.linear(
             &format!("{PREFIX}.proj_out.weight"),
             hidden,
             config.out_channels,
@@ -671,21 +696,21 @@ impl QwenImage21Dit {
         let mut q = vec![0.0f32; hidden * seq];
         let mut k = vec![0.0f32; hidden * seq];
         let mut v = vec![0.0f32; hidden * seq];
-        self.q8_linear(
+        self.linear(
             &format!("{prefix}.attn.to_q.weight"),
             hidden,
             hidden,
             &h,
             &mut q,
         )?;
-        self.q8_linear(
+        self.linear(
             &format!("{prefix}.attn.to_k.weight"),
             hidden,
             hidden,
             &h,
             &mut k,
         )?;
-        self.q8_linear(
+        self.linear(
             &format!("{prefix}.attn.to_v.weight"),
             hidden,
             hidden,
@@ -798,7 +823,7 @@ impl QwenImage21Dit {
             *target = value * ATTENTION_OUT_SCALE;
         }
         let mut attn_projected = vec![0.0f32; hidden * seq];
-        self.q8_linear(
+        self.linear(
             &format!("{prefix}.attn.to_out.0.weight"),
             hidden,
             hidden,
@@ -834,7 +859,7 @@ impl QwenImage21Dit {
         }
         let mut gate_up = vec![0.0f32; 2 * config.intermediate_size * seq];
         report("qwen.debug.b.mod2", &h);
-        self.q8_linear(
+        self.linear(
             &format!("{prefix}.img_mlp.gate_up.weight"),
             hidden,
             2 * config.intermediate_size,
@@ -852,7 +877,7 @@ impl QwenImage21Dit {
             }
         }
         let mut mlp_out = vec![0.0f32; hidden * seq];
-        self.q8_linear(
+        self.linear(
             &format!("{prefix}.img_mlp.out.weight"),
             config.intermediate_size,
             hidden,

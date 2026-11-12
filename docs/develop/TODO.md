@@ -3415,7 +3415,7 @@ CFG 1 / seed 42）：连跑 **6 次，PNG 逐位相同**（6 个 md5 一致）�
 不是数学保证，只是「这段时间内没再看到不一样的」，而本条的根因（设备投影
 偶发整片出错）至今没有定位到具体成因。6/6 不能替代那个定位。
 
-对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-067](#todo-068-ernie-image-的设备投影比-cpu-慢--k-quant-权重在设备上没有优势)）
+对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-068](#todo-068-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)）
 也是连跑 3 次逐位相同 —— 说明「可复现」这条门禁判据本身是可测的，
 Mage-Flow 缺的仍然是根因，不是证据。
 - `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
@@ -5054,110 +5054,57 @@ HTTP 请求中位数。）
 
 ---
 
-### TODO-068: ERNIE-Image 的设备投影比 CPU 慢 —— K-quant 权重在设备上没有优势
+### TODO-068: ERNIE-Image 的设备路径：K-quant 慢，Q8_0 快 2.8 倍
 
-**状态**：⚠️ 已知缺口，未排期。2026-11-11 实测。
+**状态**：✅ 已解决（2026-11-12）。K-quant 仍是已知缺口。
 
-**现象**：把 ERNIE-Image 的 DiT 投影整批交给设备之后，结果是**正确但更慢**。
-Q4_K_M DiT、256×256 / 8 步 / CFG 5 / seed 42 / 16 线程：
+**结论**：ERNIE-Image 的设备投影**能不能赢，取决于权重量化格式和投影形状两件事**，
+不是取决于模型。
 
-| 路径 | denoise | 总计 |
-|---|---|---|
-| CPU | 251.8 s | 256.6 s |
-| 设备（`--gpu`） | 559.5 s | 562.0 s |
+| DiT 权重 | 规格 | CPU denoise | 设备 denoise | 结果 |
+|---|---|---|---|---|
+| Q4_K_M | 256×256 / 8 步 | 251.8 s | 559.5 s | **慢 2.2 倍** |
+| Q8_0 | 256×256 / 8 步 | 219.2 s | **78.4 s** | **快 2.8 倍** |
 
-设备路径慢 **2.2 倍**。64×64 / 1 步时同样落后（1.4 s → 4.7 s）。
+Q8_0 的结果：与 CPU 的 PNG 差异 PSNR **69.78 dB**（max_abs 1/255），同一 seed
+连跑两次逐位相同。
 
-**已排除的原因**：
+**两件事各占一半**：
 
-- **不是权重重复上传**：投影运行时是常驻的，`ensure_weight` 按
-  （权重指针、长度、n_in、n_out、layout）缓存，252 个权重各上传一次；
-  同一进程内指针稳定，缓存命中。
-- **不是形状没批**：整批 20 / 260 行一次 dispatch，252 次投影全部走到设备
-  （`RMI_ERNIE_GPU_TRACE=1` 逐条可见，无失败）。
-- **不是数值错误**：设备与 CPU 的 PNG 差异 PSNR **41.3 dB**（max_abs 5/255），
-  感知无损；差异来自设备侧的 K-quant 激活量化与求和顺序。
-- **不是不确定**：同一 seed 连跑 3 次，PNG **逐位相同**。这与 TODO-044 的
-  门禁判据不同 —— 设备的路径是可复现的，慢是慢，但不会给出坏图。
+**一、权重量化格式**。设备只有 Q8_0 有向量化 kernel —— `Q8_MATMUL_GROUPED_DP4A`
+与 `Q8_MATMUL_TILED_DP4A` 吃设备 int8 dot-product ✓✓。K-quant 家族只有一个标量
+kernel：它的**块缩放 int32 累加塞不进 int8 dot product** ✓✓（Q8_0 的量化把乘积
+压在 int8 内 ✓✓），要吃 DP4A 得写一个「块缩放 + int32 提升」的 int8 dot
+kernel —— 那是 TODO-032 量过的完整 shader 项目 ✓✓。
 
-**真正的成因**：**K-quant 的设备 dispatch 不在模型里，而在共享内核里**。
-`src/ops/kernel/q4_k.rs` 的 `forward_prepared` 自带一条设备路径，只要
-`ops::gpu_matmul_active()` 为真就会走它（109 行）。模型层拦不住它 ——
-本条最初就是在模型层加了一道「只给 Q8_0 走设备」的门控之后，仍然测到
-`--gpu` 让 denoise 从 0.9 s 变成 3.4 s：拦截的是模型自己发起的投影，
-共享内核自己发起的那条没被拦到。
+⇒ **模型层按权重量化格式选后端** ✓✓：Q8_0 的 DiT 走设备 ✓✓，K-quant 的 DiT 留在
+CPU 范围 ✓✓。
 
-这与 **TODO-032** 记的是同一件事：Q4_K/Q5_K/Q6_K 在设备上没有 DP4A
-kernel，8B Q4_K_M 比 CPU 慢 17.6 倍。ERNIE 的 2.2 倍落在同一个方向上，
-只是模型更小、投影形状更规整，所以没有 TODO-032 记的那么极端。
+**二、投影形状**（这一半是本条自己踩出来的）。ERNIE 的 DiT 原本**逐 token** 调用
+投影 —— `text_proj`、`final_linear`、qkv、mlp 都是一行一次 ✓✓。一行一次在设备上
+是「每行一次权重上传 + 一次 fence」✗✗，fence 的开销淹没计算 ✗✗：
 
-**因此的处置**：ERNIE-Image 回到**精确 CPU 范围**（`main.rs` 的
-`ernie_image` 分支），`--gpu` 不再改变它的结果，也不让它变慢 —— 实测
-`--gpu` 与纯 CPU 的 PNG **逐位相同**，`--gpu` 的输出与改造前也**逐位相同**。
-留在仓库里的是**批行重构**：投影按整批调用而不是逐 token 调用，这是设备
-路径需要的形状，也是以后把设备路径接回来时的前提。
+| 路径 | Q8_0 DiT denoise |
+|---|---|
+| 单行投影允许上设备 | 624.6 s |
+| 单行投影强制 CPU、整批上设备 | **78.4 s** |
 
-**方向**（未定）：
+⇒ ⇒ **单行投影强制 CPU** ✓✓（`disable_gpu_matmul_for_scope` ✓✓，底下的多线程
+CPU kernel 不变 ✓✓），**整批投影走设备** ✓✓ ✓✓。
 
-1. 要么给 K-quant 写设备内核（DP4A 那条 TODO-032 已经量过工程量），
-   要么在调度上**按权重量化格式选后端** —— 设备只接 Q8_0 / F16 / BF16，
-   K-quant 留在 CPU。这是与本条一致的做法，仓库里也已有按 dtype 分流的先例。
-2. **ERNIE 另有一条路没有量过**：Q8_0 的 DiT 走设备的 int8 点积路径，
-   同一台机器上 Z-Image 的 Q8_0 权重拿到 **6.2 倍**加速。Q8_0 的 ERNIE
-   权重更大（8.7 GB vs 5.0 GB），CPU 侧会更慢，设备侧的优势可能更大 ——
-   但**必须实测**，本机到 ModelScope 的下载只有约 0.5 MB/s，8.7 GB 的
-   权重这次没有下完（实测 58 分钟下到 17%），所以这条仍是推断，不是测量。
-3. 模型层要能拦住共享内核自己发起的设备 dispatch，得有一个**按权重格式**
-   的开关，而不是只有一个全局的 `gpu_matmul_active()`。
+**仍然剩下的缺口**：K-quant 的 DiT 在设备上没有优势 ✓✓ ⇒ 要么给 K-quant 写设备
+kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 
-**验收**：同一个模型同一份 prompt，设备路径要么比 CPU 快，要么明确说明
-它在哪种权重量化格式下才有意义。
+**踩过的两个坑，记下来**：
 
-**关联**：`src/ops/kernel/q4_k.rs`（共享 K-quant 设备 dispatch）、
-`src/models/diffusion/ernie_image/dit.rs`（批行重构）、
-`src/models/diffusion/ernie_image/mod.rs`（`linear_into_rows`）、
-`src/vulkan/ops.rs`（`BatchedLinearRuntime`、`ensure_weight`）。
+- **共享内核自带设备 dispatch，模型层拦不住** ✗✗：`src/ops/kernel/q4_k.rs` 与
+  `q8_0/parallel.rs` 在 `ops::gpu_matmul_active()` 为真时自己就走设备 ✗✗。
+  模型层的门控只覆盖模型自己发起的投影 ✗✗。⇒ **单行路径要显式关掉** ✓✓。
+- **64×64 / 1 步这类小规格测不出设备路径的真实表现** ✗✗：20 个 token 时，
+  权重上传和 252 次 dispatch 的固定成本占主导 ✗✗，设备必然输 ✗✗。⇒ 设备路径的
+  测量要用真实尺寸（256×256 / 8 步 ✓✓）✓✓。
 
-### TODO-069: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读
-
-**状态**：⚠️ 已知缺口，未排期。2026-11-11 定位。
-
-**现象**：`src/models/qwen3/vision/mod.rs` 的 `decode_linear_weight` **不看张量自己声明的
-格式**，而是看字节长度：
-
-- 每元素 4 字节 → F32
-- 每元素 2 字节 → **F16**
-- `n_out * (n_in / 32) * 34` → Q8_0
-
-⇒ **F16 与 BF16 都是每元素 2 字节** ✓✓ —— **长度分不出两者** ✓✓，而两者解出来的值
-不同：1.0 的 BF16 位模式按 F16 读出来是 **1.875** ✓✓。
-
-**为什么现在没炸**：目前走 qwen3 视觉塔的模型，视觉权重都是 F32
-（Mage-Flow 的 `mmproj-mage-flow-F32.gguf` 全部 314 个张量都是 F32）——F32 是
-4 字节，猜得对 ✓✓。**一旦有一个 BF16 的视觉塔进这个路径，就是静默的错值** ✓✓：
-不报错、不崩，只是每个权重都读错 ✓✓。
-
-**对照**：qwen35 的视觉塔**已经是对的** ✓✓ —— 它的 `load_source_weight` 按
-`ggml_type` 分派（F32 / F16 / BF16 / Q8_0 ✓✓），而不是靠长度猜 ✓✓ ✓✓。
-qwen3 塔是这一族里剩下的那个例外 ✓✓。
-
-**为什么没有直接改**：qwen3 塔的 `VisionLayer` 每个权重字段是 `&[u8]` ✓✓，
-**同一个层里的不同权重可以是不同格式** ✓✓（比如 BF16 的主干 + F32 的 norm ✓✓），
-所以要修就得给每个字段各记一个 dtype ✓✓ —— 那是 `VisionLayer` 的结构变更 ✓✓，
-会牵动所有构造它的调用方（zdt ✓✓、wevisone_vl ✓✓、mage_flow ✓✓）✓✓。
-
-**方向**（未定）：
-
-1. 在 `core::tensor` 加一个按声明格式取矩阵的共享入口
-   （`load_f32_matrix` 已经在 `4c77690f` 里加好了 ✓✓ —— 它就是给这一类用的 ✓✓）✓✓，
-   然后把 qwen3 塔的权重路径换成它 ✓✓ —— 顺带把「按格式取」这件事收进 core ✓✓，
-   符合 §6 的单一事实源原则 ✓✓。
-2. 或者把 qwen3 塔的 `VisionLayer` 权重字段从 `&[u8]` 改成解码后的值 ✓✓，
-   跟刚修完的 bias 一样 ✓✓ —— 代价是所有构造方都要跟 ✓✓。
-
-**验收**：给 qwen3 塔一个 BF16 的视觉塔，权重解码结果与按声明格式解码的结果
-逐位相同 ✓✓。
-
-**关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
-`src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
-`src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
+**关联**：`src/models/diffusion/ernie_image/{gpu.rs,dit.rs,mod.rs}`、
+`src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
+`src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
+[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
