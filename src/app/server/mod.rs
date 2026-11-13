@@ -102,7 +102,7 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
-    Decision(crate::models::thx02::Engine),
+    Decision(crate::models::decision::Engine),
 }
 
 impl Backend {
@@ -1141,10 +1141,25 @@ fn build_backend(
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
+    if crate::models::decision::is_model_directory(&options.model) {
+        return Ok(Arc::new(Backend::Decision(
+            crate::app::decision::from_path(
+                options,
+                resolve_thread_count(
+                    options.threads,
+                    std::thread::available_parallelism()
+                        .map(usize::from)
+                        .unwrap_or(1),
+                ),
+            )?,
+        )));
+    }
     let decision_source =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
-            .filter(|source| crate::app::arch_of(source.as_ref()) == crate::models::thx02::ARCH);
+            .filter(|source| {
+                crate::models::decision::is_arch(&crate::app::arch_of(source.as_ref()))
+            });
     if let Some(source) = decision_source {
         let available = std::thread::available_parallelism()
             .map(usize::from)

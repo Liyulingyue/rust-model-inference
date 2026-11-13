@@ -1,0 +1,18 @@
+{
+  "command": [
+    "target/release-fast/deps/rust_model_inference-89d19ecf4f180428",
+    "independently_dequantized_projections_match_shared_cpu_kernels",
+    "--ignored",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "exit": 0,
+  "seconds": 0.266145610017702,
+  "layers": [
+    0,
+    44,
+    58
+  ],
+  "output": "\nrunning 1 test\ntest models::d3_turbo::tests::independently_dequantized_projections_match_shared_cpu_kernels ... \"q8_0-layer0\" projection max_abs=0.00002670288\n\"q8_0-layer44\" projection max_abs=0.000008583069\n\"q8_0-layer58\" projection max_abs=0.000005722046\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1918 filtered out; finished in 0.25s\n\n",
+  "method": "Same native layer inputs; external gguf dequantizer and independent Q8 activation rounding, original official-graph whole-run failures are unchanged."
+}

@@ -42,7 +42,7 @@ fn describe(value: &Value) -> String {
         .unwrap_or_else(|| python_json(value, false, false))
 }
 
-fn options(q: &Value) -> Result<(Vec<String>, Vec<String>), String> {
+pub(crate) fn options(q: &Value) -> Result<(Vec<String>, Vec<String>), String> {
     if !q.is_object() {
         return Err("a question is an object with a type".into());
     }
@@ -112,7 +112,7 @@ fn options(q: &Value) -> Result<(Vec<String>, Vec<String>), String> {
     }
 }
 
-fn user_prompt(state: &Value, q: &Value, codes: &[String]) -> Result<String, String> {
+pub(crate) fn user_prompt(state: &Value, q: &Value, codes: &[String]) -> Result<String, String> {
     let (_, texts) = options(q)?;
     if texts.len() > codes.len() {
         return Err("insufficient answer codes".into());
@@ -891,7 +891,7 @@ fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn decision_answer(q: &Value, keys: &[String], logits: &[f32]) -> Result<Value, String> {
+pub(crate) fn decision_answer(q: &Value, keys: &[String], logits: &[f32]) -> Result<Value, String> {
     if logits.len() != keys.len() || logits.iter().any(|x| !x.is_finite()) {
         return Err("invalid decision logits".into());
     }

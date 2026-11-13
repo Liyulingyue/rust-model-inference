@@ -18,12 +18,14 @@ use crate::app::{JevGroupedQuestionInput, JevInputs, JevMode, JevQuestionInput};
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/decide", post(decide))
+        .route("/v1/systemone", post(decide))
         .route("/v1/decide/batch", post(batch))
         .route("/v1/jev/score", post(jev_score))
         .route("/v1/jev/grouped", post(jev_grouped))
         .route("/v1/jev/image", post(jev_image))
         .route("/v1/jev/image_grouped", post(jev_image_grouped))
-        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
+        // A 32 MB inline video needs ~43 MB after base64 encoding.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -47,6 +49,10 @@ fn inference_error_status(message: &str) -> StatusCode {
         || message == "THX-02 missing thinker"
         || message.starts_with("THX-02 think requires the matching merged thinker GGUF")
         || message.starts_with("THX-02 input contains non-finite")
+        || message.starts_with("video must contain frames")
+        || message.starts_with("video frame size must be positive")
+        || message == "ffprobe could not read the video"
+        || message == "video decoding failed"
     {
         StatusCode::BAD_REQUEST
     } else {
@@ -63,33 +69,54 @@ fn parse_body(body: Result<Json<Value>, JsonRejection>) -> Result<Value, Respons
     })
 }
 
+#[cfg(test)]
 fn prepare_request(mut request: Value) -> Result<Value, String> {
     crate::models::thx02::validate_request(&request)?;
-    if let Some(images) = request.get_mut("images").and_then(Value::as_array_mut) {
-        for source in images {
-            let text = source.as_str().ok_or("images must contain strings")?.trim();
-            // The shared decoder also accepts file paths; HTTP callers may only supply URLs.
-            let data_url = text.starts_with("data:image/")
-                && text
-                    .split_once(',')
-                    .is_some_and(|(metadata, _)| metadata.contains(";base64"));
-            if !data_url && !text.starts_with("http://") && !text.starts_with("https://") {
-                return Err("HTTP decision images require data URLs or enabled remote URLs; local files are CLI-only".into());
-            }
-            let image = super::api::image_input::decode_image_source(
-                text,
-                super::api::image_input::allow_remote(),
-            )?;
-            crate::app::media::decode_image_bytes(&image.bytes)?;
-            let format = image::guess_format(&image.bytes).map_err(|error| error.to_string())?;
-            *source = json!(format!(
-                "data:{};base64,{}",
-                format.to_mime_type(),
-                base64::engine::general_purpose::STANDARD.encode(&image.bytes)
-            ));
+    normalize_images(&mut request)?;
+    Ok(request)
+}
+
+fn normalize_images(request: &mut Value) -> Result<(), String> {
+    if let Some(videos) = request.get("videos").and_then(Value::as_array) {
+        for video in videos {
+            crate::models::d3_turbo::validate_video_input(video)?;
         }
     }
-    Ok(request)
+    if let Some(images) = request.get_mut("images").and_then(Value::as_array_mut) {
+        for source in images {
+            normalize_image(source)?;
+        }
+    }
+    if let Some(assets) = request.get_mut("assets").and_then(Value::as_object_mut) {
+        for source in assets.values_mut() {
+            normalize_image(source)?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_image(source: &mut Value) -> Result<(), String> {
+    let text = source.as_str().ok_or("images must contain strings")?.trim();
+    // The shared decoder also accepts file paths; HTTP callers may only supply URLs.
+    let data_url = text.starts_with("data:image/")
+        && text
+            .split_once(',')
+            .is_some_and(|(metadata, _)| metadata.contains(";base64"));
+    if !data_url && !text.starts_with("http://") && !text.starts_with("https://") {
+        return Err("HTTP decision images require data URLs or enabled remote URLs; local files are CLI-only".into());
+    }
+    let image = super::api::image_input::decode_image_source(
+        text,
+        super::api::image_input::allow_remote(),
+    )?;
+    crate::app::media::decode_image_bytes(&image.bytes)?;
+    let format = image::guess_format(&image.bytes).map_err(|error| error.to_string())?;
+    *source = json!(format!(
+        "data:{};base64,{}",
+        format.to_mime_type(),
+        base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+    ));
+    Ok(())
 }
 
 async fn execute(
@@ -125,7 +152,11 @@ async fn execute(
             // Remote images use a blocking client; validate every batch item before forwarding.
             let requests = requests
                 .into_iter()
-                .map(prepare_request)
+                .map(|mut request| {
+                    engine.validate_request(&request)?;
+                    normalize_images(&mut request)?;
+                    Ok(request)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
             let results = requests
@@ -139,7 +170,7 @@ async fn execute(
                     .map_err(|message| (StatusCode::INTERNAL_SERVER_ERROR, message));
             }
             if batch {
-                Ok(json!({"model":"THX-02","results":results}))
+                Ok(json!({"model":engine.name(),"results":results}))
             } else {
                 results.into_iter().next().ok_or_else(|| {
                     (
@@ -316,6 +347,22 @@ mod tests {
     }
 
     #[test]
+    fn system_one_assets_cannot_read_server_files() {
+        for source in ["/etc/passwd", "file:///etc/passwd"] {
+            assert!(normalize_images(&mut json!({"assets":{"@picture":source}}))
+                .unwrap_err()
+                .contains("local files"));
+        }
+        for source in [
+            "/etc/passwd",
+            "file:///etc/passwd",
+            "https://example.com/video.mp4",
+        ] {
+            assert!(normalize_images(&mut json!({"videos":[source]})).is_err());
+        }
+    }
+
+    #[test]
     fn decision_http_rejects_bad_schema_streaming_and_local_files() {
         assert!(prepare_request(json!({"state":"hello","questions":[]})).is_err());
         for source in [
@@ -393,6 +440,10 @@ mod tests {
             "THX-02 think requires the matching merged thinker GGUF (--decision-thinker)",
             "THX-02 missing thinker",
             "THX-02 input contains non-finite values",
+            "video must contain frames and last at most 300 seconds",
+            "video frame size must be positive and at most 8,294,400 pixels",
+            "ffprobe could not read the video",
+            "video decoding failed",
         ] {
             assert_eq!(
                 inference_error_status(message),
@@ -403,6 +454,8 @@ mod tests {
         for message in [
             "THX-02 produced non-finite decision logits",
             "THX-02 missing decision head",
+            "d3 video needs ffprobe on PATH: executable not found",
+            "Vulkan device failed during projection language_model.layers.0.linear_attn.in_proj_qkv.weight",
         ] {
             assert_eq!(
                 inference_error_status(message),

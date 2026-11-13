@@ -167,6 +167,11 @@ fn main() {
         ));
         return;
     }
+    if options.jev && rust_model_inference::models::decision::is_model_directory(&options.model) {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::decision::jev::run_jev_cli(None, &options, n_threads));
+        return;
+    }
     // A native JEV model must validate its flags before another task loads components.
     let early_jev_source: Option<Arc<dyn TensorSource>> = if options.jev {
         open_model_source(&options.model, ComponentRole::Llm)
@@ -175,13 +180,12 @@ fn main() {
     } else {
         None
     };
-    if let Some(source) = early_jev_source
-        .as_ref()
-        .filter(|source| app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH)
-    {
+    if let Some(source) = early_jev_source.as_ref().filter(|source| {
+        rust_model_inference::models::decision::is_arch(&app::arch_of(source.as_ref()))
+    }) {
         app::init_rayon_global_pool(n_threads);
         app::run_or_exit(app::decision::jev::run_jev_cli(
-            source.clone(),
+            Some(source.clone()),
             &options,
             n_threads,
         ));
@@ -633,9 +637,9 @@ fn main() {
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
-    if app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH {
+    if rust_model_inference::models::decision::is_arch(&app::arch_of(source.as_ref())) {
         app::run_or_exit(app::decision::jev::run_jev_cli(
-            source.clone(),
+            Some(source.clone()),
             &options,
             n_threads,
         ));

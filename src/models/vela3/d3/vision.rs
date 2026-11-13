@@ -11,9 +11,23 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub(crate) struct D3Images {
     pub(crate) grids: Vec<VisionGrid>,
     projected: Vec<Vec<f32>>,
+}
+
+impl D3Images {
+    pub(crate) fn empty() -> Self {
+        Self {
+            grids: Vec::new(),
+            projected: Vec::new(),
+        }
+    }
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.grids.extend(other.grids);
+        self.projected.extend(other.projected);
+    }
 }
 
 pub(crate) struct D3ImageInput {
@@ -51,6 +65,27 @@ impl TensorSource for View<'_> {
 }
 
 impl<'a> View<'a> {
+    fn preserve_f32(&mut self) -> Result<(), String> {
+        let names = self
+            .entries
+            .iter()
+            .filter_map(|(name, (info, _))| {
+                (info.ggml_type != GGMLType::F32
+                    && (info.dims.len() == 1 || name.starts_with("v.patch_embd.weight")))
+                .then(|| name.clone())
+            })
+            .collect::<Vec<_>>();
+        for name in names {
+            let values = tensor::values(self, &name)?;
+            let (info, data) = self.entries.get_mut(&name).unwrap();
+            *data = Data::Owned(values.into_iter().flat_map(f32::to_le_bytes).collect());
+            info.ggml_type = GGMLType::F32;
+        }
+        // Native Transformers keeps normalized pixels in F32 through the temporal projection.
+        self.metadata
+            .insert("clip.vision.preserve_f32".into(), MetaValue::Bool(true));
+        Ok(())
+    }
     fn alias(&mut self, name: String, original: String) -> Result<(), String> {
         let mut info = self
             .base
@@ -275,14 +310,26 @@ pub(super) fn prepare(
     pool: Arc<ComputePool>,
     images: &[Value],
 ) -> Result<D3Images, String> {
+    prepare_with_gelu(source, config, pool, images, false)
+}
+
+pub(super) fn prepare_with_gelu(
+    source: &dyn TensorSource,
+    config: &Value,
+    pool: Arc<ComputePool>,
+    images: &[Value],
+    f32_gelu: bool,
+) -> Result<D3Images, String> {
     if images.is_empty() {
         return Ok(D3Images {
             grids: Vec::new(),
             projected: Vec::new(),
         });
     }
-    let view = View::new(source, config)?;
-    // shortcut: F32/F16-GELU tower is approximate; add BF16 activations before claiming image parity.
+    let mut view = View::new(source, config)?;
+    if f32_gelu {
+        view.preserve_f32()?;
+    }
     let encoder = VisionEncoder::from_source(&view, Arc::clone(&pool))?;
     let mut scratch = VisionScratchpad::new(&encoder.config);
     let mut prepared = D3Images {
@@ -301,7 +348,13 @@ pub(super) fn prepare(
             .pixels()
             .flat_map(|pixel| (0..3).map(move |c| (pixel[c] as f32 * (1. / 255.) - 0.5) / 0.5))
             .collect::<Vec<_>>();
-        let actual = encoder.encode_image(
+        let encode = if f32_gelu {
+            VisionEncoder::encode_image_f32_gelu
+        } else {
+            VisionEncoder::encode_image
+        };
+        let actual = encode(
+            &encoder,
             &pixels,
             grid.image_width(),
             grid.image_height(),
@@ -335,58 +388,143 @@ pub(super) fn expand(
     images: &D3Images,
     image_token: u32,
 ) -> Result<D3ImageInput, String> {
+    expand_media(encoder, ids, images, image_token, None)
+}
+
+pub(super) fn expand_media(
+    encoder: &D3Encoder,
+    ids: &[u32],
+    images: &D3Images,
+    image_token: u32,
+    videos: Option<(&D3Images, u32)>,
+) -> Result<D3ImageInput, String> {
     let mut expanded = Vec::new();
     let mut map = Vec::with_capacity(ids.len() + 1);
     let mut image = 0;
+    let mut video = 0;
+    let mut ordered = D3Images::empty();
+    let mut ranges = Vec::new();
     for &id in ids {
         map.push(expanded.len());
-        if id == image_token {
-            let grid = images
-                .grids
-                .get(image)
-                .ok_or("image placeholder has no image")?;
-            expanded.extend(std::iter::repeat_n(id, grid.checked_token_count()?));
+        let media = if id == image_token {
+            let index = image;
             image += 1;
+            Some((images, index))
+        } else if let Some((frames, token)) = videos.filter(|(_, token)| *token == id) {
+            let index = video;
+            video += 1;
+            let _ = token;
+            Some((frames, index))
+        } else {
+            None
+        };
+        if let Some((media, index)) = media {
+            let grid = *media
+                .grids
+                .get(index)
+                .ok_or("media placeholder has no matching feature grid")?;
+            let start = expanded.len();
+            expanded.extend(std::iter::repeat_n(id, grid.checked_token_count()?));
+            ranges.push((start, expanded.len()));
+            ordered.grids.push(grid);
+            ordered.projected.push(media.projected[index].clone());
         } else {
             expanded.push(id);
         }
     }
     map.push(expanded.len());
-    if image != images.grids.len() {
-        return Err("image count does not match prompt placeholders".into());
+    if image != images.grids.len() || video != videos.map_or(0, |(frames, _)| frames.grids.len()) {
+        return Err("media count does not match prompt placeholders".into());
     }
     encoder.validate_length(expanded.len())?;
     let mut embeddings = tensor::embed(
-        &encoder.source,
+        encoder.source.as_ref(),
         "language_model.embed_tokens.weight",
         &expanded,
     )?;
-    let mut row = 0;
-    let mut image = 0;
-    while row < expanded.len() {
-        if expanded[row] == image_token {
-            let count = images.grids[image].checked_token_count()?;
-            let projected = &images.projected[image];
-            if projected.len() != count * encoder.config.hidden {
-                return Err("image projection does not fit d3 hidden size".into());
-            }
-            embeddings[row * encoder.config.hidden..(row + count) * encoder.config.hidden]
-                .copy_from_slice(projected);
-            row += count;
-            image += 1;
-        } else {
-            row += 1;
+    let mut position_ids = expanded.clone();
+    for (image, &(row, end)) in ranges.iter().enumerate() {
+        let count = end - row;
+        let projected = &ordered.projected[image];
+        if projected.len() != count * encoder.config.hidden {
+            return Err("image projection does not fit d3 hidden size".into());
         }
+        embeddings[row * encoder.config.hidden..(row + count) * encoder.config.hidden]
+            .copy_from_slice(projected);
+        position_ids[row..end].fill(image_token);
     }
     encoder.cast(&mut embeddings);
-    let (positions, _) =
-        crate::models::qwen35::build_qwen35_positions(&expanded, Some(image_token), &images.grids)?;
+    let (positions, _) = crate::models::qwen35::build_qwen35_positions(
+        &position_ids,
+        Some(image_token),
+        &ordered.grids,
+    )?;
     Ok(D3ImageInput {
         ids: expanded,
         positions: positions.into_iter().map(|p| [p[0], p[1], p[2]]).collect(),
         original_to_expanded: map,
         embeddings,
     })
+}
+
+pub(super) fn prepare_frames(
+    source: &dyn TensorSource,
+    config: &Value,
+    pool: Arc<ComputePool>,
+    frames: &[image::RgbImage],
+) -> Result<D3Images, String> {
+    if frames.len() < 2 || frames.len() > 32 || frames.len() % 2 != 0 {
+        return Err("d3 video needs 2..32 paired frames".into());
+    }
+    let mut view = View::new(source, config)?;
+    view.preserve_f32()?;
+    let encoder = VisionEncoder::from_source(&view, Arc::clone(&pool))?;
+    let mut scratch = VisionScratchpad::new(&encoder.config);
+    let (width, height) = frames[0].dimensions();
+    let mut resize_config = encoder.config.clone();
+    resize_config.image_min_pixels = 4096_usize.div_ceil(frames.len());
+    resize_config.image_max_pixels = 200704;
+    let grid = resize_grid(width as usize, height as usize, &resize_config)?;
+    let mut prepared = D3Images::empty();
+    for pair in frames.chunks_exact(2) {
+        if pair
+            .iter()
+            .any(|frame| frame.dimensions() != (width, height))
+        {
+            return Err("all video frames must have the same size".into());
+        }
+        let pixels = pair
+            .iter()
+            .map(|frame| {
+                let image =
+                    super::super::vision::resize(frame, grid.image_width(), grid.image_height())?;
+                Ok(image
+                    .pixels()
+                    .flat_map(|p| p.0.map(|v| (v as f32 * (1. / 255.) - 0.5) / 0.5))
+                    .collect::<Vec<_>>())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        encoder.encode_pair_f32_gelu(
+            &pixels[0],
+            &pixels[1],
+            grid.image_width(),
+            grid.image_height(),
+            &mut scratch,
+            &pool,
+        )?;
+        if scratch.projected.iter().any(|v| !v.is_finite()) {
+            return Err("nonfinite video features".into());
+        }
+        trace(
+            "vela3.d3.vision.projected",
+            None,
+            &[grid.checked_token_count()?, encoder.config.projection_dim],
+            &scratch.projected,
+        );
+        prepared.grids.push(grid);
+        prepared.projected.push(scratch.projected.clone());
+    }
+    Ok(prepared)
 }
 
 #[cfg(test)]
@@ -433,6 +571,46 @@ mod tests {
             source.add(&name, &shape, &values);
         }
         (source, config)
+    }
+
+    #[test]
+    fn native_f32_vision_widens_bf16_auxiliaries_without_changing_legacy_view() {
+        let (mut source, config) = vision_fixture();
+        for (info, bytes) in source.0.values_mut() {
+            if info.dims.len() == 1 {
+                let values = bytes
+                    .chunks_exact(4)
+                    .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+                    .collect::<Vec<_>>();
+                *bytes = values
+                    .into_iter()
+                    .flat_map(|v| half::bf16::from_f32(v).to_le_bytes())
+                    .collect();
+                info.ggml_type = GGMLType::BF16;
+            }
+        }
+        let mut view = View::new(&source, &config).unwrap();
+        assert_eq!(
+            view.tensor_info("v.post_ln.bias").unwrap().ggml_type,
+            GGMLType::BF16
+        );
+        view.preserve_f32().unwrap();
+        assert_eq!(
+            view.tensor_info("v.patch_embd.weight").unwrap().ggml_type,
+            GGMLType::F32
+        );
+        assert_eq!(
+            view.tensor_info("v.post_ln.bias").unwrap().ggml_type,
+            GGMLType::F32
+        );
+        assert_eq!(
+            source
+                .tensor_info("visual.merger.norm.bias")
+                .unwrap()
+                .ggml_type,
+            GGMLType::BF16
+        );
+        VisionEncoder::from_source(&view, Arc::new(ComputePool::new(1))).unwrap();
     }
 
     #[test]
