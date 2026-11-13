@@ -6,13 +6,272 @@
   "request_fixture": "tools/oracle/d3_turbo/one.json",
   "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
   "threads": 8,
-  "measurements": {},
-  "reference_f32": null,
-  "reference_bf16": null,
+  "measurements": {
+    "performance-cpu": {
+      "name": "performance-cpu",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/d3-turbo",
+        "--system-one-request",
+        "target/d3-turbo/one.json",
+        "--threads",
+        "8",
+        "--compute",
+        "cpu"
+      ],
+      "started": 1794604990.657842,
+      "exit": 0,
+      "seconds": 52.14470312604681,
+      "stdout_path": "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/performance-cpu.stdout"
+    },
+    "performance-vulkan": {
+      "name": "performance-vulkan",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/d3-turbo",
+        "--system-one-request",
+        "target/d3-turbo/one.json",
+        "--threads",
+        "8",
+        "--compute",
+        "vulkan"
+      ],
+      "started": 1794605042.8034647,
+      "exit": 1,
+      "seconds": 5.071801627986133,
+      "stdout_path": "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/performance-vulkan.stdout"
+    },
+    "performance-oracle": {
+      "name": "performance-oracle",
+      "command": [
+        "target/oracle-cpu/bin/python",
+        "tools/oracle/d3_turbo/trace.py",
+        "--model",
+        "models/d3-turbo",
+        "--request",
+        "target/d3-turbo/one.json",
+        "--out",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/performance-oracle.jsonl",
+        "--threads",
+        "8"
+      ],
+      "started": 1794605047.8761194,
+      "exit": 0,
+      "seconds": 38.274362368974835,
+      "stdout_path": "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/performance-oracle.stdout"
+    },
+    "official-bf16-cpu": {
+      "name": "official-bf16-cpu",
+      "command": [
+        "target/oracle-cpu/bin/python",
+        "tools/oracle/d3_turbo/trace.py",
+        "--model",
+        "models/d3-turbo",
+        "--request",
+        "target/d3-turbo/one.json",
+        "--out",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-cpu.json",
+        "--threads",
+        "8",
+        "--official",
+        "--device",
+        "cpu"
+      ],
+      "started": 1794605514.3948503,
+      "exit": 0,
+      "seconds": 13.083152615930885,
+      "stdout_path": "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-cpu.stdout"
+    },
+    "performance-oracle-no-trace": {
+      "name": "performance-oracle-no-trace",
+      "command": [
+        "target/oracle-cpu/bin/python",
+        "-c",
+        "import argparse,importlib.util\nfrom pathlib import Path\nspec=importlib.util.spec_from_file_location('d3_reference_timing','tools/oracle/d3_turbo/trace.py')\nm=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nclass QuietTrace:\n    def __init__(self,*args):pass\n    def emit(self,*args,**kwargs):pass\n    def record(self,*args,**kwargs):pass\nm.Trace=QuietTrace\nm.main(argparse.Namespace(model=Path('models/d3-turbo'),request=Path('target/d3-turbo/one.json'),out=Path('target/d3-turbo/coverage/performance-oracle-no-trace.jsonl'),threads=8,official=False,device='cpu',gguf=None,activation_quantization=False,vision_only=False))\n"
+      ],
+      "started": 1794605091.6956124,
+      "exit": 0,
+      "seconds": 35.86868391185999
+    },
+    "official-bf16-gpu-isolated": {
+      "name": "official-bf16-gpu-isolated",
+      "command": [
+        ".venv/bin/python",
+        "tools/oracle/d3_turbo/trace.py",
+        "--model",
+        "models/d3-turbo",
+        "--request",
+        "target/d3-turbo/one.json",
+        "--out",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-gpu-isolated.json",
+        "--threads",
+        "8",
+        "--official",
+        "--device",
+        "cuda:0"
+      ],
+      "started": 1794605527.4790237,
+      "exit": -15,
+      "seconds": 161.25012880098075,
+      "stdout_path": "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-gpu-isolated.stdout"
+    }
+  },
+  "reference_f32": {
+    "response": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "sentiment": {
+          "type": "choice",
+          "choice": "negative",
+          "probabilities": {
+            "positive": 0.0029988714131783047,
+            "negative": 0.9821543852021494,
+            "neutral": 0.014846743384672326
+          },
+          "confidence": 0.9111498725296336
+        }
+      },
+      "usage": {
+        "input_tokens": 117,
+        "output_tokens": 0
+      }
+    },
+    "load_seconds": 0.9230190729722381,
+    "inference_seconds": 31.299106998136267,
+    "dtype": "float32",
+    "device": "cpu",
+    "vision_only": false
+  },
+  "reference_bf16": {
+    "response": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "sentiment": {
+          "type": "choice",
+          "choice": "negative",
+          "probabilities": {
+            "positive": 0.0030380580631977324,
+            "negative": 0.9819063406456412,
+            "neutral": 0.015055601291161028
+          },
+          "confidence": 0.9101479474916581
+        }
+      },
+      "usage": {
+        "input_tokens": 117,
+        "output_tokens": 0
+      }
+    },
+    "load_seconds": 1.3207563199102879,
+    "inference_seconds": 6.214026652975008,
+    "dtype": "bfloat16",
+    "device": "cpu",
+    "torch": "2.10.0+cpu",
+    "transformers": "5.17.0"
+  },
   "limitations": [
     "End-to-end diagnostic timings include model loading; F32 Oracle includes trace payload I/O.",
     "A failed strict Vulkan attempt is not a GPU inference timing.",
     "Official BF16 and the native F32 execution use different activation precision.",
-    "Earlier runs with concurrent conversion, different thread counts or administrative pauses are not throughput comparisons."
-  ]
+    "Earlier runs with concurrent conversion, different thread counts or administrative pauses are not throughput comparisons.",
+    "The isolated official GPU attempt was terminated during loading at the container memory bound, before inference. It is neither an observed OOM exception nor a GPU inference timing.",
+    "CPU and GPU setup failures are archived separately; the corrected CPU BF16 retry passed and the corrected cuda:0 GPU retry did not reach inference.",
+    "The no-trace F32 reference runs the same graph with a QuietTrace sink; its diagnostic end-to-end time includes Python startup and model loading.",
+    "CPU reference environment additionally uses project-local accelerate 1.13.0 and psutil 7.2.2; GPU Torch reuses the preinstalled host ROCm environment."
+  ],
+  "attempts_complete": true,
+  "reference_f32_without_trace": {
+    "response": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "sentiment": {
+          "type": "choice",
+          "choice": "negative",
+          "probabilities": {
+            "positive": 0.0029988714131783047,
+            "negative": 0.9821543852021494,
+            "neutral": 0.014846743384672326
+          },
+          "confidence": 0.9111498725296336
+        }
+      },
+      "usage": {
+        "input_tokens": 117,
+        "output_tokens": 0
+      }
+    },
+    "load_seconds": 0.8813125339802355,
+    "inference_seconds": 29.525012555066496,
+    "dtype": "float32",
+    "device": "cpu",
+    "vision_only": false
+  },
+  "reference_bf16_gpu": null,
+  "official_bf16_gpu_interruption": {
+    "timestamp": 1794605686.595917,
+    "pid": 188252,
+    "command": ".venv/bin/python tools/oracle/d3_turbo/trace.py --model models/d3-turbo --request target/d3-turbo/one.json --out /workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-gpu-isolated.json --threads 8 --official --device cuda:0 ",
+    "stage": "model loading; no inference result",
+    "action": "SIGTERM by validation runner",
+    "reason": "Isolated load remained at the container memory bound; stopped rather than treating an incomplete load as inference or OOM.",
+    "memory": {
+      "memory.current": "59049050112",
+      "memory.max": "59055800320",
+      "memory.events": "low 0\nhigh 0\nmax 16\noom 0\noom_kill 0\noom_group_kill 0",
+      "memory.swap.current": "0"
+    },
+    "process_status": "Name:\tpython\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t188252\nNgid:\t0\nPid:\t188252\nPPid:\t188215\nTracerPid:\t0\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t64\nGroups:\t0 \nNStgid:\t188252\nNSpid:\t188252\nNSpgid:\t188214\nNSsid:\t188214\nKthread:\t0\nVmPeak:\t113793736 kB\nVmSize:\t111731520 kB\nVmLck:\t       0 kB\nVmPin:\t       0 kB\nVmHWM:\t26659964 kB\nVmRSS:\t26659964 kB\nRssAnon:\t26140552 kB\nRssFile:\t  519408 kB\nRssShmem:\t       4 kB\nVmData:\t51983528 kB\nVmStk:\t     132 kB\nVmExe:\t    2956 kB\nVmLib:\t  971612 kB\nVmPTE:\t   53796 kB\nVmSwap:\t       0 kB\nHugetlbPages:\t       0 kB\nCoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t32\nSigQ:\t104/2061183\nSigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000001001000\nSigCgt:\t0000000100000002\nCapInh:\t0000000000000000\nCapPrm:\t00000000200404db\nCapEff:\t00000000200404db\nCapBnd:\t00000000200404db\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t2\nSeccomp_filters:\t1\nSpeculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\nCpus_allowed:\tffffffff,ffffffff,ffffffff,ffffffff\nCpus_allowed_list:\t0-127\nMems_allowed:\t00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000003\nMems_allowed_list:\t0-1\nvoluntary_ctxt_switches:\t994\nnonvoluntary_ctxt_switches:\t68\nx86_Thread_features:\t\nx86_Thread_features_locked:\t\n",
+    "last_log": ":  20%|█▉        | 234/1183 [00:12<00:35, 26.55it/s]\nLoading weights:  20%|██        | 238/1183 [00:12<00:47, 19.73it/s]\nLoading weights:  20%|██        | 241/1183 [00:12<00:46, 20.07it/s]\nLoading weights:  21%|██        | 249/1183 [00:13<00:32, 28.89it/s]\nLoading weights:  21%|██▏       | 253/1183 [00:13<00:42, 21.93it/s]\nLoading weights:  22%|██▏       | 256/1183 [00:13<00:41, 22.34it/s]\nLoading weights:  22%|██▏       | 259/1183 [00:13<01:00, 15.16it/s]\nLoading weights:  22%|██▏       | 265/1183 [00:14<00:46, 19.83it/s]\nLoading weights:  23%|██▎       | 273/1183 [00:14<00:33, 27.32it/s]\nLoading weights:  23%|██▎       | 277/1183 [00:14<00:35, 25.84it/s]\nLoading weights:  24%|██▍       | 281/1183 [00:14<00:42, 21.26it/s]\nLoading weights:  24%|██▍       | 288/1183 [00:14<00:32, 27.78it/s]\nLoading weights:  25%|██▍       | 292/1183 [00:15<00:42, 21.09it/s]\nLoading weights:  25%|██▍       | 295/1183 [00:15<00:42, 20.95it/s]\nLoading weights:  25%|██▌       | 301/1183 [00:15<00:33, 26.20it/s]\nLoading weights:  26%|██▌       | 305/1183 [00:15<00:42, 20.55it/s]\nLoading weights:  26%|██▌       | 308/1183 [00:15<00:42, 20.73it/s]\nLoading weights:  26%|██▋       | 311/1183 [00:16<01:02, 13.95it/s]\nLoading weights:  27%|██▋       | 318/1183 [00:16<00:43, 20.01it/s]\nLoading weights:  28%|██▊       | 327/1183 [00:16<00:29, 28.91it/s]\nLoading weights:  28%|██▊       | 331/1183 [00:17<00:44, 19.07it/s]\nLoading weights:  29%|██▊       | 338/1183 [00:17<00:34, 24.46it/s]\nLoading weights:  29%|██▉       | 344/1183 [00:17<00:44, 18.90it/s]\nLoading weights:  30%|███       | 355/1183 [00:17<00:29, 28.24it/s]\nLoading weights:  30%|███       | 360/1183 [00:18<00:42, 19.14it/s]\nLoading weights:  31%|███       | 364/1183 [00:18<00:47, 17.37it/s]\nLoading weights:  31%|███       | 367/1183 [00:18<00:47, 17.30it/s]\nLoading weights:  31%|███▏      | 371/1183 [00:19<00:45, 17.98it/s]\nLoading weights:  32%|███▏      | 378/1183 [00:19<00:35, 22.55it/s]\nLoading weights:  32%|███▏      | 383/1183 [00:19<00:35, 22.74it/s]\nLoading weights:  33%|███▎      | 386/1183 [00:19<00:46, 17.22it/s]\nLoading weights:  33%|███▎      | 393/1183 [00:19<00:34, 23.21it/s]\nLoading weights:  34%|███▎      | 397/1183 [00:20<00:36, 21.40it/s]\nLoading weights:  34%|███▍      | 400/1183 [00:20<00:49, 15.88it/s]\nLoading weights:  34%|███▍      | 406/1183 [00:20<00:36, 21.56it/s]\nLoading weights:  35%|███▍      | 410/1183 [00:21<00:43, 17.83it/s]\nLoading weights:  35%|███▍      | 410/1183 [00:40<00:43, 17.83it/s]"
+  },
+  "preflight_failures": {
+    "official-bf16-cpu": {
+      "step": {
+        "name": "official-bf16-cpu",
+        "command": [
+          "target/oracle-cpu/bin/python",
+          "tools/oracle/d3_turbo/trace.py",
+          "--model",
+          "models/d3-turbo",
+          "--request",
+          "target/d3-turbo/one.json",
+          "--out",
+          "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-cpu.json",
+          "--threads",
+          "8",
+          "--official"
+        ],
+        "started": 1794605086.1513193,
+        "exit": 1,
+        "seconds": 3.569711778080091,
+        "stdout_path": "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-cpu.stdout"
+      },
+      "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference-d3-turbo/tools/oracle/d3_turbo/trace.py\", line 238, in <module>\n    main(p.parse_args())\n  File \"/workspace/rust-model-inference-d3-turbo/tools/oracle/d3_turbo/trace.py\", line 92, in main\n    engine = runtime.D3(root, device=args.device, model_name=\"vllm-sr/d3-turbo\")\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference-d3-turbo/models/d3-turbo/d3_runtime.py\", line 1765, in __init__\n    self.backbone = backbone_class(self.backbone_type).from_pretrained(\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference-d3-turbo/target/oracle-cpu/lib/python3.12/site-packages/transformers/modeling_utils.py\", line 4164, in from_pretrained\n    device_map = check_and_set_device_map(device_map)  # warn, error and fix the device map\n                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference-d3-turbo/target/oracle-cpu/lib/python3.12/site-packages/transformers/integrations/accelerate.py\", line 137, in check_and_set_device_map\n    raise ValueError(\nValueError: Using a `device_map`, `tp_plan`, `torch.device` context manager or setting `torch.set_default_device(device)` requires `accelerate`. You can install it with `pip install accelerate`\n"
+    },
+    "official-bf16-gpu-isolated": {
+      "step": {
+        "name": "official-bf16-gpu-isolated",
+        "command": [
+          ".venv/bin/python",
+          "tools/oracle/d3_turbo/trace.py",
+          "--model",
+          "models/d3-turbo",
+          "--request",
+          "target/d3-turbo/one.json",
+          "--out",
+          "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/official-bf16-gpu-isolated.json",
+          "--threads",
+          "8",
+          "--official",
+          "--device",
+          "cuda"
+        ],
+        "started": 1794605127.56523,
+        "exit": 1,
+        "seconds": 5.822080468060449
+      },
+      "error": "Traceback (most recent call last):\n  File \"/workspace/rust-model-inference-d3-turbo/tools/oracle/d3_turbo/trace.py\", line 238, in <module>\n    main(p.parse_args())\n  File \"/workspace/rust-model-inference-d3-turbo/tools/oracle/d3_turbo/trace.py\", line 92, in main\n    engine = runtime.D3(root, device=args.device, model_name=\"vllm-sr/d3-turbo\")\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/rust-model-inference-d3-turbo/models/d3-turbo/d3_runtime.py\", line 1753, in __init__\n    torch.cuda.set_device(self.device)\n  File \"/opt/venv/lib/python3.12/site-packages/torch/cuda/__init__.py\", line 565, in set_device\n    device = _get_device_index(device)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/venv/lib/python3.12/site-packages/torch/cuda/_utils.py\", line 373, in _get_device_index\n    return _torch_get_device_index(device, optional, allow_cpu)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/opt/venv/lib/python3.12/site-packages/torch/_utils.py\", line 872, in _get_device_index\n    raise ValueError(\nValueError: Expected a torch.device with a specified index or an integer, but got:cuda\n"
+    }
+  }
 }

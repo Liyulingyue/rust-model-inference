@@ -115,6 +115,33 @@ impl Media {
 fn invalid_question(question: &Value, message: &str) -> Value {
     json!({"type":question["type"],"error":"invalid_question","reason":"question_malformed","message":message})
 }
+
+fn media_length(
+    ids: &[u32],
+    images: &D3Images,
+    videos: &D3Images,
+    image_token: u32,
+    video_token: u32,
+) -> Result<usize, String> {
+    if ids.iter().filter(|&&id| id == image_token).count() != images.grids.len()
+        || ids.iter().filter(|&&id| id == video_token).count() != videos.grids.len()
+    {
+        return Err("media count does not match prompt placeholders".into());
+    }
+    images
+        .grids
+        .iter()
+        .chain(&videos.grids)
+        .try_fold(ids.len(), |len, grid| {
+            let extra = grid
+                .checked_token_count()?
+                .checked_sub(1)
+                .ok_or("empty media feature grid")?;
+            len.checked_add(extra)
+                .ok_or_else(|| "d3 expanded media length overflow".into())
+        })
+}
+
 fn count_usage(
     prefixes: &mut std::collections::HashMap<String, Vec<u32>>,
     tokens: &mut usize,
@@ -385,7 +412,32 @@ impl Engine {
             .iter()
             .take_while(|&&(_, stop)| stop <= end)
             .count();
-        let input = if images.grids.is_empty() && media.features.grids.is_empty() {
+        let has_media = !images.grids.is_empty() || !media.features.grids.is_empty();
+        let expanded_len = if has_media {
+            match media_length(
+                encoded.get_ids(),
+                &images,
+                &media.features,
+                self.tokenizer
+                    .token_to_id("<|image_pad|>")
+                    .ok_or("d3 tokenizer has no image token")?,
+                self.video_token,
+            ) {
+                Ok(len) => len,
+                Err(message) => return Ok((invalid_question(question, &message), Vec::new(), 0)),
+            }
+        } else {
+            encoded.len()
+        };
+        if expanded_len > limit {
+            return Ok((
+                json!({"type":question["type"],"error":"max_length_exceeded","reason":"question_tokens",
+                "message":format!("the question prompt has {expanded_len} tokens, over the maximum context length of {limit} tokens; nothing was truncated")}),
+                Vec::new(),
+                0,
+            ));
+        }
+        let input = if !has_media {
             None
         } else {
             Some(self.encoder.media_input(
@@ -407,14 +459,6 @@ impl Engine {
         let (ids, state) = input.as_ref().map_or((encoded.get_ids(), state), |input| {
             (input.ids.as_slice(), input.original_to_expanded[state])
         });
-        if ids.len() > limit {
-            return Ok((
-                json!({"type":question["type"],"error":"max_length_exceeded","reason":"question_tokens",
-                "message":format!("the question prompt has {} tokens, over the maximum context length of {limit} tokens; nothing was truncated",ids.len())}),
-                Vec::new(),
-                0,
-            ));
-        }
         if state == 0 || state >= ids.len() {
             return Err("invalid d3 state/question boundary".into());
         }
@@ -610,6 +654,33 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn media_length_checks_placeholders_and_expansion_without_embeddings() {
+        let mut images = D3Images::empty();
+        images
+            .grids
+            .push(crate::models::qwen35::vision::VisionGrid {
+                grid_t: 1,
+                grid_h: 2,
+                grid_w: 3,
+                patch_size: 16,
+                merge_size: 2,
+            });
+        let empty = D3Images::empty();
+        assert_eq!(
+            media_length(&[1, 4, 2, 3], &images, &empty, 4, 9).unwrap(),
+            9
+        );
+        assert_eq!(
+            media_length(&[1, 9, 2, 3], &empty, &images, 4, 9).unwrap(),
+            9
+        );
+        for ids in [&[1, 4, 4][..], &[1, 2], &[1, 4, 9]] {
+            assert!(media_length(ids, &images, &empty, 4, 9).is_err());
+        }
+        assert!(media_length(&[1, 4], &images, &images, 4, 9).is_err());
+    }
+
     #[test]
     #[ignore = "requires the remote same-input GGUF projection fixtures"]
     fn independently_dequantized_projections_match_shared_cpu_kernels() {

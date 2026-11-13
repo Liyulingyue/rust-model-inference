@@ -1,4 +1,173 @@
 {
-  "status": "pending",
-  "comparisons": []
+  "status": "complete",
+  "comparisons": [
+    {
+      "format": "raw",
+      "requested_backend": "auto",
+      "actual": {
+        "requested": "auto",
+        "device_submissions": [
+          0
+        ],
+        "device_error": true,
+        "actual": "cpu"
+      },
+      "command": [
+        "target/oracle-cpu/bin/python",
+        "tools/oracle/d3_turbo/compare.py",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/text-entries/raw-cpu.jsonl",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/device-entries/raw-auto.jsonl"
+      ],
+      "exit": 0,
+      "validation": "passed",
+      "checks": 195,
+      "failed": 0,
+      "first_failure": null,
+      "worst_relative_rmse": {
+        "name": "vela3.d3.embedding",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0
+      },
+      "final_logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0
+        }
+      ]
+    },
+    {
+      "format": "raw",
+      "requested_backend": "vulkan",
+      "actual": {
+        "requested": "vulkan",
+        "device_submissions": [],
+        "device_error": true,
+        "actual": "failed"
+      },
+      "validation": "not-run",
+      "reason": "The CLI did not complete inference; no complete trace exists."
+    },
+    {
+      "format": "f16",
+      "requested_backend": "auto",
+      "actual": {
+        "requested": "auto",
+        "device_submissions": [
+          0
+        ],
+        "device_error": true,
+        "actual": "cpu"
+      },
+      "command": [
+        "target/oracle-cpu/bin/python",
+        "tools/oracle/d3_turbo/compare.py",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/gguf-text-entries/f16-cpu.jsonl",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/device-entries/f16-auto.jsonl",
+        "--lossy"
+      ],
+      "exit": 0,
+      "validation": "passed",
+      "checks": 195,
+      "failed": 0,
+      "first_failure": null,
+      "worst_relative_rmse": {
+        "name": "vela3.d3.embedding",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0
+      },
+      "final_logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0
+        }
+      ]
+    },
+    {
+      "format": "f16",
+      "requested_backend": "vulkan",
+      "actual": {
+        "requested": "vulkan",
+        "device_submissions": [],
+        "device_error": true,
+        "actual": "failed"
+      },
+      "validation": "not-run",
+      "reason": "The CLI did not complete inference; no complete trace exists."
+    },
+    {
+      "format": "q8_0",
+      "requested_backend": "auto",
+      "actual": {
+        "requested": "auto",
+        "device_submissions": [
+          0
+        ],
+        "device_error": true,
+        "actual": "cpu"
+      },
+      "command": [
+        "target/oracle-cpu/bin/python",
+        "tools/oracle/d3_turbo/compare.py",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/gguf-text-entries/q8_0-cpu.jsonl",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/coverage/device-entries/q8_0-auto.jsonl",
+        "--lossy"
+      ],
+      "exit": 0,
+      "validation": "passed",
+      "checks": 195,
+      "failed": 0,
+      "first_failure": null,
+      "worst_relative_rmse": {
+        "name": "vela3.d3.embedding",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0
+      },
+      "final_logits": [
+        {
+          "name": "vela3.d3.logits",
+          "layer": null,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0
+        }
+      ]
+    },
+    {
+      "format": "q8_0",
+      "requested_backend": "vulkan",
+      "actual": {
+        "requested": "vulkan",
+        "device_submissions": [],
+        "device_error": true,
+        "actual": "failed"
+      },
+      "validation": "not-run",
+      "reason": "The CLI did not complete inference; no complete trace exists."
+    }
+  ],
+  "limitation": "A passing Auto trace that fell back to CPU does not establish GPU execution or acceptance."
 }

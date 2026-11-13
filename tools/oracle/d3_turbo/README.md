@@ -35,6 +35,8 @@ Use a project-local Python environment with the versions listed in
 `validation.md`. The original `d3_runtime.py`, `d3_compose.py` and checkpoint
 remain read-only Oracle inputs. `trace.py --official` runs the runtime's default
 BF16 mode; the diagnostic path streams its official graph through F32.
+The default runtime also requires Accelerate. Select an indexed GPU device
+such as `--device cuda:0`; the pinned runtime rejects unindexed `cuda`.
 
 ```bash
 python tools/oracle/d3_turbo/trace.py --model models/d3-turbo \

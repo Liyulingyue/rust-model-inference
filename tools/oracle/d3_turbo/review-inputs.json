@@ -1,0 +1,186 @@
+{
+  "passed": true,
+  "host": "d3-navi31",
+  "scope": "Adapter-local encoded media marker and expanded context preflight",
+  "before_cli": {
+    "command": [
+      "target/release-fast/rust-model-inference",
+      "--model",
+      "models/d3-turbo",
+      "--decision-request",
+      "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/review-marker-request.json",
+      "--max-context",
+      "64",
+      "--compute",
+      "cpu",
+      "--threads",
+      "2"
+    ],
+    "request_sha256": "cb52c0a8961d3041aeba74be60d29f2712c61a8b355e7cffe5866862c7c6477a",
+    "exit": 1,
+    "stderr": "Inference error: media placeholder has no matching feature grid"
+  },
+  "checks": [
+    {
+      "name": "review-marker-cli",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/d3-turbo",
+        "--decision-request",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/review-marker-request.json",
+        "--max-context",
+        "64",
+        "--compute",
+        "cpu",
+        "--threads",
+        "2"
+      ],
+      "request_sha256": "cb52c0a8961d3041aeba74be60d29f2712c61a8b355e7cffe5866862c7c6477a",
+      "exit": 0,
+      "cumulative_child_max_rss_kib": 1085136,
+      "seconds": 4.77720060502179,
+      "response": {
+        "model": "vllm-sr/d3-turbo",
+        "answers": {
+          "bad": {
+            "type": "noul",
+            "error": "invalid_question",
+            "reason": "question_malformed",
+            "message": "media count does not match prompt placeholders"
+          },
+          "good": {
+            "type": "noul",
+            "error": "max_length_exceeded",
+            "reason": "question_tokens",
+            "message": "the question prompt has 159 tokens, over the maximum context length of 64 tokens; nothing was truncated"
+          }
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "stderr": "[vision-timing] total=4.304s  patch_embed=0.028s (0.7%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.007s (0.2%)  vit_layers=4.039s (93.8%)  post_ln=0.000s (0.0%)  projection=0.229s (5.3%)\n"
+    },
+    {
+      "name": "review-context-cli",
+      "command": [
+        "target/release-fast/rust-model-inference",
+        "--model",
+        "models/d3-turbo",
+        "--decision-request",
+        "/workspace/rust-model-inference-d3-turbo/target/d3-turbo/review-long-context-request.json",
+        "--max-context",
+        "64",
+        "--compute",
+        "cpu",
+        "--threads",
+        "2"
+      ],
+      "request_sha256": "313115ee0070f4024f2a898cb202bc088eb7ec5fcf1758c006cae973691e6934",
+      "exit": 0,
+      "cumulative_child_max_rss_kib": 1095776,
+      "seconds": 4.907013772986829,
+      "response": {
+        "model": "vllm-sr/d3-turbo",
+        "answers": {
+          "good": {
+            "type": "noul",
+            "error": "max_length_exceeded",
+            "reason": "question_tokens",
+            "message": "the question prompt has 140155 tokens, over the maximum context length of 64 tokens; nothing was truncated"
+          }
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "stderr": "[vision-timing] total=4.249s  patch_embed=0.028s (0.7%)  spatial_merge=0.000s (0.0%)  patch_bias=0.000s (0.0%)  pos_emb=0.008s (0.2%)  vit_layers=4.002s (94.2%)  post_ln=0.000s (0.0%)  projection=0.210s (4.9%)\n"
+    },
+    {
+      "name": "review-marker-http",
+      "command": [
+        "target/release-fast/rust-model-server",
+        "--model",
+        "models/d3-turbo",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "56409",
+        "--max-context",
+        "4096",
+        "--compute",
+        "cpu",
+        "--threads",
+        "4"
+      ],
+      "request_sha256": "cb52c0a8961d3041aeba74be60d29f2712c61a8b355e7cffe5866862c7c6477a",
+      "route": "/v1/systemone",
+      "status": 200,
+      "seconds": 149.60518521186896,
+      "response": {
+        "model": "vllm-sr/d3-turbo",
+        "answers": {
+          "bad": {
+            "type": "noul",
+            "error": "invalid_question",
+            "reason": "question_malformed",
+            "message": "media count does not match prompt placeholders"
+          },
+          "good": {
+            "type": "noul",
+            "noul": 0.9139342495530434
+          }
+        },
+        "usage": {
+          "input_tokens": 159,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "review-context-http",
+      "command": [
+        "target/release-fast/rust-model-server",
+        "--model",
+        "models/d3-turbo",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "56409",
+        "--max-context",
+        "4096",
+        "--compute",
+        "cpu",
+        "--threads",
+        "4"
+      ],
+      "request_sha256": "313115ee0070f4024f2a898cb202bc088eb7ec5fcf1758c006cae973691e6934",
+      "route": "/v1/systemone",
+      "status": 200,
+      "seconds": 2.6260122950188816,
+      "response": {
+        "model": "vllm-sr/d3-turbo",
+        "answers": {
+          "good": {
+            "type": "noul",
+            "error": "max_length_exceeded",
+            "reason": "question_tokens",
+            "message": "the question prompt has 140155 tokens, over the maximum context length of 4096 tokens; nothing was truncated"
+          }
+        },
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    }
+  ],
+  "limits": [
+    "The short CLI request uses a 64-token context: the normal question receives max_length_exceeded; the HTTP run uses 4096 and answers the normal question.",
+    "The 140155-token media prompt is rejected before text embedding expansion. Child RSS values are Linux cumulative child peak RSS in KiB; the second CLI sample is the higher peak.",
+    "These probes validate input handling, not large-context inference acceptance."
+  ]
+}

@@ -1,39 +1,4 @@
 {
-  "engineering-final11.json": [
-    {
-      "name": "build11",
-      "command": [
-        "cargo",
-        "build",
-        "--locked",
-        "--profile",
-        "release-fast",
-        "--features",
-        "vulkan,parity-trace",
-        "--bin",
-        "rust-model-inference",
-        "--bin",
-        "rust-model-server"
-      ],
-      "exit": 0,
-      "seconds": 322.7189342950005
-    },
-    {
-      "name": "lib-final11",
-      "command": [
-        "cargo",
-        "test",
-        "--locked",
-        "--profile",
-        "release-fast",
-        "--features",
-        "vulkan,parity-trace",
-        "--lib"
-      ],
-      "exit": 101,
-      "seconds": 313.2968940290157
-    }
-  ],
   "baseline-comparison.json": {
     "baseline": {
       "passed": 1644,
@@ -77,7 +42,7 @@
       ]
     },
     "current": {
-      "passed": 1653,
+      "passed": 1654,
       "failed": 34,
       "ignored": 232,
       "failures": [
@@ -119,7 +84,7 @@
     },
     "new_failures": [],
     "resolved_failures": [],
-    "current_log": "lib-final11.log"
+    "current_log": "lib-final13.log"
   },
   "bin-targets.json": {
     "baseline": [
@@ -215,14 +180,20 @@
       "--bin",
       "rust-model-server"
     ],
-    "started_utc": "2026-11-13T20:03:14Z",
     "exit": 101,
-    "seconds": 85.23986842203885
+    "seconds": 18.440813757944852
   },
   "cli-final.json": {
     "command": [
-      "target/release-fast/deps/d3_turbo_cli-2599d550ee04d965",
-      "--nocapture"
+      "cargo",
+      "test",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--test",
+      "d3_turbo_cli"
     ],
     "exit": 0
   },
@@ -383,10 +354,28 @@
       }
     ],
     "new_errors": [],
-    "note": "Line offsets may differ in shared files; compare error message, file and lint. No lint level was disabled."
+    "note": "Line offsets may differ in shared files; compare error message, file and lint. No lint level was disabled.",
+    "current_run": {
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib",
+        "--bin",
+        "rust-model-inference",
+        "--bin",
+        "rust-model-server"
+      ],
+      "exit": 101,
+      "seconds": 18.440813757944852
+    }
   },
   "source_sync": {
-    "verified_utc": "2026-11-13T20:18:33.594515+00:00",
+    "verified_utc": "2026-11-13T21:18:07.407954+00:00",
     "base": "237a67bba3d8255f459e493701b4435c29e3cb11",
     "all_equal": true,
     "files": [
@@ -427,8 +416,8 @@
       },
       {
         "path": "src/models/d3_turbo/mod.rs",
-        "sha256": "d8df2df16ebd754f525dc6c5d244c658f693e203d67408c58870f13aca1a2ade",
-        "remote_sha256": "d8df2df16ebd754f525dc6c5d244c658f693e203d67408c58870f13aca1a2ade"
+        "sha256": "f1479da9addf3e0ea4ba02aa02e848087845cbf6c5b6925bf77fbff3c9abbea5",
+        "remote_sha256": "f1479da9addf3e0ea4ba02aa02e848087845cbf6c5b6925bf77fbff3c9abbea5"
       },
       {
         "path": "src/models/d3_turbo/video.rs",
@@ -521,5 +510,56 @@
         "remote_sha256": "6172c6314bc67aad75774382d6c2603d166ebf780e83ab4498b366084a022d44"
       }
     ]
-  }
+  },
+  "engineering-final13.json": [
+    {
+      "name": "build12",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--bin",
+        "rust-model-inference",
+        "--bin",
+        "rust-model-server"
+      ],
+      "exit": 0,
+      "seconds": 328.13622036599554
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib"
+      ],
+      "exit": 101,
+      "log": "lib-final13.log",
+      "name": "lib-final13"
+    },
+    {
+      "name": "cli-final12",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--test",
+        "d3_turbo_cli"
+      ],
+      "exit": 0,
+      "seconds": 81.21308393008076
+    }
+  ]
 }

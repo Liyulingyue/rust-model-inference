@@ -45,6 +45,14 @@ approval for a fully aligned model or a working GPU implementation.
 - Clippy's initially missing component was streamed into the project-local
   toolchain with its published SHA256. An actual run and fresh baseline run
   both report the same 10 fatal lint signatures; none was added or suppressed.
+- A literal image marker in one question could abort all questions, and media
+  text embeddings were allocated before checking the effective context cap.
+  An adapter-local encoded-token preflight now checks image/video marker counts
+  and expanded length before the shared media expansion. This preserves
+  question-level errors and avoids oversized embedding allocations. The real
+  pre-fix CLI reproduced the batch abort; metadata-only checks cover expansion
+  and missing/extra markers without allocating embeddings. Accepted inference
+  and all legacy/shared code remain unchanged by this repair.
 
 ## Layer and compatibility review
 

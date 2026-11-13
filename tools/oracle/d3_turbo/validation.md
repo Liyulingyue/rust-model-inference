@@ -30,8 +30,11 @@ thresholds below were not relaxed.
 16-core cgroup CPU quota, 59,055,800,320-byte memory cgroup, RADV NAVI31 / gfx1100
 with 49,136 MB VRAM. Rust 1.98.1, `release-fast`, features
 `vulkan,parity-trace`. CPU Oracle: Torch 2.10.0+cpu, Transformers 5.17.0,
-NumPy 2.1.2, external `gguf` 0.17.1. Torch GPU diagnostic environment: ROCm
-7.2.1 / Torch 2.9.1. All environments/toolchains are project-local.
+NumPy 2.1.2, external `gguf` 0.17.1, Accelerate 1.13.0 and psutil 7.2.2.
+Torch GPU diagnostic environment: ROCm
+7.2.1 / Torch 2.9.1. Added dependencies and toolchains are project-local; the
+GPU diagnostic environment reuses the host's existing ROCm Torch through the
+project environment's system-site-packages setting.
 
 The native original directory and GGUF BF16/F32 use F32 activations and
 accumulation. F16 prepared projections round activations to F16; Q8_0/Q4_0/
@@ -117,12 +120,36 @@ so the fixed spatial product checks passed. One of 201 internal checks failed
 at layer 63 output (max abs 0.004516602, relative RMSE 0.0000023583).
 Whole-graph acceptance therefore remains failed. This run includes a brief
 administrative trace-cleanup pause and is excluded from performance comparisons.
+The [cleanup audit](trace-cleanup.json) verifies that the retained manifest
+prefix is byte-identical to the backup after removing the superseded aborted
+run; it distinguishes the paused line count from the final manifest.
 
 Original CPU tracking passed all 402 floating checks. Track length, timestamps
 and usage matched exactly; maximum edge difference was 0.000000346, visibility
 difference 0.000000259 and confidence difference zero. Both the internal and
 fixed spatial product gates passed on this short fixture. Compilation and other
 validation work overlapped the run, so its wall time is diagnostic only.
+
+The sequential same-GGUF single-question matrix completed all nine formats,
+with 195 floating checkpoints per format. All nine final logit checks passed,
+including identical argmax for the lossy profiles. Whole-graph results remain
+separate:
+
+| GGUF storage | Failed / 195 | Worst relative RMSE | Whole-graph gate |
+| --- | --- | --- | --- |
+| BF16 | 0 | 0.000003728 | passed |
+| F32 | 0 | 0.000003728 | passed |
+| F16 | 0 | 0.001794428 | passed |
+| Q8_0 | 57 | 0.043577229 | failed |
+| Q4_0 | 70 | 0.067283551 | failed |
+| Q4_1 | 58 | 0.037410178 | failed |
+| Q4_K | 110 | 0.178324955 | failed |
+| Q5_K | 106 | 0.086455848 | failed |
+| Q6_K | 108 | 0.146404908 | failed |
+
+The floating and lossy profiles retain their original thresholds. These are
+same-stored-weight implementation comparisons; passing final decisions does
+not override the failed internal gates or measure quantization quality broadly.
 
 ## Real CPU entries
 
@@ -133,6 +160,44 @@ entry also passed. The fixed single-question input has SHA256
 its byte-identical fixture is `one.json`. These execution results are separate
 from whole-graph numerical acceptance.
 
+Original CPU JEV text and image requests also completed real CLI/HTTP calls
+with identical responses. Native HTTP requests for text, image, video, box,
+video-box and tracking returned HTTP 200 with no question errors. These sampled
+entries do not establish the unrun format/media/JEV combinations.
+
+The official runtime's default BF16 CPU result passed the separately fixed
+text-choice product gate: labels, selected choice and 117-token usage matched
+exactly. Maximum probability difference was 0.000248062 and confidence
+difference 0.001002037, both below 0.02. This is one product fixture across
+different activation precision, not whole-graph BF16 arithmetic equivalence.
+
+## Same-host diagnostic performance
+
+Sequential eight-thread runs used the same original BF16 weights and
+117-token `one.json` input. End-to-end wall times include process startup and
+model loading; these are `release-fast` diagnostics, not throughput or capacity
+measurements. The native path uses F32 activations/accumulation.
+
+| Path | End-to-end seconds | Reference forward seconds | Outcome |
+| --- | ---: | ---: | --- |
+| Native CPU, F32 computation | 52.14 | not separately measured | passed |
+| Official graph CPU, F32, trace payloads | 38.27 | 31.30 | passed |
+| Official graph CPU, F32, QuietTrace sink | 35.87 | 29.53 | passed |
+| Official default CPU, BF16 computation | 13.08 | 6.21 | passed |
+| Native strict Vulkan attempt | 5.07 | unavailable | device loss before a completed forward |
+| Official default GPU, BF16, `cuda:0` | 161.25 | unavailable | loading interrupted at container memory bound |
+
+The default BF16 CPU comparison uses different arithmetic from native F32.
+The F32 rows provide a more comparable graph baseline, with trace overhead
+listed separately. Native Vulkan has no completed GPU inference time because
+the shared projection fails. The corrected official GPU attempt ran without
+a concurrent CPU Oracle; loading stalled at 410/1183 tensors and the runner
+terminated it after observing 59,049,050,112 of 59,055,800,320 cgroup bytes in
+use. No OOM or OOM-kill event was recorded, and inference never started. This
+is an interrupted resource-bound load, not an OOM exception or a GPU benchmark.
+The earlier missing-Accelerate and unindexed-`cuda` setup failures are archived
+separately in `performance.json`; neither is an inference failure.
+
 ## Device failure and shared dependency
 
 Strict Vulkan runs of the original BF16 directory, F16 GGUF and Q8_0 GGUF failed
@@ -141,8 +206,12 @@ Initialization and warmup succeeded, but inference did not. The repository's
 existing ignored `batched_linear_device_rows_match_and_reuse_weights` probe also
 failed on its first F32 format, independently of D3's model graph. A same-host
 ROCm Torch matrix diagnostic succeeded for F16 and F32; this is only a hardware
-probe, not a complete reference model benchmark. The complete official BF16 GPU
-load exceeded the cgroup memory budget before inference and was stopped.
+probe, not a complete reference model benchmark. An earlier complete official
+BF16 GPU load was interrupted as the cgroup approached its memory limit while
+a same-weight CPU Oracle was also running. It did not reach inference and does
+not establish isolated-GPU memory requirements or performance. The
+[recorded shared-test output and interruption](shared-vulkan.json) preserve
+these measurement boundaries.
 
 The adapter uses existing eligible Vulkan projections, with scan, norms,
 softmax and small projections on CPU. Complete working GPU execution remains
@@ -172,7 +241,7 @@ F16 activation and Q4_1 sum semantics rather than weakening their projection
 checks. Lossy embeddings use numerical tolerances; only discrete contracts
 require exact equality.
 
-The final library run (`lib-final11.log`) has 1653 passed, 34 failed and 232
+The final library run (`lib-final13.log`) has 1654 passed, 34 failed and 232
 ignored, compared with 1644/34/230 on the unchanged base with identical features.
 The 34 failure names are identical; no new failing test was introduced. The
 real FFmpeg fixture test passed (one test actually executed), including Unix
@@ -192,6 +261,18 @@ converter; the repaired converter passes all seven Python checks, including
 all nine small-format round trips and serial/parallel K-quant equality. This
 changes publication only, not the existing exported model payloads.
 
+A further review reproduced a literal image marker aborting an entire
+multi-question request. Encoded image/video marker counts are now checked per
+question, and the expanded token count is checked against the effective context
+cap before allocating text embeddings. This preflight is local to the new
+adapter; accepted requests retain the shared encoder's computation. A small
+metadata-only test covers both media types and missing/extra markers; real
+CLI and HTTP [regressions](review-inputs.json) also passed. The HTTP response
+retained a valid answer alongside the malformed question's error. A
+140,155-token media prompt was rejected at a 64-token cap with a measured child
+peak RSS of 1,095,776 KiB, before allocating its text embeddings. This checks
+rejection behavior, not large-context inference acceptance.
+
 Real legacy Vela model assets are unavailable on this host: small graph tests
 and compilation are useful but are **not** a real legacy inference regression.
 
@@ -209,8 +290,9 @@ Machine-readable evidence: [asset hashes](assets.json),
 [CPU/Auto trace comparisons](device-comparison.json),
 [510-row matrix](coverage.csv), [performance](performance.json) and
 [snapshot status](report-status.json). The snapshot explicitly records whether
-the sequential remote validation queue has finished; an in-progress snapshot
-does not establish acceptance of its remaining runs.
+the sequential remote validation queue has finished. All scheduled runs are
+now finished, including the interrupted official GPU load; this does not
+establish acceptance of failed or unrun combinations.
 
 Layer 2 owns remaining whole-graph numerical gates, unrun media/format/JEV
 combinations, large context/multiwindow acceptance and real legacy-model

@@ -117,3 +117,19 @@ question; usage counts shared state once but runtime cost is not cached.
 Auto may fall back to CPU after a device failure. Strict Vulkan errors instead
 of reporting a successful CPU execution. Neither fallback nor correct rejection
 counts as GPU support passing.
+
+## Same-host diagnostic timings
+
+Eight-thread, 117-token text-choice runs on the authorized EPYC 9334 / NAVI31
+host measured 52.14 s end to end for native CPU F32 computation, 35.87 s for
+the official F32 graph without trace payload I/O, and 13.08 s for the official
+default BF16 CPU runtime. These include startup/loading and use different
+activation precision in the BF16 row; they are not throughput measurements.
+The default BF16 CPU product result passed the fixed probability/confidence
+tolerances with identical choice and token usage.
+
+Strict native Vulkan failed before a completed forward, so it has no GPU
+inference timing. The separate official `cuda:0` load was stopped at the
+container memory bound before inference, without a recorded OOM event. Exact
+commands, timings and setup/interruption evidence are in
+[performance.json](../../tools/oracle/d3_turbo/performance.json).

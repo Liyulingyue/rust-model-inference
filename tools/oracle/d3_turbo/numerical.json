@@ -1666,5 +1666,2356 @@
     ],
     "failed_checkpoints": [],
     "remote_evidence": "target/d3-turbo/coverage/track-compare.stdout"
+  },
+  "one_f32": {
+    "passed": true,
+    "profile": "float",
+    "checks": 195,
+    "failed": 0,
+    "first_failure": null,
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": true,
+      "max_abs": 0.000171661376953125,
+      "rmse": 3.6210710629723923e-06,
+      "relative_rmse": 3.727750260270753e-06,
+      "cosine": 0.9999999999930512
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 5.7220458984375e-06,
+        "rmse": 5.422821715428664e-06,
+        "relative_rmse": 5.198589970826377e-07,
+        "cosine": 0.999999999999906
+      }
+    ],
+    "failed_checkpoints": [],
+    "remote_evidence": "target/d3-turbo/coverage/one-f32-compare.stdout"
+  },
+  "one_f16": {
+    "passed": true,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 0,
+    "first_failure": null,
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": true,
+      "max_abs": 0.12142181396484375,
+      "rmse": 0.001743043454070515,
+      "relative_rmse": 0.0017944278214254788,
+      "cosine": 0.9999983902204613
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.0009298324584960938,
+        "rmse": 0.0005869540673741705,
+        "relative_rmse": 5.6267004767248406e-05,
+        "cosine": 0.9999999993371576
+      }
+    ],
+    "failed_checkpoints": [],
+    "remote_evidence": "target/d3-turbo/coverage/one-f16-compare.stdout"
+  },
+  "one_bf16": {
+    "passed": true,
+    "profile": "float",
+    "checks": 195,
+    "failed": 0,
+    "first_failure": null,
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": true,
+      "max_abs": 0.000171661376953125,
+      "rmse": 3.6210710629723923e-06,
+      "relative_rmse": 3.727750260270753e-06,
+      "cosine": 0.9999999999930512
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 5.7220458984375e-06,
+        "rmse": 5.422821715428664e-06,
+        "relative_rmse": 5.198589970826377e-07,
+        "cosine": 0.999999999999906
+      }
+    ],
+    "failed_checkpoints": [],
+    "remote_evidence": "target/d3-turbo/coverage/one-bf16-compare.stdout"
+  },
+  "one_q8_0": {
+    "passed": false,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 57,
+    "first_failure": {
+      "name": "vela3.d3.input_norm",
+      "layer": 44,
+      "passed": false,
+      "max_abs": 0.6642026901245117,
+      "rmse": 0.01974743845108568,
+      "relative_rmse": 0.021374522234153537,
+      "cosine": 0.999771570138277
+    },
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": false,
+      "max_abs": 1.2681055068969727,
+      "rmse": 0.0423380224410003,
+      "relative_rmse": 0.043577228786158065,
+      "cosine": 0.9990503507676065
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.003993988037109375,
+        "rmse": 0.0029521838507482923,
+        "relative_rmse": 0.0002828041566371034,
+        "cosine": 0.9999999781892357
+      }
+    ],
+    "failed_checkpoints": [
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.hidden",
+        "layer": null
+      }
+    ],
+    "remote_evidence": "target/d3-turbo/coverage/one-q8_0-compare.stdout"
+  },
+  "one_q4_0": {
+    "passed": false,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 70,
+    "first_failure": {
+      "name": "vela3.d3.input_norm",
+      "layer": 38,
+      "passed": false,
+      "max_abs": 0.48406681418418884,
+      "rmse": 0.020744128418109062,
+      "relative_rmse": 0.02145941047947868,
+      "cosine": 0.9997697405485818
+    },
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": false,
+      "max_abs": 5.795016288757324,
+      "rmse": 0.0661558129676817,
+      "relative_rmse": 0.06728355136226162,
+      "cosine": 0.9977393184957299
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.029320716857910156,
+        "rmse": 0.023486702972761796,
+        "relative_rmse": 0.0022310422878845013,
+        "cosine": 0.9999975502414433
+      }
+    ],
+    "failed_checkpoints": [
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.hidden",
+        "layer": null
+      }
+    ],
+    "remote_evidence": "target/d3-turbo/coverage/one-q4_0-compare.stdout"
+  },
+  "one_q4_1": {
+    "passed": false,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 58,
+    "first_failure": {
+      "name": "vela3.d3.input_norm",
+      "layer": 44,
+      "passed": false,
+      "max_abs": 2.6549625396728516,
+      "rmse": 0.020244052304038907,
+      "relative_rmse": 0.02193260682949652,
+      "cosine": 0.999759474544775
+    },
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": false,
+      "max_abs": 0.8838577270507812,
+      "rmse": 0.03682336899241117,
+      "relative_rmse": 0.037410177792723535,
+      "cosine": 0.9993002493715797
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.028099536895751953,
+        "rmse": 0.020124733498546907,
+        "relative_rmse": 0.001957075699557294,
+        "cosine": 0.9999993646975153
+      }
+    ],
+    "failed_checkpoints": [
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.hidden",
+        "layer": null
+      }
+    ],
+    "remote_evidence": "target/d3-turbo/coverage/one-q4_1-compare.stdout"
+  },
+  "one_q4_k": {
+    "passed": false,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 110,
+    "first_failure": {
+      "name": "vela3.d3.input_norm",
+      "layer": 24,
+      "passed": false,
+      "max_abs": 0.19849777221679688,
+      "rmse": 0.015921022685734854,
+      "relative_rmse": 0.020288268926521264,
+      "cosine": 0.9997941927557104
+    },
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": false,
+      "max_abs": 7.215343475341797,
+      "rmse": 0.17495511418494844,
+      "relative_rmse": 0.17832495494686298,
+      "cosine": 0.9841021605554211
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.08867359161376953,
+        "rmse": 0.06948569280178757,
+        "relative_rmse": 0.006738911212648153,
+        "cosine": 0.9999835210431731
+      }
+    ],
+    "failed_checkpoints": [
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 24
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 26
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 28
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 28
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.hidden",
+        "layer": null
+      }
+    ],
+    "remote_evidence": "target/d3-turbo/coverage/one-q4_k-compare.stdout"
+  },
+  "one_q5_k": {
+    "passed": false,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 106,
+    "first_failure": {
+      "name": "vela3.d3.input_norm",
+      "layer": 28,
+      "passed": false,
+      "max_abs": 0.21465638279914856,
+      "rmse": 0.018806657192590007,
+      "relative_rmse": 0.02359215396725597,
+      "cosine": 0.9997216996576441
+    },
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": false,
+      "max_abs": 4.42401123046875,
+      "rmse": 0.08398164053665626,
+      "relative_rmse": 0.08645584792668184,
+      "cosine": 0.9962582518493652
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.15634441375732422,
+        "rmse": 0.09638328461796698,
+        "relative_rmse": 0.009174686258864447,
+        "cosine": 0.9999934324993701
+      }
+    ],
+    "failed_checkpoints": [
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 28
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.hidden",
+        "layer": null
+      }
+    ],
+    "remote_evidence": "target/d3-turbo/coverage/one-q5_k-compare.stdout"
+  },
+  "one_q6_k": {
+    "passed": false,
+    "profile": "cpu-block-activations",
+    "checks": 195,
+    "failed": 108,
+    "first_failure": {
+      "name": "vela3.d3.input_norm",
+      "layer": 26,
+      "passed": false,
+      "max_abs": 0.14873385429382324,
+      "rmse": 0.015666244550702795,
+      "relative_rmse": 0.020053211939135743,
+      "cosine": 0.999798929529731
+    },
+    "worst_relative_rmse": {
+      "name": "vela3.d3.input_norm",
+      "layer": 58,
+      "passed": false,
+      "max_abs": 8.286638736724854,
+      "rmse": 0.14231953197805033,
+      "relative_rmse": 0.1464049080675527,
+      "cosine": 0.9892795643592024
+    },
+    "logits": [
+      {
+        "name": "vela3.d3.logits",
+        "layer": null,
+        "passed": true,
+        "max_abs": 0.08360862731933594,
+        "rmse": 0.05198235723700554,
+        "relative_rmse": 0.004970246346928157,
+        "cosine": 0.9999908498981268
+      }
+    ],
+    "failed_checkpoints": [
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 26
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 28
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 29
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 30
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 31
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 32
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 33
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 34
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 35
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 36
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 37
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 38
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 39
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 40
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 41
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 42
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 43
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 44
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 45
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 46
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 47
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 48
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 49
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 50
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 51
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 52
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 53
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 54
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 55
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 56
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 57
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 58
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 59
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 60
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 61
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 62
+      },
+      {
+        "name": "vela3.d3.input_norm",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.attention_residual",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.layer",
+        "layer": 63
+      },
+      {
+        "name": "vela3.d3.hidden",
+        "layer": null
+      }
+    ],
+    "remote_evidence": "target/d3-turbo/coverage/one-q6_k-compare.stdout"
   }
 }

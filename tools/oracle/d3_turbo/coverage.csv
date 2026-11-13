@@ -1,35 +1,35 @@
 capability,format,requested_backend,compute_and_state,implementation,validation,entry_validation,numerical_validation,cli_evidence,http_evidence,actual_backend,numerical_evidence,remaining_layer
-choice,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,entries.json:choice/raw/cpu/cli,entries.json:choice/raw/cpu/http,cpu,numerical.json:raw_text_three,2
-choice,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/f32/cpu/cli,entries.json:choice/f32/cpu/http,cpu,,2
+choice,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,entries.json:choice/raw/cpu/cli,entries.json:raw-media-http/text,cpu,numerical.json:raw_text_three,2
+choice,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,失败（共享设备投影；Auto 回退不是 GPU 通过）,通过,通过（回退 CPU 对比；非 GPU 验收）,entries.json:choice/raw/auto/cli,entries.json:choice/raw/auto/http,cpu,device-comparison.json:raw/auto,3
+choice,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,失败（共享设备投影；Auto 回退不是 GPU 通过）,失败,未运行,entries.json:choice/raw/vulkan/cli,entries.json:choice/raw/vulkan/http,failed,,3
+choice,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,entries.json:choice/f32/cpu/cli,entries.json:choice/f32/cpu/http,cpu,numerical.json:one_f32,2
 choice,f32,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,f32,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,f16,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/f16/cpu/cli,entries.json:choice/f16/cpu/http,cpu,,2
-choice,f16,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,f16,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,bf16,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/bf16/cpu/cli,entries.json:choice/bf16/cpu/http,cpu,,2
+choice,f16,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,entries.json:choice/f16/cpu/cli,entries.json:choice/f16/cpu/http,cpu,numerical.json:one_f16,2
+choice,f16,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,失败（共享设备投影；Auto 回退不是 GPU 通过）,通过,通过（回退 CPU 对比；非 GPU 验收）,entries.json:choice/f16/auto/cli,entries.json:choice/f16/auto/http,cpu,device-comparison.json:f16/auto,3
+choice,f16,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,失败（共享设备投影；Auto 回退不是 GPU 通过）,失败,未运行,entries.json:choice/f16/vulkan/cli,entries.json:choice/f16/vulkan/http,failed,,3
+choice,bf16,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,entries.json:choice/bf16/cpu/cli,entries.json:choice/bf16/cpu/http,cpu,numerical.json:one_bf16,2
 choice,bf16,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,bf16,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q8_0,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/q8_0/cpu/cli,entries.json:choice/q8_0/cpu/http,cpu,,2
-choice,q8_0,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q8_0,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q4_0,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/q4_0/cpu/cli,entries.json:choice/q4_0/cpu/http,cpu,,2
+choice,q8_0,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,entries.json:choice/q8_0/cpu/cli,entries.json:choice/q8_0/cpu/http,cpu,numerical.json:one_q8_0,2
+choice,q8_0,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,失败（共享设备投影；Auto 回退不是 GPU 通过）,通过,通过（回退 CPU 对比；非 GPU 验收）,entries.json:choice/q8_0/auto/cli,entries.json:choice/q8_0/auto/http,cpu,device-comparison.json:q8_0/auto,3
+choice,q8_0,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,失败（共享设备投影；Auto 回退不是 GPU 通过）,失败,未运行,entries.json:choice/q8_0/vulkan/cli,entries.json:choice/q8_0/vulkan/http,failed,,3
+choice,q4_0,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,entries.json:choice/q4_0/cpu/cli,entries.json:choice/q4_0/cpu/http,cpu,numerical.json:one_q4_0,2
 choice,q4_0,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,q4_0,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q4_1,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/q4_1/cpu/cli,entries.json:choice/q4_1/cpu/http,cpu,,2
+choice,q4_1,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,entries.json:choice/q4_1/cpu/cli,entries.json:choice/q4_1/cpu/http,cpu,numerical.json:one_q4_1,2
 choice,q4_1,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,q4_1,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q4_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/q4_k/cpu/cli,entries.json:choice/q4_k/cpu/http,cpu,,2
+choice,q4_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,entries.json:choice/q4_k/cpu/cli,entries.json:choice/q4_k/cpu/http,cpu,numerical.json:one_q4_k,2
 choice,q4_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,q4_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q5_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/q5_k/cpu/cli,entries.json:choice/q5_k/cpu/http,cpu,,2
+choice,q5_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,entries.json:choice/q5_k/cpu/cli,entries.json:choice/q5_k/cpu/http,cpu,numerical.json:one_q5_k,2
 choice,q5_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-choice,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:choice/q6_k/cpu/cli,entries.json:choice/q6_k/cpu/http,cpu,,2
+choice,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,entries.json:choice/q6_k/cpu/cli,entries.json:choice/q6_k/cpu/http,cpu,numerical.json:one_q6_k,2
 choice,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 choice,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-noul,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（HTTP 尚缺）,未运行,通过,numerical.json:raw_text_three,,cpu,numerical.json:raw_text_three,2
+noul,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,numerical.json:raw_text_three,entries.json:raw-media-http/text,cpu,numerical.json:raw_text_three,2
 noul,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 noul,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 noul,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -59,7 +59,7 @@ noul,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding
 noul,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 noul,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 noul,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-score,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（HTTP 尚缺）,未运行,通过,numerical.json:raw_text_three,,cpu,numerical.json:raw_text_three,2
+score,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,numerical.json:raw_text_three,entries.json:raw-media-http/text,cpu,numerical.json:raw_text_three,2
 score,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 score,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 score,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -89,7 +89,7 @@ score,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block roundin
 score,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 score,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 score,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-image,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,未运行,失败,numerical.json:raw_image,,cpu,numerical.json:raw_image,2
+image,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,numerical.json:raw_image,entries.json:raw-media-http/image,cpu,numerical.json:raw_image,2
 image,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 image,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 image,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -119,7 +119,7 @@ image,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block roundin
 image,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 image,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 image,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-video,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（HTTP 尚缺）,未运行,通过,numerical.json:raw_video,,cpu,numerical.json:raw_video,2
+video,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,numerical.json:raw_video,entries.json:raw-media-http/video,cpu,numerical.json:raw_video,2
 video,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 video,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 video,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -179,7 +179,7 @@ asset_state,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block r
 asset_state,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 asset_state,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 asset_state,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-asset_instructions,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,未运行,失败,numerical.json:raw_box,,cpu,numerical.json:raw_box,2
+asset_instructions,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,numerical.json:raw_box,entries.json:raw-media-http/box,cpu,numerical.json:raw_box,2
 asset_instructions,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 asset_instructions,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 asset_instructions,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -239,7 +239,7 @@ asset_criteria,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 bloc
 asset_criteria,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 asset_criteria,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 asset_criteria,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-box,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,未运行,失败,numerical.json:raw_box,,cpu,numerical.json:raw_box,2
+box,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,numerical.json:raw_box,entries.json:raw-media-http/box,cpu,numerical.json:raw_box,2
 box,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 box,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 box,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -269,7 +269,7 @@ box,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding 
 box,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 box,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 box,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-video_box,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,未运行,失败,numerical.json:raw_video_box,,cpu,numerical.json:raw_video_box,2
+video_box,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,失败（数值门槛）,通过,失败,numerical.json:raw_video_box,entries.json:raw-media-http/video-box,cpu,numerical.json:raw_video_box,2
 video_box,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 video_box,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 video_box,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -299,7 +299,7 @@ video_box,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rou
 video_box,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 video_box,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 video_box,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-track,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（HTTP 尚缺）,未运行,通过,numerical.json:raw_track,,cpu,numerical.json:raw_track,2
+track,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,通过（已测样例；范围见证据）,通过,通过,numerical.json:raw_track,entries.json:raw-media-http/track,cpu,numerical.json:raw_track,2
 track,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 track,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 track,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -329,7 +329,7 @@ track,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block roundin
 track,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 track,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 track,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-jev_text,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
+jev_text,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:jev_text/raw/cpu/cli,entries.json:jev_text/raw/cpu/http,cpu,,2
 jev_text,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 jev_text,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 jev_text,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
@@ -359,7 +359,7 @@ jev_text,q5_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block roun
 jev_text,q6_k,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
 jev_text,q6_k,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 jev_text,q6_k,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
-jev_image,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2
+jev_image,raw,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行（数值尚缺）,通过,未运行,entries.json:jev_image/raw/cpu/cli,entries.json:jev_image/raw/cpu/http,cpu,,2
 jev_image,raw,auto,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 jev_image,raw,vulkan,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,未实现（共享设备投影待补）,未运行,未运行,未运行,,,,,3
 jev_image,f32,cpu,F32 activations/accumulation and scratch; F16/Q8 block rounding in compatible projections; no generation KV,已实现,未运行,未运行,未运行,,,,,2

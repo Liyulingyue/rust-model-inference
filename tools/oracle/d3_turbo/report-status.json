@@ -1,9 +1,13 @@
 {
-  "snapshot_utc": "2026-11-13T20:25:47Z",
-  "pipeline_done": false,
+  "snapshot_utc": "2026-11-13T21:35:22Z",
+  "pipeline_done": true,
   "pipeline_error": null,
   "matrix_rows": 510,
-  "entry_rows": 10,
-  "numerical_cases": 7,
-  "product_cases": 3
+  "entry_rows": 16,
+  "numerical_cases": 16,
+  "product_cases": 3,
+  "followup_done": true,
+  "official_isolated_done": true,
+  "all_scheduled_runs_finished": true,
+  "adaptation_status": "Experimental / partial; failed numerical gates and shared Vulkan dependency remain"
 }
