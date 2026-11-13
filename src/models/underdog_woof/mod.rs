@@ -143,6 +143,7 @@ impl Model {
         if threads == 0 {
             return Err("Underdog Woof requires at least one compute thread".into());
         }
+        eprintln!("Voice by Underdog Woof (https://underdog.ai)");
         Ok(Self {
             source,
             frontend,

@@ -227,7 +227,9 @@ Self-review corrected the missing exhaustive server backend label arm, checked
 request/route isolation and retry semantics, retained upstream code/derivative
 licensing, and fixed the interface checker to finish negative/concurrency tests
 without hiding the numerical failure. Documentation now names both acceptance
-failures. No subjective listening or broad perceptual evaluation was done.
+failures. A final license check added visible upstream voice credit when the
+model loads, shared by CLI and server. No subjective listening or broad
+perceptual evaluation was done.
 
 Remaining work before marking complete:
 

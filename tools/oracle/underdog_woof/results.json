@@ -5187,7 +5187,59 @@
         "first_relative_gate_failure": null,
         "peak_relative_error": 1.1319955334131986e-05
       }
-    ]
+    ],
+    "mira_first_sentence_metrics": {
+      "natural": {
+        "format": "f32",
+        "requested": "Cpu",
+        "gpu_projections": 0,
+        "cpu_projections": 5985,
+        "metrics": {
+          "latents": {
+            "max_abs": 0.2969844937324524,
+            "rmse": 0.009264118037371882,
+            "relative_rmse": 0.009913711342426844,
+            "cosine": 0.9999508769986692
+          },
+          "waveform": {
+            "max_abs": 0.14010997489094734,
+            "rmse": 0.0032826713858221186,
+            "relative_rmse": 0.056912917316735985,
+            "cosine": 0.9983803315525062
+          }
+        },
+        "seconds": {
+          "speech": 1.280615667,
+          "decoder": 29.525644529
+        },
+        "oracle": "target/underdog-woof/sensitivity/natural"
+      },
+      "forced": {
+        "format": "f32",
+        "requested": "Cpu",
+        "gpu_projections": 0,
+        "cpu_projections": 5985,
+        "metrics": {
+          "latents": {
+            "max_abs": 2.0682811737060547e-05,
+            "rmse": 1.2056899595235132e-06,
+            "relative_rmse": 1.2902320737883536e-06,
+            "cosine": 0.9999999999991659
+          },
+          "waveform": {
+            "max_abs": 7.189810276031494e-07,
+            "rmse": 5.580189383904424e-08,
+            "relative_rmse": 9.674585716667579e-07,
+            "cosine": 0.9999999999994871
+          }
+        },
+        "seconds": {
+          "speech": 1.318649854,
+          "decoder": 29.641438829
+        },
+        "oracle": "target/underdog-woof/sensitivity/forced"
+      }
+    }
   },
   "vulkan_diagnostics": {
     "shared-vulkan-control.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails' (49721) panicked at src/compute/linear.rs:882:18:\ncalled `Result::unwrap()` on an `Err` value: Device(\"Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails ... FAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.33s\n\n",
@@ -5290,7 +5342,8 @@
       "Preserve source code/license and derivative notice; do not treat upstream artifacts as MIT.",
       "Missing Backend label match arm fixed and release binaries rebuilt.",
       "Interface checker records numerical gate failures separately so negative/concurrency tests still run; gate remains failed.",
-      "Document long Mira drift and strict Vulkan failures instead of marking full support."
+      "Document long Mira drift and strict Vulkan failures instead of marking full support.",
+      "Display Voice by Underdog Woof (https://underdog.ai) when the model loads in CLI/server, as required by the upstream attribution terms."
     ],
     "remaining": [
       "Shared Vulkan initialization/device path needs repair and per-format numeric/performance reruns.",
