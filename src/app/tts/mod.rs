@@ -107,6 +107,51 @@ pub(crate) fn pivo_request(
     })
 }
 
+pub(crate) fn is_underdog_woof_model(path: &Path) -> bool {
+    crate::format::ggufrs::open_model_source(path, ComponentRole::Llm)
+        .ok()
+        .is_some_and(|source| {
+            source
+                .metadata("general.architecture")
+                .and_then(|value| value.to_string_val())
+                == Some(crate::models::underdog_woof::ARCHITECTURE)
+        })
+}
+
+pub(crate) fn underdog_woof_request(
+    options: &crate::app::cli::CliOptions,
+) -> Result<crate::models::underdog_woof::SpeechRequest, String> {
+    for flag in &options.supplied_flags {
+        let allowed = matches!(
+            flag.as_str(),
+            "--tts"
+                | "--model"
+                | "--voice"
+                | "--seed"
+                | "--temperature"
+                | "--temp"
+                | "--threads"
+                | "--compute"
+                | "--gpu"
+        ) || (!options.serve && matches!(flag.as_str(), "--prompt" | "--out"))
+            || (options.serve && flag == "--serve");
+        if !allowed {
+            return Err(format!("Underdog Woof --tts does not support {flag}"));
+        }
+    }
+    let seed = u32::try_from(options.seed.unwrap_or(0))
+        .map_err(|_| "Underdog Woof --seed must be in 0..=4294967295".to_string())?;
+    let request = crate::models::underdog_woof::SpeechRequest {
+        input: options.prompt.clone().unwrap_or_default(),
+        voice: options.voice.clone().unwrap_or_else(|| "juno".into()),
+        seed,
+        temperature: options.temperature.unwrap_or(0.5),
+        normalize: true,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
 enum TtsFrontend<'a> {
     Breeze,
     Dots,
@@ -164,17 +209,20 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         .metadata("general.architecture")
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
+    let write_waveform = |waveform: &[f32], sample_rate| {
+        write_wav_f32_channels(
+            options.out.as_deref().ok_or("--tts requires --out")?,
+            waveform,
+            sample_rate,
+            1,
+        )
+    };
     if arch == "pivo" {
         let request = pivo_request(options)?;
         let model =
             crate::models::pivo::Model::from_source(source.as_ref(), options.compute_policy())?;
         let waveform = model.synthesize(&request).map_err(|e| e.to_string())?;
-        write_wav_f32_channels(
-            options.out.as_deref().ok_or("--tts requires --out")?,
-            &waveform,
-            crate::models::pivo::SAMPLE_RATE,
-            1,
-        )?;
+        write_waveform(&waveform, crate::models::pivo::SAMPLE_RATE)?;
         eprintln!(
             "PiVo: format={} voice={} samples={} elapsed={:.3}s",
             model.format.name(),
@@ -185,6 +233,30 @@ pub fn run_tts_cli(options: &crate::app::cli::CliOptions) -> Result<(), String> 
         if let Some(notice) = pivo_format_notice(model.format) {
             eprintln!("{notice}");
         }
+        return Ok(());
+    }
+    if arch == crate::models::underdog_woof::ARCHITECTURE {
+        let request = underdog_woof_request(options)?;
+        let available = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        let model = crate::models::underdog_woof::Model::from_source(
+            source,
+            resolve_thread_count(options.threads, available),
+            options.compute_policy(),
+        )?;
+        let waveform = model
+            .synthesize(&request)
+            .map_err(|error| error.to_string())?;
+        write_waveform(&waveform, crate::models::underdog_woof::SAMPLE_RATE)?;
+        eprintln!(
+            "Underdog Woof: format={} voice={} seed={} samples={} elapsed={:.3}s",
+            model.format,
+            request.voice,
+            request.seed,
+            waveform.len(),
+            started.elapsed().as_secs_f64()
+        );
         return Ok(());
     }
     let mmproj_path = options
@@ -429,8 +501,119 @@ fn generate_tts_frames<R: rand::Rng + ?Sized>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) struct WoofMetadataFixture(pub std::path::PathBuf);
+
+    impl WoofMetadataFixture {
+        pub(crate) fn new() -> Self {
+            use std::io::Write;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("woof-{}-{nonce}.gguf", std::process::id()));
+            let mut bytes = b"GGUF".to_vec();
+            bytes.extend(3u32.to_le_bytes());
+            bytes.extend(0u64.to_le_bytes());
+            bytes.extend(1u64.to_le_bytes());
+            let key = "general.architecture";
+            bytes.extend((key.len() as u64).to_le_bytes());
+            bytes.extend(key.as_bytes());
+            bytes.extend(8u32.to_le_bytes());
+            let value = crate::models::underdog_woof::ARCHITECTURE;
+            bytes.extend((value.len() as u64).to_le_bytes());
+            bytes.extend(value.as_bytes());
+            bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap()
+                .write_all(&bytes)
+                .unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for WoofMetadataFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn woof_options(extra: &[&str]) -> crate::app::cli::CliOptions {
+        let mut args = vec!["rmi", "--tts", "--prompt", "Hi.", "--out", "speech.wav"];
+        args.extend_from_slice(extra);
+        crate::app::cli::parse_cli_options(
+            &args.into_iter().map(str::to_string).collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn underdog_woof_cli_uses_voice_seed_and_temperature() {
+        let options = woof_options(&[
+            "--voice",
+            "mira",
+            "--seed",
+            "4294967295",
+            "--temperature",
+            "0.25",
+        ]);
+        let request = underdog_woof_request(&options).unwrap();
+        assert_eq!(request.input, "Hi.");
+        assert_eq!(request.voice, "mira");
+        assert_eq!(request.seed, u32::MAX);
+        assert_eq!(request.temperature, 0.25);
+        assert!(request.normalize);
+        assert_eq!(
+            underdog_woof_request(&woof_options(&["--temp", "0.75"]))
+                .unwrap()
+                .temperature,
+            0.75
+        );
+        for extra in [
+            vec!["--seed", "-1"],
+            vec!["--seed", "4294967296"],
+            vec!["--voice", "Pi"],
+            vec!["--temperature", "NaN"],
+        ] {
+            assert!(underdog_woof_request(&woof_options(&extra)).is_err());
+        }
+    }
+
+    #[test]
+    fn underdog_woof_rejects_every_irrelevant_cli_option() {
+        for extra in [
+            vec!["--mmproj", "unused.gguf"],
+            vec!["--ref-audio", "voice.wav"],
+            vec!["--ref-text", "reference"],
+            vec!["--edit"],
+            vec!["--speed", "1.0"],
+            vec!["--pronunciations", "{}"],
+            vec!["--kv-cache", "f32"],
+            vec!["--max-tokens", "10"],
+            vec!["--max-context", "1100"],
+            vec!["--top-k", "10"],
+            vec!["--language", "en"],
+            vec!["--dry-run"],
+            vec!["--tts-model", "unused.gguf"],
+            vec!["--embedding"],
+            vec!["--profile"],
+        ] {
+            let options = woof_options(&extra);
+            let error = underdog_woof_request(&options).unwrap_err();
+            assert!(error.contains(extra[0]), "{error}");
+        }
+        let mut server = woof_options(&["--serve"]);
+        server.serve = true;
+        assert!(underdog_woof_request(&server)
+            .unwrap_err()
+            .contains("--prompt"));
+    }
 
     #[test]
     fn pivo_rejects_options_that_cannot_affect_speech() {

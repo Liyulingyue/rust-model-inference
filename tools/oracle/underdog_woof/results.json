@@ -1,0 +1,5301 @@
+{
+  "schema": "underdog-woof-validation-v1",
+  "date": "2026-11-14",
+  "base_commit": "237a67bba3d8255f459e493701b4435c29e3cb11",
+  "status": "Experimental / partial adaptation: strict Vulkan failed; long Mira free-generation gate failed",
+  "environment": {
+    "host": {
+      "cpu": "AMD EPYC 9334",
+      "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+      "system": "Linux-6.8.0-147-generic-x86_64-with-glibc2.39",
+      "python": "3.12.3"
+    },
+    "packages": {
+      "numpy": "2.3.4",
+      "gguf": "0.19.0"
+    },
+    "formats": {
+      "f32": {
+        "bytes": 153003648,
+        "tensors": {
+          "F32": 127
+        }
+      },
+      "f16": {
+        "bytes": 76955104,
+        "tensors": {
+          "F32": 43,
+          "F16": 84
+        }
+      },
+      "bf16": {
+        "bytes": 76955104,
+        "tensors": {
+          "F32": 43,
+          "BF16": 84
+        }
+      },
+      "q8_0": {
+        "bytes": 41334848,
+        "tensors": {
+          "F32": 51,
+          "Q8_0": 76
+        }
+      },
+      "q4_0": {
+        "bytes": 22327392,
+        "tensors": {
+          "F32": 51,
+          "Q4_0": 76
+        }
+      },
+      "q4_1": {
+        "bytes": 24703328,
+        "tensors": {
+          "F32": 51,
+          "Q4_1": 76
+        }
+      },
+      "q4_k": {
+        "bytes": 105694848,
+        "tensors": {
+          "F32": 111,
+          "Q4_K": 16
+        }
+      },
+      "q5_k": {
+        "bytes": 107415168,
+        "tensors": {
+          "F32": 111,
+          "Q5_K": 16
+        }
+      },
+      "q6_k": {
+        "bytes": 109243008,
+        "tensors": {
+          "F32": 111,
+          "Q6_K": 16
+        }
+      }
+    }
+  },
+  "source": {
+    "repository": "ConwayResearch/Underdog-Woof",
+    "url": "https://modelscope.cn/models/ConwayResearch/Underdog-Woof",
+    "revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+    "hashes": {
+      "LICENSE": "784c4a353d15f370ff387f74bde64f50a2041df9c6f2338c3d8a2f781b944de5",
+      "NOTICE": "0849de251c109869d24f8a0b520260afa10594334ae3d0c06b75e68be1e2c623",
+      "underdog_woof/__init__.py": "aaacf02b28eabce10280a60c2699d4e40d4ca5aa22170d169b64943fee7849f7",
+      "underdog_woof/__main__.py": "737f9823169c5337f49dbc27ab51f0ceab5d5d0302e6c0f3aad051ad13562a3b",
+      "underdog_woof/normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+      "underdog_woof/respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+      "underdog_woof/respell.tsv": "4c700d4015390bb6e34c1f7362f87ea75acfb45144d2fbc45cf00d5739b66abc",
+      "underdog_woof/runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220",
+      "underdog_woof/textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+      "woof_int8.npz": "d895fbbe84b8f4f461e3e94ab48b1164353b1988ce8d365f5aa8263d0de1203e"
+    },
+    "weight_size": 40595426,
+    "weight_semantics": "Effective F32 values recovered exactly from source int8/grouped-int8 and FP16 arrays; original prequantization weights are unavailable."
+  },
+  "source_to_f32": {
+    "source_to_f32_official_checkpoints_equal": true,
+    "checkpoint_count": 240,
+    "manifests": [
+      "oracle-source-juno/manifest.json",
+      "oracle-f32-juno/manifest.json"
+    ]
+  },
+  "compute": {
+    "state": "F32",
+    "kv": "F32",
+    "accumulation": "F32",
+    "cpu": "shared SIMD/ComputePool/PreparedLinear kernels; block formats also quantize activations",
+    "gpu": "shared LinearExecutor projections; host norm/RoPE/attention/state and convolution orchestration"
+  },
+  "thresholds": {
+    "f32": {
+      "relative_rmse_max": 0.0002,
+      "cosine_min": 0.999999,
+      "max_abs_factor": 0.002
+    },
+    "f16_bf16": {
+      "relative_rmse_max": 0.002,
+      "cosine_min": 0.99999,
+      "max_abs_factor": 0.02
+    },
+    "block_quant": {
+      "relative_rmse_max": 0.06,
+      "cosine_min": 0.998,
+      "max_abs_factor": 0.25
+    },
+    "max_abs_rule": "max_abs <= factor * (1 + reference absolute peak)",
+    "public_f32": {
+      "relative_rmse_max": 0.002,
+      "cosine_min": 0.99999
+    },
+    "note": "Declared before the probes; the failed long Mira gate is retained without relaxation."
+  },
+  "cpu_same_weight_cases": {
+    "juno": {
+      "text": "Hi.",
+      "voice": "juno",
+      "seed": 0,
+      "frames": 16
+    },
+    "mira-seed7": {
+      "text": "The quick brown fox.",
+      "voice": "mira",
+      "seed": 7,
+      "frames": 32
+    }
+  },
+  "cpu_same_weight": {
+    "bf16-mira-seed7": {
+      "format": "bf16",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.947185516357422e-06,
+          "rmse": 8.004898684993469e-07,
+          "relative_rmse": 8.987772866682754e-07,
+          "cosine": 0.9999999999995961
+        },
+        "waveform": {
+          "max_abs": 6.109476089477539e-07,
+          "rmse": 6.145007595051466e-08,
+          "relative_rmse": 9.503772737539663e-07,
+          "cosine": 0.9999999999995397
+        }
+      },
+      "seconds": {
+        "speech": 0.076092668,
+        "decoder": 0.166423932
+      },
+      "oracle": "target/underdog-woof/oracle-forced-bf16-mira-seed7"
+    },
+    "bf16": {
+      "format": "bf16",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 3.6954879760742188e-06,
+          "rmse": 4.393423555611092e-07,
+          "relative_rmse": 5.99297058838662e-07,
+          "cosine": 0.9999999999998224
+        },
+        "waveform": {
+          "max_abs": 7.152557373046875e-07,
+          "rmse": 5.853965579426124e-08,
+          "relative_rmse": 9.897393050652929e-07,
+          "cosine": 0.9999999999995087
+        }
+      },
+      "seconds": {
+        "speech": 0.088784768,
+        "decoder": 0.1154511
+      },
+      "oracle": "target/underdog-woof/oracle-forced-bf16-juno"
+    },
+    "f16-mira-seed7": {
+      "format": "f16",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.005892038345336914,
+          "rmse": 0.0005689290298175815,
+          "relative_rmse": 0.0006392977588772994,
+          "cosine": 0.9999997956501826
+        },
+        "waveform": {
+          "max_abs": 0.0010228604078292847,
+          "rmse": 5.309246806441683e-05,
+          "relative_rmse": 0.0008209032460768399,
+          "cosine": 0.9999996656596707
+        }
+      },
+      "seconds": {
+        "speech": 0.104674771,
+        "decoder": 0.188729472
+      },
+      "oracle": "target/underdog-woof/oracle-forced-f16-mira-seed7"
+    },
+    "f16": {
+      "format": "f16",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.0018286705017089844,
+          "rmse": 0.00032870722192828464,
+          "relative_rmse": 0.0004486435607177275,
+          "cosine": 0.9999998993610721
+        },
+        "waveform": {
+          "max_abs": 0.0008794590830802917,
+          "rmse": 6.412166828124139e-05,
+          "relative_rmse": 0.001084078460249263,
+          "cosine": 0.9999994154475806
+        }
+      },
+      "seconds": {
+        "speech": 0.090014821,
+        "decoder": 0.125243451
+      },
+      "oracle": "target/underdog-woof/oracle-forced-f16-juno"
+    },
+    "f32-mira-seed7": {
+      "format": "f32",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 5.9604644775390625e-06,
+          "rmse": 6.798524424229864e-07,
+          "relative_rmse": 7.639023632344074e-07,
+          "cosine": 0.9999999999997087
+        },
+        "waveform": {
+          "max_abs": 4.842877388000488e-07,
+          "rmse": 4.686895819712537e-08,
+          "relative_rmse": 7.247161026247236e-07,
+          "cosine": 0.9999999999997198
+        }
+      },
+      "seconds": {
+        "speech": 0.079462498,
+        "decoder": 0.137183662
+      },
+      "oracle": "target/underdog-woof/oracle-forced-f32-mira-seed7"
+    },
+    "f32": {
+      "format": "f32",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 1.0952353477478027e-06,
+          "rmse": 6.836890837046115e-08,
+          "relative_rmse": 1.1559215369891935e-06,
+          "cosine": 0.9999999999993348
+        }
+      },
+      "seconds": {
+        "speech": 0.039249415,
+        "decoder": 0.069755522
+      },
+      "oracle": "target/underdog-woof/oracle-forced-f32-juno"
+    },
+    "q4_0-mira-seed7": {
+      "format": "q4_0",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.32901328802108765,
+          "rmse": 0.023208857025505007,
+          "relative_rmse": 0.026368722894474197,
+          "cosine": 0.9996524738120133
+        },
+        "waveform": {
+          "max_abs": 0.026478536427021027,
+          "rmse": 0.002079600399151657,
+          "relative_rmse": 0.03060941165232549,
+          "cosine": 0.9995314509081591
+        }
+      },
+      "seconds": {
+        "speech": 0.085144445,
+        "decoder": 0.191675095
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_0-mira-seed7"
+    },
+    "q4_0": {
+      "format": "q4_0",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.12113595008850098,
+          "rmse": 0.014851521903261286,
+          "relative_rmse": 0.020191176765276556,
+          "cosine": 0.9997974998780956
+        },
+        "waveform": {
+          "max_abs": 0.020035134628415108,
+          "rmse": 0.0013693867047005648,
+          "relative_rmse": 0.024125535156812632,
+          "cosine": 0.9997178481336325
+        }
+      },
+      "seconds": {
+        "speech": 0.052756145,
+        "decoder": 0.082725775
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_0-juno"
+    },
+    "q4_1-mira-seed7": {
+      "format": "q4_1",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.18240141868591309,
+          "rmse": 0.02156000712284485,
+          "relative_rmse": 0.025036420160881045,
+          "cosine": 0.9996870695727593
+        },
+        "waveform": {
+          "max_abs": 0.017240971326828003,
+          "rmse": 0.0018127457456293026,
+          "relative_rmse": 0.02783294434880502,
+          "cosine": 0.999612590017053
+        }
+      },
+      "seconds": {
+        "speech": 0.072650408,
+        "decoder": 0.172268228
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_1-mira-seed7"
+    },
+    "q4_1": {
+      "format": "q4_1",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.16677427291870117,
+          "rmse": 0.01657212532945396,
+          "relative_rmse": 0.022737134923782765,
+          "cosine": 0.9997417609797459
+        },
+        "waveform": {
+          "max_abs": 0.017120763659477234,
+          "rmse": 0.001731802839228029,
+          "relative_rmse": 0.026956332529754906,
+          "cosine": 0.9996487360342874
+        }
+      },
+      "seconds": {
+        "speech": 0.05349003,
+        "decoder": 0.089301136
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_1-juno"
+    },
+    "q4_k-mira-seed7": {
+      "format": "q4_k",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 5.9604644775390625e-06,
+          "rmse": 6.798524424229864e-07,
+          "relative_rmse": 7.639023632344074e-07,
+          "cosine": 0.9999999999997087
+        },
+        "waveform": {
+          "max_abs": 0.014201954007148743,
+          "rmse": 0.0015382300998280165,
+          "relative_rmse": 0.02393325977546168,
+          "cosine": 0.9997136888502997
+        }
+      },
+      "seconds": {
+        "speech": 0.082329321,
+        "decoder": 0.140147945
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_k-mira-seed7"
+    },
+    "q4_k": {
+      "format": "q4_k",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 0.025405153632164,
+          "rmse": 0.0014518774484919895,
+          "relative_rmse": 0.02479450790482379,
+          "cosine": 0.9996936875366373
+        }
+      },
+      "seconds": {
+        "speech": 0.039244385,
+        "decoder": 0.082433357
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_k-juno"
+    },
+    "q5_k-mira-seed7": {
+      "format": "q5_k",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 5.9604644775390625e-06,
+          "rmse": 6.798524424229864e-07,
+          "relative_rmse": 7.639023632344074e-07,
+          "cosine": 0.9999999999997087
+        },
+        "waveform": {
+          "max_abs": 0.011775955557823181,
+          "rmse": 0.0013437550405732942,
+          "relative_rmse": 0.02072104253832106,
+          "cosine": 0.9997864324131679
+        }
+      },
+      "seconds": {
+        "speech": 0.08255657,
+        "decoder": 0.139773617
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q5_k-mira-seed7"
+    },
+    "q5_k": {
+      "format": "q5_k",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 0.015110589563846588,
+          "rmse": 0.0014310575847426097,
+          "relative_rmse": 0.02423561683290802,
+          "cosine": 0.9997063156052733
+        }
+      },
+      "seconds": {
+        "speech": 0.05684728,
+        "decoder": 0.084363215
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q5_k-juno"
+    },
+    "q6_k-mira-seed7": {
+      "format": "q6_k",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 5.9604644775390625e-06,
+          "rmse": 6.798524424229864e-07,
+          "relative_rmse": 7.639023632344074e-07,
+          "cosine": 0.9999999999997087
+        },
+        "waveform": {
+          "max_abs": 0.019612395204603672,
+          "rmse": 0.0019352672023794596,
+          "relative_rmse": 0.03001186215781323,
+          "cosine": 0.9995495667871853
+        }
+      },
+      "seconds": {
+        "speech": 0.081874844,
+        "decoder": 0.13227765
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q6_k-mira-seed7"
+    },
+    "q6_k": {
+      "format": "q6_k",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 0.01696215569972992,
+          "rmse": 0.001431389447189604,
+          "relative_rmse": 0.02434567052699175,
+          "cosine": 0.9997040788773375
+        }
+      },
+      "seconds": {
+        "speech": 0.041526861,
+        "decoder": 0.079350615
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q6_k-juno"
+    },
+    "q8_0-mira-seed7": {
+      "format": "q8_0",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1779,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.1531074047088623,
+          "rmse": 0.020723311663560322,
+          "relative_rmse": 0.023266602530836757,
+          "cosine": 0.9997309803898952
+        },
+        "waveform": {
+          "max_abs": 0.015079673379659653,
+          "rmse": 0.0017101813636223504,
+          "relative_rmse": 0.026499072793915945,
+          "cosine": 0.999648867734819
+        }
+      },
+      "seconds": {
+        "speech": 0.045185927,
+        "decoder": 0.116134895
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q8_0-mira-seed7"
+    },
+    "q8_0": {
+      "format": "q8_0",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.21426713466644287,
+          "rmse": 0.018977702988923144,
+          "relative_rmse": 0.025889394042609225,
+          "cosine": 0.9996649905081639
+        },
+        "waveform": {
+          "max_abs": 0.013546910136938095,
+          "rmse": 0.001528207153574765,
+          "relative_rmse": 0.02579027256794359,
+          "cosine": 0.9996696374982508
+        }
+      },
+      "seconds": {
+        "speech": 0.066722971,
+        "decoder": 0.092243838
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q8_0-juno"
+    }
+  },
+  "auto_same_weight": {
+    "bf16": {
+      "format": "bf16",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 3.6954879760742188e-06,
+          "rmse": 4.393423555611092e-07,
+          "relative_rmse": 5.99297058838662e-07,
+          "cosine": 0.9999999999998224
+        },
+        "waveform": {
+          "max_abs": 7.152557373046875e-07,
+          "rmse": 5.853965579426124e-08,
+          "relative_rmse": 9.897393050652929e-07,
+          "cosine": 0.9999999999995087
+        }
+      },
+      "seconds": {
+        "speech": 0.156378466,
+        "decoder": 0.15571458
+      },
+      "oracle": "target/underdog-woof/oracle-forced-bf16-juno"
+    },
+    "f16": {
+      "format": "f16",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.0018286705017089844,
+          "rmse": 0.00032870722192828464,
+          "relative_rmse": 0.0004486435607177275,
+          "cosine": 0.9999998993610721
+        },
+        "waveform": {
+          "max_abs": 0.0008794590830802917,
+          "rmse": 6.412166828124139e-05,
+          "relative_rmse": 0.001084078460249263,
+          "cosine": 0.9999994154475806
+        }
+      },
+      "seconds": {
+        "speech": 0.135602758,
+        "decoder": 0.157541889
+      },
+      "oracle": "target/underdog-woof/oracle-forced-f16-juno"
+    },
+    "f32": {
+      "format": "f32",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 1.0952353477478027e-06,
+          "rmse": 6.836890837046115e-08,
+          "relative_rmse": 1.1559215369891935e-06,
+          "cosine": 0.9999999999993348
+        }
+      },
+      "seconds": {
+        "speech": 0.061943814,
+        "decoder": 0.07612351
+      },
+      "oracle": "target/underdog-woof/oracle-forced-f32-juno"
+    },
+    "q4_0": {
+      "format": "q4_0",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.12113595008850098,
+          "rmse": 0.014851521903261286,
+          "relative_rmse": 0.020191176765276556,
+          "cosine": 0.9997974998780956
+        },
+        "waveform": {
+          "max_abs": 0.020035134628415108,
+          "rmse": 0.0013693867047005648,
+          "relative_rmse": 0.024125535156812632,
+          "cosine": 0.9997178481336325
+        }
+      },
+      "seconds": {
+        "speech": 0.058233076,
+        "decoder": 0.100010809
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_0-juno"
+    },
+    "q4_1": {
+      "format": "q4_1",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.16677427291870117,
+          "rmse": 0.01657212532945396,
+          "relative_rmse": 0.022737134923782765,
+          "cosine": 0.9997417609797459
+        },
+        "waveform": {
+          "max_abs": 0.017120763659477234,
+          "rmse": 0.001731802839228029,
+          "relative_rmse": 0.026956332529754906,
+          "cosine": 0.9996487360342874
+        }
+      },
+      "seconds": {
+        "speech": 0.075671303,
+        "decoder": 0.119400775
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_1-juno"
+    },
+    "q4_k": {
+      "format": "q4_k",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 0.025405153632164,
+          "rmse": 0.0014518774484919895,
+          "relative_rmse": 0.02479450790482379,
+          "cosine": 0.9996936875366373
+        }
+      },
+      "seconds": {
+        "speech": 0.053368565,
+        "decoder": 0.069359061
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q4_k-juno"
+    },
+    "q5_k": {
+      "format": "q5_k",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 0.015110589563846588,
+          "rmse": 0.0014310575847426097,
+          "relative_rmse": 0.02423561683290802,
+          "cosine": 0.9997063156052733
+        }
+      },
+      "seconds": {
+        "speech": 0.055132625,
+        "decoder": 0.096960738
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q5_k-juno"
+    },
+    "q6_k": {
+      "format": "q6_k",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 4.887580871582031e-06,
+          "rmse": 5.858695422688217e-07,
+          "relative_rmse": 7.996485835433125e-07,
+          "cosine": 0.9999999999996827
+        },
+        "waveform": {
+          "max_abs": 0.01696215569972992,
+          "rmse": 0.001431389447189604,
+          "relative_rmse": 0.02434567052699175,
+          "cosine": 0.9997040788773375
+        }
+      },
+      "seconds": {
+        "speech": 0.056300468,
+        "decoder": 0.111312493
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q6_k-juno"
+    },
+    "q8_0": {
+      "format": "q8_0",
+      "requested": "Auto",
+      "gpu_projections": 0,
+      "cpu_projections": 917,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.21426713466644287,
+          "rmse": 0.018977702988923144,
+          "relative_rmse": 0.025889394042609225,
+          "cosine": 0.9996649905081639
+        },
+        "waveform": {
+          "max_abs": 0.013546910136938095,
+          "rmse": 0.001528207153574765,
+          "relative_rmse": 0.02579027256794359,
+          "cosine": 0.9996696374982508
+        }
+      },
+      "seconds": {
+        "speech": 0.082332244,
+        "decoder": 0.122678365
+      },
+      "oracle": "target/underdog-woof/oracle-forced-q8_0-juno"
+    }
+  },
+  "long_teacher_forced_260": {
+    "format": "f32",
+    "requested": "Cpu",
+    "gpu_projections": 0,
+    "cpu_projections": 14075,
+    "metrics": {
+      "latents": {
+        "max_abs": 8.106231689453125e-06,
+        "rmse": 4.6653117633440243e-07,
+        "relative_rmse": 7.005821378140308e-07,
+        "cosine": 0.9999999999997459
+      },
+      "waveform": {
+        "max_abs": 1.1343508958816528e-06,
+        "rmse": 5.8406202682691044e-08,
+        "relative_rmse": 9.886674286358079e-07,
+        "cosine": 0.9999999999994365
+      }
+    },
+    "seconds": {
+      "speech": 0.617197219,
+      "decoder": 1.350433441
+    },
+    "oracle": "target/underdog-woof/oracle-forced-f32-260"
+  },
+  "natural_f32": {
+    "natural-mira.json": {
+      "format": "f32",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1893,
+      "metrics": {
+        "latents": {
+          "max_abs": 0.00010383129119873047,
+          "rmse": 8.026263826985992e-06,
+          "relative_rmse": 9.194199217953917e-06,
+          "cosine": 0.9999999999577585
+        },
+        "waveform": {
+          "max_abs": 8.948985487222672e-05,
+          "rmse": 5.1680198318648214e-06,
+          "relative_rmse": 0.00010043021174554984,
+          "cosine": 0.9999999949570288
+        }
+      },
+      "seconds": {
+        "speech": 0.089995906,
+        "decoder": 0.174736201
+      },
+      "oracle": "target/underdog-woof/oracle-natural-mira"
+    },
+    "natural-juno.json": {
+      "format": "f32",
+      "requested": "Cpu",
+      "gpu_projections": 0,
+      "cpu_projections": 1462,
+      "metrics": {
+        "latents": {
+          "max_abs": 2.956390380859375e-05,
+          "rmse": 2.7270245226764317e-06,
+          "relative_rmse": 4.011927008939296e-06,
+          "cosine": 0.9999999999919735
+        },
+        "waveform": {
+          "max_abs": 3.8757920265197754e-05,
+          "rmse": 1.839980887318611e-06,
+          "relative_rmse": 3.905994776326727e-05,
+          "cosine": 0.9999999992372014
+        }
+      },
+      "seconds": {
+        "speech": 0.072190569,
+        "decoder": 0.1322355
+      },
+      "oracle": "target/underdog-woof/oracle-natural-juno"
+    }
+  },
+  "public_reference_manifests": {
+    "public-f32-juno-short/manifest.json": {
+      "schema": "underdog-woof-public-v1",
+      "source": {
+        "repository": "ConwayResearch/Underdog-Woof",
+        "url": "https://modelscope.cn/models/ConwayResearch/Underdog-Woof",
+        "revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+        "hashes": {
+          "LICENSE": "784c4a353d15f370ff387f74bde64f50a2041df9c6f2338c3d8a2f781b944de5",
+          "NOTICE": "0849de251c109869d24f8a0b520260afa10594334ae3d0c06b75e68be1e2c623",
+          "underdog_woof/__init__.py": "aaacf02b28eabce10280a60c2699d4e40d4ca5aa22170d169b64943fee7849f7",
+          "underdog_woof/__main__.py": "737f9823169c5337f49dbc27ab51f0ceab5d5d0302e6c0f3aad051ad13562a3b",
+          "underdog_woof/normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+          "underdog_woof/respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+          "underdog_woof/respell.tsv": "4c700d4015390bb6e34c1f7362f87ea75acfb45144d2fbc45cf00d5739b66abc",
+          "underdog_woof/runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220",
+          "underdog_woof/textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+          "woof_int8.npz": "d895fbbe84b8f4f461e3e94ab48b1164353b1988ce8d365f5aa8263d0de1203e"
+        },
+        "weight_size": 40595426,
+        "weight_semantics": "Effective F32 values recovered exactly from source int8/grouped-int8 and FP16 arrays; original prequantization weights are unavailable."
+      },
+      "text": "Hi.",
+      "voice": "juno",
+      "seed": 0,
+      "temperature": 0.5,
+      "same_weight_gguf": {
+        "path": "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+        "format": "f32",
+        "independent_dequantization": "gguf.quants.dequantize"
+      },
+      "takes": [
+        {
+          "text": "Hi.",
+          "frames": 26
+        },
+        {
+          "text": "Hi.",
+          "frames": 28
+        },
+        {
+          "text": "Hi.",
+          "frames": 28
+        },
+        {
+          "text": "Hi.",
+          "frames": 26
+        }
+      ],
+      "samples": 24960,
+      "seconds": 0.7199614618439227,
+      "waveform_sha256": "3519c0188d102326c31189d72eee102cabfd58da3b8285efa9f0298eaa3ef81c"
+    },
+    "public-f32-mira-split/manifest.json": {
+      "schema": "underdog-woof-public-v1",
+      "source": {
+        "repository": "ConwayResearch/Underdog-Woof",
+        "url": "https://modelscope.cn/models/ConwayResearch/Underdog-Woof",
+        "revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+        "hashes": {
+          "LICENSE": "784c4a353d15f370ff387f74bde64f50a2041df9c6f2338c3d8a2f781b944de5",
+          "NOTICE": "0849de251c109869d24f8a0b520260afa10594334ae3d0c06b75e68be1e2c623",
+          "underdog_woof/__init__.py": "aaacf02b28eabce10280a60c2699d4e40d4ca5aa22170d169b64943fee7849f7",
+          "underdog_woof/__main__.py": "737f9823169c5337f49dbc27ab51f0ceab5d5d0302e6c0f3aad051ad13562a3b",
+          "underdog_woof/normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+          "underdog_woof/respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+          "underdog_woof/respell.tsv": "4c700d4015390bb6e34c1f7362f87ea75acfb45144d2fbc45cf00d5739b66abc",
+          "underdog_woof/runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220",
+          "underdog_woof/textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+          "woof_int8.npz": "d895fbbe84b8f4f461e3e94ab48b1164353b1988ce8d365f5aa8263d0de1203e"
+        },
+        "weight_size": 40595426,
+        "weight_semantics": "Effective F32 values recovered exactly from source int8/grouped-int8 and FP16 arrays; original prequantization weights are unavailable."
+      },
+      "text": "Your order costs $12.50. It ships on March 3rd.",
+      "voice": "mira",
+      "seed": 0,
+      "temperature": 0.5,
+      "same_weight_gguf": {
+        "path": "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+        "format": "f32",
+        "independent_dequantization": "gguf.quants.dequantize"
+      },
+      "takes": [
+        {
+          "text": "Your order costs twelve dollars and fifty cents.",
+          "frames": 110
+        },
+        {
+          "text": "It ships on March third.",
+          "frames": 64
+        },
+        {
+          "text": "It ships on March third.",
+          "frames": 68
+        },
+        {
+          "text": "It ships on March third.",
+          "frames": 68
+        },
+        {
+          "text": "It ships on March third.",
+          "frames": 62
+        }
+      ],
+      "samples": 165120,
+      "seconds": 2.0311790900304914,
+      "waveform_sha256": "93bc2e4e288dba02bef706dcdcf63596aaa57d61b06dcf40a43d997e2a7aa9c3"
+    },
+    "public-f32-juno-split/manifest.json": {
+      "schema": "underdog-woof-public-v1",
+      "source": {
+        "repository": "ConwayResearch/Underdog-Woof",
+        "url": "https://modelscope.cn/models/ConwayResearch/Underdog-Woof",
+        "revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+        "hashes": {
+          "LICENSE": "784c4a353d15f370ff387f74bde64f50a2041df9c6f2338c3d8a2f781b944de5",
+          "NOTICE": "0849de251c109869d24f8a0b520260afa10594334ae3d0c06b75e68be1e2c623",
+          "underdog_woof/__init__.py": "aaacf02b28eabce10280a60c2699d4e40d4ca5aa22170d169b64943fee7849f7",
+          "underdog_woof/__main__.py": "737f9823169c5337f49dbc27ab51f0ceab5d5d0302e6c0f3aad051ad13562a3b",
+          "underdog_woof/normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+          "underdog_woof/respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+          "underdog_woof/respell.tsv": "4c700d4015390bb6e34c1f7362f87ea75acfb45144d2fbc45cf00d5739b66abc",
+          "underdog_woof/runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220",
+          "underdog_woof/textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+          "woof_int8.npz": "d895fbbe84b8f4f461e3e94ab48b1164353b1988ce8d365f5aa8263d0de1203e"
+        },
+        "weight_size": 40595426,
+        "weight_semantics": "Effective F32 values recovered exactly from source int8/grouped-int8 and FP16 arrays; original prequantization weights are unavailable."
+      },
+      "text": "Your order costs $12.50. It ships on March 3rd.",
+      "voice": "juno",
+      "seed": 0,
+      "temperature": 0.5,
+      "same_weight_gguf": {
+        "path": "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+        "format": "f32",
+        "independent_dequantization": "gguf.quants.dequantize"
+      },
+      "takes": [
+        {
+          "text": "Your order costs twelve dollars and fifty cents.",
+          "frames": 82
+        },
+        {
+          "text": "It ships on March third.",
+          "frames": 49
+        }
+      ],
+      "samples": 125760,
+      "seconds": 0.7345442259684205,
+      "waveform_sha256": "d9eae027f7f62773e925210ec9e3e35fa6b9767d6ccccccd3d8a63e1988881b8"
+    },
+    "public-f32-mira-short/manifest.json": {
+      "schema": "underdog-woof-public-v1",
+      "source": {
+        "repository": "ConwayResearch/Underdog-Woof",
+        "url": "https://modelscope.cn/models/ConwayResearch/Underdog-Woof",
+        "revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+        "hashes": {
+          "LICENSE": "784c4a353d15f370ff387f74bde64f50a2041df9c6f2338c3d8a2f781b944de5",
+          "NOTICE": "0849de251c109869d24f8a0b520260afa10594334ae3d0c06b75e68be1e2c623",
+          "underdog_woof/__init__.py": "aaacf02b28eabce10280a60c2699d4e40d4ca5aa22170d169b64943fee7849f7",
+          "underdog_woof/__main__.py": "737f9823169c5337f49dbc27ab51f0ceab5d5d0302e6c0f3aad051ad13562a3b",
+          "underdog_woof/normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+          "underdog_woof/respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+          "underdog_woof/respell.tsv": "4c700d4015390bb6e34c1f7362f87ea75acfb45144d2fbc45cf00d5739b66abc",
+          "underdog_woof/runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220",
+          "underdog_woof/textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+          "woof_int8.npz": "d895fbbe84b8f4f461e3e94ab48b1164353b1988ce8d365f5aa8263d0de1203e"
+        },
+        "weight_size": 40595426,
+        "weight_semantics": "Effective F32 values recovered exactly from source int8/grouped-int8 and FP16 arrays; original prequantization weights are unavailable."
+      },
+      "text": "Hi.",
+      "voice": "mira",
+      "seed": 0,
+      "temperature": 0.5,
+      "same_weight_gguf": {
+        "path": "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+        "format": "f32",
+        "independent_dequantization": "gguf.quants.dequantize"
+      },
+      "takes": [
+        {
+          "text": "Hi.",
+          "frames": 34
+        },
+        {
+          "text": "Hi.",
+          "frames": 30
+        },
+        {
+          "text": "Hi.",
+          "frames": 34
+        },
+        {
+          "text": "Hi.",
+          "frames": 34
+        }
+      ],
+      "samples": 28800,
+      "seconds": 0.7112729030195624,
+      "waveform_sha256": "457eaa13d29fc9026a036befec1d5972f7a6d1d396d2978ecd3318728e9bd28b"
+    }
+  },
+  "interfaces": [
+    {
+      "format": "f32",
+      "requested": "cpu",
+      "model_sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.4495011300314218,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=f32 voice=juno seed=0 samples=24960 elapsed=1.410s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.510691198054701,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=f32 voice=mira seed=0 samples=28800 elapsed=1.470s"
+          ],
+          "samples": 28800
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/seed7-temp025.wav",
+            "--seed",
+            "7",
+            "--temperature",
+            "0.25"
+          ],
+          "exit": 0,
+          "seconds": 1.551868794951588,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7572 utterances=1 samples=32640",
+            "Underdog Woof: format=f32 voice=mira seed=7 samples=32640 elapsed=1.512s"
+          ],
+          "samples": 32640
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Your order costs $12.50. It ships on March 3rd.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/split-juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.7016418080311269,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7182 utterances=2 samples=125760",
+            "Underdog Woof: format=f32 voice=juno seed=0 samples=125760 elapsed=1.655s"
+          ],
+          "samples": 125760
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Your order costs $12.50. It ships on March 3rd.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/split-mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 3.874951115809381,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=20329 utterances=2 samples=165120",
+            "Underdog Woof: format=f32 voice=mira seed=0 samples=165120 elapsed=3.831s"
+          ],
+          "samples": 165120
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/bad.wav",
+            "--speed",
+            "2"
+          ],
+          "exit": 2,
+          "seconds": 0.0036548611242324114,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/bad.wav",
+            "--kv-cache",
+            "f16"
+          ],
+          "exit": 2,
+          "seconds": 0.003556532086804509,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/bad.wav",
+            "--language",
+            "Chinese"
+          ],
+          "exit": 2,
+          "seconds": 0.0028493849094957113,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-review/f32-cpu/bad.wav",
+            "--max-tokens",
+            "10"
+          ],
+          "exit": 2,
+          "seconds": 0.0027119459118694067,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f32"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960,
+          "public_oracle": {
+            "max_abs": 5.77800990671784e-05,
+            "relative_rmse": 0.00037024045142175976,
+            "cosine": 0.9999999400669984
+          }
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f32"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800,
+          "public_oracle": {
+            "max_abs": 3.8388168462178546e-05,
+            "relative_rmse": 0.00029543582149680654,
+            "cosine": 0.9999999619112329
+          }
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation",
+        "nondefault seed/temperature and normalize=false",
+        {
+          "normalized_multi_utterance": "juno",
+          "metrics": {
+            "max_abs": 6.304302052989597e-05,
+            "relative_rmse": 0.00040453768919668996,
+            "cosine": 0.9999999337596058
+          }
+        },
+        {
+          "normalized_multi_utterance": "mira",
+          "metrics": {
+            "max_abs": 0.14008514774951833,
+            "relative_rmse": 0.046341486085664026,
+            "cosine": 0.9989260148545215
+          }
+        },
+        {
+          "concurrency": [
+            200,
+            429,
+            429,
+            429
+          ]
+        }
+      ],
+      "errors": [],
+      "oracle_failures": [
+        {
+          "case": "split-mira",
+          "metrics": {
+            "max_abs": 0.14008514774951833,
+            "relative_rmse": 0.046341486085664026,
+            "cosine": 0.9989260148545215
+          },
+          "threshold": {
+            "relative_rmse": 0.002,
+            "cosine": 0.99999
+          }
+        }
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "55795"
+      ],
+      "execution": [
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7572 utterances=1 samples=32640",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=84084 utterances=10 samples=358080",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "entry_passed": true,
+      "passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "f32",
+      "requested": "auto",
+      "model_sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f32-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.248113486915827,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=f32 voice=juno seed=0 samples=24960 elapsed=5.209s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f32-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.3749821309465915,
+          "execution": [
+            "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=f32 voice=mira seed=0 samples=28800 elapsed=5.320s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f32"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960,
+          "public_oracle": {
+            "max_abs": 5.77800990671784e-05,
+            "relative_rmse": 0.00037024045142175976,
+            "cosine": 0.9999999400669984
+          }
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f32"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800,
+          "public_oracle": {
+            "max_abs": 3.8388168462178546e-05,
+            "relative_rmse": 0.00029543582149680654,
+            "cosine": 0.9999999619112329
+          }
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "53129"
+      ],
+      "execution": [
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "f32",
+      "requested": "vulkan",
+      "model_sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f32-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.927740088896826,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f32-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.939111775020137,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f32"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f32"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f32.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "35069"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "f16",
+      "requested": "cpu",
+      "model_sha256": "e987d705f14c35b7e685205e9d06673e1fae3c3ebee007f0acb79b47c37e6872",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f16-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.4129647549707443,
+          "execution": [
+            "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=f16 voice=juno seed=0 samples=24960 elapsed=1.393s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f16-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.6390751670114696,
+          "execution": [
+            "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=f16 voice=mira seed=0 samples=28800 elapsed=1.619s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "45979"
+      ],
+      "execution": [
+        "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "f16",
+      "requested": "auto",
+      "model_sha256": "e987d705f14c35b7e685205e9d06673e1fae3c3ebee007f0acb79b47c37e6872",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f16-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.772735327016562,
+          "execution": [
+            "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=f16 voice=juno seed=0 samples=24960 elapsed=5.705s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f16-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 6.229319568024948,
+          "execution": [
+            "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=f16 voice=mira seed=0 samples=28800 elapsed=6.185s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "49397"
+      ],
+      "execution": [
+        "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=f16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "f16",
+      "requested": "vulkan",
+      "model_sha256": "e987d705f14c35b7e685205e9d06673e1fae3c3ebee007f0acb79b47c37e6872",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f16-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.665396881988272,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/f16-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.66443015797995,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f16"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-f16"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-f16.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "34903"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "bf16",
+      "requested": "cpu",
+      "model_sha256": "5186f014b39795e502232a1d234d79ed430fe359016ce27ab360fe3672807a22",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/bf16-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 0.9683004270773381,
+          "execution": [
+            "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+            "Underdog Woof: format=bf16 voice=juno seed=0 samples=23040 elapsed=0.952s"
+          ],
+          "samples": 23040
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/bf16-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.2461255330126733,
+          "execution": [
+            "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=bf16 voice=mira seed=0 samples=28800 elapsed=1.227s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-bf16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 23040
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-bf16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "39353"
+      ],
+      "execution": [
+        "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=bf16 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "bf16",
+      "requested": "auto",
+      "model_sha256": "5186f014b39795e502232a1d234d79ed430fe359016ce27ab360fe3672807a22",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/bf16-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.196910226950422,
+          "execution": [
+            "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+            "Underdog Woof: format=bf16 voice=juno seed=0 samples=23040 elapsed=5.157s"
+          ],
+          "samples": 23040
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/bf16-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.296085129026324,
+          "execution": [
+            "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=bf16 voice=mira seed=0 samples=28800 elapsed=5.254s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-bf16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 23040
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-bf16"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "60097"
+      ],
+      "execution": [
+        "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=bf16 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "bf16",
+      "requested": "vulkan",
+      "model_sha256": "5186f014b39795e502232a1d234d79ed430fe359016ce27ab360fe3672807a22",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/bf16-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.660897033056244,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/bf16-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.684413968818262,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-bf16"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-bf16"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-bf16.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "42249"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "q8_0",
+      "requested": "cpu",
+      "model_sha256": "588fb47f12e6727e3ccea796c8aab987900b52e2ae8a797f4a522f96ce188542",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q8_0-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 0.9502618310507387,
+          "execution": [
+            "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+            "Underdog Woof: format=q8_0 voice=juno seed=0 samples=23040 elapsed=0.932s"
+          ],
+          "samples": 23040
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q8_0-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.05525790899992,
+          "execution": [
+            "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q8_0 voice=mira seed=0 samples=28800 elapsed=1.039s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q8_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 23040
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q8_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "37435"
+      ],
+      "execution": [
+        "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=q8_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "q8_0",
+      "requested": "auto",
+      "model_sha256": "588fb47f12e6727e3ccea796c8aab987900b52e2ae8a797f4a522f96ce188542",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q8_0-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 4.955770215950906,
+          "execution": [
+            "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+            "Underdog Woof: format=q8_0 voice=juno seed=0 samples=23040 elapsed=4.905s"
+          ],
+          "samples": 23040
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q8_0-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.237626161193475,
+          "execution": [
+            "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q8_0 voice=mira seed=0 samples=28800 elapsed=5.195s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q8_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 23040
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q8_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "58761"
+      ],
+      "execution": [
+        "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040",
+        "Underdog Woof: format=q8_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5786 utterances=1 samples=23040"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "q8_0",
+      "requested": "vulkan",
+      "model_sha256": "588fb47f12e6727e3ccea796c8aab987900b52e2ae8a797f4a522f96ce188542",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q8_0-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.665834960993379,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q8_0-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.6897819640580565,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q8_0"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q8_0"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q8_0.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "35243"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "q4_0",
+      "requested": "cpu",
+      "model_sha256": "eb3eeebcdf119340fa219c5deff3a8305327069e00935154ab0d0eb18c725b57",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_0-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.2983960669953376,
+          "execution": [
+            "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+            "Underdog Woof: format=q4_0 voice=juno seed=0 samples=26880 elapsed=1.282s"
+          ],
+          "samples": 26880
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_0-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 20.661289551993832,
+          "execution": [
+            "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=123036 utterances=1 samples=26880",
+            "Underdog Woof: format=q4_0 voice=mira seed=0 samples=26880 elapsed=20.563s"
+          ],
+          "samples": 26880
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 26880
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 26880
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "33185"
+      ],
+      "execution": [
+        "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=123036 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=123036 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "q4_0",
+      "requested": "auto",
+      "model_sha256": "eb3eeebcdf119340fa219c5deff3a8305327069e00935154ab0d0eb18c725b57",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_0-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.333861369173974,
+          "execution": [
+            "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+            "Underdog Woof: format=q4_0 voice=juno seed=0 samples=26880 elapsed=5.293s"
+          ],
+          "samples": 26880
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_0-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 26.851474250899628,
+          "execution": [
+            "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=123036 utterances=1 samples=26880",
+            "Underdog Woof: format=q4_0 voice=mira seed=0 samples=26880 elapsed=26.728s"
+          ],
+          "samples": 26880
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 26880
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_0"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 26880
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "54261"
+      ],
+      "execution": [
+        "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=123036 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=123036 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880",
+        "Underdog Woof: format=q4_0 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6378 utterances=1 samples=26880"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "q4_0",
+      "requested": "vulkan",
+      "model_sha256": "eb3eeebcdf119340fa219c5deff3a8305327069e00935154ab0d0eb18c725b57",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_0-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.652549860067666,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_0-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.67218361585401,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_0"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_0"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_0.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "58925"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "q4_1",
+      "requested": "cpu",
+      "model_sha256": "bc00f1b100b14b83220b15b961fec4ad6361dc5ae709be0b0bd99ea01b66eb38",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_1-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.0441917919088155,
+          "execution": [
+            "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+            "Underdog Woof: format=q4_1 voice=juno seed=0 samples=23040 elapsed=1.029s"
+          ],
+          "samples": 23040
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_1-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.281799013959244,
+          "execution": [
+            "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q4_1 voice=mira seed=0 samples=28800 elapsed=1.258s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_1"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 23040
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_1"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "58939"
+      ],
+      "execution": [
+        "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+        "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+        "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+        "Underdog Woof: format=q4_1 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "q4_1",
+      "requested": "auto",
+      "model_sha256": "bc00f1b100b14b83220b15b961fec4ad6361dc5ae709be0b0bd99ea01b66eb38",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_1-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.091884042136371,
+          "execution": [
+            "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+            "Underdog Woof: format=q4_1 voice=juno seed=0 samples=23040 elapsed=5.053s"
+          ],
+          "samples": 23040
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_1-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.475515514146537,
+          "execution": [
+            "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q4_1 voice=mira seed=0 samples=28800 elapsed=5.433s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_1"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 23040
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_1"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "50711"
+      ],
+      "execution": [
+        "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+        "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+        "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040",
+        "Underdog Woof: format=q4_1 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=5578 utterances=1 samples=23040"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "q4_1",
+      "requested": "vulkan",
+      "model_sha256": "bc00f1b100b14b83220b15b961fec4ad6361dc5ae709be0b0bd99ea01b66eb38",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_1-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.680730923078954,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_1-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.673271556850523,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_1"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_1"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_1.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "47183"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "q4_k",
+      "requested": "cpu",
+      "model_sha256": "20ba26a77cd635e2f0ebc00464023b84061af3020d8f149053bdfd168dbc988e",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_k-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.2535153990611434,
+          "execution": [
+            "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=q4_k voice=juno seed=0 samples=24960 elapsed=1.224s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_k-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.4105932081583887,
+          "execution": [
+            "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q4_k voice=mira seed=0 samples=28800 elapsed=1.383s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "51003"
+      ],
+      "execution": [
+        "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q4_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "q4_k",
+      "requested": "auto",
+      "model_sha256": "20ba26a77cd635e2f0ebc00464023b84061af3020d8f149053bdfd168dbc988e",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_k-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.23165535996668,
+          "execution": [
+            "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=q4_k voice=juno seed=0 samples=24960 elapsed=5.178s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_k-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.337387741077691,
+          "execution": [
+            "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q4_k voice=mira seed=0 samples=28800 elapsed=5.285s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "34343"
+      ],
+      "execution": [
+        "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q4_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "q4_k",
+      "requested": "vulkan",
+      "model_sha256": "20ba26a77cd635e2f0ebc00464023b84061af3020d8f149053bdfd168dbc988e",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_k-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.775766832986847,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q4_k-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.816968979081139,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_k"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q4_k"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q4_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "53167"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "q5_k",
+      "requested": "cpu",
+      "model_sha256": "dd14f06673196d9f6d024910894ea2a04b6bccf38a24bb1fa3aca771b6c61e53",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q5_k-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.2723065258469433,
+          "execution": [
+            "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=q5_k voice=juno seed=0 samples=24960 elapsed=1.250s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q5_k-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.715994237922132,
+          "execution": [
+            "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q5_k voice=mira seed=0 samples=28800 elapsed=1.689s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q5_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q5_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "36753"
+      ],
+      "execution": [
+        "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q5_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "q5_k",
+      "requested": "auto",
+      "model_sha256": "dd14f06673196d9f6d024910894ea2a04b6bccf38a24bb1fa3aca771b6c61e53",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q5_k-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.276990954065695,
+          "execution": [
+            "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=q5_k voice=juno seed=0 samples=24960 elapsed=5.180s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q5_k-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.373974888119847,
+          "execution": [
+            "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q5_k voice=mira seed=0 samples=28800 elapsed=5.327s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q5_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q5_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "57847"
+      ],
+      "execution": [
+        "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q5_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "q5_k",
+      "requested": "vulkan",
+      "model_sha256": "dd14f06673196d9f6d024910894ea2a04b6bccf38a24bb1fa3aca771b6c61e53",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q5_k-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.835821588989347,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q5_k-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.852299110963941,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q5_k"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q5_k"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q5_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "42371"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    },
+    {
+      "format": "q6_k",
+      "requested": "cpu",
+      "model_sha256": "9292219f03c7212033980c26686ff5276b96a22b16ed2f08248dcc79e2f5b56b",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q6_k-cpu/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.2285660679917783,
+          "execution": [
+            "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=q6_k voice=juno seed=0 samples=24960 elapsed=1.205s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "cpu",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q6_k-cpu/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 1.4771126620471478,
+          "execution": [
+            "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q6_k voice=mira seed=0 samples=28800 elapsed=1.452s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q6_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q6_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "54687"
+      ],
+      "execution": [
+        "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q6_k requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "real CLI and HTTP; per-format teacher-forced numeric checks recorded separately"
+    },
+    {
+      "format": "q6_k",
+      "requested": "auto",
+      "model_sha256": "9292219f03c7212033980c26686ff5276b96a22b16ed2f08248dcc79e2f5b56b",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q6_k-auto/juno.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.288263373076916,
+          "execution": [
+            "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+            "Underdog Woof: format=q6_k voice=juno seed=0 samples=24960 elapsed=5.234s"
+          ],
+          "samples": 24960
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "auto",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q6_k-auto/mira.wav"
+          ],
+          "exit": 0,
+          "seconds": 5.3265350898727775,
+          "execution": [
+            "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+            "Underdog Woof: format=q6_k voice=mira seed=0 samples=28800 elapsed=5.280s"
+          ],
+          "samples": 28800
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q6_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 24960
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q6_k"
+          },
+          "status": 200,
+          "content_type": "audio/wav",
+          "samples": 28800
+        }
+      ],
+      "checks": [
+        "CLI=HTTP WAV and PCM",
+        "request reset",
+        "invalid requests",
+        "route isolation"
+      ],
+      "errors": [],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "35763"
+      ],
+      "execution": [
+        "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7354 utterances=1 samples=28800",
+        "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960",
+        "Underdog Woof: format=q6_k requested=Auto backend=Cpu gpu_projections=0 cpu_projections=6056 utterances=1 samples=24960"
+      ],
+      "passed": true,
+      "entry_passed": true,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "passed",
+      "actual_backend": "Cpu",
+      "gpu_verified": false,
+      "verification_scope": "CPU fallback only; GPU execution not verified"
+    },
+    {
+      "format": "q6_k",
+      "requested": "vulkan",
+      "model_sha256": "9292219f03c7212033980c26686ff5276b96a22b16ed2f08248dcc79e2f5b56b",
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "juno",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q6_k-vulkan/juno.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.7979678579140455,
+          "execution": []
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+            "--tts",
+            "--model",
+            "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+            "--threads",
+            "2",
+            "--compute",
+            "vulkan",
+            "--prompt",
+            "Hi.",
+            "--voice",
+            "mira",
+            "--seed",
+            "0",
+            "--temp",
+            "0.5",
+            "--out",
+            "target/underdog-woof/entries-release/q6_k-vulkan/mira.wav"
+          ],
+          "exit": 1,
+          "seconds": 4.8144129330758005,
+          "execution": []
+        }
+      ],
+      "http": [
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "juno",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q6_k"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        },
+        {
+          "route": "/v1/audio/speech",
+          "request": {
+            "input": "Hi.",
+            "voice": "mira",
+            "seed": 0,
+            "temperature": 0.5,
+            "model": "woof-q6_k"
+          },
+          "status": 500,
+          "content_type": "application/json"
+        }
+      ],
+      "checks": [],
+      "errors": [
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}",
+        "{\"error\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}"
+      ],
+      "server_command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-server",
+        "--tts",
+        "--model",
+        "/workspace/rust-model-inference-underdog-woof/models/Underdog-Woof/woof-q6_k.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "51389"
+      ],
+      "execution": [],
+      "passed": false,
+      "entry_passed": false,
+      "implementation_status": "implemented (shared LinearExecutor hybrid path)",
+      "verification_status": "failed",
+      "actual_backend": "device initialization failed",
+      "gpu_verified": false,
+      "verification_scope": "failed with device lost; not accepted as GPU support"
+    }
+  ],
+  "storage_loss_against_original": {
+    "fixed_inputs": {
+      "f32": {
+        "manifest": "target/underdog-woof/oracle-forced-f32-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "decoder.transformer": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "f16": {
+        "manifest": "target/underdog-woof/oracle-forced-f16-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.0017323493957519531,
+            "rmse": 0.0003340742465662034
+          },
+          "waveform": {
+            "max_abs": 0.00043373554944992065,
+            "rmse": 2.6691486215694987e-05
+          },
+          "decoder.transformer": {
+            "max_abs": 0.0006454885005950928,
+            "rmse": 8.586326292159681e-05
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "bf16": {
+        "manifest": "target/underdog-woof/oracle-forced-bf16-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.012754440307617188,
+            "rmse": 0.002421602171802626
+          },
+          "waveform": {
+            "max_abs": 0.0030474327504634857,
+            "rmse": 0.0002429308413583238
+          },
+          "decoder.transformer": {
+            "max_abs": 0.005819499492645264,
+            "rmse": 0.000994759399554937
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "q8_0": {
+        "manifest": "target/underdog-woof/oracle-forced-q8_0-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.06354761123657227,
+            "rmse": 0.011286294975336206
+          },
+          "waveform": {
+            "max_abs": 0.007127974182367325,
+            "rmse": 0.0007723796586064038
+          },
+          "decoder.transformer": {
+            "max_abs": 0.035027146339416504,
+            "rmse": 0.002607912441740966
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "q4_0": {
+        "manifest": "target/underdog-woof/oracle-forced-q4_0-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.6244474649429321,
+            "rmse": 0.14011641513449483
+          },
+          "waveform": {
+            "max_abs": 0.1874876469373703,
+            "rmse": 0.017346983391783456
+          },
+          "decoder.transformer": {
+            "max_abs": 0.6330661773681641,
+            "rmse": 0.06446711662604515
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "q4_1": {
+        "manifest": "target/underdog-woof/oracle-forced-q4_1-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 1.4147899150848389,
+            "rmse": 0.1620479178247435
+          },
+          "waveform": {
+            "max_abs": 0.11126860976219177,
+            "rmse": 0.014151160728090367
+          },
+          "decoder.transformer": {
+            "max_abs": 0.36177778244018555,
+            "rmse": 0.047927851215886656
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "q4_k": {
+        "manifest": "target/underdog-woof/oracle-forced-q4_k-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.09016797691583633,
+            "rmse": 0.006462602139249706
+          },
+          "decoder.transformer": {
+            "max_abs": 0.21729862689971924,
+            "rmse": 0.03226419075554825
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "q5_k": {
+        "manifest": "target/underdog-woof/oracle-forced-q5_k-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.03613854572176933,
+            "rmse": 0.003523383297968492
+          },
+          "decoder.transformer": {
+            "max_abs": 0.10093891620635986,
+            "rmse": 0.016189385199186196
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      },
+      "q6_k": {
+        "manifest": "target/underdog-woof/oracle-forced-q6_k-juno/manifest.json",
+        "source_weight_loss_same_inputs": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.027112819254398346,
+            "rmse": 0.001720041184191796
+          },
+          "decoder.transformer": {
+            "max_abs": 0.0458284467458725,
+            "rmse": 0.00791933638309852
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0
+      }
+    },
+    "free_generation": {
+      "f32": {
+        "gguf_sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+        "gguf_bytes": 153003648,
+        "manifest": "target/underdog-woof/oracle-f32-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "decoder.transformer": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.10591655201278627,
+          "decoder": 0.0321705408859998
+        }
+      },
+      "f16": {
+        "gguf_sha256": "e987d705f14c35b7e685205e9d06673e1fae3c3ebee007f0acb79b47c37e6872",
+        "gguf_bytes": 76955104,
+        "manifest": "target/underdog-woof/oracle-f16-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 0.029744893312454224,
+            "rmse": 0.0024496041503565677
+          },
+          "waveform": {
+            "max_abs": 0.03932487592101097,
+            "rmse": 0.0022471798865957688
+          },
+          "decoder.transformer": {
+            "max_abs": 0.01980757713317871,
+            "rmse": 0.0013799282632139045
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.14039341104216874,
+          "decoder": 0.03262598905712366
+        }
+      },
+      "bf16": {
+        "gguf_sha256": "5186f014b39795e502232a1d234d79ed430fe359016ce27ab360fe3672807a22",
+        "gguf_bytes": 76955104,
+        "manifest": "target/underdog-woof/oracle-bf16-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 0.4906625747680664,
+            "rmse": 0.03786857273744204
+          },
+          "waveform": {
+            "max_abs": 0.45693179965019226,
+            "rmse": 0.030040097209822245
+          },
+          "decoder.transformer": {
+            "max_abs": 0.32052287459373474,
+            "rmse": 0.021019201932778352
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.12187868310138583,
+          "decoder": 0.03267460921779275
+        }
+      },
+      "q8_0": {
+        "gguf_sha256": "588fb47f12e6727e3ccea796c8aab987900b52e2ae8a797f4a522f96ce188542",
+        "gguf_bytes": 41334848,
+        "manifest": "target/underdog-woof/oracle-q8_0-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 1.4794163703918457,
+            "rmse": 0.14167723509578303
+          },
+          "waveform": {
+            "max_abs": 0.5722098350524902,
+            "rmse": 0.06072660297537432
+          },
+          "decoder.transformer": {
+            "max_abs": 1.0734068155288696,
+            "rmse": 0.07315127474022272
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.10507298586890101,
+          "decoder": 0.03163968399167061
+        }
+      },
+      "q4_0": {
+        "gguf_sha256": "eb3eeebcdf119340fa219c5deff3a8305327069e00935154ab0d0eb18c725b57",
+        "gguf_bytes": 22327392,
+        "manifest": "target/underdog-woof/oracle-q4_0-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 4.479625225067139,
+            "rmse": 0.44107796352920264
+          },
+          "waveform": {
+            "max_abs": 0.5467369556427002,
+            "rmse": 0.08169273503152853
+          },
+          "decoder.transformer": {
+            "max_abs": 2.542808771133423,
+            "rmse": 0.2359999830672352
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.14299241499975324,
+          "decoder": 0.039600279880687594
+        }
+      },
+      "q4_1": {
+        "gguf_sha256": "bc00f1b100b14b83220b15b961fec4ad6361dc5ae709be0b0bd99ea01b66eb38",
+        "gguf_bytes": 24703328,
+        "manifest": "target/underdog-woof/oracle-q4_1-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 4.830854892730713,
+            "rmse": 0.5311936820249756
+          },
+          "waveform": {
+            "max_abs": 0.5994288325309753,
+            "rmse": 0.07318106436565608
+          },
+          "decoder.transformer": {
+            "max_abs": 4.232450008392334,
+            "rmse": 0.29607759238355386
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.1314500798471272,
+          "decoder": 0.03446809807792306
+        }
+      },
+      "q4_k": {
+        "gguf_sha256": "20ba26a77cd635e2f0ebc00464023b84061af3020d8f149053bdfd168dbc988e",
+        "gguf_bytes": 105694848,
+        "manifest": "target/underdog-woof/oracle-q4_k-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.09016797691583633,
+            "rmse": 0.006462602139249706
+          },
+          "decoder.transformer": {
+            "max_abs": 0.21729862689971924,
+            "rmse": 0.03226419075554825
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.10421904106624424,
+          "decoder": 0.039266302017495036
+        }
+      },
+      "q5_k": {
+        "gguf_sha256": "dd14f06673196d9f6d024910894ea2a04b6bccf38a24bb1fa3aca771b6c61e53",
+        "gguf_bytes": 107415168,
+        "manifest": "target/underdog-woof/oracle-q5_k-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.03613854572176933,
+            "rmse": 0.003523383297968492
+          },
+          "decoder.transformer": {
+            "max_abs": 0.10093891620635986,
+            "rmse": 0.016189385199186196
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.10495405714027584,
+          "decoder": 0.036445558071136475
+        }
+      },
+      "q6_k": {
+        "gguf_sha256": "9292219f03c7212033980c26686ff5276b96a22b16ed2f08248dcc79e2f5b56b",
+        "gguf_bytes": 109243008,
+        "manifest": "target/underdog-woof/oracle-q6_k-juno/manifest.json",
+        "source_weight_loss": {
+          "latents": {
+            "max_abs": 0.0,
+            "rmse": 0.0
+          },
+          "waveform": {
+            "max_abs": 0.027112819254398346,
+            "rmse": 0.001720041184191796
+          },
+          "decoder.transformer": {
+            "max_abs": 0.0458284467458725,
+            "rmse": 0.00791933638309852
+          }
+        },
+        "decoder_chunk_vs_full_sentence_max_abs": 0.0,
+        "performance_seconds": {
+          "speech": 0.10859097703360021,
+          "decoder": 0.03205425199121237
+        }
+      }
+    },
+    "note": "Separate weight-storage loss from Rust same-weight implementation error; low-bit output quality is not equivalent to original."
+  },
+  "autoregressive_sensitivity": {
+    "perturbations": [
+      {
+        "ulps": 1,
+        "direction": "inf",
+        "samples": 165120,
+        "head_max_abs": 4.76837158203125e-07,
+        "head_relative_rmse": 8.772782565319842e-08,
+        "waveform": {
+          "max_abs": 0.03850225359201431,
+          "relative_rmse": 0.021613728802066086,
+          "cosine": 0.999766416251216
+        }
+      },
+      {
+        "ulps": 1,
+        "direction": "-inf",
+        "samples": 165120,
+        "head_max_abs": 4.76837158203125e-07,
+        "head_relative_rmse": 8.771882094131538e-08,
+        "waveform": {
+          "max_abs": 0.02060078550130129,
+          "relative_rmse": 0.008707906890783648,
+          "cosine": 0.999962085481254
+        }
+      },
+      {
+        "ulps": 4,
+        "direction": "inf",
+        "samples": 165120,
+        "head_max_abs": 1.9073486328125e-06,
+        "head_relative_rmse": 3.5087452762362396e-07,
+        "waveform": {
+          "max_abs": 0.020146680064499378,
+          "relative_rmse": 0.00830618226700575,
+          "cosine": 0.9999655032511842
+        }
+      },
+      {
+        "ulps": 4,
+        "direction": "-inf",
+        "samples": 165120,
+        "head_max_abs": 1.9073486328125e-06,
+        "head_relative_rmse": 3.5083342005311526e-07,
+        "waveform": {
+          "max_abs": 0.029152821749448776,
+          "relative_rmse": 0.013405585787803093,
+          "cosine": 0.999910142356088
+        }
+      },
+      {
+        "ulps": 16,
+        "direction": "inf",
+        "samples": 165120,
+        "head_max_abs": 7.62939453125e-06,
+        "head_relative_rmse": 1.4030925677695339e-06,
+        "waveform": {
+          "max_abs": 0.2545371353626251,
+          "relative_rmse": 0.10945685610074496,
+          "cosine": 0.994009388294055
+        }
+      },
+      {
+        "ulps": 16,
+        "direction": "-inf",
+        "samples": 165120,
+        "head_max_abs": 7.62939453125e-06,
+        "head_relative_rmse": 1.4036737425193763e-06,
+        "waveform": {
+          "max_abs": 0.08001683093607426,
+          "relative_rmse": 0.03811122632957442,
+          "cosine": 0.9992737622393238
+        }
+      }
+    ],
+    "stages": [
+      {
+        "case": "natural",
+        "exit": 101,
+        "first_float_difference": {
+          "checkpoint": "speech.prefix.0",
+          "metrics": {
+            "max_abs": 1.33514404296875e-05,
+            "relative_rmse": 3.100570814531142e-07,
+            "cosine": 0.9999999999999521
+          }
+        },
+        "first_relative_gate_failure": {
+          "checkpoint": "speech.head.24",
+          "metrics": {
+            "max_abs": 0.0018011927604675293,
+            "relative_rmse": 0.0002638306934230573,
+            "cosine": 0.9999999652044868
+          }
+        },
+        "peak_relative_error": 0.0672462245854123
+      },
+      {
+        "case": "forced",
+        "exit": 0,
+        "first_float_difference": {
+          "checkpoint": "speech.prefix.0",
+          "metrics": {
+            "max_abs": 1.33514404296875e-05,
+            "relative_rmse": 3.100570814531142e-07,
+            "cosine": 0.9999999999999521
+          }
+        },
+        "first_relative_gate_failure": null,
+        "peak_relative_error": 1.1319955334131986e-05
+      }
+    ]
+  },
+  "vulkan_diagnostics": {
+    "shared-vulkan-control.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails' (49721) panicked at src/compute/linear.rs:882:18:\ncalled `Result::unwrap()` on an `Err` value: Device(\"Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails ... FAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.33s\n\n",
+    "shared-vulkan-trace.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails' (66369) panicked at src/compute/linear.rs:882:18:\ncalled `Result::unwrap()` on an `Err` value: Device(\"Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails ... FAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.77s\n\n",
+    "vulkan/f16.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (48851) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.37s\n\n",
+    "vulkan/q4_k.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (49030) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.50s\n\n",
+    "vulkan/q6_k.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (49604) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.49s\n\n",
+    "vulkan/q8_0.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (48861) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.36s\n\n",
+    "vulkan/q5_k.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (49599) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.52s\n\n",
+    "vulkan/f32.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (48843) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.63s\n\n",
+    "vulkan/q4_1.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (48954) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.39s\n\n",
+    "vulkan/q4_0.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (48866) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.40s\n\n",
+    "vulkan/bf16.log": "\nrunning 1 test\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'models::underdog_woof::tests::official_pipeline_fixture' (48856) panicked at src/models/underdog_woof/tests.rs:180:10:\ncalled `Result::unwrap()` on an `Err` value: \"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest models::underdog_woof::tests::official_pipeline_fixture ... FAILED\n\nfailures:\n\nfailures:\n    models::underdog_woof::tests::official_pipeline_fixture\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1916 filtered out; finished in 4.36s\n\n"
+  },
+  "regression": {
+    "baseline": {
+      "results": [
+        "test result: FAILED. 1527 passed; 14 failed; 100 ignored; 0 measured; 0 filtered out; finished in 37.20s"
+      ],
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+      ]
+    },
+    "current": {
+      "results": [
+        "test result: FAILED. 1540 passed; 14 failed; 101 ignored; 0 measured; 0 filtered out; finished in 39.08s"
+      ],
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+      ]
+    },
+    "failure_names_identical": true,
+    "pivo_real_cli_http": [
+      {
+        "voice": "Pi",
+        "cli_exit": 0,
+        "wav_sha256": "3557f2288aa7f21fb54298df8771586e6a71197ca01de1c41d214b6cc1ee9f9d",
+        "http_status": 200,
+        "cli_http_bytes_equal": true
+      },
+      {
+        "voice": "Vo",
+        "cli_exit": 0,
+        "wav_sha256": "e0b9174b4c561df13e3e237b568dae53edd5618a0a718d9498b330f873c06e66",
+        "http_status": 200,
+        "cli_http_bytes_equal": true
+      }
+    ],
+    "binary_target_names": [
+      "codec_test",
+      "dump_dims",
+      "dump_emb",
+      "dump_meta",
+      "dump_tensors",
+      "ggufrs",
+      "micro-bench",
+      "rust-model-inference",
+      "rust-model-server"
+    ],
+    "binary_targets_unchanged": true
+  },
+  "checks": {
+    "woof_vulkan_parity_tests": "13 passed, 0 failed, 1 ignored (remote model fixture)",
+    "python_converter_download_tests": "13 passed",
+    "rustfmt": "passed",
+    "git_diff_check": "passed",
+    "all_targets_vulkan_parity_check": "passed (release-fast, offline)",
+    "release_cli_server_build": "passed (8m32s)"
+  },
+  "review": {
+    "completed": true,
+    "fixes": [
+      "Official public wrapper normalization/splitting and four-take retry behavior retained in models layer.",
+      "Preserve source code/license and derivative notice; do not treat upstream artifacts as MIT.",
+      "Missing Backend label match arm fixed and release binaries rebuilt.",
+      "Interface checker records numerical gate failures separately so negative/concurrency tests still run; gate remains failed.",
+      "Document long Mira drift and strict Vulkan failures instead of marking full support."
+    ],
+    "remaining": [
+      "Shared Vulkan initialization/device path needs repair and per-format numeric/performance reruns.",
+      "Long natural Mira audio needs task-level quality acceptance; strict original waveform gate remains failed.",
+      "No subjective listening or perceptual quality guarantee for re-quantized weights."
+    ]
+  }
+}

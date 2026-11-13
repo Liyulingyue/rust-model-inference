@@ -15,6 +15,8 @@ const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [
 
 PiVo-1.4M: --tts --model pivo-F32.gguf --prompt TEXT --out speech.wav [--voice Pi|Vo] [--speed 0.5..2] [--pronunciations JSON] | English, 16 kHz mono; bundled vocoder, no --mmproj; CPU/Auto; HTTP /v1/audio/speech; see tools/oracle/pivo/README.md
 
+Underdog-Woof: --tts --model woof-f32.gguf --prompt TEXT --out speech.wav [--voice juno|mira] [--seed U32] [--temperature 0.5] | English, 24 kHz mono; bundled decoder, no --mmproj; HTTP /v1/audio/speech accepts voice, seed, temperature, normalize and response_format wav|pcm
+
 AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--auk-sway α (default -1.0, sway-warped time grid)] [--auk-flash (pin the AuK-Flash recipe: 4 steps, cfg 0, official time grid)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
