@@ -4,6 +4,24 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    if crate::app::tts::is_underdog_woof_model(&options.model) {
+        if !options.tts {
+            return Err(
+                "Underdog Woof requires --tts; it is an English speech synthesis model".into(),
+            );
+        }
+        crate::app::tts::underdog_woof_request(options)?;
+        if !options.serve
+            && options
+                .out
+                .as_deref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            return Err("--tts requires --out".into());
+        }
+        options.validate_compute_mode()?;
+        return Ok(());
+    }
     if options.enhance {
         if options.model.as_os_str().is_empty()
             || (!options.serve && (options.audio.is_none() || options.out.is_none()))
@@ -593,5 +611,28 @@ pub fn transcription_options(
         language,
         prompt: options.prompt.clone(),
         max_new_tokens: resolve_cli_generation_options(options).0,
+    }
+}
+
+#[cfg(test)]
+mod underdog_woof_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_woof_skips_the_projector_and_rejects_other_tasks() {
+        let fixture = crate::app::tts::tests::WoofMetadataFixture::new();
+        let mut options = CliOptions {
+            model: fixture.0.clone(),
+            tts: true,
+            prompt: Some("Hi.".into()),
+            out: Some("speech.wav".into()),
+            ..Default::default()
+        };
+        assert!(validate_cli_options(&options).is_ok());
+        options.tts = false;
+        options.embedding = true;
+        assert!(validate_cli_options(&options)
+            .unwrap_err()
+            .contains("requires --tts"));
     }
 }

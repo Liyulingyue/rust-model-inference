@@ -93,6 +93,7 @@ enum Backend {
     /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
     /// text frontend, the acoustic decoder and the bundled vocoder.
     Pivo(speech::PivoBackend),
+    UnderdogWoof(speech::UnderdogWoofBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -1175,6 +1176,23 @@ fn build_backend(
         })));
     }
     if options.tts {
+        if crate::app::tts::is_underdog_woof_model(&options.model) {
+            let defaults = crate::app::tts::underdog_woof_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|error| error.to_string())?;
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1);
+            let model = Arc::new(crate::models::underdog_woof::Model::from_source(
+                Arc::from(source),
+                resolve_thread_count(options.threads, available),
+                options.compute_policy(),
+            )?);
+            return Ok(Arc::new(Backend::UnderdogWoof(
+                speech::UnderdogWoofBackend { model, defaults },
+            )));
+        }
         if crate::models::pivo::matches_model(&options.model) {
             let defaults = crate::app::tts::pivo_request(options)?;
             let source =
@@ -2015,7 +2033,10 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() && !crate::models::pivo::matches_model(&options.model) {
+        if options.max_tokens.is_none()
+            && !crate::models::pivo::matches_model(&options.model)
+            && !crate::app::tts::is_underdog_woof_model(&options.model)
+        {
             options.max_tokens = Some(128);
         }
     }
@@ -2078,7 +2099,7 @@ pub fn run_server() {
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::AudioEnhancement(_) => "audio-enhancement",
-        Backend::Tts(_) | Backend::Pivo(_) => "tts",
+        Backend::Tts(_) | Backend::Pivo(_) | Backend::UnderdogWoof(_) => "tts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
@@ -2126,6 +2147,9 @@ pub fn run_server() {
             post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
         Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
+        Backend::UnderdogWoof(_) => {
+            router.route("/v1/audio/speech", post(speech::synthesize_underdog_woof))
+        }
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),
@@ -2240,6 +2264,23 @@ mod server_mode_tests {
             model: PathBuf::from(model),
             ..CliOptions::default()
         }
+    }
+
+    #[test]
+    fn woof_backend_selects_its_contract_before_projector_tts() {
+        let fixture = crate::app::tts::tests::WoofMetadataFixture::new();
+        let options = CliOptions {
+            model: fixture.0.clone(),
+            tts: true,
+            serve: true,
+            prompt: Some("placeholder".into()),
+            voice: Some("juno".into()),
+            ..Default::default()
+        };
+        let Err(error) = super::build_backend(&options, None) else {
+            panic!("metadata-only Woof fixture should fail the model contract");
+        };
+        assert!(error.contains("underdog_woof.config"), "{error}");
     }
 
     #[tokio::test]

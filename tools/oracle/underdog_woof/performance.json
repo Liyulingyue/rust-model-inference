@@ -1,0 +1,143 @@
+{
+  "profile": "release (opt-level=3, fat LTO, codegen-units=1), features=vulkan",
+  "host": "Linux-6.8.0-147-generic-x86_64-with-glibc2.39",
+  "cpu": "AMD EPYC 9334",
+  "threads": 2,
+  "numpy_thread_environment": {
+    "OPENBLAS_NUM_THREADS": "2",
+    "OMP_NUM_THREADS": "2"
+  },
+  "source_revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+  "text": "Your order costs $12.50. It ships on March 3rd.",
+  "voice": "juno",
+  "seed": 0,
+  "temperature": 0.5,
+  "samples": 125760,
+  "official_numpy": {
+    "construction_seconds": 0.32998138992115855,
+    "scope": "synthesis only, model already loaded",
+    "seconds": [
+      0.850580814993009,
+      0.71373095898889,
+      0.7891209039371461
+    ],
+    "median_seconds": 0.7891209039371461
+  },
+  "rust": {
+    "cpu": {
+      "scope": "CLI process wall time, including startup/model load",
+      "seconds": [
+        1.4636589009314775,
+        1.4359338788781315,
+        1.4338507780339569
+      ],
+      "median_seconds": 1.4359338788781315,
+      "samples": [
+        125760,
+        125760,
+        125760,
+        125760
+      ],
+      "execution": [
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7182 utterances=2 samples=125760",
+        "Underdog Woof: format=f32 voice=juno seed=0 samples=125760 elapsed=1.434s",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7182 utterances=2 samples=125760",
+        "Underdog Woof: format=f32 voice=juno seed=0 samples=125760 elapsed=1.432s",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7182 utterances=2 samples=125760",
+        "Underdog Woof: format=f32 voice=juno seed=0 samples=125760 elapsed=1.403s",
+        "Underdog Woof: format=f32 requested=Cpu backend=Cpu gpu_projections=0 cpu_projections=7182 utterances=2 samples=125760",
+        "Underdog Woof: format=f32 voice=juno seed=0 samples=125760 elapsed=1.403s"
+      ],
+      "errors": [],
+      "command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+        "--tts",
+        "--model",
+        "models/Underdog-Woof/woof-f32.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "cpu",
+        "--prompt",
+        "Your order costs $12.50. It ships on March 3rd.",
+        "--seed",
+        "0",
+        "--out",
+        "/workspace/rust-model-inference-underdog-woof/target/underdog-woof/woof-bench-nkcn6zlh/out.wav"
+      ]
+    },
+    "auto": {
+      "scope": "CLI process wall time, including startup/model load",
+      "seconds": [
+        5.29185062716715
+      ],
+      "median_seconds": 5.29185062716715,
+      "samples": [
+        125760
+      ],
+      "execution": [
+        "Underdog Woof: format=f32 requested=Auto backend=Cpu gpu_projections=0 cpu_projections=7182 utterances=2 samples=125760",
+        "Underdog Woof: format=f32 voice=juno seed=0 samples=125760 elapsed=5.236s"
+      ],
+      "errors": [],
+      "command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+        "--tts",
+        "--model",
+        "models/Underdog-Woof/woof-f32.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "auto",
+        "--prompt",
+        "Your order costs $12.50. It ships on March 3rd.",
+        "--seed",
+        "0",
+        "--out",
+        "/workspace/rust-model-inference-underdog-woof/target/underdog-woof/woof-bench-nkcn6zlh/out.wav"
+      ]
+    },
+    "vulkan": {
+      "scope": "CLI process wall time, including startup/model load",
+      "seconds": [
+        4.912249044980854
+      ],
+      "median_seconds": 4.912249044980854,
+      "samples": [],
+      "execution": [],
+      "errors": [
+        "compute requested=Vulkan backend=partial mode=tts note=no complete device path for this mode; any offloadable parts run on the device\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+      ],
+      "command": [
+        "/workspace/rust-model-inference-underdog-woof/target/release/rust-model-inference",
+        "--tts",
+        "--model",
+        "models/Underdog-Woof/woof-f32.gguf",
+        "--threads",
+        "2",
+        "--compute",
+        "vulkan",
+        "--prompt",
+        "Your order costs $12.50. It ships on March 3rd.",
+        "--seed",
+        "0",
+        "--out",
+        "/workspace/rust-model-inference-underdog-woof/target/underdog-woof/woof-bench-nkcn6zlh/out.wav"
+      ]
+    }
+  },
+  "gguf_sha256": "89a63f9c9913d1a833253ff0fcd603535be2498041d9bd1f51ddac88b766a67c",
+  "notes": [
+    "CPU includes model loading; NumPy synthesis-only timing excludes construction/imports.",
+    "Auto CPU fallback is not GPU throughput. A failed strict attempt is not a completed inference.",
+    "No external acceleration library is linked into Rust; NumPy is the read-only oracle."
+  ],
+  "date": "2026-11-14",
+  "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+  "summary": {
+    "audio_seconds": 5.24,
+    "cpu_wall_rtf": 0.2740331829920098,
+    "numpy_synthesis_rtf": 0.1505955923544172,
+    "strict_vulkan_status": "failed; no completed GPU inference timing"
+  }
+}

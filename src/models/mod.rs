@@ -51,6 +51,7 @@ pub mod sensenova_loop;
 pub mod spark;
 pub mod thx02;
 pub mod timestral;
+pub mod underdog_woof;
 pub mod unlimited_ocr;
 pub mod vela3;
 pub mod vibevoice_asr;
