@@ -1,4 +1,4 @@
-//! The JEV adapter for THX-02.
+//! The JEV adapter for native decision engines.
 //!
 //! The JEV framework is model-agnostic: it knows how to score one question
 //! against a context and how to group questions, but nothing about a
@@ -14,7 +14,6 @@ use serde_json::{json, Map, Value};
 use super::super::jev::single::PreparedQuestion;
 use super::super::jev::types::{JevGroupResult, JevGroupedResult};
 use super::super::{CliOptions, JevInputs, JevMode, JevResult};
-use crate::models::thx02::validate_request;
 use crate::TensorSource;
 
 struct Readout {
@@ -141,8 +140,10 @@ impl JevPlan {
                 }),
             );
         }
-        let request = json!({"state":context,"questions":questions,"images":images,"think":false});
-        validate_request(&request)?;
+        if questions.is_empty() {
+            return Err("JEV needs at least one question".into());
+        }
+        let request = json!({"state":context,"questions":questions,"images":images});
         Ok(Self {
             request,
             context,
@@ -155,7 +156,7 @@ impl JevPlan {
         let answers = native
             .get("answers")
             .and_then(Value::as_object)
-            .ok_or("THX-02 response is missing answers")?;
+            .ok_or("decision response is missing answers")?;
         let prefill_ms = native
             .get("latency_ms")
             .and_then(Value::as_f64)
@@ -168,7 +169,7 @@ impl JevPlan {
                     .get(&readout.id)
                     .and_then(|answer| answer.get("probabilities"))
                     .and_then(Value::as_object)
-                    .ok_or("THX-02 response is missing JEV probabilities")?;
+                    .ok_or("decision response is missing JEV probabilities")?;
                 let q = &readout.question;
                 let probabilities =
                     readout
@@ -269,7 +270,7 @@ impl JevPlan {
 }
 
 pub fn run_jev_cli(
-    source: Arc<dyn TensorSource>,
+    source: Option<Arc<dyn TensorSource>>,
     options: &CliOptions,
     n_threads: usize,
 ) -> Result<(), String> {
@@ -280,10 +281,10 @@ pub fn run_jev_cli(
             .iter()
             .any(|question| question.options.len() % 2 != 0)
     {
-        return Err("THX-02 --jev-multi needs an even number of paired options".into());
+        return Err("native --jev-multi needs an even number of paired options".into());
     }
     let inputs = super::super::build_jev_inputs(options)?
-        .ok_or("THX-02 requires --decision-request or --jev")?;
+        .ok_or("native decisions require --decision-request or --jev")?;
     let images = options
         .image
         .as_deref()
@@ -292,8 +293,12 @@ pub fn run_jev_cli(
         .collect();
     let mut plan = JevPlan::new(inputs, images)?;
     super::normalize_cli_images(&mut plan.request)?;
-    let result =
-        plan.format(&super::from_source(options, source, n_threads)?.decide(&plan.request)?)?;
+    let engine = if let Some(source) = source {
+        super::from_source(options, source, n_threads)?
+    } else {
+        super::from_path(options, n_threads)?
+    };
+    let result = plan.format(&engine.decide(&plan.request)?)?;
     for value in result["results"].as_array().ok_or("missing JEV results")? {
         println!(
             "{}",
@@ -312,6 +317,24 @@ pub fn run_jev_cli(
 mod tests {
     use super::*;
     use crate::app::{JevGroupInput, JevGroupedQuestionInput, JevQuestionInput};
+
+    #[test]
+    fn decision_jev_defers_model_specific_media_limits_to_the_engine() {
+        let plan = JevPlan::new(
+            JevInputs::Single {
+                context: "state".into(),
+                questions: vec![JevQuestionInput {
+                    text: "pick".into(),
+                    options: vec!["yes".into(), "no".into()],
+                }],
+                positive: None,
+            },
+            vec!["image.png".into(); 5],
+        )
+        .unwrap();
+        assert!(crate::models::d3_turbo::validate_request(&plan.request).is_ok());
+        assert!(crate::models::thx02::validate_request(&plan.request).is_err());
+    }
 
     #[test]
     fn decision_jev_binary_preserves_native_choice_probabilities() {

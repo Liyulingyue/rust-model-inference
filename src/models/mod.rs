@@ -13,6 +13,8 @@ pub mod chat_template {
 }
 
 pub mod clm;
+pub mod d3_turbo;
+pub mod decision;
 pub mod decoder_embedding;
 pub mod diffusion;
 pub mod dory;

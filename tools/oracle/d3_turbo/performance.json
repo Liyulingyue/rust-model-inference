@@ -1,0 +1,16 @@
+{
+  "status": "partial",
+  "host": "d3-navi31",
+  "build": "release-fast; vulkan,parity-trace; Rust 1.98.1",
+  "request": "target/d3-turbo/one.json",
+  "threads": 8,
+  "measurements": {},
+  "reference_f32": null,
+  "reference_bf16": null,
+  "limitations": [
+    "End-to-end diagnostic timings include model loading; F32 Oracle includes trace payload I/O.",
+    "A failed strict Vulkan attempt is not a GPU inference timing.",
+    "Official BF16 and the native F32 execution use different activation precision.",
+    "Earlier runs with concurrent conversion, different thread counts or administrative pauses are not throughput comparisons."
+  ]
+}

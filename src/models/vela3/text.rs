@@ -7,7 +7,7 @@ const FAST_CJK: &str = "⺀-⿿　-〿぀-ヿ㄀-ㇿ㐀-䶿一-鿿ꀀ-꓏가-힯
 const EDGE: &str = "[](){}<>「」『』【】《》〈〉\"'“”‘’«»‹›";
 
 // Python's separators and exponent spelling are part of the trained prompt contract.
-pub(super) fn python_json(value: &Value, compact: bool, sorted: bool) -> String {
+pub(crate) fn python_json(value: &Value, compact: bool, sorted: bool) -> String {
     let comma = if compact { "," } else { ", " };
     let colon = if compact { ":" } else { ": " };
     match value {

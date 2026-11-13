@@ -1,0 +1,237 @@
+{
+  "engineering-final11.json": [
+    {
+      "name": "build11",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--bin",
+        "rust-model-inference",
+        "--bin",
+        "rust-model-server"
+      ],
+      "exit": 0,
+      "seconds": 322.7189342950005
+    },
+    {
+      "name": "lib-final11",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib"
+      ],
+      "exit": 101,
+      "seconds": 313.2968940290157
+    }
+  ],
+  "baseline-comparison.json": {
+    "baseline": {
+      "passed": 1644,
+      "failed": 34,
+      "ignored": 230,
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::gpu_adaln_modulate_matches_the_cpu_branch",
+        "models::diffusion::z_image::dit::tests::gpu_batched_down_projection_reproduces_the_cpu_scale",
+        "models::diffusion::z_image::dit::tests::gpu_batched_qkv_matches_the_per_row_cpu_projection",
+        "models::diffusion::z_image::dit::tests::gpu_fused_norm_and_modulate_match_the_per_row_cpu_chain",
+        "models::diffusion::z_image::dit::tests::gpu_interleaved_qk_norm_rope_matches_the_host_chain",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::dit_gpu::tests::batched_ffn_chain_matches_incremental_submission",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_gpu_prefill_decode_visit_state_fallback_and_reset",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_shader_prefill_decode_cache_and_reset_allows_software_icd",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_dt_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_norm_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits",
+        "vulkan::ops::tests::pivo_operators_match_the_host_kernels",
+        "vulkan::ops::tests::recurrent_ssm_gpu_repeat_interleave_preserves_default_head_layout",
+        "vulkan::ops::tests::sensenova_mhc_gpu_matches_independent_cpu_for_all_modes_and_rows"
+      ]
+    },
+    "current": {
+      "passed": 1653,
+      "failed": 34,
+      "ignored": 232,
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::gpu_adaln_modulate_matches_the_cpu_branch",
+        "models::diffusion::z_image::dit::tests::gpu_batched_down_projection_reproduces_the_cpu_scale",
+        "models::diffusion::z_image::dit::tests::gpu_batched_qkv_matches_the_per_row_cpu_projection",
+        "models::diffusion::z_image::dit::tests::gpu_fused_norm_and_modulate_match_the_per_row_cpu_chain",
+        "models::diffusion::z_image::dit::tests::gpu_interleaved_qk_norm_rope_matches_the_host_chain",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::dit_gpu::tests::batched_ffn_chain_matches_incremental_submission",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_gpu_prefill_decode_visit_state_fallback_and_reset",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_shader_prefill_decode_cache_and_reset_allows_software_icd",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_dt_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_norm_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits",
+        "vulkan::ops::tests::pivo_operators_match_the_host_kernels",
+        "vulkan::ops::tests::recurrent_ssm_gpu_repeat_interleave_preserves_default_head_layout",
+        "vulkan::ops::tests::sensenova_mhc_gpu_matches_independent_cpu_for_all_modes_and_rows"
+      ]
+    },
+    "new_failures": [],
+    "resolved_failures": [],
+    "current_log": "lib-final11.log"
+  },
+  "bin-targets.json": {
+    "baseline": [
+      {
+        "name": "codec_test",
+        "path": "src/bin/codec_test.rs"
+      },
+      {
+        "name": "dump_dims",
+        "path": "src/bin/dump_dims.rs"
+      },
+      {
+        "name": "dump_emb",
+        "path": "src/bin/dump_emb.rs"
+      },
+      {
+        "name": "dump_meta",
+        "path": "src/bin/dump_meta.rs"
+      },
+      {
+        "name": "dump_tensors",
+        "path": "src/bin/dump_tensors.rs"
+      },
+      {
+        "name": "ggufrs",
+        "path": "src/bin/ggufrs.rs"
+      },
+      {
+        "name": "micro-bench",
+        "path": "src/bin/micro_bench.rs"
+      },
+      {
+        "name": "rust-model-inference",
+        "path": "src/main.rs"
+      },
+      {
+        "name": "rust-model-server",
+        "path": "src/bin/server.rs"
+      }
+    ],
+    "current": [
+      {
+        "name": "codec_test",
+        "path": "src/bin/codec_test.rs"
+      },
+      {
+        "name": "dump_dims",
+        "path": "src/bin/dump_dims.rs"
+      },
+      {
+        "name": "dump_emb",
+        "path": "src/bin/dump_emb.rs"
+      },
+      {
+        "name": "dump_meta",
+        "path": "src/bin/dump_meta.rs"
+      },
+      {
+        "name": "dump_tensors",
+        "path": "src/bin/dump_tensors.rs"
+      },
+      {
+        "name": "ggufrs",
+        "path": "src/bin/ggufrs.rs"
+      },
+      {
+        "name": "micro-bench",
+        "path": "src/bin/micro_bench.rs"
+      },
+      {
+        "name": "rust-model-inference",
+        "path": "src/main.rs"
+      },
+      {
+        "name": "rust-model-server",
+        "path": "src/bin/server.rs"
+      }
+    ],
+    "equal": true
+  },
+  "clippy-final.json": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--lib",
+      "--bin",
+      "rust-model-inference",
+      "--bin",
+      "rust-model-server"
+    ],
+    "exit": 1,
+    "seconds": 0.1405006239656359
+  },
+  "cli-final.json": {
+    "command": [
+      "target/release-fast/deps/d3_turbo_cli-2599d550ee04d965",
+      "--nocapture"
+    ],
+    "exit": 0
+  },
+  "video_decoder": {
+    "command": "PATH=target/ffmpeg:$PATH RMI_D3_VIDEO_FIXTURE=target/d3-turbo/media/moving-box.mkv target/release-fast/deps/rust_model_inference-89d19ecf4f180428 decodes_sampled_frames_with_current_ffmpeg --ignored --nocapture --test-threads=1",
+    "output": "\nrunning 1 test\ntest models::d3_turbo::video::tests::decodes_sampled_frames_with_current_ffmpeg ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1918 filtered out; finished in 0.23s\n\n"
+  },
+  "python_tests": {
+    "command": "target/oracle-cpu/bin/python -m unittest tools.converter.d3_turbo.test_convert tools.oracle.d3_turbo.test_compare",
+    "passed": 7,
+    "failed": 0
+  }
+}

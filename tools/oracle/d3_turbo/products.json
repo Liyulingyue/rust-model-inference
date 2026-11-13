@@ -1,0 +1,194 @@
+{
+  "box": {
+    "oracle": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "q": {
+          "type": "box",
+          "box": {
+            "top": 0.230733193299645,
+            "bottom": 0.6880596156777119,
+            "left": 0.2543964493912685,
+            "right": 0.7210163022167981
+          },
+          "confidence": 1.0
+        }
+      },
+      "usage": {
+        "input_tokens": 201,
+        "output_tokens": 0
+      }
+    },
+    "native": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "q": {
+          "type": "box",
+          "box": {
+            "top": 0.23073544365811938,
+            "bottom": 0.6880585687101994,
+            "left": 0.25439627356860844,
+            "right": 0.7210160992059873
+          },
+          "confidence": 1.0
+        }
+      },
+      "usage": {
+        "input_tokens": 201,
+        "output_tokens": 0
+      }
+    },
+    "metrics": {
+      "discrete_and_usage_equal": true,
+      "max_edge_abs": 2.250358474370495e-06,
+      "max_confidence_abs": 0.0,
+      "max_visibility_abs": 0
+    },
+    "passed": true,
+    "gates": {
+      "edge_abs": 0.015625,
+      "confidence_abs": 0.02,
+      "visibility_abs": 0.01
+    }
+  },
+  "video_box": {
+    "oracle": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "q": {
+          "type": "box",
+          "box": {
+            "top": 0.22872171764416435,
+            "bottom": 0.6871270165325989,
+            "left": 0.3328802911799812,
+            "right": 0.6797590913333349
+          },
+          "confidence": 0.9400974911406524,
+          "time": 0.25
+        }
+      },
+      "usage": {
+        "input_tokens": 169,
+        "output_tokens": 0
+      }
+    },
+    "native": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "q": {
+          "confidence": 0.9400974911406524,
+          "box": {
+            "top": 0.2287219806652742,
+            "bottom": 0.6871268916689397,
+            "left": 0.3328803586291705,
+            "right": 0.6797590354549233
+          },
+          "time": 0.25,
+          "type": "box"
+        }
+      },
+      "usage": {
+        "input_tokens": 169,
+        "output_tokens": 0
+      }
+    },
+    "metrics": {
+      "discrete_and_usage_equal": true,
+      "max_edge_abs": 2.6302110983644766e-07,
+      "max_confidence_abs": 0.0,
+      "max_visibility_abs": 0
+    },
+    "passed": true,
+    "gates": {
+      "edge_abs": 0.015625,
+      "confidence_abs": 0.02,
+      "visibility_abs": 0.01
+    }
+  },
+  "track": {
+    "oracle": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "q": {
+          "type": "track",
+          "track": [
+            {
+              "box": {
+                "top": 0.23782062046836563,
+                "bottom": 0.6945123724078729,
+                "left": 0.3401461073275675,
+                "right": 0.6737960675409403
+              },
+              "confidence": 0.9272600565479847,
+              "visible": 0.9130539093974104,
+              "time": 0.25
+            },
+            {
+              "box": {
+                "top": 0.25746968636992945,
+                "bottom": 0.7261570027358007,
+                "left": 0.36424990063497875,
+                "right": 0.6801624072392818
+              },
+              "confidence": 0.8816643316431614,
+              "visible": 0.952701922682293,
+              "time": 1.25
+            }
+          ]
+        }
+      },
+      "usage": {
+        "input_tokens": 301,
+        "output_tokens": 0
+      }
+    },
+    "native": {
+      "model": "vllm-sr/d3-turbo",
+      "answers": {
+        "q": {
+          "type": "track",
+          "track": [
+            {
+              "visible": 0.9130541682243347,
+              "box": {
+                "top": 0.23782042723217106,
+                "bottom": 0.6945122448374083,
+                "left": 0.34014600993268274,
+                "right": 0.6737960017967302
+              },
+              "confidence": 0.9272600565479847,
+              "time": 0.25
+            },
+            {
+              "visible": 0.952701985836029,
+              "box": {
+                "top": 0.2574695593407558,
+                "bottom": 0.7261566569183137,
+                "left": 0.3642498948629755,
+                "right": 0.6801622365765154
+              },
+              "confidence": 0.8816643316431614,
+              "time": 1.25
+            }
+          ]
+        }
+      },
+      "usage": {
+        "input_tokens": 301,
+        "output_tokens": 0
+      }
+    },
+    "metrics": {
+      "discrete_and_usage_equal": true,
+      "max_edge_abs": 3.4581748709072713e-07,
+      "max_confidence_abs": 0.0,
+      "max_visibility_abs": 2.5882692433754073e-07
+    },
+    "passed": true,
+    "gates": {
+      "edge_abs": 0.015625,
+      "confidence_abs": 0.02,
+      "visibility_abs": 0.01
+    }
+  }
+}

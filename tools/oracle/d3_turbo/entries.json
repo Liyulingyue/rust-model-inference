@@ -1,0 +1,101 @@
+{
+  "text-entries": [
+    {
+      "format": "raw",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 238.38703303784132,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/d3-turbo",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0029988399322218705,
+                "negative": 0.9821544025122161,
+                "neutral": 0.014846757555562036
+              },
+              "confidence": 0.911149984414973
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 56.39455921808258,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0029988399322218705,
+                "negative": 0.9821544025122161,
+                "neutral": 0.014846757555562036
+              },
+              "confidence": 0.911149984414973
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "models/d3-turbo",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "43025",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    }
+  ],
+  "jev-text-entries": [],
+  "jev-image-entries": [],
+  "gguf-text-entries": [],
+  "device-entries": [],
+  "raw-media-http": []
+}
