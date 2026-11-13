@@ -2,11 +2,12 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from tools.converter.d3_turbo.convert import CONFIG_FILES, convert, encode_matrix
-from tools.converter.utils.gguf import GGML_BF16, GGML_F16, GGML_F32, GGML_Q8_0
+from tools.converter.utils.gguf import GGML_BF16, GGML_F16, GGML_F32, GGML_Q8_0, GgufWriter
 from tools.converter.utils.gguf import f32_to_bf16, read_gguf_directory, read_gguf_tensor_bytes
 
 
@@ -64,6 +65,32 @@ class MatrixFormats(unittest.TestCase):
                     parallel = root / "parallel.gguf"
                     convert(root, parallel, kind, workers=2)
                     self.assertEqual(output.read_bytes(), parallel.read_bytes())
+            output = root / "late-output.gguf"
+            write = GgufWriter.write
+
+            def publish_another_output(writer):
+                write(writer)
+                output.write_bytes(b"keep other output")
+
+            with patch.object(GgufWriter, "write", publish_another_output):
+                with self.assertRaises(FileExistsError):
+                    convert(root, output, "bf16")
+            self.assertEqual(output.read_bytes(), b"keep other output")
+            self.assertFalse(output.with_suffix(".gguf.partial").exists())
+
+            output = root / "late-partial.gguf"
+            partial = output.with_suffix(".gguf.partial")
+            add_tensor = GgufWriter.add_tensor_chunks
+
+            def reserve_another_partial(writer, *args):
+                partial.write_bytes(b"keep other partial")
+                add_tensor(writer, *args)
+
+            with patch.object(GgufWriter, "add_tensor_chunks", reserve_another_partial):
+                with self.assertRaises(FileExistsError):
+                    convert(root, output, "bf16")
+            self.assertEqual(partial.read_bytes(), b"keep other partial")
+            self.assertFalse(output.exists())
             save(root / "readout.safetensors", [("weight", list(head.shape), head, "BF16")])
             with self.assertRaisesRegex(ValueError, "readout must use F32"):
                 convert(root, root / "bad-readout.gguf", "bf16")

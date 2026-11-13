@@ -163,6 +163,13 @@ production binaries as the base. The final Clippy attempt could not run because
 the project-local toolchain lacks its Clippy component; the bounded component
 download did not complete. Compilation and tests do not imply a clean lint run.
 
+Post-PR review also repaired conversion publication: a file created after the
+initial existence check can no longer be overwritten, and a competing partial
+file is preserved. The injected race check fails against the original PR
+converter; the repaired converter passes all seven Python checks, including
+all nine small-format round trips and serial/parallel K-quant equality. This
+changes publication only, not the existing exported model payloads.
+
 Real legacy Vela model assets are unavailable on this host: small graph tests
 and compilation are useful but are **not** a real legacy inference regression.
 

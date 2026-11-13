@@ -151,13 +151,14 @@ def convert(root, output, kind, workers=1):
                     yield pending.popleft().result()[1]
 
         writer.add_tensor_chunks(name, dtype, gguf_dims(shape), size, chunks)
+    partial.touch(exist_ok=False)
     try:
         with (ProcessPoolExecutor(max_workers=workers) if workers > 1 and kind in ("q4_k", "q5_k", "q6_k") else nullcontext(None)) as pool:
             writer.write()
-        partial.rename(output)
-    except BaseException:
+        # Publishing with a hard link atomically refuses a destination created during conversion.
+        output.hardlink_to(partial)
+    finally:
         partial.unlink(missing_ok=True)
-        raise
 
 
 if __name__ == "__main__":

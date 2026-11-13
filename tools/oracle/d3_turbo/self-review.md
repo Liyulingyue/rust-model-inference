@@ -36,6 +36,12 @@ approval for a fully aligned model or a working GPU implementation.
 - Native trace manifests append by design. Entry probes now reset the manifest
   before each rerun; the superseded aborted video-box prefix was removed before
   comparison while retaining the final run's sidecar paths and checkpoint order.
+- Post-PR review found that a destination created during a long conversion could
+  be overwritten by `rename`, and a concurrently created partial file was not
+  reserved atomically. Exclusive partial creation and atomic hard-link
+  publication now preserve both files. Injected concurrent-publication checks
+  fail on the original PR converter and pass after the fix; GGUF payload bytes
+  and inference behavior are unchanged.
 
 ## Layer and compatibility review
 
