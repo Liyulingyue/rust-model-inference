@@ -1,0 +1,1 @@
+{"state": "The package arrived on time, but the glass inside was broken. \u5ba2\u6237\u8981\u6c42\u9000\u6b3e\u3002", "questions": {"sentiment": {"type": "choice", "instructions": "What is the customer's overall sentiment?", "criteria": {"positive": "Satisfied", "negative": "Dissatisfied", "neutral": "Neither"}}}}

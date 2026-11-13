@@ -42,6 +42,9 @@ approval for a fully aligned model or a working GPU implementation.
   publication now preserve both files. Injected concurrent-publication checks
   fail on the original PR converter and pass after the fix; GGUF payload bytes
   and inference behavior are unchanged.
+- Clippy's initially missing component was streamed into the project-local
+  toolchain with its published SHA256. An actual run and fresh baseline run
+  both report the same 10 fatal lint signatures; none was added or suppressed.
 
 ## Layer and compatibility review
 

@@ -1,0 +1,9 @@
+{
+  "status": "pending",
+  "gates": {
+    "probability_abs": 0.02,
+    "confidence_abs": 0.02,
+    "labels_and_usage_exact": true
+  },
+  "scope": "One fixed text choice; official default BF16 CPU versus native F32 CPU, not whole-graph equivalence."
+}

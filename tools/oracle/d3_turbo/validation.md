@@ -58,6 +58,10 @@ weight decoder. Q4_1 additionally models its separately rounded Q8_1 sum.
   box edges within two 128-bin steps (0.015625), confidence within 0.02,
   visibility within 0.01, identical timestamps/track length and usage. Product
   acceptance does not override a failed intermediate-checkpoint gate.
+- For the separate official-default BF16 CPU versus native F32 CPU text-choice
+  product check: identical option labels, selected choice and usage, probability
+  and confidence absolute difference ≤ 0.02. This gate is fixed before the
+  official-default run and does not change any same-compute-precision gate.
 
 These are implementation comparisons against the same stored weights, not a
 broad evaluation of quantization quality against the original model. Lossy
@@ -92,6 +96,13 @@ BF16, F32, F16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. Max abs was
 0.000034333 or below on that fixture. This narrows the Q8 whole-graph
 issue; it does not prove the 64-layer graph passes or establish a root cause.
 
+A follow-up same-input Q8_0 projection probe also passed at layers 0, 44 (the
+first whole-graph failing checkpoint) and 58 (the worst reported checkpoint).
+Max abs was 0.000026703 / 0.000008583 / 0.000005722 respectively. These
+[late-layer probes](late-layer-projections.json) use the independent external
+dequantizer and activation rounding; they narrow the investigation without
+changing the whole-graph failure or establishing its cause.
+
 Original CPU video passed all 198 floating checks after restoring the outer
 `vision_start`/`vision_end` pair that the official processor retains. Both
 token sequences contain 120 identical IDs, and all three position axes match
@@ -112,6 +123,15 @@ and usage matched exactly; maximum edge difference was 0.000000346, visibility
 difference 0.000000259 and confidence difference zero. Both the internal and
 fixed spatial product gates passed on this short fixture. Compilation and other
 validation work overlapped the run, so its wall time is diagnostic only.
+
+## Real CPU entries
+
+All nine converted formats completed real CPU CLI and HTTP requests with exit
+0 / HTTP 200 and identical native responses. The original directory's CPU
+entry also passed. The fixed single-question input has SHA256
+`5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61`;
+its byte-identical fixture is `one.json`. These execution results are separate
+from whole-graph numerical acceptance.
 
 ## Device failure and shared dependency
 
@@ -158,10 +178,12 @@ The 34 failure names are identical; no new failing test was introduced. The
 real FFmpeg fixture test passed (one test actually executed), including Unix
 0600 permissions and temporary-file cleanup. The CLI integration check passed
 against the final rebuilt executable. Seven converter and trace-acceptance
-Python tests passed. Cargo metadata confirms the same nine
-production binaries as the base. The final Clippy attempt could not run because
-the project-local toolchain lacks its Clippy component; the bounded component
-download did not complete. Compilation and tests do not imply a clean lint run.
+Python tests passed. Cargo metadata confirms the same nine production binaries
+as the base. The initially unavailable Clippy component was streamed into the
+project-local toolchain and SHA256-verified. The actual Clippy run failed with
+10 errors; a fresh check of the unchanged base has the same 10 error signatures
+and no new error was introduced. No lint level was disabled. The detailed
+baseline comparison is in `engineering.json`; this is not a clean lint pass.
 
 Post-PR review also repaired conversion publication: a file created after the
 initial existence check can no longer be overwritten, and a competing partial
@@ -183,6 +205,8 @@ entry report for commands, request hashes, actual device evidence and results.
 Machine-readable evidence: [asset hashes](assets.json),
 [engineering and baseline](engineering.json), [numerical gates](numerical.json),
 [spatial products](products.json), [real entries](entries.json),
+[official-default product comparison](official-product.json),
+[CPU/Auto trace comparisons](device-comparison.json),
 [510-row matrix](coverage.csv), [performance](performance.json) and
 [snapshot status](report-status.json). The snapshot explicitly records whether
 the sequential remote validation queue has finished; an in-progress snapshot

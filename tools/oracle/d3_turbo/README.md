@@ -63,7 +63,7 @@ each GGUF projection. Run the ignored Rust test with
 weight decoding/activation rounding from recurrent whole-graph drift.
 
 ```bash
-python tools/oracle/d3_turbo/entries.py --request target/d3-turbo/one.json \
+python tools/oracle/d3_turbo/entries.py --request tools/oracle/d3_turbo/one.json \
   --out target/d3-turbo/entries --threads 8 --trace
 python -m unittest tools.converter.d3_turbo.test_convert \
   tools.oracle.d3_turbo.test_compare
@@ -74,3 +74,6 @@ single-question JEV request. Its reports distinguish execution, CPU fallback,
 strict device failure and CLI/HTTP equality. Numerical acceptance is separate.
 Empty/incomplete traces are rejected. Full coverage and remaining layers are in
 [validation.md](validation.md), with [user-facing usage](../../../docs/develop/D3_TURBO.md).
+
+`one.json` is the byte-identical single-question input used for the format and
+performance probes (`target/d3-turbo/one.json` in the recorded remote commands).

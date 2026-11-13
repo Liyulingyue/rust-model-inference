@@ -95,7 +95,836 @@
   ],
   "jev-text-entries": [],
   "jev-image-entries": [],
-  "gguf-text-entries": [],
+  "gguf-text-entries": [
+    {
+      "format": "f32",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 386.7832004118245,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-f32.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0029988399322218705,
+                "negative": 0.9821544025122161,
+                "neutral": 0.014846757555562036
+              },
+              "confidence": 0.911149984414973
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 218.68520614411682,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0029988399322218705,
+                "negative": 0.9821544025122161,
+                "neutral": 0.014846757555562036
+              },
+              "confidence": 0.911149984414973
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-f32.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "49555",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "f16",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 245.85769872693345,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-f16.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.002996063018940009,
+                "negative": 0.9821783229561191,
+                "neutral": 0.014825614024940878
+              },
+              "confidence": 0.9112453157539311
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 53.23617629613727,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.002996063018940009,
+                "negative": 0.9821783229561191,
+                "neutral": 0.014825614024940878
+              },
+              "confidence": 0.9112453157539311
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-f16.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "60835",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "bf16",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 235.07477480801754,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-bf16.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0029988399322218705,
+                "negative": 0.9821544025122161,
+                "neutral": 0.014846757555562036
+              },
+              "confidence": 0.911149984414973
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 48.05481144506484,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0029988399322218705,
+                "negative": 0.9821544025122161,
+                "neutral": 0.014846757555562036
+              },
+              "confidence": 0.911149984414973
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-bf16.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "44557",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "q8_0",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 198.32777598383836,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q8_0.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0030226955299374456,
+                "negative": 0.9820816694477235,
+                "neutral": 0.01489563502233913
+              },
+              "confidence": 0.910837885887563
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 15.577100255992264,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0030226955299374456,
+                "negative": 0.9820816694477235,
+                "neutral": 0.01489563502233913
+              },
+              "confidence": 0.910837885887563
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q8_0.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "35273",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "q4_0",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 212.32292925613,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q4_0.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.004271835759281685,
+                "negative": 0.97781293313705,
+                "neutral": 0.017915231103668362
+              },
+              "confidence": 0.8932271907817453
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 32.21040356415324,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.004271835759281685,
+                "negative": 0.97781293313705,
+                "neutral": 0.017915231103668362
+              },
+              "confidence": 0.8932271907817453
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q4_0.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "41121",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "q4_1",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 206.11940440209582,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q4_1.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.00479838164744802,
+                "negative": 0.9715760467857948,
+                "neutral": 0.023625571566757216
+              },
+              "confidence": 0.8706324527245249
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 25.6123692211695,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.00479838164744802,
+                "negative": 0.9715760467857948,
+                "neutral": 0.023625571566757216
+              },
+              "confidence": 0.8706324527245249
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q4_1.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "45761",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "q4_k",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 207.39299700502306,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q4_k.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.007262622380586898,
+                "negative": 0.9641840932737242,
+                "neutral": 0.028553284345688913
+              },
+              "confidence": 0.8430108208425304
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 27.837492040125653,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.007262622380586898,
+                "negative": 0.9641840932737242,
+                "neutral": 0.028553284345688913
+              },
+              "confidence": 0.8430108208425304
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q4_k.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "45545",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "q5_k",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 206.78350948402658,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q5_k.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0035708139575617985,
+                "negative": 0.9782552230120626,
+                "neutral": 0.018173963030375603
+              },
+              "confidence": 0.8958094620383027
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 26.298511135857552,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.0035708139575617985,
+                "negative": 0.9782552230120626,
+                "neutral": 0.018173963030375603
+              },
+              "confidence": 0.8958094620383027
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q5_k.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "43185",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    },
+    {
+      "format": "q6_k",
+      "compute": "cpu",
+      "request": "target/d3-turbo/one.json",
+      "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
+      "cli": {
+        "exit": 0,
+        "seconds": 197.12305121799,
+        "command": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q6_k.gguf",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu",
+          "--decision-request",
+          "target/d3-turbo/one.json"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        },
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.003485998466466614,
+                "negative": 0.9799380510604315,
+                "neutral": 0.016575950473101907
+              },
+              "confidence": 0.9021085606972472
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        }
+      },
+      "http": {
+        "status": 200,
+        "seconds": 14.033140532905236,
+        "response": {
+          "model": "vllm-sr/d3-turbo",
+          "answers": {
+            "sentiment": {
+              "type": "choice",
+              "choice": "negative",
+              "probabilities": {
+                "positive": 0.003485998466466614,
+                "negative": 0.9799380510604315,
+                "neutral": 0.016575950473101907
+              },
+              "confidence": 0.9021085606972472
+            }
+          },
+          "usage": {
+            "input_tokens": 117,
+            "output_tokens": 0
+          }
+        },
+        "route": "/v1/systemone",
+        "command": [
+          "target/release-fast/rust-model-server",
+          "--model",
+          "target/d3-turbo/gguf/d3-turbo-q6_k.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "49721",
+          "--threads",
+          "8",
+          "--compute",
+          "cpu"
+        ],
+        "execution": {
+          "requested": "cpu",
+          "device_submissions": [],
+          "device_error": false,
+          "actual": "cpu"
+        }
+      },
+      "cli_http_equal": true,
+      "local_asset_rejected": true,
+      "local_video_rejected": true
+    }
+  ],
   "device-entries": [],
   "raw-media-http": []
 }

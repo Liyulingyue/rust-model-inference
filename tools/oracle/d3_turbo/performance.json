@@ -3,6 +3,8 @@
   "host": "d3-navi31",
   "build": "release-fast; vulkan,parity-trace; Rust 1.98.1",
   "request": "target/d3-turbo/one.json",
+  "request_fixture": "tools/oracle/d3_turbo/one.json",
+  "request_sha256": "5d5ee51db2e9154308ceca9d147606bc238f69615d7e1a39202b4468154d8e61",
   "threads": 8,
   "measurements": {},
   "reference_f32": null,

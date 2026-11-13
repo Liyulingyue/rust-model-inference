@@ -215,8 +215,9 @@
       "--bin",
       "rust-model-server"
     ],
-    "exit": 1,
-    "seconds": 0.1405006239656359
+    "started_utc": "2026-11-13T20:03:14Z",
+    "exit": 101,
+    "seconds": 85.23986842203885
   },
   "cli-final.json": {
     "command": [
@@ -238,5 +239,287 @@
       "late partial reservation is preserved"
     ],
     "old_converter_regression_failed_as_expected": true
+  },
+  "clippy-comparison.json": {
+    "base": "237a67bba3d8255f459e493701b4435c29e3cb11",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--lib",
+      "--bin",
+      "rust-model-inference",
+      "--bin",
+      "rust-model-server"
+    ],
+    "baseline_exit": 101,
+    "seconds": 111.13658640510403,
+    "baseline_errors": [
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 197,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 550,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: this operation will always return zero. This is likely not the intended outcome",
+        "path": "src/models/diffusion/pig.rs",
+        "line": 393,
+        "lint": "erasing_op"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/encoder.rs",
+        "line": 358,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/vad.rs",
+        "line": 92,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen3/vision/mod.rs",
+        "line": 1487,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 193,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 1839,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: approximate value of `f32::consts::LOG2_E` found",
+        "path": "src/models/yue2/nar.rs",
+        "line": 750,
+        "lint": "approx_constant"
+      },
+      {
+        "message": "error: approximate value of `f{32, 64}::consts::LOG2_E` found",
+        "path": "src/ops/math/torch28.rs",
+        "line": 17,
+        "lint": "approx_constant"
+      }
+    ],
+    "current_errors": [
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 197,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 550,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: this operation will always return zero. This is likely not the intended outcome",
+        "path": "src/models/diffusion/pig.rs",
+        "line": 393,
+        "lint": "erasing_op"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/encoder.rs",
+        "line": 358,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/vad.rs",
+        "line": 92,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen3/vision/mod.rs",
+        "line": 1487,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 193,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 1864,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: approximate value of `f32::consts::LOG2_E` found",
+        "path": "src/models/yue2/nar.rs",
+        "line": 750,
+        "lint": "approx_constant"
+      },
+      {
+        "message": "error: approximate value of `f{32, 64}::consts::LOG2_E` found",
+        "path": "src/ops/math/torch28.rs",
+        "line": 17,
+        "lint": "approx_constant"
+      }
+    ],
+    "new_errors": [],
+    "note": "Line offsets may differ in shared files; compare error message, file and lint. No lint level was disabled."
+  },
+  "source_sync": {
+    "verified_utc": "2026-11-13T20:18:33.594515+00:00",
+    "base": "237a67bba3d8255f459e493701b4435c29e3cb11",
+    "all_equal": true,
+    "files": [
+      {
+        "path": "src/app/decision.rs",
+        "sha256": "844e370601adf2738f26cc3252dd7045f6f086f87606926db2b9e076acac811c",
+        "remote_sha256": "844e370601adf2738f26cc3252dd7045f6f086f87606926db2b9e076acac811c"
+      },
+      {
+        "path": "src/app/decision/jev.rs",
+        "sha256": "225a1b0ce2ecfab8c028f822b8704565277e1660faa4df8e38380d826a208244",
+        "remote_sha256": "225a1b0ce2ecfab8c028f822b8704565277e1660faa4df8e38380d826a208244"
+      },
+      {
+        "path": "src/app/server/decision.rs",
+        "sha256": "8a2865479485c0f0226843e55e1d950329f063763b65455e425d630e0585be2d",
+        "remote_sha256": "8a2865479485c0f0226843e55e1d950329f063763b65455e425d630e0585be2d"
+      },
+      {
+        "path": "src/app/server/mod.rs",
+        "sha256": "a28071d7c03a8a0ffc08dc8af897d270577af61886b451901514ee03eb463321",
+        "remote_sha256": "a28071d7c03a8a0ffc08dc8af897d270577af61886b451901514ee03eb463321"
+      },
+      {
+        "path": "src/app/system_one.rs",
+        "sha256": "b7b4e48531b6067717854f0794c517c74643f544c6379ffe745e79c7f50ced84",
+        "remote_sha256": "b7b4e48531b6067717854f0794c517c74643f544c6379ffe745e79c7f50ced84"
+      },
+      {
+        "path": "src/main.rs",
+        "sha256": "e99bb7d8f9c2c5e3a7ad0cba72fb413a926761d316ca7500da0294de861328c5",
+        "remote_sha256": "e99bb7d8f9c2c5e3a7ad0cba72fb413a926761d316ca7500da0294de861328c5"
+      },
+      {
+        "path": "src/models/d3_turbo/compose.rs",
+        "sha256": "86b247c8981c39477ced8a8fdddb880c0fb3204200290c928b8ef8b2b8343944",
+        "remote_sha256": "86b247c8981c39477ced8a8fdddb880c0fb3204200290c928b8ef8b2b8343944"
+      },
+      {
+        "path": "src/models/d3_turbo/mod.rs",
+        "sha256": "d8df2df16ebd754f525dc6c5d244c658f693e203d67408c58870f13aca1a2ade",
+        "remote_sha256": "d8df2df16ebd754f525dc6c5d244c658f693e203d67408c58870f13aca1a2ade"
+      },
+      {
+        "path": "src/models/d3_turbo/video.rs",
+        "sha256": "26d18ae0c5594da42c1852f89083596fdfe6fa4596e5b33ffe9932dc355d2ec3",
+        "remote_sha256": "26d18ae0c5594da42c1852f89083596fdfe6fa4596e5b33ffe9932dc355d2ec3"
+      },
+      {
+        "path": "src/models/decision.rs",
+        "sha256": "263cc14c8dd37c5b7f2ea5c6c6cc80107af67c7af35b854255d9edf2a6f039b6",
+        "remote_sha256": "263cc14c8dd37c5b7f2ea5c6c6cc80107af67c7af35b854255d9edf2a6f039b6"
+      },
+      {
+        "path": "src/models/mod.rs",
+        "sha256": "1d94130f4c9b08a75d4478f58e7f750399ce5d6a6e28b7046cbb8f034057827f",
+        "remote_sha256": "1d94130f4c9b08a75d4478f58e7f750399ce5d6a6e28b7046cbb8f034057827f"
+      },
+      {
+        "path": "src/models/qwen35/vision/mod.rs",
+        "sha256": "600cfd3d5bc2cca2adc4d36b232b10337db54f00dff503de45d8caa40a5fb8f0",
+        "remote_sha256": "600cfd3d5bc2cca2adc4d36b232b10337db54f00dff503de45d8caa40a5fb8f0"
+      },
+      {
+        "path": "src/models/vela3/d3.rs",
+        "sha256": "51e5743b78c9313d6f1a9edc8315651429b0ab875cbbe985401aaf513bb4f270",
+        "remote_sha256": "51e5743b78c9313d6f1a9edc8315651429b0ab875cbbe985401aaf513bb4f270"
+      },
+      {
+        "path": "src/models/vela3/d3/vision.rs",
+        "sha256": "146ca4eeaeb0ed312304fddcbed06e32e3516988cd480099eef2db211751f923",
+        "remote_sha256": "146ca4eeaeb0ed312304fddcbed06e32e3516988cd480099eef2db211751f923"
+      },
+      {
+        "path": "src/models/vela3/decoder.rs",
+        "sha256": "9d215379112c03e82f1ba695c3b56283c566d274f1d93e2eb8d8a780eb1898e0",
+        "remote_sha256": "9d215379112c03e82f1ba695c3b56283c566d274f1d93e2eb8d8a780eb1898e0"
+      },
+      {
+        "path": "src/models/vela3/tensor.rs",
+        "sha256": "0e14cf890c4d253d7867581723ad80ad2a4fa66a4dbbc1d98fb0626db5598a25",
+        "remote_sha256": "0e14cf890c4d253d7867581723ad80ad2a4fa66a4dbbc1d98fb0626db5598a25"
+      },
+      {
+        "path": "src/models/vela3/text.rs",
+        "sha256": "6b8643375e9e51561a69bf93f9bc7b3b00a7bab7be03b969c63366849aef1847",
+        "remote_sha256": "6b8643375e9e51561a69bf93f9bc7b3b00a7bab7be03b969c63366849aef1847"
+      },
+      {
+        "path": "tests/d3_turbo_cli.rs",
+        "sha256": "a7e292284511f13cad27044eb1a1741a72f18b94b1b84512ff8a7130624d602c",
+        "remote_sha256": "a7e292284511f13cad27044eb1a1741a72f18b94b1b84512ff8a7130624d602c"
+      },
+      {
+        "path": "tools/converter/d3_turbo/convert.py",
+        "sha256": "e473936b861b4096861d3b1d36baa892767124662894bb0a06a1d4ee206a95a5",
+        "remote_sha256": "e473936b861b4096861d3b1d36baa892767124662894bb0a06a1d4ee206a95a5"
+      },
+      {
+        "path": "tools/converter/d3_turbo/test_convert.py",
+        "sha256": "772f039552f21006fe345476bcd0c25ecb5cfe640ffffa54d601411e377a1686",
+        "remote_sha256": "772f039552f21006fe345476bcd0c25ecb5cfe640ffffa54d601411e377a1686"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/entries.py",
+        "sha256": "b9ccd545cb972dd2ae05636e71d3941182b9efb3d990dd9144ee1c200a7a5a98",
+        "remote_sha256": "b9ccd545cb972dd2ae05636e71d3941182b9efb3d990dd9144ee1c200a7a5a98"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/trace.py",
+        "sha256": "f2fc5ef98c095fd92318fad3703406d84b0412f4d10c85d3f85d82ad06f3081d",
+        "remote_sha256": "f2fc5ef98c095fd92318fad3703406d84b0412f4d10c85d3f85d82ad06f3081d"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/gguf_weights.py",
+        "sha256": "f2a67d5f6a3272b43a92b82bdfbd23501b4dc775422cd3980e164ae68852cd5d",
+        "remote_sha256": "f2a67d5f6a3272b43a92b82bdfbd23501b4dc775422cd3980e164ae68852cd5d"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/compare.py",
+        "sha256": "8b230359ec6e647d4cb9716c336f2eb4f96659d1ce6f07662bdd27441ecbf5f7",
+        "remote_sha256": "8b230359ec6e647d4cb9716c336f2eb4f96659d1ce6f07662bdd27441ecbf5f7"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/projection.py",
+        "sha256": "273a96189e3d630dc04f4ba47d62af71e4d34eddbc690aff15791b6075328855",
+        "remote_sha256": "273a96189e3d630dc04f4ba47d62af71e4d34eddbc690aff15791b6075328855"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/test_compare.py",
+        "sha256": "6172c6314bc67aad75774382d6c2603d166ebf780e83ab4498b366084a022d44",
+        "remote_sha256": "6172c6314bc67aad75774382d6c2603d166ebf780e83ab4498b366084a022d44"
+      }
+    ]
   }
 }
