@@ -669,14 +669,26 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
     }
 
     /// Save the recurrent state so a rejected draft can be undone.
+    ///
+    /// The state is tens of megabytes, so the backup keeps its buffers
+    /// between rounds and only the contents are copied.
     fn save_mtp_state(&mut self) {
         let backup = self
             .mtp_state_backup
             .get_or_insert_with(|| (Vec::new(), Vec::new()));
-        backup.0.clear();
-        backup.1.clear();
-        backup.0.extend(self.scratch.conv_states.iter().cloned());
-        backup.1.extend(self.scratch.ssm_states.iter().cloned());
+        if backup.0.len() != self.scratch.conv_states.len()
+            || backup.1.len() != self.scratch.ssm_states.len()
+        {
+            backup.0 = self.scratch.conv_states.clone();
+            backup.1 = self.scratch.ssm_states.clone();
+            return;
+        }
+        for (slot, saved) in backup.0.iter_mut().zip(self.scratch.conv_states.iter()) {
+            slot.copy_from_slice(saved);
+        }
+        for (slot, saved) in backup.1.iter_mut().zip(self.scratch.ssm_states.iter()) {
+            slot.copy_from_slice(saved);
+        }
     }
 
     /// Put the recurrent state back after a rejected draft.
