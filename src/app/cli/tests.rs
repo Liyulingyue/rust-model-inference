@@ -322,6 +322,17 @@ fn planner_cli_requires_complete_component_set() {
 }
 
 #[test]
+fn cli_parses_mtp_draft_strictly() {
+    let parsed = parse_cli_options(&args(&["rmi", "--mtp-draft", "4"])).unwrap();
+    assert_eq!(parsed.effective_mtp_draft(), 4);
+    assert!(parse_cli_options(&args(&["rmi", "--mtp-draft", "x"])).is_err());
+    assert!(parse_cli_options(&args(&["rmi", "--mtp-draft"])).is_err());
+    // The default is no speculative decoding at all.
+    let plain = parse_cli_options(&args(&["rmi"])).unwrap();
+    assert_eq!(plain.effective_mtp_draft(), 0);
+}
+
+#[test]
 fn cli_parses_prefill_batch_size_strictly() {
     assert_eq!(
         CliOptions::default()

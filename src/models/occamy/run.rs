@@ -93,6 +93,7 @@ pub fn run_inference(
             pool,
             tokenizer: tokenizer.clone(),
             mmproj: None,
+            mtp_draft: 0,
         },
     )?;
 

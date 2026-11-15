@@ -3415,7 +3415,7 @@ CFG 1 / seed 42）：连跑 **6 次，PNG 逐位相同**（6 个 md5 一致）�
 不是数学保证，只是「这段时间内没再看到不一样的」，而本条的根因（设备投影
 偶发整片出错）至今没有定位到具体成因。6/6 不能替代那个定位。
 
-对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-072](#todo-072-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)）
+对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)）
 也是连跑 3 次逐位相同 —— 说明「可复现」这条门禁判据本身是可测的，
 Mage-Flow 缺的仍然是根因，不是证据。
 - `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
@@ -4267,7 +4267,14 @@ ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think �
   张量类型是否都有设备 kernel —— 12 个档类型齐全，另外 10 个含 i-quant 或
   Q2_K / Q3_K 的档没有对应设备 kernel，整个 session 建不起来
   （`auto` 回退 CPU，`--compute vulkan` 严格报错）。
-  - ✅ **`Q8_0` 档已验证，而且设备路径逐位（2026-11-11）**：该档 401 个张量
+  - **不必做 20 档全量评估**：30B 的 trunk（MoE / SSM / attention 的算术）与
+    量化类型无关，换档只是权重字节不同，每多测一档重复验证的是「已有 kernel
+    在新字节上的表现」；而 10 个 i-quant / Q2_K / Q3_K 档**设备上根本建不起
+    session**，给它们做「设备 vs CPU」评估没有意义。
+  - **按类型家族抽样 3 档即可**（未做）：`Q6_K`（k-quant 家族，设备可跑）、
+    `Q4_0`（无 k-quant 的 4-bit 家族）、`IQ4_XS`（i-quant 家族，CPU-only
+    路径）。其余维持「类型层面的契约」描述。
+  - ✅ **`Q8_0` 档已验证，设备路径实测也是逐位的（2026-11-11）**：该档 401 个张量
     只有 Q8_0（164）与 F32（237），两类设备 kernel 都是逐位的，路由 shader
     用 ggml-exact 的 `exp_reference` + `divide_finite_normal`。实测设备 vs CPU
     的 1 / 2 / 3 token prefill 全部 `relative_l2 = 0`、top-1 token 相同；
@@ -5137,6 +5144,88 @@ Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
 `tools/oracle/ovisocr3/README.md`、`docs/develop/SUPPORTED_MODELS.md`、
 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
 
+### TODO-069: MTP / DSpark 投机解码 —— 契约已查清，qwen35 的 MTP 已实现，其余未做
+
+**状态**：⚠️ 调研完成（2026-11-11）。**`qwen35` 稠密档的 MTP 起草头与验证/接受
+回路已实现**（见 TODO-072 与 PR #241：草稿逐 token 与 pinned llama.cpp 一致，
+接受率 0.58 vs 0.53，投机解码与 greedy 逐 token 相同）；DSpark / DFlash /
+EAGLE3 仍未实现。
+
+**背景**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 是 2026-09-23 的设计稿。
+按上游 llama.cpp 的 pin `b96806d` 重新核对了一遍契约，并盘点了真实模型里
+到底哪些带这些头（unsloth 名下 354 个 `-GGUF` 仓库，逐个读 GGUF 头部）。
+
+**上游契约**（`common/speculative.cpp::common_speculative_types_from_gguf` 自动识别）：
+
+| 类型 | 识别条件 | draft 是什么 |
+|---|---|---|
+| `draft-mtp` | arch 不是 `dflash`，且有 `blk.{block_count-1}.nextn.eh_proj.weight` | 主模型里多出来的 MTP block |
+| `draft-dflash` | arch 是 `dflash`，且没有 `markov_w1.weight` | 独立的 DFlash 小模型 |
+| `draft-dspark` | arch 是 `dflash`，且有 `markov_w1.weight` | DFlash + Markov 头（+ 可选 Confidence 头） |
+| `draft-eagle3` | 独立的小 EAGLE3 模型 | |
+
+- **MTP 计算**（`src/models/deepseek4.cpp::graph_mtp`）：
+  `concat(RMSNorm(embed(next_token), nextn.enorm), RMSNorm(h_last, nextn.hnorm))`
+  → `eh_proj` → 一层普通 block → `shared_head_head(shared_head_norm(out))`。
+  张量：`blk.%d.nextn.{eh_proj,embed_tokens,enorm,hnorm,shared_head_head,shared_head_norm}`；
+  metadata：`<arch>.nextn_predict_layers`。
+- **DSpark 计算**（`src/models/dflash.cpp`）：DFlash 小模型读主模型若干层的
+  hidden state（`target_layers`），内部 conv + selector；**Markov 头**按「上一个
+  已提交的 token」给每个位置的 draft logits 加偏置
+  （`logits[i] = base[i] + markov_w2 @ markov_w1[prev(i)]`，链式），
+  **Confidence 头**预测每个位置的接受概率
+  （`sigmoid(conf_proj · [embd[i]; markov_w1[prev(i)]] + b)`）。
+- **sidecar 约定**：上游下载器认 draft repo 里的 `MTP/`、`dflash/`、`dspark/`、
+  `eagle3/` 子目录（`dspark` 优先于 `dflash`）。
+
+**真实模型**（unsloth 的发布就是按这个约定）：
+
+| 模型 | sidecar | arch / 备注 |
+|---|---|---|
+| Gemma-4 全系（E2B/E4B/12B/26B-A4B/31B，含 qat 变体） | `MTP/` 0.06–0.95 GB | `gemma4-assistant`，`nextn_predict_layers = 4`，形状不同（`nextn.pre_projection` / `post_projection`） |
+| Qwen3.8-27B | `MTP/` 1.37 GB (Q4_0) | `qwen35`，`nextn_predict_layers = 1` |
+| Qwen3.8-Flash-Next | `MTP/` 2.79–7.77 GB | `qwen4exp`，带 mHC 头（`nextn.hc_head_{up,down,norm}`） |
+| DeepSeek-V4-Flash-0731 / V4.1-Flash-1017 | `dspark/` 8.5–11.3 GB | `dflash`，3 个 DSV4 block，128 专家 top-3，`target_layers=[37,38,39]`，`block_size=5` |
+| Mistral-Large-4-1T-A52B | `dspark/` 4.21 GB | `dflash` |
+| MiniMax-M3.1-Flash | 根目录 `dspark-*.gguf` 2.09 GB | `dflash` |
+
+**本仓库现状**：
+
+- `xing4_0` **已经解析**了 MTP block 的六个张量（`nextn_eh_proj` /
+  `nextn_embed_tokens` / `nextn_enorm` / `nextn_hnorm` /
+  `nextn_shared_head_head` / `nextn_shared_head_norm`，与上游 `blk.N.nextn.*`
+  契约一致），但**没有任何 forward 用它们**。
+- `qwen35` 的 config 有 `n_nextn`，并且**把 MTP 层排除在 trunk 之外**
+  （`n_layer_impl = n_layer - n_nextn`）。**Qwen3.8-27B 的主 GGUF 自带
+  `qwen35.nextn_predict_layers = 1` 与 `blk.64.nextn.*`**，所以它的 MTP 头现在
+  是**被静默忽略**的。
+- verify 侧的前向**已经够了**：`ChunkedPrefill::prefill` + per-row kernel
+  能一次算 `P + K` 个位置；缺的是 `forward_chunk` 的返回值要保留**全部**
+  `P + K` 行 logits（现在只留最后一行），以及接受循环。
+- 接受测试的形状有现成样板：`run_jev_grouped_decision` 的 per-group softmax。
+
+**建议的第一步**：
+
+1. **先做 MTP，不做 DSpark。** MTP 只要主模型最后一层的 hidden state + 一层
+   block，不需要第二个模型、不需要新架构，`xing4_0` / `qwen35` 的权重已经在
+   仓库里了；DSpark 要整个第二模型 + Markov 链 + Confidence 头。
+2. **先量 verify 侧的收益。** 把 `forward_chunk` 扩成返回全部行，然后测
+   `P + K` 一次批量 prefill 相比 `K` 次单 token 到底省多少。收益小的话，
+   任何 draft 策略都回不了本 —— 这与设计稿里「先上 NGRAM 量基线」是同一条
+   推理。
+3. **hidden state 必须先可信。** draft 头吃的是主模型的最后一层 hidden
+   state，它继承主模型的误差；仓库现成的逐位对拍基础设施
+   （`RMI_PARITY_TRACE`、`tools/oracle/*`）正是用来查这件事的 —— 一个建在
+   未验证 hidden state 上的 draft 头，比没有 draft 头更糟。
+4. **首个目标选 Gemma-4**：本仓库已有 `gemma4` trunk，MTP sidecar 只有
+   0.06–0.95 GB，整个实验（头 + verify + 接受率测量）一个 gigabyte 就够。
+   但它的 MTP 形状（`pre_projection` / `post_projection`）与 DeepSeek 系不同，
+   设计通用 MTP 路径之前要先把上游 Gemma-4 的 draft 代码读一遍。
+
+**关联**：`docs/develop/SPECULATIVE_DECODING.md`、
+`src/models/xing4_0/trunk/weights.rs`、`src/models/qwen35/trunk/config.rs`、
+`src/core/prefill.rs`、`src/app/jev/grouped.rs`。
+
 ### TODO-070: Qwen3.8-27B 的 Vulkan 路径在 Q8_0 档下不可用（FFN 太宽）
 
 **状态**：✅ 已修（#238）。
@@ -5200,11 +5289,82 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 **关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
 `tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
 
----
+### TODO-072: Qwen3.8-27B 的 MTP 起草头已可执行，但 CPU 上的投机解码不划算
 
----
+**状态**：✅ 起草头 + 验证/接受回路已实现并与 pinned llama.cpp 对拍；⚠ 性能结论
+待设备路径（草稿头目前只在 CPU 上跑）。
 
-### TODO-072: ERNIE-Image 的设备路径：K-quant 慢，Q8_0 快 2.8 倍
+**做了什么**：
+
+- `src/models/qwen35/trunk/mtp.rs`：装载并执行 GGUF 自带的 MTP 头（`blk.64.*`）。
+  图与 llama.cpp `b96806d` 的 `graph_mtp` 一致：
+  `concat(RMSNorm(embed(t_p), nextn.enorm), RMSNorm(h_{p-1}, nextn.hnorm))`
+  `→ nextn.eh_proj → 一个注意力块（自己的权重、自己的 KV cache）→ FFN`
+  `→ shared_head_norm → shared_head_head`。
+  `nextn.embed_tokens` / `shared_head_head` / `shared_head_norm` 缺省时回落到主
+  模型的 embedding / 输出权重 / 输出 norm（与上游相同）。
+- 配对规则：MTP 块在位置 `p` 上吃 `(embed(t_p), h_{p-1})`，预测 `t_{p+1}`；`h`
+  必须是**输出 norm 之后**的 hidden state（llama.cpp 的 `h_nextn`）。这条规则踩
+  过两个坑，两个都定位到了：
+  1. `last_hidden_state()` 原来返回的是最后一个 chunk 的**第一**行而不是最后一行
+     → 预填之后的第一轮起草全是噪声（接受率 0.36）；
+  2. 起草上下文的 catch-up 必须把 hidden 整体**右移一位**（位置 `p` 的 token 配
+     `h_{p-1}`），llama.cpp 用 `pending_h` 跨 batch 携带最后一行；配错时起草头的
+     KV 内容整体错一位。
+- 验证/接受回路：一次目标前向跑 `[bonus, draft_0..draft_{n-1}]`，用每一行的
+  logits 与草稿逐个比对，取最长匹配前缀。被拒的草稿必须回滚：
+  - KV：把被拒位置的 key 行清零（本仓库的自由槽位靠「第一行全零」扫描出来）；
+  - 循环状态：GDN / shortconv 的状态逐 token 携带，只回滚 KV 不够 → 快照 +
+    重放已接受的 token。llama.cpp 用 context checkpoint + replay，语义一致。
+- CLI：`--mtp-draft N`（N=每轮起草的 token 数，0=关闭）。只支持 greedy
+  （`--temp 0`）、只支持纯文本 prompt（视觉路径的 prompt 行是投影后的 embedding，
+  拿不到 token id）。HTTP（`--serve --mtp-draft N`）走同一条路：温度为 0 的请求
+  走投机解码，其余请求照旧逐 token 解码。
+
+**实测**（Qwen3.8-27B Q8_0，同一个 16 token prompt，`--mtp-draft 4`）：
+
+- 起草头与 llama.cpp **逐 token 一致**：第一轮的 4 个草稿
+  `[119721, 103722, 97889, 102768]` 与 pinned llama.cpp `b96806d` 的
+  `llama-server --spec-type draft-mtp --spec-draft-n-max 4` 记的候选完全相同。
+- 接受率：本仓库 14/24 = 0.58，llama.cpp 10/19 = 0.53（同一个模型、同一个
+  prompt、同一个 n_max）。
+- 投机解码产出的 token 与 greedy **逐个相同**——这是回滚做对了的判据。
+
+**为什么 CPU 上不划算**：27B Q8_0 的前向是**算力瓶颈**（实测约 230 GOPS，权重
+25.7 GB / 4.5 s ≈ 5.7 GB/s），所以把 `n+1` 个 token 塞进一次前向并不比 `n+1`
+次单 token 前向便宜；而被拒的草稿照样付了一次前向的算力，再加回滚的重放，整体
+比 greedy 慢（CLI 实测 16 token：greedy 的 decode 4.4 s，投机 28～32 s）。
+llama.cpp 在同一台机器上同样没有收益（它的 MTP decode 262 ms/token，就是单 token
+decode 的量级）。要拿到收益，草稿头必须跑到设备上、且目标的 batched 前向要比逐
+token 前向便宜。
+
+**已知边界**：
+
+- 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
+  Vulkan 路径下直接报错。
+- 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
+- TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
+  `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
+
+**复现**：
+
+```sh
+# 本仓库：接受率 + 与 greedy 逐 token 相同
+RMI_QWEN35_MODEL=<Qwen3.8-27B-Q8_0.gguf> \
+RMI_QWEN35_PROMPT_TOKENS=846,198,95826,110827,98419,108829,113672,119721,1710,198,74455,198,248068,271,248069,271 \
+RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 \
+cargo test --locked --profile release-fast --features parity-trace --lib qwen35_mtp -- --ignored --nocapture
+
+# llama.cpp 参照：同一模型、同一 prompt、同一 n_max
+llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv 5
+# 然后用同样的 token 数组打 /completion，日志里的 "draft candidate" 就是草稿
+```
+
+**关联**：`src/models/qwen35/trunk/mtp.rs`、`src/models/qwen35/trunk/session.rs`、
+`src/models/qwen35/trunk/weights.rs`、`src/models/qwen35/trunk/scratch.rs`、
+`docs/develop/SUPPORTED_MODELS.md`。
+
+### TODO-073: ERNIE-Image 的设备路径：K-quant 慢，Q8_0 快 2.8 倍
 
 **状态**：✅ 已解决（2026-11-12）。K-quant 仍是已知缺口。
 
@@ -5258,3 +5418,47 @@ kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 `src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
 `src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
 [TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
+
+### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读
+
+**状态**：⚠️ 已知缺口，未排期。2026-11-11 定位。
+
+**现象**：`src/models/qwen3/vision/mod.rs` 的 `decode_linear_weight` **不看张量自己声明的
+格式**，而是看字节长度：
+
+- 每元素 4 字节 → F32
+- 每元素 2 字节 → **F16**
+- `n_out * (n_in / 32) * 34` → Q8_0
+
+⇒ **F16 与 BF16 都是每元素 2 字节** ✓✓ —— **长度分不出两者** ✓✓，而两者解出来的值
+不同：1.0 的 BF16 位模式按 F16 读出来是 **1.875** ✓✓。
+
+**为什么现在没炸**：目前走 qwen3 视觉塔的模型，视觉权重都是 F32
+（Mage-Flow 的 `mmproj-mage-flow-F32.gguf` 全部 314 个张量都是 F32）——F32 是
+4 字节，猜得对 ✓✓。**一旦有一个 BF16 的视觉塔进这个路径，就是静默的错值** ✓✓：
+不报错、不崩，只是每个权重都读错 ✓✓。
+
+**对照**：qwen35 的视觉塔**已经是对的** ✓✓ —— 它的 `load_source_weight` 按
+`ggml_type` 分派（F32 / F16 / BF16 / Q8_0 ✓✓），而不是靠长度猜 ✓✓ ✓✓。
+qwen3 塔是这一族里剩下的那个例外 ✓✓。
+
+**为什么没有直接改**：qwen3 塔的 `VisionLayer` 每个权重字段是 `&[u8]` ✓✓，
+**同一个层里的不同权重可以是不同格式** ✓✓（比如 BF16 的主干 + F32 的 norm ✓✓），
+所以要修就得给每个字段各记一个 dtype ✓✓ —— 那是 `VisionLayer` 的结构变更 ✓✓，
+会牵动所有构造它的调用方（zdt ✓✓、wevisone_vl ✓✓、mage_flow ✓✓）✓✓。
+
+**方向**（未定）：
+
+1. 在 `core::tensor` 加一个按声明格式取矩阵的共享入口
+   （`load_f32_matrix` 已经在 `4c77690f` 里加好了 ✓✓ —— 它就是给这一类用的 ✓✓）✓✓，
+   然后把 qwen3 塔的权重路径换成它 ✓✓ —— 顺带把「按格式取」这件事收进 core ✓✓，
+   符合 §6 的单一事实源原则 ✓✓。
+2. 或者把 qwen3 塔的 `VisionLayer` 权重字段从 `&[u8]` 改成解码后的值 ✓✓，
+   跟刚修完的 bias 一样 ✓✓ —— 代价是所有构造方都要跟 ✓✓。
+
+**验收**：给 qwen3 塔一个 BF16 的视觉塔，权重解码结果与按声明格式解码的结果
+逐位相同 ✓✓。
+
+**关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
+`src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
+`src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
