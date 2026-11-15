@@ -858,6 +858,13 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         self.next_position = 0;
         self.processed_tokens = 0;
         self.last_step_tokens = 0;
+        // The draft context starts empty as well: its KV cache covers the
+        // committed positions, and the carry-over row belongs to the row
+        // before the next committed one.
+        if let Some(cache) = self.mtp_cache.as_mut() {
+            cache.clear();
+        }
+        self.mtp_pending_hidden.fill(0.0);
         #[cfg(feature = "vulkan")]
         if let Some(gpu) = &mut self.gpu {
             if let Err(error) = gpu.reset() {

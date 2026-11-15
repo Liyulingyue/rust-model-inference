@@ -80,6 +80,9 @@ pub struct RuntimeOptions {
     /// image input; without it an image-bearing request fails with a clear
     /// error instead of silently dropping the images.
     pub mmproj: Option<Arc<dyn TensorSource>>,
+    /// How many tokens the MTP draft head may propose per speculative
+    /// decoding round. Zero keeps the one-token-at-a-time decode.
+    pub mtp_draft: usize,
 }
 
 impl RuntimeOptions {
@@ -99,7 +102,14 @@ impl RuntimeOptions {
             pool,
             tokenizer,
             mmproj: None,
+            mtp_draft: 0,
         }
+    }
+
+    /// Turn the decode into a speculative one with the MTP draft head.
+    pub fn with_mtp_draft(mut self, n_drafts: usize) -> Self {
+        self.mtp_draft = n_drafts;
+        self
     }
 
     pub fn with_compute(mut self, policy: crate::compute::ComputePolicy) -> Self {
@@ -792,6 +802,8 @@ pub struct HybridTextRuntime {
     threads: usize,
     arch: String,
     max_context: usize,
+    /// Tokens the MTP draft head may propose per round; zero disables it.
+    mtp_draft: usize,
 }
 
 impl HybridTextRuntime {
@@ -833,6 +845,7 @@ impl HybridTextRuntime {
             threads: options.threads,
             arch,
             max_context: options.max_context,
+            mtp_draft: options.mtp_draft,
         })
     }
 }
@@ -939,9 +952,18 @@ impl TextRuntime for HybridTextRuntime {
         } else {
             self.prepare_image_prefill(&request.token_ids, &request.images)?
         };
+        // The speculative path writes the KV of the drafted tokens before it
+        // knows whether the target accepts them, so the cache needs room for
+        // one round of drafts on top of the committed tokens.
+        let mtp_overhead = if self.mtp_draft > 0 {
+            self.mtp_draft + 1
+        } else {
+            0
+        };
         let capacity = prefill_ids
             .len()
             .checked_add(request.max_new_tokens)
+            .and_then(|length| length.checked_add(mtp_overhead))
             .ok_or("context length overflow")?;
         if capacity > self.context_length() {
             return Err(format!(
@@ -970,7 +992,18 @@ impl TextRuntime for HybridTextRuntime {
         let mut text = String::new();
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
-        for step in 0..request.max_new_tokens {
+        // The speculative path below commits several tokens per round, so
+        // the one-token-at-a-time loop runs zero times when it is on.
+        let mtp_enabled = self.mtp_draft > 0
+            && request.sampling.temperature <= 0.0
+            && request.images.is_empty()
+            && prefill_embeddings.is_none();
+        let plain_steps = if mtp_enabled {
+            0
+        } else {
+            request.max_new_tokens
+        };
+        for step in 0..plain_steps {
             let pos = next_text_position;
             if step > 0 {
                 next_text_position += 1;
@@ -998,6 +1031,42 @@ impl TextRuntime for HybridTextRuntime {
                 if sink.push_text(&chunk) == Flow::Stop {
                     finish = Finish::Cancelled;
                     break;
+                }
+            }
+        }
+        if mtp_enabled {
+            // The speculative path: the MTP draft head proposes tokens and
+            // the target checks them in one forward pass. Greedy only: a
+            // sampled token would need the rejection scheme.
+            let ids: Vec<u32> = prefill_ids
+                .iter()
+                .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+                .collect::<Result<Vec<u32>, String>>()?;
+            let generation = session.mtp_generate(
+                &ids,
+                &prefill_positions,
+                request.max_new_tokens,
+                self.mtp_draft,
+            )?;
+            log::info!(
+                "MTP speculative decode: {} rounds, {}/{} drafts accepted",
+                generation.rounds,
+                generation.accepted,
+                generation.drafted
+            );
+            for id in generation.tokens {
+                if eos_id == Some(id) || im_end_id == Some(id) {
+                    finish = Finish::Eos;
+                    break;
+                }
+                token_ids.push(id);
+                let chunk = decoder.push(id);
+                if !chunk.is_empty() {
+                    text.push_str(&chunk);
+                    if sink.push_text(&chunk) == Flow::Stop {
+                        finish = Finish::Cancelled;
+                        break;
+                    }
                 }
             }
         }
@@ -1318,6 +1387,7 @@ mod tests {
             threads: 1,
             arch: arch.into(),
             max_context,
+            mtp_draft: 0,
         }
     }
 
