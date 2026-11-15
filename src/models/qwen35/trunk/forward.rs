@@ -287,6 +287,16 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let normed_len = n_tokens * n_embd;
             let attn_out = if is_recr {
                 let normed_input = unsafe { std::slice::from_raw_parts(normed_ptr, normed_len) };
+                if scratch.capture_recurrent_inputs {
+                    // Keep the recurrent layers' inputs so a speculative
+                    // rollback can replay only these layers.
+                    let row = scratch
+                        .recurrent_inputs
+                        .get_mut(il)
+                        .expect("recurrent input slot");
+                    row.clear();
+                    row.extend_from_slice(normed_input);
+                }
                 #[cfg(feature = "parity-trace")]
                 {
                     self.forward_recurrent_layer(
@@ -935,6 +945,52 @@ impl<'a> super::weights::HybridTrunk<'a> {
             );
         }
         result
+    }
+
+    /// Put the recurrent state back where the committed tokens leave it.
+    ///
+    /// The GDN and short-convolution layers carry their state from token to
+    /// token, so a rejected draft advances it. The state is a function of
+    /// the incoming state and the layer's input, and the dense layers do
+    /// not touch it, so restoring the state from before the verification and
+    /// replaying only the recurrent layers over the accepted rows (with the
+    /// inputs the forward captured) reproduces it exactly -- without
+    /// re-running the whole model.
+    ///
+    /// `n_rows` is how many of the captured rows belong to the accepted
+    /// prefix.
+    pub(crate) fn replay_recurrent_state(
+        &self,
+        n_rows: usize,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+    ) -> Result<(), String> {
+        let n_embd = self.config.n_embd;
+        let width = n_rows * n_embd;
+        for il in 0..self.config.n_layer_impl() {
+            if !self.config.is_recurrent.get(il).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(saved) = scratch.recurrent_inputs.get(il) else {
+                return Err(format!(
+                    "Qwen3.5 recurrent layer {il} has no captured input to replay"
+                ));
+            };
+            if saved.len() < width {
+                return Err(format!(
+                    "Qwen3.5 recurrent layer {il} captured {} values, need {width}",
+                    saved.len()
+                ));
+            }
+            let input = saved[..width].to_vec();
+            #[cfg(feature = "parity-trace")]
+            self.forward_recurrent_layer(
+                il, il, &input, n_rows, scratch, pool, false, false, false,
+            )?;
+            #[cfg(not(feature = "parity-trace"))]
+            self.forward_recurrent_layer(il, il, &input, n_rows, scratch, pool, false, false)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn forward_recurrent_layer(
