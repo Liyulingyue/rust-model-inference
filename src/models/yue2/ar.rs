@@ -1945,6 +1945,27 @@ pub(super) fn value_reduce_block2(
         }
         return;
     }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() && head_width >= 8 {
+        // SAFETY: AVX2 availability is checked, and both segments are bounded
+        // by the caller to stay inside their slices.
+        unsafe {
+            value_reduce_block2_avx2(
+                values_first,
+                base_first,
+                values_second,
+                base_second,
+                n_first,
+                scores,
+                output,
+                row_stride,
+                head_offset,
+                n_tokens,
+                head_width,
+            );
+        }
+        return;
+    }
     value_reduce_block2_scalar(
         values_first,
         base_first,
@@ -1995,6 +2016,65 @@ pub(super) unsafe fn value_reduce_block2_neon(
         let out = vld1q_f32(output.as_ptr().add(dim));
         vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
         dim += 4;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
+/// AVX2 mirror of [`value_reduce_block2_neon`].
+///
+/// Both segments accumulate into the *same* accumulator, so a KV block that
+/// straddles the prefix/latent boundary is reduced as one sum rather than
+/// two. The multiply and the add stay separate operations for the same
+/// bit-exactness reason as the single-segment kernel.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn value_reduce_block2_avx2(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::x86_64::*;
+    let mut dim = 0;
+    while dim + 8 <= head_width {
+        let mut acc = _mm256_setzero_ps();
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                let row = base_first + token;
+                (values_first, row * row_stride + head_offset + dim)
+            } else {
+                let row = base_second + (token - n_first);
+                (values_second, row * row_stride + head_offset + dim)
+            };
+            let weight = _mm256_set1_ps(scores[token]);
+            let v = _mm256_loadu_ps(values.as_ptr().add(start));
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(weight, v));
+        }
+        let out = _mm256_loadu_ps(output.as_ptr().add(dim));
+        _mm256_storeu_ps(output.as_mut_ptr().add(dim), _mm256_add_ps(out, acc));
+        dim += 8;
     }
     while dim < head_width {
         let mut sum = 0.0f32;
@@ -2080,6 +2160,27 @@ pub(super) fn value_reduce_block(
             return;
         }
     }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::has_avx2_fma() && head_width >= 8 && n_tokens > 0 {
+            // SAFETY: AVX2 is available per `has_avx2_fma`, and every load below
+            // is bounded by `base + n_tokens * row_stride + head_offset +
+            // head_width` which the caller guarantees is within `values`.
+            unsafe {
+                value_reduce_block_avx2(
+                    values,
+                    scores,
+                    output,
+                    base,
+                    row_stride,
+                    head_offset,
+                    n_tokens,
+                    head_width,
+                );
+            }
+            return;
+        }
+    }
     value_reduce_block_scalar(
         values,
         scores,
@@ -2131,6 +2232,54 @@ pub(super) unsafe fn value_reduce_block_neon(
     }
 }
 
+/// AVX2 mirror of [`value_reduce_block_neon`].
+///
+/// The reduction is vectorized over the head dimension, which is independent
+/// per lane, while the token loop stays strictly sequential. The multiply and
+/// the add are separate operations, so the product is rounded before it is
+/// accumulated, and the block lands in the output with a single add at the
+/// end. Both properties are what the bit-exactness test in
+/// `nar_attention_parity_tests` pins, so neither may be "optimized" into an
+/// FMA here.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn value_reduce_block_avx2(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::x86_64::*;
+    let mut dim = 0;
+    while dim + 8 <= head_width {
+        // Fresh accumulator per block, and a separate multiply so the product
+        // is rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc = _mm256_setzero_ps();
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            let weight = _mm256_set1_ps(scores[token]);
+            let v = _mm256_loadu_ps(values.as_ptr().add(start));
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(weight, v));
+        }
+        let out = _mm256_loadu_ps(output.as_ptr().add(dim));
+        _mm256_storeu_ps(output.as_mut_ptr().add(dim), _mm256_add_ps(out, acc));
+        dim += 8;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
 #[inline]
 pub(super) fn value_reduce_block_scalar(
     values: &[f32],
@@ -2168,15 +2317,15 @@ pub(super) fn attention_head(
     }
     if scores.len() <= 512 {
         let inverse_sum = softmax(scores);
-        // The scalar form iterated dimension-outer, so consecutive reads of
-        // `value_cache` were `kv_width` floats apart and every access landed on a
-        // fresh cache line. `value_reduce_block` walks tokens outer and the head
-        // dimension inner, which is the contiguous order, and it reproduces the
-        // original arithmetic exactly: a fresh zeroed accumulator per call, a
-        // separate multiply and add rather than an FMA, and one add into
-        // `output` at the end. This is the same kernel the NAR attention uses
-        // and it is pinned bit-exact by
-        // `nar::attention_parity_tests::optimized_attention_matches_legacy_bitwise`.
+        // The reduction must reproduce the original arithmetic exactly: a fresh
+        // zeroed accumulator per call, a separate multiply and add rather than
+        // an FMA, and one add into `output` at the end. `value_reduce_block`
+        // therefore keeps the legacy dimension-outer / token-inner order, so
+        // the per-dimension accumulation order is untouched, and vectorizes the
+        // head dimension instead, so one token read covers contiguous dims
+        // rather than a single scalar. This is the same kernel the NAR
+        // attention uses, and it is pinned bit-exact by
+        // `nar::attention_parity_tests::value_reduce_block_is_bitwise_identical_to_the_scalar_form`.
         output.fill(0.0);
         value_reduce_block(
             value_cache,
@@ -2273,6 +2422,69 @@ fn trace(name: &str, layer: Option<usize>, step: usize, shape: &[usize], values:
 mod performance_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Times the shipped `value_reduce_block` against the scalar kernel at the
+    /// production AR shape (one kv head, 128 dims, a 4 KiB row stride).
+    ///
+    /// The row stride is exactly one page, so the scalar kernel's dim-outer /
+    /// token-inner order walks one fresh page per access; that is what makes
+    /// the reduction the dominant cost of AR attention.
+    #[test]
+    #[ignore = "timing probe, run with --ignored --nocapture"]
+    fn value_reduce_block_simd_speedup_at_production_shape() {
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const KV_WIDTH: usize = KV_HEADS * HEAD_DIM;
+        for n_tokens in [512usize, 1200] {
+            let values: Vec<f32> = (0..n_tokens * KV_WIDTH)
+                .map(|index| ((index * 37 % 251) as f32 - 125.0) * 0.017)
+                .collect();
+            let scores: Vec<f32> = (0..n_tokens)
+                .map(|index| ((index * 13 % 17) as f32 - 8.0) * 0.031)
+                .collect();
+            let mut output = vec![0.0f32; HEAD_DIM];
+
+            let mut best_scalar = f64::MAX;
+            let mut best_simd = f64::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                for head in 0..KV_HEADS {
+                    value_reduce_block_scalar(
+                        &values,
+                        &scores,
+                        &mut output,
+                        0,
+                        KV_WIDTH,
+                        head * HEAD_DIM,
+                        n_tokens,
+                        HEAD_DIM,
+                    );
+                }
+                best_scalar = best_scalar.min(start.elapsed().as_secs_f64());
+
+                let start = std::time::Instant::now();
+                for head in 0..KV_HEADS {
+                    value_reduce_block(
+                        &values,
+                        &scores,
+                        &mut output,
+                        0,
+                        KV_WIDTH,
+                        head * HEAD_DIM,
+                        n_tokens,
+                        HEAD_DIM,
+                    );
+                }
+                best_simd = best_simd.min(start.elapsed().as_secs_f64());
+            }
+            println!(
+                "n_tokens={n_tokens:5} scalar={:8.3} ms  simd={:8.3} ms  speedup={:5.2}x",
+                best_scalar * 1e3,
+                best_simd * 1e3,
+                best_scalar / best_simd,
+            );
+        }
+    }
 
     #[cfg(feature = "vulkan")]
     #[test]

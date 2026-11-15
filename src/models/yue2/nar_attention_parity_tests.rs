@@ -129,6 +129,76 @@ fn value_reduce_block_is_bitwise_identical_to_the_scalar_form() {
 }
 
 #[test]
+fn value_reduce_block2_is_bitwise_identical_to_the_scalar_form() {
+    // `value_reduce_block2` reduces a KV block that straddles the prefix/latent
+    // boundary. Both segments accumulate into the *same* accumulator, so the
+    // block is one sum rather than two, and the segment switch must not
+    // introduce a rounding step of its own. `base_first`/`base_second` are row
+    // indices here, unlike the single-segment kernel where `base` is an
+    // element offset.
+    let config = config();
+    let head_dim = config.head_dim;
+    let kv_width = config.kv_heads * head_dim;
+    let mut state = 5150501u32;
+    for n_first in [0usize, 1, 63, 128, 511] {
+        let n_tokens = n_first + 257;
+        // The first segment covers tokens `0..n_first`, the second the rest.
+        let first_rows = n_first;
+        let second_rows = n_tokens - n_first;
+        let values_first: Vec<f32> = (0..first_rows * kv_width)
+            .map(|_| draw(&mut state, 16384.0))
+            .collect();
+        let values_second: Vec<f32> = (0..second_rows * kv_width)
+            .map(|_| draw(&mut state, 16384.0))
+            .collect();
+        let scores: Vec<f32> = (0..n_tokens).map(|_| draw(&mut state, 4.0)).collect();
+        for head in [0usize, config.kv_heads - 1] {
+            let mut expected = vec![0.0f32; head_dim];
+            for dimension in 0..head_dim {
+                let mut sum = 0.0f32;
+                for token in 0..n_tokens {
+                    let (values, start) = if token < n_first {
+                        let row = token;
+                        (&values_first, row * kv_width + head * head_dim + dimension)
+                    } else {
+                        let row = token - n_first;
+                        (&values_second, row * kv_width + head * head_dim + dimension)
+                    };
+                    sum += scores[token] * values[start];
+                }
+                expected[dimension] = sum;
+            }
+            let mut actual = vec![0.0f32; head_dim];
+            for (index, slot) in actual.iter_mut().enumerate() {
+                *slot = draw(&mut state, 512.0) * (index as f32 + 1.0);
+            }
+            let seed_output = actual.clone();
+            super::value_reduce_block2(
+                &values_first,
+                0,
+                &values_second,
+                0,
+                n_first,
+                &scores,
+                &mut actual,
+                kv_width,
+                head * head_dim,
+                n_tokens,
+                head_dim,
+            );
+            for (index, value) in actual.iter().enumerate() {
+                assert_eq!(
+                    value.to_bits(),
+                    (seed_output[index] + expected[index]).to_bits(),
+                    "n_first={n_first} head={head} dim={index}: two-segment value \
+                     reduce diverged from the scalar form"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn hybrid_attention_is_stable_across_pool_widths() {
     let config = config();
     let q_width = config.q_heads * config.head_dim;
