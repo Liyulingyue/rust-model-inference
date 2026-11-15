@@ -778,6 +778,7 @@ impl YuE2Model {
             // Single-token decode over a 3B AR pass is seconds per step on
             // CPU, so emit a periodic rate log instead of a silent stall.
             if output.len() % 16 == 0 || step + 1 == sampling.max_tokens {
+                session.timing.report();
                 let elapsed = sampling_started.elapsed().as_secs_f64();
                 eprintln!(
                     "[yue2:{}] {} tokens in {:.1}s ({:.2} tok/s)",
@@ -887,6 +888,7 @@ pub struct YuE2ArSession<'model> {
     /// Outer None requests initialization; Some(None) permanently keeps fallback.
     #[cfg(feature = "vulkan")]
     gpu: Option<Option<crate::vulkan::yue2::YuE2VulkanSession<'model>>>,
+    timing: ArPhaseTiming,
 }
 
 /// Run one device chunk for `token_ids`, mirror the K/V deltas into the CPU
@@ -962,6 +964,7 @@ impl<'model> YuE2ArSession<'model> {
         ));
         Ok(Self {
             model,
+            timing: ArPhaseTiming::new(),
             kv: KvState::new(arch, KvFormat::F32, capacity),
             x: vec![0.0; config.hidden],
             normed: vec![0.0; config.hidden],
@@ -1100,6 +1103,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.normed,
             );
+            let qkv_started = std::time::Instant::now();
             layer.ar_attention.q.matmul(
                 &self.normed,
                 &mut self.q,
@@ -1124,6 +1128,7 @@ impl<'model> YuE2ArSession<'model> {
                 &mut self.scales,
                 &mut self.q8k,
             );
+            ArPhaseTiming::add(&self.timing.qkv, qkv_started);
             rms_norm_heads(
                 &mut self.q,
                 &layer.ar_attention.q_norm,
@@ -1182,6 +1187,7 @@ impl<'model> YuE2ArSession<'model> {
             let row_base = layer_base + position * kv_width;
             key_cache[row_base..row_base + kv_width].copy_from_slice(&self.k);
             value_cache[row_base..row_base + kv_width].copy_from_slice(&self.v);
+            let attn_started = std::time::Instant::now();
             self.attention.fill(0.0);
             for head in 0..config.q_heads {
                 let kv_head = head / group_size;
@@ -1198,6 +1204,7 @@ impl<'model> YuE2ArSession<'model> {
                     scale,
                 );
             }
+            ArPhaseTiming::add(&self.timing.attn, attn_started);
             trace(
                 "yue2.ar.attn",
                 Some(layer_index),
@@ -1205,6 +1212,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[q_width],
                 &self.attention,
             );
+            let o_started = std::time::Instant::now();
             layer.ar_attention.output.matmul(
                 &self.attention,
                 &mut self.projected,
@@ -1220,6 +1228,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.projected,
             );
+            ArPhaseTiming::add(&self.timing.o_proj, o_started);
             add_in_place(&mut self.x, &self.projected);
             trace(
                 "yue2.ar.attn_residual",
@@ -1242,6 +1251,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.normed,
             );
+            let mlp_started = std::time::Instant::now();
             layer.ar_mlp.gate.matmul(
                 &self.normed,
                 &mut self.gate,
@@ -1291,6 +1301,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.down,
             );
+            ArPhaseTiming::add(&self.timing.mlp, mlp_started);
             add_in_place(&mut self.x, &self.down);
             trace(
                 "yue2.ar.ffn_residual",
@@ -1320,6 +1331,7 @@ impl<'model> YuE2ArSession<'model> {
             &[config.hidden],
             &self.normed,
         );
+        let head_started = std::time::Instant::now();
         self.model.lm_head.matmul(
             &self.normed,
             &mut self.logits,
@@ -1328,6 +1340,7 @@ impl<'model> YuE2ArSession<'model> {
             &mut self.scales,
             &mut self.q8k,
         );
+        ArPhaseTiming::add(&self.timing.head, head_started);
         trace(
             "yue2.ar.logits",
             None,
@@ -1610,6 +1623,58 @@ impl Phase {
                     || token == MUSIC_END as usize
             }
         }
+    }
+}
+
+/// Per-phase nanosecond counters for the AR decode loop.
+///
+/// The AR runs one token at a time, so the split between its
+/// projections, its attention and its sampling decides where a device
+/// port has to land. `RMI_YUE2_AR_TIMING=1` prints the accumulated
+/// counters.
+struct ArPhaseTiming {
+    qkv: std::sync::atomic::AtomicU64,
+    attn: std::sync::atomic::AtomicU64,
+    o_proj: std::sync::atomic::AtomicU64,
+    mlp: std::sync::atomic::AtomicU64,
+    head: std::sync::atomic::AtomicU64,
+    enabled: bool,
+}
+
+impl ArPhaseTiming {
+    fn new() -> Self {
+        Self {
+            qkv: std::sync::atomic::AtomicU64::new(0),
+            attn: std::sync::atomic::AtomicU64::new(0),
+            o_proj: std::sync::atomic::AtomicU64::new(0),
+            mlp: std::sync::atomic::AtomicU64::new(0),
+            head: std::sync::atomic::AtomicU64::new(0),
+            enabled: std::env::var("RMI_YUE2_AR_TIMING").is_ok(),
+        }
+    }
+
+    fn add(counter: &std::sync::atomic::AtomicU64, started: std::time::Instant) {
+        counter.fetch_add(
+            started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn report(&self) {
+        if !self.enabled {
+            return;
+        }
+        let read = |counter: &std::sync::atomic::AtomicU64| {
+            counter.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9
+        };
+        eprintln!(
+            "[yue2.ar.timing] qkv={:.2}s attn={:.2}s o_proj={:.2}s mlp={:.2}s head={:.2}s",
+            read(&self.qkv),
+            read(&self.attn),
+            read(&self.o_proj),
+            read(&self.mlp),
+            read(&self.head),
+        );
     }
 }
 
@@ -2405,6 +2470,281 @@ mod performance_tests {
     /// Micro-benchmark of the device linear path: the submission overhead, the
     /// BF16 dot kernel and the tiled float kernel on the shapes the NAR and the
     /// AR use.
+    /// Measures how well the decode-shaped BF16 projection scales over the
+    /// compute pool. The AR decode is single-token, so the projection is a
+    /// GEMV and the pool is the only source of parallelism.
+    #[test]
+    #[ignore = "needs a large BF16 weight"]
+    fn cpu_bf16_gemv_pool_scaling() {
+        use std::time::Instant;
+        let cases: [(usize, usize); 4] = [(2048, 2048), (2048, 6144), (6144, 2048), (2048, 184704)];
+        for (n_in, n_out) in cases {
+            let bytes: &'static [u8] = Box::leak(vec![0x3fu8; n_in * n_out * 2].into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                #[cfg(feature = "vulkan")]
+                gpu_bf16: Default::default(),
+                n_in,
+                n_out,
+            };
+            let input = vec![0.01f32; n_in];
+            let mut output = vec![0.0f32; n_out];
+            let pool = crate::core::thread_pool::ComputePool::new(8);
+
+            let single_started = Instant::now();
+            torch_bf16_matmul_rows(bytes, &input, None, &mut output, n_in, 0);
+            let single = single_started.elapsed();
+
+            weight.matmul_bf16(&input, None, &mut output, &pool);
+            let pool_started = Instant::now();
+            for _ in 0..3 {
+                weight.matmul_bf16(&input, None, &mut output, &pool);
+            }
+            let parallel = pool_started.elapsed() / 3;
+
+            let bytes_moved = (n_in * n_out * 2) as f64;
+            eprintln!(
+                "n_in={n_in} n_out={n_out}: single={single:?} pool8={parallel:?} speedup={:.2}x \
+                 single_bw={:.1} GB/s pool_bw={:.1} GB/s",
+                single.as_secs_f64() / parallel.as_secs_f64(),
+                bytes_moved / single.as_secs_f64() / 1e9,
+                bytes_moved / parallel.as_secs_f64() / 1e9,
+            );
+        }
+    }
+
+    /// Locates the AR decode's CPU bottleneck: the single dot product, the
+    /// per-call overhead of the compute pool and the weight streaming.
+    #[test]
+    #[ignore = "timing probe"]
+    fn cpu_bf16_gemv_breakdown() {
+        use std::time::Instant;
+        let n_in = 2048usize;
+        let n_out = 2048usize;
+        let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+        let input = vec![0.01f32; n_in];
+
+        eprintln!(
+            "has_avx2_fma={} scalar_mode={} detected_avx2={} detected_fma={}",
+            crate::ops::has_avx2_fma(),
+            crate::ops::scalar_mode(),
+            is_x86_feature_detected!("avx2"),
+            is_x86_feature_detected!("fma"),
+        );
+
+        // One dot product, warm. The weight bytes decide whether the FMA
+        // stays on the fast path: -0.0 weights keep the accumulator at
+        // zero, and the timing below compares that against a normal weight.
+        let mut probe = 0.0f32;
+        for (label, weight_byte) in [("neg-zero", 0x80u8), ("normal", 0x3fu8)] {
+            let mut local = bytes.to_vec();
+            local[..n_in * 2].fill(weight_byte);
+            let dot_started = Instant::now();
+            for _ in 0..1000 {
+                probe += crate::ops::dot_bf16_f32(&input, &local[..n_in * 2], n_in);
+            }
+            let dot_each = dot_started.elapsed() / 1000;
+            eprintln!(
+                "dot_bf16_f32(n_in={n_in}) {label}: {dot_each:?} ({:.2} G elem/s) probe={probe}",
+                n_in as f64 / dot_each.as_secs_f64() / 1e9
+            );
+        }
+
+        // The pool barrier alone.
+        let pool = crate::core::thread_pool::ComputePool::new(8);
+        let barrier_started = Instant::now();
+        for _ in 0..1000 {
+            pool.compute(|_, _| {});
+        }
+        let barrier_each = barrier_started.elapsed() / 1000;
+        eprintln!("pool.compute(empty) barrier: {barrier_each:?}");
+
+        // The same work split over the pool.
+        let mut output = vec![0.0f32; n_out];
+        let rows_started = Instant::now();
+        for _ in 0..20 {
+            torch_bf16_matmul_rows(bytes, &input, None, &mut output, n_in, 0);
+        }
+        let rows_each = rows_started.elapsed() / 20;
+        eprintln!(
+            "torch_bf16_matmul_rows(n_out={n_out}): {rows_each:?} -> {:.1} ns/dot",
+            rows_each.as_secs_f64() * 1e9 / n_out as f64
+        );
+    }
+
+    /// Breaks the AR attention cost down into its two halves: the score dot
+    /// per cached position and the weighted value reduction.
+    ///
+    /// The AR decode runs one token at a time, so the attention walks the
+    /// whole KV cache for every token. This probe reports how much of that
+    /// walk is the score dot and how much is the value reduction, so a
+    /// change targets the part that actually costs.
+    #[test]
+    #[ignore = "timing probe"]
+    fn ar_attention_cost_split() {
+        use std::time::Instant;
+        let head_dim = 128usize;
+        let kv_heads = 8usize;
+        let q_heads = 16usize;
+        let kv_width = kv_heads * head_dim;
+        // The semantic phase decodes with the 888-token prefix plus the
+        // generated tokens, so the KV walk grows to about 1200 positions.
+        for positions in [256usize, 1200] {
+            let key: Vec<f32> = (0..positions * kv_width)
+                .map(|i| (i % 251) as f32 * 0.001)
+                .collect();
+            let value: Vec<f32> = (0..positions * kv_width)
+                .map(|i| (i % 97) as f32 * 0.002)
+                .collect();
+            let query: Vec<f32> = (0..head_dim).map(|i| (i % 13) as f32 * 0.01).collect();
+            let mut scores = vec![0.0f32; positions];
+            let mut output = vec![0.0f32; head_dim];
+
+            // Score half: one dot per cached position, per head.
+            let score_started = Instant::now();
+            let mut sink = 0.0f32;
+            for head in 0..q_heads {
+                let kv_start = (head / 2) * head_dim;
+                for (position, score) in scores.iter_mut().enumerate() {
+                    let key_start = position * kv_width + kv_start;
+                    *score = dot(&query, &key[key_start..key_start + head_dim]);
+                }
+                sink += scores[0];
+            }
+            let score_each = score_started.elapsed();
+
+            // Value half: the weighted reduction over the same positions.
+            let value_started = Instant::now();
+            for head in 0..q_heads {
+                let kv_start = (head / 2) * head_dim;
+                output.fill(0.0);
+                value_reduce_block(
+                    &value,
+                    &scores,
+                    &mut output,
+                    0,
+                    kv_width,
+                    kv_start,
+                    positions,
+                    head_dim,
+                );
+            }
+            let value_each = value_started.elapsed();
+
+            eprintln!(
+                "positions={positions}: score={:?} value={:?} total={:?} sink={sink:.4}",
+                score_each,
+                value_each,
+                score_each + value_each,
+            );
+        }
+    }
+
+    /// How the SIMD speedup of the value reduction depends on how much of the
+    /// KV cache is resident.
+    ///
+    /// The AR decode cycles through every layer's KV cache once per generated
+    /// token, so by the time it returns to a layer the cache has been evicted
+    /// and the reduction reads from DRAM. This probe grows the number of layers
+    /// -- and with it the working set -- to see whether the kernel's speedup
+    /// survives that.
+    ///
+    /// Each variant gets its own buffer so neither one warms the other's
+    /// cache before it is measured.
+    #[test]
+    #[ignore = "timing probe, run with --ignored --nocapture"]
+    fn value_reduce_speedup_against_the_kv_working_set() {
+        use std::time::Instant;
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const KV_WIDTH: usize = KV_HEADS * HEAD_DIM;
+        const Q_HEADS: usize = 16;
+        const POSITIONS: usize = 900;
+        for layers in [1usize, 2, 4, 8, 16, 28] {
+            let total = layers * POSITIONS * KV_WIDTH;
+            let scalar_buffer: Vec<f32> = (0..total).map(|i| (i % 251) as f32 * 0.002).collect();
+            let simd_buffer: Vec<f32> = (0..total).map(|i| (i % 251) as f32 * 0.002).collect();
+            let scores: Vec<f32> = (0..POSITIONS).map(|i| (i % 97) as f32 * 0.01).collect();
+            let mut output = vec![0.0f32; HEAD_DIM];
+            let mut best_scalar = f64::MAX;
+            let mut best_simd = f64::MAX;
+            for _ in 0..3 {
+                let started = Instant::now();
+                for layer in 0..layers {
+                    let base = layer * POSITIONS * KV_WIDTH;
+                    for head in 0..Q_HEADS {
+                        let kv_start = (head / 2) * HEAD_DIM;
+                        value_reduce_block_scalar(
+                            &scalar_buffer[base..],
+                            &scores,
+                            &mut output,
+                            0,
+                            KV_WIDTH,
+                            kv_start,
+                            POSITIONS,
+                            HEAD_DIM,
+                        );
+                    }
+                }
+                best_scalar = best_scalar.min(started.elapsed().as_secs_f64());
+
+                let started = Instant::now();
+                for layer in 0..layers {
+                    let base = layer * POSITIONS * KV_WIDTH;
+                    for head in 0..Q_HEADS {
+                        let kv_start = (head / 2) * HEAD_DIM;
+                        value_reduce_block(
+                            &simd_buffer[base..],
+                            &scores,
+                            &mut output,
+                            0,
+                            KV_WIDTH,
+                            kv_start,
+                            POSITIONS,
+                            HEAD_DIM,
+                        );
+                    }
+                }
+                best_simd = best_simd.min(started.elapsed().as_secs_f64());
+            }
+            let megabytes = (total * 4) as f64 / (1024.0 * 1024.0);
+            let bytes_read = (layers * Q_HEADS * POSITIONS * HEAD_DIM * 4) as f64;
+            // The ceiling this core can stream at: the same bytes, read once,
+            // with no reduction. Nothing the kernel does can beat this.
+            let mut best_stream = f64::MAX;
+            for _ in 0..3 {
+                let started = Instant::now();
+                let mut sink = 0.0f32;
+                for value in &simd_buffer {
+                    sink += *value;
+                }
+                std::hint::black_box(sink);
+                best_stream = best_stream.min(started.elapsed().as_secs_f64());
+            }
+            let stream_bytes = (total * 4) as f64;
+            eprintln!(
+                "layers={layers:3} working_set={megabytes:7.1} MB  scalar={:8.3}s \
+                 ({:5.2} GB/s)  simd={:8.3}s ({:5.2} GB/s)  speedup={:5.2}x  \
+                 stream_read={:5.2} GB/s",
+                best_scalar,
+                bytes_read / best_scalar / 1e9,
+                best_simd,
+                bytes_read / best_simd / 1e9,
+                best_scalar / best_simd,
+                stream_bytes / best_stream / 1e9,
+            );
+        }
+    }
+
+    /// Micro-benchmark of the device linear path: the submission overhead, the
+    /// BF16 dot kernel and the tiled float kernel on the shapes the NAR and the
+    /// AR use.
     #[cfg(feature = "vulkan")]
     #[test]
     #[ignore = "requires a Vulkan device; times the device linear path per shape"]
@@ -2460,6 +2800,15 @@ mod performance_tests {
                     eprintln!("n_in={n_in} n_out={n_out} rows={rows} {label}: declined");
                     continue;
                 }
+                // The CPU reference for the same shape.
+                let pool = crate::core::thread_pool::ComputePool::new(8);
+                let mut cpu = vec![0.0f32; rows * n_out];
+                weight.matmul_bf16(&input, None, &mut cpu, &pool);
+                let cpu_started = Instant::now();
+                for _ in 0..5 {
+                    weight.matmul_bf16(&input, None, &mut cpu, &pool);
+                }
+                let cpu_each = cpu_started.elapsed() / 5;
                 let calls = 20u32;
                 let started = Instant::now();
                 for _ in 0..calls {
@@ -2470,7 +2819,7 @@ mod performance_tests {
                 let each = started.elapsed() / calls;
                 let macs = (n_in * n_out * rows) as f64;
                 eprintln!(
-                    "n_in={n_in} n_out={n_out} rows={rows} {label}: {each:?} ({:.2} GFLOP/s)",
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: {each:?} ({:.2} GFLOP/s) cpu={cpu_each:?}",
                     2.0 * macs / each.as_secs_f64() / 1e9
                 );
             }
