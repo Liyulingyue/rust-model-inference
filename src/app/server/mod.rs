@@ -1680,6 +1680,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     .with_threads(options.threads)
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
+    .with_mtp_draft(options.effective_mtp_draft())
     .with_mmproj(mmp);
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {

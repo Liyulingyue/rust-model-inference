@@ -147,6 +147,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--mtp-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --mtp-draft")?;
+                options.mtp_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --mtp-draft value: {error}"))?,
+                );
+                i += 1;
+            }
             "--steps" => {
                 let value = args.get(i + 1).ok_or("Missing value for --steps")?;
                 options.steps = Some(

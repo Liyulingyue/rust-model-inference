@@ -5278,3 +5278,78 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 
 **关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
 `tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
+
+### TODO-072: Qwen3.8-27B 的 MTP 起草头已可执行，但 CPU 上的投机解码不划算
+
+**状态**：✅ 起草头 + 验证/接受回路已实现并与 pinned llama.cpp 对拍；⚠ 性能结论
+待设备路径（草稿头目前只在 CPU 上跑）。
+
+**做了什么**：
+
+- `src/models/qwen35/trunk/mtp.rs`：装载并执行 GGUF 自带的 MTP 头（`blk.64.*`）。
+  图与 llama.cpp `b96806d` 的 `graph_mtp` 一致：
+  `concat(RMSNorm(embed(t_p), nextn.enorm), RMSNorm(h_{p-1}, nextn.hnorm))`
+  `→ nextn.eh_proj → 一个注意力块（自己的权重、自己的 KV cache）→ FFN`
+  `→ shared_head_norm → shared_head_head`。
+  `nextn.embed_tokens` / `shared_head_head` / `shared_head_norm` 缺省时回落到主
+  模型的 embedding / 输出权重 / 输出 norm（与上游相同）。
+- 配对规则：MTP 块在位置 `p` 上吃 `(embed(t_p), h_{p-1})`，预测 `t_{p+1}`；`h`
+  必须是**输出 norm 之后**的 hidden state（llama.cpp 的 `h_nextn`）。这条规则踩
+  过两个坑，两个都定位到了：
+  1. `last_hidden_state()` 原来返回的是最后一个 chunk 的**第一**行而不是最后一行
+     → 预填之后的第一轮起草全是噪声（接受率 0.36）；
+  2. 起草上下文的 catch-up 必须把 hidden 整体**右移一位**（位置 `p` 的 token 配
+     `h_{p-1}`），llama.cpp 用 `pending_h` 跨 batch 携带最后一行；配错时起草头的
+     KV 内容整体错一位。
+- 验证/接受回路：一次目标前向跑 `[bonus, draft_0..draft_{n-1}]`，用每一行的
+  logits 与草稿逐个比对，取最长匹配前缀。被拒的草稿必须回滚：
+  - KV：把被拒位置的 key 行清零（本仓库的自由槽位靠「第一行全零」扫描出来）；
+  - 循环状态：GDN / shortconv 的状态逐 token 携带，只回滚 KV 不够 → 快照 +
+    重放已接受的 token。llama.cpp 用 context checkpoint + replay，语义一致。
+- CLI：`--mtp-draft N`（N=每轮起草的 token 数，0=关闭）。只支持 greedy
+  （`--temp 0`）、只支持纯文本 prompt（视觉路径的 prompt 行是投影后的 embedding，
+  拿不到 token id）。HTTP（`--serve --mtp-draft N`）走同一条路：温度为 0 的请求
+  走投机解码，其余请求照旧逐 token 解码。
+
+**实测**（Qwen3.8-27B Q8_0，同一个 16 token prompt，`--mtp-draft 4`）：
+
+- 起草头与 llama.cpp **逐 token 一致**：第一轮的 4 个草稿
+  `[119721, 103722, 97889, 102768]` 与 pinned llama.cpp `b96806d` 的
+  `llama-server --spec-type draft-mtp --spec-draft-n-max 4` 记的候选完全相同。
+- 接受率：本仓库 14/24 = 0.58，llama.cpp 10/19 = 0.53（同一个模型、同一个
+  prompt、同一个 n_max）。
+- 投机解码产出的 token 与 greedy **逐个相同**——这是回滚做对了的判据。
+
+**为什么 CPU 上不划算**：27B Q8_0 的前向是**算力瓶颈**（实测约 230 GOPS，权重
+25.7 GB / 4.5 s ≈ 5.7 GB/s），所以把 `n+1` 个 token 塞进一次前向并不比 `n+1`
+次单 token 前向便宜；而被拒的草稿照样付了一次前向的算力，再加回滚的重放，整体
+比 greedy 慢（CLI 实测 16 token：greedy 的 decode 4.4 s，投机 28～32 s）。
+llama.cpp 在同一台机器上同样没有收益（它的 MTP decode 262 ms/token，就是单 token
+decode 的量级）。要拿到收益，草稿头必须跑到设备上、且目标的 batched 前向要比逐
+token 前向便宜。
+
+**已知边界**：
+
+- 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
+  Vulkan 路径下直接报错。
+- 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
+- TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
+  `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
+
+**复现**：
+
+```sh
+# 本仓库：接受率 + 与 greedy 逐 token 相同
+RMI_QWEN35_MODEL=<Qwen3.8-27B-Q8_0.gguf> \
+RMI_QWEN35_PROMPT_TOKENS=846,198,95826,110827,98419,108829,113672,119721,1710,198,74455,198,248068,271,248069,271 \
+RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 \
+cargo test --locked --profile release-fast --features parity-trace --lib qwen35_mtp -- --ignored --nocapture
+
+# llama.cpp 参照：同一模型、同一 prompt、同一 n_max
+llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv 5
+# 然后用同样的 token 数组打 /completion，日志里的 "draft candidate" 就是草稿
+```
+
+**关联**：`src/models/qwen35/trunk/mtp.rs`、`src/models/qwen35/trunk/session.rs`、
+`src/models/qwen35/trunk/weights.rs`、`src/models/qwen35/trunk/scratch.rs`、
+`docs/develop/SUPPORTED_MODELS.md`。
