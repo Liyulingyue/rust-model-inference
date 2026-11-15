@@ -160,6 +160,40 @@ pub(crate) fn kv_cache_pos(cache: &KvCache, il: usize, k_dim: usize, n_layer: us
     }
 }
 
+/// Drop the KV entries at positions `from..to`.
+///
+/// A speculative verification writes the KV of the drafted tokens before it
+/// knows whether the target accepts them. When the acceptance is partial the
+/// rejected positions have to become free again, and the free slot of a
+/// layer is found by scanning for the first all-zero key row, so zeroing the
+/// rows is what frees them.
+pub(crate) fn kv_cache_truncate(
+    cache: &mut KvCache,
+    n_layer: usize,
+    k_dim: usize,
+    from: usize,
+    to: usize,
+) {
+    if let KvCache::F32(c) = cache {
+        if n_layer == 0 || k_dim == 0 {
+            return;
+        }
+        let k_len = c.k.len() / n_layer;
+        let rows = k_len / k_dim;
+        let to = to.min(rows);
+        if from >= to {
+            return;
+        }
+        for il in 0..n_layer {
+            let base = il * k_len;
+            for pos in from..to {
+                let start = base + pos * k_dim;
+                c.k[start..start + k_dim].fill(0.0);
+            }
+        }
+    }
+}
+
 /// Append `n_tokens` rows of K/V data starting at `pos` for layer `il`.
 ///
 /// V cache is stored in `[layer, kv_head, head_dim, seq]` layout (column-major

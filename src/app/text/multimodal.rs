@@ -1305,6 +1305,7 @@ pub fn run_multimodal(
         max_context,
         repetition_penalty,
         None,
+        0,
         jinja,
     )
 }
@@ -1325,6 +1326,47 @@ pub fn run_multimodal_with_video(
     repetition_penalty: f32,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
+    run_multimodal_with_video_and_mtp(
+        llm_source,
+        model_path,
+        mmproj_path,
+        image_path,
+        video_path,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        prefill_batch_size,
+        max_context,
+        repetition_penalty,
+        0,
+        jinja,
+    )
+}
+
+/// The same path with the MTP draft head enabled.
+///
+/// `mtp_draft` is the number of tokens the draft head proposes per
+/// speculative decoding round; zero keeps the plain one-token-at-a-time
+/// decode.
+pub fn run_multimodal_with_video_and_mtp(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    mtp_draft: usize,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
         llm_source.as_ref(),
@@ -1341,6 +1383,7 @@ pub fn run_multimodal_with_video(
         max_context,
         repetition_penalty,
         Some(owned_source),
+        mtp_draft,
         jinja,
     )
 }
@@ -1376,6 +1419,7 @@ pub(super) fn run_multimodal_with_video_ref(
     max_context: usize,
     _repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
+    mtp_draft: usize,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let arch = llm_source
@@ -1866,10 +1910,35 @@ pub(super) fn run_multimodal_with_video_ref(
     // the session has to be sized by rows, not by tokens.
     let n_prompt = prompt_tokens.len();
     let prompt_rows = prompt_embd.len() / n_embd_row;
-    let max_seq = (prompt_rows + max_tokens)
+    // The speculative path writes the KV of the drafted tokens before it
+    // knows whether the target accepts them, so the cache needs room for
+    // one round of drafts on top of the committed tokens.
+    let mtp_overhead = if mtp_draft > 0 { mtp_draft + 1 } else { 0 };
+    let max_seq = (prompt_rows + max_tokens + mtp_overhead)
         .min(config.n_ctx)
         .min(max_context);
     let mut all_tokens = prompt_tokens.clone();
+
+    if mtp_draft > 0 {
+        // The draft head embeds the prompt tokens itself, so it needs the
+        // token ids: the vision path, whose prompt rows are projected
+        // embeddings, cannot use it.
+        if llm.trunk().mtp.is_none() {
+            return Err(
+                "--mtp-draft needs a checkpoint with an MTP draft head (Qwen3.5 dense)".into(),
+            );
+        }
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--mtp-draft needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--mtp-draft needs greedy decoding (--temp 0)".into());
+        }
+    }
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
@@ -1896,7 +1965,10 @@ pub(super) fn run_multimodal_with_video_ref(
     let mut t_decode = 0.0;
     let mut decode_evals = 0usize;
 
-    for step in 0..max_tokens {
+    // The speculative path below commits several tokens per round, so the
+    // one-token-at-a-time loop runs zero times when the draft head is on.
+    let plain_steps = if mtp_draft > 0 { 0 } else { max_tokens };
+    for step in 0..plain_steps {
         let t0 = std::time::Instant::now();
         let tokens = if step == 0 {
             &prompt_tokens
@@ -1998,6 +2070,47 @@ pub(super) fn run_multimodal_with_video_ref(
 
         all_tokens.push(next_token);
     }
+
+    if mtp_draft > 0 {
+        // The speculative path: the MTP draft head proposes tokens and the
+        // target checks them in one forward pass, so a round can commit
+        // more than one token.
+        //
+        // The head embeds the prompt tokens itself, so it needs the token
+        // ids: the vision path, whose prompt rows are projected
+        // embeddings, cannot use it.
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        let generation = session.mtp_generate(&ids, &prompt_positions, max_tokens, mtp_draft)?;
+        t_decode += t0.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[mtp] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    }
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids(
         "qwen35.greedy_token_ids",
@@ -2081,6 +2194,7 @@ mod tests {
             64,
             1.0,
             None,
+            0,
             &crate::prompt::jinja::Options::default(),
         )
         .unwrap_err();

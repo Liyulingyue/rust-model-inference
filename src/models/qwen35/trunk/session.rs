@@ -60,6 +60,21 @@ pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
     capacity: usize,
     compute_policy: ComputePolicy,
     kv_cache: KvCache,
+    /// The MTP draft head's own KV cache. One layer, as in llama.cpp: the
+    /// draft context is separate from the target's, so the draft block
+    /// attends over the drafted positions and not over the target's keys.
+    /// `None` when the checkpoint has no MTP head.
+    mtp_cache: Option<KvCache>,
+    /// The hidden state of the position before the next committed one: the
+    /// MTP head pairs a token with the hidden state of the *previous*
+    /// position, so the first row of a batch needs the last row of the
+    /// previous one. llama.cpp keeps the same value as `pending_h`.
+    mtp_pending_hidden: Vec<f32>,
+    /// A copy of the recurrent state, taken before a speculative
+    /// verification. The GDN and short-convolution layers carry their state
+    /// from token to token, so a rejected draft cannot be undone by
+    /// truncating the KV cache alone: the state has to be put back.
+    mtp_state_backup: Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)>,
     scratch: Qwen35Scratchpad,
     prefill_batch_size: usize,
     pool: Arc<ComputePool>,
@@ -82,6 +97,35 @@ pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
 }
 
 pub type Qwen35Session<'a, 'm> = HybridSession<'a, 'm, Qwen35Model<'m>>;
+
+/// What a speculative decoding run produced.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MtpGeneration {
+    /// The generated tokens.
+    pub tokens: Vec<u32>,
+    /// How many speculative rounds ran.
+    pub rounds: usize,
+    /// How many of the drafted tokens the target accepted.
+    pub accepted: usize,
+    /// How many tokens were drafted.
+    pub drafted: usize,
+}
+
+/// What one speculative decoding step produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtpStep {
+    /// The tokens the step commits, in order: the bonus token the target
+    /// had already sampled and the drafts it accepted.
+    pub tokens: Vec<u32>,
+    /// The token the target sampled after the committed ones. It is the
+    /// bonus token of the next round: llama.cpp samples it from the
+    /// verification logits as well, so it costs no extra forward pass.
+    pub next: u32,
+    /// How many of the drafted tokens the target accepted.
+    pub accepted: usize,
+    /// How many tokens were drafted.
+    pub drafted: usize,
+}
 
 /// Shared session operations for the Qwen3.5 and Edge0 hybrid trunks.
 pub trait HybridTrunkModel<'m> {
@@ -267,6 +311,13 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             ));
         }
         let kv_cache = KvCache::new_f32(cfg.n_layer_impl(), capacity, cfg.n_embd_gqa());
+        let mtp_cache = model
+            .trunk()
+            .mtp
+            .as_ref()
+            .map(|_| KvCache::new_f32(1, capacity, cfg.n_embd_gqa()));
+        let mtp_pending_hidden = vec![0.0f32; cfg.n_embd];
+        let mtp_state_backup = None;
         let scratch = Qwen35Scratchpad::new(cfg, capacity.min(prefill_batch_size));
         #[cfg(feature = "vulkan")]
         let (gpu, full_model_gpu_failed) = match if model.supports_vulkan() {
@@ -307,6 +358,9 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             capacity,
             compute_policy,
             kv_cache,
+            mtp_cache,
+            mtp_pending_hidden,
+            mtp_state_backup,
             scratch,
             prefill_batch_size,
             pool,
@@ -371,6 +425,345 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             .get(..len)
             .ok_or_else(|| "Qwen3.5 hidden request exceeds the last step".into())
     }
+    /// Fill the MTP head's KV cache over the tokens the target just
+    /// committed.
+    ///
+    /// `tokens` are the committed tokens, `positions` their logical
+    /// positions and `hidden` the target's normalized hidden rows (one row
+    /// per token, the row of the token's own position).
+    ///
+    /// The head pairs the token at position `p` with the hidden state of
+    /// position `p - 1`: it predicts the token *after* the one it is given,
+    /// so it still needs the state of the position before it. llama.cpp
+    /// shifts the target's hidden rows by one for the same reason and keeps
+    /// the row that has no predecessor in `pending_h`
+    /// (`common/speculative.cpp`, `common_speculative_impl_draft_mtp`).
+    /// This session keeps the same carry-over row, so the head sees the
+    /// committed positions in its attention exactly as upstream does.
+    pub fn mtp_catch_up(
+        &mut self,
+        tokens: &[u32],
+        positions: &[usize],
+        hidden: &[f32],
+    ) -> Result<(), String> {
+        let n_embd = self.model.trunk().config.n_embd;
+        if tokens.len() != positions.len() {
+            return Err(format!(
+                "Qwen3.5 MTP catch-up: {} tokens but {} positions",
+                tokens.len(),
+                positions.len()
+            ));
+        }
+        if hidden.len() < tokens.len() * n_embd {
+            return Err(format!(
+                "Qwen3.5 MTP catch-up: {} hidden rows for {} tokens",
+                hidden.len() / n_embd.max(1),
+                tokens.len()
+            ));
+        }
+        let Some(mtp) = self.model.trunk().mtp.as_ref() else {
+            return Err("this checkpoint has no MTP head".into());
+        };
+        let Some(cache) = self.mtp_cache.as_mut() else {
+            return Err("the MTP head has no KV cache".into());
+        };
+        let _scope = self.compute_policy.cpu_scope();
+        let mut pending = std::mem::take(&mut self.mtp_pending_hidden);
+        for (index, (&token, &position)) in tokens.iter().zip(positions).enumerate() {
+            // The first row has no predecessor inside this batch, so it uses
+            // the carry-over row; every later row uses the row before it.
+            let row: &[f32] = if index == 0 {
+                &pending
+            } else {
+                &hidden[(index - 1) * n_embd..index * n_embd]
+            };
+            let mrope = [position, position, position, 0];
+            super::mtp::forward_mtp(
+                self.model.trunk(),
+                mtp,
+                row,
+                token,
+                position,
+                mrope,
+                cache,
+                &mut self.scratch,
+                &self.pool,
+            )?;
+        }
+        // The last row of the batch becomes the carry-over row for the next
+        // batch, which is how the head chains across the batch boundary.
+        if !tokens.is_empty() {
+            pending.copy_from_slice(&hidden[(tokens.len() - 1) * n_embd..tokens.len() * n_embd]);
+        }
+        self.mtp_pending_hidden = pending;
+        Ok(())
+    }
+
+    /// The hidden state of the position before the next committed one.
+    ///
+    /// The MTP head pairs the token at position `p` with the hidden state of
+    /// position `p - 1`, so the first draft of a round needs this row.
+    pub fn mtp_pending_hidden(&self) -> Result<&[f32], String> {
+        Ok(&self.mtp_pending_hidden)
+    }
+
+    /// The target's logits for every row of the last forward pass.
+    ///
+    /// A speculative verification needs the logits of *every* row of the
+    /// verification batch, not only the last one: the target has to be able
+    /// to say what it would have produced at each drafted position. The
+    /// rows are the target's normalized hidden states of the last chunk, so
+    /// this only works after a forward that kept them.
+    fn logits_rows(&mut self, n_rows: usize) -> Result<Vec<Vec<f32>>, String> {
+        let trunk = self.model.trunk();
+        let n_embd = trunk.config.n_embd;
+        let vocab = trunk.config.vocab_size;
+        let rows = n_rows.min(self.last_step_tokens);
+        if rows == 0 {
+            return Err("Qwen3.5 MTP verification needs at least one forward row".into());
+        }
+        let mut out = Vec::with_capacity(rows);
+        for row in 0..rows {
+            let normed = &self.scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
+            trunk.output_weight.quantize_and_matmul_with_scratch(
+                normed,
+                &mut self.scratch.q8k_buf,
+                &mut self.scratch.q8_buf,
+                &mut self.scratch.scale_buf,
+                &mut self.scratch.matmul_out,
+                &self.pool,
+            );
+            let n = vocab.min(self.scratch.matmul_out.len());
+            out.push(self.scratch.matmul_out[..n].to_vec());
+        }
+        Ok(out)
+    }
+
+    /// One speculative decoding step with the MTP draft head.
+    ///
+    /// `token` is the token the target sampled at `position`, `n` the number
+    /// of tokens to draft. The head proposes `n` tokens, the target checks
+    /// them in a single forward pass over `[token, draft_0, ...]`, and the
+    /// step returns the tokens to commit: the accepted draft prefix plus
+    /// the token the target itself would have produced next.
+    ///
+    /// The draft head runs on the CPU, so the target has to run on the CPU
+    /// as well: the device path does not expose the hidden states the head
+    /// consumes.
+    pub fn mtp_speculative_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        n: usize,
+    ) -> Result<MtpStep, String> {
+        if self.model.trunk().mtp.is_none() {
+            return Err("this checkpoint has no MTP head".into());
+        }
+        #[cfg(feature = "vulkan")]
+        if self.gpu.is_some() {
+            return Err(
+                "the Qwen3.5 MTP draft head needs the CPU path: the device path does not expose the hidden states the head consumes"
+                    .into(),
+            );
+        }
+        if n == 0 {
+            return Ok(MtpStep {
+                tokens: vec![token],
+                next: token,
+                accepted: 0,
+                drafted: 0,
+            });
+        }
+
+        // The draft: the head runs at `position` with the token the target
+        // just sampled and proposes the tokens after it.
+        let drafts = self.mtp_draft_tokens(token, position, n)?;
+
+        // The verification: the target runs the bonus token and the whole
+        // draft in one forward pass.
+        let mut batch = Vec::with_capacity(drafts.len() + 1);
+        batch.push(token);
+        batch.extend_from_slice(&drafts);
+        let positions: Vec<[usize; 4]> = (0..batch.len())
+            .map(|offset| {
+                let p = position + offset;
+                [p, p, p, 0]
+            })
+            .collect();
+
+        // The GDN and short-convolution layers carry their state from token
+        // to token, so the state has to be saved before the verification:
+        // a rejected draft cannot be undone by truncating the KV cache alone.
+        self.save_mtp_state();
+
+        let embeddings = self.embed_tokens(&batch)?;
+        let processed_before = self.processed_tokens;
+        self.step(&embeddings, batch.len(), &positions)?;
+
+        // The target's own continuation: the logits of row `i` say what the
+        // target would produce at the position of draft `i`.
+        let rows = self.logits_rows(batch.len())?;
+        let mut accepted = 0usize;
+        while accepted < drafts.len()
+            && crate::ops::sampling::argmax(&rows[accepted]) as u32 == drafts[accepted]
+        {
+            accepted += 1;
+        }
+        // The round commits the bonus token the target had already sampled
+        // and the drafts it accepted. The token the target produces after
+        // them is the bonus token of the next round.
+        let mut tokens = Vec::with_capacity(accepted + 1);
+        tokens.push(token);
+        tokens.extend_from_slice(&drafts[..accepted]);
+        let next = crate::ops::sampling::argmax(&rows[accepted]) as u32;
+
+        // The draft context has to see the same positions as the target: the
+        // head's KV cache is refreshed with the target's hidden states, which
+        // is what llama.cpp's draft context does after every verification.
+        let n_embd = self.model.trunk().config.n_embd;
+        let hidden = self.scratch.normed_buf[..batch.len() * n_embd].to_vec();
+        self.mtp_catch_up(&batch, &positions_as_usize(&positions), &hidden)?;
+        // The carry-over row is the hidden state of the last accepted
+        // position, so the next round starts from the target's state and not
+        // from a rejected draft's.
+        self.mtp_pending_hidden
+            .copy_from_slice(&hidden[accepted * n_embd..(accepted + 1) * n_embd]);
+
+        // The rejected drafts left their KV and their recurrent state behind:
+        // both have to go, or the next round would continue from a state the
+        // target never produced.
+        //
+        // The GDN and short-convolution layers carry their state from token
+        // to token, so the state cannot be truncated -- the committed tokens
+        // have to be run through the model again. llama.cpp does the same
+        // with its context checkpoint: it restores the checkpoint and
+        // replays the accepted tokens.
+        if accepted < drafts.len() {
+            self.restore_mtp_state();
+            let cfg = &self.model.trunk().config;
+            let k_dim = cfg.n_embd_head() * cfg.n_head_kv;
+            // Free the whole verification batch: the replay writes the
+            // committed rows again, and the free slot of a layer is the
+            // first all-zero key row.
+            super::scratch::kv_cache_truncate(
+                &mut self.kv_cache,
+                cfg.n_layer_impl(),
+                k_dim,
+                position,
+                position + batch.len(),
+            );
+            self.processed_tokens = processed_before;
+            self.next_position = position;
+            // Replay the committed tokens: the bonus token and the drafts
+            // the target accepted.
+            let keep = accepted + 1;
+            self.step(&embeddings[..keep * n_embd], keep, &positions[..keep])?;
+        }
+
+        Ok(MtpStep {
+            tokens,
+            next,
+            accepted,
+            drafted: drafts.len(),
+        })
+    }
+
+    /// Save the recurrent state so a rejected draft can be undone.
+    fn save_mtp_state(&mut self) {
+        let backup = self
+            .mtp_state_backup
+            .get_or_insert_with(|| (Vec::new(), Vec::new()));
+        backup.0.clear();
+        backup.1.clear();
+        backup.0.extend(self.scratch.conv_states.iter().cloned());
+        backup.1.extend(self.scratch.ssm_states.iter().cloned());
+    }
+
+    /// Put the recurrent state back after a rejected draft.
+    fn restore_mtp_state(&mut self) {
+        let Some((conv, ssm)) = self.mtp_state_backup.as_ref() else {
+            return;
+        };
+        if conv.len() != self.scratch.conv_states.len()
+            || ssm.len() != self.scratch.ssm_states.len()
+        {
+            return;
+        }
+        for (slot, saved) in self.scratch.conv_states.iter_mut().zip(conv.iter()) {
+            slot.copy_from_slice(saved);
+        }
+        for (slot, saved) in self.scratch.ssm_states.iter_mut().zip(ssm.iter()) {
+            slot.copy_from_slice(saved);
+        }
+    }
+
+    /// Propose up to `n` draft tokens.
+    ///
+    /// `token` is the token the target just sampled and `position` its
+    /// logical position. The head pairs that token with the hidden state of
+    /// the position before it -- the carry-over row [`Self::mtp_pending_hidden`]
+    /// -- and each draft step feeds the head's own hidden state into the
+    /// next one, which is how llama.cpp chains the drafts.
+    ///
+    /// The head keeps its own KV cache, so the draft block attends over the
+    /// committed and the drafted positions, exactly as llama.cpp's separate
+    /// draft context does.
+    pub fn mtp_draft_tokens(
+        &mut self,
+        token: u32,
+        position: usize,
+        n: usize,
+    ) -> Result<Vec<u32>, String> {
+        let Some(mtp) = self.model.trunk().mtp.as_ref() else {
+            return Err("this checkpoint has no MTP head".into());
+        };
+        let Some(cache) = self.mtp_cache.as_mut() else {
+            return Err("the MTP head has no KV cache".into());
+        };
+        let _scope = self.compute_policy.cpu_scope();
+        let mut drafts = Vec::with_capacity(n);
+        let mut token = token;
+        let mut position = position;
+        let mut hidden = self.mtp_pending_hidden.clone();
+        for _ in 0..n {
+            let mrope = [position, position, position, 0];
+            let draft = super::mtp::forward_mtp(
+                self.model.trunk(),
+                mtp,
+                &hidden,
+                token,
+                position,
+                mrope,
+                cache,
+                &mut self.scratch,
+                &self.pool,
+            )?;
+            let next = crate::ops::sampling::argmax(&draft.logits) as u32;
+            drafts.push(next);
+            token = next;
+            position += 1;
+            hidden = draft.hidden;
+        }
+        Ok(drafts)
+    }
+
+    /// The main model's last hidden state after the output norm: what the
+    /// MTP draft head consumes.
+    ///
+    /// The scratchpad keeps one row per token of the last forward, so the
+    /// row of the *last* token is the one the MTP head needs -- not the
+    /// first row of the chunk.
+    pub fn last_hidden_state(&self) -> Result<&[f32], String> {
+        let n_embd = self.model.trunk().config.n_embd;
+        let rows = self.last_step_tokens.max(1);
+        let start = (rows - 1) * n_embd;
+        let end = start + n_embd;
+        if end > self.scratch.normed_buf.len() {
+            return Err("Qwen3.5 hidden state exceeds the scratchpad".into());
+        }
+        Ok(&self.scratch.normed_buf[start..end])
+    }
+
     pub fn dense_kv_snapshots(
         &self,
         layers: &[usize],
@@ -727,6 +1120,88 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         self.gpu.is_some() || self.gpu_failure_for_test.is_some()
     }
 
+    /// Prefill the prompt and keep the MTP draft context in sync with it.
+    ///
+    /// The prompt is chunked like a normal prefill, but every chunk also
+    /// runs through the MTP head: the draft block attends over the
+    /// committed positions, so its KV cache has to cover the prompt before
+    /// the first draft.
+    ///
+    /// The MTP head embeds the tokens itself, so this path needs the token
+    /// ids -- the image path, whose prompt rows are projected embeddings,
+    /// cannot use it.
+    pub fn prefill_with_mtp(
+        &mut self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        let n_embd = self.model.trunk().config.n_embd;
+        let mut logits = Vec::new();
+        for range in prefill_chunks(token_ids.len(), self.prefill_batch_size) {
+            let ids = &token_ids[range.clone()];
+            let chunk_positions = &positions[range.clone()];
+            logits = self.step_with_tokens(ids, chunk_positions)?;
+            let hidden = self.scratch.normed_buf[..ids.len() * n_embd].to_vec();
+            let flat: Vec<usize> = chunk_positions.iter().map(|p| p[0]).collect();
+            self.mtp_catch_up(ids, &flat, &hidden)?;
+        }
+        Ok(logits)
+    }
+
+    /// Generate `max_tokens` tokens with the MTP draft head.
+    ///
+    /// The head proposes `n_drafts` tokens per round and the target checks
+    /// them in one forward pass, so a round can commit more than one token.
+    /// The tokens are the target's own greedy continuation: the draft head
+    /// only proposes, the target decides.
+    ///
+    /// Greedy only. A sampled token would need the rejection scheme of
+    /// speculative sampling, which is a different piece of work.
+    pub fn mtp_generate(
+        &mut self,
+        prompt_tokens: &[u32],
+        prompt_positions: &[[usize; 4]],
+        max_tokens: usize,
+        n_drafts: usize,
+    ) -> Result<MtpGeneration, String> {
+        if self.model.trunk().mtp.is_none() {
+            return Err("this checkpoint has no MTP head".into());
+        }
+        if max_tokens == 0 {
+            return Ok(MtpGeneration::default());
+        }
+        let logits = self.prefill_with_mtp(prompt_tokens, prompt_positions)?;
+        let mut position = prompt_positions
+            .last()
+            .map(|p| p[0].saturating_add(1))
+            .unwrap_or(0);
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        let mut out: Vec<u32> = Vec::with_capacity(max_tokens);
+        let mut rounds = 0usize;
+        let mut accepted = 0usize;
+        let mut drafted = 0usize;
+        while out.len() < max_tokens {
+            let step = self.mtp_speculative_step(bonus, position, n_drafts)?;
+            rounds += 1;
+            accepted += step.accepted;
+            drafted += step.drafted;
+            position += step.tokens.len();
+            bonus = step.next;
+            for token in step.tokens {
+                out.push(token);
+                if out.len() >= max_tokens {
+                    break;
+                }
+            }
+        }
+        Ok(MtpGeneration {
+            tokens: out,
+            rounds,
+            accepted,
+            drafted,
+        })
+    }
+
     /// Embed + step in a single call (the common prefill/decode pattern for
     /// text-only inference). Returns next-token logits.
     pub fn step_with_tokens(
@@ -805,4 +1280,9 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             })?;
         self.model.trunk().score_logits(hidden)
     }
+}
+
+/// The flat (non-mrope) positions of an mrope position list.
+fn positions_as_usize(positions: &[[usize; 4]]) -> Vec<usize> {
+    positions.iter().map(|p| p[0]).collect()
 }
