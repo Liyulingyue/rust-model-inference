@@ -416,12 +416,14 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     if !matches!(
         prefix,
         "qwen2"
+            | "mage_vl"
             | "qwen2vl"
             | "qwen3"
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
             | "qwen35moe"
+            | "thx02"
             | "edge0"
             | "sensenova_loop"
             | "qwen3tts"
@@ -668,6 +670,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     };
     let n_embd_head = if arch == "qwen35"
         || arch == "qwen35moe"
+        || arch == "thx02"
         || arch == "edge0"
         || arch == "sensenova_loop"
         || arch == "nanbeige"
@@ -936,6 +939,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
     if !matches!(
         arch.as_str(),
         "qwen2"
+            | "mage_vl"
             | "qwen2vl"
             | "qwen3"
             | "qwen3vl"
@@ -952,7 +956,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let has_qk_norm = matches!(
         arch.as_str(),
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
+        "qwen3" | "mage_vl" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
     );
     let has_qkv_bias = arch == "qwen2vl";
 
@@ -974,6 +978,8 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let allowed_dimensions = if arch == "qwen3vl" {
         Some(KNOWN_QWEN3VL_DIMENSIONS)
+    } else if arch == "mage_vl" {
+        Some(KNOWN_QWEN3VL_4B_DIMENSIONS)
     } else {
         None
     };

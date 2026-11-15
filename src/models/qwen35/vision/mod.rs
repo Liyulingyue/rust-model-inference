@@ -1023,6 +1023,26 @@ impl<'a> VisionEncoder<'a> {
         self.encode_pair(image_pixels, image_pixels, img_w, img_h, scratch, pool)
     }
 
+    /// Preserve F32 GELU activations for native Transformers vision graphs.
+    pub fn encode_image_f32_gelu(
+        &self,
+        image_pixels: &[f32],
+        img_w: usize,
+        img_h: usize,
+        scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
+    ) -> Result<VisionGrid, String> {
+        self.encode_pair_with_gelu(
+            image_pixels,
+            image_pixels,
+            img_w,
+            img_h,
+            scratch,
+            pool,
+            crate::ops::gelu_inplace,
+        )
+    }
+
     pub fn encode_pair(
         &self,
         frame_a: &[f32],
@@ -1031,6 +1051,27 @@ impl<'a> VisionEncoder<'a> {
         img_h: usize,
         scratch: &mut VisionScratchpad,
         pool: &Arc<ComputePool>,
+    ) -> Result<VisionGrid, String> {
+        self.encode_pair_with_gelu(
+            frame_a,
+            frame_b,
+            img_w,
+            img_h,
+            scratch,
+            pool,
+            gelu_ggml_f16_inplace,
+        )
+    }
+
+    fn encode_pair_with_gelu(
+        &self,
+        frame_a: &[f32],
+        frame_b: &[f32],
+        img_w: usize,
+        img_h: usize,
+        scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
+        gelu: fn(&mut [f32]),
     ) -> Result<VisionGrid, String> {
         let cfg = &self.config;
         let n_embd = cfg.n_embd;
@@ -1158,6 +1199,7 @@ impl<'a> VisionEncoder<'a> {
                 &mrope_positions,
                 &window_ids,
                 pool,
+                gelu,
             );
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -1493,6 +1535,7 @@ impl<'a> VisionEncoder<'a> {
         mrope_positions: &[[usize; 4]],
         window_ids: &[usize],
         pool: &Arc<ComputePool>,
+        gelu: fn(&mut [f32]),
     ) {
         let do_profile = std::env::var("PROFILE_VIT_LAYER").is_ok();
         let cfg = &self.config;
@@ -2145,7 +2188,7 @@ impl<'a> VisionEncoder<'a> {
                 *value = crate::ops::gelu(*value);
             }
         } else {
-            gelu_ggml_f16_inplace(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
+            gelu(&mut scratch.ffn_buf[..n_tokens * cfg.n_ff]);
         }
         t_act = t_act_start.elapsed().as_secs_f64();
 

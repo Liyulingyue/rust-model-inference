@@ -7,7 +7,7 @@ mod vision;
 
 pub use generation::*;
 pub use multimodal::*;
-pub use qwen3::{run_hunyuan_inference, run_qwen3_inference};
+pub use qwen3::{run_chat_runtime, run_hunyuan_inference, run_qwen3_inference};
 pub use runtime::{build_text_runtime, RuntimeOptions};
 pub use tts_bridge::*;
 pub use vision::*;
@@ -70,6 +70,7 @@ mod tests {
             output_norm: vec![1.0; 2],
             output_weight,
             layers: Vec::new(),
+            mtp: None,
             cls_score: None,
             cls_score_bias: Vec::new(),
             #[cfg(feature = "vulkan")]

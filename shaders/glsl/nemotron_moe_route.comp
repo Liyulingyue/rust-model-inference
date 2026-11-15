@@ -1,0 +1,98 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_ARB_gpu_shader_fp64 : enable
+#include "host_libm.glsl"
+#include "f32_divide.glsl"
+
+// Nemotron-3 Nano MoE routing.
+//
+// The upstream reference (`src/models/nemotron-h.cpp::build_moe_ffn`)
+// routes with a **sigmoid**, not a softmax, and the selection bias only
+// takes part in the *ranking*:
+//
+//     probs      = sigmoid(logits)
+//     selection  = probs + exp_probs_b.bias
+//     chosen     = topk(selection, n_expert_used)
+//     weights    = probs[chosen]              // the unbiased probabilities
+//     weights    = weights / max(sum, 2^-14)  // when expert_weights_norm
+//     weights    = weights * expert_weights_scale
+//
+// The whole decision is taken on the device: the chosen ids go into the
+// arena, and the expert kernels read them from there. A host round trip per
+// layer would cost 23 synchronisations per token.
+//
+// One workgroup per token, and only its first lane works: the routing is
+// 128 sigmoids and a top-k over 128 candidates, which is noise next to the
+// tens of millions of multiply-accumulates of the layer it feeds.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint logits;
+    uint probs;
+    uint selection;
+    uint ids;
+    uint weights;
+    uint bias;
+    uint experts;
+    uint used;
+    float scale;
+    uint normalize;
+} pc;
+
+// `2^-14`, the floor the reference puts under the sum of the chosen
+// weights before it divides by it.
+const float SUM_FLOOR = 6.103515625e-5;
+
+void main() {
+    if (gl_LocalInvocationID.x != 0u) return;
+    uint token = gl_WorkGroupID.z;
+    uint logits = pc.logits + token * pc.experts;
+    uint probs = pc.probs + token * pc.experts;
+    uint selection = pc.selection + token * pc.experts;
+    uint ids = pc.ids + token * pc.used;
+    uint weights = pc.weights + token * pc.used;
+    bool valid = true;
+    for (uint e = 0u; e < pc.experts; e++) {
+        float logit = uintBitsToFloat(arena.data[logits + e]);
+        valid = valid && !isnan(logit) && !isinf(logit);
+        // `LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID`: 1 / (1 + exp(-x)).
+        float probability = divide_finite_normal(1.0, 1.0 + exp_reference(-logit));
+        arena.data[probs + e] = floatBitsToUint(probability);
+        float bias = uintBitsToFloat(arena.data[pc.bias + e]);
+        arena.data[selection + e] = floatBitsToUint(probability + bias);
+    }
+    // Descending by the selection score, ties by ascending id: the strict
+    // comparison keeps the first candidate of an equal score, which is the
+    // same order `ggml_argsort_top_k` leaves equal keys in.
+    // The sum of the chosen weights. `ggml_sum_rows` accumulates in F64
+    // and rounds the accumulator to F32, so the shader does the same.
+    double selected_sum = 0.0;
+    for (uint slot = 0u; slot < pc.used; slot++) {
+        float best = -1.0 / 0.0;
+        uint chosen = 0u;
+        for (uint e = 0u; e < pc.experts; e++) {
+            bool taken = false;
+            for (uint previous = 0u; previous < slot; previous++) {
+                taken = taken || arena.data[ids + previous] == e;
+            }
+            float score = uintBitsToFloat(arena.data[selection + e]);
+            if (!taken && score > best) { best = score; chosen = e; }
+        }
+        arena.data[ids + slot] = chosen;
+        // The weight is the *unbiased* probability of the chosen expert.
+        float probability = uintBitsToFloat(arena.data[probs + chosen]);
+        arena.data[weights + slot] = floatBitsToUint(probability);
+        selected_sum += double(probability);
+    }
+    precise float sum = float(selected_sum);
+    sum = max(sum, SUM_FLOOR);
+    for (uint slot = 0u; slot < pc.used; slot++) {
+        float weight = uintBitsToFloat(arena.data[weights + slot]);
+        float normalized = pc.normalize != 0u
+            ? divide_finite_normal(weight, sum)
+            : weight;
+        arena.data[weights + slot] = floatBitsToUint(valid ? normalized * pc.scale : 0x7fc00000u);
+    }
+}

@@ -1,0 +1,22 @@
+{
+  "source_commit": "bfa8564e33a716ed2dc0b08d8f0ef4942adbc503",
+  "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "cpu_count": 128,
+  "cpu_model": "AMD EPYC 9334 32-Core Processor",
+  "memory_max": "59055800320",
+  "cpu_max": "1600000 100000",
+  "cargo_lock_sha256": "f2b0f641b14db89da6aa1585e0ba86ec4437362a4a9d80fbad2994a21585a2c6",
+  "profile": "release-fast",
+  "features": "default; no parity-trace",
+  "binary_sha256": {
+    "rust-model-inference": "8c44811c079950ca6af058bdcd3c316ccf8e2c73b3b1d89ee6aa645106e27818",
+    "rust-model-server": "06977cc7fd56b38072c32446fd1edd7fd5506923e244f9e0d2bda050333ef0ee"
+  },
+  "validation_date": "2026-11-09",
+  "verified_source_files": 1567,
+  "source_manifest_sha256": "c941285485a7065db97da46d76e4421c7acf6a47362a5784aafabc4ef27b51e4",
+  "libsndfile_version": "1.2.2"
+}

@@ -234,6 +234,8 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
             | "lfm3"
             | "qwen3"
             | "qwen35"
+            | "nemotron_h"
+            | "nemotron_h_moe"
     );
     if !covered {
         eprintln!("skipping: arch {arch} is not in the agreement matrix yet");

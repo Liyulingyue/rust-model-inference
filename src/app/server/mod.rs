@@ -1,8 +1,11 @@
 pub mod api;
+mod audio;
 mod auk;
+mod decision;
 mod forecast;
 mod prediction;
 mod rerank;
+mod speech;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -36,7 +39,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
 
 // =============================================================================
 // Backend types
@@ -85,7 +88,11 @@ enum Backend {
     Asr(AsrBackend),
     HySimulMt(HySimulMtBackend),
     Audio8(Audio8Backend),
+    AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
     Tts(TtsBackend),
+    /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
+    /// text frontend, the acoustic decoder and the bundled vocoder.
+    Pivo(speech::PivoBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -95,6 +102,7 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
+    Decision(crate::models::thx02::Engine),
 }
 
 impl Backend {
@@ -1125,9 +1133,32 @@ fn build_backend(
     options: &CliOptions,
     auk_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<Arc<Backend>, String> {
+    if options.enhance {
+        return Ok(Arc::new(Backend::AudioEnhancement(Arc::new(
+            crate::models::nemotron_reuse::Model::load(&options.model, options.compute_policy())?,
+        ))));
+    }
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
+    let decision_source =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .filter(|source| crate::app::arch_of(source.as_ref()) == crate::models::thx02::ARCH);
+    if let Some(source) = decision_source {
+        let available = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let engine = crate::app::decision::from_source(
+            options,
+            Arc::from(source),
+            resolve_thread_count(options.threads, available),
+        )?;
+        return Ok(Arc::new(Backend::Decision(engine)));
+    }
+    if options.decision_thinker.is_some() {
+        return Err("--decision-thinker requires a THX-02 decision model".into());
+    }
     if crate::models::unlimited_ocr::matches_model(&options.model) {
         crate::models::unlimited_ocr::validate_options(options)?;
         let model = Arc::new(crate::models::unlimited_ocr::Model::load(
@@ -1144,6 +1175,26 @@ fn build_backend(
         })));
     }
     if options.tts {
+        if crate::models::pivo::matches_model(&options.model) {
+            let defaults = crate::app::tts::pivo_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+            let model = Arc::new(crate::models::pivo::Model::from_source(
+                source.as_ref(),
+                options.compute_policy(),
+            )?);
+            if let Some(notice) = crate::app::tts::pivo_format_notice(model.format) {
+                eprintln!("{notice}");
+            }
+            return Ok(Arc::new(Backend::Pivo(speech::PivoBackend {
+                model,
+                defaults,
+            })));
+        }
+        if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+            return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
+        }
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
     // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
@@ -1175,9 +1226,9 @@ fn build_backend(
     // metadata peek BEFORE the full Text build (which would load
     // unrelated multimodal state).
     //
-    // This is the only metadata-probed backend in this function; the others are
-    // flag-driven. Why they differ — and why adding a probe is usually the wrong
-    // fix — is in docs/develop/SERVER_BACKEND_SELECTION.md.
+    // Decision/forecast architectures select their own task pipelines; rerank
+    // needs this probe because it shares an architecture with text generation.
+    // See docs/develop/SERVER_BACKEND_SELECTION.md.
     if is_rerank_gguf(&options.model) || is_jina_rerank_gguf(&options.model) {
         // The probe outranks the flag-driven backends below, so a caller
         // who explicitly selected one of them would have it silently
@@ -1608,6 +1659,11 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .filter(|path| !path.as_os_str().is_empty())
         .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
     let mmproj = mmp.clone();
+    if arch == "mage_vl" {
+        if let Some(vision) = &mmp {
+            crate::models::mage_vl::validate_components(source.as_ref(), vision.as_ref())?;
+        }
+    }
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
@@ -1624,6 +1680,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     .with_threads(options.threads)
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
+    .with_mtp_draft(options.effective_mtp_draft())
     .with_mmproj(mmp);
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
@@ -1651,7 +1708,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     // user explicitly asked for a template, and a config error should surface
     // at startup rather than on the first request.
     let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
-        jinja: options.jinja,
+        jinja: options.jinja || arch == "mage_vl",
         file: options.chat_template_file.clone(),
     });
     let compiled_chat_template =
@@ -1858,6 +1915,9 @@ fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeSc
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.decision_request.is_some() {
+        return Err("--decision-request is a CLI input; server decisions use /v1/decide".into());
+    }
     if options.system_one_request.is_some() || options.adapter.is_some() {
         return Err("--system-one-request is not supported by rust-model-server".into());
     }
@@ -1930,13 +1990,14 @@ pub fn run_server() {
     // Apply the parsed flag before any request can be decoded.
     api::image_input::set_allow_remote(allow_remote_images);
 
-    let options = match parse_cli_options(&cli_args) {
+    let mut options = match parse_cli_options(&cli_args) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
+    options.serve = true;
     if let Err(error) = reject_unsupported_server_modes(&options) {
         eprintln!("{error}");
         std::process::exit(2);
@@ -1945,6 +2006,9 @@ pub fn run_server() {
     // server receives both over HTTP. Inject placeholders so validation
     // passes; the real values come from `/v1/audio/speech` requests.
     let mut options = options;
+    if options.enhance {
+        options.serve = true;
+    }
     if options.tts {
         if options.prompt.as_deref().is_none_or(str::is_empty) {
             options.prompt = Some("placeholder".to_string());
@@ -1952,7 +2016,7 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() {
+        if options.max_tokens.is_none() && !crate::models::pivo::matches_model(&options.model) {
             options.max_tokens = Some(128);
         }
     }
@@ -2014,13 +2078,15 @@ pub fn run_server() {
         Backend::Asr(_) => "asr",
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
-        Backend::Tts(_) => "tts",
+        Backend::AudioEnhancement(_) => "audio-enhancement",
+        Backend::Tts(_) | Backend::Pivo(_) => "tts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
         Backend::Gliner2Boundary(_) => "gliner2-boundary",
         Backend::Timestral(_) => "timestral",
+        Backend::Decision(_) => "decision",
     };
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
@@ -2056,6 +2122,11 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::AudioEnhancement(_) => router.route(
+            "/v1/audio/enhancements",
+            post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
+        Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),
@@ -2077,6 +2148,7 @@ pub fn run_server() {
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
+        Backend::Decision(_) => router.merge(decision::routes()),
     };
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
         && matches!(
@@ -2092,7 +2164,7 @@ pub fn run_server() {
         // for a device and gets a partial one, so say so once.
         eprintln!(
             "compute requested=Vulkan backend=partial mode=jev \
-             note=no complete device path for this mode; only the \
+             note=no complete device path for this mode; any \
              offloadable parts run on the device"
         );
     }

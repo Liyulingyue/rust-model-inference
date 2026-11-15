@@ -13,6 +13,37 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
+      2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
+      vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor
+      （实测 172 次提交 / 2.17 GB 权重上传，vision embedding 与 CPU 差约 3e-5；CPU 路径仍是
+      原来逐位对齐 llama.cpp oracle 的 `dot_f32` 循环，未改）。剩下三块的情况：
+      ① **ViT 块的 attention 技术上可以上**：`AttentionSpec` 支持 `causal: false`，
+      `models/qwen3/vision` 已有先例，而本视觉塔的 `[token, head*d_head]` 布局正好是设备要的
+      `[token, head, dim]`，连重排都省了；**但 `ops::kernel::vulkan::try_attention` 每次都会用
+      CPU kernel 复核结果**（`attention_matches_cpu`，为 TODO-044「设备返回上一次调用的数字」
+      而加，无开关），不符就重试、再不符退回 CPU 重算 → **CPU 时间一点省不下来，反而更慢**。
+      要真提速必须先有"可信设备路径"：让严格档（`--compute vulkan`）跳过复核，或改成首次/抽样
+      校验，并把 TODO-044 的风险写成显式声明。
+      ② **vit_merger 的窗口 attention 上不去**：它是 2x2 块 mask 的，`AttentionSpec` 没有 mask
+      字段，设备路径表达不了 → 需要 mask-aware kernel。
+      ③ **norm 没有独立设备 kernel**，且是逐行小操作（1024×1152）夹在投影中间，搬上去只增加
+      往返；要做只能融合进投影的 epilogue。
+      ④ **slicing 不是计算**：是像素搬运/切片（CPU 侧数据准备），没有内核可移。
+      另外，投影的输出目前都回读到 host（`run_group` 写进调用方缓冲），attention 要用就得重新
+      上传（每层 q/k/v 各 4.7 MB × 27 层 ≈ 380 MB 往返）—— 要省掉这段就是 THX-02/Mage-VL
+      都撞到的 L2（设备常驻中间结果 + 持久权重）。
+- [ ] **转换器的接受格式集由共享 `BLOCK_FORMATS` 推导，会静默接受模型加载器不支持的格式** —
+      `tools/converter/mage_vl/convert_mage_vl.py` 写 `TEXT_TYPES = ("f32", *BLOCK_FORMATS)`，
+      `tools/converter/thx02/convert_thx02.py` 写 `FORMATS = {..., **BLOCK_FORMATS, ...}`。共享层每
+      新增一种格式（例如 Q4_1 进入 `BLOCK_FORMATS`），这两个转换器就会自动把它列进 `--format`
+      选项里，而对应模型的 Rust 加载器白名单不会跟着变 → 转换器能导出、运行时拒绝加载，
+      用户只看到一句含糊的 tensor type 报错。2026-11-10 实测：合并 main 后 mage_vl 的
+      `--text-type q4_1` 导出成功，但 `models/mage_vl` 的 `TEXT_TYPES` 不含 `GGMLType::Q4_1`
+      （已补上），同时 `test_convert_mage_vl.py` 的体积表缺 `q4_1` 直接 KeyError（已补）。
+      建议：转换器的接受集改成**显式列出该模型支持的格式**（加载器白名单的镜像），或在共享层
+      提供「模型 ↔ 支持格式」的单一来源让两侧都读；至少在给共享 `BLOCK_FORMATS` 加格式时，
+      同时检查所有 `*BLOCK_FORMATS` 的使用点。
 - [x] **HTTP 文本运行时统一（TextRuntime）** — 已完成：`build_text_runtime(arch)` 是唯一
       arch 分发点，`TextInner` 四变体与 server 内手写 decode 循环全部删除；prompt 构造、greedy/
       温度采样、llama 家族的 rep-penalty+停止规则均单一来源（CLI/HTTP 共用）；
@@ -136,7 +167,7 @@ NEON on aarch64; no AVX-512).
       **算子从未在生产规模验证过**（自检只覆盖 96 个元素，真实是 3800 万）。
       clamp 改 `±80` + 新增生产规模门禁。⚠️ **clamp 值不可调回 88.376**，且
       GPU SiLU 已与 CPU 不再逐位一致（PSNR 33.34 → 31.52 dB）。
-      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)。
+      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
@@ -145,7 +176,7 @@ NEON on aarch64; no AVX-512).
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
       Vulkan shader 用 ±80（补偿算法需要 `1/den` 保持正规数，见
-      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷--已修复但饱和边界不可回退)）。
+      [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)）。
       三者的饱和边界因此不同：`x = 88.2` 时 NEON 走慢路径给出接近真值的 2.4e38，
       x86 给 1.65e38（31% 偏差），GPU 给 exp(80) 的饱和值。
       现状：x86 至少不再返回 `+inf`（旧 clamp `88.376_26` 会），并且
@@ -493,13 +524,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
       原语，现有 `compute` 就够（closure 里顺序做多个投影，各自按 `ith/nth` 切分）。
       风险是位序和 DRAM 局部性；收益的绝对值与机器无关，相对值随 CPU 带宽上升。
-      详见 [TODO-050](#todo-050-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
+      详见 [TODO-052](#todo-052-decode-每个投影一次-pool-dispatch784-次里-26-次的开销大于活)。
 - [~] **Nemotron-3-Nano 30B-A3B（`nemotron_h_moe`）完全不支持** — arch 不在白名单、
       MoE 层分支不存在，且**它需要的 Q5_1 量化本仓库没有 dequant kernel**（所有 unsloth
       30B 量化档的 `ffn_up_shexp` 都是 Q5_1，换档躲不掉）。基座（Mamba-2 + attention 混合
       trunk）已在 4B 上验证，MoE 的 3D 专家张量与路由归一化在 `qwen35moe` 里已有同构实现，
       约 1100 行。契约从 GGUF 头部读出（不必下完 24 GB），详见
-      [TODO-051](#todo-051-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
+      [TODO-053](#todo-053-nemotron-3-nano-30b-a3bnemotron_h_moe完全不支持先补-q5_1-kernel)
       与 [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md)。
       **B1–B5 已全部完成**：Q5_1 kernel、arch/config、MoE 层、共享专家，以及
       与上游 llama.cpp 的 oracle 对拍（全 52 层 × 6 步逐位一致，最终 logits
@@ -510,13 +541,13 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       未覆盖 dory。
       另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
-      [TODO-052](#todo-052-dory-的默认提示在-cli--http--模型自带模板之间三分pixtral-缺强制-bosjev-的backendpartial提示对-dory-是假的)。
+      [TODO-054](#todo-054-dory-的默认提示在-cli--http--模型自带模板之间三分jev-的backendpartial提示对-dory-是假的)。
 - [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
   Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
   因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
   pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
   情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
-  详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)。
+  详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)。
 
 ## 入口面覆盖（2026-10-19 审计）
 
@@ -709,6 +740,45 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 "Microsoft BitNet b1.58 I2_S extension; not upstream ggml"。`docs/usage/bitnet_embedding.md` 第一节
 "已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
 
+
+- [ ] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** —
+      `src/app/cli/parse.rs` 的主循环统一解析所有 flag（`--gpu` 在第 389 行），
+      但每个模式在解析之后另有一段手写白名单，声明该模式接受哪些 flag，并对带值
+      参数补一次取值校验。`--enhance`、`--system-one-request`、`--decision-request`
+      各有一段，`--gpu` 已经是第 3 个模式接受共享 compute flag —— Vela3 混合投影
+      放开 `--system-one-request` 的 GPU 支持时，就得手改系统模式的白名单，那行
+      `| "--gpu"` 看着像特例，实际是共享 flag 列表的又一份副本。
+      方向：把「模式 → 允许的 flag 集」集中成一份声明，或反过来给 flag 标注归属
+      模式；两者都是**纯重构**，不改行为。`parse.rs` 是所有模型的入口，要**独立成
+      PR**，别混进模型适配。
+      详见 [TODO-064](#todo-064-模式互斥白名单手写枚举每加一个共享-flag-都要改多处)。
+- [ ] **Vela3 的 F32 权重路径每次投影都整份拷贝** — `models/vela3/tensor.rs` 的
+      `linear()` 用 `QuantizedTensor::from_bytes` 交权重：F16/BF16 借用 mmap 字节切片，
+      **F32 会把整份权重 `collect()` 成 `Vec<f32>`**（`ops/kernel/quantized_tensor.rs`）。
+      而 `linear()` 在 `d3.rs` 的 `project()` 里每层每投影调一次 → F32 诊断变体
+      （`vela3-d3-lite-f32` 等）反复拷贝整份权重。发布的 Vela3 权重是 BF16，走零拷贝，
+      **生产默认不受影响**，只有 F32 变体慢。
+      方向：让 `QuantizedTensor::F32` 也借用字节切片（共享算子改动），或在 Vela3 侧
+      加载期转一次并复用。详见
+      [TODO-065](#todo-065-vela3-的-f32-权重路径每次投影都整份拷贝)。
+- [ ] **严格 Vulkan 抓不到「投影静默回落 CPU」** — `--compute vulkan` 的语义是
+      「请求真的在设备上」。共享投影器在若干情况下静默回落 CPU 且**不**把设备标记为
+      故障：输出元素数小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K）时、`RUST_GPU_MAX_ROWS`
+      限流时、形状检查失败时。请求结束时的严格档检查只看「设备是否因队列故障被禁用」，
+      抓不到这些 → 一次 `--compute vulkan` 请求可能全在 CPU 上跑完仍返回 200。
+      「设备根本不存在」已由 `configure_cli()` 的前置检查挡住（实测两种情形都成立）；
+      还没覆盖的是「设备在，但投影因形状或阈值回落」。
+      这是**语义决策而非 bug**：把回落升级成错误，等于承诺严格档的每次投影都在设备上，
+      而小投影留在 CPU 正是当前设计意图。
+      详见 [TODO-066](#todo-066-严格-vulkan-抓不到投影静默回落-cpu)。
+
+- [ ] **PiVo 编码器的投影换用共享的 F32 分块 GEMM** — 手写的 `pivo_linear` 是
+      「一 lane 一输出列」的朴素版，边际成本 0.126 ms/token，比宿主的 0.071 ms/token
+      还贵 1.8×；共享层已有 `float_matmul_tiled`（分块 + 合并读 + FMA，三组权重
+      一次 dispatch），换过去**不需要新 shader**。**不要做块级融合**：融合只砍固定
+      开销、边际成本不变，仍慢于宿主，而 92% 的时间在声码器（上不了设备）。详见
+      [TODO-067](#todo-067-pivo-编码器的投影换用共享的-f32-分块-gemm不是融合)。
+
 ## Low Priority
 
 - [ ] 更多量化格式支持（Q4_K, Q5_K 等）
@@ -733,7 +803,7 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       （CPU 与 Vulkan 都对）。**但逐步 logits 包络不跨主机**：本机 step 6 = 0.11984，
       超过记录的界 0.1（记录那次自身最大 0.08481，本来就贴边），argmax 两台机器都一致。
       脆弱点是 step 4：llama.cpp 的 top-2 margin 0.247，Rust 侧只有 0.039。详见
-      **TODO-053**。
+      **TODO-055**。
     - 无损载荷/layout/token IDs 使用精确检查；量化、低精度舍入、近似激活使用明确数值误差界限。
     - 未覆盖：**Intern-Decision-4B 真实权重**（转换器已支持并校验形状，但引擎的 Qwen3.5 recurrent
       投影尚不接受该 SSM 形状，暂时不能推理）、GPU 数值对齐、性能基准。
@@ -3970,13 +4040,19 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 
 #### Q5_1 是硬前置，而且换量化档躲不掉
 
-`ffn_up_shexp.weight`（共享专家 up 投影）在**所有** unsloth 30B 量化档里都是 Q5_1：
+`ffn_up_shexp.weight`（共享专家 up 投影）在**大多数** unsloth 30B 量化档里是 Q5_1：
 
-| 量化档 | 张量类型分布 | 缺 Q5_1？ |
+> **2026-11-10 更正**：本条原先只列了 3 个量化档。上游实际有 **22 个**文件
+> （13 个标准档 + 9 个 UD 档），完整对照见
+> [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B1 的量化档表 ——
+> 22 个档里 11 个含 Q5_1，其余是 Q5_0 或 Q8_0。
+
+| 量化档（举例） | 张量类型分布 | 缺 Q5_1？ |
 |---|---|---|
 | `Q4_K_M` | Q8_0 37 / F32 237 / Q5_0 75 / Q4_K 29 / **Q5_1 23** | ✗ |
 | `IQ4_XS` | Q8_0 24 / F32 237 / Q5_0 1 / IQ4_NL 87 / IQ4_XS 29 / **Q5_1 23** | ✗ |
 | `Q4_0` | Q8_0 24 / F32 237 / Q4_0 115 / Q4_1 2 / **Q5_1 23** | ✗ |
+| `Q8_0` | Q8_0 164 / F32 237 | ✓（整档没有 Q5_1） |
 
 23 个 Q5_1 = 23 个 MoE 层的共享专家 up 投影。
 
@@ -4048,9 +4124,11 @@ Q5_1 dequant / matmul kernel 已落地（`src/ops/kernel/q5_1/`），逐位对�
 - **附带修复**：`gemma4` 的权重白名单早就列了 `GGMLType::Q5_1`，但
   `QuantizedTensor::from_bytes` 没有 `Q5_1` 分支 → 遇到 Q5_1 权重会 panic。
   这次补上后那处静默变成可用。
-- **未做（有意）**：Q5_1 没有 Vulkan 路径。`src/compute/linear.rs` 的白名单里
-  没有 `Q5_1`，GPU 模式会明确报「weight format has no Vulkan kernel」，
-  而不是静默算错。30B 的 GPU 支持留到 arch 适配那一步再决定是否补。
+- **设备路径**：Q5_1 起初没有 Vulkan 路径（GPU 模式会明确报「weight format has no
+  Vulkan kernel」，而不是静默算错）。**2026-11-09 已补上**：`shaders/glsl/q5_1_matmul.comp`
+  与 `q5_0_matmul.comp` 两个设备 kernel（Q4_1 的设备 kernel 带 `m` 项，正好是 Q5_1
+  的模板；Q4_0 是 Q5_0 的模板），与 CPU kernel 的数值在 2e-3 / 3e-3 的门限内一致，
+  且比 CPU 快 2-3×。
 
 **未验证的部分**：以上只证明 Q5_1 的**块语义**正确。真实 30B 权重上的
 MoE 前向（sigmoid 路由 + squared ReLU + 共享专家）还没跑过 —— 那属于 B2/B3。
@@ -4081,7 +4159,7 @@ B1 之后的三个阻塞项也已落地：
 - **B4 共享专家与平方 ReLU**：squared ReLU 内联在 `moe.rs`（`relu` 后 `x*x`）。
 
 **顺带修掉一个更早就存在的语义错误**：`add_bos` 的**优先级**写反了
-（详见 [TODO-052 F2](#f2强制-bos的优先级与-llamacpp相反-已修)）。30B 的 GGUF
+（详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)）。30B 的 GGUF
 是 `pre = "pixtral"` 且**没有** `add_bos_token` key，参考实现会加 BOS，
 仓库原先不加 —— 少了 `<s>` 提示就与参考实现不同。Dory 反而是对的（它的 GGUF
 明写 `add_bos_token = false`，参考实现同样不加）。
@@ -4127,13 +4205,73 @@ Q4_K 出投影的 Q8_K 激活量化放大了约 7000× —— 一个 1-ULP 的�
    values matter」。所以 oracle 与 Rust 两侧都必须在
    `-march=armv8.2-a+dotprod` 下编译，且**不能开 i8mm**。
 
+**进展：入口层已补齐（2026-11-09）** —— `nemotron_h` 与 `nemotron_h_moe` 现在
+共用一个 `TextRuntime` 适配器（`src/models/nemotron_h/trunk/runtime.rs`），
+HTTP `/v1/chat/completions` 从 501 变成可用；JEV 的单次与分组判定本来就按 arch
+分派，两个入口都覆盖。
+
+**顺带修掉一个族内的提示分叉**：CLI 走 `prompt::legacy::format_chat`（ChatML，
+`add_special: true`，无 think 块），HTTP 走 qwen 的 ChatML builder（**没有 BOS**，
+**多一个空 think 块**）—— 同一条消息 CLI 15 token、HTTP 19 token，贪心解码给出
+不同文本。现在两族都走 `prompt::build_nemotron_chat_prompt`：把对话轮次渲染成
+ChatML 文本、再用 `add_special: true` 编码一次，于是 BOS 与 think 块都和 CLI
+一致。`tests/cli_http_agreement.rs` 现在锁住 4B 与 30B 的两条入口逐 token 一致。
+
 **还没做的**：
 
-- **HTTP 服务端** —— `nemotron_h`（4B）本来就没有 `TextRuntime` 适配器，
-  `/v1/chat/completions` 对它返回 501；30B 与 4B 一致。JEV 路径按 arch 分派，
-  已覆盖 `nemotron_h_moe`。
-- **Vulkan 路径** —— Q5_1 没有设备 kernel（见 B1 一节）；Q5_0/Q8_0 的
-  ggml-exact 路径也只覆盖 CPU。
+- ~~**Vulkan 路径**~~ ✅ **已完成（2026-11-10，阶段 3）**。分两层：
+  1. ~~**Q5_0 与 Q5_1 的设备 kernel**~~ ✅ **已完成（2026-11-09）**。仓库原有的设备
+     格式只有 Q8_0 / Q4_0 / Q4_1 / Q4_K / Q5_K / Q6_K / F16 / BF16 / F32，而 30B 的
+     `attn_q/k/v`、`ssm_in`、`ffn_up_exps`、`token_embd` 都是 **Q5_0**，共享专家的
+     `ffn_up_shexp` 是 **Q5_1** —— 换量化档躲不掉。现在两个格式都有设备 kernel
+     （`shaders/glsl/q5_0_matmul.comp`、`shaders/glsl/q5_1_matmul.comp`），与 CPU
+     kernel 的数值在门限内一致，且比 CPU 快 2-3×。**顺带修掉一个真 bug**：
+     `matmul_rows_push` 只给 Q4_1 填了「每块激活和」那个 push constant，
+     Q5_1 的 `m` 项因此读到 arena 的偏移 0（垃圾），数值差 17%。
+  2. ~~**MoE 层的设备分支**~~ ✅ **已完成（2026-11-10）**：新 shader
+     `nemotron_moe_route`（sigmoid + 偏置排序 + top-6 + 归一化 + scale）与
+     `nemotron_moe_reduce`（加权求和 + 共享专家直加 + 残差）；专家投影复用
+     `relu_square` 与 Q5_0 / Q8_0 kernel。**路由留在设备上**：选中的专家 id
+     写进 arena，专家 kernel 自己读 id 并把权重偏移一个专家矩阵，因此一层
+     不产生同步点（3D 张量整体绑定，一个 MoE 层只占一个 descriptor set）。
+     整模 52 层（23 SSM / 23 MoE / 6 attention）全部在设备上。
+     `nemotron_h_moe` 已列入 `ComputePolicy::has_complete_device_path`。
+  - **数值门限是 8%，不是 1%**：设备 kernel 的求和顺序与 host 的 NEON kernel
+    不同（Q5_0 的 `ssm_in` 投影 `max_rel = 3.791e-3`），Mamba-2 的递归把它沿
+    52 层放大，实测 logits 相对 L2 **4.28% / 4.23% / 1.79%**（1 / 2 / 3 token
+    的 prefill，三个分支归因表里的最大值是 5.51%）。另有一条更硬的功能门限：
+    **top-1 token 必须与 CPU 相同**。全部层留在 host、只让最终归一化 +
+    输出投影上设备时，差异是 **0**（设备这两步与 CPU 逐位一致）。细节见
+    [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B7。
+  - **踩坑（已修）**：设备 session 在场时，`ops::kernel::q4_k` 会把 **host 上的
+    Q4_K matmul 也 offload 到设备**。30B 的 `ssm_out` / `attn_output` 都是
+    Q4_K，于是「在 host 上跑的层」与纯 CPU 运行不等价（一个投影差 1e-7，
+    经递归放大后最后一层 hidden state 差 18%）。设备路径里跑在 host 上的层
+    现在被锁进 `ComputePolicy::Cpu` scope，`RMI_NH_CPU_*` 三个归因开关才
+    能说明差异来自真正搬上设备的那个分支。
+- **其余量化档** —— 上游共 22 个档，`Q4_K_M` 与 `Q8_0` 两档真实下载并验证过。
+  其余 20 个档的**张量类型分布已从各档 GGUF 头部读出**（见 B1 一节与
+  [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B1 的量化档表）：
+  **CPU 路径的类型全部支持**（白名单 + kernel 都在），但没有下载权重，
+  所以「能加载、能跑」只是类型层面的推断；**设备路径**则取决于该档的每种
+  张量类型是否都有设备 kernel —— 12 个档类型齐全，另外 10 个含 i-quant 或
+  Q2_K / Q3_K 的档没有对应设备 kernel，整个 session 建不起来
+  （`auto` 回退 CPU，`--compute vulkan` 严格报错）。
+  - **不必做 20 档全量评估**：30B 的 trunk（MoE / SSM / attention 的算术）与
+    量化类型无关，换档只是权重字节不同，每多测一档重复验证的是「已有 kernel
+    在新字节上的表现」；而 10 个 i-quant / Q2_K / Q3_K 档**设备上根本建不起
+    session**，给它们做「设备 vs CPU」评估没有意义。
+  - **按类型家族抽样 3 档即可**（未做）：`Q6_K`（k-quant 家族，设备可跑）、
+    `Q4_0`（无 k-quant 的 4-bit 家族）、`IQ4_XS`（i-quant 家族，CPU-only
+    路径）。其余维持「类型层面的契约」描述。
+  - ✅ **`Q8_0` 档已验证，设备路径实测也是逐位的（2026-11-11）**：该档 401 个张量
+    只有 Q8_0（164）与 F32（237），两类设备 kernel 都是逐位的，路由 shader
+    用 ggml-exact 的 `exp_reference` + `divide_finite_normal`。实测设备 vs CPU
+    的 1 / 2 / 3 token prefill 全部 `relative_l2 = 0`、top-1 token 相同；
+    CPU vs llama.cpp 的 2574 个 join 到的 checkpoint 全部 `EXACT`，最终
+    logits `worst disagreement 0.0000`。细节与命令见
+    [NEMOTRON3_NANO_30B_MOE.md](NEMOTRON3_NANO_30B_MOE.md) §B7.4。
+    测试可用 `RMI_NEMOTRON_MOE_EXACT=1` 把门限收紧到 0。
 
 ### TODO-054: Dory 的默认提示在 CLI / HTTP / 模型自带模板之间三分；JEV 的「backend=partial」提示对 Dory 是假的
 
@@ -4321,7 +4459,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 40 层 → 每 token **360 次极小的投影**（1×2048 → 1×512）。设备的 prefill（一次几百行）
 划算 ✓，但 decode 是 360 次单行 dispatch ✗ → 每次的固定开销大于那点算力 ✗。
 
-与仓库里已有的结论同源：TODO-052（Mellum 的 784 次 pool dispatch）、LFM2.5 的
+与仓库里已有的结论同源：TODO-052（每投影一次 pool dispatch，784 次里 26 次的开销大于活）、LFM2.5 的
 `min_gpu_matmul_outputs` 阈值（单行投影留在 CPU）。**qwen35moe 的 decode 目前没有
 类似的"留在 CPU"策略** —— 单行专家投影在设备上必然亏。
 
@@ -4674,3 +4812,544 @@ layout 只是把字节换个位置，kernel 的归约顺序不变。
 `shaders/glsl/q8_matmul_transposed.comp`、
 `shaders/glsl/q8_matmul_tiled_dp4a*_transposed.comp`、
 `scripts/transposed-tiled-shader.py`、TODO-061（Nemotron 设备路径）。
+
+---
+
+### TODO-063: JEV / 多问题永远拿不到「完整设备路径」（所有架构）
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`--compute vulkan` 起 server 时，server 自己会打印
+
+```
+compute requested=Vulkan backend=partial mode=jev
+note=no complete device path for this mode; only the offloadable parts run on the device
+```
+
+（`src/app/server/mod.rs`、`src/app/cli/types.rs`）。JEV 走的
+`run_forward_logits_*` 家族**没有**「把整个模型挂到设备」的入口：
+Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
+（文本生成）一个调用点，JEV 的 scoring 路径不走它；其它架构连
+`attach_gpu` 都没有，只有按投影的 `ComputePolicy` 卸载，所以 JEV 在它们
+身上最多是「部分卸载」，不是完整设备路径。
+
+**实测**（Nemotron-3 Nano 30B-A3B，Q4_K_M，GB10，8 线程）：CLI `--jev`
+两个问题（同一 context）12.3 s；HTTP `/v1/jev/score` 两个问题 42.6 s
+（含冷启动）。两者都是纯 CPU 结果 —— 与 CPU 运行逐位相同，因为根本没有
+上设备。
+
+**为什么不是 30B 独有的问题**：覆盖矩阵的「JEV × GPU」这一格在所有架构上
+都是空的。30B 只是把它显式暴露出来（它的文本路径有完整设备路径，JEV
+没有），因此不能靠补 Nemotron 解决。
+
+**方向**（未定）：
+
+1. JEV 的 scoring 本质是「同一 context + N 个 option 的 logits」，设备
+   session 已经有 `prefill`，缺的是把 JEV 的 `forward_logits` 接到 session
+   上（每个 option 一次短 prefill，或把 option 拼成多行一次算）。
+2. 先要定 KV 复用语义：`docs/develop/jev.md` 里 multi-question 目前是
+   「每个 question 重新 prefill」，接设备后要不要保留这个语义、还是共享
+   KV，会改变数值与耗时。
+3. 验收：JEV 的判定概率在设备路径上按误差界验收（不能要求逐位，理由同
+   `NEMOTRON3_NANO_30B_MOE.md` §B7.2），并加一条「top-1 option 与 CPU
+   相同」的功能门限。
+
+**关联**：`src/app/jev/`、`src/models/*/trunk/forward.rs` 的
+`run_forward_logits_*`、`src/models/nemotron_h/trunk/runtime.rs`、
+`docs/develop/jev.md`、TODO-053（30B 适配）。
+
+### TODO-064: 模式互斥白名单手写枚举，每加一个共享 flag 都要改多处
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`src/app/cli/parse.rs` 的主解析循环统一处理所有 flag
+（`--gpu` 在第 389 行就是 `"--gpu" => options.gpu = true`），但每个
+「模式」在解析之后另有一段**手写白名单**，用来声明该模式允许哪些
+flag、并对带值参数补一次取值校验：
+
+- `options.enhance` → `--enhance | --compute | --gpu | --overwrite | --serve`
+- `options.system_one_request` → `--adapter | --system-one-request | --compute | --gpu`
+- `options.decision_request` → 自带一段匹配
+
+白名单里出现一个 flag，就等于「这个模式接受它」；其余任何 flag 都会得到
+「`<模式>` cannot be combined with `<flag>`」。
+
+**为什么它是缺口**：白名单是**手写枚举**，每有一个新模式接受共享 flag，
+就要在三处白名单里各加一次。Vela3 混合 Vulkan 投影
+（`codex/vela3-gpu`，`828c8e8a`）把 `--system-one-request` 从「只允许
+CPU」放开到可带 `--gpu`，就必须手改 `parse.rs` 的系统模式白名单 ——
+那行 `| "--gpu"` 看起来像特例，实际是「共享 flag 列表」的第四份副本。
+下次 `--enhance`（RE-USE）也支持 compute 时，已经改过一次了。
+
+**实测**（GB10，`review/vela3-gpu`）：`--system-one-request --gpu` 走
+`parse_cli_options` → `validate_cli_options` 均通过，`compute_policy()`
+为 `Auto`；`--gpu` 与 `--compute` 同用仍被拒。
+
+**方向**（未定）：
+
+1. 把「模式 → 允许的 flag 集」集中成一份声明（例如每个模式一个
+   `const ALLOWED: &[&str]`），解析后统一查表，取代三处内联白名单。
+   这是**纯重构**，不改任何 flag 的接受或拒绝行为。
+2. 或者反过来：给 flag 声明它属于哪些模式（`--gpu` 属于 text / enhance /
+   decision / system-one / …），模式检查按声明求交集。后者更不容易
+   漏，但要求给每个共享 flag 标注归属，改动面更大。
+3. 两种方案都要带一条「重构前后行为逐项相同」的回归：把现有
+   `src/app/cli/tests.rs` 与 `tests/system_one_cli.rs` 里的模式冲突用例
+   扩充成「每个模式 × 每个共享 flag」的矩阵。
+
+**影响面**：`src/app/cli/parse.rs` 是**所有模型**的入口（Qwen3、GLM-4、
+llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，因此应当
+**独立成 PR**，不要混进模型适配的 PR。
+
+**关联**：`src/app/cli/parse.rs`、`src/app/cli/types.rs`、
+`src/app/cli/validate.rs`、`tests/system_one_cli.rs`。
+
+### TODO-065: Vela3 的 F32 权重路径每次投影都整份拷贝
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`src/models/vela3/tensor.rs` 的 `linear()` 用
+`QuantizedTensor::from_bytes` 把权重交给共享投影器。F16 与 BF16 走
+`QuantizedTensor::F16`/`BF16` 变体，只借用 mmap 的字节切片；**F32 走
+`QuantizedTensor::F32` 变体，会把整份权重 `collect()` 成一份
+`Vec<f32>`**（`src/ops/kernel/quantized_tensor.rs` 的 `from_bytes`）。
+
+`linear()` 在 `models/vela3/d3.rs` 的 `project()` 里被调用，而
+`project()` 每层每投影调一次（q/k/v/o、MLP gate/up、LoRA 的 A/B 各一次），
+于是 F32 变体（`vela3-d3-lite-f32`、`vela3-d3-turbo-f32` 等诊断
+产物）会反复拷贝整份权重。
+
+**为什么现在不严重**：发布的 Vela3 权重是 BF16（README 的
+`--stream-f32-weights` 一节写明「先检查每个源张量都是 BF16」），走的是
+零拷贝路径，所以**生产默认不受影响**；只有 F32 诊断变体会慢。
+
+**方向**（未定）：
+
+1. 让 `QuantizedTensor::F32` 也借用字节切片，kernel 侧按需解释
+   little-endian F32；这是共享算子的改动，影响所有用 F32 的模型。
+2. 或者在 Vela3 侧把 F32 权重在加载期就转成一次性的 `Vec<f32>` 并
+   复用，而不是每次 `linear()` 重新构造。
+3. 验收：F32 变体在固定请求上的墙钟不随投影次数线性增长。
+
+**关联**：`src/models/vela3/tensor.rs`、
+`src/ops/kernel/quantized_tensor.rs`、`tools/oracle/vela3/README.md`。
+
+### TODO-066: 严格 Vulkan 抓不到「投影静默回落 CPU」
+
+**状态**：⚠️ 已知缺口，未排期。
+
+**现象**：`--compute vulkan` 的语义是「请求真的在设备上」。共享投影器在
+若干情况下会**静默**回落 CPU，并且不把设备标记为故障：
+
+- `try_matmul` 在输出元素数小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K）时
+  返回 `false`，让投影留在 CPU 池上 —— 这是为避免 fence 延迟拖慢小投影
+  的**有意设计**；
+- `RUST_GPU_MAX_ROWS` 限流、形状检查、CPU scope 也走同一出口。
+
+这些出口**不调用** `mark_gpu_broken`，所以请求结束时的严格档检查
+（`ComputePolicy::context()`，只看「设备是否因队列故障被禁用」）**抓不到
+它们**。结果是：一次 `--compute vulkan` 请求可能全部在 CPU 上跑完，
+仍然返回 200 和完整响应。
+
+**已经覆盖的场景**：「设备根本不存在」由 `configure_cli()` 的前置检查
+挡住 —— 严格档在加载权重之前就报 `requires a usable Vulkan device`；
+未编译 `--features vulkan` 时报 `--features vulkan`。Vela3 混合投影
+（`codex/vela3-gpu`）实测这两种情形都成立。
+
+**还没覆盖的场景**：设备存在但投影因形状或阈值回落 CPU。仓库现有惯例是
+把这种回落当作正常行为（共享投影器对所有模型都这样），因此要不要把它
+升级成严格档的错误，**是语义决策而非 bug**：改了就等于承诺「严格档的每
+一次投影都在设备上」，而小投影留在 CPU 恰恰是当前的设计意图。
+
+**方向**（未定）：
+
+1. 先定语义：严格档到底承诺「设备可用」还是「每一次投影都在设备上」。
+2. 若取后者，需要一个能区分「回落原因」的接口（形状不支持 / 阈值太小 /
+   设备故障），并让严格档在出现「非设备故障」的回落时报错或计数上报。
+3. 验收：一次全部落回 CPU 的严格档请求，要么被拒，要么在响应里带一个
+   可观测的「设备投影数 = 0」标记。
+
+**关联**：`src/ops/kernel/vulkan.rs`（`try_matmul`、
+`min_gpu_matmul_outputs`）、`src/compute/mod.rs`（`context`）、
+`src/models/vela3/mod.rs`（严格档事后检查）。
+
+---
+
+### TODO-067: PiVo 编码器的投影换用共享的 F32 分块 GEMM（不是融合）
+
+**状态**：📌 待办，未开工。设备路径已经接线且数值等价（帧数与宿主完全相同，
+波形在 oracle 门限内），本条只处理它的性能，**不阻塞任何交付**。
+
+**问题**：`shaders/glsl/pivo_linear.comp` 是手写的朴素投影——每个 lane 负责一个
+输出列，权重按列跨步读，既不合并读也不分块。结果是**边际成本比宿主还贵**：
+
+| 量 | 设备 | 宿主 |
+| --- | --- | --- |
+| 编码器边际成本 | 0.126 ms/token | 0.071 ms/token |
+| 编码器固定开销（≈70 次 dispatch × ≈50 µs） | ≈3.7 ms | — |
+| 编码器，34 token | 8.01 ms | 2.63 ms |
+| 编码器，100 token | 14.54 ms | 8.54 ms |
+| 编码器，200 token | 17.10 ms | 14.37 ms |
+| 端到端 HTTP 请求，短（21 token） | 78.3 ms | 75.8 ms |
+| 端到端 HTTP 请求，长（≈130 token） | 630.7 ms | 561.7 ms |
+
+（Intel Core Ultra 5 125H + Intel(R) Graphics (MTL) 核显，`release-fast`，
+HTTP 请求中位数。）
+
+**做法**：直接复用共享层已有的 F32 分块路径，**不写新 shader**：
+
+- `src/vulkan/ops.rs` 的 `record_transposed_float_matmul_rows` 走
+  `shaders/glsl/float_matmul_tiled.comp`（64 lane、32 token 暂存、权重 vec4
+  合并读、FMA），小形状走 `float_matmul_small`。
+- **权重布局**：该 kernel 按 `[in][out]` 取权重，PiVo 的 GGUF 是 `[out][in]` →
+  用 `src/vulkan/dense.rs` 已有的 `upload_f32_transposed` /
+  `transpose_f32_weights` 在加载时转置一次（编码器权重约 1.6 MB，一次性）。
+- **权重来源**：该 kernel 从 binding（w0/w1/w2）读权重，不走 arena → PiVo 运行时
+  改成「权重常驻独立 buffer」，而不是现在的「常驻 arena」。
+- **一次 dispatch 三组权重**：q/k/v（以及 gate/up）合并成一次，kernel 支持 3 个
+  slot，每个 attention block 因此少 2 次 dispatch。
+- **激活值布局**：输入 `[token][in]`、输出 `[token][out]` 行主序 = PiVo 原生布局，
+  不需要转置。
+- **没有 bias**：PiVo 编码器的 43 个张量里没有 bias，与该 kernel 一致（它不支持
+  bias）。
+- `n_in % 2 == 0` 的要求对 PiVo 成立（96 / 192 / 24）。
+
+**不要做的**：**不要做块级融合**（把整个 attention block 融成一个 shader）。
+收益分析：融合只砍固定开销（≈70 → ≈7 次 dispatch，省 ≈3.3 ms），边际成本不变，
+融合后 34 token 约 4.7 ms、200 token 约 25 ms，**仍慢于宿主**。而融合会让三件事
+变复杂：barrier 纪律（barrier 前不得有 lane 相关退出——本条实现时已经踩过一次
+死锁）、寄存器与共享内存压力（分数暂存 512 float + Kahan 归约 128 float）、
+以及校验结构（要从算子级改成块级）。仓库里融合真正划算的先例是 Z-Image 的 VAE
+（1477 次提交 → 39 次，GPU 时间 −56%），PiVo 的 ≈70 次不在那个量级；而且 92% 的
+时间在声码器（FARGAN 严格顺序递归，上不了设备），编码器最多占 3–12%，融合最多
+换来 2–8%。
+
+**校验要求**：
+
+1. **帧数必须与宿主完全相同**（否则音频长度会变）。现在的余量：编码器相对误差
+   4.61e-7、对数时长误差 4.77e-7，最短 oracle 用例的帧数舍入余量是 0.0024 帧
+   （约 650× 余量）。
+2. `src/vulkan/ops.rs` 里现有的算子级测试要覆盖新核（对 PiVo 的形状做宿主参照）；
+   `src/models/pivo/tests.rs` 的帧数对比继续作为端到端门禁。
+3. 若换核后 `pivo_linear.comp` 退役，先把它降级为**设备侧参照实现**，用「新核 ==
+   旧核，逐位相同」验收，而不是只对宿主。
+
+**待办**：
+
+1. 换核后实测编码器的边际成本与 dispatch 次数，再决定要不要块级融合。
+2. 权重常驻位置从 arena 改到独立 buffer 后，`PivoRuntime` 的权重指纹、容量核算
+   与 `upload_weight` 要跟着改。
+3. 在 AVX2 与标量主机、以及独显上各验收一次（本机只有核显）。
+4. 若将来 PiVo 支持批量合成，固定开销与边际成本会被摊薄，届时 GPU 才可能真正
+   赢过宿主——比融合更值得等。
+
+**关联**：`shaders/glsl/float_matmul_tiled.comp`、`shaders/glsl/float_matmul_small.comp`、
+`src/vulkan/ops.rs`（`record_transposed_float_matmul_rows`、`FLOAT_MATMUL_TILED`、
+`PivoRuntime::linear`）、`src/vulkan/dense.rs`（`upload_f32_transposed`、
+`transpose_f32_weights`）、`src/models/pivo/gpu.rs`、`shaders/glsl/pivo_linear.comp`、
+[PiVo validation](../../tools/oracle/pivo/validation.md)。
+
+### TODO-068: OvisOCR3 的运行时 Oracle 还 pin 在 `11fe0215`，要重新 pin 到 `b96806d`
+
+**状态**：✅ 已完成（2026-11-12，运行时 Oracle 已重新 pin 到 `b96806d`，两个测试重跑通过）。
+
+**背景**：`4a2ac0b`（Holo4 合并）把共用的 GDN 归一化换成 llama.cpp
+`11fe0215` 的 `build_gdn_l2_norm`（`x / sqrt(sum(x²) + eps)`），当时仓库里
+只有 OvisOCR3 的**运行时** Oracle 还 pin 在 `11fe0215`（它的**转换**一直
+pin 在 `b96806d`），于是「实现跟着唯一的例外走」，把其余所有与 `b96806d`
+对齐的模型（Qwen3.8、Holo4、Sage-A1.5、NeoHorse、MiniCPM-V 35B）全部拉离
+了各自的 Oracle。
+
+上游在 `11fe0215` 与 `b96806d` 之间把 GDN 归一化换成了 `ggml_l2_norm`
+（`x / max(sqrt(sum(x²)), eps)`，epsilon 当分母下限）。仓库现在跟上游（新
+公式）。这个差是**公式版本差**，按误差界接受（GDN 递推 state 上约 1.2e-5
+相对 L2，与 Holo4 当年记录的同一现象同量级）；需要复现旧 Oracle 自己的算术
+时打开 `RMI_QWEN35_GDN_LEGACY_NORM=1`（默认关闭）。详见
+[GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md) 的「GDN 归一化」一节。
+
+**已完成**：
+
+1. `tools/oracle/ovisocr3/build_oracles.sh` 的运行时 pin 改成 `b96806d`，
+   与转换 pin 相同；`tests/qwen35_reference.rs` 删掉单独的
+   `OVISOCR3_RUNTIME_LLAMA_PIN`，两个 OvisOCR3 测试都断言 `LLAMA_PIN`。
+   trace 补丁在 `b96806d` 上仍能干净应用，`git diff -- src` 仍为空。
+2. 两个测试重跑通过。逐位检查点回到噪声水平：`q_conv_predelta-0`
+   `7.8e-8`、`state_predelta-0` `1.1e-7`、`conv_output_raw-0` 精确 `0`、
+   `final_output-0` `1.7e-7`；只把公式换回旧版则分别是 `1.18e-5` 与
+   `4.70e-5`。视觉 14 个检查点最大相对 L2 `0.0147`（门槛 `0.05`）。
+3. 数值门槛跟着收紧到「两类检查点」：单块检查点仍按 Oracle 自己的
+   BF16/F32 spread 定界（`min(0.05, max(1e-5, 1.5 * spread))`），累积检查点
+   只报告漂移并以 `0.05` 为上限。原因是深层栈在 BF16 下是混沌的：只把 state
+   移动 `1e-5`（换公式）就会让 `layer_output-23` 在 `0.0117` 与 `0.0195`
+   之间摆动、`result_output` 停在 Oracle spread 的 `4.4` 倍，spread 倍数在
+   那里没有信息量；那些层的功能门限是 greedy token 逐个相同（仍精确比较）。
+
+**剩余**：`RMI_QWEN35_GDN_LEGACY_NORM` 现在没有任何 Oracle 需要它了，但按
+「保留诊断开关、默认关闭」的约定继续留着；它只影响 CPU 路径。
+
+**顺带复测的另一个家族（NeoHorse-1-4B，2026-11-12）**：
+
+- **BF16（无损）档与固定 llama.cpp `b96806d` 逐位一致**（85 条 trace 记录、
+  全部 checkpoint 与 logits 逐位相同，token id 相同）——共享的 GDN 归一化没有
+  破坏这个家族。
+- **量化档（Q8_0 / Q4_K_M）不再逐位一致**：仓库默认 Q8_0 kernel 与 llama.cpp 的
+  per-lane 累加差约 1 ULP（`src/ops/kernel/q8_0/ggml.rs` 记着这件事并提供复刻
+  llama.cpp 算术的入口，qwen35 家族保持默认契约）。GDN checkpoint 相对 L2
+  `8.9e-8`…`5.4e-7`（门槛 `1e-5`）、greedy token 逐个相同，深层栈漂移
+  `layer_output-31` `5.7e-2`…`1.1e-1`。
+- **这与 GDN 公式无关**：把公式换回旧的，同一个 Oracle 上 `state_predelta-0`
+  从 `4.1e-7` 变成 `8.6e-5`（212 倍）；`conv_output_raw-0`（归一化之前）在两种
+  公式下都是 `2.8e-7`，说明漂移来自量化投影本身。
+
+**Sage-A1.5**（`qwen35moe`）也复测了（2026-11-12）：本机 aarch64 用 pinned
+`b96806d` 的标量 Oracle（`--no-repack`、`-U__ARM_NEON`）重跑全量对拍，
+1,100 个检查点**逐位一致**（最大相对 L2 与最大绝对误差都是 0，最小 cosine
+为 1），token id 与 Oracle 相同。原始 `Hello` 输入的 greedy 序列是
+`[11, 353, 1044, 4313]`（早先本机记录是 `[11, 271, 40, 1044]`——那个输入是
+近平局，Oracle 的构建决定翻到哪一边；中文输入各机一致）。AMD 性能记录与
+gfx1100 上的物理设备复测仍未重跑。
+
+**MiniCPM-V 4.7 35B-A3B**（`qwen35moe`）也复测了（2026-11-12）：Q4_K_M 档，
+Oracle 用 pinned `b96806d` 的标量构建（`tools/oracle/sage_a15/build_oracle.sh`，
+`--no-repack`），Rust 侧用 `tests/minicpmv_reference.rs::dump_qwen35moe_logits`
+并喂 Oracle 自己 tokenize 出来的 id，新的 `tools/oracle/minicpmv/compare_text.py`
+做比较：**437 个检查点逐位一致**（layer 0/3/39 的路由 logits、probs、选中的
+专家 id、路由权重、归一化权重、MoE 输出、shared expert 输出各 57 个，外加
+`result_norm` 与最终 logits 各 19 个）。它的**权重**也在设备上跑过：8 步 greedy
+token 与 CPU 逐个相同，logits 相对 L2 `0.0313`。
+
+这个模型文档里 pin 的 Oracle 是 `69f201a2`（比 `b96806d` 新，带
+`minicpmv4_7` 的视觉支持）；本机没有那个 checkout 也没有 GitHub 出网，所以
+文本对拍用的是 `b96806d`——两者的 GDN 公式相同，差别只在视觉侧。逐层的
+`l_out`、attention 检查点与 GDN 递推 state 不在这个 harness 里（MiniCPM-V 的
+dump 路径不发这些），同一架构由 Sage-A1.5 覆盖。
+
+至此，共享 GDN 归一化的影响面里，Qwen3.8、Holo4、OvisOCR3、NeoHorse、
+Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
+
+**影响面**：只影响 OvisOCR3 一个模型的数值验证，不影响任何模型的推理
+正确性——两个公式相差 2.4e-6 相对，模型行为不变。
+
+**关联**：`src/models/qwen35/trunk/util.rs`、`tests/qwen35_reference.rs`、
+`tools/oracle/ovisocr3/README.md`、`docs/develop/SUPPORTED_MODELS.md`、
+[GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
+
+### TODO-069: MTP / DSpark 投机解码 —— 契约已查清，qwen35 的 MTP 已实现，其余未做
+
+**状态**：⚠️ 调研完成（2026-11-11）。**`qwen35` 稠密档的 MTP 起草头与验证/接受
+回路已实现**（见 TODO-072 与 PR #241：草稿逐 token 与 pinned llama.cpp 一致，
+接受率 0.58 vs 0.53，投机解码与 greedy 逐 token 相同）；DSpark / DFlash /
+EAGLE3 仍未实现。
+
+**背景**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 是 2026-09-23 的设计稿。
+按上游 llama.cpp 的 pin `b96806d` 重新核对了一遍契约，并盘点了真实模型里
+到底哪些带这些头（unsloth 名下 354 个 `-GGUF` 仓库，逐个读 GGUF 头部）。
+
+**上游契约**（`common/speculative.cpp::common_speculative_types_from_gguf` 自动识别）：
+
+| 类型 | 识别条件 | draft 是什么 |
+|---|---|---|
+| `draft-mtp` | arch 不是 `dflash`，且有 `blk.{block_count-1}.nextn.eh_proj.weight` | 主模型里多出来的 MTP block |
+| `draft-dflash` | arch 是 `dflash`，且没有 `markov_w1.weight` | 独立的 DFlash 小模型 |
+| `draft-dspark` | arch 是 `dflash`，且有 `markov_w1.weight` | DFlash + Markov 头（+ 可选 Confidence 头） |
+| `draft-eagle3` | 独立的小 EAGLE3 模型 | |
+
+- **MTP 计算**（`src/models/deepseek4.cpp::graph_mtp`）：
+  `concat(RMSNorm(embed(next_token), nextn.enorm), RMSNorm(h_last, nextn.hnorm))`
+  → `eh_proj` → 一层普通 block → `shared_head_head(shared_head_norm(out))`。
+  张量：`blk.%d.nextn.{eh_proj,embed_tokens,enorm,hnorm,shared_head_head,shared_head_norm}`；
+  metadata：`<arch>.nextn_predict_layers`。
+- **DSpark 计算**（`src/models/dflash.cpp`）：DFlash 小模型读主模型若干层的
+  hidden state（`target_layers`），内部 conv + selector；**Markov 头**按「上一个
+  已提交的 token」给每个位置的 draft logits 加偏置
+  （`logits[i] = base[i] + markov_w2 @ markov_w1[prev(i)]`，链式），
+  **Confidence 头**预测每个位置的接受概率
+  （`sigmoid(conf_proj · [embd[i]; markov_w1[prev(i)]] + b)`）。
+- **sidecar 约定**：上游下载器认 draft repo 里的 `MTP/`、`dflash/`、`dspark/`、
+  `eagle3/` 子目录（`dspark` 优先于 `dflash`）。
+
+**真实模型**（unsloth 的发布就是按这个约定）：
+
+| 模型 | sidecar | arch / 备注 |
+|---|---|---|
+| Gemma-4 全系（E2B/E4B/12B/26B-A4B/31B，含 qat 变体） | `MTP/` 0.06–0.95 GB | `gemma4-assistant`，`nextn_predict_layers = 4`，形状不同（`nextn.pre_projection` / `post_projection`） |
+| Qwen3.8-27B | `MTP/` 1.37 GB (Q4_0) | `qwen35`，`nextn_predict_layers = 1` |
+| Qwen3.8-Flash-Next | `MTP/` 2.79–7.77 GB | `qwen4exp`，带 mHC 头（`nextn.hc_head_{up,down,norm}`） |
+| DeepSeek-V4-Flash-0731 / V4.1-Flash-1017 | `dspark/` 8.5–11.3 GB | `dflash`，3 个 DSV4 block，128 专家 top-3，`target_layers=[37,38,39]`，`block_size=5` |
+| Mistral-Large-4-1T-A52B | `dspark/` 4.21 GB | `dflash` |
+| MiniMax-M3.1-Flash | 根目录 `dspark-*.gguf` 2.09 GB | `dflash` |
+
+**本仓库现状**：
+
+- `xing4_0` **已经解析**了 MTP block 的六个张量（`nextn_eh_proj` /
+  `nextn_embed_tokens` / `nextn_enorm` / `nextn_hnorm` /
+  `nextn_shared_head_head` / `nextn_shared_head_norm`，与上游 `blk.N.nextn.*`
+  契约一致），但**没有任何 forward 用它们**。
+- `qwen35` 的 config 有 `n_nextn`，并且**把 MTP 层排除在 trunk 之外**
+  （`n_layer_impl = n_layer - n_nextn`）。**Qwen3.8-27B 的主 GGUF 自带
+  `qwen35.nextn_predict_layers = 1` 与 `blk.64.nextn.*`**，所以它的 MTP 头现在
+  是**被静默忽略**的。
+- verify 侧的前向**已经够了**：`ChunkedPrefill::prefill` + per-row kernel
+  能一次算 `P + K` 个位置；缺的是 `forward_chunk` 的返回值要保留**全部**
+  `P + K` 行 logits（现在只留最后一行），以及接受循环。
+- 接受测试的形状有现成样板：`run_jev_grouped_decision` 的 per-group softmax。
+
+**建议的第一步**：
+
+1. **先做 MTP，不做 DSpark。** MTP 只要主模型最后一层的 hidden state + 一层
+   block，不需要第二个模型、不需要新架构，`xing4_0` / `qwen35` 的权重已经在
+   仓库里了；DSpark 要整个第二模型 + Markov 链 + Confidence 头。
+2. **先量 verify 侧的收益。** 把 `forward_chunk` 扩成返回全部行，然后测
+   `P + K` 一次批量 prefill 相比 `K` 次单 token 到底省多少。收益小的话，
+   任何 draft 策略都回不了本 —— 这与设计稿里「先上 NGRAM 量基线」是同一条
+   推理。
+3. **hidden state 必须先可信。** draft 头吃的是主模型的最后一层 hidden
+   state，它继承主模型的误差；仓库现成的逐位对拍基础设施
+   （`RMI_PARITY_TRACE`、`tools/oracle/*`）正是用来查这件事的 —— 一个建在
+   未验证 hidden state 上的 draft 头，比没有 draft 头更糟。
+4. **首个目标选 Gemma-4**：本仓库已有 `gemma4` trunk，MTP sidecar 只有
+   0.06–0.95 GB，整个实验（头 + verify + 接受率测量）一个 gigabyte 就够。
+   但它的 MTP 形状（`pre_projection` / `post_projection`）与 DeepSeek 系不同，
+   设计通用 MTP 路径之前要先把上游 Gemma-4 的 draft 代码读一遍。
+
+**关联**：`docs/develop/SPECULATIVE_DECODING.md`、
+`src/models/xing4_0/trunk/weights.rs`、`src/models/qwen35/trunk/config.rs`、
+`src/core/prefill.rs`、`src/app/jev/grouped.rs`。
+
+### TODO-070: Qwen3.8-27B 的 Vulkan 路径在 Q8_0 档下不可用（FFN 太宽）
+
+**状态**：✅ 已修（#238）。
+
+**现象**：`--compute vulkan` 跑 `Qwen3.8-27B-Q8_0.gguf` 直接报
+
+```
+Inference error: Unsupported shape: invalid Vulkan matmul input width/stride
+```
+
+**原因**：Vulkan 的 Q8_0 matmul 有 `n_in > 16_384` 的上限
+（`src/vulkan/ops.rs` 的 `matmul_rows_push` 与 `src/vulkan.rs` 的
+`matmul_q8_0`）。Qwen3.8-27B 的 MLP down 投影是 `blk.N.ffn_down.weight` =
+17408×5120 的 Q8_0，即 `n_in = 17408`，超限。Holo4-27B 同样的 FFN 宽度没问题，
+因为它是 Q4_K/Q6_K，那个上限只针对 Q8_0。
+
+**根因是过期的守卫**：16384 来自旧 kernel —— 它把整行输入一次性放进 shared
+memory（`shared uint s_input[4096]`，512 个 block）。#166 起 Q8_0 的 kernel
+都按 64 个 block 分块暂存，shared memory 不再是约束，但 host 侧两处守卫没删。
+所以不需要改 shader，删掉守卫即可。
+
+**结果**（#238，本机 GB10）：设备 Q8_0 kernel 对 CPU 归约（宽度 17408）逐位
+一致；16 步 greedy 的 15 个 token（含 EOS）CPU 与设备逐个相同；logits
+（248320 维）逐位一致（relative L2 = 0）。详见
+[UNIFIED_COMPUTE_VALIDATION.md](UNIFIED_COMPUTE_VALIDATION.md) 的
+「Q8_0 宽投影与 Qwen3.8-27B 的设备路径」一节。
+
+**仍未覆盖**：batch=64 的长行预填、图像路径（视觉塔仍在 CPU）、长上下文、
+AMD/Apple 驱动，以及 27B 以外的 Q8_0 宽投影模型。
+
+**关联**：#238、`src/vulkan/ops.rs`、`src/vulkan.rs`、
+`docs/develop/SUPPORTED_MODELS.md` 的 Qwen3.8 行。
+
+### TODO-071: qwen35 家族的量化档与 llama.cpp 差约 1 ULP（默认 Q8_0 kernel 的累加顺序）
+
+**状态**：⚠️ 已定位，按误差界接受，未改默认 kernel。
+
+**现象**：量化档（Q8_0 / Q4_K_M）与 pinned llama.cpp 不再逐位一致。以
+NeoHorse-1-4B 为例：GDN checkpoint 的相对 L2 是 `8.9e-8`…`5.4e-7`（门槛
+`1e-5`），greedy token 逐个相同，但深层栈的漂移到 `layer_output-31`
+`5.7e-2`…`1.1e-1`；Qwen3.8 的 Q8_0 档是同一形状（GDN `2.2e-7`…`3.5e-7`、
+第 63 层 `7.4e-2`、logits `5.4e-2`）。
+
+**根因**：仓库默认的 Q8_0 kernel（`dotprod_nrc4` / `neon_nrc1`）把每个 block
+的整数点积先归约成标量再进 F32 乘加；llama.cpp 的
+`ggml_vec_dot_q8_0_q8_0` 对每对 block 保留 4 路累加器、最后才归约。
+per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` 记着这件事，
+并提供了复刻 llama.cpp 算术的入口（`forward_prepared_ggml`），Nemotron 主干在
+用它。
+
+**为什么不改**：qwen35 家族保持默认契约（那个 ggml-exact 入口比默认 kernel
+慢，而 Q8_0 档的验收已经是「GDN checkpoint ≤ 1e-5 + greedy token 逐个相同 +
+漂移报告」）。这是**全局**取舍，不是逐模型的：若要恢复量化档的逐位一致，
+应当给 qwen35 家族一个统一开关（例如 `RMI_QWEN35_Q8_GGML_EXACT=1`），
+并重新测性能与各模型的数值。
+
+**顺带**：MoE 路径（`qwen35moe`）默认走参考归约，所以它与标量 Oracle 逐位
+一致（Sage-A1.5 的 1,100 个检查点、MiniCPM-V 的 437 个检查点都是 0 误差）；
+受影响的只有用默认 Q8_0 SIMD kernel 的稠密路径。
+
+**关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
+`tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
+
+### TODO-072: Qwen3.8-27B 的 MTP 起草头已可执行，但 CPU 上的投机解码不划算
+
+**状态**：✅ 起草头 + 验证/接受回路已实现并与 pinned llama.cpp 对拍；⚠ 性能结论
+待设备路径（草稿头目前只在 CPU 上跑）。
+
+**做了什么**：
+
+- `src/models/qwen35/trunk/mtp.rs`：装载并执行 GGUF 自带的 MTP 头（`blk.64.*`）。
+  图与 llama.cpp `b96806d` 的 `graph_mtp` 一致：
+  `concat(RMSNorm(embed(t_p), nextn.enorm), RMSNorm(h_{p-1}, nextn.hnorm))`
+  `→ nextn.eh_proj → 一个注意力块（自己的权重、自己的 KV cache）→ FFN`
+  `→ shared_head_norm → shared_head_head`。
+  `nextn.embed_tokens` / `shared_head_head` / `shared_head_norm` 缺省时回落到主
+  模型的 embedding / 输出权重 / 输出 norm（与上游相同）。
+- 配对规则：MTP 块在位置 `p` 上吃 `(embed(t_p), h_{p-1})`，预测 `t_{p+1}`；`h`
+  必须是**输出 norm 之后**的 hidden state（llama.cpp 的 `h_nextn`）。这条规则踩
+  过两个坑，两个都定位到了：
+  1. `last_hidden_state()` 原来返回的是最后一个 chunk 的**第一**行而不是最后一行
+     → 预填之后的第一轮起草全是噪声（接受率 0.36）；
+  2. 起草上下文的 catch-up 必须把 hidden 整体**右移一位**（位置 `p` 的 token 配
+     `h_{p-1}`），llama.cpp 用 `pending_h` 跨 batch 携带最后一行；配错时起草头的
+     KV 内容整体错一位。
+- 验证/接受回路：一次目标前向跑 `[bonus, draft_0..draft_{n-1}]`，用每一行的
+  logits 与草稿逐个比对，取最长匹配前缀。被拒的草稿必须回滚：
+  - KV：把被拒位置的 key 行清零（本仓库的自由槽位靠「第一行全零」扫描出来）；
+  - 循环状态：GDN / shortconv 的状态逐 token 携带，只回滚 KV 不够 → 快照 +
+    重放已接受的 token。llama.cpp 用 context checkpoint + replay，语义一致。
+- CLI：`--mtp-draft N`（N=每轮起草的 token 数，0=关闭）。只支持 greedy
+  （`--temp 0`）、只支持纯文本 prompt（视觉路径的 prompt 行是投影后的 embedding，
+  拿不到 token id）。HTTP（`--serve --mtp-draft N`）走同一条路：温度为 0 的请求
+  走投机解码，其余请求照旧逐 token 解码。
+
+**实测**（Qwen3.8-27B Q8_0，同一个 16 token prompt，`--mtp-draft 4`）：
+
+- 起草头与 llama.cpp **逐 token 一致**：第一轮的 4 个草稿
+  `[119721, 103722, 97889, 102768]` 与 pinned llama.cpp `b96806d` 的
+  `llama-server --spec-type draft-mtp --spec-draft-n-max 4` 记的候选完全相同。
+- 接受率：本仓库 14/24 = 0.58，llama.cpp 10/19 = 0.53（同一个模型、同一个
+  prompt、同一个 n_max）。
+- 投机解码产出的 token 与 greedy **逐个相同**——这是回滚做对了的判据。
+
+**为什么 CPU 上不划算**：27B Q8_0 的前向是**算力瓶颈**（实测约 230 GOPS，权重
+25.7 GB / 4.5 s ≈ 5.7 GB/s），所以把 `n+1` 个 token 塞进一次前向并不比 `n+1`
+次单 token 前向便宜；而被拒的草稿照样付了一次前向的算力，再加回滚的重放，整体
+比 greedy 慢（CLI 实测 16 token：greedy 的 decode 4.4 s，投机 28～32 s）。
+llama.cpp 在同一台机器上同样没有收益（它的 MTP decode 262 ms/token，就是单 token
+decode 的量级）。要拿到收益，草稿头必须跑到设备上、且目标的 batched 前向要比逐
+token 前向便宜。
+
+**已知边界**：
+
+- 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
+  Vulkan 路径下直接报错。
+- 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
+- TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
+  `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
+
+**复现**：
+
+```sh
+# 本仓库：接受率 + 与 greedy 逐 token 相同
+RMI_QWEN35_MODEL=<Qwen3.8-27B-Q8_0.gguf> \
+RMI_QWEN35_PROMPT_TOKENS=846,198,95826,110827,98419,108829,113672,119721,1710,198,74455,198,248068,271,248069,271 \
+RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 \
+cargo test --locked --profile release-fast --features parity-trace --lib qwen35_mtp -- --ignored --nocapture
+
+# llama.cpp 参照：同一模型、同一 prompt、同一 n_max
+llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv 5
+# 然后用同样的 token 数组打 /completion，日志里的 "draft candidate" 就是草稿
+```
+
+**关联**：`src/models/qwen35/trunk/mtp.rs`、`src/models/qwen35/trunk/session.rs`、
+`src/models/qwen35/trunk/weights.rs`、`src/models/qwen35/trunk/scratch.rs`、
+`docs/develop/SUPPORTED_MODELS.md`。

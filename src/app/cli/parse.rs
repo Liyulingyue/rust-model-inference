@@ -14,6 +14,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     while i < args.len() {
         parsed_flags.push(i);
         match args[i].as_str() {
+            "--enhance" => options.enhance = true,
             "--yue2" => options.yue2 = true,
             "--dreamx" => options.dreamx = true,
             "--astronex" => options.astronex = true,
@@ -68,6 +69,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--system-one-request" => {
                 options.system_one_request =
                     Some(required_path_value(args, &mut i, "--system-one-request")?);
+            }
+            "--decision-request" => {
+                options.decision_request =
+                    Some(required_path_value(args, &mut i, "--decision-request")?);
+            }
+            "--decision-thinker" => {
+                options.decision_thinker =
+                    Some(required_path_value(args, &mut i, "--decision-thinker")?);
             }
             "--adapter" => {
                 options.adapter = Some(required_path_value(args, &mut i, "--adapter")?);
@@ -135,6 +144,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                     value
                         .parse::<usize>()
                         .map_err(|error| format!("Invalid --prefill-batch-size value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--mtp-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --mtp-draft")?;
+                options.mtp_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --mtp-draft value: {error}"))?,
                 );
                 i += 1;
             }
@@ -588,6 +606,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--tts" => options.tts = true,
+            "--voice" => options.voice = Some(required_string_value(args, &mut i, "--voice")?),
+            "--speed" => {
+                options.speed = Some(
+                    required_string_value(args, &mut i, "--speed")?
+                        .parse()
+                        .map_err(|_| "--speed must be a number between 0.5 and 2.0")?,
+                );
+            }
+            "--pronunciations" => {
+                options.pronunciations =
+                    Some(required_string_value(args, &mut i, "--pronunciations")?)
+            }
             "--edit" => options.edit = true,
             "--out" => {
                 let value = args
@@ -691,6 +721,41 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         }
         i += 1;
     }
+    options.supplied_flags = parsed_flags
+        .iter()
+        .map(|index| args[*index].clone())
+        .collect();
+    if options.enhance {
+        for &index in &parsed_flags {
+            let mut index = index;
+            match args[index].as_str() {
+                "--model" | "--audio" | "--out" => {
+                    let flag = &args[index];
+                    required_path_value(args, &mut index, flag)?;
+                }
+                "--threads" => {
+                    required_usize_value(args, &mut index, "--threads")?;
+                }
+                "--enhance" | "--compute" | "--gpu" | "--overwrite" | "--serve" => {}
+                flag => return Err(format!("--enhance cannot be combined with {flag}")),
+            }
+        }
+    }
+    if options.decision_request.is_some() {
+        crate::app::decision::validate_options(&options)?;
+        for mut index in parsed_flags.iter().copied() {
+            match args[index].as_str() {
+                "--model" => {
+                    required_path_value(args, &mut index, "--model")?;
+                }
+                "--threads" | "--max-context" => {
+                    let flag = args[index].clone();
+                    required_usize_value(args, &mut index, &flag)?;
+                }
+                _ => {}
+            }
+        }
+    }
     if options.system_one_request.is_some() {
         for mut index in parsed_flags {
             match args[index].as_str() {
@@ -700,7 +765,7 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 "--threads" => {
                     required_usize_value(args, &mut index, "--threads")?;
                 }
-                "--adapter" | "--system-one-request" | "--compute" => {}
+                "--adapter" | "--system-one-request" | "--compute" | "--gpu" => {}
                 flag => {
                     return Err(format!(
                         "--system-one-request cannot be combined with {flag}"

@@ -509,6 +509,9 @@ impl Qwen3Model {
         use super::util::{checked_product, load_f32_tensor, usize_to_u64};
 
         let config = Qwen3Config::from_source(source.as_ref())?;
+        if config.architecture == crate::models::mage_vl::ARCH {
+            crate::models::mage_vl::validate_text_tensors(source.as_ref())?;
+        }
         if config.vocab != tokenizer.vocab_size() {
             return Err(format!(
                 "{} vocabulary size {} does not match tokenizer vocab {}",

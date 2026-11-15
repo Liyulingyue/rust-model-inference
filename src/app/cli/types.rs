@@ -15,6 +15,8 @@ pub enum EmbeddingOutput {
 
 #[derive(Debug, Default)]
 pub struct CliOptions {
+    /// Parsed option names, excluding their values, for capability-specific validation.
+    pub supplied_flags: Vec<String>,
     pub yue2: bool,
     pub dreamx: bool,
     pub astronex: bool,
@@ -46,6 +48,7 @@ pub struct CliOptions {
     /// Defaults to one task built from `--jev-question` + `--jev-option`.
     pub gliner2_schema: Option<String>,
     pub audio: Option<PathBuf>,
+    pub enhance: bool,
     pub ref_audio: Option<PathBuf>,
     pub ref_text: Option<String>,
     pub image: Option<PathBuf>,
@@ -66,6 +69,10 @@ pub struct CliOptions {
     pub max_tokens: Option<usize>,
     pub max_context: Option<usize>,
     pub prefill_batch_size: Option<usize>,
+    /// Number of tokens the MTP draft head proposes per speculative
+    /// decoding round. `None` (or zero) keeps the plain one-token-at-a-time
+    /// decode.
+    pub mtp_draft: Option<usize>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     /// Astronex output latent-frame count. `--frames` remains reserved for
@@ -131,6 +138,9 @@ pub struct CliOptions {
     pub gpu: bool,
     pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
+    pub voice: Option<String>,
+    pub speed: Option<f32>,
+    pub pronunciations: Option<String>,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
     pub source_text: Option<String>,
@@ -148,6 +158,8 @@ pub struct CliOptions {
     pub wevisone_decoder: Option<PathBuf>,
     pub timestral_request: Option<PathBuf>,
     pub system_one_request: Option<PathBuf>,
+    pub decision_request: Option<PathBuf>,
+    pub decision_thinker: Option<PathBuf>,
     /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
     /// weights; the d3 variants need both.
     pub adapter: Option<PathBuf>,
@@ -221,7 +233,7 @@ impl CliOptions {
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!(
                         "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; only the \
+                         note=no complete device path for this mode; any \
                          offloadable parts run on the device"
                     );
                 }
@@ -288,6 +300,14 @@ impl CliOptions {
     }
     pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
         crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
+    }
+
+    /// How many tokens the MTP draft head may propose per round.
+    ///
+    /// Zero means "no speculative decoding": the draft head is then not
+    /// used at all.
+    pub fn effective_mtp_draft(&self) -> usize {
+        self.mtp_draft.unwrap_or(0)
     }
 
     /// Default max-context cap. Most chat workloads fit in 8K; this

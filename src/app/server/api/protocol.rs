@@ -468,6 +468,7 @@ fn content_parts(
             let mut text = String::new();
             let mut images = Vec::new();
             for b in blocks {
+                let before = images.len();
                 match b.get("type").and_then(Value::as_str) {
                     Some("text" | "input_text" | "output_text") => {
                         if b.get("cache_control").is_some() {
@@ -528,6 +529,9 @@ fn content_parts(
                             "unsupported content block {other:?}; only text and image are supported"
                         ))
                     }
+                }
+                if images.len() > before {
+                    images.last_mut().unwrap().text_offset = Some(text.len());
                 }
             }
             Ok((text, images))
@@ -690,11 +694,12 @@ fn anthropic_messages(body: &Value) -> Result<Vec<Message>, String> {
                             ))
                         }
                     };
-                    item.images
-                        .push(decode_image_source(raw, allow_remote_images())?);
+                    let mut image = decode_image_source(raw, allow_remote_images())?;
+                    image.text_offset = Some(item.text.len());
+                    item.images.push(image);
                 }
                 Some("tool_result") if role == "user" => {
-                    if !item.text.is_empty() || !item.calls.is_empty() {
+                    if !item.text.is_empty() || !item.calls.is_empty() || !item.images.is_empty() {
                         result.push(item);
                         item = message(&role, String::new());
                     }
@@ -1738,6 +1743,10 @@ mod tests {
         assert_eq!(request.messages[0].text, "what is this?");
         assert_eq!(request.messages[0].images.len(), 1);
         assert_eq!(
+            request.messages[0].images[0].text_offset,
+            Some("what is this?".len())
+        );
+        assert_eq!(
             request.messages[0].images[0].bytes.len(),
             synthetic_png().len()
         );
@@ -1757,10 +1766,14 @@ mod tests {
         // Anthropic Messages shape: {"source": {"type": "base64", "data": ...}} — RAW base64.
         let b64 = apple_png_b64();
         let body = json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"前"},
             {"type":"image","source":{"type":"base64","media_type":"image/png","data":b64}},
+            {"type":"text","text":"后"},
         ]}]});
         let request = Protocol::Anthropic.parse(&body).unwrap();
         assert_eq!(request.messages[0].images.len(), 1);
+        assert_eq!(request.messages[0].text, "前后");
+        assert_eq!(request.messages[0].images[0].text_offset, Some("前".len()));
         assert_eq!(
             request.messages[0].images[0].bytes.len(),
             synthetic_png().len()

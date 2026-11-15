@@ -61,14 +61,24 @@ import numpy as np
 from tools.converter.utils.gguf import (
     GGML_Q4_0,
     quantize_q4_0,
+    GGML_Q4_1,
+    quantize_q4_1,
     GGML_BF16, GGML_F16, GGML_F32, GGML_Q4K, GGML_Q5K, GGML_Q6K, GGML_Q8_0,
     _read_gguf, GgufWriter, f32_to_bf16, gguf_dims, quantize_q8_0,
 )
 from tools.converter.utils.kquants import quantize_k
 
+#: GGUF `general.file_type` for each format. This is the standard unsigned
+#: FTYPE enum (llama.cpp's `llama_ftype`), which is a *different* enum from the
+#: per-tensor GGML types: the loader does not read it, but inspection tooling
+#: expects the integer, so a format string here would be a spec violation.
+FILE_TYPES = {"f32": 0, "f16": 1, "bf16": 32, "q8_0": 7, "q4_0": 2, "q4_1": 3,
+              "q4_k": 14, "q5_k": 16, "q6_k": 18}
+
 #: Elements per block, and the GGUF type each format produces.
 BLOCK_FORMATS = {
     "q4_0": (32, GGML_Q4_0),
+    "q4_1": (32, GGML_Q4_1),
     "q8_0": (32, GGML_Q8_0),
     "q4_k": (256, GGML_Q4K),
     "q5_k": (256, GGML_Q5K),
@@ -137,8 +147,13 @@ def _quantize_one(
         return target, raw
     values = _decode_f32(raw, source_type)
     if target == GGML_Q4_0:
-        # Per-block `f16 scale / int4 payload`, mirroring the Q8_0 layout.
+        # Per-block `f16 scale / int4 payload`, mirroring the Q4_0 layout.
         return target, quantize_q4_0(values)
+    if target == GGML_Q4_1:
+        # Per-block `f16 scale / f16 min / int4 payload`. The runtime Q4_1
+        # kernel reads the nibbles unsigned, so the block minimum travels in
+        # the `m` field instead of being folded into the scale.
+        return target, quantize_q4_1(values)
     if target == GGML_Q8_0:
         # Per-block `f16 scale / int8 payload` over the F32 dynamic range,
         # which is what `quantize_row_q8_0_ref` in `ggml-quants.c` does.
@@ -155,6 +170,16 @@ def _quantize_one(
         # would change which scale wins.
         return target, quantize_k(target_format, values)
     raise AssertionError(f"unreachable target {target}")
+
+
+def quantize_tensor(name: str, raw: bytes, source_type: int, dims: tuple[int, ...],
+                    target_format: str, keep: frozenset[str] = frozenset()) -> tuple[int, bytes]:
+    """Quantize one tensor payload with the shared rules.
+
+    Public wrapper over `_quantize_one`: a converter that reuses the shared
+    quantizers should not have to import a private helper.
+    """
+    return _quantize_one(name, raw, source_type, dims, target_format, keep)
 
 
 def quantize_gguf(
@@ -181,14 +206,14 @@ def quantize_gguf(
     wrote_file_type = False
     for key, value in metadata.items():
         if key == "general.file_type":
-            writer.add_meta(key, target_format)
+            writer.add_meta(key, FILE_TYPES[target_format])
             wrote_file_type = True
         else:
             writer.add_meta(key, value)
     if not wrote_file_type:
         # The format is what a reader needs to pick the right tolerance, so
         # it is recorded whether or not the source carried it.
-        writer.add_meta("general.file_type", target_format)
+        writer.add_meta("general.file_type", FILE_TYPES[target_format])
     quantised = 0
     kept = 0
     source_types = {value[0] for value in tensors.values()}

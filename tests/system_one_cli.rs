@@ -39,6 +39,40 @@ fn system_one_request_uses_shared_cli_options() {
 }
 
 #[test]
+fn system_one_accepts_shared_compute_modes() {
+    use rust_model_inference::compute::ComputePolicy;
+    for (flags, policy) in [
+        (vec!["--compute", "cpu"], ComputePolicy::Cpu),
+        (vec!["--compute", "auto"], ComputePolicy::Auto),
+        (vec!["--compute", "vulkan"], ComputePolicy::Vulkan),
+        (vec!["--gpu"], ComputePolicy::Auto),
+    ] {
+        let args: Vec<_> = ["rmi", "--model", "vela", "--system-one-request", "-"]
+            .into_iter()
+            .chain(flags)
+            .map(String::from)
+            .collect();
+        let options = parse_cli_options(&args).unwrap();
+        assert_eq!(options.compute_policy(), policy);
+        validate_cli_options(&options).unwrap();
+    }
+    assert!(parse_cli_options(
+        &[
+            "rmi",
+            "--model",
+            "vela",
+            "--system-one-request",
+            "-",
+            "--gpu",
+            "--compute",
+            "cpu"
+        ]
+        .map(String::from)
+    )
+    .is_err());
+}
+
+#[test]
 fn system_one_flag_as_prompt_text_does_not_select_the_mode() {
     let args = [
         "rmi",
@@ -103,9 +137,6 @@ fn system_one_conflicts_fail_before_model_loading() {
         vec!["--max-tokens", "1"],
         vec!["--seed", "1"],
         vec!["--unknown"],
-        vec!["--gpu"],
-        vec!["--compute", "auto"],
-        vec!["--compute", "vulkan"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rust-model-inference"))
             .args([

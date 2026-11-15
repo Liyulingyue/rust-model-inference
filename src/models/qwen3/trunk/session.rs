@@ -178,6 +178,10 @@ impl<'model> Qwen3Session<'model> {
         lifecycle: KvLifecycle,
         compute_policy: ComputePolicy,
     ) -> Result<Self, String> {
+        let projection_only = model.config.architecture == crate::models::mage_vl::ARCH;
+        if projection_only {
+            compute_policy.validate_text_arch(crate::models::mage_vl::ARCH)?;
+        }
         compute_policy.check_build()?;
         let _scope = compute_policy.cpu_scope();
         if capacity == 0 || capacity > model.config.n_ctx {
@@ -265,7 +269,9 @@ impl<'model> Qwen3Session<'model> {
         let _ = kv_bytes;
 
         #[cfg(feature = "vulkan")]
-        let context = if kv_format == KvFormat::F16 {
+        let context = if projection_only {
+            None
+        } else if kv_format == KvFormat::F16 {
             compute_policy
                 .context()
                 .map_err(|error| error.to_string())?
@@ -306,7 +312,7 @@ impl<'model> Qwen3Session<'model> {
             None => (None, false),
         };
 
-        Ok(Self {
+        let mut session = Self {
             model,
             compute_policy,
             kv_state,
@@ -348,7 +354,11 @@ impl<'model> Qwen3Session<'model> {
             gpu_contract_validated: false,
             #[cfg(test)]
             fail_cpu_prefill_after_layer: None,
-        })
+        };
+        if projection_only && compute_policy != ComputePolicy::Cpu {
+            session.enable_projection_offload(compute_policy, 1)?;
+        }
+        Ok(session)
     }
 
     pub fn kv_state(&self) -> &KvState {

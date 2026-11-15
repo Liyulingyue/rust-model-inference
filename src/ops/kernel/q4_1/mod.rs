@@ -32,6 +32,10 @@ impl<'a> Q4_1Kernel<'a> {
 }
 
 impl<'a> Kernel for Q4_1Kernel<'a> {
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_q4_1(self.weight, token_id, n_embd, out);
+    }
+
     fn weight_bytes(&self) -> Option<&[u8]> {
         Some(self.weight)
     }
@@ -224,6 +228,33 @@ mod tests {
         kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 32, 1, 0, 1);
 
         assert_eq!(output, [32.0]);
+    }
+
+    #[test]
+    fn q4_1_embedding_row_reads_the_scale_and_the_minimum() {
+        // Two blocks: the first carries a nibble pattern, the second a
+        // constant one. The lookup dequantizes as `d * q + m`.
+        let mut weight = Vec::new();
+        weight.extend_from_slice(&crate::ops::f32_to_f16(0.5).to_le_bytes());
+        weight.extend_from_slice(&crate::ops::f32_to_f16(-1.0).to_le_bytes());
+        for index in 0..16u8 {
+            weight.push(index | ((15 - index) << 4));
+        }
+        weight.extend_from_slice(&crate::ops::f32_to_f16(0.0).to_le_bytes());
+        weight.extend_from_slice(&crate::ops::f32_to_f16(2.0).to_le_bytes());
+        for _ in 0..16 {
+            weight.push(0x33);
+        }
+
+        let mut out = vec![0.0f32; 64];
+        crate::ops::embedding::embedding_lookup_q4_1(&weight, 0, 64, &mut out);
+        for index in 0..16usize {
+            assert_eq!(out[index], index as f32 * 0.5 - 1.0);
+            assert_eq!(out[index + 16], (15 - index) as f32 * 0.5 - 1.0);
+        }
+        for index in 32..64 {
+            assert_eq!(out[index], 2.0);
+        }
     }
 
     #[test]

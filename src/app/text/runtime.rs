@@ -80,6 +80,9 @@ pub struct RuntimeOptions {
     /// image input; without it an image-bearing request fails with a clear
     /// error instead of silently dropping the images.
     pub mmproj: Option<Arc<dyn TensorSource>>,
+    /// How many tokens the MTP draft head may propose per speculative
+    /// decoding round. Zero keeps the one-token-at-a-time decode.
+    pub mtp_draft: usize,
 }
 
 impl RuntimeOptions {
@@ -99,7 +102,14 @@ impl RuntimeOptions {
             pool,
             tokenizer,
             mmproj: None,
+            mtp_draft: 0,
         }
+    }
+
+    /// Turn the decode into a speculative one with the MTP draft head.
+    pub fn with_mtp_draft(mut self, n_drafts: usize) -> Self {
+        self.mtp_draft = n_drafts;
+        self
     }
 
     pub fn with_compute(mut self, policy: crate::compute::ComputePolicy) -> Self {
@@ -143,6 +153,22 @@ impl RuntimeOptions {
     }
 }
 
+/// Whether a Vulkan request may carry images for `arch`.
+///
+/// The gate is capability, not device path: an arch whose text runtime has no
+/// vision branch would silently answer a text-only prompt, so it is rejected.
+/// An arch with a vision path keeps its vision tower on the CPU and lets the
+/// device run what it can, so images are allowed there on every policy.
+///
+/// This is deliberately not tied to `has_complete_device_path`: the resident
+/// decoder's numerics already differ from the CPU for quantized weights (the
+/// device Q8_0 kernels are not bit-identical), and that drift is accepted for
+/// text on those archs, so rejecting images would protect against nothing the
+/// text path does not already do.
+fn vulkan_allows_images(arch: &str) -> bool {
+    crate::compute::ComputePolicy::supports_vision(arch)
+}
+
 /// Build the per-arch runtime. Returns `None` for archs this pass does not
 /// cover (the server keeps its `Fallback` 501 for those).
 pub fn build_text_runtime(
@@ -152,18 +178,21 @@ pub fn build_text_runtime(
     let policy = options.compute;
     policy.check_build()?;
     policy.validate_text_arch(arch)?;
-    // Qwen3-VL's vision tower has no Vulkan path: it runs on the CPU and
-    // feeds the GPU decoder its projected embeddings and DeepStack planes.
-    // That split is verified against the CPU, so an mmproj is fine there.
-    let qwen3_vision = matches!(arch, "qwen3vl" | "qwen3vlmoe" | "qwen2vl");
-    if policy == crate::compute::ComputePolicy::Vulkan && options.mmproj.is_some() && !qwen3_vision
+    if policy == crate::compute::ComputePolicy::Vulkan
+        && options.mmproj.is_some()
+        && !vulkan_allows_images(arch)
     {
-        return Err("full Vulkan runtime supports text input only".into());
+        return Err(format!(
+            "{arch} has no vision path; --mmproj/--image are not supported"
+        ));
     }
     let _scope = policy.enter_legacy_scope();
     let inner: Box<dyn TextRuntime> = if crate::app::text::uses_llama_trunk(arch) {
         Box::new(LlamaTextRuntime::new(options)?)
-    } else if matches!(arch, "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe") {
+    } else if matches!(
+        arch,
+        "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe" | "mage_vl"
+    ) {
         // qwen2vl / qwen3vlmoe share the Qwen3 model + session + Qwen3Input
         // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
         // only the projector family differs, which the image path handles.
@@ -186,6 +215,12 @@ pub fn build_text_runtime(
         )?)
     } else if arch == "dory" {
         Box::new(crate::models::dory::DoryTextRuntime::new(options)?)
+    } else if matches!(arch, "nemotron_h" | "nemotron_h_moe") {
+        // The 4B and the 30B-A3B share the trunk, the tokenizer and the
+        // forward; only the layer mix differs.
+        Box::new(crate::models::nemotron_h::trunk::NemotronTextRuntime::new(
+            options,
+        )?)
     } else {
         return Err(format!("No TextRuntime adapter for architecture {arch}"));
     };
@@ -209,8 +244,14 @@ impl TextRuntime for ComputeTextRuntime {
         images: &[Vec<u8>],
         max_new_tokens: usize,
     ) -> Result<(), String> {
-        if self.policy == crate::compute::ComputePolicy::Vulkan && !images.is_empty() {
-            return Err("full Vulkan runtime supports text input only".into());
+        if self.policy == crate::compute::ComputePolicy::Vulkan
+            && !images.is_empty()
+            && !vulkan_allows_images(self.inner.arch())
+        {
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.inner.arch()
+            ));
         }
         self.inner
             .validate_request(token_ids, images, max_new_tokens)
@@ -220,14 +261,14 @@ impl TextRuntime for ComputeTextRuntime {
         request: &GenerationRequest,
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
-        // Qwen3-VL's image path runs on the Vulkan decoder: the vision tower
-        // stays on the CPU and hands the GPU its projected embeddings and
-        // DeepStack planes. Every other arch keeps the text-only rule.
         if self.policy == crate::compute::ComputePolicy::Vulkan
             && !request.images.is_empty()
-            && !matches!(self.inner.arch(), "qwen3vl" | "qwen3vlmoe" | "qwen2vl")
+            && !vulkan_allows_images(self.inner.arch())
         {
-            return Err("full Vulkan runtime supports text input only".into());
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.inner.arch()
+            ));
         }
         let _scope = self.policy.enter_legacy_scope();
         self.inner.generate(request, sink)
@@ -421,6 +462,14 @@ impl Qwen3TextRuntime {
             .validate_text_arch(&arch_of(&options.source))?;
         let _scope = options.compute.enter_legacy_scope();
         let arch = arch_of(&options.source);
+        if arch == "mage_vl" {
+            if let Some(vision) = &options.mmproj {
+                crate::models::mage_vl::validate_components(
+                    options.source.as_ref(),
+                    vision.as_ref(),
+                )?;
+            }
+        }
         let model = crate::models::qwen3::Qwen3Model::from_source(
             options.source.clone(),
             options.tokenizer.clone(),
@@ -453,7 +502,11 @@ impl TextRuntime for Qwen3TextRuntime {
     }
 
     fn context_length(&self) -> usize {
-        self.model.config().n_ctx
+        if self.arch == "mage_vl" {
+            self.options.capacity_for(self.model.config().n_ctx)
+        } else {
+            self.model.config().n_ctx
+        }
     }
 
     fn generate(
@@ -462,6 +515,15 @@ impl TextRuntime for Qwen3TextRuntime {
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String> {
         let _scope = self.options.compute.enter_legacy_scope();
+        if self.options.compute == crate::compute::ComputePolicy::Vulkan
+            && !request.images.is_empty()
+            && !vulkan_allows_images(&self.arch)
+        {
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.arch
+            ));
+        }
         let capacity = self.options.capacity_for(self.model.config().n_ctx);
         let mut session = crate::models::qwen3::Qwen3Session::new_with_compute(
             &self.model,
@@ -475,10 +537,45 @@ impl TextRuntime for Qwen3TextRuntime {
         // embeddings AND the per-layer deepstack features. Mirrors
         // `app::text::multimodal::run_qwen3_family_multimodal`.
         let (token_ids, embeddings, deepstack, positions) = if request.images.is_empty() {
+            if self.arch == "mage_vl" && request.token_ids.contains(&crate::models::mage_vl::IMAGE)
+            {
+                return Err("Mage-VL image placeholders require attached images".into());
+            }
             let positions: Vec<_> = (0..request.token_ids.len()).map(|i| [i, i, i, 0]).collect();
             (request.token_ids.clone(), None, None, positions)
         } else {
-            self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
+            if self.arch == "mage_vl" {
+                let vision = self
+                    .mmproj
+                    .as_ref()
+                    .ok_or("Mage-VL image input requires --mmproj")?;
+                let images = request
+                    .images
+                    .iter()
+                    .map(|b| crate::app::media::decode_image_bytes(b))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let prepared = crate::models::mage_vl::prepare(
+                    &self.model,
+                    vision.as_ref(),
+                    &request.token_ids,
+                    &images,
+                    &self.pool,
+                    capacity
+                        .checked_sub(request.max_new_tokens)
+                        .ok_or("Mage-VL output budget exceeds --max-context")?,
+                )?;
+                if prepared.tokens.len() > capacity {
+                    return Err("Mage-VL image prompt exceeds --max-context".into());
+                }
+                (
+                    prepared.tokens,
+                    Some(prepared.embeddings),
+                    None,
+                    prepared.positions,
+                )
+            } else {
+                self.prepare_qwen3vl_image_prefill(&request.token_ids, &request.images)?
+            }
         };
         let input = crate::models::qwen3::Qwen3Input {
             token_ids: &token_ids,
@@ -705,6 +802,8 @@ pub struct HybridTextRuntime {
     threads: usize,
     arch: String,
     max_context: usize,
+    /// Tokens the MTP draft head may propose per round; zero disables it.
+    mtp_draft: usize,
 }
 
 impl HybridTextRuntime {
@@ -746,6 +845,7 @@ impl HybridTextRuntime {
             threads: options.threads,
             arch,
             max_context: options.max_context,
+            mtp_draft: options.mtp_draft,
         })
     }
 }
@@ -771,8 +871,13 @@ impl TextRuntime for HybridTextRuntime {
     ) -> Result<(), String> {
         let mut prompt_len = token_ids.len();
         if !images.is_empty() {
-            if self.compute == crate::compute::ComputePolicy::Vulkan {
-                return Err("full Vulkan runtime supports text input only".into());
+            if self.compute == crate::compute::ComputePolicy::Vulkan
+                && !vulkan_allows_images(&self.arch)
+            {
+                return Err(format!(
+                    "{} has no vision path; --mmproj/--image are not supported",
+                    self.arch
+                ));
             }
             if self.arch == "edge0" {
                 return Err("Edge0-35B preview contains no vision weights; text input only".into());
@@ -847,9 +952,18 @@ impl TextRuntime for HybridTextRuntime {
         } else {
             self.prepare_image_prefill(&request.token_ids, &request.images)?
         };
+        // The speculative path writes the KV of the drafted tokens before it
+        // knows whether the target accepts them, so the cache needs room for
+        // one round of drafts on top of the committed tokens.
+        let mtp_overhead = if self.mtp_draft > 0 {
+            self.mtp_draft + 1
+        } else {
+            0
+        };
         let capacity = prefill_ids
             .len()
             .checked_add(request.max_new_tokens)
+            .and_then(|length| length.checked_add(mtp_overhead))
             .ok_or("context length overflow")?;
         if capacity > self.context_length() {
             return Err(format!(
@@ -878,7 +992,18 @@ impl TextRuntime for HybridTextRuntime {
         let mut text = String::new();
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
-        for step in 0..request.max_new_tokens {
+        // The speculative path below commits several tokens per round, so
+        // the one-token-at-a-time loop runs zero times when it is on.
+        let mtp_enabled = self.mtp_draft > 0
+            && request.sampling.temperature <= 0.0
+            && request.images.is_empty()
+            && prefill_embeddings.is_none();
+        let plain_steps = if mtp_enabled {
+            0
+        } else {
+            request.max_new_tokens
+        };
+        for step in 0..plain_steps {
             let pos = next_text_position;
             if step > 0 {
                 next_text_position += 1;
@@ -906,6 +1031,42 @@ impl TextRuntime for HybridTextRuntime {
                 if sink.push_text(&chunk) == Flow::Stop {
                     finish = Finish::Cancelled;
                     break;
+                }
+            }
+        }
+        if mtp_enabled {
+            // The speculative path: the MTP draft head proposes tokens and
+            // the target checks them in one forward pass. Greedy only: a
+            // sampled token would need the rejection scheme.
+            let ids: Vec<u32> = prefill_ids
+                .iter()
+                .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+                .collect::<Result<Vec<u32>, String>>()?;
+            let generation = session.mtp_generate(
+                &ids,
+                &prefill_positions,
+                request.max_new_tokens,
+                self.mtp_draft,
+            )?;
+            log::info!(
+                "MTP speculative decode: {} rounds, {}/{} drafts accepted",
+                generation.rounds,
+                generation.accepted,
+                generation.drafted
+            );
+            for id in generation.tokens {
+                if eos_id == Some(id) || im_end_id == Some(id) {
+                    finish = Finish::Eos;
+                    break;
+                }
+                token_ids.push(id);
+                let chunk = decoder.push(id);
+                if !chunk.is_empty() {
+                    text.push_str(&chunk);
+                    if sink.push_text(&chunk) == Flow::Stop {
+                        finish = Finish::Cancelled;
+                        break;
+                    }
                 }
             }
         }
@@ -989,7 +1150,10 @@ impl TextRuntime for Lfm2MoeTextRuntime {
     ) -> Result<GeneratedText, String> {
         let _scope = self.compute.enter_legacy_scope();
         if self.compute == crate::compute::ComputePolicy::Vulkan && !request.images.is_empty() {
-            return Err("full Vulkan runtime supports text input only".into());
+            return Err(format!(
+                "{} has no vision path; --mmproj/--image are not supported",
+                self.arch
+            ));
         }
         let mut session = self.session.lock().map_err(|e| e.to_string())?;
         session.reset();
@@ -1095,10 +1259,10 @@ mod tests {
     fn compute_runtime_scope_restores_on_error_and_rejects_images() {
         use super::*;
         use crate::compute::ComputePolicy;
-        struct Probe;
+        struct Probe(&'static str, ComputePolicy);
         impl TextRuntime for Probe {
             fn arch(&self) -> &str {
-                "probe"
+                self.0
             }
             fn context_length(&self) -> usize {
                 4
@@ -1111,13 +1275,13 @@ mod tests {
                 _: &GenerationRequest,
                 _: &mut dyn TokenSink,
             ) -> Result<GeneratedText, String> {
-                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+                assert_eq!(ComputePolicy::legacy(), self.1);
                 Err("probe error".into())
             }
         }
         let _outer = ComputePolicy::Auto.enter_legacy_scope();
         let mut runtime = ComputeTextRuntime {
-            inner: Box::new(Probe),
+            inner: Box::new(Probe("qwen3", ComputePolicy::Cpu)),
             policy: ComputePolicy::Cpu,
         };
         let mut request = GenerationRequest::new(vec![1], 1);
@@ -1135,10 +1299,56 @@ mod tests {
         assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
         runtime.policy = ComputePolicy::Vulkan;
         request.images.push(vec![1]);
-        assert!(runtime
-            .generate(&request, &mut sink)
-            .unwrap_err()
-            .contains("text input only"));
+        // qwen3 has a vision path, so images reach the inner runtime instead
+        // of being rejected.
+        runtime.inner = Box::new(Probe("qwen3", ComputePolicy::Vulkan));
+        assert_eq!(
+            runtime.generate(&request, &mut sink).unwrap_err(),
+            "probe error"
+        );
+        runtime.inner = Box::new(Probe("mage_vl", ComputePolicy::Vulkan));
+        assert_eq!(
+            runtime
+                .validate_request(&request.token_ids, &request.images, 1)
+                .unwrap_err(),
+            "probe validation error"
+        );
+        assert_eq!(
+            runtime.generate(&request, &mut sink).unwrap_err(),
+            "probe error"
+        );
+        assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
+        assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
+        // The gate is capability, not device path: an arch with a vision path
+        // takes images on every policy, and one without it is rejected with a
+        // message that says so.
+        for arch in ["qwen35", "edge0", "sensenova_loop"] {
+            runtime.inner = Box::new(Probe(arch, ComputePolicy::Vulkan));
+            assert_eq!(
+                runtime
+                    .validate_request(&request.token_ids, &request.images, 1)
+                    .unwrap_err(),
+                "probe validation error",
+                "{arch}"
+            );
+            assert_eq!(
+                runtime.generate(&request, &mut sink).unwrap_err(),
+                "probe error",
+                "{arch}"
+            );
+        }
+        for arch in ["llama", "gemma4", "unknown"] {
+            runtime.inner = Box::new(Probe(arch, ComputePolicy::Vulkan));
+            let error = runtime
+                .generate(&request, &mut sink)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("no vision path") && error.contains(arch),
+                "{arch}: {error}"
+            );
+        }
+        assert_eq!(ComputePolicy::legacy(), ComputePolicy::Auto);
     }
 
     #[test]
@@ -1177,6 +1387,7 @@ mod tests {
             threads: 1,
             arch: arch.into(),
             max_context,
+            mtp_draft: 0,
         }
     }
 

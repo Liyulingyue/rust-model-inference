@@ -66,6 +66,16 @@ impl Qwen3Config {
         };
         let n_deepstack_layers =
             optional_usize(source, &format!("{}.n_deepstack_layers", knobs.arch))?.unwrap_or(0);
+        if knobs.arch == "mage_vl"
+            && (config.vocab_size != 151936
+                || n_deepstack_layers != 0
+                || source
+                    .metadata("mage_vl.source_revision")
+                    .and_then(|v| v.to_string_val())
+                    != Some(crate::models::mage_vl::REVISION))
+        {
+            return Err("invalid released Mage-VL-Cowork text contract".into());
+        }
 
         Ok(Self {
             architecture: knobs.arch,

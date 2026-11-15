@@ -1,0 +1,47 @@
+#version 450
+
+// Nemotron-3 Nano MoE reduction.
+//
+// The routed part is the weighted sum of the expert outputs, and the
+// shared expert is added on top of it **without a gate and without a
+// weight**:
+//
+//     out = sum_i weights[i] * down_i + shared_down
+//
+// (The Qwen3.5 reducer differs: its shared expert is gated by a sigmoid of
+// its own router, so it needs another shader.)
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint target;
+    uint routed;
+    uint weights;
+    uint shared_out;
+    uint width;
+    uint used;
+    uint has_shared;
+} pc;
+
+void main() {
+    uint token = gl_WorkGroupID.z;
+    uint index = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u
+        + gl_LocalInvocationID.x;
+    if (index >= pc.width) return;
+    precise float sum = 0.0;
+    for (uint slot = 0u; slot < pc.used; slot++) {
+        float value = uintBitsToFloat(
+            arena.data[pc.routed + (token * pc.used + slot) * pc.width + index]
+        );
+        float weight = uintBitsToFloat(arena.data[pc.weights + token * pc.used + slot]);
+        precise float term = weight * value;
+        sum += term;
+    }
+    if (pc.has_shared != 0u) {
+        precise float term = uintBitsToFloat(arena.data[pc.shared_out + token * pc.width + index]);
+        sum += term;
+    }
+    uint output_index = pc.target + token * pc.width + index;
+    arena.data[output_index] = floatBitsToUint(uintBitsToFloat(arena.data[output_index]) + sum);
+}

@@ -14,13 +14,14 @@ use std::time::Instant;
 /// as `qwen35` and its text tower loads through the same `Qwen35Model`, so it
 /// needs no separate scorer. It was missing here while the plain multimodal
 /// gate already accepted it, which left 35B-A3B able to chat but not score.
-const IMAGE_JEV_ARCHES: [&str; 6] = [
+const IMAGE_JEV_ARCHES: [&str; 7] = [
     "sensenova_loop",
     "qwen35",
     "qwen35moe",
     "qwen3",
     "qwen3vl",
     "qwen3vlmoe",
+    "mage_vl",
 ];
 
 pub fn image_supported_arch(arch: &str) -> bool {
@@ -40,6 +41,7 @@ pub fn run_jev_decision_data(
     n_threads_arg: usize,
     prefill_batch_size: usize,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     run_jev_decision_data_with_image(
         source,
@@ -51,6 +53,7 @@ pub fn run_jev_decision_data(
         None,
         None,
         jinja,
+        max_context,
     )
 }
 
@@ -64,6 +67,7 @@ fn run_jev_decision_data_with_image(
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevResult>, String> {
     let prepared = prepare_jev_questions(questions, positive)?;
 
@@ -87,7 +91,7 @@ fn run_jev_decision_data_with_image(
         // Qwen1.5 use a different newline format and are not in scope; if a
         // user opens such a GGUF with `--jev`, the dispatch will still reach
         // this branch and the special-token lookup will fail loudly.
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen3vlmoe" => qwen3::run_jev_decision_qwen3(
+        "qwen2" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "mage_vl" => qwen3::run_jev_decision_qwen3(
             source.clone(),
             context,
             &prepared,
@@ -97,6 +101,7 @@ fn run_jev_decision_data_with_image(
             mmproj_path,
             image_path,
             jinja.clone(),
+            max_context,
         ),
         // `qwen35moe` shares `qwen35::run_jev_decision_qwen35`: the MoE tower is
         // a `Qwen35Model` with `moe` set, so `run_forward_logits_qwen35_with_batch`
@@ -255,6 +260,7 @@ pub fn run_jev_decision(
     mmproj_path: Option<&Path>,
     image_path: Option<&Path>,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let results = run_jev_decision_data_with_image(
@@ -267,6 +273,7 @@ pub fn run_jev_decision(
         mmproj_path,
         image_path,
         jinja,
+        max_context,
     )?;
 
     if output_json {

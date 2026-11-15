@@ -10,6 +10,123 @@
 当成所有 GPU 数值与模型均已通过。历史 AMD Qwen3 Q8 的确定性长输入曾通过自动分发，
 本次新的 Q8 kernel 仅在本机复验，不代表 AMD、其他驱动或 Z-Image 全链路已经通过。
 
+## Q8_0 宽投影与 Qwen3.8-27B 的设备路径（2026-11-12）
+
+**改动**：设备侧的 Q8_0 matmul 不再限制投影宽度。16384 这个上限来自旧版
+kernel —— 它把整行输入一次性放进 shared memory（`shared uint s_input[4096]`，
+512 个 block）。现在的 kernel 按 64 个 block 分块暂存，shared memory 不再是
+约束，但 host 侧两处守卫（`matmul_rows_push` 与 `matmul_q8_0`）还留着旧上限。
+Qwen3.8-27B 的 MLP down 投影是 17408 宽，`--compute vulkan` 因此在第一个
+matmul 就报 `invalid Vulkan matmul input width/stride`，整个模型上不了设备。
+上限去掉后，宽度只需要是整块（32 个元素）即可。
+
+**实测**（2026-11-12，本机 Linux aarch64 + NVIDIA GB10，
+`release-fast --features "parity-trace,vulkan"`，8 线程，F32 KV，
+`models/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf`，prompt `你好`，16 步 greedy）：
+
+| 项目 | 结果 |
+|---|---|
+| 设备 Q8_0 kernel 对 CPU 归约（宽度 17408） | 逐位一致（`vulkan_q8_matches_cpu_reduction_bits` 新增该宽度） |
+| greedy token（CPU vs 设备） | 15 个 token 逐个相同（含 EOS） |
+| logits（248320 维，CPU vs 设备） | 逐位一致：relative L2 = 0，max abs diff = 0 |
+
+设备路径与 CPU 逐位一致：权重是同一份 Q8_0 字节，激活量化与归约在设备上按
+CPU 的顺序做，所以这条路径上没有量化漂移。
+
+**长行预填**：372 token（`--prefill-batch-size 64`，即 6 个 64 行批次）的
+prefill 也逐位一致：8 个 greedy token 相同，prefill logits（248320 维）
+relative L2 = 0。这说明 64 行的宽投影走的是同一条逐位路径，不是只在单行
+时对上。892 token（14 个批次）同样逐位一致：4 个 greedy token 相同，logits
+relative L2 = 0；这一档的 CPU prefill 是 326 s，设备（不带 trace）是 20.1 s。
+
+**图像路径**：`--mmproj mmproj-F16.gguf --image <png>` 配 `--compute vulkan`
+也跑通，且与 CPU 逐位一致：26 个 prompt token（含 9 个 vision placeholder）
+的 id 完全相同，8 步 greedy 的 token 也完全相同。视觉塔仍在 CPU，设备只跑
+文本解码，所以这条路径验证的是「CPU 视觉 + 设备文本」的衔接，不是视觉塔上
+设备。同一次图像 prefill：CPU 6.0 s，设备 0.85 s（约 7 倍）。
+
+**性能**（同样的模型与参数；短 prompt 为 CPU 与设备交替各跑 3 次的中位数，
+长 prompt 为设备 2 次、CPU 1 次，都不带 `RMI_PARITY_TRACE`）：
+
+| 阶段 | CPU | Vulkan |
+|---|---:|---:|
+| prefill，13 token | 3.19 s | 0.66 s |
+| prefill，372 token | 96.0 s | 8.1 s |
+| prefill，892 token | 326 s | 20.1 s |
+| decode，14 token | 4.07 s | 5.65 s |
+
+prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍，892 token
+约 16 倍：短 prompt 里固定开销占比大）；decode 反而慢约 1.4 倍 —— 每个 token
+一次提交，且 GDN 卷积在设备上。短 prompt 的端到端基本持平（7.26 s vs
+6.32 s）。
+
+注：**对拍时开的 `RMI_PARITY_TRACE` 会让设备路径慢一个数量级以上**，不能用
+来量性能。tracer 的 schema 是 token-major，所以
+`src/models/qwen35/trunk/session.rs` 在「有 trace 且设备可用」时把 prefill
+批次强制成 1 行，逐行记录：
+
+| prompt | 带 trace | 不带 trace |
+|---|---:|---:|
+| 372 token | 216 s | 8.1 s |
+| 892 token | 545 s | 20.1 s |
+| 26 token（图像） | 13.4 s | 0.85 s |
+
+（本机是共享的统一内存机型，早先把这个差记成了内存压力，实际是 trace 把
+64 行批次拆成了逐行 prefill。）上表的设备耗时都取自不带 trace 的运行。
+
+**未覆盖**：视觉塔上设备、更长上下文（892 token 以上）、AMD/Apple 驱动，
+以及 27B 以外的 Q8_0 宽投影模型。
+
+## MiniCPM-V 4.7 35B-A3B 的设备路径（2026-11-12）
+
+`qwen35moe` 的设备路径此前只在 Holo4 上验证过，MiniCPM-V 35B-A3B 的权重
+从没在设备上跑过。Q4_K_M 档（`MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf`，21,166,255,008 B），
+本机 GB10，`--jinja`，prompt `What is 2+2?`，8 步 greedy：
+
+| 项目 | 结果 |
+|---|---|
+| greedy token（CPU vs 设备） | 8 个逐个相同 `[17, 478, 220, 17, 283, 220, 19, 248046]`（含 EOS） |
+| logits 相对 L2 | `0.0313372890132432`（最大绝对差 `0.32964634895324707`） |
+| prefill，19 token | CPU 3.53 s，设备 6.23 s（设备另加 17.3 s 权重上传） |
+| decode，7 token | CPU 1.25 s，设备 2.38 s |
+
+token 逐个相同而 logits 差 3%，与 Holo4 设备路径的量级一致（Holo4 那边整模
+CPU/GPU logits 相对 L2 是 `0.05884`/`0.04931`，设备端单步门槛 `0.262208`），
+所以这是设备路径的正常漂移，不是回归。
+
+**未覆盖**：图像路径（MiniCPM-V 4.7 的 mmproj 需要从源仓库转换，本机没有）、
+AMD/Apple 驱动、以及 CPU 侧与 pinned Oracle 的文本对拍（它的 Oracle pin 在
+`69f201a2`，本机没有该 llama.cpp checkout，也没有 GitHub 出网）。
+
+## Vulkan 上的图像门禁改为能力判定（2026-11-10）
+
+**改动**：`src/app/text/runtime.rs` 的图像门禁从"完整设备路径架构一律拒绝"改为
+"`ComputePolicy::supports_vision(arch)` 才放行"（`src/compute/mod.rs`）。有视觉路径的
+架构（qwen3/qwen3vl/qwen2vl/qwen3vlmoe/mage_vl/qwen35/qwen35moe/edge0/sensenova_loop）
+在 `--compute vulkan` 下现在可以带 `--mmproj`/`--image`；没有视觉路径的架构仍然拒绝，
+报错从 "full Vulkan runtime supports text input only" 改成
+"<arch> has no vision path; --mmproj/--image are not supported"。
+
+**动机**：旧规则按设备路径拒绝图像，但它保护不了新东西 —— 设备 Q8_0 kernel 与 CPU 本来
+就不逐位一致（TODO-046），而这套漂移在这些架构的纯文本路径上已经被接受。实测也确认
+图像路径的差异与文本路径同源（见下），所以"拒绝图像"只是把一个已存在的漂移藏起来。
+
+**实测**（2026-11-10，本机 Linux x86_64 + NVIDIA L20，`release-fast --features vulkan`，
+8 线程，F16 KV）：
+
+| 请求 | CPU | Vulkan | 说明 |
+|---|---|---|---|
+| Qwen3.5-0.8B Q8_0 + Qwen3.5-0.8B-mmproj-F16 + 448×448 图，8 tokens | 这张图片展示了一个简洁的几何图形 | 这张图片展示了一个简约的图形设计 | 都能出连贯描述；前缀 8 token 内 1–2 个词不同 |
+| 同上，视觉 embedding 前 5 值 | `-1.6644864, 0.0800025, 0.13018638, 0.3386622, 0.32162872` | 完全相同 | 视觉塔两档都在 CPU，逐位一致 |
+| 纯文本（无图），12 tokens | 你好！我是一名由**阿里巴巴集团旗下的通义实验室 | 你好！我是 Qwen3.5，由阿里巴巴集团 | **分歧与图像无关**：同一模型纯文本在 CPU/设备就不同 |
+
+结论：图像路径在 Vulkan 上可用，其数值差异与同模型纯文本路径的差异同量级（量化 kernel
+漂移），不是图像注入独有的问题。设备侧算子级 parity 检查（attention 归约、量化tie）
+在设备上全部通过。
+
+**未覆盖**：其它权重格式（BF16/F32）在 Vulkan 上的图像路径未测；其它有视觉路径的架构
+（qwen3vl/mage_vl/edge0/sensenova_loop）在本机没有可用权重，只有上游/本分支既有的证据。
+
 ## Q8 单 token 内核优化（2026-10-12，合并 main 后）
 
 本轮继续处理 GPU 单 token decode 热点。A/B 基线为已合并 main 的

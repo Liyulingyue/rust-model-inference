@@ -510,6 +510,8 @@ fn gpu_compatible(binding: LinearBinding<'_, '_>) -> Result<(), ComputeError> {
             | GGMLType::Q8_0
             | GGMLType::Q4_0
             | GGMLType::Q4_1
+            | GGMLType::Q5_0
+            | GGMLType::Q5_1
             | GGMLType::Q4K
             | GGMLType::Q5K
             | GGMLType::Q6K

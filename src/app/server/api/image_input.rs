@@ -26,6 +26,9 @@ pub struct ImageRef {
     pub bytes: Vec<u8>,
     /// The original URL / data URI / path, kept for diagnostics.
     pub source: String,
+    /// UTF-8 byte offset in the turn's flattened text, preserving interleaved content parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_offset: Option<usize>,
 }
 
 impl ImageRef {
@@ -33,6 +36,7 @@ impl ImageRef {
         Self {
             bytes,
             source: source.into(),
+            text_offset: None,
         }
     }
 }

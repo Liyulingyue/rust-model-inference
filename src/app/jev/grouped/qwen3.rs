@@ -20,13 +20,19 @@ pub(crate) fn run_jev_grouped_qwen3(
     prefill_batch_size: usize,
     output_json: bool,
     jinja: crate::prompt::jinja::Options,
+    max_context: usize,
 ) -> Result<Vec<JevGroupedResult>, String> {
     let available_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
     let n_threads = resolve_thread_count(n_threads_arg, available_threads);
-    let mut scorer =
-        Qwen3JevGroupedScorer::new(source.clone(), n_threads, prefill_batch_size, &jinja)?;
+    let mut scorer = Qwen3JevGroupedScorer::new(
+        source.clone(),
+        n_threads,
+        prefill_batch_size,
+        &jinja,
+        max_context,
+    )?;
     if !output_json {
         eprintln!("compute pool: {} threads", scorer.pool().n_threads());
     }
@@ -45,6 +51,7 @@ impl Qwen3JevGroupedScorer {
         n_threads: usize,
         prefill_batch_size: usize,
         jinja: &crate::prompt::jinja::Options,
+        max_context: usize,
     ) -> Result<Self, String> {
         Ok(Self {
             inner: super::super::single::qwen3::Qwen3JevScorer::new(
@@ -52,6 +59,7 @@ impl Qwen3JevGroupedScorer {
                 n_threads,
                 prefill_batch_size,
                 jinja,
+                max_context,
             )?,
         })
     }

@@ -39,6 +39,49 @@ const WITH_SPECIAL: EncodeOptions = EncodeOptions {
     parse_special: true,
 };
 
+/// Render the Nemotron-3 Nano chat prompt (`nemotron_h`, `nemotron_h_moe`).
+///
+/// The family is ChatML, but the server must render it the way the CLI
+/// does, and the two differ in two ways that change the token ids:
+///
+/// * the CLI encodes the rendered text with `add_special: true`, so the
+///   prompt starts with the BOS that the GGUF's pre-tokenizer asks for
+///   (the 30B GGUF has `pre = "pixtral"` and no `add_bos_token` key, so
+///   llama.cpp adds one);
+/// * the CLI's built-in ChatML preset has no think block, while
+///   [`build_qwen_chat_prompt`] appends an empty `<think>\n</think>`.
+///
+/// Rendering the turns as text and encoding them once keeps the server
+/// and the CLI on the same ids: the same message is 15 tokens through
+/// both, instead of 15 (CLI) against 19 (server).
+pub fn build_nemotron_chat_prompt(
+    tokenizer: &BPETokenizer,
+    turns: &[(&str, &str)],
+) -> Result<Vec<u32>, String> {
+    let mut text = String::new();
+    for (role, content) in turns {
+        // `developer` is the OpenAI name for a system turn.
+        let role = if *role == "developer" {
+            "system"
+        } else {
+            *role
+        };
+        text.push_str("<|im_start|>");
+        text.push_str(role);
+        text.push('\n');
+        text.push_str(content);
+        text.push_str("<|im_end|>\n");
+    }
+    text.push_str("<|im_start|>assistant\n");
+    Ok(tokenizer.encode(
+        &text,
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    ))
+}
+
 /// K2-Horizon chat prompt template (used by `llama` trunk).
 ///
 /// Default (`enable_thinking = true`): emits `\n` after
@@ -315,6 +358,11 @@ mod tests {
         }
         tokens.extend(["<think>", "</think>"]);
         types.extend([3, 4]);
+        // The letters "assistant" and "system" need, so a ChatML prompt
+        // can be decoded back into text. Appended last, so the ids the
+        // other tests pin do not move.
+        tokens.extend(["a", "n", "t", "y", "m"]);
+        types.extend([1, 1, 1, 1, 1]);
         let metadata: HashMap<String, MetaValue> = HashMap::from([
             (
                 "tokenizer.ggml.model".into(),
@@ -355,6 +403,30 @@ mod tests {
         let mut output = Vec::new();
         append_qwen_message_tokens(&mut output, &tokenizer, "user", &[5, 6]).unwrap();
         assert_eq!(output, vec![7, 0, 1, 2, 3, 4, 5, 6, 8, 4]);
+    }
+
+    #[test]
+    fn nemotron_prompt_is_the_cli_chatml_without_a_think_block() {
+        let tokenizer = prompt_tokenizer(true);
+        let ids = build_nemotron_chat_prompt(&tokenizer, &[("user", "Hi")]).unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.starts_with("<|im_start|>user\n"), "{text}");
+        assert!(text.ends_with("<|im_start|>assistant\n"), "{text}");
+        assert!(text.contains("<|im_end|>"), "{text}");
+        // The qwen builder appends an empty think block, which is what
+        // used to make the server's prompt four tokens longer than the
+        // CLI's for the same message.
+        assert!(!text.contains("<think>"), "{text}");
+    }
+
+    #[test]
+    fn nemotron_prompt_maps_the_developer_role_to_system() {
+        let tokenizer = prompt_tokenizer(true);
+        let ids =
+            build_nemotron_chat_prompt(&tokenizer, &[("developer", "Hi"), ("user", "Hi")]).unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.starts_with("<|im_start|>system\nHi"), "{text}");
+        assert!(text.contains("<|im_start|>user\nHi"), "{text}");
     }
 
     #[test]

@@ -25,10 +25,10 @@ description: Use when 在 rust-model-inference 中需要快速验证改动（编
 | 看 clippy 警告 | `cargo clippy --profile release-fast --lib -- -D warnings`（按需） |
 | 跑集成测试 | `cargo test --profile release-fast --test <test_name>` |
 
-`release-fast` 的 baseline：**1346 passed / 26 failed / 87 ignored**（2026-11-04，Linux/aarch64 实测）。**26 failed 是预存失败**，分两类，都不是本次回归：
+`release-fast` 的 baseline：**1608 passed / 22 failed / 217 ignored**（2026-11-10，Linux/aarch64 实测）。**22 failed 是预存失败**，分两类，都不是本次回归：
 
-- **平台相关（aarch64 上的 NEON parity）**：`ops::quant::neon_k`（8）、`models::funasr::encoder::parity_tests`（2）、`models::diffusion::z_image::text`（2）、`models::diffusion::z_image::vae`（1）、`ops::rope::tests` / `ops::rope::neox::tests` / `ops::matmul::neon_tests`（各 1）、`models::gemma4::asr`（1）——都是拿 ggml 的 ARM NEON 参考值比对，在 x86 上反而是过的。
-- **平台无关**：`models::breeze`（3）、`models::clm`（2）、`models::yue2` / `models::qwen_drive` / `models::gemma4::trunk` / `format::ggufrs`（各 1）——parity oracle 未跑或第三方依赖回归。
+- **平台相关（12）**：`models::diffusion::z_image::dit` 的 ggml-NEON attention/silu（2）、`models::diffusion::z_image::text` 的 pinned-NEON softmax/silu（2）、`models::diffusion::z_image::vae`（1）、`models::funasr::encoder::parity_tests`（2）、`ops::matmul::neon_tests`（1）、`ops::rope::neox::tests`（1）、`ops::rope::tests`（1）、`ops::kernel::q8_0::tests::q8_kernel_thread_partition`（1）、`models::gemma4::asr::tests`（1）——前 10 个是拿 ggml 的 ARM NEON 参考值比对，在 x86 上反而是过的；后两个分别依赖线程数与标量 softmax 的实现。
+- **平台无关（10）**：`models::breeze`（3）、`models::clm`（2）、`models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values`（1）、`models::gemma4::trunk`（1）、`models::qwen_drive`（1）、`models::yue2`（1）、`format::ggufrs`（1）——parity oracle 未跑或第三方依赖回归。
 
 x86 机器上的失败名单不同（少 NEON 那一组），所以**先跑一遍拿当次基线**再对比。
 

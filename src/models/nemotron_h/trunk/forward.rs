@@ -72,6 +72,16 @@ pub struct NemotronModel {
     /// fallback (no eligible GPU or Vulkan init failed).
     #[cfg(feature = "vulkan")]
     pub(crate) gpu: Option<crate::vulkan::nemotron_h::NemotronHVulkanSession>,
+    /// Whether the attached device session is used for the next call.
+    ///
+    /// The HTTP runtime attaches one session for the whole server
+    /// lifetime, because building it uploads the weights to the device.
+    /// A request whose prompt has more rows than the device arena holds
+    /// cannot use that session -- the row buffers would overflow -- so
+    /// the runtime turns the device off for that request instead of
+    /// dropping the session.
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu_active: bool,
 }
 
 impl NemotronModel {
@@ -106,6 +116,8 @@ impl NemotronModel {
             pool,
             #[cfg(feature = "vulkan")]
             gpu: None,
+            #[cfg(feature = "vulkan")]
+            gpu_active: true,
         })
     }
 
@@ -147,6 +159,24 @@ impl NemotronModel {
     #[cfg(feature = "vulkan")]
     pub fn gpu_available(&self) -> bool {
         self.gpu.is_some()
+    }
+
+    /// Turn the attached device session on or off for the next call.
+    ///
+    /// The session keeps its weights and its arena; only the choice
+    /// between the device path and the CPU path changes. The HTTP
+    /// runtime uses this to run an over-long request on the CPU without
+    /// paying for another weight upload.
+    #[cfg(feature = "vulkan")]
+    pub fn set_gpu_active(&mut self, active: bool) {
+        self.gpu_active = active;
+    }
+
+    /// The number of rows the device arena holds, i.e. the longest
+    /// prompt the device path can take in one call.
+    #[cfg(feature = "vulkan")]
+    pub fn gpu_max_rows(&self) -> Option<usize> {
+        self.gpu.as_ref().map(|gpu| gpu.max_rows())
     }
 
     /// Build the model and try to attach a Vulkan session.
@@ -366,7 +396,7 @@ impl NemotronModel {
         // `RMI_NH_CPU_*` overrides move one branch back to the host for
         // attribution.
         #[cfg(feature = "vulkan")]
-        if self.gpu.is_some() {
+        if self.gpu.is_some() && self.gpu_active {
             // Take the session out so the layer loop can still call
             // `&self` helpers (`is_ssm_layer`, `forward_layer`) while the
             // device is borrowed. It goes back before returning.
@@ -431,6 +461,15 @@ impl NemotronModel {
                     scratch.hidden[..hidden_len].copy_from_slice(&device_hidden);
                 }
                 // Run the CPU layers one at a time.
+                //
+                // The CPU scope keeps the host's matmuls on the host: the
+                // shared Q4_K offload would otherwise send them to the
+                // device, and the device's Q4_K kernel is not bit-exact
+                // with the host's. A branch that runs on the host has to
+                // reproduce the host's arithmetic, otherwise the
+                // `RMI_NH_CPU_*` overrides cannot attribute a numerical
+                // difference to the branch that moved.
+                let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
                 while layer_end < self.config.n_layer && !self.device_layer(layer_end) {
                     let lw = &self.layers[layer_end];
                     self.forward_layer(layer_end, lw, n, base_position, scratch)?;

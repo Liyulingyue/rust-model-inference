@@ -16,6 +16,10 @@ shader_names=(
     q4_1_matmul
     q4_k_matmul
     q4_k_matmul_cooperative
+    q5_0_matmul
+    q5_1_matmul
+    nemotron_moe_route
+    nemotron_moe_reduce
     q5_k_matmul
     q5_k_matmul_cooperative
     q6_k_matmul
@@ -72,6 +76,13 @@ shader_names=(
     nemotron_h_ssm_scan
     nemotron_h_ssm_gate
     nemotron_h_ssm_norm
+    pivo_linear
+    pivo_rope
+    pivo_attention
+    pivo_rms_norm
+    pivo_conv1d
+    pivo_swiglu
+    pivo_silu
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
