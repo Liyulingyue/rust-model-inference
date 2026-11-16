@@ -1,0 +1,26 @@
+#version 450
+
+// Gated linear unit for the PiVo feed-forward blocks.
+//
+// `out[i] = silu(gate[i]) * up[i]`
+//
+// The host path computes `x / (1 + exp(-x))` in F32 and multiplies in F32.
+// The device's exponential may differ from the host's by an ULP, so the two
+// agree to the precision of the F32 grid rather than bit for bit.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint gate_word; uint up_word; uint output_word; uint count; uint stride;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= pc.count) return;
+    float gate = uintBitsToFloat(arena.data[pc.gate_word + index * pc.stride]);
+    float up = uintBitsToFloat(arena.data[pc.up_word + index * pc.stride]);
+    float activated = gate / (1.0 + exp(-gate));
+    arena.data[pc.output_word + index * pc.stride] = floatBitsToUint(activated * up);
+}

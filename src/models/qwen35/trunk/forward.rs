@@ -11,7 +11,7 @@
 
 use super::config::Qwen35Config;
 use super::scratch::{kv_cache_pos, kv_cache_store};
-use super::util::{l2_norm, softplus_f32};
+use super::util::{gdn_l2_norm, softplus_f32};
 use super::weights::{Qwen35LayerWeights, Qwen35Model};
 use crate::app::cli::KvFormat;
 use crate::core::scratchpad::KvCache;
@@ -287,6 +287,16 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let normed_len = n_tokens * n_embd;
             let attn_out = if is_recr {
                 let normed_input = unsafe { std::slice::from_raw_parts(normed_ptr, normed_len) };
+                if scratch.capture_recurrent_inputs {
+                    // Keep the recurrent layers' inputs so a speculative
+                    // rollback can replay only these layers.
+                    let row = scratch
+                        .recurrent_inputs
+                        .get_mut(il)
+                        .expect("recurrent input slot");
+                    row.clear();
+                    row.extend_from_slice(normed_input);
+                }
                 #[cfg(feature = "parity-trace")]
                 {
                     self.forward_recurrent_layer(
@@ -548,6 +558,48 @@ impl<'a> super::weights::HybridTrunk<'a> {
         interleaved_mrope: bool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
+        self.forward_dense_attn_layer_with(
+            &self.layers[il],
+            il,
+            cache_slot,
+            self.config.n_layer_impl(),
+            input,
+            n_tokens,
+            kv_cache,
+            scratch,
+            pool,
+            mrope_positions,
+            base_position,
+            interleaved_mrope,
+            #[cfg(feature = "parity-trace")]
+            trace_layer,
+        )
+    }
+
+    /// The dense attention block, with the weights and the KV layout given
+    /// explicitly.
+    ///
+    /// The main stack passes its own layer and its own cache layout. The MTP
+    /// head passes the block after the main stack and a cache of its own --
+    /// llama.cpp gives the draft context a separate KV cache as well, so the
+    /// draft block attends over the drafted positions, not over the target's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_dense_attn_layer_with(
+        &self,
+        layer: &super::weights::Qwen35LayerWeights<'a>,
+        il: usize,
+        cache_slot: usize,
+        cache_layers: usize,
+        input: &[f32],
+        n_tokens: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
+        base_position: Option<usize>,
+        interleaved_mrope: bool,
+        #[cfg(feature = "parity-trace")] trace_layer: bool,
+    ) -> Vec<f32> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
         let cfg: &Qwen35Config = &self.config;
         let n_embd = cfg.n_embd;
@@ -556,7 +608,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
         let n_embd_head = cfg.n_embd_head();
         let eps = cfg.norm_eps;
         let _nth = pool.n_threads();
-        let layer = &self.layers[il];
         let wq = layer.wq.as_ref().unwrap();
         let wk = layer.wk.as_ref().unwrap();
         let wv = layer.wv.as_ref().unwrap();
@@ -680,7 +731,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         }
 
         let kv_pos = base_position
-            .unwrap_or_else(|| kv_cache_pos(kv_cache, cache_slot, k_dim, cfg.n_layer_impl()));
+            .unwrap_or_else(|| kv_cache_pos(kv_cache, cache_slot, k_dim, cache_layers));
         let sections = cfg.rope_dimension_sections;
         let use_mrope = sections[0] > 0 && sections[1] > 0;
         let apply_mrope = |head: &mut [f32], positions| {
@@ -765,7 +816,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         kv_cache_store(
             kv_cache,
             cache_slot,
-            cfg.n_layer_impl(),
+            cache_layers,
             n_head_kv,
             n_embd_head,
             &scratch.k_buf[..n_tokens * k_dim],
@@ -781,8 +832,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
             KvCache::F32(c) => (&c.k, &c.v),
             _ => return vec![0.0; n_tokens * n_embd],
         };
-        let k_len = k_cache.len() / cfg.n_layer_impl();
-        let v_len = v_cache.len() / cfg.n_layer_impl();
+        let k_len = k_cache.len() / cache_layers;
+        let v_len = v_cache.len() / cache_layers;
 
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
@@ -894,6 +945,52 @@ impl<'a> super::weights::HybridTrunk<'a> {
             );
         }
         result
+    }
+
+    /// Put the recurrent state back where the committed tokens leave it.
+    ///
+    /// The GDN and short-convolution layers carry their state from token to
+    /// token, so a rejected draft advances it. The state is a function of
+    /// the incoming state and the layer's input, and the dense layers do
+    /// not touch it, so restoring the state from before the verification and
+    /// replaying only the recurrent layers over the accepted rows (with the
+    /// inputs the forward captured) reproduces it exactly -- without
+    /// re-running the whole model.
+    ///
+    /// `n_rows` is how many of the captured rows belong to the accepted
+    /// prefix.
+    pub(crate) fn replay_recurrent_state(
+        &self,
+        n_rows: usize,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+    ) -> Result<(), String> {
+        let n_embd = self.config.n_embd;
+        let width = n_rows * n_embd;
+        for il in 0..self.config.n_layer_impl() {
+            if !self.config.is_recurrent.get(il).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(saved) = scratch.recurrent_inputs.get(il) else {
+                return Err(format!(
+                    "Qwen3.5 recurrent layer {il} has no captured input to replay"
+                ));
+            };
+            if saved.len() < width {
+                return Err(format!(
+                    "Qwen3.5 recurrent layer {il} captured {} values, need {width}",
+                    saved.len()
+                ));
+            }
+            let input = saved[..width].to_vec();
+            #[cfg(feature = "parity-trace")]
+            self.forward_recurrent_layer(
+                il, il, &input, n_rows, scratch, pool, false, false, false,
+            )?;
+            #[cfg(not(feature = "parity-trace"))]
+            self.forward_recurrent_layer(il, il, &input, n_rows, scratch, pool, false, false)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn forward_recurrent_layer(
@@ -1093,8 +1190,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     normalize_recurrent_qk(q, eps, 1.0 / head_k_dim as f32);
                     normalize_recurrent_qk(k, eps, 1.0 / (head_k_dim as f32).sqrt());
                 } else {
-                    l2_norm(q, eps);
-                    l2_norm(k, eps);
+                    gdn_l2_norm(q, eps);
+                    gdn_l2_norm(k, eps);
                 }
             }
         }

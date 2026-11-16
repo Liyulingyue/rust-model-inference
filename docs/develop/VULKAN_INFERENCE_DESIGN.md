@@ -164,7 +164,9 @@ runs on CPU.
   `VK_DRIVER_FILES` overrides.
 - Restore representative `vk_check` shapes, including vocabulary projection
   and the `n_in = 16384` boundary; compare every output against the CPU scalar
-  reference.
+  reference. The Q8_0 row width is no longer bounded: the kernels stage the
+  input row in chunks of 64 blocks, so a projection wider than 16384 -- the
+  Qwen3.8-27B MLP down projection is 17408 wide -- is valid.
 - For each available text model, compare fixed-prompt prefill logits, greedy
   token IDs, and 32 decode steps against the CPU path. For the embedding model,
   compare the complete output vector and ranking on a fixed input. GPU reduction

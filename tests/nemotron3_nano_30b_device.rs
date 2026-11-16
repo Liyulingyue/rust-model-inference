@@ -8,13 +8,23 @@
 //! # Why the gate is 8% and not 1%
 //!
 //! The CPU path of this model is bit-exact with llama.cpp, because it
-//! reproduces ggml's F32 accumulation structure. The device path cannot
-//! be: its Q5_0, Q5_1 and Q4_K kernels sum the integer dots in a
-//! different order than the host's NEON kernels, so a single projection
-//! already differs by ~4e-3 relative (the Q5_0 `ssm_in` projection:
-//! `max_rel = 3.791e-3`). The Mamba-2 recurrence then amplifies that
-//! difference over the 52 layers, and the router can flip a near-tie on
-//! the way.
+//! reproduces ggml's F32 accumulation structure. The device path is not,
+//! and it is not supposed to be: quantization is lossy anyway, so a
+//! different accumulation order is not a different answer, only a
+//! different rounding. The Q5_0, Q5_1 and Q4_K device kernels sum the
+//! integer dots in a different order than the host's NEON kernels, so a
+//! single projection already differs by ~4e-3 relative (the Q5_0 `ssm_in`
+//! projection: `max_rel = 3.791e-3`). The Mamba-2 recurrence then
+//! amplifies that difference over the 52 layers, and the router can flip
+//! a near-tie on the way.
+//!
+//! What the device path is held to is therefore an **error bound plus a
+//! functional gate**, which is what the repository does for every device
+//! path (`docs/develop/VULKAN.md`). Bit-exactness is the tool for
+//! *diagnosis* -- when a model talks nonsense, being able to bisect the
+//! two implementations down to the first diverging tensor is what finds
+//! the bug -- not the criterion for *acceptance*. See
+//! `docs/develop/GGML_PARITY_BOUNDARY.md`.
 //!
 //! The measured numbers on an RTX-class GB10 (see
 //! `docs/develop/NEMOTRON3_NANO_30B_MOE.md` §B7 for the full attribution
@@ -23,7 +33,7 @@
 //! and the scaled maximum, and the test prints both numbers so a
 //! regression shows how far it moved.
 //!
-//! # The Q8_0 tier is bit-exact
+//! # The Q8_0 tier lands on zero
 //!
 //! That 8% bound is a property of the Q4_K_M tier, not of the device path.
 //! Q4_K_M's `ssm_in` and attention q/k/v are Q5_0 and its `ssm_out` and
@@ -31,9 +41,10 @@
 //! dots in a different order than the host's NEON kernels. The Q8_0 tier
 //! has neither: every quantized tensor in it is Q8_0, whose device kernel
 //! is bit-exact (`max_abs = 0`), and the rest is F32 (`exact_bits = true`).
-//! Measured `relative_l2 = 0` for all three prefill lengths. Set
-//! `RMI_NEMOTRON_MOE_EXACT=1` to hold the test to bit-exactness on that
-//! tier.
+//! Measured `relative_l2 = 0` for all three prefill lengths -- a stronger
+//! baseline than the gate asks for, which makes the device path bisectable
+//! against the host at any layer. Set `RMI_NEMOTRON_MOE_EXACT=1` to hold
+//! the test to bit-exactness on that tier.
 //!
 //! The functional gate is stronger than the numeric one: the device path
 //! has to pick the same top-1 token as the CPU path.

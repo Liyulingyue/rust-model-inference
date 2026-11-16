@@ -6,6 +6,7 @@ mod decision;
 mod forecast;
 mod prediction;
 mod rerank;
+mod speech;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -91,6 +92,9 @@ enum Backend {
     AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
     Tts(TtsBackend),
     ArkTts(audio_speech::Backend),
+    /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
+    /// text frontend, the acoustic decoder and the bundled vocoder.
+    Pivo(speech::PivoBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -1173,6 +1177,23 @@ fn build_backend(
         })));
     }
     if options.tts {
+        if crate::models::pivo::matches_model(&options.model) {
+            let defaults = crate::app::tts::pivo_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+            let model = Arc::new(crate::models::pivo::Model::from_source(
+                source.as_ref(),
+                options.compute_policy(),
+            )?);
+            if let Some(notice) = crate::app::tts::pivo_format_notice(model.format) {
+                eprintln!("{notice}");
+            }
+            return Ok(Arc::new(Backend::Pivo(speech::PivoBackend {
+                model,
+                defaults,
+            })));
+        }
         let source: Arc<dyn TensorSource> =
             Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
         if source
@@ -1183,6 +1204,9 @@ fn build_backend(
             return Ok(Arc::new(Backend::ArkTts(audio_speech::Backend::load(
                 options, source,
             )?)));
+        }
+        if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+            return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
         }
         return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
     }
@@ -1674,6 +1698,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     .with_threads(options.threads)
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
+    .with_mtp_draft(options.effective_mtp_draft())
     .with_mmproj(mmp);
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
@@ -2009,7 +2034,7 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() {
+        if options.max_tokens.is_none() && !crate::models::pivo::matches_model(&options.model) {
             options.max_tokens = Some(128);
         }
     }
@@ -2072,7 +2097,7 @@ pub fn run_server() {
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::AudioEnhancement(_) => "audio-enhancement",
-        Backend::Tts(_) => "tts",
+        Backend::Tts(_) | Backend::Pivo(_) => "tts",
         Backend::ArkTts(_) => "arktts",
         Backend::Auk(_) => "auk",
         Backend::Rerank(_) => "rerank",
@@ -2124,6 +2149,7 @@ pub fn run_server() {
             "/v1/audio/enhancements",
             post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
+        Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),
