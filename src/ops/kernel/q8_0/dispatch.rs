@@ -17,6 +17,8 @@ use crate::ops::{has_avx2_fma, has_f16c};
 #[cfg(target_arch = "x86_64")]
 use super::avx2::matmul_q8_0_vs_q8_0_avx2;
 #[cfg(target_arch = "aarch64")]
+use super::neon;
+#[cfg(target_arch = "aarch64")]
 use super::neon::{
     matmul_q8_0_vs_q8_0_dotprod_nrc4, matmul_q8_0_vs_q8_0_neon, matmul_q8_0_vs_q8_0_neon_nrc1,
 };
@@ -88,6 +90,93 @@ pub fn matmul_q8_0_quantized_range(
         row_start,
         row_end,
     );
+}
+
+/// Batched dispatch: one weight read serves several activation rows.
+///
+/// The per-row entry re-reads the weight for every activation row, which
+/// makes a batched forward pass cost as much traffic as that many
+/// token-at-a-time passes. The batched entry shares the weight reads
+/// between the rows and computes the same values.
+pub fn matmul_q8_0_quantized_batched_range(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    n_rows: usize,
+    ith: usize,
+    nth: usize,
+) {
+    // The weight rows are the parallel dimension: every worker owns a
+    // disjoint column range of every activation row.
+    let (row_start, row_end) = if nth <= 1 || n_out == 0 {
+        (0, n_out)
+    } else {
+        let per_thread = (n_out + nth - 1) / nth;
+        let start = ith * per_thread;
+        (start, (start + per_thread).min(n_out))
+    };
+    if row_start >= row_end {
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if has_neon() && n_rows >= 2 {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            // SAFETY: dotprod is available (runtime probe); the kernel reads
+            // the weight rows and the activation rows and writes
+            // `n_rows * n_out` outputs. Its values are the plain NEON
+            // kernel's -- the integer dot is exact and the float chain is
+            // the same.
+            unsafe {
+                neon::matmul_q8_0_vs_q8_0_neon_batched_dotprod(
+                    weight,
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    n_out,
+                    n_rows,
+                    row_start,
+                    row_end,
+                );
+            }
+            return;
+        }
+        // SAFETY: NEON is available (runtime probe); the kernel reads the
+        // weight rows and the activation rows and writes `n_rows * n_out`
+        // outputs.
+        //
+        // The kernel's arithmetic is the plain NEON kernel's: the same
+        // per-block dot and the same fused multiply-add chain. The dotprod
+        // kernel differs only in how the integer dot is computed, and the
+        // integer dot is exact, so both produce the same values.
+        unsafe {
+            neon::matmul_q8_0_vs_q8_0_neon_batched(
+                weight,
+                input_q8,
+                input_scales,
+                output,
+                n_in,
+                n_out,
+                n_rows,
+                row_start,
+                row_end,
+            );
+        }
+        return;
+    }
+    // Everything else keeps the per-row path.
+    let blocks = n_in.div_ceil(32);
+    for row in 0..n_rows {
+        let q8 = &input_q8[row * n_in..(row + 1) * n_in];
+        let scales = &input_scales[row * blocks..(row + 1) * blocks];
+        // The per-row kernel writes the columns `row_start..row_end` at the
+        // front of the slice it is given.
+        let out = &mut output[row * n_out + row_start..row * n_out + row_end];
+        matmul_q8_0_quantized_range(weight, q8, scales, out, n_in, row_start, row_end);
+    }
 }
 
 /// aarch64-only single-row dispatch: NEON (NRC=1 fused FMA) → scalar.

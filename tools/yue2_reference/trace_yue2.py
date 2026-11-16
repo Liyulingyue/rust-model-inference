@@ -303,12 +303,12 @@ def trace_ar(args) -> None:
     try:
         with torch.inference_mode():
             abc_prefix = token_prefixes(request, tokenizer)
-            if args.phase == "ar":
+            if args.phase in ("ar", "e2e"):
                 sink.tokens("yue2.abc.prefix_ids", abc_prefix)
             abc_ids = generate(abc_prefix, abc_sampling, "abc")
             sink.tokens("yue2.abc.generated_ids", abc_ids)
             semantic_prefix = token_prefixes(request, tokenizer, abc_ids)
-            if args.phase == "ar":
+            if args.phase in ("ar", "e2e"):
                 sink.tokens("yue2.semantic.prefix_ids", semantic_prefix)
             semantic_ids = generate(semantic_prefix, semantic_sampling, "semantic")
             sink.tokens("yue2.semantic.generated_ids", semantic_ids)

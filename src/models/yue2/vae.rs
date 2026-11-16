@@ -127,6 +127,12 @@ impl Conv {
     }
 
     fn forward(&self, input: &[f32], frames: usize) -> Result<(Vec<f32>, usize), String> {
+        #[cfg(feature = "vulkan")]
+        if crate::compute::ComputePolicy::legacy() != crate::compute::ComputePolicy::Cpu {
+            if let Some(result) = self.forward_device(input, frames) {
+                return Ok(result);
+            }
+        }
         let length = if self.transpose {
             (frames - 1)
                 .checked_mul(self.stride)
@@ -262,6 +268,46 @@ impl Conv {
                 }
             });
         Ok((out, length))
+    }
+
+    /// Run one non-transposed convolution on the device.
+    ///
+    /// The CPU implementation is pinned bit-for-bit to the reference and has
+    /// several specialised paths, so it stays the default; this is only used
+    /// when a device policy is requested. Transposed convolutions have no
+    /// device kernel and return `None`, which keeps them on the CPU path.
+    #[cfg(feature = "vulkan")]
+    fn forward_device(&self, input: &[f32], frames: usize) -> Option<(Vec<f32>, usize)> {
+        if self.transpose {
+            return None;
+        }
+        let length = frames
+            .checked_add(2 * self.padding)?
+            .checked_sub(self.dilation * (self.kernel - 1) + 1)?
+            / self.stride
+            + 1;
+        let mut out = vec![0.0f32; self.output.checked_mul(length)?];
+        let spec = crate::ops::nn::Conv3dSpec {
+            stride: [1, 1, self.stride],
+            padding: [0, 0, self.padding],
+            dilation: [1, 1, self.dilation],
+            groups: 1,
+        };
+        let ok = crate::ops::kernel::vulkan::try_conv3d(
+            input,
+            &self.weights,
+            Some(&self.bias),
+            &mut out,
+            [self.input, 1, 1, frames],
+            [self.output, self.input, 1, 1, self.kernel],
+            [self.output, 1, 1, length],
+            spec,
+        );
+        if ok {
+            Some((out, length))
+        } else {
+            None
+        }
     }
 }
 
@@ -762,6 +808,71 @@ fn f32_tensor(source: &dyn TensorSource, name: &str, dims: &[usize]) -> Result<V
         return Err(format!("Non-finite tensor: {name}"));
     }
     Ok(values)
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod device_tests {
+    use super::*;
+
+    /// The VAE's regular convolutions must reach the device and stay close to
+    /// the CPU kernel the reference is pinned to.
+    #[test]
+    #[ignore = "requires hardware Vulkan; run alone with --test-threads=1"]
+    fn vae_conv_device_matches_the_cpu_kernel() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let kernel = 3usize;
+        let input = 4usize;
+        let output = 8usize;
+        let mut weights = vec![0.0f32; output * input * kernel];
+        for (index, value) in weights.iter_mut().enumerate() {
+            *value = ((index * 7) % 11) as f32 / 11.0 - 0.5;
+        }
+        let bias: Vec<f32> = (0..output).map(|channel| channel as f32 / 16.0).collect();
+        let conv = Conv {
+            weights,
+            bias,
+            input,
+            output,
+            kernel,
+            stride: 1,
+            padding: 1,
+            dilation: 1,
+            transpose: false,
+        };
+        let frames = 65usize;
+        let data: Vec<f32> = (0..input * frames)
+            .map(|index| ((index * 5) % 13) as f32 / 13.0 - 0.5)
+            .collect();
+
+        let before = context.submission_count();
+        let (expected, length) = {
+            let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+            conv.forward(&data, frames).unwrap()
+        };
+        assert_eq!(
+            context.submission_count(),
+            before,
+            "the CPU path must not submit"
+        );
+        let (actual, device_length) = conv
+            .forward_device(&data, frames)
+            .expect("the device declined the convolution");
+        assert_eq!(device_length, length);
+        assert!(
+            context.submission_count() > before,
+            "the convolution never reached the device"
+        );
+        let max_abs = expected
+            .iter()
+            .zip(&actual)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs < 1e-4,
+            "device convolution differs from the CPU kernel: max_abs={max_abs}"
+        );
+    }
 }
 
 #[cfg(test)]

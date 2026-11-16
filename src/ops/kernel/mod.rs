@@ -217,6 +217,17 @@ impl PreparedRows {
                 .iter()
                 .filter(|(_, _, done)| !done)
                 .all(|(weight, _, _)| weight.kernel.scalar_q4_0_bytes().is_some());
+        // The Q8_0 weights can share their reads between the activation
+        // rows of a batch. Without that a batched forward pass reads the
+        // whole weight matrix once per token, which is what makes a batch
+        // cost as much traffic as that many token-at-a-time passes.
+        let batched_q8 = !batched_q4
+            && self.rows >= 2
+            && self.need_q8
+            && projections
+                .iter()
+                .filter(|(_, _, done)| !done)
+                .all(|(weight, _, _)| weight.kernel.batchable_q8_0_bytes().is_some());
         pool.compute(|ith, nth| {
             if batched_q4 {
                 for (weight, output_ptr, gpu_done) in projections {
@@ -232,6 +243,30 @@ impl PreparedRows {
                             &self.q8,
                             &self.scales,
                             output_ptr,
+                            self.n_in,
+                            weight.n_out,
+                            self.rows,
+                            ith,
+                            nth,
+                        );
+                    }
+                }
+                return;
+            }
+            if batched_q8 {
+                for (weight, output_ptr, gpu_done) in projections {
+                    if gpu_done {
+                        continue;
+                    }
+                    // SAFETY: the output lengths were checked above (the
+                    // buffer holds `rows * n_out` values) and each worker
+                    // owns a disjoint column range of every row.
+                    unsafe {
+                        q8_0::dispatch::matmul_q8_0_quantized_batched_range(
+                            weight.kernel.batchable_q8_0_bytes().unwrap(),
+                            &self.q8,
+                            &self.scales,
+                            std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out),
                             self.n_in,
                             weight.n_out,
                             self.rows,
