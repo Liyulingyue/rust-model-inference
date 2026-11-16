@@ -122,10 +122,15 @@ pub fn matmul_q8_0_quantized_batched_range(
         return;
     }
     #[cfg(target_arch = "aarch64")]
-    if has_neon() && n_rows >= 4 {
+    if has_neon() && n_rows >= 2 {
         // SAFETY: NEON is available (runtime probe); the kernel reads the
         // weight rows and the activation rows and writes `n_rows * n_out`
         // outputs.
+        //
+        // The kernel's arithmetic is the plain NEON kernel's: the same
+        // per-block dot and the same fused multiply-add chain. The dotprod
+        // kernel differs only in how the integer dot is computed, and the
+        // integer dot is exact, so both produce the same values.
         unsafe {
             neon::matmul_q8_0_vs_q8_0_neon_batched(
                 weight,
