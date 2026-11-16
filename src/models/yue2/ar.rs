@@ -1721,7 +1721,13 @@ pub(super) fn sample_phase_token(
         .filter(|(_, score)| score.is_finite())
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-    candidates.truncate(sampling.top_k.min(candidates.len()));
+    // The reference keeps every token at or above the k-th score instead of
+    // exactly k tokens, so ties survive the cut and the nucleus boundary lands
+    // where the reference puts it.
+    if candidates.len() > sampling.top_k {
+        let threshold = candidates[sampling.top_k - 1].1;
+        candidates.retain(|(_, score)| *score >= threshold);
+    }
     if candidates.is_empty() {
         return Err("YuE2 sampling has no allowed tokens".into());
     }
