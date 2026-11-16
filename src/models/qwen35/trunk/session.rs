@@ -596,7 +596,11 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
 
         let embeddings = self.embed_tokens(&batch)?;
         let processed_before = self.processed_tokens;
+        // Capture the recurrent layers' inputs: a rollback replays only
+        // those layers instead of the whole model.
+        self.prepare_recurrent_capture(batch.len());
         let last_logits = self.step(&embeddings, batch.len(), &positions)?;
+        self.scratch.capture_recurrent_inputs = false;
 
         // The target's own continuation: the logits of row `i` say what the
         // target would produce at the position of draft `i`.
@@ -644,32 +648,32 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         // The rejected drafts left their KV and their recurrent state behind:
         // both have to go, or the next round would continue from a state the
         // target never produced.
-        //
-        // The GDN and short-convolution layers carry their state from token
-        // to token, so the state cannot be truncated -- the committed tokens
-        // have to be run through the model again. llama.cpp does the same
-        // with its context checkpoint: it restores the checkpoint and
-        // replays the accepted tokens.
         if accepted < drafts.len() {
             self.restore_mtp_state();
             let cfg = &self.model.trunk().config;
             let k_dim = cfg.n_embd_head() * cfg.n_head_kv;
-            // Free the whole verification batch: the replay writes the
-            // committed rows again, and the free slot of a layer is the
-            // first all-zero key row.
+            // The committed rows of the verification batch are already
+            // correct -- every row of a forward pass sees exactly the state
+            // its own position has. Only the rows after them are wrong, and
+            // the free slot of a layer is the first all-zero key row.
             super::scratch::kv_cache_truncate(
                 &mut self.kv_cache,
                 cfg.n_layer_impl(),
                 k_dim,
-                position,
+                position + accepted + 1,
                 position + batch.len(),
             );
-            self.processed_tokens = processed_before;
-            self.next_position = position;
-            // Replay the committed tokens: the bonus token and the drafts
-            // the target accepted.
+            // The recurrent state is the one thing that cannot be
+            // truncated: the GDN and short-convolution layers carry it from
+            // token to token. Restoring it and replaying only those layers
+            // over the accepted rows puts it back where the committed tokens
+            // leave it, without re-running the whole model.
             let keep = accepted + 1;
-            self.step(&embeddings[..keep * n_embd], keep, &positions[..keep])?;
+            self.model
+                .trunk()
+                .replay_recurrent_state(keep, &mut self.scratch, &self.pool)?;
+            self.processed_tokens = processed_before + keep;
+            self.next_position = position + keep;
         }
 
         Ok(MtpStep {
@@ -678,6 +682,27 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             accepted,
             drafted: drafts.len(),
         })
+    }
+
+    /// Prepare the capture of the recurrent layers' inputs.
+    ///
+    /// The capture is what lets a rollback replay the recurrent layers
+    /// alone: their state is a function of the incoming state and their
+    /// input, and the inputs of the verification batch are the ones the
+    /// forward actually used.
+    fn prepare_recurrent_capture(&mut self, n_rows: usize) {
+        let n_embd = self.model.trunk().config.n_embd;
+        let n_layer = self.model.trunk().config.n_layer_impl();
+        let width = n_rows * n_embd;
+        let inputs = &mut self.scratch.recurrent_inputs;
+        if inputs.len() < n_layer {
+            inputs.resize_with(n_layer, Vec::new);
+        }
+        for slot in inputs.iter_mut().take(n_layer) {
+            slot.clear();
+            slot.reserve(width);
+        }
+        self.scratch.capture_recurrent_inputs = true;
     }
 
     /// Save the recurrent state so a rejected draft can be undone.

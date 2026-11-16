@@ -34,6 +34,17 @@ pub struct Qwen35Scratchpad {
     pub ffn_gate_buf: Vec<f32>,
     pub conv_states: Vec<Vec<f32>>,
     pub ssm_states: Vec<Vec<f32>>,
+    /// The input rows of the recurrent layers, captured during a forward
+    /// pass when `capture_recurrent_inputs` is set.
+    ///
+    /// A speculative verification runs the target over the drafted tokens,
+    /// and a rejected draft advances the recurrent state. Restoring the
+    /// state and replaying only the recurrent layers over the accepted rows
+    /// (with these captured inputs) puts the state back where the committed
+    /// tokens leave it -- without re-running the whole model.
+    pub recurrent_inputs: Vec<Vec<f32>>,
+    /// Whether the forward pass captures the recurrent layers' inputs.
+    pub capture_recurrent_inputs: bool,
     pub matmul_out: Vec<f32>,
     pub q8k_buf: Vec<quant::BlockQ8K>,
     pub q8_buf: Vec<u8>,
@@ -77,6 +88,8 @@ impl Qwen35Scratchpad {
             attn_out_buf: vec![0.0; max_tokens * dense_attn_out_dim.max(value_dim)],
             ffn_up_buf: vec![0.0; max_tokens * n_ff],
             ffn_gate_buf: vec![0.0; max_tokens * n_ff],
+            recurrent_inputs: Vec::new(),
+            capture_recurrent_inputs: false,
             conv_states: (0..n_layer).map(|_| vec![0.0; d_conv * conv_dim]).collect(),
             ssm_states: (0..n_layer)
                 .map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim])
