@@ -489,7 +489,8 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                 &mut self.scratch,
                 &self.pool,
                 // The row only fills the head's cache: nothing samples it,
-                // so the vocabulary projection is not needed.
+                // so neither the head's output nor its vocabulary
+                // projection is needed.
                 false,
             )?;
         }
