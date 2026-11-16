@@ -1593,7 +1593,7 @@ pub(super) enum Phase {
 }
 
 impl Phase {
-    fn end_token(self) -> u32 {
+    pub(super) fn end_token(self) -> u32 {
         match self {
             Self::Abc => ABC_END,
             Self::Semantic => MUSIC_END,
@@ -1615,7 +1615,7 @@ impl Phase {
         }
     }
 
-    fn allows(self, token: usize) -> bool {
+    pub(super) fn allows(self, token: usize) -> bool {
         match self {
             Self::Abc => token < EOD as usize || token == ABC_END as usize,
             Self::Semantic => {
