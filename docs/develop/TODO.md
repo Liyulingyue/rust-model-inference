@@ -5330,10 +5330,11 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 ### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 上的投机解码已经比 greedy 快
 
 **状态**：✅ 起草头 + 验证/接受回路已实现，与 pinned llama.cpp **逐轮同草稿**；
-接受率 0.54 vs 0.53。✅ CPU 上也有收益了：批量 Q8_0 kernel 之后，2 个草稿的
-投机解码比 greedy 快约 18%（5.4 s vs 6.6 s）。⚠ 批量前向仍然是**算力**瓶颈
-（这台机器没有 dotprod），所以收益是 1.2 倍而不是 llama.cpp 在设备路径上的
-倍数级（草稿头目前只在 CPU 上跑）。
+接受率 0.54 vs 0.53。✅ CPU 上也有收益了：批量 Q8_0 kernel（`sdot`）+ 不用重算
+投影的回滚之后，2 个草稿的投机解码比 greedy 快约 22%（4.67 s vs 5.98 s，只算解码
+段是 3.20 s vs 4.39 s，1.37 倍）。⚠ 目标前向是**访存**瓶颈（一遍前向要把 29 GB
+的 Q8_0 权重读一遍），所以收益是 1.3 倍而不是 llama.cpp 在设备路径上的倍数级
+（草稿头目前只在 CPU 上跑）。
 
 **做了什么**：
 
@@ -5367,6 +5368,8 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
   - KV：把被拒位置的 key 行清零（本仓库的自由槽位靠「第一行全零」扫描出来）；
   - 循环状态：GDN / shortconv 的状态逐 token 携带，只回滚 KV 不够 → 快照 +
     重放已接受的 token。llama.cpp 用 context checkpoint + replay，语义一致。
+    重放只做**状态更新**：前向捕获状态更新要吃的那几行（投影后的 q/k/v 与过了
+    激活函数的 beta/alpha），回滚不重算投影，也不算这一层的输出。
 - CLI：`--mtp-draft N`（N=每轮起草的 token 数，0=关闭）。只支持 greedy
   （`--temp 0`）、只支持纯文本 prompt（视觉路径的 prompt 行是投影后的 embedding，
   拿不到 token id）。HTTP（`--serve --mtp-draft N`）走同一条路：温度为 0 的请求
@@ -5383,7 +5386,7 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
   prompt、同一个 n_max）。
 - 投机解码产出的 token 与 greedy **逐个相同**——这是回滚做对了的判据。
 
-**CPU 上的性能：与 greedy 打平，还没有倍数收益**。这里有三条独立的账：
+**CPU 上的性能：比 greedy 快 1.3 倍，还没有倍数收益**。这里有五条独立的账：
 
 1. **批量前向曾经不比逐 token 前向便宜**：Q8_0 的 per-row kernel 每个激活行都要
    把权重矩阵重读一遍，而权重就是流量的主体，于是 `R` 行的批量前向要付 `R` 倍
@@ -5392,37 +5395,57 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
    投影逐位相同，最大差 0），预填从 5.23 s 降到 2.16 s，整段 greedy 生成从
    10.28 s 降到 6.59 s。两行以上的批次都走这条路径——三行（两个草稿的验证）原来
    因为一个 `n_rows >= 4` 的门槛掉回 per-row 路径，白白多付了一遍权重流量。
-2. **前向本身是算力瓶颈**：这台机器没有 dotprod，Q8_0 的点积是逐块的 NEON
-   widening 累加，约 4 int8 MAC/cycle/core。所以一次 5 行前向只比一次单行前向
-   便宜 2.4 倍，而不是 5 倍——权重的流量省下来了，算力还在。
-3. **一轮的固定开销**：起草头的 4 次前向（每次都带一次词表投影）、catch-up 的
-   5 次头前向、验证那一遍的词表行、以及回滚重放循环层。现在只读用得到的词表行
-   （catch-up 的行没人采样，验证在第一个不匹配处就停），一轮从 1.35 s 降到
-   0.85 s。
+2. **批量 kernel 自己曾经是算力瓶颈**：它的整数点积走的是 widening 累加
+   （`vmull_s8` + 成对加法，每条指令 4 个 int8 MAC），而 per-row 的 dispatch 在
+   这台机器上选的是 `sdot`（每条指令 16 个 MAC）。也就是说，批量路径跑在它替换掉
+   的那条路径的 1/4 指令速率上。改用同一个 `sdot` 之后（整数点积精确，分组方式
+   不影响结果，批量路径仍然与 per-row 路径逐位相同），预填 2.16 s → 1.47 s。
+   ⚠ 这里的判据是**运行时探测**：`is_aarch64_feature_detected!("dotprod")` 在这台
+   机器上是 true，尽管 `/proc/cpuinfo` 里没有 `dotprod`（内核不列 ARMv9 隐含的
+   扩展），所以不能照抄 cpuinfo 那一行。
+3. **前向是访存瓶颈**：这个 checkpoint 的 Q8_0 权重一共 29 GB，一遍前向要把它们
+   全读一遍；greedy 每个 token 一遍前向（≈290 ms/token，≈100 GB/s 的有效带宽），
+   这已经是这台机器的内存带宽上限。所以批量前向再快也快不过「把权重读一遍」，
+   投机解码的收益只能来自**少跑几遍前向**。
+4. **回滚曾经把 5.6 GB 权重又读了一遍**：被拒绝的草稿会推进循环状态，回滚要把
+   状态退回已接受的位置。原来的回滚拿捕获的层输入重跑整个循环层——包括投影
+   （每层 86 MB）和输出投影（每层 31 MB），而后者的结果根本没人用。现在前向
+   捕获**状态更新真正要吃的**那几行（投影后的 q/k/v，以及过了激活函数的
+   beta/alpha），回滚只重放状态更新本身：一轮的回滚从 89 ms 降到 23 ms。
+5. **一轮的固定开销**：起草头的 `N` 次前向（每次都带一次 1.3 GB 的词表投影：
+   `output.weight` 是 248320 × 5120）、catch-up 的头前向、验证那一遍的词表行。
+   现在只读用得到的词表行（catch-up 的行没人采样，验证在第一个不匹配处就停），
+   一轮从 1.35 s 降到 0.85 s，回滚再降 0.07 s/轮。
 
-合起来的实测（19 token chat prompt，生成 16 token，8 线程；这组数字是叠在
-批量 Q8_0 kernel 之上的，两个改动都在本仓库的分支上）：
+合起来的实测（19 token chat prompt，生成 16 token，8 线程；这组数字叠在批量
+Q8_0 kernel、`sdot` 与便宜回滚之上）。这台机器的负载会漂，所以对比一律用
+**交替跑**的两个二进制（`sdot` vs `sdot` + 便宜回滚），取中位数：
 
 | 路径 | 整段生成 |
 | --- | --- |
-| greedy | 6.57 s（prefill 2.17 s + decode 4.40 s） |
-| 投机，2 个草稿 | **5.38 s / 5.54 s**（接受率 0.83） |
-| 投机，3 个草稿 | 6.30 s / 6.32 s（接受率 0.72） |
-| 投机，4 个草稿 | 7.37 s（接受率 0.54） |
+| greedy | 5.98 s（prefill 1.47 s + decode 4.39 s） |
+| 投机，2 个草稿 | **4.67 s**（中位数；采样 4.17–5.32 s；接受率 0.83） |
+| 投机，2 个草稿（没有便宜回滚） | 5.45 s（中位数；采样 5.38–6.35 s） |
+| 投机，3 个草稿 | 4.96 s / 5.01 s（接受率 0.72） |
+| 投机，4 个草稿 | 5.39 s / 5.51 s（接受率 0.54） |
 
-即：**2 个草稿时比 greedy 快约 18%**；草稿再多反而更慢（一轮的行数是线性涨的，
-收益是对数涨的）。llama.cpp 在同一台机器上没有这个收益（它的 MTP decode
-262 ms/token，就是单 token decode 的量级）——差别在于它没有把 Q8_0 的权重读取
-在批次内共享。要再往上走，目标的批量前向必须真的比逐 token 前向便宜——也就是要
-更快的 int8 点积（i8mm / svei8mm）或设备路径上的批量 kernel；草稿头本身也要能
-跑到设备上（现在只跑 CPU）。
+即：**2 个草稿时比 greedy 快约 22%**（只算解码段是 3.20 s vs 4.39 s，1.37 倍），
+而便宜回滚本身又省掉 14%（5.45 s → 4.67 s）。草稿再多反而更慢（一轮的行数是
+线性涨的，收益是对数涨的，而且每个草稿都要付一次 1.3 GB 的词表投影）。
+llama.cpp 在同一台机器上没有这个收益（它的 MTP decode 262 ms/token，就是单
+token decode 的量级）——差别在于它没有把 Q8_0 的权重读取在批次内共享。
+一轮 36 GB 的流量里，目标前向占 29 GB（跑不掉），草稿头占 3.4 GB，catch-up
+占 1.2 GB，词表投影占 5.2 GB。还能省的有三处：一是目标侧那一遍词表投影可以
+按批做（验证的几行现在是一行一次投影，每次重读 1.3 GB 的 `output.weight`；
+一次批量投影只读一遍）；二是 catch-up 只需要刷新草稿头的 KV cache，不必跑完
+整个头（现在连 FFN 一起跑了）；三是让草稿头跑到设备上（现在只跑 CPU）。
 
 **已知边界**：
 
 - 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
   Vulkan 路径下直接报错。
-- CPU 上批量前向是算力瓶颈，投机解码的收益只有 1.2 倍（见上面的实测）；要多
-  草稿才有倍数收益的话，得先让批量前向比逐 token 前向便宜。
+- CPU 上前向是访存瓶颈，投机解码的收益只有 1.3 倍（见上面的实测）；要多草稿
+  才有倍数收益的话，得先让每个草稿的词表投影不再单独读一遍 1.3 GB。
 - 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
 - TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
   `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
@@ -5442,5 +5465,6 @@ llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv
 ```
 
 **关联**：`src/models/qwen35/trunk/mtp.rs`、`src/models/qwen35/trunk/session.rs`、
-`src/models/qwen35/trunk/weights.rs`、`src/models/qwen35/trunk/scratch.rs`、
+`src/models/qwen35/trunk/forward.rs`、`src/models/qwen35/trunk/weights.rs`、
+`src/models/qwen35/trunk/scratch.rs`、`src/ops/kernel/q8_0/neon.rs`、
 `docs/develop/SUPPORTED_MODELS.md`。

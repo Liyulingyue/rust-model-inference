@@ -11,6 +11,7 @@
 
 use crate::compute::ComputePolicy;
 
+use super::forward::RecurrentInput;
 use super::session::required_token_count;
 use super::session::Qwen35Session;
 use super::*;
@@ -1151,7 +1152,7 @@ fn hf_gdn_heads_repeat_in_pairs_and_visit_caches_are_independent() {
                 .forward_recurrent_layer(
                     0,
                     slot,
-                    &[1., 2., 3., 4.],
+                    RecurrentInput::Project(&[1., 2., 3., 4.]),
                     1,
                     scratch,
                     &pool,
@@ -1184,6 +1185,63 @@ fn hf_gdn_heads_repeat_in_pairs_and_visit_caches_are_independent() {
         assert_eq!(scratch.conv_states[1], conv);
         assert_ne!(scratch.ssm_states[0], first);
     }
+}
+
+#[test]
+fn qwen35_recurrent_replay_restores_the_state_after_the_accepted_rows() {
+    let model = tiny_recurrent_session_model();
+    let pool = ComputePool::new(1);
+
+    // The state the committed row leaves behind.
+    let mut committed = Qwen35Scratchpad::new(&model.config, 1);
+    model
+        .forward_recurrent_layer(
+            0,
+            0,
+            RecurrentInput::Project(&[1., 2., 3., 4.]),
+            1,
+            &mut committed,
+            &pool,
+            false,
+            false,
+            #[cfg(feature = "parity-trace")]
+            false,
+        )
+        .unwrap();
+
+    // The verification: the committed row and a draft that gets rejected.
+    // The forward captures what the state update consumes.
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 2);
+    scratch.recurrent_replay.resize_with(1, Default::default);
+    scratch.capture_recurrent_replay = true;
+    model
+        .forward_recurrent_layer(
+            0,
+            0,
+            RecurrentInput::Project(&[1., 2., 3., 4., 5., 6., 7., 8.]),
+            2,
+            &mut scratch,
+            &pool,
+            false,
+            false,
+            #[cfg(feature = "parity-trace")]
+            false,
+        )
+        .unwrap();
+    scratch.capture_recurrent_replay = false;
+    assert_ne!(scratch.ssm_states[0], committed.ssm_states[0]);
+
+    // The rollback: put the state back where the verification found it and
+    // replay the committed row. The state has to come out exactly where the
+    // committed row leaves it -- the replay reuses the captured projections
+    // instead of projecting the row again.
+    scratch.ssm_states[0].fill(0.0);
+    scratch.conv_states[0].fill(0.0);
+    model
+        .replay_recurrent_state(1, &mut scratch, &pool)
+        .unwrap();
+    assert_eq!(scratch.ssm_states[0], committed.ssm_states[0]);
+    assert_eq!(scratch.conv_states[0], committed.conv_states[0]);
 }
 
 fn tiny_mixed_session_model() -> Qwen35Model<'static> {
