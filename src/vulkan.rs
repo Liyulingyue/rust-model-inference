@@ -1169,18 +1169,36 @@ impl VulkanContext {
         &self,
         data: &[u8],
     ) -> Result<GpuBuffer, VulkanError> {
+        self.upload_device_static_filled(data.len(), |bytes| bytes.copy_from_slice(data))
+    }
+
+    /// Same as [`upload_device_static`] for bytes that are produced in place.
+    ///
+    /// The transposed Q8_0 layout is written straight into the staging
+    /// buffer instead of a second host copy.
+    pub(crate) unsafe fn upload_device_static_filled(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
         if !self.is_discrete() {
-            return self.upload_static(data);
+            let padded = size.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+            let buffer = self.alloc_persistently_mapped(padded as u64)?;
+            fill(std::slice::from_raw_parts_mut(buffer.mapped, size));
+            std::ptr::write_bytes(buffer.mapped.add(size), 0, padded - size);
+            self.flush_mapped(buffer, 0, size as u64)?;
+            self.count_upload(size);
+            return Ok(buffer);
         }
-        let size = data.len().checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
-        let staging = self.allocate_session_buffer(size)?;
-        std::ptr::write_bytes(staging.mapped.add(data.len()), 0, size - data.len());
-        std::ptr::copy_nonoverlapping(data.as_ptr(), staging.mapped, data.len());
-        let buffer = match self.alloc_device_buffer(size) {
+        let padded = size.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+        let staging = self.allocate_session_buffer(padded)?;
+        fill(std::slice::from_raw_parts_mut(staging.mapped, size));
+        std::ptr::write_bytes(staging.mapped.add(size), 0, padded - size);
+        let buffer = match self.alloc_device_buffer(padded) {
             Ok(buffer) => buffer,
             Err(VulkanError::OutOfMemory) => {
                 // A full VRAM heap must preserve the shared-memory fallback.
-                self.count_upload(data.len());
+                self.count_upload(size);
                 return Ok(staging);
             }
             Err(error) => {
@@ -1194,7 +1212,7 @@ impl VulkanContext {
                 .lock()
                 .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
             self.begin_commands(&mut submission)?;
-            self.record_buffer_copy(self.command_buffer, staging, buffer, 0, 0, size as u64);
+            self.record_buffer_copy(self.command_buffer, staging, buffer, 0, 0, padded as u64);
             self.submit_transfer_commands(&mut submission)
         })();
         if let Err(error) = result {
@@ -1203,7 +1221,7 @@ impl VulkanContext {
             return Err(error);
         }
         self.destroy_buffer(&staging);
-        self.count_upload(data.len());
+        self.count_upload(size);
         Ok(buffer)
     }
 

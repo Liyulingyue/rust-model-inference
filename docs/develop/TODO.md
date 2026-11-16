@@ -13,6 +13,54 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **YuE2 AR 的 KV cache 布局：转置后剩下的那部分访存浪费** —
+      2026-11-16 实测：value reduce 的瓶颈是**访存模式**而不是带宽——KV 布局是
+      `[layer][position][kv_head][dim]`，扫一个 kv head 时步长 4 KiB、每行只用 512 B，
+      而内核是 dim-outer 的（每个 32 B 的 dim block 单独重走一遍 4 KiB 步长）。用真实
+      内核实测三种布局：现状 34.5 ms → 转置 `[kv_head][position][dim]` 14.6 ms（2.36x）
+      → 转置 + token-outer（16 个独立累加器）7.1 ms（**4.84x**）；两种改法都逐位一致
+      （每个 dim 内的 token 顺序不变）。
+      ✅ **先做掉了收益更大的那一半**：不改布局、只把 reduce 的循环顺序换成 token-outer
+      （`13344004`），逐位一致；AR attention 94.0 s → 69.0 s、NAR prefix attention
+      14.1 s → 10.2 s、整链 510.9 s → 457.6 s，音频 md5 不变。换成 token-outer 之后内核
+      已经按行顺序读，**剩下的收益只是布局带来的访存局部性**（页面复用、预取），比
+      4.84x 这个合成基准暗示的小得多。
+      ⏳ 剩下的改动面：AR 的 KV 写入/读取、score 与 reduce 两条路径、`commit_kv_shadow`、
+      NAR 的 `prefix_kv`。**注意 KV cache 是 `core::scratchpad::KvCache` 这份共享结构**
+      （LFM2 等模型也在用），改布局不是 YuE2 内部改动：要么给共享结构加一个「按 head
+      分块」的变体，要么让 YuE2 自己维护一份转置副本。
+      ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
+      "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
+- [ ] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（远大于 VAE 那 1 个档位）** —
+      2026-11-16 实测：同一提示词下 `--compute cpu` 与 `--compute vulkan` 的输出有
+      98.73% 采样不同（max 10512/32767、rms 358.7，可闻）。原因：设备路径下 AR 的
+      **prefill** 走设备（`prefill_on_gpu`），设备端 attention 的累加顺序与 CPU 不同，
+      KV 出现微小差异后 token 就分叉、后面整条链路都不同。VAE 解码阶段本身只差 ≤1 个
+      PCM16 档位（`vae_conv_device_matches_the_cpu_kernel` 在 L20 上通过），但**整链**
+      的差异要大得多。要让设备路径与 CPU 互认，得先定"设备 AR 的数值容差"怎么定
+      （或者把 prefill 也留在 CPU）。
+- [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
+      2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
+      整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
+      NAR 63.9 s。原因：AR 逐 token 调用一次 lm_head（rows=1 的 GEMV，设备 ~70 ms vs CPU
+      ~8 ms，已用 rows>=4 门禁挡掉），NAR 每步两次全模型前向（每次 28 层投影，rows=256
+      时设备与 CPU 持平）。下一步按review 提示做**融合 / 批提交 / 避免 host↔device 往返**：
+      把每层的多个投影合成一次提交（共享 linear executor 已有 `run_group`），以及把
+      NAR 的 prefix+velocity 两次前向的合成一次提交；设备侧 GEMV 的效率也需要单独看
+      （每 workgroup 64 输出通道 × 32 帧的 tiling 对 rows=1 是否合适）。
+- [ ] **共享卷积的设备路径无复核门槛，YuE2 VAE 设备化后被它吃掉收益** —
+      `ops::nn::conv3d_with_options` 在设备成功后**无条件**用 CPU kernel 复核
+      （`conv3d_matches_cpu`，不符就重试、再不符退回 CPU 重算），而线性路径的复核是
+      门控的（`RMI_GPU_CPU_CHECK`，默认关）。YuE2 的 VAE 设备化如果走 `ops::nn::conv1d`
+      就会因为这次复核变成约 2 倍慢；本分支因此直接调 `ops::kernel::vulkan::try_conv3d`
+      绕过复核，VAE 从 77.0 s 降到 24.7 s（3.1x），输出与 CPU 最多差 1 个 PCM16 档位
+      （0.67% 采样，最大 1/32768）。**但这是一个绕过共享复核的决定**：设备卷积曾经被
+      观测到与 CPU 不一致（代码注释里的原因），绕过意味着 VAE 的设备结果没有逐次复核，
+      只靠端到端对比兜底。要么给卷积复核加一个和线性一样的显式开关（默认关、严格档打开），
+      要么在共享层记录"哪些调用方接受未复核的设备卷积"。
+      另：`src/models/yue2/ar.rs` 的 `vulkan_yue2_bf16_rounds_after_bias_across_tiles`
+      测试规模小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K 输出），默认门槛下设备会拒绝这些
+      投影，必须用 `RUST_GPU_MIN_OUTPUTS=0` 才能跑（已在 2026-11-12 实测确认）。
 - [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
       2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
       vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor

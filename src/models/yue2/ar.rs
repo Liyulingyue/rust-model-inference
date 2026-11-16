@@ -30,6 +30,20 @@ impl YuE2Weight {
     pub(crate) fn ggml_type(&self) -> GGMLType {
         self.fast.ggml_type
     }
+
+    /// The underlying weight, for callers that drive the shared linear executor.
+    pub(crate) fn weight(&self) -> &Weight<'static> {
+        &self.fast
+    }
+
+    /// A binding for the shared linear executor, so several projections that
+    /// share an input can be submitted together.
+    pub(crate) fn binding(&self) -> crate::compute::linear::LinearBinding<'_, 'static> {
+        crate::compute::linear::LinearBinding {
+            weight: &self.fast,
+            mode: crate::compute::linear::LinearMode::Prepared,
+        }
+    }
 }
 
 /// GGML types the YuE2 converter can emit for a 2-D projection.
@@ -373,6 +387,12 @@ impl YuE2Weight {
         #[cfg(feature = "vulkan")]
         if self.gpu_bf16.try_matmul(
             bytes,
+            // The dot mode matches dot_bf16_f32's FMA streams and
+            // horizontal sum, so the device keeps the CPU's token
+            // decisions. The prepared mode accumulates in a different
+            // order: it is faster on paper but its rounding differences
+            // flip sampled tokens in the NAR, which rewrites the whole
+            // waveform.
             crate::vulkan::ops::GpuWeightFormat::BF16
                 .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot),
             input,
@@ -387,8 +407,41 @@ impl YuE2Weight {
                     *value = half::bf16::from_f32(sum).to_f32();
                 }
             }
+            if std::env::var_os("RMI_YUE2_CHECK_MATMUL").is_some() {
+                let mut reference = vec![0.0f32; output.len()];
+                self.matmul_bf16_cpu(input, bias, &mut reference, pool);
+                let mut worst = 0.0f32;
+                let mut worst_index = 0usize;
+                for (index, (want, got)) in reference.iter().zip(output.iter()).enumerate() {
+                    let difference = (want - got).abs();
+                    if difference > worst {
+                        worst = difference;
+                        worst_index = index;
+                    }
+                }
+                eprintln!(
+                    "[yue2.matmul-check] n_in={} n_out={} rows={} worst={worst} at {worst_index} cpu={} device={}",
+                    self.n_in,
+                    self.n_out,
+                    n_rows,
+                    reference[worst_index],
+                    output[worst_index],
+                );
+            }
             return;
         }
+        self.matmul_bf16_cpu(input, bias, output, pool);
+    }
+
+    fn matmul_bf16_cpu(
+        &self,
+        input: &[f32],
+        bias: Option<&[f32]>,
+        output: &mut [f32],
+        pool: &ComputePool,
+    ) {
+        let bytes = self.bf16.unwrap();
+        let n_rows = input.len() / self.n_in;
         let batched_rows = n_rows / 4 * 4;
         let output_ptr = output.as_mut_ptr();
         pool.compute(|thread, threads| {
@@ -725,6 +778,7 @@ impl YuE2Model {
             // Single-token decode over a 3B AR pass is seconds per step on
             // CPU, so emit a periodic rate log instead of a silent stall.
             if output.len() % 16 == 0 || step + 1 == sampling.max_tokens {
+                session.timing.report();
                 let elapsed = sampling_started.elapsed().as_secs_f64();
                 eprintln!(
                     "[yue2:{}] {} tokens in {:.1}s ({:.2} tok/s)",
@@ -834,6 +888,7 @@ pub struct YuE2ArSession<'model> {
     /// Outer None requests initialization; Some(None) permanently keeps fallback.
     #[cfg(feature = "vulkan")]
     gpu: Option<Option<crate::vulkan::yue2::YuE2VulkanSession<'model>>>,
+    timing: ArPhaseTiming,
 }
 
 /// Run one device chunk for `token_ids`, mirror the K/V deltas into the CPU
@@ -909,6 +964,7 @@ impl<'model> YuE2ArSession<'model> {
         ));
         Ok(Self {
             model,
+            timing: ArPhaseTiming::new(),
             kv: KvState::new(arch, KvFormat::F32, capacity),
             x: vec![0.0; config.hidden],
             normed: vec![0.0; config.hidden],
@@ -1047,6 +1103,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.normed,
             );
+            let qkv_started = std::time::Instant::now();
             layer.ar_attention.q.matmul(
                 &self.normed,
                 &mut self.q,
@@ -1071,6 +1128,7 @@ impl<'model> YuE2ArSession<'model> {
                 &mut self.scales,
                 &mut self.q8k,
             );
+            ArPhaseTiming::add(&self.timing.qkv, qkv_started);
             rms_norm_heads(
                 &mut self.q,
                 &layer.ar_attention.q_norm,
@@ -1129,6 +1187,7 @@ impl<'model> YuE2ArSession<'model> {
             let row_base = layer_base + position * kv_width;
             key_cache[row_base..row_base + kv_width].copy_from_slice(&self.k);
             value_cache[row_base..row_base + kv_width].copy_from_slice(&self.v);
+            let attn_started = std::time::Instant::now();
             self.attention.fill(0.0);
             for head in 0..config.q_heads {
                 let kv_head = head / group_size;
@@ -1145,6 +1204,7 @@ impl<'model> YuE2ArSession<'model> {
                     scale,
                 );
             }
+            ArPhaseTiming::add(&self.timing.attn, attn_started);
             trace(
                 "yue2.ar.attn",
                 Some(layer_index),
@@ -1152,6 +1212,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[q_width],
                 &self.attention,
             );
+            let o_started = std::time::Instant::now();
             layer.ar_attention.output.matmul(
                 &self.attention,
                 &mut self.projected,
@@ -1167,6 +1228,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.projected,
             );
+            ArPhaseTiming::add(&self.timing.o_proj, o_started);
             add_in_place(&mut self.x, &self.projected);
             trace(
                 "yue2.ar.attn_residual",
@@ -1189,6 +1251,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.normed,
             );
+            let mlp_started = std::time::Instant::now();
             layer.ar_mlp.gate.matmul(
                 &self.normed,
                 &mut self.gate,
@@ -1238,6 +1301,7 @@ impl<'model> YuE2ArSession<'model> {
                 &[config.hidden],
                 &self.down,
             );
+            ArPhaseTiming::add(&self.timing.mlp, mlp_started);
             add_in_place(&mut self.x, &self.down);
             trace(
                 "yue2.ar.ffn_residual",
@@ -1267,6 +1331,7 @@ impl<'model> YuE2ArSession<'model> {
             &[config.hidden],
             &self.normed,
         );
+        let head_started = std::time::Instant::now();
         self.model.lm_head.matmul(
             &self.normed,
             &mut self.logits,
@@ -1275,6 +1340,7 @@ impl<'model> YuE2ArSession<'model> {
             &mut self.scales,
             &mut self.q8k,
         );
+        ArPhaseTiming::add(&self.timing.head, head_started);
         trace(
             "yue2.ar.logits",
             None,
@@ -1527,7 +1593,7 @@ pub(super) enum Phase {
 }
 
 impl Phase {
-    fn end_token(self) -> u32 {
+    pub(super) fn end_token(self) -> u32 {
         match self {
             Self::Abc => ABC_END,
             Self::Semantic => MUSIC_END,
@@ -1549,7 +1615,7 @@ impl Phase {
         }
     }
 
-    fn allows(self, token: usize) -> bool {
+    pub(super) fn allows(self, token: usize) -> bool {
         match self {
             Self::Abc => token < EOD as usize || token == ABC_END as usize,
             Self::Semantic => {
@@ -1557,6 +1623,58 @@ impl Phase {
                     || token == MUSIC_END as usize
             }
         }
+    }
+}
+
+/// Per-phase nanosecond counters for the AR decode loop.
+///
+/// The AR runs one token at a time, so the split between its
+/// projections, its attention and its sampling decides where a device
+/// port has to land. `RMI_YUE2_AR_TIMING=1` prints the accumulated
+/// counters.
+struct ArPhaseTiming {
+    qkv: std::sync::atomic::AtomicU64,
+    attn: std::sync::atomic::AtomicU64,
+    o_proj: std::sync::atomic::AtomicU64,
+    mlp: std::sync::atomic::AtomicU64,
+    head: std::sync::atomic::AtomicU64,
+    enabled: bool,
+}
+
+impl ArPhaseTiming {
+    fn new() -> Self {
+        Self {
+            qkv: std::sync::atomic::AtomicU64::new(0),
+            attn: std::sync::atomic::AtomicU64::new(0),
+            o_proj: std::sync::atomic::AtomicU64::new(0),
+            mlp: std::sync::atomic::AtomicU64::new(0),
+            head: std::sync::atomic::AtomicU64::new(0),
+            enabled: std::env::var("RMI_YUE2_AR_TIMING").is_ok(),
+        }
+    }
+
+    fn add(counter: &std::sync::atomic::AtomicU64, started: std::time::Instant) {
+        counter.fetch_add(
+            started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn report(&self) {
+        if !self.enabled {
+            return;
+        }
+        let read = |counter: &std::sync::atomic::AtomicU64| {
+            counter.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9
+        };
+        eprintln!(
+            "[yue2.ar.timing] qkv={:.2}s attn={:.2}s o_proj={:.2}s mlp={:.2}s head={:.2}s",
+            read(&self.qkv),
+            read(&self.attn),
+            read(&self.o_proj),
+            read(&self.mlp),
+            read(&self.head),
+        );
     }
 }
 
@@ -1603,7 +1721,13 @@ pub(super) fn sample_phase_token(
         .filter(|(_, score)| score.is_finite())
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-    candidates.truncate(sampling.top_k.min(candidates.len()));
+    // The reference keeps every token at or above the k-th score instead of
+    // exactly k tokens, so ties survive the cut and the nucleus boundary lands
+    // where the reference puts it.
+    if candidates.len() > sampling.top_k {
+        let threshold = candidates[sampling.top_k - 1].1;
+        candidates.retain(|(_, score)| *score >= threshold);
+    }
     if candidates.is_empty() {
         return Err("YuE2 sampling has no allowed tokens".into());
     }
@@ -1827,6 +1951,27 @@ pub(super) fn value_reduce_block2(
         }
         return;
     }
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() && head_width >= 8 {
+        // SAFETY: AVX2 availability is checked, and both segments are bounded
+        // by the caller to stay inside their slices.
+        unsafe {
+            value_reduce_block2_tokens_avx2(
+                values_first,
+                base_first,
+                values_second,
+                base_second,
+                n_first,
+                scores,
+                output,
+                row_stride,
+                head_offset,
+                n_tokens,
+                head_width,
+            );
+        }
+        return;
+    }
     value_reduce_block2_scalar(
         values_first,
         base_first,
@@ -1895,6 +2040,95 @@ pub(super) unsafe fn value_reduce_block2_neon(
     }
 }
 
+/// The token-outer form of [`value_reduce_block2`].
+///
+/// The block that straddles the prefix/latent boundary is still one sum: the
+/// tokens are visited in ascending order across both segments, so every
+/// dimension accumulates them in the same order as the dimension-outer form
+/// and the result is bit-identical.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe fn value_reduce_block2_tokens_avx2(
+    values_first: &[f32],
+    base_first: usize,
+    values_second: &[f32],
+    base_second: usize,
+    n_first: usize,
+    scores: &[f32],
+    output: &mut [f32],
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::x86_64::*;
+    const BLOCK: usize = 8;
+    const GROUP: usize = 4;
+    let mut dim = 0;
+    while dim + GROUP * BLOCK <= head_width {
+        // Fresh accumulators per group, and a separate multiply so the product
+        // is rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                (
+                    values_first,
+                    (base_first + token) * row_stride + head_offset + dim,
+                )
+            } else {
+                (
+                    values_second,
+                    (base_second + token - n_first) * row_stride + head_offset + dim,
+                )
+            };
+            let weight = _mm256_set1_ps(scores[token]);
+            let first = values.as_ptr().add(start);
+            acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(weight, _mm256_loadu_ps(first)));
+            acc1 = _mm256_add_ps(
+                acc1,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(BLOCK))),
+            );
+            acc2 = _mm256_add_ps(
+                acc2,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(2 * BLOCK))),
+            );
+            acc3 = _mm256_add_ps(
+                acc3,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(3 * BLOCK))),
+            );
+        }
+        let out = output.as_mut_ptr().add(dim);
+        let acc = [acc0, acc1, acc2, acc3];
+        for (index, accumulator) in acc.iter().enumerate() {
+            let target = out.add(index * BLOCK);
+            let previous = _mm256_loadu_ps(target);
+            _mm256_storeu_ps(target, _mm256_add_ps(previous, *accumulator));
+        }
+        dim += GROUP * BLOCK;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let (values, start) = if token < n_first {
+                (
+                    values_first,
+                    (base_first + token) * row_stride + head_offset + dim,
+                )
+            } else {
+                (
+                    values_second,
+                    (base_second + token - n_first) * row_stride + head_offset + dim,
+                )
+            };
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn value_reduce_block2_scalar(
     values_first: &[f32],
@@ -1949,6 +2183,27 @@ pub(super) fn value_reduce_block(
             // which the caller guarantees is within `values`.
             unsafe {
                 value_reduce_block_neon(
+                    values,
+                    scores,
+                    output,
+                    base,
+                    row_stride,
+                    head_offset,
+                    n_tokens,
+                    head_width,
+                );
+            }
+            return;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::has_avx2_fma() && head_width >= 8 && n_tokens > 0 {
+            // SAFETY: AVX2 is available per `has_avx2_fma`, and every load below
+            // is bounded by `base + n_tokens * row_stride + head_offset +
+            // head_width` which the caller guarantees is within `values`.
+            unsafe {
+                value_reduce_tokens_avx2(
                     values,
                     scores,
                     output,
@@ -2034,6 +2289,106 @@ pub(super) fn value_reduce_block_scalar(
     }
 }
 
+/// Token-outer value reduce.
+///
+/// The dimension-outer kernel walks the cache once per dimension block, so
+/// every pass steps over the positions with the full row stride and touches
+/// 32 B of every cache line. Reading the other way round -- one cached token
+/// at a time, its whole head slice in one contiguous run -- walks the memory
+/// in order.
+///
+/// The per-dimension accumulation is unchanged: every dimension still sums the
+/// tokens in ascending order, with a separate multiply and add and no FMA, so
+/// the result is bit-identical to the dimension-outer form. Only the order in
+/// which the memory is touched differs.
+pub(super) fn value_reduce_tokens_scalar(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    const MAX_WIDTH: usize = 256;
+    assert!(head_width <= MAX_WIDTH, "YuE2 head width is too wide");
+    let mut sums = [0.0f32; MAX_WIDTH];
+    for token in 0..n_tokens {
+        let weight = scores[token];
+        let start = base + token * row_stride + head_offset;
+        for dim in 0..head_width {
+            sums[dim] += weight * values[start + dim];
+        }
+    }
+    for dim in 0..head_width {
+        output[dim] += sums[dim];
+    }
+}
+
+/// The AVX2 form of [`value_reduce_tokens_scalar`].
+///
+/// The dimensions are processed in groups of four blocks so the accumulators
+/// stay in registers, and the group's 32 dims of a token are read in one run.
+pub(super) unsafe fn value_reduce_tokens_avx2(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::x86_64::*;
+    const BLOCK: usize = 8;
+    const GROUP: usize = 4;
+    let mut dim = 0;
+    while dim + GROUP * BLOCK <= head_width {
+        // Fresh accumulators per group, and a separate multiply so the product
+        // is rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            let weight = _mm256_set1_ps(scores[token]);
+            let first = values.as_ptr().add(start);
+            acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(weight, _mm256_loadu_ps(first)));
+            acc1 = _mm256_add_ps(
+                acc1,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(BLOCK))),
+            );
+            acc2 = _mm256_add_ps(
+                acc2,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(2 * BLOCK))),
+            );
+            acc3 = _mm256_add_ps(
+                acc3,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(3 * BLOCK))),
+            );
+        }
+        let out = output.as_mut_ptr().add(dim);
+        let acc = [acc0, acc1, acc2, acc3];
+        for (index, accumulator) in acc.iter().enumerate() {
+            let target = out.add(index * BLOCK);
+            let previous = _mm256_loadu_ps(target);
+            _mm256_storeu_ps(target, _mm256_add_ps(previous, *accumulator));
+        }
+        dim += GROUP * BLOCK;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
+    }
+}
+
 pub(super) fn attention_head(
     query: &[f32],
     key_cache: &[f32],
@@ -2050,15 +2405,15 @@ pub(super) fn attention_head(
     }
     if scores.len() <= 512 {
         let inverse_sum = softmax(scores);
-        // The scalar form iterated dimension-outer, so consecutive reads of
-        // `value_cache` were `kv_width` floats apart and every access landed on a
-        // fresh cache line. `value_reduce_block` walks tokens outer and the head
-        // dimension inner, which is the contiguous order, and it reproduces the
-        // original arithmetic exactly: a fresh zeroed accumulator per call, a
-        // separate multiply and add rather than an FMA, and one add into
-        // `output` at the end. This is the same kernel the NAR attention uses
-        // and it is pinned bit-exact by
-        // `nar::attention_parity_tests::optimized_attention_matches_legacy_bitwise`.
+        // The reduction must reproduce the original arithmetic exactly: a fresh
+        // zeroed accumulator per call, a separate multiply and add rather than
+        // an FMA, and one add into `output` at the end. `value_reduce_block`
+        // therefore keeps the legacy dimension-outer / token-inner order, so
+        // the per-dimension accumulation order is untouched, and vectorizes the
+        // head dimension instead, so one token read covers contiguous dims
+        // rather than a single scalar. This is the same kernel the NAR
+        // attention uses, and it is pinned bit-exact by
+        // `nar::attention_parity_tests::value_reduce_block_is_bitwise_identical_to_the_scalar_form`.
         output.fill(0.0);
         value_reduce_block(
             value_cache,
@@ -2155,6 +2510,69 @@ fn trace(name: &str, layer: Option<usize>, step: usize, shape: &[usize], values:
 mod performance_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Times the shipped `value_reduce_block` against the scalar kernel at the
+    /// production AR shape (one kv head, 128 dims, a 4 KiB row stride).
+    ///
+    /// The row stride is exactly one page, so the scalar kernel's dim-outer /
+    /// token-inner order walks one fresh page per access; that is what makes
+    /// the reduction the dominant cost of AR attention.
+    #[test]
+    #[ignore = "timing probe, run with --ignored --nocapture"]
+    fn value_reduce_block_simd_speedup_at_production_shape() {
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const KV_WIDTH: usize = KV_HEADS * HEAD_DIM;
+        for n_tokens in [512usize, 1200] {
+            let values: Vec<f32> = (0..n_tokens * KV_WIDTH)
+                .map(|index| ((index * 37 % 251) as f32 - 125.0) * 0.017)
+                .collect();
+            let scores: Vec<f32> = (0..n_tokens)
+                .map(|index| ((index * 13 % 17) as f32 - 8.0) * 0.031)
+                .collect();
+            let mut output = vec![0.0f32; HEAD_DIM];
+
+            let mut best_scalar = f64::MAX;
+            let mut best_simd = f64::MAX;
+            for _ in 0..5 {
+                let start = std::time::Instant::now();
+                for head in 0..KV_HEADS {
+                    value_reduce_block_scalar(
+                        &values,
+                        &scores,
+                        &mut output,
+                        0,
+                        KV_WIDTH,
+                        head * HEAD_DIM,
+                        n_tokens,
+                        HEAD_DIM,
+                    );
+                }
+                best_scalar = best_scalar.min(start.elapsed().as_secs_f64());
+
+                let start = std::time::Instant::now();
+                for head in 0..KV_HEADS {
+                    value_reduce_block(
+                        &values,
+                        &scores,
+                        &mut output,
+                        0,
+                        KV_WIDTH,
+                        head * HEAD_DIM,
+                        n_tokens,
+                        HEAD_DIM,
+                    );
+                }
+                best_simd = best_simd.min(start.elapsed().as_secs_f64());
+            }
+            println!(
+                "n_tokens={n_tokens:5} scalar={:8.3} ms  simd={:8.3} ms  speedup={:5.2}x",
+                best_scalar * 1e3,
+                best_simd * 1e3,
+                best_scalar / best_simd,
+            );
+        }
+    }
 
     #[cfg(feature = "vulkan")]
     #[test]
@@ -2349,9 +2767,641 @@ mod performance_tests {
         }
     }
 
+    /// Micro-benchmark of the device linear path: the submission overhead, the
+    /// BF16 dot kernel and the tiled float kernel on the shapes the NAR and the
+    /// AR use.
+    /// Measures how well the decode-shaped BF16 projection scales over the
+    /// compute pool. The AR decode is single-token, so the projection is a
+    /// GEMV and the pool is the only source of parallelism.
+    #[test]
+    #[ignore = "needs a large BF16 weight"]
+    fn cpu_bf16_gemv_pool_scaling() {
+        use std::time::Instant;
+        let cases: [(usize, usize); 4] = [(2048, 2048), (2048, 6144), (6144, 2048), (2048, 184704)];
+        for (n_in, n_out) in cases {
+            let bytes: &'static [u8] = Box::leak(vec![0x3fu8; n_in * n_out * 2].into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                #[cfg(feature = "vulkan")]
+                gpu_bf16: Default::default(),
+                n_in,
+                n_out,
+            };
+            let input = vec![0.01f32; n_in];
+            let mut output = vec![0.0f32; n_out];
+            let pool = crate::core::thread_pool::ComputePool::new(8);
+
+            let single_started = Instant::now();
+            torch_bf16_matmul_rows(bytes, &input, None, &mut output, n_in, 0);
+            let single = single_started.elapsed();
+
+            weight.matmul_bf16(&input, None, &mut output, &pool);
+            let pool_started = Instant::now();
+            for _ in 0..3 {
+                weight.matmul_bf16(&input, None, &mut output, &pool);
+            }
+            let parallel = pool_started.elapsed() / 3;
+
+            let bytes_moved = (n_in * n_out * 2) as f64;
+            eprintln!(
+                "n_in={n_in} n_out={n_out}: single={single:?} pool8={parallel:?} speedup={:.2}x \
+                 single_bw={:.1} GB/s pool_bw={:.1} GB/s",
+                single.as_secs_f64() / parallel.as_secs_f64(),
+                bytes_moved / single.as_secs_f64() / 1e9,
+                bytes_moved / parallel.as_secs_f64() / 1e9,
+            );
+        }
+    }
+
+    /// Locates the AR decode's CPU bottleneck: the single dot product, the
+    /// per-call overhead of the compute pool and the weight streaming.
+    #[test]
+    #[ignore = "timing probe"]
+    fn cpu_bf16_gemv_breakdown() {
+        use std::time::Instant;
+        let n_in = 2048usize;
+        let n_out = 2048usize;
+        let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+        let input = vec![0.01f32; n_in];
+
+        eprintln!(
+            "has_avx2_fma={} scalar_mode={} detected_avx2={} detected_fma={}",
+            crate::ops::has_avx2_fma(),
+            crate::ops::scalar_mode(),
+            is_x86_feature_detected!("avx2"),
+            is_x86_feature_detected!("fma"),
+        );
+
+        // One dot product, warm. The weight bytes decide whether the FMA
+        // stays on the fast path: -0.0 weights keep the accumulator at
+        // zero, and the timing below compares that against a normal weight.
+        let mut probe = 0.0f32;
+        for (label, weight_byte) in [("neg-zero", 0x80u8), ("normal", 0x3fu8)] {
+            let mut local = bytes.to_vec();
+            local[..n_in * 2].fill(weight_byte);
+            let dot_started = Instant::now();
+            for _ in 0..1000 {
+                probe += crate::ops::dot_bf16_f32(&input, &local[..n_in * 2], n_in);
+            }
+            let dot_each = dot_started.elapsed() / 1000;
+            eprintln!(
+                "dot_bf16_f32(n_in={n_in}) {label}: {dot_each:?} ({:.2} G elem/s) probe={probe}",
+                n_in as f64 / dot_each.as_secs_f64() / 1e9
+            );
+        }
+
+        // The pool barrier alone.
+        let pool = crate::core::thread_pool::ComputePool::new(8);
+        let barrier_started = Instant::now();
+        for _ in 0..1000 {
+            pool.compute(|_, _| {});
+        }
+        let barrier_each = barrier_started.elapsed() / 1000;
+        eprintln!("pool.compute(empty) barrier: {barrier_each:?}");
+
+        // The same work split over the pool.
+        let mut output = vec![0.0f32; n_out];
+        let rows_started = Instant::now();
+        for _ in 0..20 {
+            torch_bf16_matmul_rows(bytes, &input, None, &mut output, n_in, 0);
+        }
+        let rows_each = rows_started.elapsed() / 20;
+        eprintln!(
+            "torch_bf16_matmul_rows(n_out={n_out}): {rows_each:?} -> {:.1} ns/dot",
+            rows_each.as_secs_f64() * 1e9 / n_out as f64
+        );
+    }
+
+    /// Breaks the AR attention cost down into its two halves: the score dot
+    /// per cached position and the weighted value reduction.
+    ///
+    /// The AR decode runs one token at a time, so the attention walks the
+    /// whole KV cache for every token. This probe reports how much of that
+    /// walk is the score dot and how much is the value reduction, so a
+    /// change targets the part that actually costs.
+    #[test]
+    #[ignore = "timing probe"]
+    fn ar_attention_cost_split() {
+        use std::time::Instant;
+        let head_dim = 128usize;
+        let kv_heads = 8usize;
+        let q_heads = 16usize;
+        let kv_width = kv_heads * head_dim;
+        // The semantic phase decodes with the 888-token prefix plus the
+        // generated tokens, so the KV walk grows to about 1200 positions.
+        for positions in [256usize, 1200] {
+            let key: Vec<f32> = (0..positions * kv_width)
+                .map(|i| (i % 251) as f32 * 0.001)
+                .collect();
+            let value: Vec<f32> = (0..positions * kv_width)
+                .map(|i| (i % 97) as f32 * 0.002)
+                .collect();
+            let query: Vec<f32> = (0..head_dim).map(|i| (i % 13) as f32 * 0.01).collect();
+            let mut scores = vec![0.0f32; positions];
+            let mut output = vec![0.0f32; head_dim];
+
+            // Score half: one dot per cached position, per head.
+            let score_started = Instant::now();
+            let mut sink = 0.0f32;
+            for head in 0..q_heads {
+                let kv_start = (head / 2) * head_dim;
+                for (position, score) in scores.iter_mut().enumerate() {
+                    let key_start = position * kv_width + kv_start;
+                    *score = dot(&query, &key[key_start..key_start + head_dim]);
+                }
+                sink += scores[0];
+            }
+            let score_each = score_started.elapsed();
+
+            // Value half: the weighted reduction over the same positions.
+            let value_started = Instant::now();
+            for head in 0..q_heads {
+                let kv_start = (head / 2) * head_dim;
+                output.fill(0.0);
+                value_reduce_block(
+                    &value,
+                    &scores,
+                    &mut output,
+                    0,
+                    kv_width,
+                    kv_start,
+                    positions,
+                    head_dim,
+                );
+            }
+            let value_each = value_started.elapsed();
+
+            eprintln!(
+                "positions={positions}: score={:?} value={:?} total={:?} sink={sink:.4}",
+                score_each,
+                value_each,
+                score_each + value_each,
+            );
+        }
+    }
+
+    /// How the SIMD speedup of the value reduction depends on how much of the
+    /// KV cache is resident.
+    ///
+    /// The AR decode cycles through every layer's KV cache once per generated
+    /// token, so by the time it returns to a layer the cache has been evicted
+    /// and the reduction reads from DRAM. This probe grows the number of layers
+    /// -- and with it the working set -- to see whether the kernel's speedup
+    /// survives that.
+    ///
+    /// Each variant gets its own buffer so neither one warms the other's
+    /// cache before it is measured.
+    #[test]
+    #[ignore = "timing probe, run with --ignored --nocapture"]
+    fn value_reduce_speedup_against_the_kv_working_set() {
+        use std::time::Instant;
+        const KV_HEADS: usize = 8;
+        const HEAD_DIM: usize = 128;
+        const KV_WIDTH: usize = KV_HEADS * HEAD_DIM;
+        const Q_HEADS: usize = 16;
+        const POSITIONS: usize = 900;
+        for layers in [1usize, 2, 4, 8, 16, 28] {
+            let total = layers * POSITIONS * KV_WIDTH;
+            let scalar_buffer: Vec<f32> = (0..total).map(|i| (i % 251) as f32 * 0.002).collect();
+            let simd_buffer: Vec<f32> = (0..total).map(|i| (i % 251) as f32 * 0.002).collect();
+            let scores: Vec<f32> = (0..POSITIONS).map(|i| (i % 97) as f32 * 0.01).collect();
+            let mut output = vec![0.0f32; HEAD_DIM];
+            let mut best_scalar = f64::MAX;
+            let mut best_simd = f64::MAX;
+            for _ in 0..3 {
+                let started = Instant::now();
+                for layer in 0..layers {
+                    let base = layer * POSITIONS * KV_WIDTH;
+                    for head in 0..Q_HEADS {
+                        let kv_start = (head / 2) * HEAD_DIM;
+                        value_reduce_block_scalar(
+                            &scalar_buffer[base..],
+                            &scores,
+                            &mut output,
+                            0,
+                            KV_WIDTH,
+                            kv_start,
+                            POSITIONS,
+                            HEAD_DIM,
+                        );
+                    }
+                }
+                best_scalar = best_scalar.min(started.elapsed().as_secs_f64());
+
+                let started = Instant::now();
+                for layer in 0..layers {
+                    let base = layer * POSITIONS * KV_WIDTH;
+                    for head in 0..Q_HEADS {
+                        let kv_start = (head / 2) * HEAD_DIM;
+                        value_reduce_block(
+                            &simd_buffer[base..],
+                            &scores,
+                            &mut output,
+                            0,
+                            KV_WIDTH,
+                            kv_start,
+                            POSITIONS,
+                            HEAD_DIM,
+                        );
+                    }
+                }
+                best_simd = best_simd.min(started.elapsed().as_secs_f64());
+            }
+            let megabytes = (total * 4) as f64 / (1024.0 * 1024.0);
+            let bytes_read = (layers * Q_HEADS * POSITIONS * HEAD_DIM * 4) as f64;
+            // The ceiling this core can stream at: the same bytes, read once,
+            // with no reduction. Nothing the kernel does can beat this.
+            let mut best_stream = f64::MAX;
+            for _ in 0..3 {
+                let started = Instant::now();
+                let mut sink = 0.0f32;
+                for value in &simd_buffer {
+                    sink += *value;
+                }
+                std::hint::black_box(sink);
+                best_stream = best_stream.min(started.elapsed().as_secs_f64());
+            }
+            let stream_bytes = (total * 4) as f64;
+            eprintln!(
+                "layers={layers:3} working_set={megabytes:7.1} MB  scalar={:8.3}s \
+                 ({:5.2} GB/s)  simd={:8.3}s ({:5.2} GB/s)  speedup={:5.2}x  \
+                 stream_read={:5.2} GB/s",
+                best_scalar,
+                bytes_read / best_scalar / 1e9,
+                best_simd,
+                bytes_read / best_simd / 1e9,
+                best_scalar / best_simd,
+                stream_bytes / best_stream / 1e9,
+            );
+        }
+    }
+
+    /// Micro-benchmark of the device linear path: the submission overhead, the
+    /// BF16 dot kernel and the tiled float kernel on the shapes the NAR and the
+    /// AR use.
     #[cfg(feature = "vulkan")]
     #[test]
-    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    #[ignore = "requires a Vulkan device; times the device linear path per shape"]
+    fn vulkan_linear_shape_costs() {
+        use std::time::Instant;
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let cases: [(usize, usize, usize); 5] = [
+            (64, 64, 4),
+            (2048, 2048, 256),
+            (2048, 2048, 1),
+            (2048, 184704, 1),
+            (2048, 184704, 4),
+        ];
+        for (n_in, n_out, rows) in cases {
+            let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                gpu_bf16: Default::default(),
+                n_in,
+                n_out,
+            };
+            let input = vec![0.01f32; rows * n_in];
+            let mut output = vec![0.0f32; rows * n_out];
+            for (label, format, mode) in [
+                (
+                    "bf16-dot",
+                    crate::vulkan::ops::GpuWeightFormat::BF16,
+                    crate::vulkan::ops::GpuMatmulMode::Dot,
+                ),
+                (
+                    "bf16-prepared",
+                    crate::vulkan::ops::GpuWeightFormat::BF16,
+                    crate::vulkan::ops::GpuMatmulMode::Prepared,
+                ),
+                (
+                    "f16-prepared",
+                    crate::vulkan::ops::GpuWeightFormat::F16,
+                    crate::vulkan::ops::GpuMatmulMode::Prepared,
+                ),
+            ] {
+                let spec = format.with_mode(mode);
+                if !weight
+                    .gpu_bf16
+                    .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, rows)
+                {
+                    eprintln!("n_in={n_in} n_out={n_out} rows={rows} {label}: declined");
+                    continue;
+                }
+                // The CPU reference for the same shape.
+                let pool = crate::core::thread_pool::ComputePool::new(8);
+                let mut cpu = vec![0.0f32; rows * n_out];
+                weight.matmul_bf16(&input, None, &mut cpu, &pool);
+                let cpu_started = Instant::now();
+                for _ in 0..5 {
+                    weight.matmul_bf16(&input, None, &mut cpu, &pool);
+                }
+                let cpu_each = cpu_started.elapsed() / 5;
+                let calls = 20u32;
+                let started = Instant::now();
+                for _ in 0..calls {
+                    weight
+                        .gpu_bf16
+                        .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, rows);
+                }
+                let each = started.elapsed() / calls;
+                let macs = (n_in * n_out * rows) as f64;
+                eprintln!(
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: {each:?} ({:.2} GFLOP/s) cpu={cpu_each:?}",
+                    2.0 * macs / each.as_secs_f64() / 1e9
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; checks the grouped BF16 projections against the CPU kernel"]
+    fn vulkan_bf16_group_projection_matches_the_cpu_kernel() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = crate::core::thread_pool::ComputePool::new(4);
+        let n_in = 256usize;
+        let rows = 40usize;
+        // The NAR projects q, k and v in one submission and their widths
+        // differ, so the group has to keep the per-slot width.
+        for widths in [[1024usize, 1024, 1024], [1024, 256, 256]] {
+            let mut state = 0x9e37_79b9u32;
+            let mut weights: Vec<&'static [u8]> = Vec::new();
+            for width in widths {
+                let mut bytes = vec![0u8; n_in * width * 2];
+                for chunk in bytes.chunks_exact_mut(2) {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let bits = ((state >> 17) & 0x3f) | 0x3c00;
+                    chunk[0] = (bits & 0xff) as u8;
+                    chunk[1] = (bits >> 8) as u8;
+                }
+                weights.push(Box::leak(bytes.into_boxed_slice()));
+            }
+            let input: Vec<f32> = (0..rows * n_in)
+                .map(|index| ((index % 23) as f32 - 11.0) / 16.0)
+                .collect();
+            let spec = crate::vulkan::ops::GpuWeightFormat::BF16
+                .with_mode(crate::vulkan::ops::GpuMatmulMode::Prepared);
+            let runtime = crate::vulkan::ops::BatchedLinearRuntime::with_output_slots(
+                context,
+                64,
+                n_in,
+                widths.iter().copied().max().unwrap(),
+                16,
+                3,
+            )
+            .expect("group runtime");
+            let mut out0 = vec![0.0f32; rows * widths[0]];
+            let mut out1 = vec![0.0f32; rows * widths[1]];
+            let mut out2 = vec![0.0f32; rows * widths[2]];
+            {
+                let mut slots: [&mut [f32]; 3] = [
+                    out0.as_mut_slice(),
+                    out1.as_mut_slice(),
+                    out2.as_mut_slice(),
+                ];
+                let mut runtime = runtime;
+                runtime
+                    .matmul_rows_group(
+                        &[
+                            (weights[0], spec, n_in, widths[0]),
+                            (weights[1], spec, n_in, widths[1]),
+                            (weights[2], spec, n_in, widths[2]),
+                        ],
+                        &input,
+                        rows,
+                        &mut slots,
+                    )
+                    .expect("group matmul");
+            }
+            let outputs = [out0, out1, out2];
+            for slot in 0..3usize {
+                let width = widths[slot];
+                let mut cpu = vec![0.0f32; rows * width];
+                let weight = YuE2Weight {
+                    fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                        weights[slot],
+                        GGMLType::BF16,
+                        n_in,
+                        width,
+                    )),
+                    bf16: Some(weights[slot]),
+                    gpu_bf16: Default::default(),
+                    n_in,
+                    n_out: width,
+                };
+                weight.matmul_bf16(&input, None, &mut cpu, &pool);
+                let scale = cpu.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+                let worst = cpu
+                    .iter()
+                    .zip(outputs[slot].iter())
+                    .fold(0.0f32, |acc, (want, got)| acc.max((want - got).abs()));
+                eprintln!(
+                    "group widths={widths:?} slot={slot} width={width} scale={scale:.6} max_abs={worst:.6}"
+                );
+                assert!(
+                    worst <= scale * 1e-2 + 1e-3,
+                    "group slot {slot} differs from the CPU kernel: max_abs={worst} scale={scale}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; checks the BF16 device projections against the CPU kernel"]
+    fn vulkan_bf16_projection_matches_the_cpu_kernel() {
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = crate::core::thread_pool::ComputePool::new(4);
+        for (n_in, n_out, rows) in [
+            (64usize, 128usize, 40usize),
+            (256, 512, 96),
+            (2048, 2048, 100),
+            (2048, 6144, 40),
+            (2048, 6144, 100),
+            (2048, 2048, 258),
+            (2048, 6144, 888),
+        ] {
+            let mut state = 0x1234_5678u32;
+            let mut bytes = vec![0u8; n_in * n_out * 2];
+            for chunk in bytes.chunks_exact_mut(2) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                // A finite BF16 pattern with a few mantissa bits set.
+                let bits = ((state >> 17) & 0x3f) | 0x3c00;
+                chunk[0] = (bits & 0xff) as u8;
+                chunk[1] = (bits >> 8) as u8;
+            }
+            let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            let weight = YuE2Weight {
+                fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    GGMLType::BF16,
+                    n_in,
+                    n_out,
+                )),
+                bf16: Some(bytes),
+                gpu_bf16: Default::default(),
+                n_in,
+                n_out,
+            };
+            let input: Vec<f32> = (0..rows * n_in)
+                .map(|index| ((index % 23) as f32 - 11.0) / 16.0)
+                .collect();
+            let mut cpu = vec![0.0f32; rows * n_out];
+            weight.matmul_bf16(&input, None, &mut cpu, &pool);
+            for (label, mode) in [
+                ("dot", crate::vulkan::ops::GpuMatmulMode::Dot),
+                ("prepared", crate::vulkan::ops::GpuMatmulMode::Prepared),
+            ] {
+                let mut device = vec![0.0f32; rows * n_out];
+                let accepted = weight.gpu_bf16.try_matmul(
+                    bytes,
+                    crate::vulkan::ops::GpuWeightFormat::BF16.with_mode(mode),
+                    &input,
+                    &mut device,
+                    n_in,
+                    n_out,
+                    rows,
+                );
+                if !accepted {
+                    eprintln!("n_in={n_in} n_out={n_out} rows={rows} {label}: declined");
+                    continue;
+                }
+                let mut worst = 0.0f32;
+                let mut worst_ratio = 0.0f32;
+                for (index, (want, got)) in cpu.iter().zip(device.iter()).enumerate() {
+                    let difference = (want - got).abs();
+                    let ratio = difference / want.abs().max(1e-6);
+                    if difference > worst {
+                        worst = difference;
+                    }
+                    if ratio > worst_ratio {
+                        worst_ratio = ratio;
+                    }
+                    if index < 3 {
+                        eprintln!(
+                            "n_in={n_in} n_out={n_out} rows={rows} {label} out[{index}] cpu={want} device={got}"
+                        );
+                    }
+                }
+                eprintln!(
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: max_abs={worst:.6} max_rel={worst_ratio:.6}"
+                );
+                // The CPU kernel rounds its output to BF16, so compare
+                // against the magnitude of the whole row instead of each
+                // element: a single element can be near zero.
+                let scale = cpu.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+                eprintln!(
+                    "n_in={n_in} n_out={n_out} rows={rows} {label}: scale={scale:.6} max_rel={worst_ratio:.6}"
+                );
+                assert!(
+                    worst <= scale * 1e-2 + 1e-3,
+                    "{label} projection differs from the CPU kernel: max_abs={worst} scale={scale}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; times the lm_head projection and its host post-processing"]
+    fn vulkan_lm_head_per_call_cost() {
+        use std::time::Instant;
+        crate::ops::enable_gpu();
+        let _context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let n_in = 2048usize;
+        let n_out = 184704usize;
+        let bytes: &'static [u8] = Box::leak(vec![0x80u8; n_in * n_out * 2].into_boxed_slice());
+        let weight = YuE2Weight {
+            fast: Weight::from_quantized(QuantizedTensor::from_bytes(
+                bytes,
+                GGMLType::BF16,
+                n_in,
+                n_out,
+            )),
+            bf16: Some(bytes),
+            gpu_bf16: Default::default(),
+            n_in,
+            n_out,
+        };
+        let input = vec![0.01f32; n_in];
+        let mut output = vec![0.0f32; n_out];
+        let spec = crate::vulkan::ops::GpuWeightFormat::BF16
+            .with_mode(crate::vulkan::ops::GpuMatmulMode::Dot);
+        assert!(
+            weight
+                .gpu_bf16
+                .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, 1),
+            "device declined"
+        );
+        let calls = 60u32;
+        for rows in [1u32, 2, 4, 8, 16, 32, 64] {
+            let input: Vec<f32> = (0..rows as usize * n_in)
+                .map(|index| ((index * 5) % 13) as f32 / 13.0 - 0.5)
+                .collect();
+            let mut output = vec![0.0f32; rows as usize * n_out];
+            assert!(weight.gpu_bf16.try_matmul(
+                bytes,
+                spec,
+                &input,
+                &mut output,
+                n_in,
+                n_out,
+                rows as usize
+            ));
+            let started = Instant::now();
+            for _ in 0..calls {
+                weight.gpu_bf16.try_matmul(
+                    bytes,
+                    spec,
+                    &input,
+                    &mut output,
+                    n_in,
+                    n_out,
+                    rows as usize,
+                );
+            }
+            eprintln!("rows={rows}: device {:?}", started.elapsed() / calls);
+        }
+        let calls = 200u32;
+        let started = Instant::now();
+        for _ in 0..calls {
+            weight
+                .gpu_bf16
+                .try_matmul(bytes, spec, &input, &mut output, n_in, n_out, 1);
+        }
+        let device = started.elapsed() / calls;
+        let bias = [0.001953125f32, -0.001953125f32];
+        let started = Instant::now();
+        for _ in 0..calls {
+            for row in output.chunks_exact_mut(n_out) {
+                for (column, value) in row.iter_mut().enumerate() {
+                    let sum = *value + bias[column % 2];
+                    *value = half::bf16::from_f32(sum).to_f32();
+                }
+            }
+        }
+        let host = started.elapsed() / calls;
+        eprintln!("lm_head n_out={n_out}: device call {device:?}, host bias+bf16 {host:?}");
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device and RUST_GPU_MIN_OUTPUTS=0: the shapes below are smaller than the default 16K output threshold, so the device declines them unless the threshold is lowered"]
     fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
