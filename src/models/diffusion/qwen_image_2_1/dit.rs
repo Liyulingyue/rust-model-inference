@@ -216,7 +216,8 @@ impl QwenImage21Dit {
     ) -> Result<(), String> {
         match self.source.tensor_info(name).map(|info| info.ggml_type) {
             Some(GGMLType::BF16) => self.bf16_linear(name, n_in, n_out, input, output),
-            _ => self.linear(name, n_in, n_out, input, output),
+            Some(GGMLType::F32) => self.f32_linear(name, n_in, n_out, input, output),
+            _ => self.q8_linear(name, n_in, n_out, input, output),
         }
     }
 
@@ -328,6 +329,18 @@ impl QwenImage21Dit {
             .chunks_exact(2)
             .map(|pair| crate::ops::bf16_to_f32(u16::from_le_bytes([pair[0], pair[1]])))
             .collect())
+    }
+
+    /// A vector whose storage format the tensor decides.
+    ///
+    /// The published weights are not uniform: every norm weight in the
+    /// file is BF16 while the block projections are Q8_0. The format comes
+    /// from the tensor rather than from the call site.
+    fn vector(&self, name: &str, len: usize) -> Result<Vec<f32>, String> {
+        match self.source.tensor_info(name).map(|info| info.ggml_type) {
+            Some(GGMLType::BF16) => self.bf16_vector_widened(name, len),
+            _ => self.f32_vector(name, len),
+        }
     }
 
     /// Single forward: velocity prediction for one latent, traced at the same
@@ -530,7 +543,7 @@ impl QwenImage21Dit {
         report("qwen.joint_final", &[hidden, image_rows], joint_final);
 
         let mut scale = vec![0.0f32; hidden];
-        self.f32_linear(
+        self.linear(
             &format!("{PREFIX}.norm_out.linear.weight"),
             hidden,
             hidden,
@@ -598,7 +611,7 @@ impl QwenImage21Dit {
         let tokens = context.len() / hidden;
         // Zero-center RMSNorm: the weight participates as (w + 1).
         let norm_weight: Vec<f32> = self
-            .bf16_vector_widened(&format!("{PREFIX}.txt_in.text_norm.weight"), hidden)?
+            .vector(&format!("{PREFIX}.txt_in.text_norm.weight"), hidden)?
             .iter()
             .map(|value| value + 1.0)
             .collect();
@@ -718,8 +731,8 @@ impl QwenImage21Dit {
             &mut v,
         )?;
 
-        let norm_q = self.f32_vector(&format!("{prefix}.attn.norm_q.weight"), head_dim)?;
-        let norm_k = self.f32_vector(&format!("{prefix}.attn.norm_k.weight"), head_dim)?;
+        let norm_q = self.vector(&format!("{prefix}.attn.norm_q.weight"), head_dim)?;
+        let norm_k = self.vector(&format!("{prefix}.attn.norm_k.weight"), head_dim)?;
         for token in 0..seq {
             for head in 0..heads {
                 let base = token * hidden + head * head_dim;

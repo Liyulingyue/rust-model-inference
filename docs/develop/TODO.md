@@ -5462,3 +5462,71 @@ qwen3 塔是这一族里剩下的那个例外 ✓✓。
 **关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
 `src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
 `src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
+
+### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
+
+**状态**：⚠️ 部分完成（2026-11-16）。设备路径能跑、能出图、能复现；与 CPU 的数值差异
+和那个偶发的首轮差异待定位。
+
+**发布权重是混合格式**：Q8_0 的 DiT GGUF 一共 265 个张量 = 192 个 Q8_0 + 73 个 BF16。
+
+- **Q8_0**：每个 block 的 `attn.to_q/to_k/to_v/to_out.0`、`img_mlp.gate_up`、
+  `img_mlp.out`。
+- **BF16**：`img_in`、`modulation.1`、`norm_out.linear`、`proj_out`、
+  `time_text_embed.timestep_embedder.linear_1/2`、`txt_in.in_layer`、
+  `txt_in.out_layer`。
+- **全部 65 个一维 norm 向量也是 BF16**：每个 block 的 `attn.norm_q.weight` 与
+  `attn.norm_k.weight`，加上 `txt_in.text_norm.weight`。
+
+⇒ 加载器原来把「二维矩阵」和「一维向量」分成两条路，**两条都硬编码了格式** ✓✓：
+一维向量按 F32 读（长度对不上 ⇒ `Invalid ... weight length` ✓✓），
+`norm_out.linear` 按 F32 读（切片越界 panic ✓✓）。
+
+⇒ 现在**格式由张量自己声明**（`tensor_info().ggml_type` ✓✓），调用点不再假设格式 ✓✓。
+
+**分派器自己写错过一次** ✓✓：把 14 个 `q8_linear` 调用点换成按 dtype 分派的 `linear()`
+时，分派器的默认分支写成了 `self.linear(...)` ⇒ **无限自递归** ✓✓。release 构建把尾递归
+优化成了循环 ⇒ **模型永远出不来**（单核 100% 死转，30 分钟无输出 ✓✓）。
+`rustc` 的 `unconditional_recursion` lint 报了，但淹没在 148 条 warning 里 ✓✓。
+
+**实测**（128×128 / 2 步 / CFG 4 / seed 42 / 16 线程 ✓✓）：
+
+| 路径 | 时间 | 复现性 |
+|---|---|---|
+| CPU | 22 s | 4/4 逐位相同 ✓✓ |
+| 设备（`--gpu`） | 15 s | 4/4 逐位相同 ✓✓ |
+
+CPU 与设备的 PNG 差异 PSNR **36.30 dB**（max_abs 57/255 ✓✓）。2 步规格下这个差异比
+LongCat 的 44.09 dB 低一档、比 Z-Image 的 49.7 dB 低两档 ✓✓。
+
+**仍未定位的两件事**：
+
+1. **偶发的首轮差异** ⚠️ ⚠️：换了二进制之后的**头一两轮**跑出来的 PNG 与之后的不一样
+   （`261e954d` vs `d3b846d3` ✓✓），之后就 4/4 逐位相同 ✓✓；加满 CPU 负载也复现不出来 ✓✓。
+   单线程、2 / 4 / 16 线程的结果都与「稳定值」一致 ⇒ **与线程数无关** ✓✓。
+   **用固定的 `--qwen-context-file` 绕过文本编码器后两次逐位相同** ✓✓ ⇒ 差异来自
+   **Qwen3-VL 的文本编码器** ✓✓，不是 DiT、不是 VAE、不是采样 ✓✓。
+
+   ⇒ Qwen3-VL 的文本编码器在多线程下偶发不可复现 ⇒ 这是**共享代码**的问题
+   （`src/models/qwen3/trunk/` ✓✓），**不是本 PR 引入的**
+   （`git diff origin/main -- src/models/qwen3/trunk/` 为空 ✓✓）。
+
+2. **设备与 CPU 的 36.30 dB 差异** ⚠️：设备路径的 Q8_0 投影把激活量化到 int8 ✓✓，
+   BF16 投影用 `RoundedBf16` 模式在设备上做 f32 累加 ✓✓，而 CPU 的 BF16 路径是 f64
+   累加 ✓✓ ⇒ **数值契约不同** ✓✓。哪一条占主导没有量 ✓✓。
+
+**方向**（未定）：
+
+1. 给 Qwen3-VL 的文本编码器补一条「同 seed 连跑逐位相同」的门禁 ✓✓，再定位那个偶发差异
+   （先怀疑线程池的归约顺序与 KV cache 的写入顺序 ✓✓）。
+2. 设备路径的数值对齐按仓库既有做法：设备对齐用 `RMI_SCALAR=1` ✓✓，或者把 CPU 的
+   BF16 累加也降到 f32 ✓✓。
+
+**验收**：Qwen-Image-2.1 基础版在 128×128 / 2 步下，CPU 连跑 3 次逐位相同 ✓✓、
+设备连跑 3 次逐位相同 ✓✓，且 PSNR 与同规格的 Turbo 水平相当 ✓✓。
+
+**关联**：`src/models/diffusion/qwen_image_2_1/dit.rs`（`linear()` / `vector()` 的 dtype
+分派 ✓✓）、`src/models/diffusion/qwen_image_2_1/mod.rs`（`PrefixedSource` ✓✓、类型集合
+校验 ✓✓）、`src/models/qwen3/trunk/`（文本编码器的复现性，待定位 ✓✓）、
+[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)（同一套「按权重量化
+格式选后端」的结论 ✓✓）。
