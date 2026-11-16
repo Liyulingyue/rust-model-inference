@@ -123,6 +123,27 @@ pub fn matmul_q8_0_quantized_batched_range(
     }
     #[cfg(target_arch = "aarch64")]
     if has_neon() && n_rows >= 2 {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            // SAFETY: dotprod is available (runtime probe); the kernel reads
+            // the weight rows and the activation rows and writes
+            // `n_rows * n_out` outputs. Its values are the plain NEON
+            // kernel's -- the integer dot is exact and the float chain is
+            // the same.
+            unsafe {
+                neon::matmul_q8_0_vs_q8_0_neon_batched_dotprod(
+                    weight,
+                    input_q8,
+                    input_scales,
+                    output,
+                    n_in,
+                    n_out,
+                    n_rows,
+                    row_start,
+                    row_end,
+                );
+            }
+            return;
+        }
         // SAFETY: NEON is available (runtime probe); the kernel reads the
         // weight rows and the activation rows and writes `n_rows * n_out`
         // outputs.
