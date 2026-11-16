@@ -13,6 +13,25 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
+- [ ] **YuE2 AR 的 KV cache 布局：换布局比换内核更值钱（实测 4.84x，逐位一致）** —
+      2026-11-16 实测：value reduce 换成 AVX2 后（`e10a8e66`），按 KV buffer 的**物理**
+      字节算只跑到约 3.0 GB/s，离内存带宽还很远——瓶颈是**访存模式**而不是带宽：KV 布局
+      是 `[layer][position][kv_head][dim]`，扫一个 kv head 时步长 4 KiB、每行只用 512 B，
+      而内核是 dim-outer 的（每个 32 B 的 dim block 单独重走一遍 4 KiB 步长）。用真实
+      内核实测三种布局：现状 34.5 ms → 转置 `[kv_head][position][dim]` 14.6 ms（2.36x）
+      → 转置 + token-outer（16 个独立累加器）7.1 ms（**4.84x**）；两种改法都逐位一致
+      （每个 dim 内的 token 顺序不变）。改动面：AR 的 KV 写入/读取、score 与 reduce
+      两条路径、`commit_kv_shadow`、NAR 的 `prefix_kv`。
+      ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
+      "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
+- [ ] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（远大于 VAE 那 1 个档位）** —
+      2026-11-16 实测：同一提示词下 `--compute cpu` 与 `--compute vulkan` 的输出有
+      98.73% 采样不同（max 10512/32767、rms 358.7，可闻）。原因：设备路径下 AR 的
+      **prefill** 走设备（`prefill_on_gpu`），设备端 attention 的累加顺序与 CPU 不同，
+      KV 出现微小差异后 token 就分叉、后面整条链路都不同。VAE 解码阶段本身只差 ≤1 个
+      PCM16 档位（`vae_conv_device_matches_the_cpu_kernel` 在 L20 上通过），但**整链**
+      的差异要大得多。要让设备路径与 CPU 互认，得先定"设备 AR 的数值容差"怎么定
+      （或者把 prefill 也留在 CPU）。
 - [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
       2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
       整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
