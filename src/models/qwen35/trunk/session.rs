@@ -596,11 +596,11 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
 
         let embeddings = self.embed_tokens(&batch)?;
         let processed_before = self.processed_tokens;
-        // Capture the recurrent layers' inputs: a rollback replays only
+        // Capture the recurrent layers' projections: a rollback replays only
         // those layers instead of the whole model.
         self.prepare_recurrent_capture(batch.len());
         let last_logits = self.step(&embeddings, batch.len(), &positions)?;
-        self.scratch.capture_recurrent_inputs = false;
+        self.scratch.capture_recurrent_replay = false;
 
         // The target's own continuation: the logits of row `i` say what the
         // target would produce at the position of draft `i`.
@@ -684,25 +684,30 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         })
     }
 
-    /// Prepare the capture of the recurrent layers' inputs.
+    /// Prepare the capture of the recurrent layers' projections.
     ///
     /// The capture is what lets a rollback replay the recurrent layers
     /// alone: their state is a function of the incoming state and their
-    /// input, and the inputs of the verification batch are the ones the
-    /// forward actually used.
+    /// projected rows, and the rows of the verification batch are the ones
+    /// the forward actually used.
     fn prepare_recurrent_capture(&mut self, n_rows: usize) {
-        let n_embd = self.model.trunk().config.n_embd;
-        let n_layer = self.model.trunk().config.n_layer_impl();
-        let width = n_rows * n_embd;
-        let inputs = &mut self.scratch.recurrent_inputs;
-        if inputs.len() < n_layer {
-            inputs.resize_with(n_layer, Vec::new);
+        let cfg = &self.model.trunk().config;
+        let n_layer = cfg.n_layer_impl();
+        let qkv_width = n_rows * cfg.conv_dim();
+        let head_width = n_rows * cfg.ssm_dt_rank;
+        let slots = &mut self.scratch.recurrent_replay;
+        if slots.len() < n_layer {
+            slots.resize_with(n_layer, Default::default);
         }
-        for slot in inputs.iter_mut().take(n_layer) {
-            slot.clear();
-            slot.reserve(width);
+        for slot in slots.iter_mut().take(n_layer) {
+            slot.qkv.clear();
+            slot.beta.clear();
+            slot.alpha.clear();
+            slot.qkv.reserve(qkv_width);
+            slot.beta.reserve(head_width);
+            slot.alpha.reserve(head_width);
         }
-        self.scratch.capture_recurrent_inputs = true;
+        self.scratch.capture_recurrent_replay = true;
     }
 
     /// Save the recurrent state so a rejected draft can be undone.
