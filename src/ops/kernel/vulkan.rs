@@ -1833,6 +1833,9 @@ impl Kernel for VulkanKernel<'_> {
     fn scalar_q4_0_bytes(&self) -> Option<&[u8]> {
         self.inner.scalar_q4_0_bytes()
     }
+    fn batchable_q8_0_bytes(&self) -> Option<&[u8]> {
+        self.inner.batchable_q8_0_bytes()
+    }
 
     fn forward_prequantized(
         &self,

@@ -44,6 +44,73 @@ pub unsafe fn dot_i8x32_lanes_neon(a: *const u8, b: *const u8) -> std::arch::aar
     vaddq_s32(dot16(a0, b0), dot16(a1, b1))
 }
 
+/// The number of activation rows one weight read serves.
+///
+/// The tile's activations have to stay in cache while the weight row is
+/// swept: the activation bytes are re-read for every output column, so
+/// they are the ones that want to be cached, not the weight.
+pub const BATCH_TILE: usize = 8;
+
+/// NEON Q8_0 × Q8_0 matmul over a batch of activation rows.
+///
+/// The weight row is read once and used by every activation row, so a batch
+/// of R rows costs one weight read instead of R. That is the difference
+/// between a batched forward pass and a token-at-a-time one: the weights
+/// are the bulk of the traffic, and reading them once per activation row
+/// makes a batch as expensive as that many single-token passes.
+///
+/// The arithmetic per row is the one of [`matmul_q8_0_vs_q8_0_neon`]: the same
+/// per-block dot and the same fused multiply-add chain, in the same block
+/// order. The results are therefore bit-for-bit the same as the per-row
+/// kernel's -- only the weight reads are shared.
+#[target_feature(enable = "neon")]
+pub unsafe fn matmul_q8_0_vs_q8_0_neon_batched(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    n_rows: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    let blocks = n_in / 32;
+    let stride = blocks * 34;
+    // The activation scales are stored one row per `div_ceil(32)` blocks,
+    // like the prepared-rows buffer holds them.
+    let scale_stride = n_in.div_ceil(32);
+    let mut tile_row = 0;
+    while tile_row < n_rows {
+        // The last tile may be short: it shares the weight read just the
+        // same, it just serves fewer activation rows.
+        let tile_len = (n_rows - tile_row).min(BATCH_TILE);
+        // The tile's activations stay in cache while the weight is swept.
+        for w in row_start..row_end {
+            let weight_row = weight.as_ptr().add(w * stride);
+            let mut sums = [0.0f32; BATCH_TILE];
+            for block in 0..blocks {
+                let woff = block * 34;
+                let wd = f16_to_f32(u16::from_le_bytes([
+                    *weight_row.add(woff),
+                    *weight_row.add(woff + 1),
+                ]));
+                let wq = weight_row.add(woff + 2);
+                for t in 0..tile_len {
+                    let r = tile_row + t;
+                    let dot = dot_i8x32_neon(wq, input_q8.as_ptr().add(r * n_in + block * 32));
+                    let scale = wd * *input_scales.get_unchecked(r * scale_stride + block);
+                    sums[t] = (dot as f32).mul_add(scale, sums[t]);
+                }
+            }
+            for t in 0..tile_len {
+                *output.get_unchecked_mut((tile_row + t) * n_out + w) = sums[t];
+            }
+        }
+        tile_row += BATCH_TILE;
+    }
+}
+
 /// NEON Q8_0 × Q8_0 matmul over a row range.
 #[target_feature(enable = "neon")]
 pub unsafe fn matmul_q8_0_vs_q8_0_neon(
