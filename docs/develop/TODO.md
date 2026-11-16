@@ -13,15 +13,22 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [ ] **YuE2 AR 的 KV cache 布局：换布局比换内核更值钱（实测 4.84x，逐位一致）** —
-      2026-11-16 实测：value reduce 换成 AVX2 后（`e10a8e66`），按 KV buffer 的**物理**
-      字节算只跑到约 3.0 GB/s，离内存带宽还很远——瓶颈是**访存模式**而不是带宽：KV 布局
-      是 `[layer][position][kv_head][dim]`，扫一个 kv head 时步长 4 KiB、每行只用 512 B，
+- [ ] **YuE2 AR 的 KV cache 布局：转置后剩下的那部分访存浪费** —
+      2026-11-16 实测：value reduce 的瓶颈是**访存模式**而不是带宽——KV 布局是
+      `[layer][position][kv_head][dim]`，扫一个 kv head 时步长 4 KiB、每行只用 512 B，
       而内核是 dim-outer 的（每个 32 B 的 dim block 单独重走一遍 4 KiB 步长）。用真实
       内核实测三种布局：现状 34.5 ms → 转置 `[kv_head][position][dim]` 14.6 ms（2.36x）
       → 转置 + token-outer（16 个独立累加器）7.1 ms（**4.84x**）；两种改法都逐位一致
-      （每个 dim 内的 token 顺序不变）。改动面：AR 的 KV 写入/读取、score 与 reduce
-      两条路径、`commit_kv_shadow`、NAR 的 `prefix_kv`。
+      （每个 dim 内的 token 顺序不变）。
+      ✅ **先做掉了收益更大的那一半**：不改布局、只把 reduce 的循环顺序换成 token-outer
+      （`13344004`），逐位一致；AR attention 94.0 s → 69.0 s、NAR prefix attention
+      14.1 s → 10.2 s、整链 510.9 s → 457.6 s，音频 md5 不变。换成 token-outer 之后内核
+      已经按行顺序读，**剩下的收益只是布局带来的访存局部性**（页面复用、预取），比
+      4.84x 这个合成基准暗示的小得多。
+      ⏳ 剩下的改动面：AR 的 KV 写入/读取、score 与 reduce 两条路径、`commit_kv_shadow`、
+      NAR 的 `prefix_kv`。**注意 KV cache 是 `core::scratchpad::KvCache` 这份共享结构**
+      （LFM2 等模型也在用），改布局不是 YuE2 内部改动：要么给共享结构加一个「按 head
+      分块」的变体，要么让 YuE2 自己维护一份转置副本。
       ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
       "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
 - [ ] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（远大于 VAE 那 1 个档位）** —
