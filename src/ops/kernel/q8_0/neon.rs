@@ -111,6 +111,77 @@ pub unsafe fn matmul_q8_0_vs_q8_0_neon_batched(
     }
 }
 
+/// NEON Q8_0 × Q8_0 matmul over a batch of activation rows, with dotprod.
+///
+/// The same values as [`matmul_q8_0_vs_q8_0_neon_batched`]: the integer
+/// dot is exact and the float chain over the blocks is the same, so the
+/// results are bit for bit the ones the plain NEON kernel produces. The
+/// difference is the instruction count: `sdot` accumulates sixteen
+/// products per instruction instead of the widening path's four, and it
+/// is the same instruction the per-row dispatch picks on this CPU, so
+/// the batched path and the per-row path agree.
+///
+/// `dotprod` is optional on aarch64, so callers must select this only
+/// after `is_aarch64_feature_detected!("dotprod")` succeeds.
+#[target_feature(enable = "neon,dotprod")]
+pub unsafe fn matmul_q8_0_vs_q8_0_neon_batched_dotprod(
+    weight: &[u8],
+    input_q8: &[u8],
+    input_scales: &[f32],
+    output: &mut [f32],
+    n_in: usize,
+    n_out: usize,
+    n_rows: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    use std::arch::aarch64::*;
+    let blocks = n_in / 32;
+    let stride = blocks * 34;
+    // The activation scales are stored one row per `div_ceil(32)` blocks,
+    // like the prepared-rows buffer holds them.
+    let scale_stride = n_in.div_ceil(32);
+    let mut tile_row = 0;
+    while tile_row < n_rows {
+        // The last tile may be short: it shares the weight read just the
+        // same, it just serves fewer activation rows.
+        let tile_len = (n_rows - tile_row).min(BATCH_TILE);
+        for w in row_start..row_end {
+            let weight_row = weight.as_ptr().add(w * stride);
+            let mut sums = [0.0f32; BATCH_TILE];
+            for block in 0..blocks {
+                let woff = block * 34;
+                let wd = f16_to_f32(u16::from_le_bytes([
+                    *weight_row.add(woff),
+                    *weight_row.add(woff + 1),
+                ]));
+                // The weight block is read once and serves every row of the
+                // tile: that is the whole point of the batched kernel.
+                let wq = vld1q_s8(weight_row.add(woff + 2) as *const i8);
+                let wq_hi = vld1q_s8(weight_row.add(woff + 18) as *const i8);
+                for t in 0..tile_len {
+                    let r = tile_row + t;
+                    let act = input_q8.as_ptr().add(r * n_in + block * 32);
+                    let a0 = vld1q_s8(act as *const i8);
+                    let a1 = vld1q_s8(act.add(16) as *const i8);
+                    let dots = dot_i8x16_dotprod_acc(
+                        dot_i8x16_dotprod_acc(vdupq_n_s32(0), wq, a0),
+                        wq_hi,
+                        a1,
+                    );
+                    let dot = vaddvq_s32(dots);
+                    let scale = wd * *input_scales.get_unchecked(r * scale_stride + block);
+                    sums[t] = (dot as f32).mul_add(scale, sums[t]);
+                }
+            }
+            for t in 0..tile_len {
+                *output.get_unchecked_mut((tile_row + t) * n_out + w) = sums[t];
+            }
+        }
+        tile_row += BATCH_TILE;
+    }
+}
+
 /// NEON Q8_0 × Q8_0 matmul over a row range.
 #[target_feature(enable = "neon")]
 pub unsafe fn matmul_q8_0_vs_q8_0_neon(
@@ -199,12 +270,13 @@ pub unsafe fn matmul_q8_0_vs_q8_0_neon_nrc1(
 
 #[target_feature(enable = "neon,dotprod")]
 #[inline]
-unsafe fn dot_i8x16_dotprod(
+unsafe fn dot_i8x16_dotprod_acc(
+    acc: std::arch::aarch64::int32x4_t,
     a: std::arch::aarch64::int8x16_t,
     b: std::arch::aarch64::int8x16_t,
 ) -> std::arch::aarch64::int32x4_t {
     use std::arch::aarch64::*;
-    let mut sum = vdupq_n_s32(0);
+    let mut sum = acc;
     std::arch::asm!(
         "sdot {sum:v}.4s, {a:v}.16b, {b:v}.16b",
         sum = inout(vreg) sum,
@@ -213,6 +285,16 @@ unsafe fn dot_i8x16_dotprod(
         options(nomem, nostack, pure),
     );
     sum
+}
+
+#[target_feature(enable = "neon,dotprod")]
+#[inline]
+unsafe fn dot_i8x16_dotprod(
+    a: std::arch::aarch64::int8x16_t,
+    b: std::arch::aarch64::int8x16_t,
+) -> std::arch::aarch64::int32x4_t {
+    use std::arch::aarch64::*;
+    dot_i8x16_dotprod_acc(vdupq_n_s32(0), a, b)
 }
 
 /// Dot-product Q8_0 × Q8_0 matmul with four output rows in flight.
