@@ -77,12 +77,20 @@ pub(crate) fn forward_mtp(
 
     // One attention block with the head's own weights and its own KV cache.
     // The cache holds one layer, so the layer count is 1 here.
+    //
+    // The attention reads the *normalized* projection: llama.cpp keeps the
+    // `eh_proj` output as the residual (`inpSA`) and normalizes a copy of
+    // it with the block's `attn_norm` before the attention
+    // (`src/models/qwen35.cpp::graph_mtp`). The dense-attention helper
+    // takes an already normalized input, like the main stack does.
+    let mut attn_input = projected.clone();
+    crate::ops::rms_norm_inplace(&mut attn_input, &mtp.layer.attn_norm, eps);
     let attn_out = trunk.forward_dense_attn_layer_with(
         &mtp.layer,
         cfg.n_layer_impl(),
         0,
         1,
-        &projected,
+        &attn_input,
         1,
         kv_cache,
         scratch,
