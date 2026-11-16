@@ -5279,12 +5279,13 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 **关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
 `tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
 
-### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 上的投机解码与 greedy 打平
+### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 上的投机解码已经比 greedy 快
 
 **状态**：✅ 起草头 + 验证/接受回路已实现，与 pinned llama.cpp **逐轮同草稿**；
-接受率 0.54 vs 0.53。⚠ CPU 上的收益仍然有限：批量前向是**算力**瓶颈，
-投机解码只能与 greedy 打平（3 个草稿时 6.5 s vs 6.0 s），要到设备路径上才会
-有真正的倍数收益（草稿头目前只在 CPU 上跑）。
+接受率 0.54 vs 0.53。✅ CPU 上也有收益了：批量 Q8_0 kernel 之后，2 个草稿的
+投机解码比 greedy 快约 18%（5.4 s vs 6.6 s）。⚠ 批量前向仍然是**算力**瓶颈
+（这台机器没有 dotprod），所以收益是 1.2 倍而不是 llama.cpp 在设备路径上的
+倍数级（草稿头目前只在 CPU 上跑）。
 
 **做了什么**：
 
@@ -5341,7 +5342,8 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
    的权重流量。新的批量 kernel（`src/ops/kernel/q8_0/neon.rs`）把权重行留在
    寄存器里同时服务一组激活行，**逐位**复刻 per-row kernel 的算术（496/496 个
    投影逐位相同，最大差 0），预填从 5.23 s 降到 2.16 s，整段 greedy 生成从
-   10.28 s 降到 6.59 s。
+   10.28 s 降到 6.59 s。两行以上的批次都走这条路径——三行（两个草稿的验证）原来
+   因为一个 `n_rows >= 4` 的门槛掉回 per-row 路径，白白多付了一遍权重流量。
 2. **前向本身是算力瓶颈**：这台机器没有 dotprod，Q8_0 的点积是逐块的 NEON
    widening 累加，约 4 int8 MAC/cycle/core。所以一次 5 行前向只比一次单行前向
    便宜 2.4 倍，而不是 5 倍——权重的流量省下来了，算力还在。
@@ -5355,22 +5357,24 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 
 | 路径 | 整段生成 |
 | --- | --- |
-| greedy | 5.97 s / 6.57 s（prefill 2.15 s + decode 3.8～4.4 s） |
-| 投机，2 个草稿 | 7.48 s / 9.20 s（接受率 0.83） |
-| 投机，3 个草稿 | 6.46 s / 6.61 s（接受率 0.72） |
-| 投机，4 个草稿 | 7.49 s / 7.59 s（接受率 0.54） |
+| greedy | 6.57 s（prefill 2.17 s + decode 4.40 s） |
+| 投机，2 个草稿 | **5.38 s / 5.54 s**（接受率 0.83） |
+| 投机，3 个草稿 | 6.30 s / 6.32 s（接受率 0.72） |
+| 投机，4 个草稿 | 7.37 s（接受率 0.54） |
 
-即：**3 个草稿时与 greedy 打平**，多草稿反而更慢（一轮的行数是线性涨的，收益
-是对数涨的）。llama.cpp 在同一台机器上也一样没有倍数收益（它的 MTP decode
-262 ms/token，就是单 token decode 的量级）。要拿到倍数收益，目标的批量前向必须
-真的比逐 token 前向便宜——也就是要更快的 int8 点积（i8mm / svei8mm）或设备路径
-上的批量 kernel；草稿头本身也要能跑到设备上（现在只跑 CPU）。
+即：**2 个草稿时比 greedy 快约 18%**；草稿再多反而更慢（一轮的行数是线性涨的，
+收益是对数涨的）。llama.cpp 在同一台机器上没有这个收益（它的 MTP decode
+262 ms/token，就是单 token decode 的量级）——差别在于它没有把 Q8_0 的权重读取
+在批次内共享。要再往上走，目标的批量前向必须真的比逐 token 前向便宜——也就是要
+更快的 int8 点积（i8mm / svei8mm）或设备路径上的批量 kernel；草稿头本身也要能
+跑到设备上（现在只跑 CPU）。
 
 **已知边界**：
 
 - 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
   Vulkan 路径下直接报错。
-- CPU 上批量前向是算力瓶颈，投机解码只能与 greedy 打平（见上面的实测）。
+- CPU 上批量前向是算力瓶颈，投机解码的收益只有 1.2 倍（见上面的实测）；要多
+  草稿才有倍数收益的话，得先让批量前向比逐 token 前向便宜。
 - 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
 - TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
   `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
