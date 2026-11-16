@@ -2046,6 +2046,7 @@ pub(super) unsafe fn value_reduce_block2_neon(
 /// tokens are visited in ascending order across both segments, so every
 /// dimension accumulates them in the same order as the dimension-outer form
 /// and the result is bit-identical.
+#[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn value_reduce_block2_tokens_avx2(
     values_first: &[f32],
@@ -2330,6 +2331,7 @@ pub(super) fn value_reduce_tokens_scalar(
 ///
 /// The dimensions are processed in groups of four blocks so the accumulators
 /// stay in registers, and the group's 32 dims of a token are read in one run.
+#[cfg(target_arch = "x86_64")]
 pub(super) unsafe fn value_reduce_tokens_avx2(
     values: &[f32],
     scores: &[f32],
@@ -2823,6 +2825,7 @@ mod performance_tests {
     /// per-call overhead of the compute pool and the weight streaming.
     #[test]
     #[ignore = "timing probe"]
+    #[cfg(target_arch = "x86_64")]
     fn cpu_bf16_gemv_breakdown() {
         use std::time::Instant;
         let n_in = 2048usize;
