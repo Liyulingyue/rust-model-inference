@@ -278,6 +278,7 @@ fn bench_variants(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
     let weight = valid_q8_weights(n_in, n_out, seed);
     let (input_q8, input_scales) = valid_q8_input(n_in, seed + 1);
     let mut dispatch_out = vec![0.0f32; n_out];
+    #[cfg(target_arch = "aarch64")]
     let mut nrc1_out = vec![0.0f32; n_out];
     let mut ggml_out = vec![0.0f32; n_out];
 
@@ -302,7 +303,9 @@ fn bench_variants(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
         },
         iterations,
     );
-    let nrc1_time = timed(
+    // The `nrc1` kernel is the ARM fallback: it has no x86 counterpart.
+    #[cfg(target_arch = "aarch64")]
+    let nrc1_time = Some(timed(
         || {
             // SAFETY: NEON is available on this target; the kernel only reads the
             // weight rows and the activation, and writes `n_out` outputs.
@@ -319,7 +322,9 @@ fn bench_variants(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
             }
         },
         iterations,
-    );
+    ));
+    #[cfg(not(target_arch = "aarch64"))]
+    let nrc1_time: Option<f64> = None;
     let ggml_time = timed(
         || {
             crate::ops::kernel::q8_0::ggml::matmul_q8_0_vs_q8_0_ggml(
@@ -343,21 +348,36 @@ fn bench_variants(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f32, f32::max)
     };
+    match nrc1_time {
+        Some(nrc1_time) => println!(
+            "{:7} x {:7} | dispatch {:7.2}ms {:6.1}GF | nrc1 {:7.2}ms {:6.1}GF | ggml {:7.2}ms {:6.1}GF",
+            n_in,
+            n_out,
+            dispatch_time * 1000.0,
+            gflops(dispatch_time),
+            nrc1_time * 1000.0,
+            gflops(nrc1_time),
+            ggml_time * 1000.0,
+            gflops(ggml_time),
+        ),
+        None => println!(
+            "{:7} x {:7} | dispatch {:7.2}ms {:6.1}GF | ggml {:7.2}ms {:6.1}GF",
+            n_in,
+            n_out,
+            dispatch_time * 1000.0,
+            gflops(dispatch_time),
+            ggml_time * 1000.0,
+            gflops(ggml_time),
+        ),
+    }
+    #[cfg(target_arch = "aarch64")]
     println!(
-        "{:7} x {:7} | dispatch {:7.2}ms {:6.1}GF | nrc1 {:7.2}ms {:6.1}GF | ggml {:7.2}ms {:6.1}GF",
-        n_in,
-        n_out,
-        dispatch_time * 1000.0,
-        gflops(dispatch_time),
-        nrc1_time * 1000.0,
-        gflops(nrc1_time),
-        ggml_time * 1000.0,
-        gflops(ggml_time),
-    );
-    println!(
-        "           nrc1 vs dispatch: identical={} max_diff={:.3e} | ggml vs dispatch: identical={} max_diff={:.3e}",
+        "           nrc1 vs dispatch: identical={} max_diff={:.3e}",
         identical(&nrc1_out, &dispatch_out),
         max_diff(&nrc1_out, &dispatch_out),
+    );
+    println!(
+        "           ggml vs dispatch: identical={} max_diff={:.3e}",
         identical(&ggml_out, &dispatch_out),
         max_diff(&ggml_out, &dispatch_out),
     );
