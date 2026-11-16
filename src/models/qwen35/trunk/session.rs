@@ -488,6 +488,9 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                 cache,
                 &mut self.scratch,
                 &self.pool,
+                // The row only fills the head's cache: nothing samples it,
+                // so the vocabulary projection is not needed.
+                false,
             )?;
         }
         // The last row of the batch becomes the carry-over row for the next
@@ -507,36 +510,31 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         Ok(&self.mtp_pending_hidden)
     }
 
-    /// The target's logits for every row of the last forward pass.
+    /// The target's logits for one row of the last forward pass.
     ///
-    /// A speculative verification needs the logits of *every* row of the
+    /// A speculative verification needs the logits of the rows of the
     /// verification batch, not only the last one: the target has to be able
     /// to say what it would have produced at each drafted position. The
     /// rows are the target's normalized hidden states of the last chunk, so
     /// this only works after a forward that kept them.
-    fn logits_rows(&mut self, n_rows: usize) -> Result<Vec<Vec<f32>>, String> {
+    fn logits_row(&mut self, row: usize) -> Result<Vec<f32>, String> {
         let trunk = self.model.trunk();
         let n_embd = trunk.config.n_embd;
         let vocab = trunk.config.vocab_size;
-        let rows = n_rows.min(self.last_step_tokens);
-        if rows == 0 {
-            return Err("Qwen3.5 MTP verification needs at least one forward row".into());
+        if row >= self.last_step_tokens {
+            return Err("Qwen3.5 MTP verification needs a row of the last forward".into());
         }
-        let mut out = Vec::with_capacity(rows);
-        for row in 0..rows {
-            let normed = &self.scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
-            trunk.output_weight.quantize_and_matmul_with_scratch(
-                normed,
-                &mut self.scratch.q8k_buf,
-                &mut self.scratch.q8_buf,
-                &mut self.scratch.scale_buf,
-                &mut self.scratch.matmul_out,
-                &self.pool,
-            );
-            let n = vocab.min(self.scratch.matmul_out.len());
-            out.push(self.scratch.matmul_out[..n].to_vec());
-        }
-        Ok(out)
+        let normed = &self.scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
+        trunk.output_weight.quantize_and_matmul_with_scratch(
+            normed,
+            &mut self.scratch.q8k_buf,
+            &mut self.scratch.q8_buf,
+            &mut self.scratch.scale_buf,
+            &mut self.scratch.matmul_out,
+            &self.pool,
+        );
+        let n = vocab.min(self.scratch.matmul_out.len());
+        Ok(self.scratch.matmul_out[..n].to_vec())
     }
 
     /// One speculative decoding step with the MTP draft head.
@@ -598,16 +596,31 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
 
         let embeddings = self.embed_tokens(&batch)?;
         let processed_before = self.processed_tokens;
-        self.step(&embeddings, batch.len(), &positions)?;
+        let last_logits = self.step(&embeddings, batch.len(), &positions)?;
 
         // The target's own continuation: the logits of row `i` say what the
         // target would produce at the position of draft `i`.
-        let rows = self.logits_rows(batch.len())?;
+        //
+        // The rows are read one at a time and only as far as the round
+        // needs them: the first row that does not match its draft ends the
+        // round, so the rows after it are never looked at. Every row is a
+        // vocabulary projection, and the last row's projection is the one
+        // the forward pass already did.
         let mut accepted = 0usize;
-        while accepted < drafts.len()
-            && crate::ops::sampling::argmax(&rows[accepted]) as u32 == drafts[accepted]
-        {
-            accepted += 1;
+        let mut next = 0u32;
+        loop {
+            let logits = if accepted + 1 == batch.len() {
+                last_logits.clone()
+            } else {
+                self.logits_row(accepted)?
+            };
+            let sampled = crate::ops::sampling::argmax(&logits) as u32;
+            if accepted < drafts.len() && sampled == drafts[accepted] {
+                accepted += 1;
+                continue;
+            }
+            next = sampled;
+            break;
         }
         // The round commits the bonus token the target had already sampled
         // and the drafts it accepted. The token the target produces after
@@ -615,7 +628,6 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let mut tokens = Vec::with_capacity(accepted + 1);
         tokens.push(token);
         tokens.extend_from_slice(&drafts[..accepted]);
-        let next = crate::ops::sampling::argmax(&rows[accepted]) as u32;
 
         // The draft context has to see the same positions as the target: the
         // head's KV cache is refreshed with the target's hidden states, which
@@ -749,6 +761,8 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                 cache,
                 &mut self.scratch,
                 &self.pool,
+                // The draft is sampled, so it needs the head's logits.
+                true,
             )?;
             let next = crate::ops::sampling::argmax(&draft.logits) as u32;
             drafts.push(next);
