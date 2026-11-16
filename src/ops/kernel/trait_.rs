@@ -63,6 +63,16 @@ pub trait Kernel: Send + Sync {
         None
     }
 
+    /// Opt in to shared-weight row batching with the canonical Q8_0
+    /// arithmetic contract.
+    ///
+    /// The batched kernel computes the same values as the per-row one --
+    /// only the weight reads are shared between the activation rows -- so
+    /// opting in changes the traffic, not the numbers.
+    fn batchable_q8_0_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
     /// Hot-path matmul: pre-quantized Q8_0 input, partitioned by row.
     ///
     /// Each call computes `output[i] = sum_k weight[i, k] * dequant(input_q8[k], input_scales[k/32])`

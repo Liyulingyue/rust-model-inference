@@ -68,6 +68,13 @@ impl<'a> Kernel for Q8Kernel<'a> {
         crate::ops::embedding::embedding_lookup_q8_0(self.weight, token_id, n_embd, out);
     }
 
+    /// The Q8_0 storage can be shared between the activation rows of a
+    /// batch: the batched kernel computes the same values as the per-row
+    /// one.
+    fn batchable_q8_0_bytes(&self) -> Option<&[u8]> {
+        Some(self.weight)
+    }
+
     /// ggml-parity path for callers that need bit-exact agreement with
     /// `ggml_vec_dot_q8_0_q8_0`. Uses the same `ith`/`nth` row partition as
     /// the production parallel entry so the threading behaviour is
@@ -110,6 +117,138 @@ impl<'a> Kernel for Q8Kernel<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The batched kernel must compute exactly what the per-row kernel
+    /// computes: only the weight reads are shared.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn batched_neon_matches_the_per_row_kernel_bitwise() {
+        let n_in = 5120;
+        let n_out = 96;
+        let n_rows = 9;
+        let mut state = 0x1234_5678u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let blocks = n_in / 32;
+        let weight: Vec<u8> = (0..n_out * blocks * 34)
+            .map(|_| (next() & 0xff) as u8)
+            .collect();
+        let input_q8: Vec<u8> = (0..n_rows * n_in).map(|_| (next() & 0xff) as u8).collect();
+        let input_scales: Vec<f32> = (0..n_rows * blocks)
+            .map(|_| (next() & 0xffff) as f32 / 65535.0)
+            .collect();
+
+        let mut per_row = vec![0.0f32; n_rows * n_out];
+        for row in 0..n_rows {
+            dispatch::matmul_q8_0_quantized_range(
+                &weight,
+                &input_q8[row * n_in..(row + 1) * n_in],
+                &input_scales[row * blocks..(row + 1) * blocks],
+                &mut per_row[row * n_out..(row + 1) * n_out],
+                n_in,
+                0,
+                n_out,
+            );
+        }
+
+        let mut batched = vec![0.0f32; n_rows * n_out];
+        dispatch::matmul_q8_0_quantized_batched_range(
+            &weight,
+            &input_q8,
+            &input_scales,
+            &mut batched,
+            n_in,
+            n_out,
+            n_rows,
+            0,
+            1,
+        );
+
+        for (index, (a, b)) in per_row.iter().zip(batched.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "row {index} differs: per-row {a} vs batched {b}"
+            );
+        }
+    }
+
+    /// The prepared-rows path must produce what the per-row path produces.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn prepared_rows_batched_matches_the_per_row_path() {
+        // Two rows is the smallest batch the batched path takes, and the
+        // row counts around the tile size cover both the full tiles and the
+        // short tail tile.
+        for n_rows in [2, 3, 5, 8, 9] {
+            prepared_rows_batched_matches_the_per_row_path_for(n_rows);
+        }
+    }
+
+    fn prepared_rows_batched_matches_the_per_row_path_for(n_rows: usize) {
+        let n_in = 5120;
+        let n_out = 64;
+        let mut state = 0xfeed_beefu64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let blocks = n_in / 32;
+        let mut weight_bytes = Vec::with_capacity(n_out * blocks * 34);
+        for _ in 0..n_out * blocks {
+            weight_bytes.extend_from_slice(&crate::ops::f32_to_f16(0.01).to_le_bytes());
+            for _ in 0..32 {
+                weight_bytes.push((next() & 0xff) as u8);
+            }
+        }
+        let input: Vec<f32> = (0..n_rows * n_in)
+            .map(|_| (next() & 0xffff) as f32 / 65535.0 - 0.5)
+            .collect();
+        let weight =
+            crate::ops::kernel::Weight::from_quantized(crate::ops::kernel::QuantizedTensor::Q8_0 {
+                data: &weight_bytes,
+                n_cols: n_in,
+                n_rows: n_out,
+            });
+
+        let pool = crate::core::thread_pool::ComputePool::new(2);
+        let mut prepared = crate::ops::kernel::PreparedRows::new(n_rows, n_in);
+        prepared.prepare(&input, n_rows, n_in, true, false).unwrap();
+        let mut batched = vec![0.0f32; n_rows * n_out];
+        prepared
+            .matmul_group(&input, [(&weight, &mut batched[..])], &pool)
+            .unwrap();
+
+        // The reference: the per-row kernel over the same activation.
+        let mut per_row = vec![0.0f32; n_rows * n_out];
+        for row in 0..n_rows {
+            let q8 = &prepared.q8[row * n_in..(row + 1) * n_in];
+            let scales = &prepared.scales[row * blocks..(row + 1) * blocks];
+            dispatch::matmul_q8_0_quantized_range(
+                &weight_bytes,
+                q8,
+                scales,
+                &mut per_row[row * n_out..(row + 1) * n_out],
+                n_in,
+                0,
+                n_out,
+            );
+        }
+
+        for (index, (a, b)) in per_row.iter().zip(batched.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "element {index} differs: per-row {a} vs prepared {b}"
+            );
+        }
+    }
 
     /// Build a Q8_0 block for a single 32-element row with all values = `value`.
     /// Returns 34 bytes: 2-byte F16 scale + 32-byte data (all same int8 value).
