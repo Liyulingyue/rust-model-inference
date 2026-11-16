@@ -129,6 +129,58 @@ fn value_reduce_block_is_bitwise_identical_to_the_scalar_form() {
 }
 
 #[test]
+fn value_reduce_tokens_is_bitwise_identical_to_the_legacy_form() {
+    // The token-outer kernel reads a cached token's whole head slice in one
+    // contiguous run, while the legacy form walks the cache once per
+    // dimension. The per-dimension accumulation order is the same -- the
+    // tokens in ascending order, a separate multiply and add -- so the two
+    // must agree bit for bit, and the dispatched kernel must agree with both.
+    let config = config();
+    let head_dim = config.head_dim;
+    let kv_width = config.kv_heads * head_dim;
+    let mut state = 7717u32;
+    for n_tokens in [1usize, 7, 64, 128, 511, 512, 513, 1025, 1566] {
+        let values: Vec<f32> = (0..n_tokens * kv_width)
+            .map(|_| draw(&mut state, 16384.0))
+            .collect();
+        let scores: Vec<f32> = (0..n_tokens).map(|_| draw(&mut state, 4.0)).collect();
+        for head in [0usize, config.kv_heads - 1] {
+            let expected = legacy_value_reduce(
+                &values,
+                &scores,
+                kv_width,
+                head * head_dim,
+                n_tokens,
+                head_dim,
+            );
+            let mut actual = vec![0.0f32; head_dim];
+            for (index, slot) in actual.iter_mut().enumerate() {
+                *slot = draw(&mut state, 512.0) * (index as f32 + 1.0);
+            }
+            let seed_output = actual.clone();
+            super::super::ar::value_reduce_tokens_scalar(
+                &values,
+                &scores,
+                &mut actual,
+                0,
+                kv_width,
+                head * head_dim,
+                n_tokens,
+                head_dim,
+            );
+            for (index, value) in actual.iter().enumerate() {
+                assert_eq!(
+                    value.to_bits(),
+                    (seed_output[index] + expected[index]).to_bits(),
+                    "n_tokens={n_tokens} head={head} dim={index}: the token-outer \
+                     value reduce diverged from the legacy form"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn value_reduce_block2_is_bitwise_identical_to_the_scalar_form() {
     // `value_reduce_block2` reduces a KV block that straddles the prefix/latent
     // boundary. Both segments accumulate into the *same* accumulator, so the

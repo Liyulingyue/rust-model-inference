@@ -1956,7 +1956,7 @@ pub(super) fn value_reduce_block2(
         // SAFETY: AVX2 availability is checked, and both segments are bounded
         // by the caller to stay inside their slices.
         unsafe {
-            value_reduce_block2_avx2(
+            value_reduce_block2_tokens_avx2(
                 values_first,
                 base_first,
                 values_second,
@@ -2040,16 +2040,14 @@ pub(super) unsafe fn value_reduce_block2_neon(
     }
 }
 
-/// AVX2 mirror of [`value_reduce_block2_neon`].
+/// The token-outer form of [`value_reduce_block2`].
 ///
-/// Both segments accumulate into the *same* accumulator, so a KV block that
-/// straddles the prefix/latent boundary is reduced as one sum rather than
-/// two. The multiply and the add stay separate operations for the same
-/// bit-exactness reason as the single-segment kernel.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
+/// The block that straddles the prefix/latent boundary is still one sum: the
+/// tokens are visited in ascending order across both segments, so every
+/// dimension accumulates them in the same order as the dimension-outer form
+/// and the result is bit-identical.
 #[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn value_reduce_block2_avx2(
+pub(super) unsafe fn value_reduce_block2_tokens_avx2(
     values_first: &[f32],
     base_first: usize,
     values_second: &[f32],
@@ -2063,34 +2061,66 @@ pub(super) unsafe fn value_reduce_block2_avx2(
     head_width: usize,
 ) {
     use std::arch::x86_64::*;
+    const BLOCK: usize = 8;
+    const GROUP: usize = 4;
     let mut dim = 0;
-    while dim + 8 <= head_width {
-        let mut acc = _mm256_setzero_ps();
+    while dim + GROUP * BLOCK <= head_width {
+        // Fresh accumulators per group, and a separate multiply so the product
+        // is rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
         for token in 0..n_tokens {
             let (values, start) = if token < n_first {
-                let row = base_first + token;
-                (values_first, row * row_stride + head_offset + dim)
+                (
+                    values_first,
+                    (base_first + token) * row_stride + head_offset + dim,
+                )
             } else {
-                let row = base_second + (token - n_first);
-                (values_second, row * row_stride + head_offset + dim)
+                (
+                    values_second,
+                    (base_second + token - n_first) * row_stride + head_offset + dim,
+                )
             };
             let weight = _mm256_set1_ps(scores[token]);
-            let v = _mm256_loadu_ps(values.as_ptr().add(start));
-            acc = _mm256_add_ps(acc, _mm256_mul_ps(weight, v));
+            let first = values.as_ptr().add(start);
+            acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(weight, _mm256_loadu_ps(first)));
+            acc1 = _mm256_add_ps(
+                acc1,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(BLOCK))),
+            );
+            acc2 = _mm256_add_ps(
+                acc2,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(2 * BLOCK))),
+            );
+            acc3 = _mm256_add_ps(
+                acc3,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(3 * BLOCK))),
+            );
         }
-        let out = _mm256_loadu_ps(output.as_ptr().add(dim));
-        _mm256_storeu_ps(output.as_mut_ptr().add(dim), _mm256_add_ps(out, acc));
-        dim += 8;
+        let out = output.as_mut_ptr().add(dim);
+        let acc = [acc0, acc1, acc2, acc3];
+        for (index, accumulator) in acc.iter().enumerate() {
+            let target = out.add(index * BLOCK);
+            let previous = _mm256_loadu_ps(target);
+            _mm256_storeu_ps(target, _mm256_add_ps(previous, *accumulator));
+        }
+        dim += GROUP * BLOCK;
     }
     while dim < head_width {
         let mut sum = 0.0f32;
         for token in 0..n_tokens {
             let (values, start) = if token < n_first {
-                let row = base_first + token;
-                (values_first, row * row_stride + head_offset + dim)
+                (
+                    values_first,
+                    (base_first + token) * row_stride + head_offset + dim,
+                )
             } else {
-                let row = base_second + (token - n_first);
-                (values_second, row * row_stride + head_offset + dim)
+                (
+                    values_second,
+                    (base_second + token - n_first) * row_stride + head_offset + dim,
+                )
             };
             sum += scores[token] * *values.get_unchecked(start);
         }
@@ -2173,7 +2203,7 @@ pub(super) fn value_reduce_block(
             // is bounded by `base + n_tokens * row_stride + head_offset +
             // head_width` which the caller guarantees is within `values`.
             unsafe {
-                value_reduce_block_avx2(
+                value_reduce_tokens_avx2(
                     values,
                     scores,
                     output,
@@ -2238,54 +2268,6 @@ pub(super) unsafe fn value_reduce_block_neon(
     }
 }
 
-/// AVX2 mirror of [`value_reduce_block_neon`].
-///
-/// The reduction is vectorized over the head dimension, which is independent
-/// per lane, while the token loop stays strictly sequential. The multiply and
-/// the add are separate operations, so the product is rounded before it is
-/// accumulated, and the block lands in the output with a single add at the
-/// end. Both properties are what the bit-exactness test in
-/// `nar_attention_parity_tests` pins, so neither may be "optimized" into an
-/// FMA here.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn value_reduce_block_avx2(
-    values: &[f32],
-    scores: &[f32],
-    output: &mut [f32],
-    base: usize,
-    row_stride: usize,
-    head_offset: usize,
-    n_tokens: usize,
-    head_width: usize,
-) {
-    use std::arch::x86_64::*;
-    let mut dim = 0;
-    while dim + 8 <= head_width {
-        // Fresh accumulator per block, and a separate multiply so the product
-        // is rounded before the add. Both are load-bearing for bit-exactness.
-        let mut acc = _mm256_setzero_ps();
-        for token in 0..n_tokens {
-            let start = base + token * row_stride + head_offset + dim;
-            let weight = _mm256_set1_ps(scores[token]);
-            let v = _mm256_loadu_ps(values.as_ptr().add(start));
-            acc = _mm256_add_ps(acc, _mm256_mul_ps(weight, v));
-        }
-        let out = _mm256_loadu_ps(output.as_ptr().add(dim));
-        _mm256_storeu_ps(output.as_mut_ptr().add(dim), _mm256_add_ps(out, acc));
-        dim += 8;
-    }
-    while dim < head_width {
-        let mut sum = 0.0f32;
-        for token in 0..n_tokens {
-            let start = base + token * row_stride + head_offset + dim;
-            sum += scores[token] * *values.get_unchecked(start);
-        }
-        *output.get_unchecked_mut(dim) += sum;
-        dim += 1;
-    }
-}
-
 #[inline]
 pub(super) fn value_reduce_block_scalar(
     values: &[f32],
@@ -2304,6 +2286,106 @@ pub(super) fn value_reduce_block_scalar(
             sum += scores[token] * values[start];
         }
         output[dim] += sum;
+    }
+}
+
+/// Token-outer value reduce.
+///
+/// The dimension-outer kernel walks the cache once per dimension block, so
+/// every pass steps over the positions with the full row stride and touches
+/// 32 B of every cache line. Reading the other way round -- one cached token
+/// at a time, its whole head slice in one contiguous run -- walks the memory
+/// in order.
+///
+/// The per-dimension accumulation is unchanged: every dimension still sums the
+/// tokens in ascending order, with a separate multiply and add and no FMA, so
+/// the result is bit-identical to the dimension-outer form. Only the order in
+/// which the memory is touched differs.
+pub(super) fn value_reduce_tokens_scalar(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    const MAX_WIDTH: usize = 256;
+    assert!(head_width <= MAX_WIDTH, "YuE2 head width is too wide");
+    let mut sums = [0.0f32; MAX_WIDTH];
+    for token in 0..n_tokens {
+        let weight = scores[token];
+        let start = base + token * row_stride + head_offset;
+        for dim in 0..head_width {
+            sums[dim] += weight * values[start + dim];
+        }
+    }
+    for dim in 0..head_width {
+        output[dim] += sums[dim];
+    }
+}
+
+/// The AVX2 form of [`value_reduce_tokens_scalar`].
+///
+/// The dimensions are processed in groups of four blocks so the accumulators
+/// stay in registers, and the group's 32 dims of a token are read in one run.
+pub(super) unsafe fn value_reduce_tokens_avx2(
+    values: &[f32],
+    scores: &[f32],
+    output: &mut [f32],
+    base: usize,
+    row_stride: usize,
+    head_offset: usize,
+    n_tokens: usize,
+    head_width: usize,
+) {
+    use std::arch::x86_64::*;
+    const BLOCK: usize = 8;
+    const GROUP: usize = 4;
+    let mut dim = 0;
+    while dim + GROUP * BLOCK <= head_width {
+        // Fresh accumulators per group, and a separate multiply so the product
+        // is rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            let weight = _mm256_set1_ps(scores[token]);
+            let first = values.as_ptr().add(start);
+            acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(weight, _mm256_loadu_ps(first)));
+            acc1 = _mm256_add_ps(
+                acc1,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(BLOCK))),
+            );
+            acc2 = _mm256_add_ps(
+                acc2,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(2 * BLOCK))),
+            );
+            acc3 = _mm256_add_ps(
+                acc3,
+                _mm256_mul_ps(weight, _mm256_loadu_ps(first.add(3 * BLOCK))),
+            );
+        }
+        let out = output.as_mut_ptr().add(dim);
+        let acc = [acc0, acc1, acc2, acc3];
+        for (index, accumulator) in acc.iter().enumerate() {
+            let target = out.add(index * BLOCK);
+            let previous = _mm256_loadu_ps(target);
+            _mm256_storeu_ps(target, _mm256_add_ps(previous, *accumulator));
+        }
+        dim += GROUP * BLOCK;
+    }
+    while dim < head_width {
+        let mut sum = 0.0f32;
+        for token in 0..n_tokens {
+            let start = base + token * row_stride + head_offset + dim;
+            sum += scores[token] * *values.get_unchecked(start);
+        }
+        *output.get_unchecked_mut(dim) += sum;
+        dim += 1;
     }
 }
 
