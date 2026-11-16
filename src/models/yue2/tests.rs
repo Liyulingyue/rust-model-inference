@@ -812,27 +812,44 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
             .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
     }
 
+    /// Replays one phase of the trace: for every generated step the reference
+    /// sampled a token from the logits it recorded, and we sample from the same
+    /// logits and must land on the same token.
+    ///
+    /// Two details of the trace format drive the wiring:
+    ///
+    /// * `step` is the token position, not a record counter. The first token of
+    ///   a phase comes from the *last* prefill position, so the first usable
+    ///   logits record sits at `prefix_len - 1`.
+    /// * both phases record `step` from zero, so the semantic phase's logits
+    ///   must be picked from the records that follow the semantic prefix, not
+    ///   by step number alone.
     fn replay(
         trace: &Path,
         generated_name: &str,
+        prefix_name: &str,
+        previous_name: Option<&str>,
         first_logit_step: u64,
         sampling: SamplingConfig,
         phase: Phase,
     ) {
-        let expected = records(trace)
-            .find(|record| record["name"] == generated_name)
-            .unwrap()["token_ids"]
+        let all = records(trace).collect::<Vec<_>>();
+        let index_of = |name: &str| all.iter().position(|record| record["name"] == name);
+        let expected = all[index_of(generated_name).unwrap()]["token_ids"]
             .as_array()
             .unwrap()
             .iter()
             .map(|token| token.as_u64().unwrap() as u32)
             .collect::<Vec<_>>();
+        // The phase's logits live between its prefix and its generated ids.
+        let start = index_of(prefix_name)
+            .or_else(|| previous_name.and_then(index_of))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let end = index_of(generated_name).unwrap();
         let mut rng = Mt19937::new(831001);
         let mut history = Vec::with_capacity(expected.len());
-        for record in records(trace) {
-            if record["name"] == generated_name {
-                break;
-            }
+        for record in &all[start..end] {
             if record["name"] != "yue2.ar.logits"
                 || record["step"].as_u64().unwrap() < first_logit_step
             {
@@ -846,7 +863,7 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
             let logits = bytes
                 .chunks_exact(4)
                 .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
-                .collect::<Vec<_>>();
+                .collect::<Vec<f32>>();
             let step = history.len();
             let token =
                 sample_phase_token(&logits, &history, sampling, step, phase, &mut rng).unwrap();
@@ -859,18 +876,34 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
         assert_eq!(history.len(), expected.len());
     }
 
+    /// The trace's `step` is the token position, so a phase's first sample comes
+    /// from position `prefix_len - 1`. The prefix records carry the length
+    /// exactly; the constants are the fallback for a trace recorded before the
+    /// prefixes were dumped.
+    fn first_logit_step(trace: &Path, name: &str, fallback: u64) -> u64 {
+        records(trace)
+            .find(|record| record["name"] == name)
+            .and_then(|record| record["token_ids"].as_array().map(|ids| ids.len() as u64))
+            .map(|length| length.saturating_sub(1))
+            .unwrap_or(fallback)
+    }
+
     let trace = PathBuf::from(std::env::var_os("YUE2_E2E_ORACLE_TRACE").unwrap());
     replay(
         &trace,
         "yue2.abc.generated_ids",
-        46,
+        "yue2.abc.prefix_ids",
+        None,
+        first_logit_step(&trace, "yue2.abc.prefix_ids", 46),
         SamplingConfig::abc(),
         Phase::Abc,
     );
     replay(
         &trace,
         "yue2.semantic.generated_ids",
-        1630,
+        "yue2.semantic.prefix_ids",
+        Some("yue2.abc.generated_ids"),
+        first_logit_step(&trace, "yue2.semantic.prefix_ids", 1630),
         SamplingConfig::semantic(),
         Phase::Semantic,
     );
