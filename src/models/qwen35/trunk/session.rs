@@ -75,6 +75,9 @@ pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
     /// from token to token, so a rejected draft cannot be undone by
     /// truncating the KV cache alone: the state has to be put back.
     mtp_state_backup: Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)>,
+    /// Whether the last forward projected the logits of every row, so that
+    /// the verification can read them instead of projecting them again.
+    mtp_logits_ready: bool,
     scratch: Qwen35Scratchpad,
     prefill_batch_size: usize,
     pool: Arc<ComputePool>,
@@ -361,6 +364,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             mtp_cache,
             mtp_pending_hidden,
             mtp_state_backup,
+            mtp_logits_ready: false,
             scratch,
             prefill_batch_size,
             pool,
@@ -525,6 +529,10 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         if row >= self.last_step_tokens {
             return Err("Qwen3.5 MTP verification needs a row of the last forward".into());
         }
+        // The forward projected every row at once: read them from there.
+        if self.mtp_logits_ready && self.scratch.logits_rows.len() >= (row + 1) * vocab {
+            return Ok(self.scratch.logits_rows[row * vocab..(row + 1) * vocab].to_vec());
+        }
         let normed = &self.scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
         trunk.output_weight.quantize_and_matmul_with_scratch(
             normed,
@@ -600,7 +608,16 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         // Capture the recurrent layers' projections: a rollback replays only
         // those layers instead of the whole model.
         self.prepare_recurrent_capture(batch.len());
+        // The verification needs the target's logits for every row of the
+        // batch, so the forward projects them all in one pass: the
+        // vocabulary matrix is 1.3 GB, and projecting the rows one at a time
+        // reads it once per row. A batch that does not fit in one chunk
+        // keeps the per-row path: the buffer holds the rows of the last
+        // chunk only.
+        self.scratch.collect_all_logits = batch.len() <= self.prefill_batch_size;
         let last_logits = self.step(&embeddings, batch.len(), &positions)?;
+        self.scratch.collect_all_logits = false;
+        self.mtp_logits_ready = self.scratch.logits_rows_collected;
         self.scratch.capture_recurrent_replay = false;
 
         // The target's own continuation: the logits of row `i` say what the
