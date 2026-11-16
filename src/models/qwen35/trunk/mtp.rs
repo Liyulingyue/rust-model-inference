@@ -39,6 +39,13 @@ pub struct MtpDraft {
 /// (llama.cpp's `h_nextn`), `token` the token that follows it, and
 /// `kv_cache` the head's own KV cache (one layer, as in llama.cpp's separate
 /// draft context).
+///
+/// `want_logits` says whether the head's own vocabulary projection is
+/// needed. It is not: a row that only fills the cache (the catch-up over
+/// the committed tokens) is never sampled, and the projection reads the
+/// whole vocabulary matrix. llama.cpp skips it the same way -- its
+/// catch-up rows carry no `logits` flag, so the draft context never builds
+/// the head's output for them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_mtp(
     trunk: &HybridTrunk<'_>,
@@ -50,6 +57,7 @@ pub(crate) fn forward_mtp(
     kv_cache: &mut KvCache,
     scratch: &mut super::scratch::Qwen35Scratchpad,
     pool: &ComputePool,
+    want_logits: bool,
 ) -> Result<MtpDraft, String> {
     let cfg = &trunk.config;
     let n_embd = cfg.n_embd;
@@ -119,12 +127,16 @@ pub(crate) fn forward_mtp(
         .unwrap_or(trunk.output_norm.as_slice());
     let mut normed = projected;
     crate::ops::rms_norm_inplace(&mut normed, head_norm, eps);
-    let head = mtp
-        .shared_head_head
-        .as_ref()
-        .unwrap_or(&trunk.output_weight);
-    project(head, &normed, scratch, pool);
-    let logits = scratch.matmul_out[..head.n_out].to_vec();
+    let logits = if want_logits {
+        let head = mtp
+            .shared_head_head
+            .as_ref()
+            .unwrap_or(&trunk.output_weight);
+        project(head, &normed, scratch, pool);
+        scratch.matmul_out[..head.n_out].to_vec()
+    } else {
+        Vec::new()
+    };
 
     Ok(MtpDraft {
         logits,
