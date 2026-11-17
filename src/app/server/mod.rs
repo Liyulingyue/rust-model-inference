@@ -1609,7 +1609,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .and_then(crate::MetaValue::to_string_val)
         .map(str::to_string)
         .unwrap_or_default();
-    if matches!(arch.as_str(), "arktts" | "arktts_codec") {
+    if crate::models::arktts::is_arktts_arch(&arch) {
         return Err(
             "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
         );

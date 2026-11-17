@@ -174,4 +174,4 @@ AuK Base/Flash 的 F16/Q8_0 投影与原生 Qwen 文本入口见 [AuK 实机记�
 
 模型实现对照过的外部仓库、固定提交和 Oracle 入口见 [参考实现与 Oracle 清单](REFERENCE_IMPLEMENTATIONS.md)。
 
-Audio8-TTS-Realistic-Air 使用专用 `arktts` / `arktts_codec` 配对加载路径，必须通过 `--tts`；不进入通用文本或 JEV 后端。
+Audio8-TTS-Realistic-Air 使用专用 `arktts` / `arktts_codec` 配对加载路径，必须通过 `--tts`；不进入通用文本或 JEV 后端。用法见 [usage/arktts.md](../usage/arktts.md)。

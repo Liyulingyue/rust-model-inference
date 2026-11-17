@@ -123,7 +123,14 @@ fn tts_frontend<'a>(
     codec_arch: &str,
     is_dots_mmproj: bool,
 ) -> Result<TtsFrontend<'a>, String> {
-    if model_arch == "arktts" || codec_arch == "arktts_codec" {
+    // PiVo consumes these in its own request; every other TTS frontend would
+    // silently ignore them, so reject before routing to a model.
+    if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+        return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
+    }
+    if crate::models::arktts::is_arktts_arch(model_arch)
+        || crate::models::arktts::is_arktts_arch(codec_arch)
+    {
         if model_arch != "arktts" || codec_arch != "arktts_codec" {
             return Err(
                 "Audio8 TTS requires architecture arktts with an arktts_codec --mmproj".into(),
@@ -131,9 +138,6 @@ fn tts_frontend<'a>(
         }
         arktts_sampling(options)?;
         return Ok(TtsFrontend::ArkTts);
-    }
-    if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
-        return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
     }
     if model_arch == "breeze" || codec_arch == "breeze_audio" {
         if model_arch != "breeze" || codec_arch != "breeze_audio" {
@@ -330,6 +334,28 @@ pub(crate) fn arktts_sampling(
     {
         return Err("Audio8 TTS does not support JEV, chat templates, thinking, or text/KV generation controls".into());
     }
+    // These pick a different task before `--tts` is dispatched, so accepting
+    // them would silently drop the request.
+    if options.rerank
+        || options.clm_head.is_some()
+        || options.laya_request.is_some()
+        || options.tts_model.is_some()
+        || options.tts_mmproj.is_some()
+    {
+        return Err(
+            "Audio8 TTS cannot be combined with --rerank, --clm-head, --laya-request or --tts-model"
+                .into(),
+        );
+    }
+    if options
+        .max_tokens
+        .is_some_and(|frames| frames > crate::models::arktts::CONTEXT)
+    {
+        return Err(format!(
+            "Audio8 TTS --max-tokens is a frame budget of at most {}",
+            crate::models::arktts::CONTEXT
+        ));
+    }
     let defaults = crate::models::arktts::Sampling::default();
     let sampling = crate::models::arktts::Sampling {
         temperature: options.temperature.unwrap_or(defaults.temperature),
@@ -415,7 +441,7 @@ fn run_arktts_cli(
     crate::models::diffusion::dreamx::media::write_wav_atomic(out, &waveform, SAMPLE_RATE, false)?;
     eprintln!(
         "Audio8 TTS: {} frames / {} samples at {SAMPLE_RATE} Hz written to {}",
-        waveform.len() / 2048,
+        waveform.len() / crate::models::arktts::SAMPLES_PER_FRAME,
         waveform.len(),
         out.display()
     );
@@ -428,7 +454,7 @@ pub fn synthesize_tts_to_wav(
     prompt_text: &str,
     language: &str,
     max_tokens: usize,
-    temperature: f32,
+    temperature: Option<f32>,
     n_threads_arg: usize,
     ref_wav_bytes: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
@@ -440,30 +466,42 @@ pub fn synthesize_tts_to_wav(
         .metadata("general.architecture")
         .and_then(|value| value.to_string_val())
         .unwrap_or_default();
-    if arch == "arktts" {
+    if crate::models::arktts::is_arktts_arch(&arch) {
         if ref_wav_bytes.is_some() {
             return Err(
                 "Audio8 voice cloning requires a transcript; use --tts --ref-audio with --ref-text"
                     .into(),
             );
         }
-        crate::models::arktts::validate_compute(crate::compute::ComputePolicy::legacy())?;
+        let policy = crate::compute::ComputePolicy::legacy();
+        crate::models::arktts::validate_compute(policy)?;
         let codec_source = open_or_exit(mmproj_path, ComponentRole::Mmproj);
         crate::models::arktts::validate_pair(source.as_ref(), codec_source.as_ref())?;
         let threads = resolve_thread_count(
             n_threads_arg,
             std::thread::available_parallelism().map_or(1, |n| n.get()),
         );
-        let model = crate::models::arktts::Model::from_source(source.as_ref(), threads)?;
-        let codec = crate::models::arktts::codec::Codec::from_source(codec_source.as_ref())?;
+        let model = crate::models::arktts::Model::from_source_with_compute(
+            source.as_ref(),
+            threads,
+            policy,
+        )?;
+        let codec = crate::models::arktts::codec::Codec::from_source_with_compute(
+            codec_source.as_ref(),
+            threads,
+            policy,
+        )?;
+        let default = crate::models::arktts::Sampling::default();
         let waveform = model.synthesize(
             &codec,
             prompt_text,
             None,
-            max_tokens,
+            crate::models::arktts::frame_budget(max_tokens),
             crate::models::arktts::Sampling {
-                temperature,
-                ..Default::default()
+                // An unset temperature keeps the model default instead of the
+                // multimodal path's greedy fallback.
+                temperature: temperature.unwrap_or(default.temperature),
+                ..default
             },
         )?;
         return encode_wav_pcm16_channels(&waveform, crate::models::arktts::SAMPLE_RATE, 1);
@@ -497,7 +535,7 @@ pub fn synthesize_tts_to_wav(
         &predictor,
         &prompt,
         max_tokens,
-        temperature,
+        temperature.unwrap_or(0.0),
         &mut rng,
     )?;
     let waveform = decoder.decode(&frames)?;
@@ -608,6 +646,40 @@ mod tests {
         assert!(tts_frontend(&options, "qwen3", "arktts_codec", false).is_err());
         options.jev = true;
         assert!(tts_frontend(&options, "arktts", "arktts_codec", false).is_err());
+    }
+
+    #[test]
+    fn arktts_rejects_flags_that_would_be_dropped() {
+        assert!(arktts_sampling(&crate::app::cli::CliOptions::default()).is_ok());
+
+        for mutate in [
+            |options: &mut crate::app::cli::CliOptions| options.rerank = true,
+            |options: &mut crate::app::cli::CliOptions| options.clm_head = Some("head.bin".into()),
+            |options: &mut crate::app::cli::CliOptions| {
+                options.laya_request = Some("request.json".into());
+            },
+            |options: &mut crate::app::cli::CliOptions| {
+                options.tts_model = Some("bridge.gguf".into());
+            },
+            |options: &mut crate::app::cli::CliOptions| {
+                options.max_tokens = Some(crate::models::arktts::CONTEXT + 1);
+            },
+        ] {
+            let mut options = crate::app::cli::CliOptions::default();
+            mutate(&mut options);
+            assert!(arktts_sampling(&options).is_err(), "{options:?}");
+        }
+
+        let mut options = crate::app::cli::CliOptions::default();
+        options.max_tokens = Some(crate::models::arktts::CONTEXT);
+        assert!(arktts_sampling(&options).is_ok());
+
+        let mut options = crate::app::cli::CliOptions::default();
+        options.voice = Some("Vo".into());
+        assert!(tts_frontend(&options, "arktts", "arktts_codec", false)
+            .err()
+            .is_some_and(|error| error.contains("PiVo")));
+        assert!(tts_frontend(&options, "qwen3", "clip", false).is_err());
     }
 
     #[test]

@@ -5,6 +5,8 @@ loaded only by the `--tts` capability and emits mono 44.1 kHz PCM16 WAV or raw P
 main model contains the slow and fast DualAR transformers; the codec contains the encoder,
 codebooks, causal convolutions and decoder.
 
+CLI, HTTP and Omni-to-TTS usage is documented in [usage/arktts.md](../usage/arktts.md).
+
 The converter supports F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. Each pair carries
 the same bundle ID. Two dimensional dense projections use the shared `LinearExecutor` with
 32-row staging chunks. Vectors, convolution weights, norms, biases and codebooks retain their

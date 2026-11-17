@@ -25,8 +25,25 @@ const WIDTH: usize = 896;
 const VOCAB: usize = 155776;
 const SEMANTIC: u32 = 151678;
 const EOS: u32 = 151645;
-const CONTEXT: usize = 2048;
+/// DualAR context length in positions, which is also the frame ceiling.
+pub const CONTEXT: usize = 2048;
 pub type Frame = [u32; 10];
+
+/// The paired architectures of this model's two GGUF components.
+pub fn is_arktts_arch(arch: &str) -> bool {
+    matches!(arch, "arktts" | "arktts_codec")
+}
+
+/// Frame budget for an upstream text budget.
+///
+/// One frame is 2048 samples at 44.1 kHz (~46 ms), so the text budget is
+/// scaled to roughly its spoken length and clamped to a floor that keeps
+/// short captions usable and a ceiling that stops the codec decoder from
+/// running for minutes. Unlike the Qwen3-TTS bridge this must not be shared
+/// across models: its 80 ms frames cover a different span.
+pub fn frame_budget(text_tokens: usize) -> usize {
+    text_tokens.saturating_mul(4).clamp(128, 1024).min(CONTEXT)
+}
 
 struct Matrix<'a> {
     weight: Weight<'a>,
@@ -654,6 +671,16 @@ mod tests {
     use super::*;
     use crate::core::tensor::TensorInfo;
     use std::collections::HashMap;
+
+    #[test]
+    fn frame_budget_scales_clamps_and_caps_at_context() {
+        assert_eq!(frame_budget(0), 128);
+        assert_eq!(frame_budget(10), 128);
+        assert_eq!(frame_budget(50), 200);
+        assert_eq!(frame_budget(1000), 1024);
+        assert_eq!(frame_budget(usize::MAX), 1024);
+        assert!(frame_budget(4_096) <= CONTEXT);
+    }
 
     struct Source {
         metadata: HashMap<String, MetaValue>,
