@@ -2357,15 +2357,34 @@ fn bind_block_weights(
         // move it to the device at the cost of its precision.
         let format = match info.ggml_type {
             GGMLType::Q8_0 => crate::vulkan::ops::GpuWeightFormat::Q8_0,
-            // Off by default. The F16 tiled kernel is 7x faster than the CPU
-            // row path on the refiner's shapes (3.74 s -> 0.52 s of a step) and
-            // agrees with it to 2.17/255, but with the refiner on the device the
-            // main stack's FFN slot measured 6.68 s against 3.81 s before, and
-            // 8.00 s with the refiner back on the CPU -- so the step total did
-            // not move and the regression is not explained. The slot is not
-            // stable enough across instrumentation changes to attribute it, so
-            // this stays opt-in until it is.
-            GGMLType::F16 if f16_refiner_enabled() => crate::vulkan::ops::GpuWeightFormat::F16,
+            // The F16 device matmul is the refiner's contract, and the refiner
+            // stacks are the only place it was measured: they have no AdaLN
+            // weights and no time input. The main stack differs -- its
+            // activations carry the AdaLN modulation and the time embedding --
+            // and dispatching it with the same kernel does not survive a
+            // second step. Measured on the F16 DiT (128x128): the first step
+            // (sigma 1.000) matched the CPU render to 58.3 dB, and the second
+            // step (sigma 0.003) came back with every flow value NaN, 1024 of
+            // 1024. The CPU render of the same spec is finite, so the F16
+            // weights are not at fault; the device path is.
+            //
+            // So the F16 weights bind for the refiner stacks only, and a model
+            // whose main stack is F16 keeps that stack on the CPU row path,
+            // which is the same policy the K-quant DiT gets (TODO-032). The
+            // F16 main stack on the device is a gap in the shared float matmul,
+            // tracked as TODO-076.
+            //
+            // The F16 tiled kernel is also off by default. It is 7x faster than
+            // the CPU row path on the refiner's shapes (3.74 s -> 0.52 s of a
+            // step) and agrees with it to 2.17/255, but with the refiner on the
+            // device the main stack's FFN slot measured 6.68 s against 3.81 s
+            // before, and 8.00 s with the refiner back on the CPU -- so the step
+            // total did not move and the regression is not explained. The slot
+            // is not stable enough across instrumentation changes to attribute
+            // it, so this stays opt-in until it is.
+            GGMLType::F16 if f16_refiner_enabled() && layer < 2 * REFINER_LAYERS => {
+                crate::vulkan::ops::GpuWeightFormat::F16
+            }
             _ => continue,
         };
         let Some(bytes) = source.tensor_slice(name) else {

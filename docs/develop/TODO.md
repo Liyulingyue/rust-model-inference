@@ -5676,3 +5676,67 @@ qwen3 塔是这一族里剩下的那个例外 ✓✓。
 校验 ✓✓）、`src/models/qwen3/trunk/`（文本编码器的复现性，待定位 ✓✓）、
 [TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)（同一套「按权重量化
 格式选后端」的结论 ✓✓）。
+
+### TODO-076: Z-Image 的 F16 DiT 档在设备路径上第二步全 NaN —— 主栈的 F16 投影不能走设备的浮点 matmul
+
+**状态**：⚠️ 部分完成（2026-11-17）。**根因定位到「F16 设备 matmul 只对 refiner 成立」，
+主栈的 F16 投影已改回 CPU 行路径**；主栈的 F16 要真正上设备，还缺共享算子的一份支持。
+
+**现象**（`models/z-image-gguf-mine/z-image-turbo-f16.gguf` ✓✓，128×128 / seed 42 ✓✓）：
+
+| 规格 | 路径 | 结果 |
+|---|---|---|
+| 128×128 / 1 步 | CPU | 13.0 s，正常出图 ✓✓ |
+| 128×128 / 1 步 | 设备（`--gpu`） | 3.9 s，正常出图，与 CPU 的 PSNR **58.29 dB**（max_abs 7 ✓✓） |
+| 128×128 / 2 步 | CPU | 26.3 s，正常出图 ✓✓ |
+| 128×128 / 2 步 | 设备（`--gpu`） | ✗✗ `Non-finite Z-Image predicted flow: len=4096, nan=4096` |
+| 64×64 / 1 步 | 设备（`--gpu`） | 正常出图 ✓✓ |
+| 64×64 / 2 步 | 设备（`--gpu`） | ✗✗ `len=1024, nan=1024` |
+
+⇒ **不是分辨率相关，是步数相关** ✓✓：`RUST_GPU_DIAG=1` 的输出把分界点钉死了 ✓✓ ——
+第 1 步 `sigma=1.000` 正常，第 2 步 `sigma=0.003` 全 NaN ✓✓。
+
+⇒ **不是权重的锅** ✓✓：同一份 F16 GGUF 在 CPU 上跑同样的规格是有限的 ✓✓，
+第 1 步的设备结果还与 CPU 差 58.29 dB（≈ 感知无损 ✓✓）⇒ 权重读对了，
+第 2 步才坏 ⇒ **坏在「主栈 + 时间步」这一侧** ✓✓。
+
+⇒ 已排除的两条假设 ✓✓：
+
+1. **不是激活溢出 F16** ✓✓ —— CPU 的 F16 路径同样把激活舍入到 F16
+   （`F16Kernel::forward_scaled` → `f32_slice_to_f16` ✓✓），CPU 有限 ⇒ 激活在 F16 范围内 ✓✓；
+   而设备的 `RoundedInputF32` 模式做的是同一件事 ✓✓。
+2. **不是融合的 AdaLN kernel** ✓✓ —— `RUST_GPU_ATTENTION=0` 把注意力放回 CPU
+   （AdaLN 调制仍走设备）✓✓，照样 NaN ✓✓。
+
+⇒ **主栈与 refiner 的差别** ✓✓：refiner 没有 AdaLN 权重、没有时间输入 ✓✓，
+它的 F16 投影是**验过**的 ✓✓（F16 tiled kernel 比 CPU 行路径快 7 倍 ✓✓，
+与 CPU 差 2.17/255 ✓✓）；主栈的激活带着 AdaLN 调制和时间嵌入 ✓✓，
+同一条 kernel 接不住 ✓✓。
+
+**本轮改了什么** ✓✓：`bind_block_weights` 里 F16 只对 **refiner 栈**
+（`layer < 2 * REFINER_LAYERS` ✓✓）绑定设备，主栈的 F16 投影落回 CPU 行路径 ✓✓ ——
+与 K-quant DiT 同一套策略（[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍) ✓✓、[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍) ✓✓）。
+⇒ Q8_0 档**完全不受影响** ✓✓（主栈本来就是 Q8_0 ✓✓，refiner 的 F16 绑定条件不变 ✓✓；实测 128×128 / 2 步的 denoise 仍是 3.4 s ✓✓）。
+
+⇒ **改后实测** ✓✓：F16 档 128×128 / 2 步 **CPU 26.3 s → 设备 23.3 s** ✓✓（denoise 22.2 s 走 CPU 行路径 ✓✓，VAE 在设备上 ✓✓），
+与 CPU 的 PNG 差异 PSNR **58.41 dB**（max_abs 3 ✓✓）；
+严格 `--compute vulkan` 档同样正常出图（`backend=partial mode=vae` ✓✓）。
+
+**还差什么** ✓✓：
+
+1. **共享算子**：设备的浮点 matmul（`GpuMatmulMode::RoundedInputF32` ✓✓）要能接住
+   **主栈**那种「带 AdaLN 调制 + 时间嵌入」的激活 ✓✓ ⇒ 这是 `src/vulkan/ops.rs` 的活 ✓✓，
+   不是模型层能补的 ✓✓。**具体缺口**：F16 权重 + 主栈形状 + 第 2 步的时间步，
+   在设备上产出 inf ⇒ NaN ✓✓；第 1 步同形状同权重是好的 ✓✓ ⇒ 缺口在**时间步相关的激活** ✓✓。
+2. **F32 档**：`z-image-turbo-f32.gguf` 也在 `models/z-image-gguf-mine/` ✓✓，
+   设备有 BF16/F32 的转置浮点 matmul ✓✓，但 Z-Image 的 `bind_block_weights` 没有绑 F32
+   （`_ => continue` ✓✓）⇒ F32 档的 DiT 现在整个留在 CPU ✓✓。
+   要上设备需要主机侧把 F32 权重转置后再传 ✓✓（共享算子的布局约定 ✓✓）。
+
+**验收**：Z-Image 的 F16 档在 `--gpu` 下出图且与 CPU 的 PSNR ≥ 40 dB ✓✓；
+F16 主栈的投影在设备上跑完一步且结果有限 ✓✓；F32 档能绑设备 ✓✓。
+
+**关联**：`src/models/diffusion/z_image/dit.rs`（`bind_block_weights` ✓✓、
+`f16_refiner_enabled` ✓✓）、`src/vulkan/ops.rs`（`GpuMatmulMode::RoundedInputF32` ✓✓、
+`uses_tiled_f16` ✓✓）、[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)
+（同一套「按权重量化格式选后端」的结论 ✓✓）。
