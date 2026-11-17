@@ -128,6 +128,13 @@ fn tts_frontend<'a>(
     if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
         return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
     }
+    // The bridge pair belongs to the multimodal post-processor; `--tts`
+    // never runs it.
+    if options.tts_model.is_some() || options.tts_mmproj.is_some() {
+        return Err(
+            "--tts-model/--tts-mmproj are only used by the multimodal post-processor".into(),
+        );
+    }
     if crate::models::arktts::is_arktts_arch(model_arch)
         || crate::models::arktts::is_arktts_arch(codec_arch)
     {
@@ -680,6 +687,11 @@ mod tests {
             .err()
             .is_some_and(|error| error.contains("PiVo")));
         assert!(tts_frontend(&options, "qwen3", "clip", false).is_err());
+
+        let mut options = crate::app::cli::CliOptions::default();
+        options.tts_model = Some("bridge.gguf".into());
+        assert!(tts_frontend(&options, "qwen3", "clip", false).is_err());
+        assert!(tts_frontend(&options, "breeze", "breeze_audio", false).is_err());
     }
 
     #[test]

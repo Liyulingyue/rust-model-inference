@@ -199,7 +199,8 @@ def convert(model_dir: Path, out_dir: Path, precision="bf16", codec_precision="f
         except Exception:
             main_path.unlink()
             raise
-    print(f"verified {len(source.header) - 1} {precision} main tensors / {len(codec)} {codec_precision} codec tensors")
+    tensor_count = sum(name != "__metadata__" for name in source.header)
+    print(f"verified {tensor_count} {precision} main tensors / {len(codec)} {codec_precision} codec tensors")
     return main_path, codec_path
 
 
