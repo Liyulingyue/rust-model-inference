@@ -204,6 +204,13 @@ struct Qwen35ArenaLayout {
     moe_scores: ArenaRegion,
     moe_status: ArenaRegion,
     logits: ArenaRegion,
+    /// The logits of every row of a chunk, when the caller asked for them.
+    ///
+    /// A speculative verification needs the target's answer at each drafted
+    /// position, so it needs one vocabulary projection per row. They are
+    /// projected into this region in a single dispatch and read back
+    /// together. Only a checkpoint with an MTP head gets the region.
+    logits_rows: ArenaRegion,
     rope: ArenaRegion,
     q8: ArenaRegion,
     q8_scales: ArenaRegion,
@@ -347,6 +354,17 @@ impl Qwen35ArenaLayout {
             qwen35_product("FFN outputs", &[ffn_rows, config.n_embd])?,
         )?;
         let logits = qwen35_f32_region(&mut cursor, config.vocab_size)?;
+        // The MTP verification projects the whole batch at once. A checkpoint
+        // without a draft head never asks for more than the last row, so it
+        // does not pay for the buffer.
+        let logits_rows = qwen35_f32_region(
+            &mut cursor,
+            if config.n_nextn > 0 {
+                qwen35_product("row logits", &[rows, config.vocab_size])?
+            } else {
+                0
+            },
+        )?;
         let quant_rows = qwen35_product("quantized rows", &[rows, quant_len.div_ceil(4) * 4])?;
         let q8 = qwen35_region(&mut cursor, quant_rows)?;
         let q8_scales = qwen35_f32_region(
@@ -414,6 +432,7 @@ impl Qwen35ArenaLayout {
             moe_scores,
             moe_status,
             logits,
+            logits_rows,
             rope,
             q8,
             q8_scales,
@@ -616,6 +635,10 @@ struct MhcBindings {
 
 pub(crate) struct Qwen35GpuChunkResult<'a> {
     pub(crate) logits: &'a [f32],
+    /// The normalized hidden state of every row of the chunk.
+    pub(crate) normed: &'a [f32],
+    /// The logits of every row, when the session was asked to collect them.
+    pub(crate) logits_rows: &'a [f32],
     pub(crate) k_delta: &'a [f32],
     pub(crate) v_delta: &'a [f32],
     pub(crate) conv_state: &'a [f32],
@@ -640,6 +663,15 @@ pub(crate) struct Qwen35VulkanSession {
     commit_state: TokenCommitState,
     rope: Vec<f32>,
     logits: Vec<f32>,
+    /// Whether the next chunk normalizes and returns every row's hidden
+    /// state. The MTP head needs a hidden state per position, both to chain
+    /// its drafts and to fill its cache from a prompt.
+    collect_normed: bool,
+    /// Whether the next chunk projects every row's logits. A speculative
+    /// verification reads the target's answer at each drafted position.
+    collect_logits: bool,
+    normed_rows: Vec<f32>,
+    logits_rows: Vec<f32>,
     k_delta: Vec<f32>,
     v_delta: Vec<f32>,
     conv_state: Vec<f32>,
@@ -996,6 +1028,14 @@ impl Qwen35VulkanSession {
         let vocab = config.vocab_size;
         let rope_dim = config.rope_dimension_count;
 
+        let normed_count = qwen35_product("normed rows", &[max_rows, config.n_embd])?;
+        // Only a checkpoint with a draft head ever collects row logits.
+        let logits_rows_count = if config.n_nextn > 0 {
+            qwen35_product("row logits", &[max_rows, vocab])?
+        } else {
+            0
+        };
+
         Ok(Some(Self {
             context,
             ops,
@@ -1014,6 +1054,10 @@ impl Qwen35VulkanSession {
             commit_state: TokenCommitState::new(0, capacity),
             rope: vec![0.0; qwen35_product("mRoPE rows", &[rope_dim, max_rows])?],
             logits: vec![0.0; vocab],
+            collect_normed: false,
+            collect_logits: false,
+            normed_rows: vec![0.0; normed_count],
+            logits_rows: vec![0.0; logits_rows_count],
             k_delta: vec![0.0; delta_count],
             v_delta: vec![0.0; delta_count],
             conv_state: vec![0.0; conv_count],
@@ -1056,6 +1100,16 @@ impl Qwen35VulkanSession {
         }
         Ok(Qwen35GpuChunkResult {
             logits: &self.logits,
+            normed: if self.collect_normed || self.mhc.is_some() {
+                &self.normed_rows[..rows * self.config.n_embd]
+            } else {
+                &[]
+            },
+            logits_rows: if self.collect_logits {
+                &self.logits_rows[..rows * self.config.vocab_size]
+            } else {
+                &[]
+            },
             k_delta: &self.k_delta[..count],
             v_delta: &self.v_delta[..count],
             conv_state: &self.conv_state,
@@ -1852,7 +1906,14 @@ impl Qwen35VulkanSession {
             offset: self.layout.x.offset + last_offset,
             size: self.layout.x.size - last_offset,
         };
-        let head_input = if self.mhc.is_some() {
+        // The MTP head reads the target's hidden state at every row of the
+        // chunk: a draft chains from the row before it, and a catch-up
+        // refreshes the head's cache from every committed row. Normalize all
+        // of them when the caller collects rows, and always hand the rows
+        // back so the caller can keep a hidden state per row.
+        let collect_logits = self.collect_logits;
+        let normalize_rows = self.mhc.is_some() || self.collect_normed || collect_logits;
+        if normalize_rows {
             self.ops.record_rms_norm_rows(
                 &commands,
                 self.output_norm,
@@ -1864,10 +1925,6 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            ArenaRegion {
-                offset: self.layout.normed.offset + last_offset,
-                size: self.layout.normed.size - last_offset,
-            }
         } else {
             self.ops.record_rms_norm(
                 &commands,
@@ -1877,15 +1934,34 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.norm_eps,
             )?;
+        }
+        let last_normed = ArenaRegion {
+            offset: self.layout.normed.offset + last_offset,
+            size: self.layout.normed.size - last_offset,
+        };
+        // `record_rms_norm` writes the last row at the base of the buffer;
+        // the multi-row form leaves it at its own offset.
+        let head_input = if collect_logits {
+            self.layout.normed
+        } else if self.mhc.is_some() || self.collect_normed {
+            last_normed
+        } else {
             self.layout.normed
         };
+        let projection_rows = if collect_logits { rows } else { 1 };
         commands.submit_and_wait()?;
         #[cfg(feature = "parity-trace")]
         self.trace_region(
             "result_norm",
             None,
             cache_position,
-            self.layout.normed,
+            // The single-row form leaves the row at the base of the buffer;
+            // the multi-row form leaves it at its own offset.
+            if normalize_rows {
+                last_normed
+            } else {
+                self.layout.normed
+            },
             config.n_embd,
             false,
         )?;
@@ -1894,27 +1970,59 @@ impl Qwen35VulkanSession {
             self.trace_rows("loop.norm", None, self.layout.normed, rows, config.n_embd)?;
         }
         let commands = TokenCommands::begin(self.context)?;
+        // One projection for the whole chunk, or one for its last row. The
+        // vocabulary matrix is the same either way; the batched form reads
+        // it once instead of once per row.
+        let output_region = if collect_logits {
+            self.layout.logits_rows
+        } else {
+            self.layout.logits
+        };
         self.record_weights(
             &commands,
             self.output,
             head_input,
-            &[(self.layout.logits, config.vocab_size)],
+            &[(output_region, config.vocab_size)],
             config.n_embd,
-            1,
+            projection_rows,
         )?;
         commands.submit_and_wait()?;
 
         #[cfg(feature = "parity-trace")]
-        self.trace_region(
-            "result_output",
-            None,
-            cache_position,
-            self.layout.logits,
-            config.vocab_size,
-            false,
-        )?;
-        self.ops
-            .read_f32_into(self.layout.logits, &mut self.logits)?;
+        {
+            let traced = if collect_logits {
+                ArenaRegion {
+                    offset: self.layout.logits_rows.offset + (rows - 1) * config.vocab_size * 4,
+                    size: config.vocab_size * 4,
+                }
+            } else {
+                self.layout.logits
+            };
+            self.trace_region(
+                "result_output",
+                None,
+                cache_position,
+                traced,
+                config.vocab_size,
+                false,
+            )?;
+        }
+        if collect_logits {
+            let logits_count = qwen35_product("row logits", &[rows, config.vocab_size])?;
+            self.ops.read_f32_into(
+                self.layout.logits_rows,
+                &mut self.logits_rows[..logits_count],
+            )?;
+            self.logits
+                .copy_from_slice(&self.logits_rows[(rows - 1) * config.vocab_size..logits_count]);
+        } else {
+            self.ops
+                .read_f32_into(self.layout.logits, &mut self.logits)?;
+        }
+        if normalize_rows {
+            self.ops
+                .read_f32_into(self.layout.normed, &mut self.normed_rows[..input_count])?;
+        }
         #[cfg(feature = "parity-trace")]
         if self.mhc.is_some() {
             crate::parity_trace::report(crate::parity_trace::checkpoint_row(
@@ -1949,6 +2057,10 @@ impl Qwen35VulkanSession {
                 .chain(&self.ssm_state)
                 .any(|v| !v.is_finite())
             || hidden.iter().any(|v| !v.is_finite())
+            || (normalize_rows
+                && self.normed_rows[..input_count]
+                    .iter()
+                    .any(|v| !v.is_finite()))
         {
             return Err(VulkanError::UnsupportedShape(
                 "Qwen3.5 Vulkan chunk produced non-finite output".into(),
@@ -1959,6 +2071,48 @@ impl Qwen35VulkanSession {
 
     pub(crate) fn commit_token(&mut self) {
         self.commit_state.commit();
+    }
+
+    /// Ask the next chunk to hand back per-row hidden states and logits.
+    ///
+    /// A speculative verification needs both; a prefill catch-up only needs
+    /// the hidden states, and projecting a whole prompt batch would read the
+    /// 1.3 GB vocabulary matrix for rows nobody looks at.
+    pub(crate) fn set_collect(&mut self, normed: bool, logits: bool) {
+        self.collect_normed = normed;
+        self.collect_logits = logits;
+    }
+
+    /// Put the recurrent state back to the one a saved copy holds.
+    ///
+    /// The shadow arrays the host keeps are the same layout the device uses
+    /// (one flat run of layers), so the copy is a straight upload.
+    pub(crate) fn restore_recurrent_state(
+        &mut self,
+        conv: &[f32],
+        ssm: &[f32],
+    ) -> Result<(), VulkanError> {
+        if conv.len() != self.conv_state.len() || ssm.len() != self.ssm_state.len() {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "Qwen3.5 Vulkan recurrent state restore needs {} + {} values, got {} + {}",
+                self.conv_state.len(),
+                self.ssm_state.len(),
+                conv.len(),
+                ssm.len()
+            )));
+        }
+        self.ops.write_f32(self.layout.conv_state, conv)?;
+        self.ops.write_f32(self.layout.ssm_state, ssm)
+    }
+
+    /// Move the committed length back after a rejected draft.
+    ///
+    /// The rejected rows stay in the device cache, but the next chunk starts
+    /// at `position` and overwrites them before anything reads them.
+    pub(crate) fn rewind(&mut self, position: usize) -> Result<(), VulkanError> {
+        self.commit_state
+            .truncate(position)
+            .map_err(VulkanError::UnsupportedShape)
     }
 
     pub(crate) fn abort_token(&mut self) {
@@ -3354,9 +3508,17 @@ mod tests {
         assert_eq!(layout.ssm_state.size, 2 * 2 * 4 * 4 * 4);
         assert_eq!(layout.q8.size, config.n_ff);
         assert_eq!(layout.q8k.size, config.n_ff);
+        // A checkpoint with a draft head projects a whole verification batch.
+        assert_eq!(layout.logits.size, config.vocab_size * 4);
+        assert_eq!(layout.logits_rows.size, config.vocab_size * 4);
         assert!(layout.total_size() >= layout.ssm_state.end());
 
         let mut config = config;
+        config.n_nextn = 0;
+        let layout = Qwen35ArenaLayout::new_rows(&config, 7, 3).unwrap();
+        assert_eq!(layout.logits_rows.size, 0, "no draft head, no row buffer");
+        let mut config = config;
+        config.n_nextn = 1;
         config.moe = Some(crate::models::qwen35::trunk::config::Qwen35Moe {
             n_expert: 32,
             n_expert_used: 8,
