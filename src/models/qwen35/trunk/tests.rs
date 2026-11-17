@@ -173,6 +173,7 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         output_norm: vec![1.0; 2],
         output_weight: identity(),
         layers: vec![layer],
+        mtp: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
         cls_score: None,
@@ -266,7 +267,11 @@ fn qwen35_k_quant_weights_reject_non_block_width() {
 
 #[test]
 fn qwen35_gdn_norm_matches_pinned_llama_cpp_numerically() {
-    // Holo4 token 248045, layer 0, head 0; llama.cpp 11fe0215 build_gdn_l2_norm.
+    // Holo4 token 248045, layer 0, head 0, captured from the pinned
+    // llama.cpp b96806d `ggml_l2_norm` (eps = 1e-6). The older golden came
+    // from 11fe0215's `build_gdn_l2_norm`, which put the epsilon inside the
+    // square root; upstream moved it to a floor on the norm, and the two
+    // differ by a few ULP.
     const INPUT_BITS: [u32; 128] = [
         0x3b314673, 0xbcd3cc3c, 0x3ac03a72, 0xbc665313, 0xbb8ce72d, 0x394956d0, 0x3cb3b1a4,
         0x3d2d63a7, 0xbd4432a2, 0x3b9e0daf, 0xbd454c6e, 0xbd0c2a00, 0xbc52b8e4, 0xbc26d947,
@@ -289,25 +294,25 @@ fn qwen35_gdn_norm_matches_pinned_llama_cpp_numerically() {
         0xba2aede9, 0x3c0b4aa0,
     ];
     const EXPECTED_BITS: [u32; 128] = [
-        0x3b1c8cf5, 0xbcbb098c, 0x3aa9c16f, 0xbc4b65ec, 0xbb78dc75, 0x3931cd22, 0x3c9eafc2,
-        0x3d191e75, 0xbd2d42d3, 0x3b8b9375, 0xbd2e3bad, 0xbcf78e57, 0xbc3a1665, 0xbc1357d3,
-        0x3c39cf10, 0x3c5f8f5e, 0xbaea8708, 0x39069b76, 0x3a9fdb13, 0xbb993262, 0xbc24d5d3,
-        0x3c547885, 0xbce60b8b, 0xbb0b7688, 0xbb855130, 0x39541990, 0xbb1a522a, 0xbb9cef04,
-        0xb9f4697c, 0xbc8c3e41, 0x3a259cd0, 0xbbc109b3, 0xbb3f0031, 0xbba270e8, 0xbcbb69ab,
-        0xbb114a54, 0xb9a32db8, 0x3a9dcedf, 0xba9da64a, 0xbc7341d2, 0xb974d3a1, 0x391416f9,
-        0x3981cbaa, 0x3aff2655, 0x3c5b0e7c, 0xbc22baec, 0xbcd12df1, 0x3cac86be, 0xbc89ff3d,
-        0x3c5f6867, 0xba15e0e5, 0xb92bb2ad, 0xbccbea66, 0xba6b0a74, 0x3cd47d56, 0xbab040a9,
-        0x3c8499db, 0xbc040a8a, 0xba0ba5d3, 0xbcbbea78, 0xb8cea990, 0x3a3a65f4, 0xbc90c179,
-        0x3b8f81f0, 0xbb52619f, 0x38ab9aaf, 0xbc21c9ad, 0xbc859ad7, 0xbc47f21e, 0xbb7d8c6e,
-        0x3bff11fb, 0xbc0e16c2, 0xbc4fb721, 0x39018d9a, 0x3d11dbe0, 0xbc1f501b, 0xbbeae823,
-        0xbcf10d53, 0xbc33eaea, 0x3cfb827b, 0x3ae85687, 0x3b70d75e, 0xbca16134, 0x3c9f3acf,
-        0x3baba13e, 0xbc8ef8ac, 0x38edd35a, 0x3b2b1d59, 0xbcece84e, 0xbcc93cdf, 0xbcc921d0,
-        0xbc18e24c, 0xbc5716d3, 0xbbf19686, 0xba3b5a02, 0x3b973642, 0xb8155976, 0x3c07f931,
-        0xbc6d70c0, 0xbd09963f, 0x3c07b748, 0x3ce1f95f, 0x38643bfa, 0xbcb0b553, 0xba1712f2,
-        0x3c869f15, 0xbe3f22fa, 0xbc149e17, 0xbcbf1c52, 0x3d2cbc18, 0xbb24254c, 0x3f77a760,
-        0x3b9e2e71, 0xbc8eb480, 0x3a9f2869, 0xb6954675, 0xbbe09130, 0x3ba9e093, 0x3b438555,
-        0xbc475fa0, 0x3ceb3bad, 0xb9b82605, 0xbc4aa055, 0xbc208311, 0xbcad7fad, 0x3ac7f3c8,
-        0xba16f256, 0x3bf603d1,
+        0x3b1c8cf8, 0xbcbb0990, 0x3aa9c173, 0xbc4b65f0, 0xbb78dc7b, 0x3931cd26, 0x3c9eafc6,
+        0x3d191e78, 0xbd2d42d7, 0x3b8b9378, 0xbd2e3bb1, 0xbcf78e5c, 0xbc3a1669, 0xbc1357d7,
+        0x3c39cf13, 0x3c5f8f61, 0xbaea870d, 0x39069b79, 0x3a9fdb16, 0xbb993265, 0xbc24d5d7,
+        0x3c54788a, 0xbce60b8f, 0xbb0b768b, 0xbb855133, 0x39541995, 0xbb1a522e, 0xbb9cef08,
+        0xb9f46982, 0xbc8c3e44, 0x3a259cd3, 0xbbc109b7, 0xbb3f0035, 0xbba270eb, 0xbcbb69b0,
+        0xbb114a57, 0xb9a32dbc, 0x3a9dcee2, 0xba9da64d, 0xbc7341d8, 0xb974d3a7, 0x391416fc,
+        0x3981cbad, 0x3aff265a, 0x3c5b0e80, 0xbc22baef, 0xbcd12df6, 0x3cac86c2, 0xbc89ff40,
+        0x3c5f686d, 0xba15e0e8, 0xb92bb2b1, 0xbccbea6a, 0xba6b0a79, 0x3cd47d5a, 0xbab040ad,
+        0x3c8499de, 0xbc040a8d, 0xba0ba5d6, 0xbcbbea7c, 0xb8cea995, 0x3a3a65f8, 0xbc90c17d,
+        0x3b8f81f3, 0xbb5261a4, 0x38ab9ab3, 0xbc21c9b1, 0xbc859ada, 0xbc47f222, 0xbb7d8c74,
+        0x3bff1200, 0xbc0e16c5, 0xbc4fb726, 0x39018d9d, 0x3d11dbe3, 0xbc1f501f, 0xbbeae828,
+        0xbcf10d59, 0xbc33eaed, 0x3cfb8280, 0x3ae8568c, 0x3b70d763, 0xbca16137, 0x3c9f3ad3,
+        0x3baba142, 0xbc8ef8af, 0x38edd35f, 0x3b2b1d5c, 0xbcece853, 0xbcc93ce3, 0xbcc921d5,
+        0xbc18e24f, 0xbc5716d7, 0xbbf1968b, 0xba3b5a06, 0x3b973645, 0xb815597a, 0x3c07f934,
+        0xbc6d70c5, 0xbd099642, 0x3c07b74c, 0x3ce1f964, 0x38643bff, 0xbcb0b557, 0xba1712f5,
+        0x3c869f18, 0xbe3f22fe, 0xbc149e1a, 0xbcbf1c56, 0x3d2cbc1c, 0xbb242550, 0x3f77a765,
+        0x3b9e2e75, 0xbc8eb483, 0x3a9f286c, 0xb6954678, 0xbbe09135, 0x3ba9e097, 0x3b43855a,
+        0xbc475fa4, 0x3ceb3bb3, 0xb9b82608, 0xbc4aa058, 0xbc208315, 0xbcad7fb1, 0x3ac7f3cc,
+        0xba16f259, 0x3bf603d6,
     ];
 
     let mut actual = INPUT_BITS.map(f32::from_bits);
@@ -318,15 +323,51 @@ fn qwen35_gdn_norm_matches_pinned_llama_cpp_numerically() {
 }
 
 #[test]
-fn qwen35_gdn_norm_adds_eps_to_sum_of_squares() {
+fn qwen35_gdn_norm_floors_the_norm_at_eps() {
+    // ggml's `ggml_l2_norm` scales by `1 / max(sqrt(sum(x²)), eps)`: the
+    // epsilon floors the norm instead of being added inside the square
+    // root, so a vector far below the epsilon is scaled up to `eps` rather
+    // than to `sqrt(eps)`.
     let mut tiny = [1e-8f32; 128];
     super::util::l2_norm(&mut tiny, 1e-6);
     for value in tiny {
-        assert!((value - 1e-5).abs() < 1e-10, "{value}");
+        assert!((value - 1e-2).abs() < 1e-9, "{value}");
     }
     let mut zero = [0.0; 128];
     super::util::l2_norm(&mut zero, 1e-6);
     assert_eq!(zero, [0.0; 128]);
+}
+
+#[test]
+fn qwen35_gdn_norm_differs_from_the_pre_b96806d_formula_by_eps_over_two_sum() {
+    // llama.cpp used `build_gdn_l2_norm` (`x / sqrt(sum(x^2) + eps)`) before
+    // `b96806d`. The two formulas differ by `eps / (2 * sum)` relative, so a
+    // model compared against a pre-`b96806d` Oracle carries exactly that
+    // error -- it is a formula-version difference, not an implementation
+    // defect.
+    const EPS: f32 = 1e-5;
+    let input: Vec<f32> = (0..128).map(|index| 0.1 + (index as f32) * 0.001).collect();
+    let sum: f64 = input
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum();
+
+    let mut upstream = input.clone();
+    super::util::l2_norm(&mut upstream, EPS);
+    let mut legacy = input.clone();
+    super::util::l2_norm_legacy(&mut legacy, EPS);
+
+    let expected = EPS as f64 / (2.0 * sum);
+    for (upstream, legacy) in upstream.iter().zip(&legacy) {
+        let relative = ((upstream - legacy) / legacy).abs() as f64;
+        // The difference itself is around 1e-7 of a value near 0.1, so the
+        // f32 resolution of the two results bounds how exactly the relative
+        // difference can be measured.
+        assert!(
+            (relative - expected).abs() <= expected * 0.1,
+            "relative difference {relative} is not the expected {expected}"
+        );
+    }
 }
 
 #[test]
@@ -366,6 +407,257 @@ fn qwen35moe_single_token_trace() {
     // beyond it succeeding, because the comparison is done offline by
     // tools/oracle/qwen35/check_moe.py against the oracle's manifest.
     session.step_with_tokens(&tokens, &positions).unwrap();
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
+fn qwen35_mtp_head_drafts_the_token_the_target_would_pick() {
+    // The MTP head is the block after the main stack: it takes the target's
+    // last hidden state and the next token and predicts the token after that.
+    // The number that says whether the head is wired up correctly is the
+    // acceptance rate -- how many drafts the target would have accepted.
+    // llama.cpp reports 0.656 for the same model and prompt
+    // (`llama-server --spec-type draft-mtp`).
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let ids = std::env::var("RMI_QWEN35_PROMPT_TOKENS")
+        .expect("RMI_QWEN35_PROMPT_TOKENS must be a comma-separated list");
+    let tokens: Vec<u32> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("token id must be a u32"))
+        .collect();
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must name at least one token"
+    );
+    let steps: usize = std::env::var("RMI_QWEN35_MTP_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+    let drafts_per_step: usize = std::env::var("RMI_QWEN35_MTP_DRAFTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    assert!(
+        model.mtp.is_some(),
+        "the checkpoint has no MTP head, so there is nothing to draft"
+    );
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps + drafts_per_step + 2);
+    let pool = session_pool();
+    let mut session =
+        Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, tokens.len(), pool).unwrap();
+
+    // Prefill, then keep the target's own greedy sequence as the reference
+    // the drafts are checked against.
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+    // The head's KV cache has to cover the committed prompt before the first
+    // draft: the draft block attends over the committed positions, so a
+    // cache that starts at the first generated token would leave the draft
+    // with almost no context.
+    let prompt_hidden = session.last_hidden(tokens.len()).unwrap().to_vec();
+    let prompt_positions: Vec<usize> = (0..tokens.len()).collect();
+    session
+        .mtp_catch_up(&tokens, &prompt_positions, &prompt_hidden)
+        .unwrap();
+    let mut generated: Vec<u32> = Vec::new();
+    let mut drafts: Vec<Vec<u32>> = Vec::new();
+    let mut position = tokens.len();
+
+    for _ in 0..steps {
+        let token = crate::ops::sampling::argmax(&logits) as u32;
+        generated.push(token);
+
+        // The head runs at the position of the token it is given and pairs it
+        // with the hidden state of the position before it, so its logits are
+        // the token after that one.
+        let proposed = session
+            .mtp_draft_tokens(token, position, drafts_per_step)
+            .unwrap();
+        drafts.push(proposed);
+
+        // Feed the target its own greedy token and keep going.
+        logits = session
+            .step_with_tokens(&[token], &[[position, position, position, 0]])
+            .unwrap();
+        // The committed token now has a hidden state of its own: catch the
+        // head's KV cache up with it so the next draft sees it.
+        let hidden = session.last_hidden_state().unwrap().to_vec();
+        session
+            .mtp_catch_up(&[token], &[position], &hidden)
+            .unwrap();
+        position += 1;
+    }
+
+    // The drafts are checked against the target's own sequence: draft `i` of
+    // step `s` should be the token the target produces at step `s + i + 1`.
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    for (step, proposed) in drafts.iter().enumerate() {
+        for (offset, &token) in proposed.iter().enumerate() {
+            let target = step + offset + 1;
+            drafted += 1;
+            if target < generated.len() && generated[target] == token {
+                accepted += 1;
+            }
+        }
+    }
+    eprintln!("Qwen3.5 MTP target tokens: {generated:?}");
+    eprintln!("Qwen3.5 MTP drafts: {drafts:?}");
+    eprintln!(
+        "Qwen3.5 MTP acceptance = {:.4} ({accepted} accepted / {drafted} drafted)",
+        accepted as f64 / drafted.max(1) as f64
+    );
+    assert!(drafted > 0, "no drafts were produced");
+    // A head that is wired up wrongly drafts noise, and noise is accepted
+    // at the rate of a coin flip at best. llama.cpp measures 0.656 for this
+    // model, so anything below a quarter means the head is not working.
+    assert!(
+        accepted * 4 >= drafted,
+        "MTP acceptance {accepted}/{drafted} is too low for a working draft head"
+    );
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
+fn qwen35_mtp_speculative_decoding_matches_greedy() {
+    // Speculative decoding has to produce exactly the tokens the target
+    // would have produced on its own -- that is the whole point of the
+    // verify/accept loop. The number that says whether the draft head is
+    // any good is the acceptance rate: how many of the drafted tokens the
+    // target accepted.
+    //
+    // llama.cpp measures 10/19 for the same model and prompt
+    // (`llama-server --spec-type draft-mtp --spec-draft-n-max 4`).
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let ids = std::env::var("RMI_QWEN35_PROMPT_TOKENS")
+        .expect("RMI_QWEN35_PROMPT_TOKENS must be a comma-separated list");
+    let tokens: Vec<u32> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("token id must be a u32"))
+        .collect();
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must name at least one token"
+    );
+    let steps: usize = std::env::var("RMI_QWEN35_MTP_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16);
+    let drafts_per_step: usize = std::env::var("RMI_QWEN35_MTP_DRAFTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    assert!(
+        model.mtp.is_some(),
+        "the checkpoint has no MTP head, so there is nothing to draft"
+    );
+    // The verification writes the KV of the rejected drafts too, so the
+    // cache has to hold the whole run.
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps * (drafts_per_step + 1) + 2);
+    let pool = session_pool();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+
+    // The reference: the target on its own.
+    let mut greedy: Vec<u32> = Vec::with_capacity(steps);
+    {
+        let mut session = Qwen35Session::new_with_prefill_batch_size(
+            &mut model,
+            n_ctx,
+            tokens.len(),
+            pool.clone(),
+        )
+        .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut position = tokens.len();
+        for _ in 0..steps {
+            let token = crate::ops::sampling::argmax(&logits) as u32;
+            greedy.push(token);
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+            position += 1;
+        }
+    }
+
+    // The same run with the draft head.
+    let mut speculative: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    let mut rounds = 0usize;
+    {
+        let mut session = Qwen35Session::new_with_prefill_batch_size(
+            &mut model,
+            n_ctx,
+            tokens.len(),
+            pool.clone(),
+        )
+        .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        // The draft context has to cover the prompt before the first draft:
+        // the draft block attends over the committed positions.
+        let prompt_hidden = session.last_hidden(tokens.len()).unwrap().to_vec();
+        let prompt_positions: Vec<usize> = (0..tokens.len()).collect();
+        session
+            .mtp_catch_up(&tokens, &prompt_positions, &prompt_hidden)
+            .unwrap();
+
+        let mut position = tokens.len();
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        while speculative.len() < steps {
+            let step = session
+                .mtp_speculative_step(bonus, position, drafts_per_step)
+                .unwrap();
+            accepted += step.accepted;
+            drafted += step.drafted;
+            rounds += 1;
+            position += step.tokens.len();
+            bonus = step.next;
+
+            for token in step.tokens {
+                speculative.push(token);
+                if speculative.len() >= steps {
+                    break;
+                }
+            }
+        }
+    }
+
+    eprintln!("Qwen3.5 MTP greedy tokens: {greedy:?}");
+    eprintln!("Qwen3.5 MTP speculative tokens: {speculative:?}");
+    eprintln!(
+        "Qwen3.5 MTP acceptance = {:.4} ({accepted} accepted / {drafted} drafted, {rounds} rounds)",
+        accepted as f64 / drafted.max(1) as f64
+    );
+
+    assert_eq!(
+        greedy, speculative,
+        "speculative decoding must produce the target's own tokens"
+    );
+    assert!(drafted > 0, "no drafts were produced");
+    // A head that is wired up wrongly drafts noise, and noise is accepted at
+    // the rate of a coin flip at best.
+    assert!(
+        accepted * 4 >= drafted,
+        "MTP acceptance {accepted}/{drafted} is too low for a working draft head"
+    );
 }
 
 #[test]
@@ -589,6 +881,7 @@ fn tiny_dense_session_model_with_embedding(
         output_norm: vec![1.0; n_embd],
         output_weight: mk_weight(vocab_size),
         layers: vec![layer],
+        mtp: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
         cls_score: None,
@@ -694,6 +987,7 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         output_norm: vec![1.0; 256],
         output_weight: q8_weight(32),
         layers: vec![layer],
+        mtp: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
         cls_score: None,

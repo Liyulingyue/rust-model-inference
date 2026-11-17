@@ -56,7 +56,7 @@ pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
     run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
-    run_multimodal_with_tts_postproc, run_multimodal_with_video,
+    run_multimodal_with_tts_postproc, run_multimodal_with_video, run_multimodal_with_video_and_mtp,
     run_multimodal_with_video_capture_text, run_qwen35_family_multimodal_logits,
     run_qwen3_family_multimodal, run_qwen3_family_multimodal_logits, run_shared_inference,
 };

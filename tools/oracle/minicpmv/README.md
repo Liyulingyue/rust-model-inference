@@ -192,3 +192,27 @@ about 3e-5 on these embeddings, the same band as the tower's other float paths.
 Not measured: the 35B-A3B tower (shares the projector implementation), other
 image sizes and slice counts, and the end-to-end text, which the device path
 changes the same way it changes the qwen35 text path.
+
+## The 35B-A3B text tower (2026-11-12)
+
+`compare_text.py` compares the Rust `qwen35moe` text tower against the pinned
+llama.cpp oracle: it runs the oracle over the prompt, feeds the Rust side the
+token ids the oracle tokenized it into, and compares the MoE checkpoints and
+the final logits.
+
+```sh
+tools/oracle/minicpmv/compare_text.py \
+  --model $MODEL \
+  --oracle $ORACLE \
+  --rust-test $RUST_TEST \
+  --out $OUT
+```
+
+With the Q4_K_M build of the 35B-A3B tower and the `b96806d` scalar oracle
+(`tools/oracle/sage_a15/build_oracle.sh`, `--no-repack`), 437 checkpoints come
+back bit-identical: the router logits, probabilities, selected expert ids,
+routed weights, normalized weights, MoE output and shared-expert gated output
+at layers 0, 3 and 39, plus the final norm and the final logits. The
+per-layer `l_out`, the attention checkpoints and the GDN recurrent state are
+not in this harness -- the MiniCPM-V dump path does not emit them; the
+Sage-A1.5 replay covers those for the same architecture.

@@ -65,6 +65,24 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "描述这张图片"
 ```
 
+**Qwen3.8-27B**（`qwen35` 架构，52 层里的 64 个主干 block + 1 个 MTP block，
+`qwen35.nextn_predict_layers = 1`）：
+
+```bash
+# 权重来自 ModelScope：原始权重 Qwen/Qwen3.8-27B，
+# 推理权重 unsloth/Qwen3.8-27B-GGUF（27 个量化档 + mmproj + MTP/DFlash 头）
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf \
+  --mmproj models/Qwen3.8-27B-GGUF/mmproj-F16.gguf \
+  --image path/to/image.jpg \
+  --prompt "描述这张图片"
+```
+
+注意这一档自带 **MTP 头**（`blk.64.nextn.*`）：主栈是 block 0-63，block 64
+是 MTP block。本仓库的 `qwen35` trunk 按 `n_layer_impl = n_layer - n_nextn`
+把它排除在主栈之外，也就是说**这枚 MTP 头目前不参与推理**
+（见 [投机解码调研](../../docs/develop/SPECULATIVE_DECODING.md) 与 TODO-064）。
+
 `Qwen3-VL-4B-Instruct`（Qwen/Qwen3-VL-4B-Instruct-GGUF Q4_K_M，~2.5 GB）
 在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
 LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,

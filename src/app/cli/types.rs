@@ -72,6 +72,10 @@ pub struct CliOptions {
     pub max_tokens: Option<usize>,
     pub max_context: Option<usize>,
     pub prefill_batch_size: Option<usize>,
+    /// Number of tokens the MTP draft head proposes per speculative
+    /// decoding round. `None` (or zero) keeps the plain one-token-at-a-time
+    /// decode.
+    pub mtp_draft: Option<usize>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     /// Astronex output latent-frame count. `--frames` remains reserved for
@@ -137,6 +141,9 @@ pub struct CliOptions {
     pub gpu: bool,
     pub compute: Option<crate::compute::ComputePolicy>,
     pub tts: bool,
+    pub voice: Option<String>,
+    pub speed: Option<f32>,
+    pub pronunciations: Option<String>,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
     pub source_text: Option<String>,
@@ -296,6 +303,14 @@ impl CliOptions {
     }
     pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
         crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
+    }
+
+    /// How many tokens the MTP draft head may propose per round.
+    ///
+    /// Zero means "no speculative decoding": the draft head is then not
+    /// used at all.
+    pub fn effective_mtp_draft(&self) -> usize {
+        self.mtp_draft.unwrap_or(0)
     }
 
     /// Default max-context cap. Most chat workloads fit in 8K; this

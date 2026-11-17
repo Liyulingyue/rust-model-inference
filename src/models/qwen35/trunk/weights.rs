@@ -56,6 +56,106 @@ pub struct Qwen35LayerWeights<'a> {
     pub moe: Option<Qwen35MoeWeights<'a>>,
 }
 
+/// The MTP (multi-token prediction) head of a Qwen3.5 checkpoint.
+///
+/// The block sits right after the main stack (`blk.{n_layer_impl}`) and is a
+/// full-attention decoder block plus the `nextn` tensors that turn it into a
+/// draft head: it takes the main model's last hidden state and the embedding
+/// of the next token, and predicts the token after that.
+///
+/// llama.cpp builds the same graph (`src/models/qwen35.cpp::graph_mtp`):
+///
+/// ```text
+/// concat(RMSNorm(embed(next_token), nextn.enorm), RMSNorm(h_last, nextn.hnorm))
+///     -> nextn.eh_proj -> one attention block -> shared_head(shared_head_norm(.))
+/// ```
+///
+/// `nextn.embed_tokens`, `nextn.shared_head_head` and `nextn.shared_head_norm`
+/// are optional upstream: without them the main model's embedding, output
+/// weight and output norm are used instead.
+pub struct MtpWeights<'a> {
+    /// The block's own attention and FFN weights: a dense Qwen3.5 layer.
+    pub layer: Qwen35LayerWeights<'a>,
+    /// `[n_embd, 2 * n_embd]`: fuses the normalized embedding and the
+    /// normalized hidden state.
+    pub eh_proj: Weight<'a>,
+    /// `[n_embd]`: normalizes the token embedding.
+    pub enorm: Vec<f32>,
+    /// `[n_embd]`: normalizes the hidden state.
+    pub hnorm: Vec<f32>,
+    /// `[n_embd, n_vocab]`: the draft head. `None` means the main model's
+    /// output weight is used.
+    pub shared_head_head: Option<Weight<'a>>,
+    /// `[n_embd]`: the draft head's norm. `None` means the main model's
+    /// output norm is used.
+    pub shared_head_norm: Option<Vec<f32>>,
+}
+
+/// Load the MTP head, if the checkpoint has one.
+///
+/// The head is identified the way upstream's
+/// `common_speculative_types_from_gguf` identifies it: the block after the
+/// main stack carries `nextn.eh_proj`.
+pub(crate) fn load_mtp_weights<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    block: usize,
+) -> Result<Option<MtpWeights<'a>>, String> {
+    let prefix = format!("blk.{block}.nextn.");
+    if source
+        .tensor_info(&format!("{prefix}eh_proj.weight"))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let need = |name: &str| -> Result<Weight<'a>, String> {
+        load_weight(source, name).ok_or_else(|| format!("Missing {name}"))
+    };
+    let need_f32 = |name: &str| -> Result<Vec<f32>, String> {
+        load_weight_f32(source, name).ok_or_else(|| format!("Missing {name}"))
+    };
+    let layer = Qwen35LayerWeights {
+        attn_norm: need_f32(&format!("blk.{block}.attn_norm.weight"))?,
+        attn_post_norm: need_f32(&format!("blk.{block}.post_attention_norm.weight"))?,
+        wq: Some(need(&format!("blk.{block}.attn_q.weight"))?),
+        wk: Some(need(&format!("blk.{block}.attn_k.weight"))?),
+        wv: Some(need(&format!("blk.{block}.attn_v.weight"))?),
+        wo: Some(need(&format!("blk.{block}.attn_output.weight"))?),
+        attn_q_norm: Some(need_f32(&format!("blk.{block}.attn_q_norm.weight"))?),
+        attn_k_norm: Some(need_f32(&format!("blk.{block}.attn_k_norm.weight"))?),
+        wqkv: None,
+        wqkv_gate: None,
+        ssm_conv1d: None,
+        ssm_dt: None,
+        ssm_a: None,
+        ssm_beta: None,
+        ssm_alpha: None,
+        ssm_norm: None,
+        ssm_out: None,
+        ffn_gate: Some(need(&format!("blk.{block}.ffn_gate.weight"))?),
+        ffn_up: Some(need(&format!("blk.{block}.ffn_up.weight"))?),
+        ffn_down: Some(need(&format!("blk.{block}.ffn_down.weight"))?),
+        moe: None,
+    };
+    let eh_proj = need(&format!("{prefix}eh_proj.weight"))?;
+    // The projection consumes the embedding and the hidden state side by
+    // side, so its input is twice the model width.
+    if eh_proj.n_in != 2 * layer.wq.as_ref().unwrap().n_in {
+        return Err(format!(
+            "{prefix}eh_proj.weight: expected an input of {} columns, got {}",
+            2 * layer.wq.as_ref().unwrap().n_in,
+            eh_proj.n_in
+        ));
+    }
+    Ok(Some(MtpWeights {
+        layer,
+        eh_proj,
+        enorm: need_f32(&format!("{prefix}enorm.weight"))?,
+        hnorm: need_f32(&format!("{prefix}hnorm.weight"))?,
+        shared_head_head: load_weight(source, &format!("{prefix}shared_head_head.weight")),
+        shared_head_norm: load_weight_f32(source, &format!("{prefix}shared_head_norm.weight")),
+    }))
+}
+
 /// MoE weights for `qwen35moe`.
 ///
 /// Experts are kept as one borrowed slice per projection rather than 3 *
@@ -148,6 +248,10 @@ pub struct HybridTrunk<'a> {
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
+    /// The MTP (multi-token prediction) head, when the checkpoint carries
+    /// one: the block after the main stack with the `nextn` tensors that
+    /// turn it into a draft head. `None` for a checkpoint without it.
+    pub mtp: Option<MtpWeights<'a>>,
     /// Optional classification head (cross-encoder / NLI), loaded when the
     /// GGUF carries `cls.output.weight` (and optionally `cls.output.bias`).
     /// The shape is `[n_embd, num_labels]` so the same `Weight` matmul used
@@ -619,12 +723,22 @@ impl<'a> HybridTrunk<'a> {
             });
         }
 
+        // The MTP head is the block right after the main stack. Only the
+        // dense arch is wired up: a MoE tower's nextn block routes through
+        // experts, which is a different graph.
+        let mtp = if config.n_nextn > 0 && config.moe.is_none() {
+            load_mtp_weights(source, n_layers_impl)?
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             tok_embd,
             output_norm,
             output_weight,
             layers,
+            mtp,
             cls_score: load_weight(source, "cls.output.weight"),
             cls_score_bias: load_weight_f32(source, "cls.output.bias").unwrap_or_default(),
             #[cfg(feature = "vulkan")]

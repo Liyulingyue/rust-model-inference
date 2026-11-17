@@ -2,7 +2,7 @@
 set -eu
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
-pin=11fe02151f79c41d0d4af7da708755d73b9c0da6
+pin=b96806d96061049a5b574269b049bf6241d63d46
 converter_pin=b96806d96061049a5b574269b049bf6241d63d46
 if [ "$#" -ne 2 ]; then
     echo "usage: $0 LLAMA_CPP_CHECKOUT FRESH_WORK_DIR" >&2
@@ -24,7 +24,11 @@ git -C "$work_dir/llama.cpp" checkout --detach "$pin"
 work_dir=$(CDPATH= cd -- "$work_dir" && pwd)
 clone_dir=$work_dir/llama.cpp
 
-# Reuse the existing trace harness; no model formulas are patched.
+# Runtime and conversion share one pin now: the runtime Oracle used to sit on
+# 11fe0215, whose GDN q/k normalization is the pre-ggml_l2_norm formula, so the
+# shared Rust implementation looked "wrong" against it. Re-pinning here removes
+# that exception (TODO-068). The eval-callback source still comes from the
+# conversion pin so the trace harness stays the one the patches were written for.
 git -C "$clone_dir" show "$converter_pin:examples/eval-callback/eval-callback.cpp" \
     > "$clone_dir/examples/eval-callback/eval-callback.cpp"
 git -C "$clone_dir" apply "$script_dir/../qwen35/qwen35-llama-trace.patch"
