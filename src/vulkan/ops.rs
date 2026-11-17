@@ -1588,8 +1588,8 @@ impl BatchedLinearLayout {
 ///
 /// It names the source allocation, the shape, the layout the kernel reads and
 /// the storage the projection asked for. Two projections that share the
-/// weight bytes but not the layout or the residency cannot share a buffer.
-type WeightCacheKey = (usize, usize, usize, usize, bool, bool);
+/// weight bytes but not the layout cannot share a buffer.
+type WeightCacheKey = (usize, usize, usize, usize, bool);
 
 /// A projection runtime for immutable weight slices kept at stable addresses
 /// throughout its lifetime. Changing or reusing a source allocation requires a
@@ -1632,23 +1632,17 @@ impl BatchedLinearRuntime {
             output_len,
         )?;
         let layout = format.device_layout(self.ops.context);
-        // The residency is part of the cache key, so the same weight bytes
-        // can be cached once for the device memory and once for the host
-        // visible storage. Both entries have to agree with the format.
-        for device_resident in [true, false] {
-            if let Some((_, binding)) = self.weights.get(&(
-                weight.as_ptr() as usize,
-                weight.len(),
-                n_in,
-                n_out,
-                layout == GpuWeightLayout::Transposed,
-                device_resident,
-            )) {
-                if binding.weight_format(1)? != format || binding.weight_mode != spec.mode {
-                    return Err(VulkanError::UnsupportedShape(
-                        "cached batched linear weight storage or numerical mode changed".into(),
-                    ));
-                }
+        if let Some((_, binding)) = self.weights.get(&(
+            weight.as_ptr() as usize,
+            weight.len(),
+            n_in,
+            n_out,
+            layout == GpuWeightLayout::Transposed,
+        )) {
+            if binding.weight_format(1)? != format || binding.weight_mode != spec.mode {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached batched linear weight storage or numerical mode changed".into(),
+                ));
             }
         }
         Ok(())
@@ -1700,7 +1694,6 @@ impl BatchedLinearRuntime {
         spec: GpuMatmulSpec,
         n_in: usize,
         n_out: usize,
-        device_resident: bool,
     ) -> Result<(WeightCacheKey, GpuBuffer), VulkanError> {
         let format = spec.format;
         let layout = format.device_layout(self.ops.context);
@@ -1708,18 +1701,12 @@ impl BatchedLinearRuntime {
         // be uploaded in the native layout and in the transposed one, and
         // the kernel that reads them has to match.
         //
-        // The residency is part of it as well: a weight that is asked for
-        // as device resident has to live in the device memory, and the
-        // grouped projections ask for the same weights with a host visible
-        // storage, so a key without the residency would hand a host visible
-        // buffer to a projection that needs the device memory.
         let key = (
             weight_bytes.as_ptr() as usize,
             weight_bytes.len(),
             n_in,
             n_out,
             layout == GpuWeightLayout::Transposed,
-            device_resident,
         );
         if let Some((buffer, bindings)) = self.weights.get(&key) {
             if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
@@ -1788,14 +1775,10 @@ impl BatchedLinearRuntime {
                     })?
             }
         } else {
-            let bytes = transposed.as_deref().unwrap_or(weight_bytes);
-            // Grouped uploads keep their host-visible path; single projections stage into VRAM.
             unsafe {
-                if device_resident {
-                    self.ops.context.upload_device_static(bytes)?
-                } else {
-                    self.ops.context.upload_static(bytes)?
-                }
+                self.ops
+                    .context
+                    .upload_device_static(transposed.as_deref().unwrap_or(weight_bytes))?
             }
         };
         let bindings =
@@ -1871,7 +1854,7 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
-        let (key, _) = self.ensure_weight(weight_bytes, spec, n_in, n_out, true)?;
+        let (key, _) = self.ensure_weight(weight_bytes, spec, n_in, n_out)?;
         let bindings = self.weights.get(&key).unwrap().1;
         // The activation copy has to land before the command buffer starts
         // recording. The barrier that begin_commands places is the one that
@@ -1984,7 +1967,7 @@ impl BatchedLinearRuntime {
                 *n_out,
                 output.len(),
             )?;
-            let (key, buffer) = self.ensure_weight(weight, *spec, *n_in, *n_out, false)?;
+            let (key, buffer) = self.ensure_weight(weight, *spec, *n_in, *n_out)?;
             keys.push(key);
             buffers.push(buffer);
             formats.push(spec.format);
@@ -2102,7 +2085,7 @@ impl BatchedLinearRuntime {
             )?;
         }
         for (weight, spec, rows, n_out) in group.iter().copied() {
-            let (key, _) = self.ensure_weight(weight, spec, n_in, n_out, false)?;
+            let (key, _) = self.ensure_weight(weight, spec, n_in, n_out)?;
             cached_bindings.push(self.weights.get(&key).unwrap().1);
         }
 
@@ -3187,7 +3170,7 @@ mod video_gpu_tests {
 
     #[test]
     #[ignore = "requires a Vulkan device"]
-    fn a_weight_asked_for_with_two_residencies_gets_two_buffers() {
+    fn a_weight_asked_for_twice_is_uploaded_once() {
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
         let weight = [1.0f32, 2.0, 3.0, 4.0];
         let bytes = bytemuck::cast_slice(&weight);
@@ -3196,17 +3179,11 @@ mod video_gpu_tests {
             format: GpuWeightFormat::F32,
             mode: GpuMatmulMode::Prepared,
         };
-        let (resident_key, resident) = runtime.ensure_weight(bytes, spec, 2, 2, true).unwrap();
-        let (host_key, host) = runtime.ensure_weight(bytes, spec, 2, 2, false).unwrap();
-        // The residency is part of the key, so the two requests do not
-        // share a buffer: the one that asked for the device memory has to
-        // get a buffer in the device memory.
-        assert_ne!(resident_key, host_key);
-        assert_ne!(resident.buffer, host.buffer);
-        // The same residency is served from the cache.
-        let (again_key, again) = runtime.ensure_weight(bytes, spec, 2, 2, true).unwrap();
-        assert_eq!(again_key, resident_key);
-        assert_eq!(again.buffer, resident.buffer);
+        let (key, _buffer) = runtime.ensure_weight(bytes, spec, 2, 2).unwrap();
+        // The same request is served from the cache.
+        let (again_key, _again) = runtime.ensure_weight(bytes, spec, 2, 2).unwrap();
+        assert_eq!(again_key, key);
+        assert_eq!(runtime.weights.len(), 1);
     }
 
     #[test]
@@ -3227,8 +3204,7 @@ mod video_gpu_tests {
             .unwrap();
         assert_eq!(second, [10.0, 26.0]);
         assert_eq!(runtime.weights.len(), 2);
-        let bindings =
-            runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4, false, true)].1;
+        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4, false)].1;
         let commands = TokenCommands::begin(context).unwrap();
         let layout = &runtime.layout;
         assert!(runtime
@@ -12483,7 +12459,7 @@ mod tests {
             .is_err());
         assert_eq!(runtime.weights.len(), 1);
         assert_eq!(context.submission_count(), u64::from(context.is_discrete()));
-        let key = (weight.as_ptr() as usize, weight.len(), 4, 1, false, true);
+        let key = (weight.as_ptr() as usize, weight.len(), 4, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         runtime.ops.arena.size = arena_size;
         runtime
@@ -13056,9 +13032,7 @@ mod tests {
                 let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
                 let mut actual = vec![f32::NAN; rows * n_out];
                 if transposed {
-                    let (key, _) = runtime
-                        .ensure_weight(&bytes, spec, n_in, n_out, true)
-                        .unwrap();
+                    let (key, _) = runtime.ensure_weight(&bytes, spec, n_in, n_out).unwrap();
                     runtime.write_input(&input).unwrap();
                     let commands = TokenCommands::begin(context).unwrap();
                     runtime
@@ -13175,7 +13149,7 @@ mod tests {
             );
             assert!(batched[195].is_nan());
             assert_eq!(runtime.weights.len(), slot + 1);
-            let key = (weight.as_ptr() as usize, weight.len(), 512, 65, false, true);
+            let key = (weight.as_ptr() as usize, weight.len(), 512, 65, false);
             if context.is_discrete() {
                 assert!(
                     runtime.weights[&key].0.mapped.is_null(),
@@ -14026,7 +14000,7 @@ mod tests {
             .unwrap();
         assert_eq!(output, [8.0]);
         let before = context.submission_count();
-        let key = (weight.as_ptr() as usize, weight.len(), 32, 1, false, true);
+        let key = (weight.as_ptr() as usize, weight.len(), 32, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
         assert!(runtime.validate(&weight, spec, 32, 1, 32, 1, 1).is_err());
