@@ -57,6 +57,24 @@ fn compute_vulkan_reports_modes_without_a_complete_device_path() {
     assert!(options.validate_compute_model("qwen3").is_ok());
 }
 
+#[test]
+fn tts_device_path_is_reported_per_architecture() {
+    let tts = |flags: &[&str]| parse_cli_options(&args(flags)).unwrap();
+
+    // Audio8 TTS puts its whole graph on the device, so `--tts` is not a
+    // partial mode for it; the frontend decides once it has the arch.
+    let arktts = tts(&["rmi", "--compute", "vulkan", "--tts"]);
+    assert!(!arktts.tts_device_path_is_partial("arktts"));
+    // Other TTS frontends have no complete device path and still report it.
+    assert!(arktts.tts_device_path_is_partial("breeze"));
+    assert!(arktts.tts_device_path_is_partial("pivo"));
+
+    let cpu = tts(&["rmi", "--compute", "cpu", "--tts"]);
+    assert!(!cpu.tts_device_path_is_partial("breeze"));
+    let text = tts(&["rmi", "--compute", "vulkan"]);
+    assert!(!text.tts_device_path_is_partial("breeze"));
+}
+
 struct TestTensorSource {
     info: TensorInfo,
     bytes: Vec<u8>,
@@ -319,6 +337,17 @@ fn planner_cli_requires_complete_component_set() {
 
     let incomplete = parse_cli_options(&args(&["rmi", "--planner", "p.gguf"])).unwrap();
     assert!(qwen_drive_cli_options(&incomplete).is_err());
+}
+
+#[test]
+fn cli_parses_mtp_draft_strictly() {
+    let parsed = parse_cli_options(&args(&["rmi", "--mtp-draft", "4"])).unwrap();
+    assert_eq!(parsed.effective_mtp_draft(), 4);
+    assert!(parse_cli_options(&args(&["rmi", "--mtp-draft", "x"])).is_err());
+    assert!(parse_cli_options(&args(&["rmi", "--mtp-draft"])).is_err());
+    // The default is no speculative decoding at all.
+    let plain = parse_cli_options(&args(&["rmi"])).unwrap();
+    assert_eq!(plain.effective_mtp_draft(), 0);
 }
 
 #[test]
@@ -998,6 +1027,66 @@ fn tts_cli_requires_complete_waveform_inputs_before_model_load() {
         vec!["rmi", "--tts", "--prompt", "hello", "--mmproj", "mm.gguf"],
         vec![
             "rmi", "--tts", "--prompt", "", "--mmproj", "mm.gguf", "--out", "o.wav",
+        ],
+    ] {
+        let options = parse(&args);
+        assert!(validate_cli_options(&options).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn tts_model_bridge_flags_require_a_multimodal_route() {
+    let parse = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        parse_cli_options(&args).unwrap()
+    };
+
+    let valid = parse(&[
+        "rmi",
+        "--model",
+        "m.gguf",
+        "--mmproj",
+        "mm.gguf",
+        "--image",
+        "frame.png",
+        "--prompt",
+        "describe",
+        "--tts-model",
+        "tts.gguf",
+        "--tts-mmproj",
+        "tts-mm.gguf",
+    ]);
+    assert!(validate_cli_options(&valid).is_ok());
+
+    for args in [
+        vec![
+            "rmi",
+            "--model",
+            "m.gguf",
+            "--image",
+            "frame.png",
+            "--tts-model",
+            "tts.gguf",
+        ],
+        vec![
+            "rmi",
+            "--model",
+            "m.gguf",
+            "--tts-mmproj",
+            "tts-mm.gguf",
+            "--image",
+            "frame.png",
+        ],
+        vec![
+            "rmi",
+            "--model",
+            "m.gguf",
+            "--prompt",
+            "hi",
+            "--tts-model",
+            "tts.gguf",
+            "--tts-mmproj",
+            "tts-mm.gguf",
         ],
     ] {
         let options = parse(&args);

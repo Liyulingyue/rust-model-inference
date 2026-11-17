@@ -1750,25 +1750,27 @@ impl BatchedLinearRuntime {
         // whole tile of rows as one run either way, and the transpose
         // would be pure overhead there.
         let buffer = if layout == GpuWeightLayout::Transposed {
-            // The layout is written straight into the device buffer: a
+            // The layout is written straight into the staging buffer: a
             // 240 MB weight would otherwise be staged in a second
             // buffer and copied over.
             let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
             unsafe {
-                self.ops.context.upload_static_filled(size, |bytes| {
-                    crate::vulkan::q8_layout::transpose_q8_0_weight_into(
-                        bytes,
-                        weight_bytes,
-                        n_in,
-                        n_out,
-                    );
-                })?
+                self.ops
+                    .context
+                    .upload_device_static_filled(size, |bytes| {
+                        crate::vulkan::q8_layout::transpose_q8_0_weight_into(
+                            bytes,
+                            weight_bytes,
+                            n_in,
+                            n_out,
+                        );
+                    })?
             }
         } else {
             unsafe {
                 self.ops
                     .context
-                    .upload_static(transposed.as_deref().unwrap_or(weight_bytes))?
+                    .upload_device_static(transposed.as_deref().unwrap_or(weight_bytes))?
             }
         };
         let bindings =
@@ -3743,10 +3745,12 @@ pub(crate) fn build_operator_pipelines(
                 // Keep ordinary Qwen operators available on baseline
                 // devices; DiT rejects this slot before recording it.
                 ATTENTION_SCORES_SHADER
-            } else if matches!(index, NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM)
-                && !context.shader_float64
+            } else if matches!(
+                index,
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+            ) && !context.shader_float64
             {
-                // Optional FP64 SSM kernels must not prevent ordinary projections from loading.
+                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
                 ATTENTION_SCORES_SHADER
             } else {
@@ -7044,6 +7048,11 @@ impl<'a> Qwen3Ops<'a> {
         normalize: bool,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron MoE routing requires shaderFloat64".into(),
+            ));
+        }
         if experts == 0 || used == 0 || used > experts || !scale.is_finite() {
             return Err(VulkanError::UnsupportedShape(
                 "invalid Nemotron MoE routing dimensions/scale".into(),

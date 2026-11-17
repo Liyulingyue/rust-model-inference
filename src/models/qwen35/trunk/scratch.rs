@@ -14,6 +14,21 @@ use crate::core::scratchpad::KvCache;
 use crate::ops::kernel::PreparedRows;
 use crate::ops::quant;
 
+/// The projected rows of one recurrent layer, captured for a rollback.
+///
+/// The rows are the ones the layer's state update consumes: the projected
+/// q/k/v (before the convolution) and the `beta` / `alpha` rows after
+/// their activation functions.
+#[derive(Default, Clone)]
+pub struct RecurrentReplay {
+    /// The projected q/k/v rows, `rows * conv_dim` values.
+    pub qkv: Vec<f32>,
+    /// The `beta` rows after the sigmoid, `rows * num_v_heads` values.
+    pub beta: Vec<f32>,
+    /// The `alpha` rows after the softplus, `rows * num_v_heads` values.
+    pub alpha: Vec<f32>,
+}
+
 pub struct Qwen35Scratchpad {
     pub x: Vec<f32>,
     pub buf: Vec<f32>,
@@ -34,6 +49,24 @@ pub struct Qwen35Scratchpad {
     pub ffn_gate_buf: Vec<f32>,
     pub conv_states: Vec<Vec<f32>>,
     pub ssm_states: Vec<Vec<f32>>,
+    /// The projected rows of the recurrent layers, captured during a forward
+    /// pass when `capture_recurrent_replay` is set.
+    ///
+    /// A speculative verification runs the target over the drafted tokens,
+    /// and a rejected draft advances the recurrent state. Restoring the
+    /// state and replaying only the recurrent layers over the accepted rows
+    /// puts the state back where the committed tokens leave it -- without
+    /// re-running the whole model.
+    ///
+    /// What is captured is what the state update consumes and what the
+    /// convolution consumes: the projected q/k/v rows (before the
+    /// convolution) and the `beta` / `alpha` rows (after their activation
+    /// functions). The projections themselves are the biggest weight read
+    /// of a recurrent layer, and a rollback that recomputes them pays for
+    /// the whole model again just to redo the state.
+    pub recurrent_replay: Vec<RecurrentReplay>,
+    /// Whether the forward pass captures the recurrent layers' projections.
+    pub capture_recurrent_replay: bool,
     pub matmul_out: Vec<f32>,
     pub q8k_buf: Vec<quant::BlockQ8K>,
     pub q8_buf: Vec<u8>,
@@ -77,6 +110,8 @@ impl Qwen35Scratchpad {
             attn_out_buf: vec![0.0; max_tokens * dense_attn_out_dim.max(value_dim)],
             ffn_up_buf: vec![0.0; max_tokens * n_ff],
             ffn_gate_buf: vec![0.0; max_tokens * n_ff],
+            recurrent_replay: Vec::new(),
+            capture_recurrent_replay: false,
             conv_states: (0..n_layer).map(|_| vec![0.0; d_conv * conv_dim]).collect(),
             ssm_states: (0..n_layer)
                 .map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim])
@@ -125,7 +160,12 @@ impl Qwen35Scratchpad {
             + self.matmul_out.len()
             + self.scale_buf.len()
             + self.conv_states.iter().map(Vec::len).sum::<usize>()
-            + self.ssm_states.iter().map(Vec::len).sum::<usize>();
+            + self.ssm_states.iter().map(Vec::len).sum::<usize>()
+            + self
+                .recurrent_replay
+                .iter()
+                .map(|slot| slot.qkv.len() + slot.beta.len() + slot.alpha.len())
+                .sum::<usize>();
         f32_values * std::mem::size_of::<f32>()
             + self.q8_buf.len()
             + self.q8k_buf.len() * std::mem::size_of::<quant::BlockQ8K>()
@@ -157,6 +197,40 @@ pub(crate) fn kv_cache_pos(cache: &KvCache, il: usize, k_dim: usize, n_layer: us
         pos
     } else {
         0
+    }
+}
+
+/// Drop the KV entries at positions `from..to`.
+///
+/// A speculative verification writes the KV of the drafted tokens before it
+/// knows whether the target accepts them. When the acceptance is partial the
+/// rejected positions have to become free again, and the free slot of a
+/// layer is found by scanning for the first all-zero key row, so zeroing the
+/// rows is what frees them.
+pub(crate) fn kv_cache_truncate(
+    cache: &mut KvCache,
+    n_layer: usize,
+    k_dim: usize,
+    from: usize,
+    to: usize,
+) {
+    if let KvCache::F32(c) = cache {
+        if n_layer == 0 || k_dim == 0 {
+            return;
+        }
+        let k_len = c.k.len() / n_layer;
+        let rows = k_len / k_dim;
+        let to = to.min(rows);
+        if from >= to {
+            return;
+        }
+        for il in 0..n_layer {
+            let base = il * k_len;
+            for pos in from..to {
+                let start = base + pos * k_dim;
+                c.k[start..start + k_dim].fill(0.0);
+            }
+        }
     }
 }
 

@@ -523,7 +523,7 @@ impl<'m> HybridTrunkModel<'m> for SenseNovaLoopModel<'m> {
                     t.forward_recurrent_layer(
                         physical,
                         visit,
-                        &branch,
+                        crate::models::qwen35::trunk::forward::RecurrentInput::Project(&branch),
                         rows,
                         scratch,
                         pool,

@@ -33,6 +33,21 @@ thread_local! {
     static CPU_SCAN_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+/// What a recurrent layer does with the rows it is given.
+#[derive(Clone, Copy)]
+pub(crate) enum RecurrentInput<'a> {
+    /// Project the rows into the layer's q/k/v, gate, beta and alpha.
+    Project(&'a [f32]),
+    /// Reuse the projections a previous pass already computed: the rows are
+    /// already in the scratch buffers, and the layer only advances its
+    /// state over them.
+    ///
+    /// This is the speculative rollback's path: it repeats the state
+    /// update of the rows the target committed, without projecting them
+    /// again and without projecting the layer's output.
+    Reuse,
+}
+
 #[cfg(test)]
 pub(super) fn set_cpu_scan_failure(row: Option<usize>) {
     CPU_SCAN_FAILURE.set(row);
@@ -292,7 +307,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     self.forward_recurrent_layer(
                         il,
                         il,
-                        normed_input,
+                        RecurrentInput::Project(normed_input),
                         n_tokens,
                         scratch,
                         pool,
@@ -306,7 +321,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     self.forward_recurrent_layer(
                         il,
                         il,
-                        normed_input,
+                        RecurrentInput::Project(normed_input),
                         n_tokens,
                         scratch,
                         pool,
@@ -548,6 +563,48 @@ impl<'a> super::weights::HybridTrunk<'a> {
         interleaved_mrope: bool,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
+        self.forward_dense_attn_layer_with(
+            &self.layers[il],
+            il,
+            cache_slot,
+            self.config.n_layer_impl(),
+            input,
+            n_tokens,
+            kv_cache,
+            scratch,
+            pool,
+            mrope_positions,
+            base_position,
+            interleaved_mrope,
+            #[cfg(feature = "parity-trace")]
+            trace_layer,
+        )
+    }
+
+    /// The dense attention block, with the weights and the KV layout given
+    /// explicitly.
+    ///
+    /// The main stack passes its own layer and its own cache layout. The MTP
+    /// head passes the block after the main stack and a cache of its own --
+    /// llama.cpp gives the draft context a separate KV cache as well, so the
+    /// draft block attends over the drafted positions, not over the target's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_dense_attn_layer_with(
+        &self,
+        layer: &super::weights::Qwen35LayerWeights<'a>,
+        il: usize,
+        cache_slot: usize,
+        cache_layers: usize,
+        input: &[f32],
+        n_tokens: usize,
+        kv_cache: &mut KvCache,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+        mrope_positions: &[[usize; 4]],
+        base_position: Option<usize>,
+        interleaved_mrope: bool,
+        #[cfg(feature = "parity-trace")] trace_layer: bool,
+    ) -> Vec<f32> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
         let cfg: &Qwen35Config = &self.config;
         let n_embd = cfg.n_embd;
@@ -556,7 +613,6 @@ impl<'a> super::weights::HybridTrunk<'a> {
         let n_embd_head = cfg.n_embd_head();
         let eps = cfg.norm_eps;
         let _nth = pool.n_threads();
-        let layer = &self.layers[il];
         let wq = layer.wq.as_ref().unwrap();
         let wk = layer.wk.as_ref().unwrap();
         let wv = layer.wv.as_ref().unwrap();
@@ -680,7 +736,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         }
 
         let kv_pos = base_position
-            .unwrap_or_else(|| kv_cache_pos(kv_cache, cache_slot, k_dim, cfg.n_layer_impl()));
+            .unwrap_or_else(|| kv_cache_pos(kv_cache, cache_slot, k_dim, cache_layers));
         let sections = cfg.rope_dimension_sections;
         let use_mrope = sections[0] > 0 && sections[1] > 0;
         let apply_mrope = |head: &mut [f32], positions| {
@@ -765,7 +821,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         kv_cache_store(
             kv_cache,
             cache_slot,
-            cfg.n_layer_impl(),
+            cache_layers,
             n_head_kv,
             n_embd_head,
             &scratch.k_buf[..n_tokens * k_dim],
@@ -781,8 +837,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
             KvCache::F32(c) => (&c.k, &c.v),
             _ => return vec![0.0; n_tokens * n_embd],
         };
-        let k_len = k_cache.len() / cfg.n_layer_impl();
-        let v_len = v_cache.len() / cfg.n_layer_impl();
+        let k_len = k_cache.len() / cache_layers;
+        let v_len = v_cache.len() / cache_layers;
 
         let t0 = std::time::Instant::now();
         for t in 0..n_tokens {
@@ -896,11 +952,87 @@ impl<'a> super::weights::HybridTrunk<'a> {
         result
     }
 
+    /// Put the recurrent state back where the committed tokens leave it.
+    ///
+    /// The GDN and short-convolution layers carry their state from token to
+    /// token, so a rejected draft advances it. The state is a function of
+    /// the incoming state and the layer's input, and the dense layers do
+    /// not touch it, so restoring the state from before the verification and
+    /// replaying only the recurrent layers over the accepted rows (with the
+    /// projections the forward captured) reproduces it exactly -- without
+    /// re-running the whole model.
+    ///
+    /// The replay reuses the captured projections instead of computing them
+    /// again: the projections are the recurrent layer's biggest weight read
+    /// (86 MB per layer in Q8_0), and the state update does not need them
+    /// recomputed -- only the rows the forward already produced.
+    ///
+    /// `n_rows` is how many of the captured rows belong to the accepted
+    /// prefix.
+    pub(crate) fn replay_recurrent_state(
+        &self,
+        n_rows: usize,
+        scratch: &mut super::scratch::Qwen35Scratchpad,
+        pool: &ComputePool,
+    ) -> Result<(), String> {
+        let cfg = &self.config;
+        let conv_dim = cfg.conv_dim();
+        let num_v_heads = cfg.ssm_dt_rank;
+        let qkv_width = n_rows * conv_dim;
+        let head_width = n_rows * num_v_heads;
+        for il in 0..self.config.n_layer_impl() {
+            if !self.config.is_recurrent.get(il).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(captured) = scratch.recurrent_replay.get(il) else {
+                return Err(format!(
+                    "Qwen3.5 recurrent layer {il} has no captured rows to replay"
+                ));
+            };
+            if captured.qkv.len() < qkv_width || captured.beta.len() < head_width {
+                return Err(format!(
+                    "Qwen3.5 recurrent layer {il} captured {} qkv and {} head values, need {qkv_width} and {head_width}",
+                    captured.qkv.len(),
+                    captured.beta.len()
+                ));
+            }
+            // Put the captured rows where the layer's projection would have
+            // put them: the state update reads them from there.
+            scratch.qkv_buf[..qkv_width].copy_from_slice(&captured.qkv[..qkv_width]);
+            scratch.beta_buf[..head_width].copy_from_slice(&captured.beta[..head_width]);
+            scratch.alpha_buf[..head_width].copy_from_slice(&captured.alpha[..head_width]);
+            #[cfg(feature = "parity-trace")]
+            self.forward_recurrent_layer(
+                il,
+                il,
+                RecurrentInput::Reuse,
+                n_rows,
+                scratch,
+                pool,
+                false,
+                false,
+                false,
+            )?;
+            #[cfg(not(feature = "parity-trace"))]
+            self.forward_recurrent_layer(
+                il,
+                il,
+                RecurrentInput::Reuse,
+                n_rows,
+                scratch,
+                pool,
+                false,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn forward_recurrent_layer(
         &self,
         il: usize,
         cache_slot: usize,
-        input: &[f32],
+        input: RecurrentInput<'_>,
         n_tokens: usize,
         scratch: &mut super::scratch::Qwen35Scratchpad,
         pool: &ComputePool,
@@ -934,77 +1066,105 @@ impl<'a> super::weights::HybridTrunk<'a> {
         let ssm_out = layer.ssm_out.as_ref().unwrap();
 
         let t0 = std::time::Instant::now();
-        let projections = [wqkv, wqkv_gate, ssm_beta, ssm_alpha];
-        let need_q8 = projections
-            .iter()
-            .any(|weight| weight.needs_q8_0_activation());
-        let need_q8k = projections.iter().any(|weight| weight.uses_q8_k());
-        scratch
-            .prepared
-            .prepare(input, n_tokens, n_embd, need_q8, need_q8k)
-            .expect("validated Qwen3.5 recurrent projection shape");
-        scratch
-            .prepared
-            .matmul_group(
-                input,
-                [
-                    (wqkv, &mut scratch.qkv_buf[..n_tokens * conv_dim]),
-                    (wqkv_gate, &mut scratch.z_buf[..n_tokens * value_dim]),
-                    (ssm_beta, &mut scratch.beta_buf[..n_tokens * num_v_heads]),
-                    (ssm_alpha, &mut scratch.alpha_buf[..n_tokens * num_v_heads]),
-                ],
-                pool,
-            )
-            .expect("validated Qwen3.5 recurrent projection shape");
-        #[cfg(feature = "parity-trace")]
-        if edge0 && trace_layer {
-            parity_trace::report(parity_trace::checkpoint_rows(
-                &format!("edge0.qkv-{il}"),
-                Some(il),
-                &[n_tokens, conv_dim],
-                &scratch.qkv_buf[..n_tokens * conv_dim],
-            ));
-            parity_trace::report(parity_trace::checkpoint_rows(
-                &format!("edge0.z-{il}"),
-                Some(il),
-                &[n_tokens, value_dim],
-                &scratch.z_buf[..n_tokens * value_dim],
-            ));
-        }
-        for t in 0..n_tokens {
-            let n_beta = num_v_heads;
-            sigmoid_inplace(&mut scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta]);
-            for v in 0..num_v_heads {
-                let a_biased = scratch.alpha_buf[t * num_v_heads + v] + ssm_dt[v % ssm_dt.len()];
-                scratch.alpha_buf[t * num_v_heads + v] =
-                    softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
-            }
-        }
-        if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
-            use std::io::Write as _;
-            let nb = n_tokens * num_v_heads;
-            for (nm, buf) in [
-                ("beta_sigmoid", &scratch.beta_buf[..nb]),
-                ("a_softplus", &scratch.alpha_buf[..nb]),
-            ] {
-                let bytes: Vec<u8> = buf.iter().flat_map(|v| v.to_le_bytes()).collect();
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(format!("rust_{nm}.bin"))
-                {
-                    let _ = f.write_all(&bytes);
+        match input {
+            RecurrentInput::Project(input) => {
+                let projections = [wqkv, wqkv_gate, ssm_beta, ssm_alpha];
+                let need_q8 = projections
+                    .iter()
+                    .any(|weight| weight.needs_q8_0_activation());
+                let need_q8k = projections.iter().any(|weight| weight.uses_q8_k());
+                scratch
+                    .prepared
+                    .prepare(input, n_tokens, n_embd, need_q8, need_q8k)
+                    .expect("validated Qwen3.5 recurrent projection shape");
+                scratch
+                    .prepared
+                    .matmul_group(
+                        input,
+                        [
+                            (wqkv, &mut scratch.qkv_buf[..n_tokens * conv_dim]),
+                            (wqkv_gate, &mut scratch.z_buf[..n_tokens * value_dim]),
+                            (ssm_beta, &mut scratch.beta_buf[..n_tokens * num_v_heads]),
+                            (ssm_alpha, &mut scratch.alpha_buf[..n_tokens * num_v_heads]),
+                        ],
+                        pool,
+                    )
+                    .expect("validated Qwen3.5 recurrent projection shape");
+                #[cfg(feature = "parity-trace")]
+                if edge0 && trace_layer {
+                    parity_trace::report(parity_trace::checkpoint_rows(
+                        &format!("edge0.qkv-{il}"),
+                        Some(il),
+                        &[n_tokens, conv_dim],
+                        &scratch.qkv_buf[..n_tokens * conv_dim],
+                    ));
+                    parity_trace::report(parity_trace::checkpoint_rows(
+                        &format!("edge0.z-{il}"),
+                        Some(il),
+                        &[n_tokens, value_dim],
+                        &scratch.z_buf[..n_tokens * value_dim],
+                    ));
+                }
+                for t in 0..n_tokens {
+                    let n_beta = num_v_heads;
+                    sigmoid_inplace(
+                        &mut scratch.beta_buf[t * num_v_heads..t * num_v_heads + n_beta],
+                    );
+                    for v in 0..num_v_heads {
+                        let a_biased =
+                            scratch.alpha_buf[t * num_v_heads + v] + ssm_dt[v % ssm_dt.len()];
+                        scratch.alpha_buf[t * num_v_heads + v] =
+                            softplus_f32(a_biased) * ssm_a[v % ssm_a.len()];
+                    }
+                }
+                if std::env::var("RMI_SSM_DUMP").is_ok() && il == 0 {
+                    use std::io::Write as _;
+                    let nb = n_tokens * num_v_heads;
+                    for (nm, buf) in [
+                        ("beta_sigmoid", &scratch.beta_buf[..nb]),
+                        ("a_softplus", &scratch.alpha_buf[..nb]),
+                    ] {
+                        let bytes: Vec<u8> = buf.iter().flat_map(|v| v.to_le_bytes()).collect();
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(format!("rust_{nm}.bin"))
+                        {
+                            let _ = f.write_all(&bytes);
+                        }
+                    }
+                }
+                #[cfg(feature = "parity-trace")]
+                if edge0 && trace_layer {
+                    parity_trace::report(parity_trace::checkpoint_rows(
+                        &format!("edge0.beta-{il}"),
+                        Some(il),
+                        &[n_tokens, num_v_heads],
+                        &scratch.beta_buf[..n_tokens * num_v_heads],
+                    ));
+                }
+                if scratch.capture_recurrent_replay {
+                    // Keep what the state update consumes, so a rollback can
+                    // replay the state alone instead of projecting the rows
+                    // again (the projections are the layer's biggest weight
+                    // read, and the rollback does not need the layer's
+                    // output).
+                    let slot = &mut scratch.recurrent_replay[il];
+                    slot.qkv.clear();
+                    slot.qkv
+                        .extend_from_slice(&scratch.qkv_buf[..n_tokens * conv_dim]);
+                    slot.beta.clear();
+                    slot.beta
+                        .extend_from_slice(&scratch.beta_buf[..n_tokens * num_v_heads]);
+                    slot.alpha.clear();
+                    slot.alpha
+                        .extend_from_slice(&scratch.alpha_buf[..n_tokens * num_v_heads]);
                 }
             }
-        }
-        #[cfg(feature = "parity-trace")]
-        if edge0 && trace_layer {
-            parity_trace::report(parity_trace::checkpoint_rows(
-                &format!("edge0.beta-{il}"),
-                Some(il),
-                &[n_tokens, num_v_heads],
-                &scratch.beta_buf[..n_tokens * num_v_heads],
-            ));
+            RecurrentInput::Reuse => {
+                // A rollback: the projections are already in the scratch
+                // buffers, copied there from the captured rows.
+            }
         }
         let t_matmul = t0.elapsed().as_secs_f64();
 
@@ -1246,6 +1406,12 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
         }
         let tssm = ts0.elapsed().as_secs_f64();
+        if matches!(input, RecurrentInput::Reuse) {
+            // A rollback only needs the state. The layer's output is not
+            // used, and projecting it is the layer's second biggest weight
+            // read -- the state update above is all the rollback asks for.
+            return Ok(Vec::new());
+        }
         let tn0 = std::time::Instant::now();
         for t in 0..n_tokens {
             for h in 0..num_v_heads {
