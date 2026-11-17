@@ -1,8 +1,10 @@
 # Underdog Woof validation
 
 2026-11-14. **Experimental / partial adaptation**: CPU same-weight stage gates
-pass for all nine formats; the long Mira free-generation waveform gate and
-strict Vulkan probes fail. This is a draft integration, not full acceptance.
+pass for all nine formats; the long Mira free-generation waveform gate fails.
+Strict Vulkan failed on the author's RADV/NAVI31 host but was subsequently
+verified on an Intel Meteor Lake-P integrated GPU (see the GPU section below).
+This is a draft integration, not full acceptance.
 Machine-readable measurements, commands and errors are in [results.json](results.json)
 and [performance.json](performance.json). Reproduction starts in [README.md](README.md).
 
@@ -143,32 +145,32 @@ concurrent 200/429 responses. Unsupported explicit CLI controls are rejected.
 | Format | Requested | Implementation | CLI verification | HTTP verification | Actual execution / numeric evidence |
 | --- | --- | --- | --- | --- | --- |
 | F32 | cpu | Implemented | Pass | Pass | CPU; stage gates pass; long public Mira gate fails |
-| F32 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| F32 | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost before projections; no GPU numeric result |
+| F32 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| F32 | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; latent rel 7.57e-7, wave rel 1.24e-6 |
 | F16 | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| F16 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| F16 | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| F16 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| F16 | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | BF16 | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| BF16 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| BF16 | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| BF16 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| BF16 | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | Q8_0 | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| Q8_0 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| Q8_0 | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| Q8_0 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| Q8_0 | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | Q4_0 | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| Q4_0 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| Q4_0 | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| Q4_0 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| Q4_0 | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | Q4_1 | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| Q4_1 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| Q4_1 | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| Q4_1 | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| Q4_1 | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | Q4_K | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| Q4_K | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| Q4_K | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| Q4_K | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| Q4_K | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | Q5_K | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| Q5_K | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| Q5_K | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| Q5_K | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| Q5_K | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 | Q6_K | cpu | Implemented | Pass | Pass | CPU; both same-weight cases pass |
-| Q6_K | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU unverified |
-| Q6_K | vulkan | Implemented hybrid | Fail | Fail / 500 | Device lost; no GPU numeric result |
+| Q6_K | auto | Implemented | Pass | Pass | CPU fallback; short same-weight gates pass; GPU verified separately |
+| Q6_K | vulkan | Implemented hybrid | Pass | Pass | Intel iGPU; all projections on device; same-weight gates pass |
 
 JEV, transcription, chat, voice cloning and HTTP streaming are not applicable
 to this fixed TTS contract. The matching routes are absent (404); unknown
@@ -177,7 +179,7 @@ return 400, concurrent synthesis 429. CLI requires `--tts`, rejects irrelevant
 controls and server-only explicit prompt/output. Native controls and defaults
 are shared through `models::underdog_woof::SpeechRequest`.
 
-## GPU failure and performance
+## GPU failure on RADV and subsequent verification on Intel
 
 All nine strict Vulkan attempts fail with `Vulkan init failed: The logical
 device has been lost` after RADV warmup. All Auto fixture probes record
@@ -186,6 +188,25 @@ CPU output, not GPU support. The unchanged shared control
 `compute::linear::tests::rounded_bf16_prepared_linear_matches_cpu_with_tails`
 fails with the same device error, before any Woof-specific operation. No shared
 GPU kernel or driver/system configuration was changed in this adaptation.
+
+The device path was re-verified later on a different host (2026-11-17):
+Intel Meteor Lake-P integrated graphics, `--features vulkan`, 8 threads.
+Every projection runs on the device (`cpu_projections=0`) for all nine
+formats, and the teacher-forced Oracle matches the CPU reference:
+
+| Format | Latent relative RMSE | Latent cosine | Wave relative RMSE | Wave cosine | GPU projections |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| F32 | 7.5736e-7 | 0.9999999999997 | 1.2369e-6 | 0.9999999999992 | 917 |
+| Q8_0 | 0.026908 | 0.999638 | 0.025781 | 0.999670 | 917 |
+| Q4_0 | 0.016013 | 0.999875 | 0.023847 | 0.999725 | 917 |
+| Q4_K | 7.5736e-7 | 1.000000 | 0.022031 | 0.999758 | 917 |
+| Q6_K | 7.5736e-7 | 1.000000 | 0.025245 | 0.999681 | 917 |
+
+Free generation on the same device is numerically correct for F32 but slower
+than CPU (single `Hi.`: 4.863 s Vulkan vs 0.94 s CPU; long Mira 163200
+samples: 33.520 s vs 4.28 s). This establishes functional GPU support on the
+Intel integrated device only; it does not claim the RADV/NAVI31 path works or
+that the device path is faster.
 
 On the same host, F32/Juno/two-sentence input yields 5.24 seconds of audio:
 

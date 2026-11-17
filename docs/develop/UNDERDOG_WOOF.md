@@ -4,10 +4,13 @@
 单个 `underdog_woof` GGUF 包含文本嵌入、语音 transformer、flow head、
 Mimi 解码器和发音词典，不需要 `--mmproj`。
 
-当前状态为 **Experimental / 部分适配（GPU 验证阻塞、长句自由生成偏差待验收）**。
-CPU 九种格式已做独立、同权重分阶段数值检查。Vulkan 投影路径已接入共享
-`LinearExecutor`，但测试机 RADV/NAVI31 的共享设备路径出现 `device lost`，
-Auto 回退 CPU，严格 Vulkan 失败；不能据此声称 GPU 已对齐或获得加速。
+当前状态为 **Experimental / 部分适配（长句自由生成偏差待验收）**。
+CPU 九种格式已做独立、同权重分阶段数值检查。Vulkan 投影路径接入共享
+`LinearExecutor`：最初在 RADV/NAVI31 上出现 `device lost`，随后在
+Intel Meteor Lake-P 集显（`--features vulkan`）上完成对齐验证，
+九种格式全部投影上设备（`cpu_projections=0`），F32 教师强制
+latent 相对 RMSE `7.57e-7`、波形 `1.24e-6`、cosine `1.0`。
+该结果只覆盖集显，不代表独显或 RADV 路径可用。
 F32 长句 Mira 在教师强制时通过分阶段检查，但自由生成的波形相对误差为
 `0.04634`，未通过预设 `0.002` 门槛。定位显示自回归反馈放大了浮点归约舍入；
 官方实现自身的 ULP 扰动实验也复现了放大现象。原失败记录和阈值均保留，
@@ -61,9 +64,12 @@ GPU 设计为投影 offload 与宿主归一化、RoPE、状态、卷积调度的
 
 同机 EPYC 9334、2 线程、F32、Juno 两句共 5.24 秒音频：三次暖运行中位数
 Rust CLI 为 1.436 秒（含进程启动、加载），官方 NumPy 为 0.789 秒（仅合成，
-另计构造 0.330 秒）。Auto 单次 5.292 秒且实际回退 CPU，严格 Vulkan 在
-4.912 秒后失败；后二者不能作为 GPU 推理吞吐。两种 CPU 计时范围不同，
-这些数字不构成同范围加速比。
+另计构造 0.330 秒）。Auto 单次 5.292 秒且实际回退 CPU；严格 Vulkan 在该机
+4.912 秒后 `device lost`。两种 CPU 计时范围不同，这些数字不构成同范围加速比。
+
+Intel Meteor Lake-P 集显（8 线程）上 F32 单句 `Hi.` 严格 Vulkan 为 4.863 秒，
+长句 Mira 163200 样本为 33.520 秒；同输入 CPU 为 0.94 秒和 4.28 秒。
+集显路径数值正确但**慢于 CPU**，这些数字只说明功能可用，不构成加速结论。
 
 ## 许可
 
