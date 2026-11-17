@@ -5327,14 +5327,18 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 **关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
 `tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
 
-### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 上的投机解码已经比 greedy 快
+### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 与设备路径上的投机解码都比 greedy 快
 
 **状态**：✅ 起草头 + 验证/接受回路已实现，与 pinned llama.cpp **逐轮同草稿**；
 接受率 0.54 vs 0.53。✅ CPU 上也有收益了：批量 Q8_0 kernel（`sdot`）+ 不用重算
 投影的回滚 + 按批做词表投影之后，2 个草稿的投机解码比 greedy 快约 27%
-（4.28 s vs 5.86 s，只算解码段是 2.81 s vs 4.39 s，1.56 倍）。⚠ 目标前向是
-**访存**瓶颈（一遍前向要把 29 GB 的 Q8_0 权重读一遍），所以收益是 1.4 倍而不是
-llama.cpp 在设备路径上的倍数级（草稿头目前只在 CPU 上跑）。
+（4.28 s vs 5.86 s，只算解码段是 2.81 s vs 4.39 s，1.56 倍）。✅ **设备路径也能
+跑投机解码了**：目标前向在 Vulkan 上，草稿头仍在 CPU，设备把每一行的 hidden 与
+词表投影一次性交回来（设备一次读一遍词表矩阵，而不是每行一遍）。真模型上投机
+解码产出的 token 与 greedy **逐个相同**（Q4_0 档，接受率 0.50～0.73）。⚠ 目标
+前向是**访存**瓶颈（一遍前向要把 29 GB 的 Q8_0 权重读一遍），所以收益是 1.1～1.4
+倍而不是 llama.cpp 在设备路径上的倍数级（草稿头目前只在 CPU 上跑，设备回滚还是
+整模型重放）。
 
 **做了什么**：
 
@@ -5374,6 +5378,39 @@ llama.cpp 在设备路径上的倍数级（草稿头目前只在 CPU 上跑）�
   （`--temp 0`）、只支持纯文本 prompt（视觉路径的 prompt 行是投影后的 embedding，
   拿不到 token id）。HTTP（`--serve --mtp-draft N`）走同一条路：温度为 0 的请求
   走投机解码，其余请求照旧逐 token 解码。
+
+**设备路径上的投机解码**（PR #250）：
+
+- 设备一次前向只交回**最后一行**的 hidden 与 logits，投机解码需要的是**每一行**
+  的：验证要知道目标在每个草稿位置会产出什么（每一行的词表投影），起草头要把
+  草稿接在上一行的 hidden 后面（每一行的 hidden），catch-up 要用每个已提交位置
+  的 hidden 填起草头的 KV cache。于是设备侧加了两条采集路径：
+  - `normed` 区（本来就是 `rows × n_embd`）：整块归一化并把每一行读回来；
+  - `logits_rows` 区（`rows × vocab`，只在**有 MTP 头**的 checkpoint 上分配）：
+    整批行一次词表投影。投影的输入按 `n_embd` 跨步、输出按 `vocab` 跨步，现有
+    的批量 kernel（`q8_matmul_tiled_dp4a.comp` 与 `q8_matmul_transposed.comp`）
+    已经是这个写法，所以**不用改 shader**。
+  - 两条采集是分开的：catch-up 只要 hidden（预填时不需要为一整批 prompt 行去读
+    1.3 GB 的词表矩阵），验证才要 logits。
+- **起草头仍然跑在 CPU 上**：它没有设备侧的 recorder，而且读的是 host 副本的
+  权重。所以起草头的那几次 matmul 在 Vulkan 策略下也被显式钉在 CPU
+  （`ComputePool::disable_gpu_matmul_for_scope`），否则它会被 offload 到设备而
+  没有对应的录制。
+- **设备上的回滚是整模型重放**：CPU 路径回滚时只重放循环状态（捕获投影后重放
+  状态更新，见 PR #248）；设备上还没有捕获，于是回滚的做法是：把保存的循环状态
+  上传回设备 → 把提交长度退回 → **把已接受的那几行重新跑一遍模型**。它们写出的
+  KV 与第一次相同，循环状态也就回到了已提交 token 该留的状态。代价是每次被拒
+  都要多一遍完整前向（下面实测里 MTP-4 的 42.5 s 里有 18 s 是它）。
+- **真模型验证**（Qwen3.8-27B Q4_0，`unsloth/Qwen3.8-27B-GGUF`，设备路径）：
+  投机解码产出的 token 与 greedy **逐个相同**（16 个生成 token），接受率 0.50。
+  同一模型在 CPU 上也逐个相同，接受率 0.60（Q4_0 的设备 kernel 与 CPU kernel
+  舍入不同，所以两条路径的 greedy token 之间可能有一两个不同，这是量化档的
+  既有现象，与投机解码无关）。
+- **tiny 模型的单测**（`qwen35_mtp_speculative_matches_greedy_on_the_cpu` /
+  `..._on_the_device`）：一个带 MTP 头、带循环层的极小模型，目标在 CPU 与设备
+  两条路径上跑，投机解码的 token 必须与 greedy 逐个相同。fixture 的起草头被
+  故意做成「提出一个目标永远不会选的 token」，于是**每一轮都被拒**，回滚与重放
+  的分支必然被执行到。
 
 **实测**（Qwen3.8-27B Q8_0，19 token 的 chat prompt，16 个生成 token，
 `--mtp-draft 4`）：
@@ -5447,12 +5484,40 @@ token decode 的量级）——差别在于它没有把 Q8_0 的权重读取在�
 词表投影（每个草稿一遍 1.3 GB，而草稿之间是串行的——下一个草稿要用上一个草稿的
 token，所以没法合并）；二是让草稿头跑到设备上（现在只跑 CPU）。
 
+**设备路径上的实测**（Qwen3.8-27B Q4_0，18 token 的 chat prompt，32 个生成
+token，`--compute vulkan`，8 线程；交替跑取中位数。这台机器的负载会漂，所以对比
+一律交替跑）：
+
+| 草稿数 | 轮数 | 接受率 | 目标前向次数 | prefill | decode | 合计 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0（greedy） | 31 | – | 31 | 6.4 s | 26.1 s | 32.5 s |
+| 1 | 18 | 77.8% | 18 | 6.5 s | 26.2 s | 32.7 s |
+| 2 | 13 | 73.1% | 13 | 6.6 s | **23.6 s** | **30.2 s** |
+| 4 | 12 | 41.7% | 12 | 6.5 s | 42.5 s | 49.0 s |
+
+即：**2 个草稿时比 greedy 快约 1.10 倍**（decode 段 23.6 s vs 26.1 s）。这比
+CPU 路径的 1.37 倍低，原因有两条，都量过了：
+
+1. **设备回滚是整模型重放**：每次被拒草稿都要多一遍完整前向。把重放临时关掉
+   （token 会错，只为计时）实测：MTP-4 的 decode 从 42.5 s 掉到 24.0 s ——
+   **18 s 是重放**。MTP-2 的接受率 73%，13 轮里大约 7 轮被拒，重放大约占 decode
+   段的三成。CPU 路径靠「捕获投影 + 只重放状态更新」把这部分压到 23 ms/轮，设备
+   侧还没有对应的捕获——这是下一步最值得做的一件事。
+2. **起草头还在 CPU 上**：每个草稿要单独读一遍 1.27 GB 的词表矩阵（Q4_0 的
+   `output.weight`），而且和设备抢同一条内存总线。草稿越多越贵：4 个草稿时
+   接受率掉到 41.7%，于是既要多付起草头的词表投影，又要付更多的重放，于是
+   MTP-4 比 greedy 慢 1.6 倍。
+
 **已知边界**：
 
-- 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
-  Vulkan 路径下直接报错。
+- 起草头只跑 CPU：设备路径不导出起草头的 hidden，所以起草头自己的那几次前向
+  仍在 CPU 上跑（草稿之间是串行的，设备帮不上忙）。
+- 设备回滚是整模型重放，不是「只重放循环状态」：CPU 路径已经便宜，设备路径
+  还没有。每次被拒草稿的代价 ≈ 一次完整前向。
 - CPU 上前向是访存瓶颈，投机解码的收益只有 1.4 倍（见上面的实测）；要多草稿
   才有倍数收益的话，得先让每个草稿的词表投影不再单独读一遍 1.3 GB。
+- 设备路径的投机解码要求整批草稿（`1 + N` 行）装进一个 chunk（默认 64 行），
+  否则报错：每一行的 hidden 与 logits 都得留在前向之后。
 - 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
 - TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
   `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
@@ -5466,6 +5531,19 @@ RMI_QWEN35_PROMPT_TOKENS=248045,846,198,95826,110827,98419,108829,113672,119721,
 RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 \
 cargo test --locked --profile release-fast --features parity-trace --lib qwen35_mtp -- --ignored --nocapture
 
+# 同一件事跑在设备上：加 --features vulkan 与 RMI_QWEN35_MTP_DEVICE=1
+RMI_QWEN35_MODEL=<Qwen3.8-27B-Q4_0.gguf> \
+RMI_QWEN35_PROMPT_TOKENS=248045,846,198,95826,110827,98419,108829,113672,119721,1710,248046,198,248045,74455,198,248068,271,248069,271 \
+RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 RMI_QWEN35_MTP_DEVICE=1 \
+cargo test --locked --profile release-fast --features "parity-trace,vulkan" \
+  --lib qwen35_mtp_speculative -- --ignored --nocapture
+
+# 设备上的性能：交替跑 greedy 与 MTP，看 [pipeline-timing] 与 [mtp] 两行
+target/release-fast/rust-model-inference --model <gguf> --prompt "..." \
+  --max-tokens 32 --temp 0 --compute vulkan --threads 8 --mtp-draft 0
+target/release-fast/rust-model-inference --model <gguf> --prompt "..." \
+  --max-tokens 32 --temp 0 --compute vulkan --threads 8 --mtp-draft 2
+
 # llama.cpp 参照：同一模型、同一 prompt、同一 n_max
 llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv 5
 # 然后用同样的 token 数组打 /completion，日志里的 "draft candidate" 就是草稿
@@ -5474,4 +5552,5 @@ llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv
 **关联**：`src/models/qwen35/trunk/mtp.rs`、`src/models/qwen35/trunk/session.rs`、
 `src/models/qwen35/trunk/forward.rs`、`src/models/qwen35/trunk/weights.rs`、
 `src/models/qwen35/trunk/scratch.rs`、`src/ops/kernel/q8_0/neon.rs`、
+`src/vulkan/qwen35.rs`、`src/compute/state.rs`、
 `docs/develop/SUPPORTED_MODELS.md`。
