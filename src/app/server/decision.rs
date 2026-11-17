@@ -51,6 +51,10 @@ fn inference_error_status(message: &str) -> StatusCode {
         || message.starts_with("THX-02 input contains non-finite")
         || message.starts_with("video must contain frames")
         || message.starts_with("video frame size must be positive")
+        || message == "video box and track support clips of at most 60 seconds"
+        || message == "the videos exceed the 16,384 visual token budget"
+        || message == "video exceeds 32,000,000 bytes"
+        || message == "invalid video frame indices"
         || message == "ffprobe could not read the video"
         || message == "video decoding failed"
     {
@@ -393,6 +397,36 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn decision_http_maps_media_limits_to_bad_request() {
+        for message in [
+            "video must contain frames and last at most 300 seconds",
+            "video frame size must be positive and at most 8,294,400 pixels",
+            "video box and track support clips of at most 60 seconds",
+            "the videos exceed the 16,384 visual token budget",
+            "video exceeds 32,000,000 bytes",
+            "invalid video frame indices",
+            "ffprobe could not read the video",
+            "video decoding failed",
+        ] {
+            assert_eq!(
+                inference_error_status(message),
+                StatusCode::BAD_REQUEST,
+                "{message}"
+            );
+        }
+        for message in [
+            "d3 vision preprocessing and encoder grids differ",
+            "video decoder returned an incomplete frame selection",
+        ] {
+            assert_eq!(
+                inference_error_status(message),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{message}"
+            );
+        }
     }
 
     #[test]
