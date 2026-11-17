@@ -1,0 +1,2276 @@
+{
+  "source_sha256": {
+    "normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+    "respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+    "textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+    "runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220"
+  },
+  "lexicon": "Saoirse\tseersha\nSaoirse Ronan\tseersha rohnan\nEoin\tOwen\nWorcestershire\twoostersher\ncrème brûlée\tkrem broolay\nNew York\tnoo york\tc\nSaint Jacques\tsant zhak\nΟΣ\tgreek\n",
+  "normalization": [
+    [
+      "",
+      ""
+    ],
+    [
+      "hello, world!",
+      "hello, world!"
+    ],
+    [
+      "Hello, world!",
+      "Hello, world!"
+    ],
+    [
+      "Line one.\nLine two!",
+      "Line one.\nLine two!"
+    ],
+    [
+      "  Several\t words \n together. ",
+      "Several words together."
+    ],
+    [
+      "Your order ships on March 3rd.",
+      "Your order ships on March third."
+    ],
+    [
+      "Dr. Smith lives at 742 Evergreen Terrace.",
+      "Doctor Smith lives at seven forty two Evergreen Terrace."
+    ],
+    [
+      "Mrs. Jones and Prof. Lee met St. Patrick.",
+      "Missus Jones and Professor Lee met Saint Patrick."
+    ],
+    [
+      "It costs $12.99, €0.01, £7.50 or $1.5.",
+      "It costs twelve dollars and ninety nine cents, one cent, seven pounds fifty or one point five dollars."
+    ],
+    [
+      "$50-75 and $4.2 million, EUR 12.99, ¥300, CAD 1.01, 12 BTC.",
+      "fifty to seventy five dollars and four point two million dollars, twelve euros and ninety nine cents, three hundred, yen one Canadian dollars and one cents, twelve bitcoin."
+    ],
+    [
+      "USD 1,000, C$10.00, 9 GBP, ₹500, 30¢ and HK$12.50.",
+      "One thousand dollars, ten Canadian dollars, nine pounds, five hundred, rupees thirty cents and twelve Hong Kong dollars and fifty cents."
+    ],
+    [
+      "The population is 1,234,567 and 4.5M visitors.",
+      "The population is one million two hundred and thirty four thousand five hundred and sixty seven and four point five million visitors."
+    ],
+    [
+      "Room 402, gate 47B, flight UA 482, B12, AA229, A380.",
+      "Room four oh two, gate forty seven B, flight U A four eighty two, B twelve, A A two twenty nine, A three eight zero."
+    ],
+    [
+      "PIN 0420 and card ending in 4459.",
+      "PIN zero four two zero and card ending in four four five nine."
+    ],
+    [
+      "The code is X7K9, CS-2026-0813, AB-4471-Z, ORD-9Q2-77L and 4hQx8Z.",
+      "The code is X seven K nine, C S two zero two six zero eight one three, A B four four seven one Z, O R D nine Q two seven seven L and four H Q X eight Z."
+    ],
+    [
+      "Booking reference A380 and order 12345678.",
+      "Booking reference A three eight zero and order one two three four five six seven eight."
+    ],
+    [
+      "Call 1-800-829-1040 or 1-800-FLOWERS.",
+      "Call one eight hundred, eight two nine, one zero four zero or one eight hundred, Flowers."
+    ],
+    [
+      "Call +44 20 7946 0958 or (212) 555-0199.",
+      "Call plus four four, two zero, seven nine four six, zero nine five eight or two one two, five five five, zero one nine nine."
+    ],
+    [
+      "Dial 911, text 12345.",
+      "Dial nine one one, text one two three four five."
+    ],
+    [
+      "Contact me at jane.doe+news@example.co.uk or https://www.example.com/a.",
+      "Contact me at jane dot doe plus news at example dot co dot uk or w w w dot example dot com slash a."
+    ],
+    [
+      "Visit http://example.com and sftp://my-host.local:8080.",
+      "Visit example dot com and S F T P colon slash slash my dash host dot local colon eighty eighty."
+    ],
+    [
+      "https://localhost:8080, http://, git://github.com/repo, mailto:hello@example.org.",
+      "localhost colon eighty eighty, H T T P colon slash slash, git colon slash slash github dot com slash repo, mail to hello at example dot org."
+    ],
+    [
+      "localhost:8080 and example.com:443.",
+      "localhost colon eighty eighty and example dot com colon four forty three."
+    ],
+    [
+      "Open report_final.pdf and /etc/nginx/site.conf then main.rs.",
+      "Open report underscore final dot pdf and slash etc slash nginx slash site dot conf then main dot rs."
+    ],
+    [
+      "Use C:\\Users\\Jane\\.env and API_KEY or SELECT * FROM table.",
+      "Use C colon backslash Users backslash Jane backslash dot env and API underscore KEY or SELECT star FROM table."
+    ],
+    [
+      "Try C#, C++, ASP.NET, getUserName(), userAccountName, OpenAI and v2.4.1.",
+      "Try C sharp, C plus plus, A S P dot net, get User Name, user Account Name, OpenAI and version two point four point one."
+    ],
+    [
+      "#HelloWorld @openai @Jane_Doe and user_id.",
+      "hashtag Hello World at open A I at Jane underscore Doe and user underscore id."
+    ],
+    [
+      "SW1A 1AA, M14 5TG and K1A 0B6.",
+      "S W one A, one A A, M one four, five T G and K one A, zero B six."
+    ],
+    [
+      "Henry VIII, Chapter XIV, Super Bowl LIX, World War II and Pope John Paul II.",
+      "Henry the eighth, Chapter fourteen, Super Bowl fifty nine, World War two and Pope John Paul the second."
+    ],
+    [
+      "John Smith III, Frozen II, Rocky IV, Type II and appendix C.",
+      "John Smith the third, Frozen two, Rocky four, Type two and appendix C."
+    ],
+    [
+      "Chapters I through IV and Volume X.",
+      "Chapters one through four and Volume ten."
+    ],
+    [
+      "The '80s, 1990s, the 2000s and '98 or '04.",
+      "The eighties, nineteen nineties, the two thousands and ninety eight or oh four."
+    ],
+    [
+      "x² + y³ = 10^23 and 6.02 x 10^23.",
+      "x squared plus y cubed equals ten to the twenty third and six point zero two times ten to the twenty third."
+    ],
+    [
+      "Solve 3x - 2 = 11; 5 m^2, 4cm^3.",
+      "Solve three x minus two equals eleven; five square meters, four cubic centimeters."
+    ],
+    [
+      "2x faster and 3 × 5 = 15, 2 x 4 feet.",
+      "two x faster and three times five equals fifteen, two by four feet."
+    ],
+    [
+      "1 km, 2 km, 1 kg, 10 mg/kg, 3 mL, 1 mph and 50 km/h.",
+      "one kilometer, two kilometers, one kilogram, ten milligrams per kilogram, three milliliters, one mile per hour and fifty kilometers per hour."
+    ],
+    [
+      "1 ft 1 in, 6 ft 2 in, 6'2\" and 5 µg.",
+      "one foot one inch, six feet two inches, six foot two and five micrograms."
+    ],
+    [
+      "2h 15m, 1h30, 6m 30s and wait for 45m.",
+      "two hours fifteen minutes, one hour thirty minutes, six minutes thirty seconds and wait for forty five minutes."
+    ],
+    [
+      "For 45m swim and runtime 12m.",
+      "For forty five meters swim and runtime twelve minutes."
+    ],
+    [
+      "3/4 cup, 1 1/2 hours, 2½ cups and ⅓ of a pie.",
+      "three quarters cup, one and a half hours, two and a half cups and one third of a pie."
+    ],
+    [
+      "Due on 3/4, 14/03, 03/14 and on 9/11.",
+      "Due on the third of April, the fourteenth of March, March fourteenth and on nine eleven."
+    ],
+    [
+      "Rated 4/5 stars; got 8/10 marks; available 24/7 and split 50/50.",
+      "Rated four out of five stars; got eight out of ten marks; available twenty four seven and split fifty fifty."
+    ],
+    [
+      "On 01/10/2026 and 14/03/2027.",
+      "On January tenth twenty twenty six and the fourteenth of March twenty twenty seven."
+    ],
+    [
+      "2026-10-21, 12-25-1999, 14.03.2027 and 3/2027.",
+      "October twenty first, twenty twenty six, December twenty fifth nineteen ninety nine, the fourteenth of March twenty twenty seven and March twenty twenty seven."
+    ],
+    [
+      "14 March 2027 and the 3rd of May; 3-17 November.",
+      "the fourteenth of March twenty twenty seven and the third of May; the third to the seventeenth of November."
+    ],
+    [
+      "1968-2020 and 1990-95, from Mon.-Fri., on Tues and Jan. 7.",
+      "nineteen sixty eight to twenty twenty and nineteen ninety to ninety five, from Monday to Friday, on Tuesday and January seventh."
+    ],
+    [
+      "On Nov 14, 2026; the Sun. and Mon. Next day.",
+      "On November fourteenth, twenty twenty six; the Sun. and Monday. Next day."
+    ],
+    [
+      "At 2:03:45 and runtime 2:03:45, 0:00:03.",
+      "At two hours, three minutes, forty five seconds and runtime two hours, three minutes, forty five seconds, three seconds."
+    ],
+    [
+      "At 10:00-16:30 and 8 AM-6 PM, 9am-5pm.",
+      "At ten o'clock to sixteen thirty and eight AM to six PM, nine AM to five PM."
+    ],
+    [
+      "At 7:05 PM, 12:00 noon, 14:00, 00:00 and 8am.",
+      "At seven oh five PM, twelve noon, fourteen hundred, zero hundred and eight AM."
+    ],
+    [
+      "The ratio of 16:9 and score 3:2.",
+      "The ratio of sixteen to nine and score three to two."
+    ],
+    [
+      "5 °C, 12°F, 90°, 10% ± 2‰, 3 ≥ 2, 1 ≤ 4 and 5 ≠ 6.",
+      "five degrees Celsius, twelve degrees Fahrenheit, ninety degrees, ten percent plus or minus two per mille, three greater than or equal to two, one less than or equal to four and five not equal to six."
+    ],
+    [
+      "a ≈ b, 6 ÷ 3, a → b, √9 and A & B.",
+      "a approximately b, six divided by three, a to b, square root of nine and A and B."
+    ],
+    [
+      "C6H12O6, H2O, CO2 and NaCl.",
+      "C six H twelve O six, H two O, C O two and NaCl."
+    ],
+    [
+      "#1, #4471 and #12-34.",
+      "number one, number four four seven one and number twelve, thirty four."
+    ],
+    [
+      "I-95 N and US 101 W, 9-5 and 3-5 days.",
+      "I ninety five North and US one oh one West, nine to five and three to five days."
+    ],
+    [
+      "Saint-Jacques, Worcestershire-glazed, Eoin's and Saoirse Ronan.",
+      "Sant zhak, Woostersher-glazed, Owen's and Seersha rohnan."
+    ],
+    [
+      "Málaga, Łódź, crème brûlée, Straße and Ægir.",
+      "Málaga, Łódź, krem broolay, Straße and Ægir."
+    ],
+    [
+      "10 Mbps, 1 mmHg, 2 sq ft, 1 km2, 1 TFLOPS and 5 rpm.",
+      "ten megabits per second, one millimeters of mercury, two square feet, one square kilometer, one teraflop and five R P M."
+    ],
+    [
+      "The dates are 0/0 and 99/99; version 4.0.1-beta.",
+      "The dates are zero slash zero and ninety nine slash ninety nine; version four point zero point one beta."
+    ],
+    [
+      "Co. Inc. Ltd. Corp. Dept. Assn. Univ. qty. ref. tel. vol. pp. yr. avg. max.",
+      "Company Incorporated Limited Corporation Department Association University quantity reference telephone volume pages year average maximum"
+    ],
+    [
+      "Est. 1999, est. 2020, Sec. 3, 5 min. and min. length.",
+      "Established nineteen ninety nine, established twenty twenty, section three, five minutes and minimum length."
+    ],
+    [
+      "42 No. 9, Apt. 12, 17 Main St. Next sentence.",
+      "forty two number nine, Apartment twelve, seventeen Main Street. Next sentence."
+    ],
+    [
+      "On Mount St. Helens and Port St. Lucie.",
+      "On Mount Saint Helens and Port Saint Lucie."
+    ],
+    [
+      "1 m/s, 2 kg/in, 2 m^3/s and 10km^2.",
+      "one meter per second, two kg slash in, two cubic meters slash s and ten square kilometers."
+    ],
+    [
+      "Read 100, 101, 1000, 1001, 2010, 12345, 0.05 and -5.",
+      "Read one hundred, one hundred and one, one thousand, one thousand and one, twenty ten, one two three four five, zero point zero five and minus five."
+    ],
+    [
+      "1 km of material.",
+      "one kilometer of material."
+    ],
+    [
+      "2.5 km of material.",
+      "two point five kilometers of material."
+    ],
+    [
+      "1 m of material.",
+      "one meter of material."
+    ],
+    [
+      "2.5 m of material.",
+      "two point five meters of material."
+    ],
+    [
+      "1 cm of material.",
+      "one centimeter of material."
+    ],
+    [
+      "2.5 cm of material.",
+      "two point five centimeters of material."
+    ],
+    [
+      "1 mm of material.",
+      "one millimeter of material."
+    ],
+    [
+      "2.5 mm of material.",
+      "two point five millimeters of material."
+    ],
+    [
+      "1 kg of material.",
+      "one kilogram of material."
+    ],
+    [
+      "2.5 kg of material.",
+      "two point five kilograms of material."
+    ],
+    [
+      "1 g of material.",
+      "one gram of material."
+    ],
+    [
+      "2.5 g of material.",
+      "two point five grams of material."
+    ],
+    [
+      "1 mg of material.",
+      "one milligram of material."
+    ],
+    [
+      "2.5 mg of material.",
+      "two point five milligrams of material."
+    ],
+    [
+      "1 l of material.",
+      "one liter of material."
+    ],
+    [
+      "2.5 l of material.",
+      "two point five liters of material."
+    ],
+    [
+      "1 L of material.",
+      "one liter of material."
+    ],
+    [
+      "2.5 L of material.",
+      "two point five liters of material."
+    ],
+    [
+      "1 ml of material.",
+      "one milliliter of material."
+    ],
+    [
+      "2.5 ml of material.",
+      "two point five milliliters of material."
+    ],
+    [
+      "1 mL of material.",
+      "one milliliter of material."
+    ],
+    [
+      "2.5 mL of material.",
+      "two point five milliliters of material."
+    ],
+    [
+      "1 km/h of material.",
+      "one kilometer per hour of material."
+    ],
+    [
+      "2.5 km/h of material.",
+      "two point five kilometers per hour of material."
+    ],
+    [
+      "1 mph of material.",
+      "one mile per hour of material."
+    ],
+    [
+      "2.5 mph of material.",
+      "two point five miles per hour of material."
+    ],
+    [
+      "1 GB of material.",
+      "one gigabyte of material."
+    ],
+    [
+      "2.5 GB of material.",
+      "two point five gigabytes of material."
+    ],
+    [
+      "1 MB of material.",
+      "one megabyte of material."
+    ],
+    [
+      "2.5 MB of material.",
+      "two point five megabytes of material."
+    ],
+    [
+      "1 TB of material.",
+      "one terabyte of material."
+    ],
+    [
+      "2.5 TB of material.",
+      "two point five terabytes of material."
+    ],
+    [
+      "1 kB of material.",
+      "one kilobyte of material."
+    ],
+    [
+      "2.5 kB of material.",
+      "two point five kilobytes of material."
+    ],
+    [
+      "1 GHz of material.",
+      "one gigahertz of material."
+    ],
+    [
+      "2.5 GHz of material.",
+      "two point five gigahertz of material."
+    ],
+    [
+      "1 MHz of material.",
+      "one megahertz of material."
+    ],
+    [
+      "2.5 MHz of material.",
+      "two point five megahertz of material."
+    ],
+    [
+      "1 kW of material.",
+      "one kilowatt of material."
+    ],
+    [
+      "2.5 kW of material.",
+      "two point five kilowatts of material."
+    ],
+    [
+      "1 kWh of material.",
+      "one kilowatt hour of material."
+    ],
+    [
+      "2.5 kWh of material.",
+      "two point five kilowatt hours of material."
+    ],
+    [
+      "1 W of material.",
+      "one watt of material."
+    ],
+    [
+      "2.5 W of material.",
+      "two point five watts of material."
+    ],
+    [
+      "1 V of material.",
+      "one volt of material."
+    ],
+    [
+      "2.5 V of material.",
+      "two point five volts of material."
+    ],
+    [
+      "1 mAh of material.",
+      "one milliamp hour of material."
+    ],
+    [
+      "2.5 mAh of material.",
+      "two point five milliamp hours of material."
+    ],
+    [
+      "1 ft of material.",
+      "one foot of material."
+    ],
+    [
+      "2.5 ft of material.",
+      "two point five feet of material."
+    ],
+    [
+      "1 in of material.",
+      "one in of material."
+    ],
+    [
+      "2.5 in of material.",
+      "two point five in of material."
+    ],
+    [
+      "1 lb of material.",
+      "one pound of material."
+    ],
+    [
+      "2.5 lb of material.",
+      "two point five pounds of material."
+    ],
+    [
+      "1 lbs of material.",
+      "one pound of material."
+    ],
+    [
+      "2.5 lbs of material.",
+      "two point five pounds of material."
+    ],
+    [
+      "1 oz of material.",
+      "one ounce of material."
+    ],
+    [
+      "2.5 oz of material.",
+      "two point five ounces of material."
+    ],
+    [
+      "1 h of material.",
+      "one hour of material."
+    ],
+    [
+      "2.5 h of material.",
+      "two point five hours of material."
+    ],
+    [
+      "1 min of material.",
+      "one minute of material."
+    ],
+    [
+      "2.5 min of material.",
+      "two point five minutes of material."
+    ],
+    [
+      "1 s of material.",
+      "one s of material."
+    ],
+    [
+      "2.5 s of material.",
+      "two point five s of material."
+    ],
+    [
+      "1 ms of material.",
+      "one millisecond of material."
+    ],
+    [
+      "2.5 ms of material.",
+      "two point five milliseconds of material."
+    ],
+    [
+      "1 mi of material.",
+      "one mile of material."
+    ],
+    [
+      "2.5 mi of material.",
+      "two point five miles of material."
+    ],
+    [
+      "1 yd of material.",
+      "one yard of material."
+    ],
+    [
+      "2.5 yd of material.",
+      "two point five yards of material."
+    ],
+    [
+      "1 yds of material.",
+      "one yard of material."
+    ],
+    [
+      "2.5 yds of material.",
+      "two point five yards of material."
+    ],
+    [
+      "1 Hz of material.",
+      "one hertz of material."
+    ],
+    [
+      "2.5 Hz of material.",
+      "two point five hertz of material."
+    ],
+    [
+      "1 kHz of material.",
+      "one kilohertz of material."
+    ],
+    [
+      "2.5 kHz of material.",
+      "two point five kilohertz of material."
+    ],
+    [
+      "1 dB of material.",
+      "one decibel of material."
+    ],
+    [
+      "2.5 dB of material.",
+      "two point five decibels of material."
+    ],
+    [
+      "1 mpg of material.",
+      "one mile per gallon of material."
+    ],
+    [
+      "2.5 mpg of material.",
+      "two point five miles per gallon of material."
+    ],
+    [
+      "1 kph of material.",
+      "one kilometer per hour of material."
+    ],
+    [
+      "2.5 kph of material.",
+      "two point five kilometers per hour of material."
+    ],
+    [
+      "1 tsp of material.",
+      "one teaspoon of material."
+    ],
+    [
+      "2.5 tsp of material.",
+      "two point five teaspoons of material."
+    ],
+    [
+      "1 tbsp of material.",
+      "one tablespoon of material."
+    ],
+    [
+      "2.5 tbsp of material.",
+      "two point five tablespoons of material."
+    ],
+    [
+      "1 gal of material.",
+      "one gallon of material."
+    ],
+    [
+      "2.5 gal of material.",
+      "two point five gallons of material."
+    ],
+    [
+      "1 qt of material.",
+      "one quart of material."
+    ],
+    [
+      "2.5 qt of material.",
+      "two point five quarts of material."
+    ],
+    [
+      "1 mcg of material.",
+      "one microgram of material."
+    ],
+    [
+      "2.5 mcg of material.",
+      "two point five micrograms of material."
+    ],
+    [
+      "1 µg of material.",
+      "one microgram of material."
+    ],
+    [
+      "2.5 µg of material.",
+      "two point five micrograms of material."
+    ],
+    [
+      "1 μg of material.",
+      "one microgram of material."
+    ],
+    [
+      "2.5 μg of material.",
+      "two point five micrograms of material."
+    ],
+    [
+      "1 nm of material.",
+      "one nanometer of material."
+    ],
+    [
+      "2.5 nm of material.",
+      "two point five nanometers of material."
+    ],
+    [
+      "1 µm of material.",
+      "one micrometer of material."
+    ],
+    [
+      "2.5 µm of material.",
+      "two point five micrometers of material."
+    ],
+    [
+      "1 μm of material.",
+      "one micrometer of material."
+    ],
+    [
+      "2.5 μm of material.",
+      "two point five micrometers of material."
+    ],
+    [
+      "1 ns of material.",
+      "one nanosecond of material."
+    ],
+    [
+      "2.5 ns of material.",
+      "two point five nanoseconds of material."
+    ],
+    [
+      "1 µs of material.",
+      "one microsecond of material."
+    ],
+    [
+      "2.5 µs of material.",
+      "two point five microseconds of material."
+    ],
+    [
+      "1 μs of material.",
+      "one microsecond of material."
+    ],
+    [
+      "2.5 μs of material.",
+      "two point five microseconds of material."
+    ],
+    [
+      "1 sec of material.",
+      "one second of material."
+    ],
+    [
+      "2.5 sec of material.",
+      "two point five seconds of material."
+    ],
+    [
+      "1 secs of material.",
+      "one second of material."
+    ],
+    [
+      "2.5 secs of material.",
+      "two point five seconds of material."
+    ],
+    [
+      "1 Mbps of material.",
+      "one megabit per second of material."
+    ],
+    [
+      "2.5 Mbps of material.",
+      "two point five megabits per second of material."
+    ],
+    [
+      "1 Gbps of material.",
+      "one gigabit per second of material."
+    ],
+    [
+      "2.5 Gbps of material.",
+      "two point five gigabits per second of material."
+    ],
+    [
+      "1 kbps of material.",
+      "one kilobit per second of material."
+    ],
+    [
+      "2.5 kbps of material.",
+      "two point five kilobits per second of material."
+    ],
+    [
+      "1 kcal of material.",
+      "one kilocalorie of material."
+    ],
+    [
+      "2.5 kcal of material.",
+      "two point five kilocalories of material."
+    ],
+    [
+      "1 mmHg of material.",
+      "one millimeters of mercury of material."
+    ],
+    [
+      "2.5 mmHg of material.",
+      "two point five millimeters of mercury of material."
+    ],
+    [
+      "1 dL of material.",
+      "one deciliter of material."
+    ],
+    [
+      "2.5 dL of material.",
+      "two point five deciliters of material."
+    ],
+    [
+      "1 dl of material.",
+      "one deciliter of material."
+    ],
+    [
+      "2.5 dl of material.",
+      "two point five deciliters of material."
+    ],
+    [
+      "1 PB of material.",
+      "one petabyte of material."
+    ],
+    [
+      "2.5 PB of material.",
+      "two point five petabytes of material."
+    ],
+    [
+      "1 MW of material.",
+      "one megawatt of material."
+    ],
+    [
+      "2.5 MW of material.",
+      "two point five megawatts of material."
+    ],
+    [
+      "1 GW of material.",
+      "one gigawatt of material."
+    ],
+    [
+      "2.5 GW of material.",
+      "two point five gigawatts of material."
+    ],
+    [
+      "1 GWh of material.",
+      "one gigawatt hour of material."
+    ],
+    [
+      "2.5 GWh of material.",
+      "two point five gigawatt hours of material."
+    ],
+    [
+      "1 MWh of material.",
+      "one megawatt hour of material."
+    ],
+    [
+      "2.5 MWh of material.",
+      "two point five megawatt hours of material."
+    ],
+    [
+      "1 kPa of material.",
+      "one kilopascal of material."
+    ],
+    [
+      "2.5 kPa of material.",
+      "two point five kilopascals of material."
+    ],
+    [
+      "1 hPa of material.",
+      "one hectopascal of material."
+    ],
+    [
+      "2.5 hPa of material.",
+      "two point five hectopascals of material."
+    ],
+    [
+      "1 mmol of material.",
+      "one millimole of material."
+    ],
+    [
+      "2.5 mmol of material.",
+      "two point five millimoles of material."
+    ],
+    [
+      "1 fl oz of material.",
+      "one fluid ounce of material."
+    ],
+    [
+      "2.5 fl oz of material.",
+      "two point five fluid ounces of material."
+    ],
+    [
+      "1 sq ft of material.",
+      "one square foot of material."
+    ],
+    [
+      "2.5 sq ft of material.",
+      "two point five square feet of material."
+    ],
+    [
+      "1 sq m of material.",
+      "one square meter of material."
+    ],
+    [
+      "2.5 sq m of material.",
+      "two point five square meters of material."
+    ],
+    [
+      "1 km2 of material.",
+      "one square kilometer of material."
+    ],
+    [
+      "2.5 km2 of material.",
+      "two point five square kilometers of material."
+    ],
+    [
+      "1 m2 of material.",
+      "one square meter of material."
+    ],
+    [
+      "2.5 m2 of material.",
+      "two point five square meters of material."
+    ],
+    [
+      "1 cc of material.",
+      "one C C of material."
+    ],
+    [
+      "2.5 cc of material.",
+      "two point five C C of material."
+    ],
+    [
+      "1 mA of material.",
+      "one milliamp of material."
+    ],
+    [
+      "2.5 mA of material.",
+      "two point five milliamps of material."
+    ],
+    [
+      "1 ng of material.",
+      "one nanogram of material."
+    ],
+    [
+      "2.5 ng of material.",
+      "two point five nanograms of material."
+    ],
+    [
+      "1 pg of material.",
+      "one picogram of material."
+    ],
+    [
+      "2.5 pg of material.",
+      "two point five picograms of material."
+    ],
+    [
+      "1 IU of material.",
+      "one I U of material."
+    ],
+    [
+      "2.5 IU of material.",
+      "two point five I U of material."
+    ],
+    [
+      "1 mEq of material.",
+      "one milliequivalent of material."
+    ],
+    [
+      "2.5 mEq of material.",
+      "two point five milliequivalents of material."
+    ],
+    [
+      "1 kN of material.",
+      "one kilonewton of material."
+    ],
+    [
+      "2.5 kN of material.",
+      "two point five kilonewtons of material."
+    ],
+    [
+      "1 Nm of material.",
+      "one newton meter of material."
+    ],
+    [
+      "2.5 Nm of material.",
+      "two point five newton meters of material."
+    ],
+    [
+      "1 TFLOPS of material.",
+      "one teraflop of material."
+    ],
+    [
+      "2.5 TFLOPS of material.",
+      "two point five teraflops of material."
+    ],
+    [
+      "1 rpm of material.",
+      "one R P M of material."
+    ],
+    [
+      "2.5 rpm of material.",
+      "two point five R P M of material."
+    ],
+    [
+      "1 psi of material.",
+      "one P S I of material."
+    ],
+    [
+      "2.5 psi of material.",
+      "two point five P S I of material."
+    ],
+    [
+      "Paid USD1.25 and USD2m today.",
+      "Paid one dollar and twenty five cents and two million dollars today."
+    ],
+    [
+      "Paid US$1.25 and US$2m today.",
+      "Paid one dollar and twenty five cents and two million dollars today."
+    ],
+    [
+      "Paid EUR1.25 and EUR2m today.",
+      "Paid one euro and twenty five cents and two million euros today."
+    ],
+    [
+      "Paid GBP1.25 and GBP2m today.",
+      "Paid one pounds twenty five and two million pounds today."
+    ],
+    [
+      "Paid JPY1.25 and JPY2m today.",
+      "Paid one point two five yen and two million yen today."
+    ],
+    [
+      "Paid ¥1.25 and ¥2m today.",
+      "Paid one point two five yen and two million yen today."
+    ],
+    [
+      "Paid CNY1.25 and CNY2m today.",
+      "Paid one point two five yuan and two million yuan today."
+    ],
+    [
+      "Paid RMB1.25 and RMB2m today.",
+      "Paid one point two five yuan and two million yuan today."
+    ],
+    [
+      "Paid INR1.25 and INR2m today.",
+      "Paid one point two five rupees and two million rupees today."
+    ],
+    [
+      "Paid ₹1.25 and ₹2m today.",
+      "Paid one point two five rupees and two million rupees today."
+    ],
+    [
+      "Paid Rs.1.25 and Rs.2m today.",
+      "Paid one point two five rupees and two million rupees today."
+    ],
+    [
+      "Paid Rs1.25 and Rs2m today.",
+      "Paid one point two five rupees and two million rupees today."
+    ],
+    [
+      "Paid CAD1.25 and CAD2m today.",
+      "Paid one Canadian dollars and twenty five cents and two million Canadian dollars today."
+    ],
+    [
+      "Paid C$1.25 and C$2m today.",
+      "Paid one Canadian dollars and twenty five cents and two million Canadian dollars today."
+    ],
+    [
+      "Paid AUD1.25 and AUD2m today.",
+      "Paid one Australian dollars and twenty five cents and two million Australian dollars today."
+    ],
+    [
+      "Paid A$1.25 and A$2m today.",
+      "Paid one Australian dollars and twenty five cents and two million Australian dollars today."
+    ],
+    [
+      "Paid NZD1.25 and NZD2m today.",
+      "Paid one New Zealand dollars and twenty five cents and two million New Zealand dollars today."
+    ],
+    [
+      "Paid CHF1.25 and CHF2m today.",
+      "Paid one point two five Swiss francs and two million Swiss francs today."
+    ],
+    [
+      "Paid HKD1.25 and HKD2m today.",
+      "Paid one Hong Kong dollars and twenty five cents and two million Hong Kong dollars today."
+    ],
+    [
+      "Paid HK$1.25 and HK$2m today.",
+      "Paid one Hong Kong dollars and twenty five cents and two million Hong Kong dollars today."
+    ],
+    [
+      "Paid SGD1.25 and SGD2m today.",
+      "Paid one Singapore dollars and twenty five cents and two million Singapore dollars today."
+    ],
+    [
+      "Paid KRW1.25 and KRW2m today.",
+      "Paid one point two five won and two million won today."
+    ],
+    [
+      "Paid ₩1.25 and ₩2m today.",
+      "Paid one point two five won and two million won today."
+    ],
+    [
+      "Paid MXN1.25 and MXN2m today.",
+      "Paid one point two five pesos and two million pesos today."
+    ],
+    [
+      "Paid BRL1.25 and BRL2m today.",
+      "Paid one point two five reais and two million reais today."
+    ],
+    [
+      "Paid R$1.25 and R$2m today.",
+      "Paid one point two five reais and two million reais today."
+    ],
+    [
+      "Paid RUB1.25 and RUB2m today.",
+      "Paid one point two five rubles and two million rubles today."
+    ],
+    [
+      "Paid ₽1.25 and ₽2m today.",
+      "Paid one point two five rubles and two million rubles today."
+    ],
+    [
+      "Paid SEK1.25 and SEK2m today.",
+      "Paid one point two five Swedish kronor and two million Swedish kronor today."
+    ],
+    [
+      "Paid NOK1.25 and NOK2m today.",
+      "Paid one point two five Norwegian kroner and two million Norwegian kroner today."
+    ],
+    [
+      "Paid DKK1.25 and DKK2m today.",
+      "Paid one point two five Danish kroner and two million Danish kroner today."
+    ],
+    [
+      "Paid ZAR1.25 and ZAR2m today.",
+      "Paid one point two five rand and two million rand today."
+    ],
+    [
+      "Paid ₦1.25 and ₦2m today.",
+      "Paid one point two five naira and two million naira today."
+    ],
+    [
+      "Paid NGN1.25 and NGN2m today.",
+      "Paid one point two five naira and two million naira today."
+    ],
+    [
+      "Paid ₺1.25 and ₺2m today.",
+      "Paid one point two five lira and two million lira today."
+    ],
+    [
+      "Paid ₱1.25 and ₱2m today.",
+      "Paid one point two five pesos and two million pesos today."
+    ],
+    [
+      "Paid ₫1.25 and ₫2m today.",
+      "Paid one point two five dong and two million dong today."
+    ],
+    [
+      "Paid BTC1.25 and BTC2m today.",
+      "Paid one point two five bitcoin and two million bitcoin today."
+    ],
+    [
+      "Paid ETH1.25 and ETH2m today.",
+      "Paid one point two five ether and two million ether today."
+    ],
+    [
+      "Paid ₿1.25 and ₿2m today.",
+      "Paid one point two five bitcoin and two million bitcoin today."
+    ],
+    [
+      "It is Dr. Adams",
+      "It is Doctor Adams"
+    ],
+    [
+      "It is Mr. Jones",
+      "It is Mister Jones"
+    ],
+    [
+      "It is Mrs. Jones",
+      "It is Missus Jones"
+    ],
+    [
+      "It is Ms. Young",
+      "It is Miz Young"
+    ],
+    [
+      "It is Prof. Young",
+      "It is Professor Young"
+    ],
+    [
+      "It is St. John",
+      "It is Saint John"
+    ],
+    [
+      "It is little St.",
+      "It is little Street"
+    ],
+    [
+      "It is Rd.",
+      "It is Road"
+    ],
+    [
+      "It is Ave.",
+      "It is Avenue"
+    ],
+    [
+      "It is Blvd.",
+      "It is Boulevard"
+    ],
+    [
+      "It is Apt.",
+      "It is Apartment"
+    ],
+    [
+      "It is Approx. 5",
+      "It is approximately five"
+    ],
+    [
+      "It is etc.",
+      "It is et cetera"
+    ],
+    [
+      "It is e.g. 7",
+      "It is for example seven"
+    ],
+    [
+      "It is i.e. that",
+      "It is that is that"
+    ],
+    [
+      "It is vs. 5",
+      "It is versus five"
+    ],
+    [
+      "It is No. 7",
+      "It is number seven"
+    ],
+    [
+      "It is dept.",
+      "It is department"
+    ],
+    [
+      "It is ext.",
+      "It is extension"
+    ],
+    [
+      "It is 5min.",
+      "It is five minutes"
+    ],
+    [
+      "It is min. size",
+      "It is minimum size"
+    ],
+    [
+      "It is min.",
+      "It is minutes"
+    ],
+    [
+      "It is hr. long",
+      "It is hours long"
+    ],
+    [
+      "It is hrs. long",
+      "It is hours long"
+    ],
+    [
+      "It is Sec. 3",
+      "It is section three"
+    ],
+    [
+      "It is Est. 1999",
+      "It is Established nineteen ninety nine"
+    ],
+    [
+      "It is Sgt.",
+      "It is Sergeant"
+    ],
+    [
+      "It is Capt.",
+      "It is Captain"
+    ],
+    [
+      "It is Lt.",
+      "It is Lieutenant"
+    ],
+    [
+      "It is Col.",
+      "It is Colonel"
+    ],
+    [
+      "It is Gen. Young",
+      "It is General Young"
+    ],
+    [
+      "It is Gov.",
+      "It is Governor"
+    ],
+    [
+      "It is Sen.",
+      "It is Senator"
+    ],
+    [
+      "It is Rep. Young",
+      "It is Representative Young"
+    ],
+    [
+      "It is Rev.",
+      "It is Reverend"
+    ],
+    [
+      "It is Hon.",
+      "It is Honorable"
+    ],
+    [
+      "It is Jr.",
+      "It is Junior"
+    ],
+    [
+      "It is Sr.",
+      "It is Senior"
+    ],
+    [
+      "It is Ln.",
+      "It is Lane"
+    ],
+    [
+      "It is Dr.",
+      "It is Drive"
+    ],
+    [
+      "It is Ct.",
+      "It is Court"
+    ],
+    [
+      "It is Pl.",
+      "It is Place"
+    ],
+    [
+      "It is Sq.",
+      "It is Square"
+    ],
+    [
+      "It is Hwy.",
+      "It is Highway"
+    ],
+    [
+      "It is Pkwy.",
+      "It is Parkway"
+    ],
+    [
+      "It is Mt.",
+      "It is Mount"
+    ],
+    [
+      "It is Ft. Young",
+      "It is Fort Young"
+    ],
+    [
+      "It is Ste.",
+      "It is Suite"
+    ],
+    [
+      "It is Bldg.",
+      "It is Building"
+    ],
+    [
+      "It is fl.",
+      "It is floor"
+    ],
+    [
+      "It is Fl.",
+      "It is Floor"
+    ],
+    [
+      "It is Rm.",
+      "It is Room"
+    ],
+    [
+      "It is Est.",
+      "It is Estimated"
+    ],
+    [
+      "It is est.",
+      "It is estimated"
+    ],
+    [
+      "It is Inc.",
+      "It is Incorporated"
+    ],
+    [
+      "It is Ltd.",
+      "It is Limited"
+    ],
+    [
+      "It is Co. Ltd.",
+      "It is Company Limited"
+    ],
+    [
+      "It is Corp.",
+      "It is Corporation"
+    ],
+    [
+      "It is Dept.",
+      "It is Department"
+    ],
+    [
+      "It is Assn.",
+      "It is Association"
+    ],
+    [
+      "It is Univ.",
+      "It is University"
+    ],
+    [
+      "It is qty",
+      "It is quantity"
+    ],
+    [
+      "It is ref.",
+      "It is reference"
+    ],
+    [
+      "It is tel.",
+      "It is telephone"
+    ],
+    [
+      "It is Tel.",
+      "It is Telephone"
+    ],
+    [
+      "It is fig.",
+      "It is figure"
+    ],
+    [
+      "It is vol.",
+      "It is volume"
+    ],
+    [
+      "It is pp.",
+      "It is pages"
+    ],
+    [
+      "It is p. 4",
+      "It is page four"
+    ],
+    [
+      "It is wk.",
+      "It is week"
+    ],
+    [
+      "It is mo.",
+      "It is month"
+    ],
+    [
+      "It is yr.",
+      "It is year"
+    ],
+    [
+      "It is avg.",
+      "It is average"
+    ],
+    [
+      "It is max.",
+      "It is maximum"
+    ],
+    [
+      "Henry I",
+      "Henry the first"
+    ],
+    [
+      "Henry II",
+      "Henry the second"
+    ],
+    [
+      "Henry V",
+      "Henry the fifth"
+    ],
+    [
+      "Henry X",
+      "Henry the tenth"
+    ],
+    [
+      "Henry XIV",
+      "Henry the fourteenth"
+    ],
+    [
+      "Henry L",
+      "Henry the fiftieth"
+    ],
+    [
+      "Henry C",
+      "Henry C"
+    ],
+    [
+      "Henry MCMXCIX",
+      "Henry MCMXCIX"
+    ],
+    [
+      "John Smith I",
+      "John Smith I"
+    ],
+    [
+      "John Smith II",
+      "John Smith the second"
+    ],
+    [
+      "John Smith V",
+      "John Smith V"
+    ],
+    [
+      "John Smith X",
+      "John Smith X"
+    ],
+    [
+      "John Smith XIV",
+      "John Smith the fourteenth"
+    ],
+    [
+      "John Smith L",
+      "John Smith L"
+    ],
+    [
+      "John Smith C",
+      "John Smith C"
+    ],
+    [
+      "John Smith MCMXCIX",
+      "John Smith MCMXCIX"
+    ],
+    [
+      "Frozen I",
+      "Frozen I"
+    ],
+    [
+      "Frozen II",
+      "Frozen two"
+    ],
+    [
+      "Frozen V",
+      "Frozen V"
+    ],
+    [
+      "Frozen X",
+      "Frozen X"
+    ],
+    [
+      "Frozen XIV",
+      "Frozen fourteen"
+    ],
+    [
+      "Frozen L",
+      "Frozen L"
+    ],
+    [
+      "Frozen C",
+      "Frozen C"
+    ],
+    [
+      "Frozen MCMXCIX",
+      "Frozen MCMXCIX"
+    ],
+    [
+      "Type I",
+      "Type one"
+    ],
+    [
+      "Type II",
+      "Type two"
+    ],
+    [
+      "Type V",
+      "Type V"
+    ],
+    [
+      "Type X",
+      "Type X"
+    ],
+    [
+      "Type XIV",
+      "Type fourteen"
+    ],
+    [
+      "Type L",
+      "Type L"
+    ],
+    [
+      "Type C",
+      "Type C"
+    ],
+    [
+      "Type MCMXCIX",
+      "Type one thousand nine hundred and ninety nine"
+    ],
+    [
+      "appendix I",
+      "appendix I"
+    ],
+    [
+      "appendix II",
+      "appendix two"
+    ],
+    [
+      "appendix V",
+      "appendix V"
+    ],
+    [
+      "appendix X",
+      "appendix X"
+    ],
+    [
+      "appendix XIV",
+      "appendix fourteen"
+    ],
+    [
+      "appendix L",
+      "appendix L"
+    ],
+    [
+      "appendix C",
+      "appendix C"
+    ],
+    [
+      "appendix MCMXCIX",
+      "appendix one thousand nine hundred and ninety nine"
+    ],
+    [
+      "chapter I",
+      "chapter I"
+    ],
+    [
+      "chapter II",
+      "chapter two"
+    ],
+    [
+      "chapter V",
+      "chapter five"
+    ],
+    [
+      "chapter X",
+      "chapter ten"
+    ],
+    [
+      "chapter XIV",
+      "chapter fourteen"
+    ],
+    [
+      "chapter L",
+      "chapter L"
+    ],
+    [
+      "chapter C",
+      "chapter C"
+    ],
+    [
+      "chapter MCMXCIX",
+      "chapter one thousand nine hundred and ninety nine"
+    ],
+    [
+      "Chapter I",
+      "Chapter one"
+    ],
+    [
+      "Chapter II",
+      "Chapter two"
+    ],
+    [
+      "Chapter V",
+      "Chapter five"
+    ],
+    [
+      "Chapter X",
+      "Chapter ten"
+    ],
+    [
+      "Chapter XIV",
+      "Chapter fourteen"
+    ],
+    [
+      "Chapter L",
+      "Chapter L"
+    ],
+    [
+      "Chapter C",
+      "Chapter C"
+    ],
+    [
+      "Chapter MCMXCIX",
+      "Chapter one thousand nine hundred and ninety nine"
+    ],
+    [
+      "King Carl I",
+      "King Carl I"
+    ],
+    [
+      "King Carl II",
+      "King Carl the second"
+    ],
+    [
+      "King Carl V",
+      "King Carl the fifth"
+    ],
+    [
+      "King Carl X",
+      "King Carl the tenth"
+    ],
+    [
+      "King Carl XIV",
+      "King Carl the fourteenth"
+    ],
+    [
+      "King Carl L",
+      "King Carl the fiftieth"
+    ],
+    [
+      "King Carl C",
+      "King Carl C"
+    ],
+    [
+      "King Carl MCMXCIX",
+      "King Carl MCMXCIX"
+    ],
+    [
+      "Rocky I",
+      "Rocky one"
+    ],
+    [
+      "Rocky II",
+      "Rocky two"
+    ],
+    [
+      "Rocky V",
+      "Rocky five"
+    ],
+    [
+      "Rocky X",
+      "Rocky ten"
+    ],
+    [
+      "Rocky XIV",
+      "Rocky fourteen"
+    ],
+    [
+      "Rocky L",
+      "Rocky L"
+    ],
+    [
+      "Rocky C",
+      "Rocky C"
+    ],
+    [
+      "Rocky MCMXCIX",
+      "Rocky one thousand nine hundred and ninety nine"
+    ],
+    [
+      "Volume I",
+      "Volume one"
+    ],
+    [
+      "Volume II",
+      "Volume two"
+    ],
+    [
+      "Volume V",
+      "Volume five"
+    ],
+    [
+      "Volume X",
+      "Volume ten"
+    ],
+    [
+      "Volume XIV",
+      "Volume fourteen"
+    ],
+    [
+      "Volume L",
+      "Volume L"
+    ],
+    [
+      "Volume C",
+      "Volume C"
+    ],
+    [
+      "Volume MCMXCIX",
+      "Volume one thousand nine hundred and ninety nine"
+    ],
+    [
+      "ΟΣ ος οσ",
+      "Greek greek οσ"
+    ],
+    [
+      "Saoirse–Ronan",
+      "Seersha rohnan"
+    ],
+    [
+      "Saoirse-Ronan",
+      "Seersha rohnan"
+    ],
+    [
+      "Saoirse  Ronan",
+      "Seersha rohnan"
+    ],
+    [
+      "saoirse ronan",
+      "seersha rohnan"
+    ],
+    [
+      "eoin’S",
+      "Owen'S"
+    ],
+    [
+      "Eoin’s",
+      "Owen's"
+    ],
+    [
+      "new York New York NEW YORK",
+      "new York Noo york Noo york"
+    ],
+    [
+      "Worcestershire-glazed",
+      "Woostersher-glazed"
+    ],
+    [
+      "worcestershire-glazed",
+      "worcestershire-glazed"
+    ],
+    [
+      "pre-Worcestershire",
+      "pre-Woostersher"
+    ],
+    [
+      "Pre-Worcestershire",
+      "Pre-Worcestershire"
+    ],
+    [
+      "Worcestershire-Sauce",
+      "Worcestershire-Sauce"
+    ],
+    [
+      "CRÈME BRÛLÉE",
+      "Krem broolay"
+    ],
+    [
+      "crème brûlée",
+      "crème brûlée"
+    ],
+    [
+      "ÁPI12",
+      "ÁP I twelve"
+    ],
+    [
+      "ÁPI 12",
+      "ÁPI twelve"
+    ],
+    [
+      "word\u001c123",
+      "word\u001cone hundred and twenty three"
+    ],
+    [
+      "١٢٣٤٥",
+      "one two three four five"
+    ],
+    [
+      "١٢٣",
+      "١٢٣"
+    ],
+    [
+      "١ kg",
+      "١ kilograms"
+    ],
+    [
+      "１２３４５",
+      "one two three four five"
+    ],
+    [
+      "१२३४५",
+      "one two three four five"
+    ],
+    [
+      "−12",
+      "minus twelve"
+    ],
+    [
+      "0.1",
+      "zero point one"
+    ],
+    [
+      ".5",
+      ".five"
+    ],
+    [
+      "$123456789012345678901234567890.01",
+      "one hundred and twenty three thousand four hundred and fifty six trillion seven hundred and eighty nine billion twelve million three hundred and forty five thousand six hundred and seventy eight trillion nine hundred and one billion two hundred and thirty four million five hundred and sixty seven thousand eight hundred and ninety dollars and one cent"
+    ],
+    [
+      "x^123456789012345678901234567890",
+      "x to the one hundred and twenty three thousand four hundred and fifty six trillion seven hundred and eighty nine billion twelve million three hundred and forty five thousand six hundred and seventy eight trillion nine hundred and one billion two hundred and thirty four million five hundred and sixty seven thousand eight hundred and ninetieth"
+    ],
+    [
+      "The year 0999 and 2000.",
+      "The year nine hundred and ninety nine and two thousand."
+    ],
+    [
+      "At 0:03, 1:01, 12:00 PM and 99:99.",
+      "At zero oh three, one oh one, twelve PM and ninety nine ninety nine."
+    ],
+    [
+      "It is 2h 01m and 1h 1m.",
+      "It is two hours one minutes and one hour one minute."
+    ],
+    [
+      "1234 Long Street. Next turn.",
+      "twelve thirty four Long Street. Next turn."
+    ]
+  ],
+  "splitting": [
+    [
+      "",
+      []
+    ],
+    [
+      "Hello. World! Why? Yes… Done.",
+      [
+        "Hello.",
+        "World!",
+        "Why?",
+        "Yes…",
+        "Done."
+      ]
+    ],
+    [
+      "One—two--three, four; five: six.",
+      [
+        "One—two--three, four; five: six."
+      ]
+    ],
+    [
+      "A sentence without clause punctuation A sentence without clause punctuation A sentence without clause punctuation A sentence without clause punctuation A sentence without clause punctuation",
+      [
+        "A sentence without clause punctuation A sentence without clause punctuation A sentence without clause punctuation A sentence without clause punctuation A sentence without clause punctuation"
+      ]
+    ],
+    [
+      "The long sentence keeps going and introduces another point The long sentence keeps going and introduces another point The long sentence keeps going and introduces another point The long sentence keeps going and introduces another point The long sentence keeps going and introduces another point",
+      [
+        "The long sentence keeps going and introduces another point The long sentence keeps going",
+        "and introduces another point The long sentence keeps going",
+        "and introduces another point The long sentence keeps going",
+        "and introduces another point The long sentence keeps going and introduces another point"
+      ]
+    ],
+    [
+      "ααααααααααααααααααααααααααααααααααααααααααααααααααααααααααααααααα, βββββββββββββββββββββββββββββββββββββββββββββββββββββββββββββββββ",
+      [
+        "ααααααααααααααααααααααααααααααααααααααααααααααααααααααααααααααααα,",
+        "βββββββββββββββββββββββββββββββββββββββββββββββββββββββββββββββββ"
+      ]
+    ],
+    [
+      "word word word word word word word word word word word word word word word word word word word word —next next next next next next next next next next next next next next next next next next next next ; last last last last last last last last last last last last last last last last last last last last ",
+      [
+        "word word word word word word word word word word word word word word word word word word word word —",
+        "next next next next next next next next next next next next next next next next next next next next ;",
+        "last last last last last last last last last last last last last last last last last last last last"
+      ]
+    ],
+    [
+      "AND but and and but but semi; where where αβγδ that semi; semi; because where ordinary longer semi; because AND ordinary but comma, ordinary colon: ordinary that text and but AND colon: semi; colon: andé andé but longer and",
+      [
+        "AND but and and but but semi; where where αβγδ that semi; semi; because where ordinary longer semi;",
+        "because AND ordinary but comma, ordinary colon: ordinary that text and but AND colon: semi; colon:",
+        "andé andé but longer and"
+      ]
+    ],
+    [
+      "and but but andé where and because αβγδ comma, where colon: — αβγδ andé until but longer and — and semi; because wholeword colon: — where ordinary and AND but colon: andé and αβγδ αβγδ ordinary — wholeword longer until because colon: andé αβγδ comma, until αβγδ and because text but that because longer AND longer wholeword AND comma, and until comma, that where text comma, but wholeword text colon: and colon: ordinary until -- but where ordinary because semi; where but andé wholeword longer where text -- wholeword andé wholeword comma, because comma, until until longer until until",
+      [
+        "and but but andé where and because αβγδ comma, where colon: —αβγδ andé until but longer and —and semi;",
+        "because wholeword colon: —where ordinary and AND but colon: andé and αβγδ αβγδ ordinary —",
+        "wholeword longer until because colon: andé αβγδ comma,",
+        "until αβγδ and because text but that because longer AND longer wholeword AND comma, and until comma,",
+        "that where text comma, but wholeword text colon: and colon: ordinary until --but where ordinary because semi;",
+        "where but andé wholeword longer where text --wholeword andé wholeword comma, because comma,",
+        "until until longer until until"
+      ]
+    ],
+    [
+      "andé andé -- until — semi; and because AND ordinary — — text and wholeword text αβγδ ordinary where wholeword colon: — until but longer andé longer",
+      [
+        "andé andé --until —semi; and because AND ordinary ——text and wholeword text αβγδ ordinary where wholeword colon: —",
+        "until but longer andé longer"
+      ]
+    ],
+    [
+      "— longer but that colon: αβγδ but AND text semi; that where and until until AND — αβγδ text -- that αβγδ colon: but where until ordinary longer -- andé that but but but longer -- and — -- — colon: until -- — text ordinary semi; longer longer comma, text where andé -- longer wholeword",
+      [
+        "—longer but that colon: αβγδ but AND text semi; that where and until until AND —αβγδ text --that αβγδ colon:",
+        "but where until ordinary longer --andé that but but but longer --and —--—colon: until --—text ordinary semi;",
+        "longer longer comma, text where andé --longer wholeword"
+      ]
+    ],
+    [
+      "text that αβγδ ordinary — andé because and where -- AND where comma, — ordinary -- but longer ordinary andé -- text that — — longer comma, andé longer — until -- but and until and colon: but αβγδ colon: ordinary ordinary wholeword where αβγδ and colon: longer but semi; and and colon: and longer but andé longer semi; where colon: colon: where ordinary ordinary comma, that longer AND but ordinary semi; longer wholeword longer colon: longer wholeword semi; and ordinary andé semi; αβγδ until longer",
+      [
+        "text that αβγδ ordinary —andé because and where --AND where comma, —ordinary --but longer ordinary andé --text that ——",
+        "longer comma, andé longer —until --but and until and colon: but αβγδ colon:",
+        "ordinary ordinary wholeword where αβγδ and colon: longer but semi; and and colon: and longer but andé longer semi;",
+        "where colon: colon: where ordinary ordinary comma, that longer AND but ordinary semi; longer wholeword longer colon:",
+        "longer wholeword semi; and ordinary andé semi; αβγδ until longer"
+      ]
+    ],
+    [
+      "but because comma, that andé where αβγδ semi; that where αβγδ but text where αβγδ -- longer text but AND andé until where longer",
+      [
+        "but because comma, that andé where αβγδ semi; that where αβγδ but text where αβγδ --",
+        "longer text but AND andé until where longer"
+      ]
+    ],
+    [
+      "longer andé colon: text wholeword longer where -- and until -- AND and but αβγδ because where -- but but text text colon: AND and andé semi; ordinary AND longer comma, ordinary -- colon: — colon: wholeword longer semi; colon: semi; andé longer where and but colon: semi; αβγδ semi; colon: — where where semi; until αβγδ -- until and semi; αβγδ semi; αβγδ until but until because that — but AND semi; -- αβγδ until but wholeword",
+      [
+        "longer andé colon: text wholeword longer where --and until --AND and but αβγδ because where --but but text text colon:",
+        "AND and andé semi; ordinary AND longer comma, ordinary --colon: —colon: wholeword longer semi; colon: semi;",
+        "andé longer where and but colon: semi; αβγδ semi; colon: —where where semi; until αβγδ --until and semi; αβγδ semi;",
+        "αβγδ until but until because that —but AND semi; --αβγδ until but wholeword"
+      ]
+    ],
+    [
+      "where colon: AND colon: colon: andé colon: comma, -- andé colon: that until text αβγδ colon: and that semi; text -- until -- that ordinary but semi; that AND but until AND",
+      [
+        "where colon: AND colon: colon: andé colon: comma, --andé colon: that until text αβγδ colon: and that semi; text --",
+        "until --that ordinary but semi; that AND but until AND"
+      ]
+    ],
+    [
+      "-- wholeword that and because αβγδ and and because where longer AND semi; AND AND longer semi; that and where colon: -- text ordinary where AND AND ordinary where semi; that comma, colon: that until text AND but ordinary but that because semi; until AND and -- colon: colon: until comma, and colon: αβγδ because wholeword but wholeword wholeword andé that — — colon: semi; AND where ordinary colon: αβγδ -- text andé text — longer but colon: until comma, semi; ordinary",
+      [
+        "--wholeword that and because αβγδ and and because where longer AND semi; AND AND longer semi; that and where colon: --",
+        "text ordinary where AND AND ordinary where semi; that comma, colon:",
+        "that until text AND but ordinary but that because semi; until AND and --colon: colon: until comma, and colon:",
+        "αβγδ because wholeword but wholeword wholeword andé that ——colon: semi; AND where ordinary colon: αβγδ --",
+        "text andé text —longer but colon: until comma, semi; ordinary"
+      ]
+    ],
+    [
+      "AND semi; and but semi; αβγδ semi; that that where because comma, andé but αβγδ wholeword semi; αβγδ AND comma, colon: AND αβγδ wholeword αβγδ text that text semi; comma, semi; text ordinary but where that until semi; text colon: comma, ordinary and andé text because until because andé colon: comma, but colon: andé colon: comma, -- comma, text wholeword wholeword comma, AND where",
+      [
+        "AND semi; and but semi; αβγδ semi; that that where because comma, andé but αβγδ wholeword semi; αβγδ AND comma, colon:",
+        "AND αβγδ wholeword αβγδ text that text semi; comma, semi; text ordinary but where that until semi; text colon: comma,",
+        "ordinary and andé text because until because andé colon: comma, but colon: andé colon: comma, --comma,",
+        "text wholeword wholeword comma, AND where"
+      ]
+    ],
+    [
+      "longer wholeword because -- because -- but comma, because -- text colon: that andé where AND text but until comma,",
+      [
+        "longer wholeword because -- because -- but comma, because -- text colon: that andé where AND text but until comma,"
+      ]
+    ],
+    [
+      "andé colon: because andé longer comma, text αβγδ text comma, and ordinary text αβγδ and — AND wholeword where longer that wholeword but — αβγδ but until and αβγδ until AND but where andé αβγδ AND text ordinary AND αβγδ wholeword ordinary because text that andé comma, comma, AND semi; ordinary ordinary that where where -- and because αβγδ until because that until αβγδ colon: semi; -- but and colon: but AND semi; ordinary andé because — text because AND but andé that longer αβγδ that but but that where that because text semi; colon: where — that",
+      [
+        "andé colon: because andé longer comma, text αβγδ text comma, and ordinary text αβγδ and —",
+        "AND wholeword where longer that wholeword but —",
+        "αβγδ but until and αβγδ until AND but",
+        "where andé αβγδ AND text ordinary AND αβγδ wholeword ordinary because text that andé comma,",
+        "comma, AND semi; ordinary ordinary that where where --and because αβγδ until because that until αβγδ colon: semi; --",
+        "but and colon: but AND semi; ordinary andé because —",
+        "text because AND but andé that longer αβγδ that but but that where that because text semi; colon: where —that"
+      ]
+    ],
+    [
+      "but where — wholeword that andé because comma, that ordinary AND ordinary -- colon: wholeword wholeword colon: semi; comma, because that ordinary that but and colon: but text text colon: longer αβγδ AND comma,",
+      [
+        "but where —wholeword that andé because comma, that ordinary AND ordinary --colon: wholeword wholeword colon: semi;",
+        "comma, because that ordinary that but and colon: but text text colon: longer αβγδ AND comma,"
+      ]
+    ],
+    [
+      "-- semi; that αβγδ andé because -- and wholeword and andé semi; colon: -- but semi; ordinary where where comma, andé wholeword AND ordinary — because andé longer where that comma, αβγδ semi; text ordinary colon: and and comma, -- but αβγδ comma, comma, but ordinary that semi; -- comma, that that and wholeword — until -- αβγδ longer wholeword ordinary -- but until but comma, — comma, that comma, —",
+      [
+        "--semi; that αβγδ andé because --and wholeword and andé semi; colon: --but semi; ordinary where where comma,",
+        "andé wholeword AND ordinary —because andé longer where that comma, αβγδ semi; text ordinary colon: and and comma, --",
+        "but αβγδ comma, comma, but ordinary that semi; --comma, that that and wholeword —until --",
+        "αβγδ longer wholeword ordinary --but until but comma, —comma, that comma, —"
+      ]
+    ],
+    [
+      "longer semi; until longer but colon: because and but that wholeword andé where longer wholeword comma, semi; and semi; and ordinary that longer ordinary AND and semi; comma, wholeword semi; colon: but andé longer wholeword ordinary but where because and wholeword longer text AND that semi; because longer because wholeword where — wholeword αβγδ -- because αβγδ comma, wholeword but",
+      [
+        "longer semi; until longer but colon: because and but that wholeword andé where longer wholeword comma, semi; and semi;",
+        "and ordinary that longer ordinary AND and semi; comma, wholeword semi; colon:",
+        "but andé longer wholeword ordinary but where because and wholeword longer text AND that semi;",
+        "because longer because wholeword where —wholeword αβγδ --because αβγδ comma, wholeword but"
+      ]
+    ],
+    [
+      "longer comma, where longer but longer andé andé -- wholeword until and that semi; — colon: αβγδ because and ordinary",
+      [
+        "longer comma, where longer but longer andé andé -- wholeword until and that semi; — colon: αβγδ because and ordinary"
+      ]
+    ],
+    [
+      "but andé AND colon: text and because that that but andé text αβγδ andé but colon: ordinary andé longer wholeword αβγδ that but because text ordinary comma,",
+      [
+        "but andé AND colon: text and because that that but andé text αβγδ andé but colon:",
+        "ordinary andé longer wholeword αβγδ that but because text ordinary comma,"
+      ]
+    ],
+    [
+      "wholeword text — because that AND text and ordinary αβγδ text ordinary longer until colon: that semi; where semi; -- longer but comma, where until semi; αβγδ where — colon: AND wholeword longer comma, -- because where — and andé wholeword comma, that colon: AND and where AND wholeword text ordinary until but because longer that wholeword where — until — because ordinary — until",
+      [
+        "wholeword text —because that AND text and ordinary αβγδ text ordinary longer until colon: that semi; where semi; --",
+        "longer but comma, where until semi; αβγδ where —colon: AND wholeword longer comma, --because where —",
+        "and andé wholeword comma, that colon:",
+        "AND and where AND wholeword text ordinary until but because longer that wholeword where —until —because ordinary —until"
+      ]
+    ],
+    [
+      "AND where andé longer αβγδ where αβγδ colon: ordinary that and colon: ordinary AND comma, but colon: that and andé and — ordinary but until colon: -- comma, colon: until where ordinary until where αβγδ αβγδ but text because because and",
+      [
+        "AND where andé longer αβγδ where αβγδ colon: ordinary that and colon: ordinary AND comma, but colon: that and andé and —",
+        "ordinary but until colon: --comma, colon: until where ordinary until where αβγδ αβγδ but text because because and"
+      ]
+    ],
+    [
+      "andé and until that and longer longer — because because -- semi; where because semi; text ordinary -- wholeword wholeword because -- text until AND and AND text αβγδ and text that comma,",
+      [
+        "andé and until that and longer longer —because because --semi; where because semi; text ordinary --",
+        "wholeword wholeword because --text until AND and AND text αβγδ and text that comma,"
+      ]
+    ],
+    [
+      "— semi; that text where semi; αβγδ AND wholeword longer colon: because but wholeword because because comma, where ordinary where where -- semi; ordinary comma, longer longer where wholeword text text until — ordinary until αβγδ colon: andé colon: — because andé but ordinary -- but longer -- αβγδ ordinary and comma, because longer text andé αβγδ semi; comma, but αβγδ colon: that longer and where text where — text until colon: andé colon: semi; andé andé comma, that because αβγδ — — comma, andé comma, andé ordinary αβγδ longer colon: longer andé but -- wholeword colon:",
+      [
+        "—semi; that text where semi; αβγδ AND wholeword longer colon: because but wholeword because because comma,",
+        "where ordinary where where --semi; ordinary comma, longer longer where wholeword text text until —",
+        "ordinary until αβγδ colon: andé colon: —because andé but ordinary --but longer --αβγδ ordinary and comma,",
+        "because longer text andé αβγδ semi; comma, but αβγδ colon: that longer and where text where —text until colon:",
+        "andé colon: semi; andé andé comma, that because αβγδ ——comma, andé comma, andé ordinary αβγδ longer colon:",
+        "longer andé but --wholeword colon:"
+      ]
+    ],
+    [
+      "semi; wholeword and longer text AND text that but ordinary and αβγδ where αβγδ that text ordinary -- semi; but ordinary and — because AND comma, — comma, comma, because -- comma, but semi; comma, — that but -- ordinary αβγδ that αβγδ αβγδ until colon: andé because — until -- where and AND andé -- αβγδ until ordinary longer colon: colon: semi; where colon: until because AND αβγδ wholeword -- ordinary andé longer AND comma, ordinary",
+      [
+        "semi; wholeword and longer text AND text that but ordinary and αβγδ where αβγδ that text ordinary --semi;",
+        "but ordinary and —because AND comma, —comma, comma, because --comma, but semi; comma, —that but --",
+        "ordinary αβγδ that αβγδ αβγδ until colon: andé because —until --where and AND andé --αβγδ until ordinary longer colon:",
+        "colon: semi; where colon: until because AND αβγδ wholeword --ordinary andé longer AND comma, ordinary"
+      ]
+    ],
+    [
+      "but — longer and until AND colon: wholeword -- longer because -- longer αβγδ that text -- and ordinary comma, and but that until where wholeword longer comma, because -- wholeword colon: text -- longer but text αβγδ ordinary because where wholeword that longer text that colon: and until because andé αβγδ ordinary because comma, until semi; and ordinary comma, ordinary ordinary αβγδ -- — -- where comma, αβγδ that text AND ordinary colon: until that comma, AND semi; text until αβγδ but wholeword because where",
+      [
+        "but —longer and until AND colon: wholeword --longer because --longer αβγδ that text --and ordinary comma,",
+        "and but that until where wholeword longer comma, because --wholeword colon: text --",
+        "longer but text αβγδ ordinary because where wholeword that longer text that colon:",
+        "and until because andé αβγδ ordinary because comma, until semi; and ordinary comma, ordinary ordinary αβγδ --—--",
+        "where comma, αβγδ that text AND ordinary colon: until that comma, AND semi; text until αβγδ but wholeword because where"
+      ]
+    ],
+    [
+      "andé because ordinary because where but comma, comma, and and AND and andé and αβγδ where comma, but wholeword and colon: andé that colon: comma, but andé until comma, AND αβγδ semi; -- colon: semi; AND because but -- wholeword text αβγδ text colon: wholeword that wholeword comma, --",
+      [
+        "andé because ordinary because where but comma, comma, and and AND and andé and αβγδ where comma,",
+        "but wholeword and colon: andé that colon: comma, but andé until comma, AND αβγδ semi; --colon: semi; AND because but --",
+        "wholeword text αβγδ text colon: wholeword that wholeword comma, --"
+      ]
+    ],
+    [
+      "that and semi; — until that where longer wholeword where and ordinary until — text and colon: until but andé that -- αβγδ -- until longer because text wholeword — wholeword text AND ordinary text wholeword — semi; andé wholeword colon: -- longer where because and and -- andé semi; -- — — wholeword that ordinary that comma, αβγδ colon: until and colon: semi; because that semi; αβγδ wholeword wholeword where text",
+      [
+        "that and semi; —until that where longer wholeword where and ordinary until —text and colon: until but andé that --",
+        "αβγδ --until longer because text wholeword —wholeword text AND ordinary text wholeword —semi; andé wholeword colon: --",
+        "longer where because and and --andé semi; --——wholeword that ordinary that comma, αβγδ colon: until and colon: semi;",
+        "because that semi; αβγδ wholeword wholeword where text"
+      ]
+    ],
+    [
+      "ordinary wholeword comma, longer where αβγδ semi; because semi; colon: longer andé AND where andé wholeword — and wholeword but that longer colon: AND wholeword because wholeword AND longer longer αβγδ that but and because longer and comma, — text",
+      [
+        "ordinary wholeword comma, longer where αβγδ semi; because semi; colon: longer andé AND where andé wholeword —",
+        "and wholeword but that longer colon:",
+        "AND wholeword because wholeword AND longer longer αβγδ that but and because longer and comma, —text"
+      ]
+    ],
+    [
+      "comma, αβγδ and αβγδ longer andé AND where colon: comma, — and ordinary semi; until wholeword and αβγδ andé where longer text αβγδ semi; ordinary semi; until and comma, — longer comma, AND because — αβγδ wholeword wholeword and ordinary that -- ordinary AND andé -- but where comma, wholeword semi; semi; — AND — αβγδ comma, until colon: text αβγδ semi; wholeword where where but where because because comma,",
+      [
+        "comma, αβγδ and αβγδ longer andé AND where colon: comma, —and ordinary semi;",
+        "until wholeword and αβγδ andé where longer text αβγδ semi; ordinary semi; until and comma, —longer comma, AND because —",
+        "αβγδ wholeword wholeword and ordinary that --ordinary AND andé --but where comma, wholeword semi; semi; —AND —",
+        "αβγδ comma, until colon: text αβγδ semi; wholeword where where but where because because comma,"
+      ]
+    ],
+    [
+      "and αβγδ αβγδ ordinary — -- longer ordinary and because longer longer comma, AND AND colon: where that but -- longer colon: text because longer that but αβγδ but αβγδ longer andé longer until text αβγδ αβγδ because -- αβγδ colon: text wholeword until αβγδ until ordinary but comma, colon: but — AND -- -- ordinary — longer -- because but until and longer",
+      [
+        "and αβγδ αβγδ ordinary —--longer ordinary and because longer longer comma, AND AND colon: where that but --",
+        "longer colon: text because longer that but αβγδ but αβγδ longer andé longer until text αβγδ αβγδ because --αβγδ colon:",
+        "text wholeword until αβγδ until ordinary but comma, colon: but —AND ----ordinary —longer --because but until and longer"
+      ]
+    ],
+    [
+      "text and AND AND longer and that that that but because that AND αβγδ ordinary longer and wholeword — semi; because until AND colon: ordinary and and where semi; -- -- but because andé longer -- where colon: where wholeword and semi;",
+      [
+        "text and AND AND longer and that that that but because that AND αβγδ ordinary longer and wholeword —semi;",
+        "because until AND colon: ordinary and and where semi; ----but because andé longer --where colon:",
+        "where wholeword and semi;"
+      ]
+    ],
+    [
+      "where colon: text wholeword andé colon: where AND comma, that — until but wholeword where text — comma, text longer text αβγδ AND but where where semi; wholeword and that because -- αβγδ longer longer ordinary where — because — -- wholeword that until where but — and semi; and ordinary longer that because until because until longer colon: and colon: comma, longer text until -- wholeword comma,",
+      [
+        "where colon: text wholeword andé colon: where AND comma, that —until but wholeword where text —comma,",
+        "text longer text αβγδ AND but where where semi; wholeword and that because --αβγδ longer longer ordinary where —",
+        "because —--wholeword that until where but —and semi; and ordinary longer that because until because until longer colon:",
+        "and colon: comma, longer text until --wholeword comma,"
+      ]
+    ],
+    [
+      "longer text because -- longer because because AND αβγδ -- AND but colon: semi; because -- wholeword text ordinary where until AND wholeword AND but αβγδ that wholeword where αβγδ andé where where text AND semi; semi; ordinary wholeword until that colon: because where andé semi; until because comma, longer and longer αβγδ AND andé -- where text AND comma, AND -- andé -- semi; wholeword -- until ordinary colon: — where text ordinary -- and that — text longer — because longer --",
+      [
+        "longer text because --longer because because AND αβγδ --AND but colon: semi; because --",
+        "wholeword text ordinary where until AND wholeword AND but αβγδ that wholeword where αβγδ andé where where text AND semi;",
+        "semi; ordinary wholeword until that colon: because where andé semi; until because comma,",
+        "longer and longer αβγδ AND andé --where text AND comma, AND --andé --semi; wholeword --until ordinary colon: —",
+        "where text ordinary --and that —text longer —because longer --"
+      ]
+    ],
+    [
+      "comma, andé semi; longer αβγδ comma, and αβγδ where and until -- colon: where andé — -- andé but until colon: — αβγδ longer andé αβγδ comma, where text colon: αβγδ and but AND colon: that longer AND wholeword and longer andé longer andé because semi; because -- ordinary colon: ordinary that where — but where — that and wholeword -- that comma, ordinary that but semi; because — that text and αβγδ and that -- ordinary wholeword andé semi; that ordinary comma, colon: where but until",
+      [
+        "comma, andé semi; longer αβγδ comma, and αβγδ where and until --colon: where andé —--andé but until colon: —",
+        "αβγδ longer andé αβγδ comma, where text colon: αβγδ and but AND colon:",
+        "that longer AND wholeword and longer andé longer andé because semi; because --ordinary colon: ordinary that where —",
+        "but where —that and wholeword --that comma, ordinary that but semi; because —that text and αβγδ and that --",
+        "ordinary wholeword andé semi; that ordinary comma, colon: where but until"
+      ]
+    ],
+    [
+      "and ordinary andé but and — ordinary where wholeword ordinary but αβγδ comma, αβγδ and text that where — colon: longer ordinary where ordinary where text andé — that semi; — that αβγδ comma, AND and that -- andé comma, because because colon: that and where AND and — AND text text but colon: longer — until semi; where — wholeword — wholeword comma, text where andé until — αβγδ until but colon: text AND longer comma, that wholeword comma, semi; andé that that and semi; AND wholeword comma, AND ordinary",
+      [
+        "and ordinary andé but and —ordinary where wholeword ordinary but αβγδ comma, αβγδ and text that where —colon:",
+        "longer ordinary where ordinary where text andé —that semi; —that αβγδ comma, AND and that --andé comma,",
+        "because because colon: that and where AND and —AND text text but colon: longer —until semi; where —wholeword —",
+        "wholeword comma, text where andé until —αβγδ until but colon: text AND longer comma, that wholeword comma, semi;",
+        "andé that that and semi; AND wholeword comma, AND ordinary"
+      ]
+    ],
+    [
+      "where αβγδ AND — andé wholeword — text comma, where until but because -- colon: andé until where semi; — because -- because colon: — but — — colon: colon: wholeword because andé",
+      [
+        "where αβγδ AND —andé wholeword —text comma, where until but because --colon: andé until where semi; —because --",
+        "because colon: —but ——colon: colon: wholeword because andé"
+      ]
+    ],
+    [
+      "until wholeword but where ordinary andé but αβγδ comma, until and wholeword colon: because and longer ordinary longer where — andé αβγδ but αβγδ -- where because longer that AND where andé ordinary that that where where because and until -- until andé because longer AND ordinary that — text longer longer longer comma, semi; but until where -- comma, wholeword colon: that until wholeword where AND because colon: colon: that until colon: until αβγδ andé where",
+      [
+        "until wholeword but where ordinary andé but αβγδ comma, until and wholeword colon:",
+        "because and longer ordinary longer where —andé αβγδ but αβγδ --",
+        "where because longer that AND where andé ordinary that that where where because and until --",
+        "until andé because longer AND ordinary that —text longer longer longer comma, semi; but until where --comma,",
+        "wholeword colon: that until wholeword where AND because colon: colon: that until colon: until αβγδ andé where"
+      ]
+    ],
+    [
+      "— wholeword but text AND wholeword wholeword — semi; but text AND ordinary that longer where andé αβγδ andé text comma, — where and where αβγδ ordinary colon: until colon: and — but because wholeword colon: αβγδ wholeword and colon: but — text — that colon: andé andé but colon: AND text and longer until wholeword that andé that because ordinary but andé AND AND comma, AND that andé semi; andé ordinary colon: AND",
+      [
+        "—wholeword but text AND wholeword wholeword —semi; but text AND ordinary that longer where andé αβγδ andé text comma, —",
+        "where and where αβγδ ordinary colon: until colon: and —but because wholeword colon: αβγδ wholeword and colon: but —",
+        "text —that colon: andé andé but colon:",
+        "AND text and longer until wholeword that andé that because ordinary but andé AND AND comma, AND that andé semi;",
+        "andé ordinary colon: AND"
+      ]
+    ],
+    [
+      "that but text wholeword — AND and text that wholeword wholeword colon: wholeword text AND αβγδ AND andé comma, ordinary where but until — until until comma, andé and that where αβγδ wholeword",
+      [
+        "that but text wholeword —AND and text that wholeword wholeword colon: wholeword text AND αβγδ AND andé comma,",
+        "ordinary where but until —until until comma, andé and that where αβγδ wholeword"
+      ]
+    ],
+    [
+      "text ordinary ordinary semi; -- AND andé text wholeword ordinary αβγδ until but αβγδ andé ordinary but AND where and until because comma, and comma, — and because αβγδ AND colon: that longer AND andé longer comma, ordinary text longer text longer until because text AND that αβγδ but -- colon: — and because wholeword text but because where AND but semi; where — — but where ordinary wholeword colon: text text ordinary colon: -- -- text but -- text comma, until ordinary and AND αβγδ comma, comma, and longer andé wholeword AND — -- colon: comma, and AND",
+      [
+        "text ordinary ordinary semi; --",
+        "AND andé text wholeword ordinary αβγδ until but αβγδ andé ordinary but AND where and until because comma, and comma, —",
+        "and because αβγδ AND colon: that longer AND andé longer comma,",
+        "ordinary text longer text longer until because text AND that αβγδ but --colon: —",
+        "and because wholeword text but because where AND but semi; where ——but where ordinary wholeword colon:",
+        "text text ordinary colon: ----text but --text comma, until ordinary and AND αβγδ comma, comma,",
+        "and longer andé wholeword AND —--colon: comma, and AND"
+      ]
+    ],
+    [
+      "but semi; where colon: comma, where that andé AND wholeword comma, until wholeword αβγδ wholeword that but wholeword AND and that colon: until AND wholeword that wholeword semi; text ordinary where where ordinary and until that where that andé αβγδ but comma, where wholeword αβγδ AND -- colon: AND and because where longer andé because semi; that -- until comma, αβγδ where that that αβγδ text and semi; but where that semi; comma, -- wholeword",
+      [
+        "but semi; where colon: comma, where that andé AND wholeword comma,",
+        "until wholeword αβγδ wholeword that but wholeword AND and that colon: until AND wholeword that wholeword semi;",
+        "text ordinary where where ordinary and until that where that andé αβγδ but comma, where wholeword αβγδ AND --colon:",
+        "AND and because where longer andé because semi; that --until comma, αβγδ where that that αβγδ text and semi;",
+        "but where that semi; comma, --wholeword"
+      ]
+    ],
+    [
+      "that until semi; that -- where semi; text colon: that comma, -- comma, and andé andé and that until that that comma, colon: wholeword but -- because andé because ordinary ordinary αβγδ where semi; colon: because but until wholeword — until but that semi; -- semi; longer until until",
+      [
+        "that until semi; that --where semi; text colon: that comma, --comma, and andé andé and that until that that comma,",
+        "colon: wholeword but --because andé because ordinary ordinary αβγδ where semi; colon: because but until wholeword —",
+        "until but that semi; --semi; longer until until"
+      ]
+    ]
+  ]
+}
