@@ -133,7 +133,7 @@ impl Session {
                 model.forward_recurrent_layer(
                     i,
                     i,
-                    &norm,
+                    crate::models::qwen35::trunk::forward::RecurrentInput::Project(&norm),
                     rows,
                     &mut self.scratch,
                     pool,

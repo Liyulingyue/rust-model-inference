@@ -39,6 +39,16 @@ pub struct MtpDraft {
 /// (llama.cpp's `h_nextn`), `token` the token that follows it, and
 /// `kv_cache` the head's own KV cache (one layer, as in llama.cpp's separate
 /// draft context).
+///
+/// `want_output` says whether the head's output is needed: the feed-forward
+/// that feeds it, the head's own norm, and its vocabulary projection.
+///
+/// It is not needed for a row that only fills the cache (the catch-up over
+/// the committed tokens): such a row is never sampled, and neither the
+/// feed-forward nor the projection -- which reads the whole vocabulary
+/// matrix -- contributes to the cache. llama.cpp skips it the same way --
+/// its catch-up rows carry no `logits` flag, so the draft context never
+/// builds the head's output for them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn forward_mtp(
     trunk: &HybridTrunk<'_>,
@@ -50,6 +60,7 @@ pub(crate) fn forward_mtp(
     kv_cache: &mut KvCache,
     scratch: &mut super::scratch::Qwen35Scratchpad,
     pool: &ComputePool,
+    want_output: bool,
 ) -> Result<MtpDraft, String> {
     let cfg = &trunk.config;
     let n_embd = cfg.n_embd;
@@ -77,12 +88,20 @@ pub(crate) fn forward_mtp(
 
     // One attention block with the head's own weights and its own KV cache.
     // The cache holds one layer, so the layer count is 1 here.
+    //
+    // The attention reads the *normalized* projection: llama.cpp keeps the
+    // `eh_proj` output as the residual (`inpSA`) and normalizes a copy of
+    // it with the block's `attn_norm` before the attention
+    // (`src/models/qwen35.cpp::graph_mtp`). The dense-attention helper
+    // takes an already normalized input, like the main stack does.
+    let mut attn_input = projected.clone();
+    crate::ops::rms_norm_inplace(&mut attn_input, &mtp.layer.attn_norm, eps);
     let attn_out = trunk.forward_dense_attn_layer_with(
         &mtp.layer,
         cfg.n_layer_impl(),
         0,
         1,
-        &projected,
+        &attn_input,
         1,
         kv_cache,
         scratch,
@@ -97,7 +116,20 @@ pub(crate) fn forward_mtp(
         projected[index] += value;
     }
 
-    // The FFN, then the head.
+    // The FFN, then the head. A row that only fills the cache stops here:
+    // the cache was written by the attention above, and nothing below it
+    // reaches the cache.
+    let head_norm = mtp
+        .shared_head_norm
+        .as_deref()
+        .unwrap_or(trunk.output_norm.as_slice());
+    if !want_output {
+        return Ok(MtpDraft {
+            logits: Vec::new(),
+            hidden: Vec::new(),
+        });
+    }
+
     let mut ffn_input = projected.clone();
     crate::ops::rms_norm_inplace(&mut ffn_input, &mtp.layer.attn_post_norm, eps);
     trunk.forward_ffn_parallel(&mtp.layer, &ffn_input, 1, scratch, pool, false);
@@ -105,10 +137,6 @@ pub(crate) fn forward_mtp(
         projected[index] += value;
     }
 
-    let head_norm = mtp
-        .shared_head_norm
-        .as_deref()
-        .unwrap_or(trunk.output_norm.as_slice());
     let mut normed = projected;
     crate::ops::rms_norm_inplace(&mut normed, head_norm, eps);
     let head = mtp

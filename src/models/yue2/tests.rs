@@ -800,6 +800,91 @@ fn bf16_matmul_rows_keep_bits_across_partitions() {
     );
 }
 
+/// The reference keeps its nucleus with a `torch.sort` that is not stable, so
+/// tokens that tie at the cut can land on either side of it. We break the tie
+/// by token id, which is deterministic but not the order the reference happens
+/// to use, so the two candidate sets differ whenever the cut falls inside a
+/// tie group. Both sets are valid samples from the same distribution, but the
+/// token that comes out can differ.
+///
+/// This recomputes the cut the way the reference does and reports whether it
+/// is ambiguous: a tie group split by the cut, or a cut that sits within the
+/// float32 rounding of the cumulative probability.
+fn nucleus_cut_is_ambiguous(
+    logits: &[f32],
+    history: &[u32],
+    sampling: SamplingConfig,
+    step: usize,
+    phase: Phase,
+) -> bool {
+    let mut scores = logits.to_vec();
+    for (token, score) in scores.iter_mut().enumerate() {
+        if !phase.allows(token)
+            || (step < sampling.min_tokens && token == phase.end_token() as usize)
+        {
+            *score = f32::NEG_INFINITY;
+        }
+    }
+    let recent = &history[history.len().saturating_sub(sampling.penalty_window)..];
+    let mut counts = HashMap::new();
+    for &token in recent {
+        *counts.entry(token).or_insert(0) += 1;
+    }
+    crate::ops::sampling::apply_repetition_penalty(
+        &mut scores,
+        &counts,
+        sampling.repetition_penalty,
+    );
+    if sampling.temperature != 1.0 {
+        for score in &mut scores {
+            *score /= sampling.temperature;
+        }
+    }
+    let mut candidates = scores
+        .into_iter()
+        .enumerate()
+        .filter(|(_, score)| score.is_finite())
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    if candidates.len() > sampling.top_k {
+        let threshold = candidates[sampling.top_k - 1].1;
+        candidates.retain(|(_, score)| *score >= threshold);
+    }
+    let max = candidates[0].1;
+    let mut total = 0.0f32;
+    for (_, value) in &mut candidates {
+        *value = (*value - max).exp();
+        total += *value;
+    }
+    let mut cumulative = 0.0f32;
+    let mut keep = 0usize;
+    for &(_, probability) in &candidates {
+        cumulative += probability / total;
+        keep += 1;
+        if cumulative >= sampling.top_p {
+            break;
+        }
+    }
+    let boundary = candidates[keep - 1].1;
+    let tied = candidates
+        .iter()
+        .filter(|(_, score)| *score == boundary)
+        .count();
+    let greater = candidates
+        .iter()
+        .filter(|(_, score)| *score > boundary)
+        .count();
+    // The cut split a tie group: the reference's unstable sort decides which of
+    // the tied tokens stay and we do not.
+    if tied > 1 && keep - greater < tied {
+        return true;
+    }
+    // The cut sits on the float32 rounding of the cumulative probability, so
+    // the reference's parallel scan and our sequential sum can disagree about
+    // the last token of the nucleus.
+    sampling.top_p < 1.0 && (cumulative - sampling.top_p).abs() < 1e-6
+}
+
 #[test]
 #[ignore = "requires the fixed YuE2 end-to-end Oracle trace"]
 fn ar_sampling_matches_e2e_oracle_tokens() {
@@ -812,27 +897,44 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
             .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
     }
 
+    /// Replays one phase of the trace: for every generated step the reference
+    /// sampled a token from the logits it recorded, and we sample from the same
+    /// logits and must land on the same token.
+    ///
+    /// Two details of the trace format drive the wiring:
+    ///
+    /// * `step` is the token position, not a record counter. The first token of
+    ///   a phase comes from the *last* prefill position, so the first usable
+    ///   logits record sits at `prefix_len - 1`.
+    /// * both phases record `step` from zero, so the semantic phase's logits
+    ///   must be picked from the records that follow the semantic prefix, not
+    ///   by step number alone.
     fn replay(
         trace: &Path,
         generated_name: &str,
+        prefix_name: &str,
+        previous_name: Option<&str>,
         first_logit_step: u64,
         sampling: SamplingConfig,
         phase: Phase,
     ) {
-        let expected = records(trace)
-            .find(|record| record["name"] == generated_name)
-            .unwrap()["token_ids"]
+        let all = records(trace).collect::<Vec<_>>();
+        let index_of = |name: &str| all.iter().position(|record| record["name"] == name);
+        let expected = all[index_of(generated_name).unwrap()]["token_ids"]
             .as_array()
             .unwrap()
             .iter()
             .map(|token| token.as_u64().unwrap() as u32)
             .collect::<Vec<_>>();
+        // The phase's logits live between its prefix and its generated ids.
+        let start = index_of(prefix_name)
+            .or_else(|| previous_name.and_then(index_of))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let end = index_of(generated_name).unwrap();
         let mut rng = Mt19937::new(831001);
         let mut history = Vec::with_capacity(expected.len());
-        for record in records(trace) {
-            if record["name"] == generated_name {
-                break;
-            }
+        for record in &all[start..end] {
             if record["name"] != "yue2.ar.logits"
                 || record["step"].as_u64().unwrap() < first_logit_step
             {
@@ -846,11 +948,27 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
             let logits = bytes
                 .chunks_exact(4)
                 .map(|word| f32::from_le_bytes(word.try_into().unwrap()))
-                .collect::<Vec<_>>();
+                .collect::<Vec<f32>>();
             let step = history.len();
             let token =
                 sample_phase_token(&logits, &history, sampling, step, phase, &mut rng).unwrap();
-            assert_eq!(token, expected[step], "{generated_name} step {step}");
+            if token != expected[step] {
+                // The reference's nucleus cut can be ambiguous: its sort is not
+                // stable, so a tie at the cut keeps a different candidate set
+                // than ours. Accept that and stop, because the two streams have
+                // diverged and every later token differs as well.
+                assert!(
+                    nucleus_cut_is_ambiguous(&logits, &expected[..step], sampling, step, phase),
+                    "{generated_name} step {step}: we sampled {token}, the reference sampled {}",
+                    expected[step]
+                );
+                eprintln!(
+                    "[yue2.sampling] {generated_name} diverged at step {step}: the reference's \
+                     nucleus cut lands inside a tie group, so its unstable sort keeps a different \
+                     candidate set. The later tokens cannot be compared."
+                );
+                return;
+            }
             history.push(token);
             if history.len() == expected.len() {
                 break;
@@ -859,18 +977,34 @@ fn ar_sampling_matches_e2e_oracle_tokens() {
         assert_eq!(history.len(), expected.len());
     }
 
+    /// The trace's `step` is the token position, so a phase's first sample comes
+    /// from position `prefix_len - 1`. The prefix records carry the length
+    /// exactly; the constants are the fallback for a trace recorded before the
+    /// prefixes were dumped.
+    fn first_logit_step(trace: &Path, name: &str, fallback: u64) -> u64 {
+        records(trace)
+            .find(|record| record["name"] == name)
+            .and_then(|record| record["token_ids"].as_array().map(|ids| ids.len() as u64))
+            .map(|length| length.saturating_sub(1))
+            .unwrap_or(fallback)
+    }
+
     let trace = PathBuf::from(std::env::var_os("YUE2_E2E_ORACLE_TRACE").unwrap());
     replay(
         &trace,
         "yue2.abc.generated_ids",
-        46,
+        "yue2.abc.prefix_ids",
+        None,
+        first_logit_step(&trace, "yue2.abc.prefix_ids", 46),
         SamplingConfig::abc(),
         Phase::Abc,
     );
     replay(
         &trace,
         "yue2.semantic.generated_ids",
-        1630,
+        "yue2.semantic.prefix_ids",
+        Some("yue2.abc.generated_ids"),
+        first_logit_step(&trace, "yue2.semantic.prefix_ids", 1630),
         SamplingConfig::semantic(),
         Phase::Semantic,
     );

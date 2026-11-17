@@ -488,6 +488,10 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                 cache,
                 &mut self.scratch,
                 &self.pool,
+                // The row only fills the head's cache: nothing samples it,
+                // so neither the head's output nor its vocabulary
+                // projection is needed.
+                false,
             )?;
         }
         // The last row of the batch becomes the carry-over row for the next
@@ -507,36 +511,31 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         Ok(&self.mtp_pending_hidden)
     }
 
-    /// The target's logits for every row of the last forward pass.
+    /// The target's logits for one row of the last forward pass.
     ///
-    /// A speculative verification needs the logits of *every* row of the
+    /// A speculative verification needs the logits of the rows of the
     /// verification batch, not only the last one: the target has to be able
     /// to say what it would have produced at each drafted position. The
     /// rows are the target's normalized hidden states of the last chunk, so
     /// this only works after a forward that kept them.
-    fn logits_rows(&mut self, n_rows: usize) -> Result<Vec<Vec<f32>>, String> {
+    fn logits_row(&mut self, row: usize) -> Result<Vec<f32>, String> {
         let trunk = self.model.trunk();
         let n_embd = trunk.config.n_embd;
         let vocab = trunk.config.vocab_size;
-        let rows = n_rows.min(self.last_step_tokens);
-        if rows == 0 {
-            return Err("Qwen3.5 MTP verification needs at least one forward row".into());
+        if row >= self.last_step_tokens {
+            return Err("Qwen3.5 MTP verification needs a row of the last forward".into());
         }
-        let mut out = Vec::with_capacity(rows);
-        for row in 0..rows {
-            let normed = &self.scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
-            trunk.output_weight.quantize_and_matmul_with_scratch(
-                normed,
-                &mut self.scratch.q8k_buf,
-                &mut self.scratch.q8_buf,
-                &mut self.scratch.scale_buf,
-                &mut self.scratch.matmul_out,
-                &self.pool,
-            );
-            let n = vocab.min(self.scratch.matmul_out.len());
-            out.push(self.scratch.matmul_out[..n].to_vec());
-        }
-        Ok(out)
+        let normed = &self.scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
+        trunk.output_weight.quantize_and_matmul_with_scratch(
+            normed,
+            &mut self.scratch.q8k_buf,
+            &mut self.scratch.q8_buf,
+            &mut self.scratch.scale_buf,
+            &mut self.scratch.matmul_out,
+            &self.pool,
+        );
+        let n = vocab.min(self.scratch.matmul_out.len());
+        Ok(self.scratch.matmul_out[..n].to_vec())
     }
 
     /// One speculative decoding step with the MTP draft head.
@@ -598,16 +597,35 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
 
         let embeddings = self.embed_tokens(&batch)?;
         let processed_before = self.processed_tokens;
-        self.step(&embeddings, batch.len(), &positions)?;
+        // Capture the recurrent layers' projections: a rollback replays only
+        // those layers instead of the whole model.
+        self.prepare_recurrent_capture(batch.len());
+        let last_logits = self.step(&embeddings, batch.len(), &positions)?;
+        self.scratch.capture_recurrent_replay = false;
 
         // The target's own continuation: the logits of row `i` say what the
         // target would produce at the position of draft `i`.
-        let rows = self.logits_rows(batch.len())?;
+        //
+        // The rows are read one at a time and only as far as the round
+        // needs them: the first row that does not match its draft ends the
+        // round, so the rows after it are never looked at. Every row is a
+        // vocabulary projection, and the last row's projection is the one
+        // the forward pass already did.
         let mut accepted = 0usize;
-        while accepted < drafts.len()
-            && crate::ops::sampling::argmax(&rows[accepted]) as u32 == drafts[accepted]
-        {
-            accepted += 1;
+        let mut next = 0u32;
+        loop {
+            let logits = if accepted + 1 == batch.len() {
+                last_logits.clone()
+            } else {
+                self.logits_row(accepted)?
+            };
+            let sampled = crate::ops::sampling::argmax(&logits) as u32;
+            if accepted < drafts.len() && sampled == drafts[accepted] {
+                accepted += 1;
+                continue;
+            }
+            next = sampled;
+            break;
         }
         // The round commits the bonus token the target had already sampled
         // and the drafts it accepted. The token the target produces after
@@ -615,7 +633,6 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let mut tokens = Vec::with_capacity(accepted + 1);
         tokens.push(token);
         tokens.extend_from_slice(&drafts[..accepted]);
-        let next = crate::ops::sampling::argmax(&rows[accepted]) as u32;
 
         // The draft context has to see the same positions as the target: the
         // head's KV cache is refreshed with the target's hidden states, which
@@ -632,32 +649,32 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         // The rejected drafts left their KV and their recurrent state behind:
         // both have to go, or the next round would continue from a state the
         // target never produced.
-        //
-        // The GDN and short-convolution layers carry their state from token
-        // to token, so the state cannot be truncated -- the committed tokens
-        // have to be run through the model again. llama.cpp does the same
-        // with its context checkpoint: it restores the checkpoint and
-        // replays the accepted tokens.
         if accepted < drafts.len() {
             self.restore_mtp_state();
             let cfg = &self.model.trunk().config;
             let k_dim = cfg.n_embd_head() * cfg.n_head_kv;
-            // Free the whole verification batch: the replay writes the
-            // committed rows again, and the free slot of a layer is the
-            // first all-zero key row.
+            // The committed rows of the verification batch are already
+            // correct -- every row of a forward pass sees exactly the state
+            // its own position has. Only the rows after them are wrong, and
+            // the free slot of a layer is the first all-zero key row.
             super::scratch::kv_cache_truncate(
                 &mut self.kv_cache,
                 cfg.n_layer_impl(),
                 k_dim,
-                position,
+                position + accepted + 1,
                 position + batch.len(),
             );
-            self.processed_tokens = processed_before;
-            self.next_position = position;
-            // Replay the committed tokens: the bonus token and the drafts
-            // the target accepted.
+            // The recurrent state is the one thing that cannot be
+            // truncated: the GDN and short-convolution layers carry it from
+            // token to token. Restoring it and replaying only those layers
+            // over the accepted rows puts it back where the committed tokens
+            // leave it, without re-running the whole model.
             let keep = accepted + 1;
-            self.step(&embeddings[..keep * n_embd], keep, &positions[..keep])?;
+            self.model
+                .trunk()
+                .replay_recurrent_state(keep, &mut self.scratch, &self.pool)?;
+            self.processed_tokens = processed_before + keep;
+            self.next_position = position + keep;
         }
 
         Ok(MtpStep {
@@ -666,6 +683,32 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             accepted,
             drafted: drafts.len(),
         })
+    }
+
+    /// Prepare the capture of the recurrent layers' projections.
+    ///
+    /// The capture is what lets a rollback replay the recurrent layers
+    /// alone: their state is a function of the incoming state and their
+    /// projected rows, and the rows of the verification batch are the ones
+    /// the forward actually used.
+    fn prepare_recurrent_capture(&mut self, n_rows: usize) {
+        let cfg = &self.model.trunk().config;
+        let n_layer = cfg.n_layer_impl();
+        let qkv_width = n_rows * cfg.conv_dim();
+        let head_width = n_rows * cfg.ssm_dt_rank;
+        let slots = &mut self.scratch.recurrent_replay;
+        if slots.len() < n_layer {
+            slots.resize_with(n_layer, Default::default);
+        }
+        for slot in slots.iter_mut().take(n_layer) {
+            slot.qkv.clear();
+            slot.beta.clear();
+            slot.alpha.clear();
+            slot.qkv.reserve(qkv_width);
+            slot.beta.reserve(head_width);
+            slot.alpha.reserve(head_width);
+        }
+        self.scratch.capture_recurrent_replay = true;
     }
 
     /// Save the recurrent state so a rejected draft can be undone.
@@ -749,6 +792,8 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                 cache,
                 &mut self.scratch,
                 &self.pool,
+                // The draft is sampled, so it needs the head's logits.
+                true,
             )?;
             let next = crate::ops::sampling::argmax(&draft.logits) as u32;
             drafts.push(next);
