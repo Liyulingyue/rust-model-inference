@@ -85,6 +85,9 @@ pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
     /// Whether the next forward should project every row's logits. The
     /// verification reads the target's answer at each drafted position.
     mtp_collect_logits: bool,
+    /// Whether the next forward should capture the recurrent layers' input.
+    /// The device rollback replays the recurrent state from it.
+    mtp_collect_capture: bool,
     /// Whether the last forward projected the logits of every row, so that
     /// the verification can read them instead of projecting them again.
     mtp_logits_ready: bool,
@@ -376,6 +379,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             mtp_state_backup,
             mtp_collect_hidden: false,
             mtp_collect_logits: false,
+            mtp_collect_capture: false,
             mtp_logits_ready: false,
             scratch,
             prefill_batch_size,
@@ -640,10 +644,14 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         self.scratch.collect_all_logits = !on_device;
         self.mtp_collect_hidden = on_device;
         self.mtp_collect_logits = on_device;
+        // The device rollback replays the recurrent state, which needs the
+        // recurrent layers' input: the chunk captures it.
+        self.mtp_collect_capture = on_device;
         let last_logits = self.step(&embeddings, batch.len(), &positions)?;
         self.scratch.collect_all_logits = false;
         self.mtp_collect_hidden = false;
         self.mtp_collect_logits = false;
+        self.mtp_collect_capture = false;
         self.mtp_logits_ready = self.scratch.logits_rows_collected;
         self.scratch.capture_recurrent_replay = false;
 
@@ -716,7 +724,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             let keep = accepted + 1;
             #[cfg(feature = "vulkan")]
             if on_device {
-                self.mtp_replay_device(position, keep, &embeddings, &positions, processed_before)?;
+                self.mtp_replay_device(position, keep, processed_before)?;
                 return Ok(MtpStep {
                     tokens,
                     next,
@@ -743,21 +751,20 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
     ///
     /// The verification advanced the device's recurrent state over every
     /// drafted row, accepted or not, and that state cannot be truncated the
-    /// way the KV cache can. So the round puts the saved copy back and runs
-    /// the committed rows again: they write the KV they wrote the first time,
-    /// and the state they leave is the one the committed tokens produce.
+    /// way the KV cache can. So the round puts the saved copy back and
+    /// replays the committed rows over the recurrent layers: the chunk
+    /// captured each recurrent layer's input, and the state update consumes
+    /// nothing else. The layers the state belongs to read a fraction of the
+    /// weights the whole model does, so the replay is much cheaper than
+    /// running the model again.
     #[cfg(feature = "vulkan")]
     fn mtp_replay_device(
         &mut self,
         position: usize,
         keep: usize,
-        embeddings: &[f32],
-        positions: &[[usize; 4]],
         processed_before: usize,
     ) -> Result<(), String> {
         let cfg = &self.model.trunk().config;
-        let n_embd = cfg.n_embd;
-        let k_dim = cfg.n_embd_head() * cfg.n_head_kv;
         let conv_len: usize = self.scratch.conv_states.iter().map(Vec::len).sum();
         let ssm_len: usize = self.scratch.ssm_states.iter().map(Vec::len).sum();
         {
@@ -771,34 +778,23 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             let gpu = self.gpu.as_mut().ok_or("the Vulkan session went away")?;
             gpu.restore_recurrent_state(conv, ssm)
                 .map_err(|error| error.to_string())?;
-            gpu.rewind(position).map_err(|error| error.to_string())?;
-            gpu.set_collect(false, false);
-            let result = gpu
-                .forward_chunk(
-                    &embeddings[..keep * n_embd],
-                    position,
-                    &positions[..keep],
-                    keep,
-                )
+            let (conv_state, ssm_state) = gpu
+                .replay_recurrent_rows(keep)
                 .map_err(|error| error.to_string())?;
-            commit_shadow_state_chunk(
-                &mut self.kv_cache,
+            // The keys of the committed rows are already in the cache: the
+            // verification wrote them, and they do not depend on the state
+            // the replay puts back.
+            crate::vulkan::qwen35::commit_shadow_recurrent_state(
                 &mut self.scratch.conv_states,
                 &mut self.scratch.ssm_states,
-                position,
-                keep,
-                self.capacity,
-                k_dim,
-                result.k_delta,
-                result.v_delta,
-                result.conv_state,
-                result.ssm_state,
+                conv_state,
+                ssm_state,
             )?;
-            gpu.commit_token();
+            // The next chunk starts at the committed rows and overwrites
+            // the rejected ones before anything reads them.
+            gpu.rewind(position + keep)
+                .map_err(|error| error.to_string())?;
         }
-        // The rejected rows left their keys behind. The next chunk starts at
-        // `position + keep` and overwrites them, and nothing reads them
-        // before that.
         self.processed_tokens = processed_before + keep;
         self.next_position = position + keep;
         self.last_step_tokens = keep;
@@ -1156,6 +1152,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             let gpu_error = if self.gpu.is_some() || forced_failure.is_some() {
                 let collect_hidden = self.mtp_collect_hidden;
                 let collect_logits = self.mtp_collect_logits;
+                let collect_capture = self.mtp_collect_capture;
                 let vocab_size = self.model.trunk().config.vocab_size;
                 let attempt = (|| {
                     if let Some(error) = forced_failure {
@@ -1163,6 +1160,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                     }
                     let gpu = self.gpu.as_mut().expect("checked above");
                     gpu.set_collect(collect_hidden || collect_logits, collect_logits);
+                    gpu.set_collect_capture(collect_capture);
                     let result = if rows == 1 {
                         gpu.forward_token(chunk_embeddings, base, chunk_positions[0])
                     } else {
