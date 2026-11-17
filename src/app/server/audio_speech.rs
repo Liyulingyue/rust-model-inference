@@ -17,10 +17,14 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 pub(super) struct Backend {
-    source: Arc<dyn TensorSource>,
-    codec: Arc<dyn TensorSource>,
+    // `Model`/`Codec` borrow the paired sources for weights that stay mapped
+    // for the process lifetime. Leaking only the Arc handles (16 bytes each,
+    // once per server start) turns them into `'static` borrows so the loaded
+    // tensors are shared by every request instead of re-materialized per
+    // request; the underlying mappings are not duplicated.
+    model: Arc<Model<'static>>,
+    codec: Arc<Codec<'static>>,
     sampling: Sampling,
-    threads: usize,
     max_frames: usize,
 }
 
@@ -46,17 +50,19 @@ impl Backend {
             options.threads,
             std::thread::available_parallelism().map_or(1, |n| n.get()),
         );
-        Model::from_source_with_compute(source.as_ref(), threads, options.compute_policy())?;
-        Codec::from_source_with_compute(codec.as_ref(), threads, options.compute_policy())?;
+        let source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(source));
+        let codec_source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(codec));
+        let policy = options.compute_policy();
+        let model = Model::from_source_with_compute(source.as_ref(), threads, policy)?;
+        let codec = Codec::from_source_with_compute(codec_source.as_ref(), threads, policy)?;
         let max_frames = options.max_tokens.unwrap_or(128);
         if !(1..2048).contains(&max_frames) {
             return Err("Audio8 max frames must be in 1..2048".into());
         }
         Ok(Self {
-            source,
-            codec,
+            model: Arc::new(model),
+            codec: Arc::new(codec),
             sampling,
-            threads,
             max_frames,
         })
     }
@@ -160,9 +166,8 @@ pub(super) async fn speech(
             )
         }
     };
-    let (source, audio) = (backend.source.clone(), backend.codec.clone());
-    let (threads, sampling, max_frames) = (backend.threads, backend.sampling, backend.max_frames);
-    let compute = state.compute;
+    let (model, codec) = (backend.model.clone(), backend.codec.clone());
+    let (sampling, max_frames) = (backend.sampling, backend.max_frames);
     let pcm = request.response_format.as_deref() == Some("pcm");
     let result = compute_task(state.compute, move || -> Result<Vec<u8>, String> {
         // Blocking work continues after HTTP cancellation, so it must own the generation slot.
@@ -171,8 +176,6 @@ pub(super) async fn speech(
             .as_deref()
             .map(|bytes| reference_wav_at_rate(bytes, SAMPLE_RATE))
             .transpose()?;
-        let model = Model::from_source_with_compute(source.as_ref(), threads, compute)?;
-        let codec = Codec::from_source_with_compute(audio.as_ref(), threads, compute)?;
         let waveform = model.synthesize(
             &codec,
             &request.input,
