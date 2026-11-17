@@ -1,14 +1,11 @@
 # Underdog Woof validation
 
 2026-11-14. **Accepted on subjective listening**; the free-generation waveform
-gate remains experimental. CPU same-weight stage gates pass for all nine
-formats; strict Vulkan failed on the author's RADV/NAVI31 host but was
-subsequently verified on an Intel Meteor Lake-P integrated GPU (see the GPU
-section below). A 2026-11-17 listening test over juno/mira short and long
-inputs (Rust CPU and Intel iGPU against the official NumPy reference) found
-the content, pronunciation and voice quality correct with no audible
-artifacts, so the model is accepted for use; waveform-level equality is
-explicitly not claimed.
+gate remains experimental. Nine formats pass CPU same-weight stage gates, and
+the Intel Meteor Lake-P iGPU runs every projection on device (the author's
+RADV/NAVI31 host still reports `device lost`). A 2026-11-17 listening test
+over juno/mira short and long inputs found no audible problem; waveform-level
+equality is explicitly not claimed.
 Machine-readable measurements, commands and errors are in [results.json](results.json)
 and [performance.json](performance.json). Reproduction starts in [README.md](README.md).
 
