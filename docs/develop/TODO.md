@@ -5716,7 +5716,7 @@ qwen3 塔是这一族里剩下的那个例外 ✓✓。
 **本轮改了什么** ✓✓：`bind_block_weights` 里 F16 只对 **refiner 栈**
 （`layer < 2 * REFINER_LAYERS` ✓✓）绑定设备，主栈的 F16 投影落回 CPU 行路径 ✓✓ ——
 与 K-quant DiT 同一套策略（[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍) ✓✓、[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍) ✓✓）。
-⇒ Q8_0 档**完全不受影响** ✓✓（主栈本来就是 Q8_0 ✓✓，refiner 的 F16 绑定条件不变 ✓✓；实测 128×128 / 2 步的 denoise 仍是 3.4 s ✓✓）。
+⇒ Q8_0 档**完全不受影响** ✓✓（主栈本来就是 Q8_0 ✓✓，refiner 的 F16 绑定条件不变 ✓✓；实测 128×128 / 2 步的 denoise 仍是 3.4 s（文档里记的 3.3 s 是同一档的另一轮总计 ✓✓））。
 
 ⇒ **改后实测** ✓✓：F16 档 128×128 / 2 步 **CPU 26.3 s → 设备 23.3 s** ✓✓（denoise 22.2 s 走 CPU 行路径 ✓✓，VAE 在设备上 ✓✓），
 与 CPU 的 PNG 差异 PSNR **58.41 dB**（max_abs 3 ✓✓）；
