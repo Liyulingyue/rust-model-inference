@@ -224,22 +224,28 @@ impl CliOptions {
             return Err("--gpu and --compute cannot be combined".into());
         }
         if self.compute_policy() == ComputePolicy::Vulkan {
-            if let Some(mode) = self.vulkan_partial_mode() {
-                // One line per request: the mode is checked at more than
-                // one layer, and the caller would otherwise see the same
-                // line twice.
-                static WARNED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!(
-                        "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; any \
-                         offloadable parts run on the device"
-                    );
-                }
+            // `--tts` is decided per model: some archs (Audio8) put the
+            // whole graph on the device, so the frontend reports the path
+            // once it has read the architecture.
+            if let Some(mode) = self.vulkan_partial_mode().filter(|mode| *mode != "tts") {
+                warn_partial_device_mode(mode);
             }
         }
         Ok(())
+    }
+
+    /// Whether `--tts` on `arch` runs a partial device path.
+    pub fn tts_device_path_is_partial(&self, arch: &str) -> bool {
+        self.tts
+            && self.compute_policy() == crate::compute::ComputePolicy::Vulkan
+            && !crate::compute::ComputePolicy::has_complete_device_path(arch)
+    }
+
+    /// Report the `--tts` device path now that the architecture is known.
+    pub fn report_tts_device_path(&self, arch: &str) {
+        if self.tts_device_path_is_partial(arch) {
+            warn_partial_device_mode("tts");
+        }
     }
 
     /// The mode whose device path is partial, if the request names one.
@@ -428,6 +434,19 @@ pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, St
             "Invalid --embedding-output {value:?}; expected summary or raw"
         )),
         None => Err("Missing value for --embedding-output".into()),
+    }
+}
+
+/// One line per request: the mode is checked at more than one layer, and
+/// the caller would otherwise see the same line twice.
+fn warn_partial_device_mode(mode: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode={mode} \
+             note=no complete device path for this mode; any \
+             offloadable parts run on the device"
+        );
     }
 }
 

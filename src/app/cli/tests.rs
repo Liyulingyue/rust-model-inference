@@ -57,6 +57,24 @@ fn compute_vulkan_reports_modes_without_a_complete_device_path() {
     assert!(options.validate_compute_model("qwen3").is_ok());
 }
 
+#[test]
+fn tts_device_path_is_reported_per_architecture() {
+    let tts = |flags: &[&str]| parse_cli_options(&args(flags)).unwrap();
+
+    // Audio8 TTS puts its whole graph on the device, so `--tts` is not a
+    // partial mode for it; the frontend decides once it has the arch.
+    let arktts = tts(&["rmi", "--compute", "vulkan", "--tts"]);
+    assert!(!arktts.tts_device_path_is_partial("arktts"));
+    // Other TTS frontends have no complete device path and still report it.
+    assert!(arktts.tts_device_path_is_partial("breeze"));
+    assert!(arktts.tts_device_path_is_partial("pivo"));
+
+    let cpu = tts(&["rmi", "--compute", "cpu", "--tts"]);
+    assert!(!cpu.tts_device_path_is_partial("breeze"));
+    let text = tts(&["rmi", "--compute", "vulkan"]);
+    assert!(!text.tts_device_path_is_partial("breeze"));
+}
+
 struct TestTensorSource {
     info: TensorInfo,
     bytes: Vec<u8>,

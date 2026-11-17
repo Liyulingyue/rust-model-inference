@@ -135,6 +135,7 @@ fn tts_frontend<'a>(
             "--tts-model/--tts-mmproj are only used by the multimodal post-processor".into(),
         );
     }
+    options.report_tts_device_path(model_arch);
     if crate::models::arktts::is_arktts_arch(model_arch)
         || crate::models::arktts::is_arktts_arch(codec_arch)
     {
