@@ -105,6 +105,8 @@ impl ComputePolicy {
                 | "nemotron_h"
                 | "nemotron_h_moe"
                 | "sensenova_loop"
+                | "arktts"
+                | "arktts_codec"
         )
     }
 
@@ -282,6 +284,8 @@ mod tests {
             "qwen35moe",
             "dory",
             "nemotron_h_moe",
+            "arktts",
+            "arktts_codec",
         ] {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
             assert!(ComputePolicy::has_complete_device_path(arch));

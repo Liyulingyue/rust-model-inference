@@ -668,6 +668,12 @@ fn main() {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
+    if rust_model_inference::models::arktts::is_arktts_arch(&arch) {
+        app::run_or_exit(Err(
+            "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
+        ));
+        return;
+    }
     if arch == "mage_flow" {
         app::run_or_exit(app::run_mage_flow_cli(source, &options, n_threads));
         return;
@@ -971,10 +977,10 @@ fn main() {
     {
         // Omni → TTS post-processor pipeline: when both the multimodal
         // media path AND a TTS model + mmproj are present, route the
-        // generated reply through Qwen3-TTS to produce a 24 kHz WAV
-        // alongside the text. The TTS layer is opt-in so the existing
-        // text-only multimodal flow is unchanged for users without a
-        // bundled TTS model.
+        // generated reply through the TTS model (Qwen3-TTS or
+        // Audio8-TTS-Realistic-Air) to produce a WAV alongside the text.
+        // The TTS layer is opt-in so the existing text-only multimodal
+        // flow is unchanged for users without a bundled TTS model.
         if let (Some(tts_model_path), Some(tts_mmproj_path)) = (tts_model, tts_mmproj) {
             let wav_out = match options
                 .out
@@ -997,7 +1003,10 @@ fn main() {
                 audio,
                 prompt,
                 max_tokens,
-                temperature,
+                // Pass the raw flag: the Omni reply keeps the greedy
+                // fallback for media prompts, the TTS stage keeps its own
+                // model default when the user did not choose one.
+                options.temperature,
                 options.threads,
                 prefill_batch_size,
                 options.effective_max_context(),
