@@ -387,6 +387,26 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         return Err("--edit requires --tts".into());
     }
     z_image_cli_options(options)?;
+    // The Omni -> TTS post-processor only runs inside the multimodal branch,
+    // which needs media or a projector; without either (or with an incomplete
+    // pair) the flags would be silently ignored.
+    match (options.tts_model.is_some(), options.tts_mmproj.is_some()) {
+        (true, false) | (false, true) => {
+            return Err("--tts-model and --tts-mmproj must be given together".into());
+        }
+        (true, true)
+            if options.audio.is_none()
+                && options.image.is_none()
+                && options.video.is_none()
+                && options
+                    .mmproj
+                    .as_deref()
+                    .is_none_or(|path| path.as_os_str().is_empty()) =>
+        {
+            return Err("--tts-model/--tts-mmproj require multimodal media or --mmproj".into());
+        }
+        _ => {}
+    }
     if options.tts {
         if options.model.as_os_str().is_empty() {
             return Err("--tts requires --model".into());
