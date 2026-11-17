@@ -1718,6 +1718,73 @@ mod tests {
         vec_mad_per_channel_f32_broadcast,
     };
 
+    /// Times the BF16 dot product against its scalar and AVX2 halves.
+    ///
+    /// The AR decode runs one token at a time, so this dot is the whole
+    /// projection cost there.
+    #[test]
+    #[ignore = "timing probe"]
+    fn bf16_dot_timing_split() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let mut a = vec![0.01f32; n];
+        let mut bytes = vec![0x3fu8; n * 2];
+        let mut sink = 0.0f32;
+
+        fn run(
+            label: &str,
+            mut f: impl FnMut(&[f32], &[u8], usize) -> f32,
+            a: &mut Vec<f32>,
+            bytes: &mut Vec<u8>,
+            n: usize,
+            sink: &mut f32,
+        ) {
+            for it in 0..100 {
+                a[0] = it as f32 * 1e-6;
+                bytes[0] = (it % 251) as u8;
+                *sink += f(a, bytes, n);
+            }
+            let started = Instant::now();
+            for it in 0..1000 {
+                a[0] = it as f32 * 1e-6;
+                bytes[0] = (it % 251) as u8;
+                *sink += f(a, bytes, n);
+            }
+            let each = started.elapsed() / 1000;
+            eprintln!(
+                "{label}: {each:?} -> {:.2} G elem/s",
+                n as f64 / each.as_secs_f64() / 1e9
+            );
+        };
+
+        run(
+            "scalar",
+            |a, b, n| super::dot_bf16_f32_scalar(a, b, n),
+            &mut a,
+            &mut bytes,
+            n,
+            &mut sink,
+        );
+        #[cfg(target_arch = "x86_64")]
+        run(
+            "avx2",
+            |a, b, n| unsafe { super::dot_bf16_f32_avx2(a, b, n) },
+            &mut a,
+            &mut bytes,
+            n,
+            &mut sink,
+        );
+        run(
+            "dispatch",
+            super::dot_bf16_f32,
+            &mut a,
+            &mut bytes,
+            n,
+            &mut sink,
+        );
+        eprintln!("sink={sink}");
+    }
+
     #[test]
     fn f64_reductions_cover_vector_and_tail_lengths() {
         let values = [
