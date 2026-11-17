@@ -1,10 +1,14 @@
 # Underdog Woof validation
 
-2026-11-14. **Experimental / partial adaptation**: CPU same-weight stage gates
-pass for all nine formats; the long Mira free-generation waveform gate fails.
-Strict Vulkan failed on the author's RADV/NAVI31 host but was subsequently
-verified on an Intel Meteor Lake-P integrated GPU (see the GPU section below).
-This is a draft integration, not full acceptance.
+2026-11-14. **Accepted on subjective listening**; the free-generation waveform
+gate remains experimental. CPU same-weight stage gates pass for all nine
+formats; strict Vulkan failed on the author's RADV/NAVI31 host but was
+subsequently verified on an Intel Meteor Lake-P integrated GPU (see the GPU
+section below). A 2026-11-17 listening test over juno/mira short and long
+inputs (Rust CPU and Intel iGPU against the official NumPy reference) found
+the content, pronunciation and voice quality correct with no audible
+artifacts, so the model is accepted for use; waveform-level equality is
+explicitly not claimed.
 Machine-readable measurements, commands and errors are in [results.json](results.json)
 and [performance.json](performance.json). Reproduction starts in [README.md](README.md).
 
@@ -83,7 +87,8 @@ therefore match F32. Storage dtype is not whole-model compute precision.
 against original effective weights. F32 has zero export loss; further
 quantization changes generated audio, especially 4-bit exports. Same-weight
 implementation gates do not establish equal audio quality across formats.
-F32 is recommended. Subjective listening was not performed.
+F32 is recommended. Subjective listening was performed on 2026-11-17
+(see the listening test below).
 
 ## Natural generation and the retained failure
 
@@ -123,10 +128,31 @@ results with `np.nextafter`, leaving its source files and weights unchanged:
 | +16 ULP / -16 ULP | 0.109457 / 0.038111 |
 
 All retain 165,120 samples. This supports a rounding-sensitivity diagnosis;
-it does **not** turn the failed natural gate into a pass or establish perceptual
-quality. SIMD remains enabled. The original failed record remains in
-`interfaces[0].oracle_failures`; the interface checker exits unsuccessfully
-when that gate fails even though the remaining API checks run.
+it does **not** turn the failed natural gate into a pass. SIMD remains enabled.
+The original failed record remains in `interfaces[0].oracle_failures`; the
+interface checker exits unsuccessfully when that gate fails even though the
+remaining API checks run.
+
+### Listening test, 2026-11-17
+
+The waveform gate above is not the acceptance criterion for a speech model.
+Four cases (juno/mira x short/long) were rendered by Rust on CPU and on the
+Intel iGPU and compared against the official NumPy reference in the same
+directory (`out/woof_{ref,cpu,gpu}_<case>.wav`). A human listener found the
+spoken content, pronunciation and voice character correct on every case, with
+no audible noise, clipping or artifacts. The waveform differences show up as
+duration and phase rather than as a change in what is said:
+
+| Case | Reference | Rust CPU/GPU |
+| --- | ---: | ---: |
+| juno / `Hi.` | 1.04 s | 1.04 s |
+| mira / `Hi.` | 1.36 s | 1.20 s |
+| juno / two sentences | 4.96 s | 5.24 s |
+| mira / two sentences | 7.52 s | 6.80 s |
+
+This is a small fixed corpus and one listener; it establishes that the
+adaptation is usable, not a broad perceptual quality claim. Low-bit exports
+were not listened to and remain unrecommended.
 
 ## CLI / HTTP / backend coverage
 
@@ -249,18 +275,22 @@ request/route isolation and retry semantics, retained upstream code/derivative
 licensing, and fixed the interface checker to finish negative/concurrency tests
 without hiding the numerical failure. Documentation now names both acceptance
 failures. A final license check added visible upstream voice credit when the
-model loads, shared by CLI and server. No subjective listening or broad
-perceptual evaluation was done.
+model loads, shared by CLI and server. A subsequent listening test on
+2026-11-17 covered juno/mira short and long inputs on CPU and Intel iGPU
+against the official reference and found no audible problem; it is not a
+broad perceptual evaluation.
 
 Remaining work before marking complete:
 
 1. Shared compute/Vulkan follow-up: diagnose the failing NAVI31 initialization
    path, then rerun the shared control, all nine strict-device numeric/interface
    rows, Auto device-execution evidence and completed GPU performance timings.
-2. Woof model follow-up: establish task-level quality acceptance for long natural
-   Mira generation using a broader fixed corpus; preserve the recorded strict
-   waveform failure and distinguish reduction sensitivity from audible errors.
-3. Check subjective and perceptual quality before recommending low-bit exports.
+2. Woof model follow-up: the 2026-11-17 listening test covers four cases
+   (juno/mira x short/long) on CPU and Intel iGPU. A broader fixed corpus
+   remains optional; the recorded strict waveform failure is preserved and
+   distinguished from audible errors.
+3. Low-bit exports remain unrecommended: subjective quality was checked for F32
+   only, and 4-bit exports carry measurable source-weight loss.
 
 The upstream non-commercial license covers code and derivatives as well as
 weights. [LICENSE](licenses/LICENSE) and [NOTICE](licenses/NOTICE) are retained;

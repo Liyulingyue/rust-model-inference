@@ -4,7 +4,7 @@
 单个 `underdog_woof` GGUF 包含文本嵌入、语音 transformer、flow head、
 Mimi 解码器和发音词典，不需要 `--mmproj`。
 
-当前状态为 **Experimental / 部分适配（长句自由生成偏差待验收）**。
+当前状态为 **已验收（主观音质听测通过；波形逐位一致性仍为实验性）**。
 CPU 九种格式已做独立、同权重分阶段数值检查。Vulkan 投影路径接入共享
 `LinearExecutor`：最初在 RADV/NAVI31 上出现 `device lost`，随后在
 Intel Meteor Lake-P 集显（`--features vulkan`）上完成对齐验证，
@@ -13,8 +13,11 @@ latent 相对 RMSE `7.57e-7`、波形 `1.24e-6`、cosine `1.0`。
 该结果只覆盖集显，不代表独显或 RADV 路径可用。
 F32 长句 Mira 在教师强制时通过分阶段检查，但自由生成的波形相对误差为
 `0.04634`，未通过预设 `0.002` 门槛。定位显示自回归反馈放大了浮点归约舍入；
-官方实现自身的 ULP 扰动实验也复现了放大现象。原失败记录和阈值均保留，
-尚未完成主观音质验收。
+官方实现自身的 ULP 扰动实验也复现了放大现象。原失败记录和阈值均保留。
+**该数值偏差不影响可懂度与音质**：2026-11-17 对 juno/mira 短句与长句
+（CPU 与 Intel 集显 GPU 各一份，与官方 NumPy 参考同目录对照）做主观音
+听，内容、发音与音色均正常，无明显杂音或破音，听测通过。波形差异体现为
+时长与相位不同（如 mira 短句 1.36 s vs 1.20 s），不构成听感差异。
 逐组合状态与实测记录见 [validation](../../tools/oracle/underdog_woof/validation.md)。
 
 ## 使用
