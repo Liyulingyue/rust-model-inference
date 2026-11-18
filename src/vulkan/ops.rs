@@ -10278,7 +10278,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
             expected[index].d.to_bits(),
         ));
     }
-    println!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
+    eprintln!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
     Ok(())
 }
 
@@ -10365,7 +10365,7 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
             expected_scales[index].to_bits()
         ));
     }
-    println!(
+    eprintln!(
         "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
         COUNT / 32
     );
@@ -10499,7 +10499,7 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
             expected.to_bits()
         ));
     }
-    println!("operator=attention_value_reduction exact=true");
+    eprintln!("operator=attention_value_reduction exact=true");
     Ok(())
 }
 
@@ -10780,7 +10780,7 @@ fn check_close(
             first_bad = Some((index, gpu, cpu, absolute, relative));
         }
     }
-    println!(
+    eprintln!(
         "operator={name} max_abs={max_absolute:.3e} max_rel={max_relative:.3e} first_bad={:?}",
         first_bad.map(|value| value.0)
     );
