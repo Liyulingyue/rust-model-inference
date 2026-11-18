@@ -21,7 +21,11 @@
 > `qwen35` trunk captures its layers' input hidden states for the encoder,
 > and `HybridSession::{prefill_with_dspark, dspark_speculative_step,
 > dspark_generate}` drives the rounds with the same verify/rollback
-> machinery as the MTP path. Entry point: CLI `--dspark-model <sidecar>`.
+> machinery as the MTP path. Entry points: CLI `--dspark-model <sidecar>`
+> and HTTP `--serve --dspark-model <sidecar>` (both wired through
+> `RuntimeOptions::with_dspark_model`; `build_text_runtime` rejects
+> non-`qwen35` targets and device paths at startup, and non-greedy or
+> image-bearing requests at request time, instead of dropping the flag).
 > Draft tokens match `llama-server --spec-type draft-dspark` (b96806d)
 > token for token on Qwen3.5-2B + its DSpark sidecar. EAGLE3 and the
 > standalone draft remain unimplemented.

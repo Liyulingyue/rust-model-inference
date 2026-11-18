@@ -116,6 +116,17 @@ NEON on aarch64; no AVX-512).
       `{%- if enable_thinking is defined and enable_thinking is false %}`，未定义即不注入空块，
       与 `unwrap_or(true)` 等价。**改动会翻转现有 thinking 模型的 HTTP 默认输出**，需先确认
       是否有依赖当前行为的调用方。
+- [ ] **qwen35 CLI `--thinking` 被静默忽略，HTTP `enable_thinking` 生效——两入口 thinking 输出不一致** —
+      2026-11-18 补 DSpark HTTP 入口时发现（哨兵 `cli_and_http_agreement` 解锁了
+      qwen35 的 greedy sweep）：`--model Qwen3.5-2B` 下 CLI `--thinking` 与
+      `--no-thinking` 的 prompt token ids **完全相同**（`[RUST_TOKENS]` 两次
+      一致——qwen35 的 legacy prompt builder 没有 thinking 槽位），而 HTTP
+      `build_prompt` 的路径对 `enable_thinking: true` 产出带 think 块的 prompt。
+      即 CLI 的 thinking flag 对 qwen35 家族是**静默丢弃**，同一请求两入口给出
+      不同输出（实测 thinking 模式下 CLI 直接答、HTTP 返回 think 块）。哨兵
+      目前对 qwen35 排除 thinking sweep（`tests/cli_http_agreement.rs` 带注释
+      指回本条）。修复方向：qwen35 的 CLI prompt builder 补 thinking 槽位与
+      HTTP 对齐，或文档化「thinking 仅在 HTTP 入口可用」。
 - [x] **lfm2moe 残余 1-ULP 贪心翻转** — ✅ **已定位根因并修复**（2026-10-15，LFM2.5-24B-A2B 适配期间）
       **先前的判断是错的**：它不是「greedy 下 top-2 logits 极接近时的 1-ULP 翻转」，而是一个
       **确定性的 shortconv 状态 bug**。完整 oracle 逐位对齐后，首个分歧 checkpoint 精确落在
@@ -5189,9 +5200,13 @@ Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
 接受率 0.58 vs 0.53，投机解码与 greedy 逐 token 相同）；**DSpark / DFlash
 sidecar 的起草侧与验证侧也已端到端实现**（`src/models/dflash/`，目标为
 `qwen35` 系：per-layer 输入 hidden 捕获 → DFlash 编码器注入 → 噪声块去噪 →
-Markov/conf 头 → 批量验证 + KV/状态回滚；CLI `--dspark-model`，与
-llama.cpp `b96806d` 的 `draft-dspark` 对同一 prompt 逐 token 一致）；EAGLE3 /
-standalone draft 仍未实现。
+Markov/conf 头 → 批量验证 + KV/状态回滚；**入口 CLI `--dspark-model` 与 HTTP
+`--serve --dspark-model` 都已接线**（`RuntimeOptions::with_dspark_model`，
+哨兵 `cli_and_http_agree_on_dspark_speculative_decode` 断言 CLI/HTTP 逐字节
+一致且与 greedy 输出相同）），与 llama.cpp `b96806d` 的 `draft-dspark` 对同一
+prompt 逐 token 一致，复现记录见
+[tools/oracle/dspark/README.md](../../tools/oracle/dspark/README.md)；EAGLE3 /
+standalone draft 仍未实现（standalone draft 已决定不做，见下）。
 
 **背景**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 是 2026-09-23 的设计稿。
 按上游 llama.cpp 的 pin `b96806d` 重新核对了一遍契约，并盘点了真实模型里
@@ -5231,42 +5246,28 @@ standalone draft 仍未实现。
 | Mistral-Large-4-1T-A52B | `dspark/` 4.21 GB | `dflash` |
 | MiniMax-M3.1-Flash | 根目录 `dspark-*.gguf` 2.09 GB | `dflash` |
 
-**本仓库现状**：
+**本仓库现状（2026-11-18，MTP 与 DSpark 均已落地）**：
 
-- `xing4_0` **已经解析**了 MTP block 的六个张量（`nextn_eh_proj` /
-  `nextn_embed_tokens` / `nextn_enorm` / `nextn_hnorm` /
-  `nextn_shared_head_head` / `nextn_shared_head_norm`，与上游 `blk.N.nextn.*`
-  契约一致），但**没有任何 forward 用它们**。
-- `qwen35` 的 config 有 `n_nextn`，并且**把 MTP 层排除在 trunk 之外**
-  （`n_layer_impl = n_layer - n_nextn`）。**Qwen3.8-27B 的主 GGUF 自带
-  `qwen35.nextn_predict_layers = 1` 与 `blk.64.nextn.*`**，所以它的 MTP 头现在
-  是**被静默忽略**的。
-- verify 侧的前向**已经够了**：`ChunkedPrefill::prefill` + per-row kernel
-  能一次算 `P + K` 个位置；缺的是 `forward_chunk` 的返回值要保留**全部**
-  `P + K` 行 logits（现在只留最后一行），以及接受循环。
-- 接受测试的形状有现成样板：`run_jev_grouped_decision` 的 per-group softmax。
+- **MTP（PR #241 / #250）**：`qwen35` 稠密档与 Vulkan 设备路径都已实现，见
+  TODO-072。Qwen3.8-27B 主 GGUF 自带的 `blk.64.nextn.*` 头由
+  `src/models/qwen35/trunk/mtp.rs` 使用，不再静默忽略。
+- **DSpark（PR #252）**：`src/models/dflash/` 起草 + `qwen35` trunk 层循环顶部
+  的 hidden 捕获 + `HybridSession` 的验证/回滚。CLI `--dspark-model` 与 HTTP
+  `--serve --dspark-model` 都走 `RuntimeOptions::with_dspark_model`：
+  `build_text_runtime` 对非 `qwen35` target 显式报错（flag 不静默丢弃），
+  设备路径显式报错，temp>0 / 带图请求在请求时显式报错。
+- **standalone draft（draft-simple）决定不做**：所有可跑 target 已有更强的
+  draft 轴（27B 有 MTP、2B 有 DSpark）；standalone 是谱系最弱形态（无 target
+  内部状态 + draft 自身 autoregressive），且缺跨 arch 的 KV 回滚基建。若未来
+  要加新轴，优先 n-gram（上游 `ngram-simple` / `ngram-map-k` 已有实现可对拍，
+  且不需要第二份权重）。
+- **设备路径的 DSpark 仍不可用**：Vulkan forward 无 per-layer 捕获
+  （`dspark_gpu_guard` 显式拒绝），是 TODO-072 之外的下一个设备侧活。
 
-**建议的第一步**：
-
-1. **先做 MTP，不做 DSpark。** MTP 只要主模型最后一层的 hidden state + 一层
-   block，不需要第二个模型、不需要新架构，`xing4_0` / `qwen35` 的权重已经在
-   仓库里了；DSpark 要整个第二模型 + Markov 链 + Confidence 头。
-2. **先量 verify 侧的收益。** 把 `forward_chunk` 扩成返回全部行，然后测
-   `P + K` 一次批量 prefill 相比 `K` 次单 token 到底省多少。收益小的话，
-   任何 draft 策略都回不了本 —— 这与设计稿里「先上 NGRAM 量基线」是同一条
-   推理。
-3. **hidden state 必须先可信。** draft 头吃的是主模型的最后一层 hidden
-   state，它继承主模型的误差；仓库现成的逐位对拍基础设施
-   （`RMI_PARITY_TRACE`、`tools/oracle/*`）正是用来查这件事的 —— 一个建在
-   未验证 hidden state 上的 draft 头，比没有 draft 头更糟。
-4. **首个目标选 Gemma-4**：本仓库已有 `gemma4` trunk，MTP sidecar 只有
-   0.06–0.95 GB，整个实验（头 + verify + 接受率测量）一个 gigabyte 就够。
-   但它的 MTP 形状（`pre_projection` / `post_projection`）与 DeepSeek 系不同，
-   设计通用 MTP 路径之前要先把上游 Gemma-4 的 draft 代码读一遍。
-
-**关联**：`docs/develop/SPECULATIVE_DECODING.md`、
-`src/models/xing4_0/trunk/weights.rs`、`src/models/qwen35/trunk/config.rs`、
-`src/core/prefill.rs`、`src/app/jev/grouped.rs`。
+**关联**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md)、
+[tools/oracle/dspark/README.md](../../tools/oracle/dspark/README.md)、
+`src/models/dflash/`、`src/models/qwen35/trunk/session.rs`、
+`src/app/text/runtime.rs`、TODO-072。
 
 ### TODO-070: Qwen3.8-27B 的 Vulkan 路径在 Q8_0 档下不可用（FFN 太宽）
 

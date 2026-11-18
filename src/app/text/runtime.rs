@@ -83,6 +83,11 @@ pub struct RuntimeOptions {
     /// How many tokens the MTP draft head may propose per speculative
     /// decoding round. Zero keeps the one-token-at-a-time decode.
     pub mtp_draft: usize,
+    /// Optional DFlash / DSpark sidecar GGUF (the CLI's `--dspark-model`):
+    /// a draft model that proposes blocks of tokens the target verifies in
+    /// a single forward pass. Only the `qwen35` trunk target is supported,
+    /// and only greedy, text-only requests take the speculative path.
+    pub dspark_model: Option<Arc<dyn TensorSource>>,
 }
 
 impl RuntimeOptions {
@@ -103,12 +108,21 @@ impl RuntimeOptions {
             tokenizer,
             mmproj: None,
             mtp_draft: 0,
+            dspark_model: None,
         }
     }
 
     /// Turn the decode into a speculative one with the MTP draft head.
     pub fn with_mtp_draft(mut self, n_drafts: usize) -> Self {
         self.mtp_draft = n_drafts;
+        self
+    }
+
+    /// Turn the decode into a speculative one driven by a DFlash / DSpark
+    /// sidecar. The sidecar takes over drafting from the MTP head when both
+    /// are set (the CLI's rule).
+    pub fn with_dspark_model(mut self, sidecar: Option<Arc<dyn TensorSource>>) -> Self {
+        self.dspark_model = sidecar;
         self
     }
 
@@ -185,6 +199,30 @@ pub fn build_text_runtime(
         return Err(format!(
             "{arch} has no vision path; --mmproj/--image are not supported"
         ));
+    }
+    if options.dspark_model.is_some() {
+        // The DSpark verify path is the qwen35 trunk session's per-layer
+        // capture; an arch without it would silently drop the flag, so it is
+        // rejected here — this is the single dispatch point every entry
+        // (CLI / HTTP / tests) goes through. The verified target is the
+        // dense `qwen35` trunk; `qwen35moe` rides the same trunk forward but
+        // has no verified sidecar pairing yet.
+        if arch != "qwen35" {
+            return Err(format!(
+                "--dspark-model needs the qwen35 trunk target; architecture {arch} has no \
+                 DSpark verify path"
+            ));
+        }
+        // The device forward does not capture the per-layer inputs the
+        // draft's encoder needs (the device-parity TODO), so the strict
+        // device policy with a sidecar is an error, not a fallback.
+        if policy == crate::compute::ComputePolicy::Vulkan {
+            return Err(
+                "--dspark-model needs the CPU target path: the Vulkan forward does not \
+                 capture the per-layer hidden states the draft encodes"
+                    .into(),
+            );
+        }
     }
     let _scope = policy.enter_legacy_scope();
     let inner: Box<dyn TextRuntime> = if crate::app::text::uses_llama_trunk(arch) {
@@ -804,6 +842,9 @@ pub struct HybridTextRuntime {
     max_context: usize,
     /// Tokens the MTP draft head may propose per round; zero disables it.
     mtp_draft: usize,
+    /// DFlash / DSpark sidecar source (`--dspark-model`); `None` keeps the
+    /// plain / MTP decode.
+    dspark: Option<Arc<dyn TensorSource>>,
 }
 
 impl HybridTextRuntime {
@@ -819,6 +860,20 @@ impl HybridTextRuntime {
             if let Some(mmproj) = &options.mmproj {
                 crate::models::sensenova_loop::validate_projector(mmproj.as_ref())?;
             }
+        }
+        // Validate the DSpark sidecar at construction: a file that is not a
+        // DFlash/DSpark GGUF, or a target without the shared embedding
+        // table, fails here (the server's startup) instead of the first
+        // request. The per-request generation re-loads these weight structs
+        // — a `DflashSession` is one conversation's draft state (scratch +
+        // Markov chain), and the loads are zero-copy borrows over the mmaps.
+        if let Some(sidecar) = &options.dspark_model {
+            crate::models::dflash::trunk::weights::load_weights(sidecar.as_ref())?;
+            crate::models::dflash::trunk::weights::load_weight(
+                source.as_ref(),
+                "token_embd.weight",
+            )
+            .ok_or("the target model has no token_embd.weight for the DSpark sidecar")?;
         }
         let mut model = crate::models::hybrid::HybridTextModel::from_source(source.as_ref())?;
         if options.compute == crate::compute::ComputePolicy::Vulkan {
@@ -846,6 +901,7 @@ impl HybridTextRuntime {
             arch,
             max_context: options.max_context,
             mtp_draft: options.mtp_draft,
+            dspark: options.dspark_model,
         })
     }
 }
@@ -952,11 +1008,41 @@ impl TextRuntime for HybridTextRuntime {
         } else {
             self.prepare_image_prefill(&request.token_ids, &request.images)?
         };
+        // The DSpark sidecar takes over drafting when one is attached: the
+        // per-round budget is the MTP count when both flags are set (the
+        // CLI's rule) and otherwise the DSpark block size default of 8,
+        // clamped by the sidecar's trained block size at draft time.
+        let dspark_drafts = if self.dspark.is_some() {
+            if self.mtp_draft > 0 {
+                self.mtp_draft
+            } else {
+                8
+            }
+        } else {
+            0
+        };
+        if dspark_drafts > 0 {
+            // The CLI's guards, as request-time errors: the sidecar embeds
+            // the prompt tokens itself through the target's embedding
+            // table, so an image prompt (whose rows are projected vision
+            // embeddings) cannot use it, and a sampled token would need a
+            // rejection scheme the sidecar path does not implement.
+            if !request.images.is_empty() {
+                return Err(
+                    "--dspark-model needs a text-only prompt: the vision path expands the \
+                     prompt into projected embedding rows"
+                        .into(),
+                );
+            }
+            if request.sampling.temperature > 0.0 {
+                return Err("--dspark-model needs greedy decoding (temperature 0)".into());
+            }
+        }
         // The speculative path writes the KV of the drafted tokens before it
         // knows whether the target accepts them, so the cache needs room for
         // one round of drafts on top of the committed tokens.
-        let mtp_overhead = if self.mtp_draft > 0 {
-            self.mtp_draft + 1
+        let mtp_overhead = if self.mtp_draft > 0 || dspark_drafts > 0 {
+            self.mtp_draft.max(dspark_drafts) + 1
         } else {
             0
         };
@@ -992,13 +1078,14 @@ impl TextRuntime for HybridTextRuntime {
         let mut text = String::new();
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
-        // The speculative path below commits several tokens per round, so
-        // the one-token-at-a-time loop runs zero times when it is on.
+        // The speculative paths below commit several tokens per round, so
+        // the one-token-at-a-time loop runs zero times when either is on.
         let mtp_enabled = self.mtp_draft > 0
+            && dspark_drafts == 0
             && request.sampling.temperature <= 0.0
             && request.images.is_empty()
             && prefill_embeddings.is_none();
-        let plain_steps = if mtp_enabled {
+        let plain_steps = if mtp_enabled || dspark_drafts > 0 {
             0
         } else {
             request.max_new_tokens
@@ -1053,6 +1140,66 @@ impl TextRuntime for HybridTextRuntime {
                 generation.rounds,
                 generation.accepted,
                 generation.drafted
+            );
+            for id in generation.tokens {
+                if eos_id == Some(id) || im_end_id == Some(id) {
+                    finish = Finish::Eos;
+                    break;
+                }
+                token_ids.push(id);
+                let chunk = decoder.push(id);
+                if !chunk.is_empty() {
+                    text.push_str(&chunk);
+                    if sink.push_text(&chunk) == Flow::Stop {
+                        finish = Finish::Cancelled;
+                        break;
+                    }
+                }
+            }
+        }
+        if dspark_drafts > 0 {
+            // The DSpark speculative path: the sidecar proposes a block of
+            // tokens in one pass and the target checks them in a single
+            // forward. The sidecar shares the target's embedding table
+            // (llama.cpp's `ctx_other`); its session is rebuilt per request
+            // because a `DflashSession` is one conversation's draft state
+            // and the weight structs are zero-copy borrows over the two
+            // mmaps the runtime already holds.
+            let ids: Vec<u32> = prefill_ids
+                .iter()
+                .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+                .collect::<Result<Vec<u32>, String>>()?;
+            let sidecar = self
+                .dspark
+                .as_ref()
+                .expect("dspark_drafts > 0 implies a sidecar");
+            let dflash_weights =
+                crate::models::dflash::trunk::weights::load_weights(sidecar.as_ref())?;
+            let token_embd = crate::models::dflash::trunk::weights::load_weight(
+                self._source.as_ref(),
+                "token_embd.weight",
+            )
+            .ok_or("the target model has no token_embd.weight for the DSpark sidecar")?;
+            let mut dflash = crate::models::dflash::DflashSession::new(
+                dflash_weights,
+                token_embd,
+                self.pool.n_threads(),
+                capacity,
+                self.prefill_batch_size.max(dspark_drafts + 1),
+            );
+            let generation = session.dspark_generate(
+                &mut dflash,
+                &ids,
+                &prefill_positions,
+                request.max_new_tokens,
+                dspark_drafts,
+            )?;
+            log::info!(
+                "[dspark] {} rounds, {}/{} drafts accepted ({:.1}%)",
+                generation.rounds,
+                generation.accepted,
+                generation.drafted,
+                100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
             );
             for id in generation.tokens {
                 if eos_id == Some(id) || im_end_id == Some(id) {
@@ -1372,6 +1519,31 @@ mod tests {
         );
     }
 
+    /// A `--dspark-model` sidecar attached to an arch whose forward does not
+    /// capture the per-layer hidden states the draft encodes must fail the
+    /// single dispatch point — the flag may never be silently dropped by an
+    /// entry that does not implement the verify path.
+    #[test]
+    fn dspark_sidecar_is_rejected_outside_the_qwen35_trunk() {
+        use super::*;
+        for arch in ["llama", "qwen3", "qwen35moe", "edge0", "sensenova_loop"] {
+            let options = RuntimeOptions::from_model(
+                Arc::new(StubSource),
+                Arc::new(crate::core::thread_pool::ComputePool::new(1)),
+                Arc::new(stub_tokenizer()),
+            )
+            .with_dspark_model(Some(Arc::new(StubSource)));
+            let error = match build_text_runtime(arch, options) {
+                Err(error) => error,
+                Ok(_) => panic!("the dspark gate must fire before any model loading ({arch})"),
+            };
+            assert!(
+                error.contains("--dspark-model") && error.contains(arch),
+                "arch {arch}: {error}"
+            );
+        }
+    }
+
     fn tiny_hybrid_runtime(arch: &str, max_context: usize) -> super::HybridTextRuntime {
         use super::*;
         let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
@@ -1388,6 +1560,7 @@ mod tests {
             arch: arch.into(),
             max_context,
             mtp_draft: 0,
+            dspark: None,
         }
     }
 

@@ -94,6 +94,7 @@ pub fn run_inference(
             tokenizer: tokenizer.clone(),
             mmproj: None,
             mtp_draft: 0,
+            dspark_model: None,
         },
     )?;
 
