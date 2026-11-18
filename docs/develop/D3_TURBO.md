@@ -118,6 +118,16 @@ Auto may fall back to CPU after a device failure. Strict Vulkan errors instead
 of reporting a successful CPU execution. Neither fallback nor correct rejection
 counts as GPU support passing.
 
+A supplementary strict-Vulkan rerun on a separate, unattributed machine with
+one Vulkan-capable GPU completed the text, media, JEV and batch entries through
+both CLI and HTTP with the locally converted bf16 GGUF, within the fixed
+tolerances and without device loss. Weights are streamed per projection and
+scan/norm/softmax stay on the CPU, so this is not full residency and is slower
+than the 48-thread CPU path; the q8_0 GGUF completed too, but reproduces the
+known q8_0 format deviation. Layer 3 stays open for the AMD RADV NAVI31 device
+loss and the per-format matrix. Evidence:
+[vulkan-supplementary.json](../../tools/oracle/d3_turbo/vulkan-supplementary.json).
+
 ## Same-host diagnostic timings
 
 Eight-thread, 117-token text-choice runs on the authorized EPYC 9334 / NAVI31

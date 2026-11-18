@@ -219,6 +219,47 @@ softmax and small projections on CPU. Complete working GPU execution remains
 correct strict errors and Auto fallback do not count as GPU acceptance. Owner:
 shared Vulkan/kernel maintainers, followed by the D3 adapter matrix rerun.
 
+## Supplementary strict Vulkan rerun
+
+A separate, unattributed test machine with one Vulkan-capable GPU was used to
+run the locally converted bf16 GGUF through `--compute vulkan` (strict: a device
+failure aborts, no CPU fallback) with 8 threads. The device was also serving an
+unrelated workload during the run. Every tested entry completed without device
+loss, and the HTTP responses match the CLI responses bit for bit:
+
+| Entry | CLI seconds | HTTP seconds | Max abs delta vs entries | Raw tolerance |
+| --- | --- | --- | --- | --- |
+| text (choice/noul/score) | 755.8 | 754.5 | 3.1e-6 | pass |
+| image | 291.7 | 258.4 | 2.0e-9 | pass |
+| video | 304.0 | 257.5 | 9.5e-7 | pass |
+| box | 303.8 | 261.9 | 7.5e-7 | pass |
+| video box | 266.4 | 260.9 | 3.3e-7 | pass |
+| track | 613.9 | 519.8 | 5.3e-7 | pass |
+| JEV text | 251.9 | 252.0 | 2.2e-7 | pass |
+| JEV image | 246.3 | 260.3 | 1.1e-8 | pass |
+| batch | n/a | 262.7 | 2.0e-9 | pass |
+| Auto, JEV text | 253.5 | n/a | 2.2e-7 | pass |
+
+Weights stream through per-projection arenas: resident VRAM moved by only about
+370 MiB and device utilisation was bursty, because scan, norms, softmax and
+small projections still run on the CPU. These timings are slower than the
+48-thread CPU path and are not performance acceptance.
+
+The same run with a locally converted q8_0 GGUF also completed and matched the
+CLI output bit for bit over HTTP, but its final answers exceed the raw-model
+tolerance (text 1.9e-2, track 9.3e-3, video 5.5e-3, box 2.7e-3, video box
+3.6e-3, JEV text 5.5e-3; image and JEV image stayed inside). The CPU q8_0 model
+reproduces the same deviation, and the GPU text output equals the CPU q8_0
+output exactly, so this is the known q8_0 format gate rather than a device
+failure.
+
+This supplementary rerun does not close layer 3: the upstream AMD RADV NAVI31
+device loss was not retested, full device residency is not implemented, and only
+bf16 and q8_0 were run. Commands, gitignored fixture hashes, per-case deltas and
+the GPU monitor summary are in
+[vulkan-supplementary.json](vulkan-supplementary.json). `coverage.csv` keeps the
+upstream matrix and is not rewritten from this host.
+
 ## Boundaries and self-review
 
 Cross-model changes are limited to facilities already shared with Vela D3 and
