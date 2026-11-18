@@ -3,7 +3,8 @@
 **Experimental / partial acceptance. BF16 CPU alignment passed at 16×16 / 5 frames.**
 The remaining format/backend/transport gates are incomplete in [matrix.json](matrix.json).
 Observed summaries are retained in [observed-results.json](observed-results.json);
-remote raw sidecars could not be retrieved after a second SSH interruption.
+model raw sidecars could not be retrieved after SSH interruptions. Final Linux
+engineering logs from the fresh replacement host were retrieved separately.
 JEV and text-token streaming do not apply to this video-generation contract.
 
 ## Real-model evidence
@@ -30,10 +31,13 @@ It does not establish final RGB/MP4 quality or other storage formats.
   The F32 manifest was observed, but its hash was not retrieved. Q8 conversion was
   running when the replacement endpoint disconnected. Remaining formats are unverified.
 
-The earlier “no real-model evidence” statement was superseded after the user
-provided a replacement endpoint. That endpoint later refused connections too;
-final task results and remote raw artifacts remain unavailable. The completed
-BF16 CPU result remains evidence for its measured revision, not an unrun final rerun.
+The completed BF16 CPU result remains evidence for its measured revision, not
+an unrun final rerun. A fresh replacement container subsequently completed all
+direct ModelScope downloads, final model/tokenizer tests and the final native
+Vulkan/parity build. It also disconnected during BF16 conversion, before any new
+full-model result was observed. Release-build and conversion completion are unknown;
+the disconnect is not diagnosed as OOM. Retrieved engineering logs are under
+`target/fastframes/port36085/`; no model payloads were copied to the Mac.
 
 ## Assets and host
 
@@ -62,13 +66,15 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | Check | Observed result |
 | --- | --- |
 | Native model tests, macOS arm64 | 13 passed / 1 ignored after the tokenizer and F32 borrowing fixes. |
+| Final native model tests, fresh Linux host | 13 passed / 1 ignored on commit `f61e7833f6c86a834e3ae3c68d0b9eefcaee173b`, built with Vulkan/parity trace; the pinned real-tokenizer test passed separately. |
 | Transport validation | Two tests passed for unsupported flags, geometry, unknown JSON fields and CLI/server boundaries. |
 | Real tokenizer, Linux | 11 official fixture cases including Unicode, mojibake, HTML, ANSI and truncation; RED on the incorrect vocabulary assumption, then GREEN. Tokenizer has 256,300 entries, embedding has 256,384 rows. |
-| Python converter/comparator/streaming, Linux | 10 passed, including parallel/serial encoded-byte equality, streamed reload and F16/Q4_1 activation semantics. |
+| Python converter/comparator/streaming, Linux | Final fresh-host run: 11 passed, including exact shared noise, parallel/serial encoded-byte equality, streamed reload and F16/Q4_1 activation semantics. Earlier host: 10 passed before the noise gate. |
 | Comparator noise gate, macOS | 3 passed; differing input noise is rejected even if inside floating tolerances. |
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
-| Latest Linux Vulkan/parity binaries | Built successfully before final F32-only mmap-loader repair. |
+| Latest Linux Vulkan/parity binaries | All nine bins built successfully on the fresh replacement host with the final F32 mmap-loader repair. The separate release build was interrupted; completion is unknown. |
+| GitHub CI | Run `44335831236` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing

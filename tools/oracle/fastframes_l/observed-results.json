@@ -1,7 +1,7 @@
 {
   "date": "2026-11-18",
   "status": "Experimental / partial acceptance",
-  "evidence_kind": "Observed command results; remote raw artifacts could not be retrieved after SSH disconnected",
+  "evidence_kind": "Observed model command results and retrieved final Linux engineering logs; model raw artifacts could not be retrieved after SSH disconnected",
   "host": {"logical_cpus":128,"physical_ram_gib_approx":503,"cgroup_memory_limit_bytes":59055800320,"gpu":"AMD Radeon Graphics (RADV NAVI31), gfx1100","vram_gib_approx":48},
   "bf16_gguf": {"size":41892093248,"sha256":"d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9"},
   "f16_gguf": {"size":41892093248,"sha256":"ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39"},
@@ -32,5 +32,20 @@
     {"recipe":"same-GGUF BF16 storage controlled F32","device":"cuda","elapsed_seconds":190.21348341926932}
   ],
   "timing_limit":"Both include streamed weights and checkpoint/RGB I/O; they are not benchmark or speedup results",
-  "interruption":"The replacement SSH endpoint first worked, then began returning Connection refused; no remote recovery mutation was attempted"
+  "fresh_host_final_checks": {
+    "source_head":"f61e7833f6c86a834e3ae3c68d0b9eefcaee173b",
+    "model_tests":{"passed":13,"failed":0,"ignored":1},
+    "real_tokenizer_test":{"passed":1,"failed":0,"fixture_cases":11},
+    "python_converter_comparator_streaming_tests":{"passed":11,"failed":0},
+    "all_bin_release_fast_vulkan_parity_build":"passed, including final F32 mmap-loader repair",
+    "source_downloads":"All four model components and tokenizer assets completed directly through ModelScope on remote storage",
+    "tokenizer_assets_sha256":"All four match reference-files.json",
+    "conversion":"BF16 started; final completion unknown after disconnection",
+    "release_build":"Started; completion unknown after disconnection",
+    "full_model_rerun":"No completed result observed",
+    "retrieved_small_logs":"target/fastframes/port36085/",
+    "model_payloads_on_mac":false
+  },
+  "github_ci":{"head":"f61e7833f6c86a834e3ae3c68d0b9eefcaee173b","run":44335831236,"conclusion":"success","jobs":["Rustfmt","x86 dispatch regressions","Vulkan compile and shaders"]},
+  "interruption":"Replacement SSH endpoints worked, then returned Connection refused; the latest fresh host disconnected during conversion. The cause is unknown; no OOM diagnosis or remote recovery mutation is claimed."
 }

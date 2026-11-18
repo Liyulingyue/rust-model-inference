@@ -1,7 +1,7 @@
 {
   "date": "2026-11-18",
   "status": "未运行",
-  "reason": "Replacement SSH endpoint disconnected; no clean repeated native/reference benchmark completed.",
+  "reason": "Replacement SSH endpoints disconnected; the latest fresh host disconnected during conversion/release build. No clean repeated native/reference benchmark completed.",
   "host": {
     "logical_cpus": 128,
     "ram_gib_approx": 503,

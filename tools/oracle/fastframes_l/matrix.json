@@ -4,7 +4,7 @@
   "status": "Experimental / partial",
   "architecture": "fastframes_l",
   "validation": "部分通过 / 其余未运行",
-  "reason": "BF16 CPU same-GGUF alignment passed; replacement SSH endpoint disconnected during remaining acceptance.",
+  "reason": "Earlier BF16 CPU same-GGUF alignment passed. Final Linux engineering checks passed on a fresh replacement host, which disconnected during conversion before new full-model acceptance results were observed.",
   "compute_precision": "F32 activation/KV storage and accumulation; F16 projection inputs round to F16, block formats use shared Q8 prepared inputs.",
   "command_parameters": {
     "model": "/root/rust-model-inference-fastframes/models/FastFrames-L-{format}.gguf",
