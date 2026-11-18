@@ -5955,8 +5955,17 @@ F32 档能加载并出图 ✓✓（CPU 13.4~15.4 s ✓✓ / 设备 5.2~5.4 s ✓
 | 8 次 | **5 个** | 多数输出占 4/8 ✓✓ |
 | 6 次（1 步） | **2 个** | ⇒ 不是跨步的状态 ✓✓ |
 | 8 次（`RUST_GPU_ATTENTION=0`） | **1 个** | ⇒ **分叉在设备的 attention** ✓✓ |
-| 8 次（`RUST_GPU_F16=0`） | **5 个** | ⇒ 与融合的 QKV/RoPE 无关 ✓✓ |
+| 8 次（`RUST_GPU_F16=0`） | **5 个** | ⇒ 与 refiner 走 CPU 行路径无关 ✓✓ |
 | 6 次（`RUST_GPU_TILED=0`） | **4 个** | ⇒ 与 tiled matmul 无关 ✓✓ |
+| 8 次（attention 链三段各自单独提交） | **4 个** | ⇒ **段与段之间的屏障不是问题** ✓✓ |
+| 8 次（`SPLIT_FFN=1`） | **5 个** | ⇒ 不是 FFN 链的提交粒度 ✓✓ |
+| 8 次（`FFN_BATCH_MAX=0`，FFN 不批量） | **5 个** | ⇒ 不是批量 FFN 链 ✓✓ |
+
+⇒ **把 attention 链的三段（`kv_write` → `attention_scores_tiled` → `softmax` →
+`attention_values`）改成各自单独提交并等待，不确定性不变** ✓✓；把 FFN 链拆开也不变 ✓✓
+⇒ **竞态在单个 dispatch 内部** ✓✓ ⇒ 只剩 Z-Image 专有的那几个着色器 ✓✓：
+`attention_scores_tiled.comp` ✓✓ 与 `qk_norm_rope_interleaved.comp` ✓✓
+（ERNIE 走的是标准的 `attention_scores.comp` + 同一份 softmax/values ✓✓，而它是确定的 ✓✓）。
 
 ⇒ 差异幅度从**末位舍入**（PSNR 65.6 dB、max_abs 1 ✓✓）到**整张图都不同**
 （PSNR 23.1 dB、max_abs 154 ✓✓）都有 ✓✓ ⇒ 不是固定的某个系数写错 ✓✓，
@@ -5976,16 +5985,19 @@ F32 档能加载并出图 ✓✓（CPU 13.4~15.4 s ✓✓ / 设备 5.2~5.4 s ✓
 （`record_diy_attention_full` ✓✓，全部录进**同一个** command buffer ✓✓，
 中间只有 `compute_barrier` ✓✓）。
 
-**还没排除** ✓✓：四段里是哪一段 ✓✓，或者 `compute_barrier` 的
-`src_access_mask = SHADER_WRITE` ✓✓ 对**读后写**（WAR）的场景不够 ✓✓ ——
-softmax 那一段正好是「读分数、写回概率」 ✓✓。
+**还没排除** ✓✓：那两个着色器里是哪一个 ✓✓，或者里面的哪一段 ✓✓。
+两个着色器的 barrier 看着都是齐的 ✓✓（`attention_scores_tiled.comp` 每个 key 段前后各一个
+✓✓、两遍折叠之间一个 ✓✓；`qk_norm_rope_interleaved.comp` 的归一化读写之间一个 ✓✓），
+所以要么漏的是某一种**跨 dispatch 的读写依赖** ✓✓，要么是着色器里有一条没看见的路径 ✓✓。
 
 **下一步** ✓✓：
 
-1. 在四段之间插 `submit_and_wait`（而不是只 `barrier`）✓✓，
-   看不确定性能不能消失 —— 能消失就是屏障/可见性问题 ✓✓，不能就是某个着色器内部 ✓✓。
-2. 若定位到着色器 ✓✓，把该段单独抽出来做「同一输入跑 N 次」的算子级测试 ✓✓
-   （仓库已有 `vulkan::ops::tests` 一类的算子测试 ✓✓，可以照那个形状写 ✓✓）。
+1. **算子级测试**：把 `attention_scores_tiled` 这一段单独抽出来，同一份输入连跑 N 次 ✓✓，
+   比对输出 ✓✓（`src/vulkan/zimage_probe.rs` 已经演示了怎么手工摆 arena ✓✓，
+   `Qwen3Ops::new_device_local_with_size` + 手摆 region 就能复现那一段 ✓✓）。
+   N 次都相同 ⇒ 竞态在着色器之间 ✓✓；N 次里有不同 ⇒ 就是这个着色器 ✓✓。
+2. 同样地单测 `qk_norm_rope_interleaved` ✓✓（它的归一化是**单 lane 串行**的 ✓✓，
+   按理最不容易出错 ✓✓，所以更可能是**跨 dispatch** 的问题 ✓✓）。
 3. 修好之前，**文档里不能再写「同一 seed 两次设备运行逐位相同」** ✓✓ ——
    那句话是**样本太少**得出的 ✓✓（同一份二进制连跑 3 次恰好相同 ✓✓），
    已更正 ✓✓（`docs/MODEL_LIST.md` ✓✓、`docs/develop/SUPPORTED_MODELS.md` ✓✓）。
