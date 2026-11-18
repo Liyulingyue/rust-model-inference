@@ -6,7 +6,7 @@
 //! DSpark heads — the Markov head that biases each block position's logits by
 //! the previously committed token, and the confidence head that estimates
 //! acceptance for the `p_min` gate. See
-//! [`docs/develop/SPECULATIVE_DECODING.md`](../docs/develop/SPECULATIVE_DECODING.md)
+//! [`docs/develop/SPECULATIVE_DECODING.md`](../../../docs/develop/SPECULATIVE_DECODING.md)
 //! for the upstream contract and the driving loop.
 //!
 //! The draft is never a primary model: the target loads it alongside itself

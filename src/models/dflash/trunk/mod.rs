@@ -1,6 +1,6 @@
 //! DFlash / DSpark draft trunk.
 //!
-//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
+//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/develop/MODEL_ORGANIZATION.md) §2:
 //! - `config.rs` — `DflashConfig`
 //! - `weights.rs` — `DflashWeights`, `DflashLayerWeights`, the Markov table
 //!   and the load helpers
