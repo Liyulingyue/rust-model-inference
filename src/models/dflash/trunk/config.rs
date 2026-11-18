@@ -104,9 +104,7 @@ impl DflashConfig {
     /// `n_vocab` (the target's) and `n_vocab_draft` come from the Markov
     /// head's two matrices rather than from metadata: `markov_w1` is indexed
     /// by target token id and `markov_w2` by draft row.
-    pub fn from_source<S: TensorSource + ?Sized>(
-        source: &S,
-    ) -> Result<Self, String> {
+    pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
         let prefix = "dflash";
         let get = |key: &str| -> Result<u64, String> {
             u64_of(source.metadata(&format!("{prefix}.{key}")))
@@ -136,25 +134,26 @@ impl DflashConfig {
             .and_then(|value| value.to_f64())
             .map(|value| value as f32)
             .unwrap_or(10_000.0);
-        let rope_dimension_count = u64_of(source.metadata(&format!("{prefix}.rope.dimension_count")))
-            .unwrap_or(n_embd_head_k as u64) as usize;
+        let rope_dimension_count =
+            u64_of(source.metadata(&format!("{prefix}.rope.dimension_count")))
+                .unwrap_or(n_embd_head_k as u64) as usize;
 
         // The rotary axes are given in pairs and must add up to half of the
         // rotated dimensions. A file with no sections at all is a plain
         // (non-multimodal) draft.
-        let rope_sections = match read_u64_array(source, &format!("{prefix}.rope.dimension_sections"))
-        {
-            Some(values) if values.len() == 4 => [
-                values[0] as i32,
-                values[1] as i32,
-                values[2] as i32,
-                values[3] as i32,
-            ],
-            _ => {
-                let pairs = (rope_dimension_count / 2) as i32;
-                [pairs, 0, 0, 0]
-            }
-        };
+        let rope_sections =
+            match read_u64_array(source, &format!("{prefix}.rope.dimension_sections")) {
+                Some(values) if values.len() == 4 => [
+                    values[0] as i32,
+                    values[1] as i32,
+                    values[2] as i32,
+                    values[3] as i32,
+                ],
+                _ => {
+                    let pairs = (rope_dimension_count / 2) as i32;
+                    [pairs, 0, 0, 0]
+                }
+            };
 
         let sliding_window = u64_of(source.metadata(&format!("{prefix}.attention.sliding_window")))
             .unwrap_or(0) as usize;
@@ -178,11 +177,10 @@ impl DflashConfig {
         };
         // The mask token: the noise block is [anchor, MASK, ...]. It is an id
         // in the target's vocabulary, whose embedding table the draft shares.
-        let mask_token = u64_of(source.metadata("tokenizer.ggml.mask_token_id"))
-            .ok_or_else(|| {
+        let mask_token =
+            u64_of(source.metadata("tokenizer.ggml.mask_token_id")).ok_or_else(|| {
                 "DFlash draft requires 'tokenizer.ggml.mask_token_id' in its GGUF".to_string()
-            })?
-            as u32;
+            })? as u32;
         let has_confidence_head = match source.metadata(&format!("{prefix}.has_confidence_head")) {
             Some(MetaValue::Bool(value)) => *value,
             Some(MetaValue::String(value)) => value == "true",

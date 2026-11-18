@@ -1720,8 +1720,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         }
         if !self.scratch.dspark_active {
             return Err(
-                "the DSpark capture is not configured: prefill_with_dspark must run first"
-                    .into(),
+                "the DSpark capture is not configured: prefill_with_dspark must run first".into(),
             );
         }
         // The draft: the sidecar denoises one block after the anchor.

@@ -80,13 +80,7 @@ fn matmul_group<const N: usize>(
 /// The layout is `[layer][position][kv head][dimension]`; positions are
 /// linear (they never exceed the cache capacity, which the caller sizes to
 /// the target's context).
-fn store_kv(
-    kv: &mut DflashKvState,
-    layer: usize,
-    position: usize,
-    k: &[f32],
-    v: &[f32],
-) {
+fn store_kv(kv: &mut DflashKvState, layer: usize, position: usize, k: &[f32], v: &[f32]) {
     let stride = kv.kv_stride;
     let at = layer * kv.capacity * stride + position * stride;
     kv.k[at..at + stride].copy_from_slice(&k[..stride]);
@@ -154,14 +148,8 @@ pub(crate) fn inject_target_features(
             rows,
             n_embd,
             [
-                (
-                    &layer.wk,
-                    &mut scratch.k[..rows * scratch.n_embd_gqa],
-                ),
-                (
-                    &layer.wv,
-                    &mut scratch.v[..rows * scratch.n_embd_gqa],
-                ),
+                (&layer.wk, &mut scratch.k[..rows * scratch.n_embd_gqa]),
+                (&layer.wv, &mut scratch.v[..rows * scratch.n_embd_gqa]),
             ],
             &mut scratch.prepared,
             pool,
@@ -222,9 +210,7 @@ pub(crate) fn decode_block(
         return Ok(());
     }
     if positions.len() != rows {
-        return Err(
-            "DFlash decoder got a different number of positions than tokens".to_string()
-        );
+        return Err("DFlash decoder got a different number of positions than tokens".to_string());
     }
     if rows > scratch.max_rows {
         return Err(format!(
@@ -328,15 +314,7 @@ pub(crate) fn decode_block(
             );
         }
 
-        attention(
-            weights,
-            layer_index,
-            rows,
-            positions,
-            kv,
-            scratch,
-            pool,
-        )?;
+        attention(weights, layer_index, rows, positions, kv, scratch, pool)?;
 
         // The output projection and the residual.
         matmul(
@@ -450,7 +428,7 @@ pub(crate) fn decode_block(
     } else {
         if head.n_out != scratch.n_vocab {
             return Err(
-                "DFlash draft head width does not match the sampler vocabulary".to_string()
+                "DFlash draft head width does not match the sampler vocabulary".to_string(),
             );
         }
         for row in 0..rows {
@@ -535,8 +513,7 @@ fn attention(
                 };
                 for (index, slot) in scores[..visible].iter_mut().enumerate() {
                     let at = layer_base + (lo + index) * stride + kv_head * n_embd_head;
-                    let key =
-                        unsafe { std::slice::from_raw_parts(k_ptr.add(at), n_embd_head) };
+                    let key = unsafe { std::slice::from_raw_parts(k_ptr.add(at), n_embd_head) };
                     *slot = crate::ops::dot::dot_f32(query, key, n_embd_head) * kq_scale;
                 }
                 crate::ops::softmax::softmax_inplace(&mut scores[..visible]);
@@ -544,8 +521,7 @@ fn attention(
                 for dimension in 0..n_embd_head {
                     let mut value = 0.0f32;
                     for index in 0..visible {
-                        let at =
-                            layer_base + (lo + index) * stride + kv_head * n_embd_head;
+                        let at = layer_base + (lo + index) * stride + kv_head * n_embd_head;
                         value += scores[index] * unsafe { *v_ptr.add(at + dimension) };
                     }
                     unsafe { *attn_ptr.add(out_at + dimension) = value };

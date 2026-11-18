@@ -2177,11 +2177,9 @@ pub(super) fn run_multimodal_with_video_ref(
         .map_err(|error| error.to_string())?;
         let dflash_weights =
             crate::models::dflash::trunk::weights::load_weights(sidecar_source.as_ref())?;
-        let token_embd = crate::models::dflash::trunk::weights::load_weight(
-            llm_source,
-            "token_embd.weight",
-        )
-        .ok_or("the target model has no token_embd.weight for the DSpark sidecar")?;
+        let token_embd =
+            crate::models::dflash::trunk::weights::load_weight(llm_source, "token_embd.weight")
+                .ok_or("the target model has no token_embd.weight for the DSpark sidecar")?;
         let mut dflash = crate::models::dflash::DflashSession::new(
             dflash_weights,
             token_embd,

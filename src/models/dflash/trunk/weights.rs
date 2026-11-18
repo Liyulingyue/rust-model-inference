@@ -212,9 +212,7 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
             Some(weight)
         }
         other => {
-            eprintln!(
-                "WARNING: unsupported quant type {other:?} for tensor {name} (DFlash draft)"
-            );
+            eprintln!("WARNING: unsupported quant type {other:?} for tensor {name} (DFlash draft)");
             None
         }
     }
@@ -234,9 +232,7 @@ fn load_vec<'a, S: TensorSource + ?Sized>(
         .ok_or_else(|| format!("DFlash draft is missing {name}"))?;
     let count = info.dims.first().copied().unwrap_or(0) as usize;
     if count != expected {
-        return Err(format!(
-            "{name}: expected {expected} values, got {count}"
-        ));
+        return Err(format!("{name}: expected {expected} values, got {count}"));
     }
     match info.ggml_type {
         GGMLType::F32 => {
@@ -258,7 +254,9 @@ fn load_vec<'a, S: TensorSource + ?Sized>(
             }
             Ok(out)
         }
-        other => Err(format!("{name}: unsupported quant type {other:?} for a norm")),
+        other => Err(format!(
+            "{name}: unsupported quant type {other:?} for a norm"
+        )),
     }
 }
 
@@ -321,21 +319,18 @@ pub fn load_weights<'a, S: TensorSource + ?Sized>(
     // The head projects onto the draft's own vocabulary, which may be a
     // reduced one; without it the target's head is shared.
     let output = load_weight(source, "output.weight");
-    let n_vocab_draft = config.n_vocab_draft.max(
-        output
-            .as_ref()
-            .map(|weight| weight.n_out)
-            .unwrap_or(0),
-    );
+    let n_vocab_draft = config
+        .n_vocab_draft
+        .max(output.as_ref().map(|weight| weight.n_out).unwrap_or(0));
 
-    let markov_w1 = source.tensor_info("markov_w1.weight").map(|info| MarkovTable {
-        bytes: source
-            .tensor_slice("markov_w1.weight")
-            .unwrap_or(&[]),
-        ggml_type: info.ggml_type,
-        rank: info.dims.first().copied().unwrap_or(0) as usize,
-        rows: info.dims.get(1).copied().unwrap_or(0) as usize,
-    });
+    let markov_w1 = source
+        .tensor_info("markov_w1.weight")
+        .map(|info| MarkovTable {
+            bytes: source.tensor_slice("markov_w1.weight").unwrap_or(&[]),
+            ggml_type: info.ggml_type,
+            rank: info.dims.first().copied().unwrap_or(0) as usize,
+            rows: info.dims.get(1).copied().unwrap_or(0) as usize,
+        });
     let markov_w2 = load_weight(source, "markov_w2.weight");
 
     let conf_proj = load_weight(source, "conf_proj.weight");
@@ -354,8 +349,7 @@ pub fn load_weights<'a, S: TensorSource + ?Sized>(
             let mut out = Vec::with_capacity(count);
             for chunk in bytes.chunks_exact(8) {
                 out.push(i64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                    chunk[7],
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
                 ]));
             }
             Some(out)

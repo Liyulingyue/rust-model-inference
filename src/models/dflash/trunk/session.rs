@@ -290,9 +290,12 @@ impl<'d, 't> DflashSession<'d, 't> {
                         markov_w2.needs_q8_0_activation(),
                         markov_w2.uses_q8_k(),
                     )?;
-                    self.scratch
-                        .prepared
-                        .matmul(markov_w2, &w1_prev, &mut bias[..n_vocab], pool)?;
+                    self.scratch.prepared.matmul(
+                        markov_w2,
+                        &w1_prev,
+                        &mut bias[..n_vocab],
+                        pool,
+                    )?;
                 }
             }
 
@@ -315,9 +318,11 @@ impl<'d, 't> DflashSession<'d, 't> {
                 self.scratch
                     .prepared
                     .matmul(conf_proj, feat, &mut conf_out, pool)?;
-                confidence = 1.0 / (1.0 + (-conf_out[0]
-                    + self.weights.conf_proj_bias.first().copied().unwrap_or(0.0))
-                    .exp());
+                confidence = 1.0
+                    / (1.0
+                        + (-conf_out[0]
+                            + self.weights.conf_proj_bias.first().copied().unwrap_or(0.0))
+                        .exp());
                 if debug {
                     eprintln!(
                         "dflash[{slot}]: hidden[0..4] = {:?} conf_out = {conf_out:?} bias = {:?}",

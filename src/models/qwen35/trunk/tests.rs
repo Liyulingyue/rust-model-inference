@@ -682,8 +682,7 @@ fn qwen35_dspark_speculative_decoding_matches_greedy() {
     // The prompt is tokenised with the target's own embedded tokenizer so
     // the ids mean the same tokens on both sides.
     let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
-    let sidecar_path =
-        std::env::var("RMI_DFLASH_SIDECAR").expect("RMI_DFLASH_SIDECAR must be set");
+    let sidecar_path = std::env::var("RMI_DFLASH_SIDECAR").expect("RMI_DFLASH_SIDECAR must be set");
     let steps: usize = std::env::var("RMI_QWEN35_DSPARK_STEPS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -700,9 +699,10 @@ fn qwen35_dspark_speculative_decoding_matches_greedy() {
         crate::ComponentRole::Llm,
     )
     .unwrap();
-    let tokenizer =
-        crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
-            .unwrap();
+    let tokenizer = crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })
+    .unwrap();
     let tokens = tokenizer.encode(
         "The capital of France is",
         crate::core::tokenizer::EncodeOptions::default(),
@@ -727,13 +727,9 @@ fn qwen35_dspark_speculative_decoding_matches_greedy() {
     // The reference: the target on its own.
     let mut greedy: Vec<u32> = Vec::with_capacity(steps);
     {
-        let mut session = Qwen35Session::new_with_prefill_batch_size(
-            &mut model,
-            n_ctx,
-            batch,
-            pool.clone(),
-        )
-        .unwrap();
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
         let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
         let mut position = tokens.len();
         for _ in 0..steps {
@@ -752,13 +748,9 @@ fn qwen35_dspark_speculative_decoding_matches_greedy() {
     let mut drafted = 0usize;
     let mut rounds = 0usize;
     {
-        let mut session = Qwen35Session::new_with_prefill_batch_size(
-            &mut model,
-            n_ctx,
-            batch,
-            pool.clone(),
-        )
-        .unwrap();
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
         let dflash_weights =
             crate::models::dflash::trunk::weights::load_weights(sidecar_source.as_ref()).unwrap();
         let token_embd = crate::models::dflash::trunk::weights::load_weight(
@@ -798,9 +790,7 @@ fn qwen35_dspark_speculative_decoding_matches_greedy() {
                 }
             }
         }
-        eprintln!(
-            "Qwen3.5 DSpark acceptance: {accepted}/{drafted} over {rounds} rounds"
-        );
+        eprintln!("Qwen3.5 DSpark acceptance: {accepted}/{drafted} over {rounds} rounds");
     }
 
     for (index, (speculative_token, greedy_token)) in
