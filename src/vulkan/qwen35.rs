@@ -7,7 +7,10 @@ use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::compute::state::TokenCommitState;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
-use crate::models::qwen35::trunk::{config::Qwen35Moe, weights::Qwen35MoeWeights};
+use crate::models::qwen35::trunk::{
+    config::Qwen35Moe,
+    weights::{MtpWeights, Qwen35MoeWeights},
+};
 use crate::models::qwen35::{Qwen35Config, Qwen35Model};
 use crate::ops::kernel::Weight;
 
@@ -274,6 +277,27 @@ struct Qwen35ArenaLayout {
     /// of the whole model. One slot per recurrent layer, in the order the
     /// layers run.
     capture: ArenaRegion,
+    /// The draft head's row buffers.
+    ///
+    /// The head is a dense block of its own with a KV cache of its own, and
+    /// it runs a batch of rows at a time: the catch-up over a verification
+    /// batch is one batch of rows, not one call per row.
+    ///
+    /// The two norms the head starts with write into the two halves of one
+    /// buffer, so the projection sees them side by side the way the CPU
+    /// trunk's concatenation does.
+    mtp_embed_in: ArenaRegion,
+    mtp_hidden_in: ArenaRegion,
+    mtp_fused: ArenaRegion,
+    mtp_proj: ArenaRegion,
+    mtp_attn_input: ArenaRegion,
+    mtp_ffn_input: ArenaRegion,
+    mtp_ffn_gate: ArenaRegion,
+    mtp_ffn_up: ArenaRegion,
+    mtp_ffn_out: ArenaRegion,
+    mtp_output: ArenaRegion,
+    /// The head's own vocabulary projection, one row of logits.
+    mtp_logits: ArenaRegion,
     rope: ArenaRegion,
     q8: ArenaRegion,
     q8_scales: ArenaRegion,
@@ -304,7 +328,7 @@ impl Qwen35ArenaLayout {
     }
 
     fn new_rows(config: &Qwen35Config, capacity: usize, rows: usize) -> Result<Self, VulkanError> {
-        Self::new_rows_with_streams(config, capacity, rows, 0)
+        Self::new_rows_with_streams(config, capacity, rows, 0, config.n_ff)
     }
 
     fn new_rows_with_streams(
@@ -312,6 +336,7 @@ impl Qwen35ArenaLayout {
         capacity: usize,
         rows: usize,
         streams: usize,
+        head_ffn: usize,
     ) -> Result<Self, VulkanError> {
         let layer_count = config.n_layer_impl();
         let head_dim = config.n_embd_head();
@@ -322,6 +347,9 @@ impl Qwen35ArenaLayout {
             .iter()
             .filter(|recurrent| **recurrent)
             .count();
+        // The draft head has a KV cache of its own: it attends over the
+        // committed and the drafted positions, not over the target's keys.
+        let head_layers = usize::from(config.n_nextn > 0);
         let value_heads = config.ssm_dt_rank;
         let ffn_width = config
             .moe
@@ -372,9 +400,19 @@ impl Qwen35ArenaLayout {
             .max(ffn_width)
             .max(expert_ff)
             .max(dense_q)
-            .max(value_dim);
-        let kv_cache = qwen35_product("KV cache", &[layer_count, capacity, dense_kv])?;
-        let kv_delta = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
+            .max(value_dim)
+            // The draft head's projection takes twice the model width -- the
+            // normalized embedding and the normalized hidden state side by
+            // side -- and its feed-forward has a width of its own.
+            .max(if config.n_nextn > 0 {
+                2 * config.n_embd
+            } else {
+                0
+            })
+            .max(head_ffn);
+        let kv_cache =
+            qwen35_product("KV cache", &[layer_count + head_layers, capacity, dense_kv])?;
+        let kv_delta = qwen35_product("KV delta", &[layer_count + head_layers, rows, dense_kv])?;
         let conv_state = qwen35_product(
             "convolution state",
             &[layer_count, config.ssm_d_conv, conv_dim],
@@ -451,6 +489,41 @@ impl Qwen35ArenaLayout {
                 0
             },
         )?;
+        // The draft head's own row buffers. The head runs a batch of rows at
+        // a time -- the catch-up over a verification batch is one batch --
+        // so the buffers are sized for a whole batch. A checkpoint without a
+        // draft head does not pay for them.
+        //
+        // The head's projection takes the normalized embedding and the
+        // normalized hidden state side by side, and the device has no
+        // concatenation: the two norms write into the two halves of one
+        // buffer instead, which is the same layout the projection reads.
+        let head_rows = if config.n_nextn > 0 { rows } else { 0 };
+        let mut head_region = |width| {
+            qwen35_f32_region(
+                &mut cursor,
+                qwen35_product("draft head row buffer", &[head_rows, width])?,
+            )
+        };
+        let mtp_embed_in = head_region(config.n_embd)?;
+        let mtp_hidden_in = head_region(config.n_embd)?;
+        let mtp_fused = head_region(2 * config.n_embd)?;
+        let mtp_proj = head_region(config.n_embd)?;
+        let mtp_attn_input = head_region(config.n_embd)?;
+        let mtp_ffn_input = head_region(config.n_embd)?;
+        let mtp_ffn_gate = head_region(head_ffn)?;
+        let mtp_ffn_up = head_region(head_ffn)?;
+        let mtp_ffn_out = head_region(config.n_embd)?;
+        let mtp_output = head_region(config.n_embd)?;
+        // The head's own vocabulary projection: one row of logits.
+        let mtp_logits = qwen35_f32_region(
+            &mut cursor,
+            if config.n_nextn > 0 {
+                config.vocab_size
+            } else {
+                0
+            },
+        )?;
         let quant_rows = qwen35_product("quantized rows", &[rows, quant_len.div_ceil(4) * 4])?;
         let q8 = qwen35_region(&mut cursor, quant_rows)?;
         let q8_scales = qwen35_f32_region(
@@ -520,6 +593,17 @@ impl Qwen35ArenaLayout {
             logits,
             logits_rows,
             capture,
+            mtp_embed_in,
+            mtp_hidden_in,
+            mtp_fused,
+            mtp_proj,
+            mtp_attn_input,
+            mtp_ffn_input,
+            mtp_ffn_gate,
+            mtp_ffn_up,
+            mtp_ffn_out,
+            mtp_output,
+            mtp_logits,
             rope,
             q8,
             q8_scales,
@@ -669,6 +753,39 @@ struct RecurrentBindings {
     output: OperatorBindings,
 }
 
+/// The draft head's weights, as the device sees them.
+///
+/// The head is a dense block of its own with a KV cache of its own, and
+/// its projection fuses the normalized embedding with the normalized hidden
+/// state. The device has no concat, so the two norms write their results
+/// into the two halves of one buffer and the projection reads that buffer.
+#[derive(Clone, Copy)]
+struct MtpBindings {
+    /// `nextn.eh_proj`: the projection of the two normalized halves.
+    eh_proj: OperatorBindings,
+    /// The head block's own attention: the queries, the keys and the values,
+    /// their norms, and the output projection.
+    qkv: WeightBindings<3>,
+    prepare: OperatorBindings,
+    output: OperatorBindings,
+    /// The head block's feed-forward.
+    ffn_gate_up: WeightBindings<2>,
+    ffn_down: OperatorBindings,
+    /// The norms: the embedding, the hidden state, the attention input, the
+    /// feed-forward input and the head's own.
+    enorm: OperatorBindings,
+    hnorm: OperatorBindings,
+    attn_norm: OperatorBindings,
+    attn_post_norm: OperatorBindings,
+    head_norm: OperatorBindings,
+    /// The head's own vocabulary projection. `None` means the main model's
+    /// output weight is used, exactly as upstream does.
+    head: Option<OperatorBindings>,
+    /// The width of the head's feed-forward. A checkpoint may give the head
+    /// a feed-forward of its own width.
+    ffn_width: usize,
+}
+
 #[derive(Clone, Copy)]
 enum AttentionBindings {
     Dense(DenseBindings),
@@ -720,6 +837,17 @@ struct MhcBindings {
     routers: Vec<[MhcRouterBindings; 2]>,
 }
 
+/// The draft head's output.
+///
+/// The head proposes a token and hands its own hidden state to the next
+/// draft step, so both come back from one call.
+pub(crate) struct Qwen35MtpHead {
+    /// The logits of the row, when the caller asked for them.
+    pub(crate) logits: Vec<f32>,
+    /// The head's hidden state, after the head norm.
+    pub(crate) hidden: Vec<f32>,
+}
+
 pub(crate) struct Qwen35GpuChunkResult<'a> {
     pub(crate) logits: &'a [f32],
     /// The normalized hidden state of every row of the chunk.
@@ -739,6 +867,8 @@ pub(crate) struct Qwen35VulkanSession {
     layers: Vec<LayerBindings>,
     plan: Vec<usize>,
     mhc: Option<MhcBindings>,
+    /// The draft head's weights, when the checkpoint has a head.
+    mtp: Option<MtpBindings>,
     output_norm: OperatorBindings,
     output: OperatorBindings,
     layout: Qwen35ArenaLayout,
@@ -833,8 +963,16 @@ impl Qwen35VulkanSession {
         let config = model.config.clone();
         let layer_count = config.n_layer_impl();
         let streams = routing.as_ref().map_or(0, |r| r.settings.streams);
-        let layout =
-            Qwen35ArenaLayout::new_rows_with_streams(&config, capacity, max_rows, streams)?;
+        // The draft head has a feed-forward of its own, and its width is the
+        // head's own: a checkpoint may give it a different one.
+        let head_ffn = model
+            .mtp
+            .as_ref()
+            .and_then(|mtp| mtp.layer.ffn_gate.as_ref())
+            .map_or(config.n_ff, |weight| weight.n_out);
+        let layout = Qwen35ArenaLayout::new_rows_with_streams(
+            &config, capacity, max_rows, streams, head_ffn,
+        )?;
         let descriptor_capacity = model.layers.iter().try_fold(3usize, |count, layer| {
             let experts = layer
                 .moe
@@ -849,6 +987,12 @@ impl Qwen35VulkanSession {
         })?;
         let descriptor_capacity = descriptor_capacity
             .checked_add(routing.as_ref().map_or(0, |r| 1 + r.routers.len() * 4))
+            .ok_or(VulkanError::OutOfMemory)?;
+        // The draft head needs a descriptor set per weight and per norm of
+        // its own: its projection, its attention, its feed-forward, its five
+        // norms and, when it has one, its vocabulary matrix.
+        let descriptor_capacity = descriptor_capacity
+            .checked_add(usize::from(model.mtp.is_some()) * 16)
             .ok_or(VulkanError::OutOfMemory)?;
         // Host routing reads between recordings; keep its arena mapped.
         let host_routed = model
@@ -1098,6 +1242,21 @@ impl Qwen35VulkanSession {
             &model.output_weight,
             "Qwen3.5 output",
         )?;
+        // The draft head, when the checkpoint has one. It is a dense block
+        // of its own with a KV cache of its own. A head whose weights the
+        // device cannot hold stays on the CPU: the target still runs here.
+        let mtp = match model.mtp.as_ref() {
+            Some(mtp) => match bind_mtp_weights(&mut ops, &mut buffers, mtp, &model.output_norm) {
+                Ok(bindings) => Some(bindings),
+                Err(error) => {
+                    eprintln!(
+                        "[GPU] Qwen3.5 Vulkan draft head unavailable: {error}. The head runs on the CPU."
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let dense_kv = config
             .n_head_kv
             .checked_mul(config.n_embd_head())
@@ -1133,6 +1292,7 @@ impl Qwen35VulkanSession {
             layers,
             plan,
             mhc,
+            mtp,
             output_norm,
             output,
             layout,
@@ -2234,6 +2394,308 @@ impl Qwen35VulkanSession {
         self.commit_state.commit();
     }
 
+    /// Whether the draft head runs on the device.
+    ///
+    /// A checkpoint whose head the device cannot hold keeps the head on the
+    /// CPU, so the caller has to ask before it hands the head over.
+    pub(crate) fn has_mtp_head(&self) -> bool {
+        self.mtp.is_some()
+    }
+
+    /// Run the draft head on the device.
+    ///
+    /// `embeddings` holds one embedding per row and `hidden` the hidden state
+    /// of the position *before* each row's token: the head pairs the token at
+    /// a position with the state of the position before it, the way the CPU
+    /// trunk's head does.
+    ///
+    /// The rows run as one batch: the catch-up over a verification batch is
+    /// one call here, not one call per row.
+    ///
+    /// `want_output` says whether the rows are sampled. A row that only
+    /// fills the head's cache is never sampled, so it stops after the
+    /// attention: neither the feed-forward nor the vocabulary projection
+    /// reaches the cache.
+    pub(crate) fn mtp_head(
+        &mut self,
+        embeddings: &[f32],
+        hidden: &[f32],
+        base_position: usize,
+        want_output: bool,
+    ) -> Result<Qwen35MtpHead, VulkanError> {
+        let Some(mtp) = self.mtp.as_ref() else {
+            return Err(VulkanError::UnsupportedShape(
+                "this checkpoint has no MTP draft head".into(),
+            ));
+        };
+        let config = &self.config;
+        let n_embd = config.n_embd;
+        if n_embd == 0 || embeddings.len() % n_embd != 0 || hidden.len() != embeddings.len() {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "invalid Qwen3.5 MTP head input: {} embeddings, {} hidden values",
+                embeddings.len(),
+                hidden.len()
+            )));
+        }
+        let rows = embeddings.len() / n_embd;
+        if rows == 0 || rows > self.max_rows {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "Qwen3.5 MTP head batch of {rows} rows does not fit the chunk size {}",
+                self.max_rows
+            )));
+        }
+        if want_output && rows != 1 {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 MTP head samples one row at a time".into(),
+            ));
+        }
+        let head_dim = config.n_embd_head();
+        let dense_q = config
+            .n_head
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let dense_kv = config
+            .n_head_kv
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let dense_raw_q = dense_q.checked_mul(2).ok_or(VulkanError::OutOfMemory)?;
+        let layer_count = config.n_layer_impl();
+        // The head has a KV cache of its own: it attends over the committed
+        // and the drafted positions, not over the target's keys. Its cache
+        // is the layer slot after the main stack.
+        let head_layer = layer_count;
+        let head_layer_count = layer_count + 1;
+        let rope_dim = config.rope_dimension_count;
+
+        self.ops.write_f32(self.layout.mtp_embed_in, embeddings)?;
+        self.ops.write_f32(self.layout.mtp_hidden_in, hidden)?;
+        for (row, position) in (base_position..base_position + rows).enumerate() {
+            fill_mrope_layout(
+                &mut self.rope[row * rope_dim..(row + 1) * rope_dim],
+                [position, position, position, 0],
+                config.rope_dimension_sections,
+                config.rope_freq_base,
+                self.mhc.is_some(),
+            )
+            .map_err(VulkanError::UnsupportedShape)?;
+        }
+        self.ops
+            .write_f32(self.layout.rope, &self.rope[..rows * rope_dim])?;
+
+        let mut commands = TokenCommands::begin(self.context)?;
+
+        // The two norms write into the two halves of one buffer, so the
+        // projection sees the normalized embedding and the normalized hidden
+        // state side by side -- the concatenation the CPU trunk builds.
+        self.ops.record_rms_norm_rows(
+            &commands,
+            mtp.enorm,
+            self.layout.mtp_embed_in,
+            self.layout.mtp_fused,
+            n_embd,
+            config.norm_eps,
+            rows,
+            n_embd,
+            2 * n_embd,
+        )?;
+        let hidden_half = ArenaRegion {
+            offset: self.layout.mtp_fused.offset + n_embd * 4,
+            size: self.layout.mtp_fused.size - n_embd * 4,
+        };
+        self.ops.record_rms_norm_rows(
+            &commands,
+            mtp.hnorm,
+            self.layout.mtp_hidden_in,
+            hidden_half,
+            n_embd,
+            config.norm_eps,
+            rows,
+            n_embd,
+            2 * n_embd,
+        )?;
+        self.record_weights(
+            &commands,
+            mtp.eh_proj,
+            self.layout.mtp_fused,
+            &[(self.layout.mtp_proj, n_embd)],
+            2 * n_embd,
+            rows,
+        )?;
+
+        // The attention block: the head's own weights, the head's own cache.
+        self.ops.record_rms_norm_rows(
+            &commands,
+            mtp.attn_norm,
+            self.layout.mtp_proj,
+            self.layout.mtp_attn_input,
+            n_embd,
+            config.norm_eps,
+            rows,
+            n_embd,
+            n_embd,
+        )?;
+        self.record_weight_group(
+            &commands,
+            mtp.qkv,
+            self.layout.mtp_attn_input,
+            [
+                (self.layout.raw_qkv, dense_raw_q),
+                (self.layout.raw_k, dense_kv),
+                (self.layout.v, dense_kv),
+            ],
+            n_embd,
+            rows,
+        )?;
+        self.ops.record_qwen35_dense_prepare(
+            &commands,
+            mtp.prepare,
+            self.layout.raw_qkv,
+            self.layout.raw_k,
+            self.layout.v,
+            self.layout.q,
+            self.layout.z,
+            self.layout.kv_k,
+            self.layout.kv_v,
+            self.layout.kv_delta_k,
+            self.layout.kv_delta_v,
+            self.layout.rope,
+            head_layer,
+            head_layer_count,
+            base_position,
+            self.capacity,
+            config.n_head,
+            config.n_head_kv,
+            head_dim,
+            rope_dim,
+            config.norm_eps,
+            rows,
+        )?;
+        self.ops.record_qwen35_attention(
+            &commands,
+            self.layout.q,
+            self.layout.z,
+            self.layout.kv_k,
+            self.layout.kv_v,
+            self.layout.attn,
+            head_layer,
+            head_layer_count,
+            base_position,
+            self.capacity,
+            config.n_head,
+            config.n_head_kv,
+            head_dim,
+            rows,
+        )?;
+        self.record_weights(
+            &commands,
+            mtp.output,
+            self.layout.attn,
+            &[(self.layout.projection, n_embd)],
+            dense_q,
+            rows,
+        )?;
+        self.ops.record_add_rows(
+            &commands,
+            self.layout.mtp_proj,
+            self.layout.projection,
+            n_embd,
+            rows,
+        )?;
+
+        if want_output {
+            // The feed-forward, then the head's own norm and its vocabulary
+            // projection.
+            self.ops.record_rms_norm_rows(
+                &commands,
+                mtp.attn_post_norm,
+                self.layout.mtp_proj,
+                self.layout.mtp_ffn_input,
+                n_embd,
+                config.norm_eps,
+                rows,
+                n_embd,
+                n_embd,
+            )?;
+            self.record_weight_group(
+                &commands,
+                mtp.ffn_gate_up,
+                self.layout.mtp_ffn_input,
+                [
+                    (self.layout.mtp_ffn_gate, mtp.ffn_width),
+                    (self.layout.mtp_ffn_up, mtp.ffn_width),
+                ],
+                n_embd,
+                rows,
+            )?;
+            self.ops.record_silu_mul_rows(
+                &commands,
+                self.layout.mtp_ffn_gate,
+                self.layout.mtp_ffn_up,
+                mtp.ffn_width,
+                rows,
+            )?;
+            self.record_weights(
+                &commands,
+                mtp.ffn_down,
+                self.layout.mtp_ffn_gate,
+                &[(self.layout.mtp_ffn_out, n_embd)],
+                mtp.ffn_width,
+                rows,
+            )?;
+            self.ops.record_add_rows(
+                &commands,
+                self.layout.mtp_proj,
+                self.layout.mtp_ffn_out,
+                n_embd,
+                rows,
+            )?;
+            self.ops.record_rms_norm_rows(
+                &commands,
+                mtp.head_norm,
+                self.layout.mtp_proj,
+                self.layout.mtp_output,
+                n_embd,
+                config.norm_eps,
+                rows,
+                n_embd,
+                n_embd,
+            )?;
+            let head = mtp.head.unwrap_or(self.output);
+            self.record_weights(
+                &commands,
+                head,
+                self.layout.mtp_output,
+                &[(self.layout.mtp_logits, config.vocab_size)],
+                n_embd,
+                rows,
+            )?;
+        }
+        commands.submit_and_wait()?;
+
+        let mut head_hidden = vec![0.0; rows * n_embd];
+        if want_output {
+            self.ops
+                .read_f32_into(self.layout.mtp_output, &mut head_hidden)?;
+        }
+        let mut logits = Vec::new();
+        if want_output {
+            logits = vec![0.0; config.vocab_size];
+            self.ops
+                .read_f32_into(self.layout.mtp_logits, &mut logits)?;
+        }
+        if head_hidden.iter().any(|value| !value.is_finite())
+            || logits.iter().any(|value| !value.is_finite())
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 Vulkan MTP head produced non-finite output".into(),
+            ));
+        }
+        Ok(Qwen35MtpHead {
+            logits,
+            hidden: head_hidden,
+        })
+    }
+
     /// Ask the next chunk to hand back per-row hidden states and logits.
     ///
     /// A speculative verification needs both; a prefill catch-up only needs
@@ -2458,6 +2920,103 @@ fn bind_weight_group<const N: usize>(
         .try_into()
         .map_err(|_| VulkanError::OutOfMemory)?;
     Ok(WeightBindings::Split(split))
+}
+
+/// Upload the draft head's weights.
+///
+/// The head is a dense block of its own: it has an attention of its own, a
+/// feed-forward of its own and norms of its own, and it attends over a KV
+/// cache of its own. Its vocabulary projection is the main model's output
+/// weight unless the checkpoint gives it one of its own, exactly as
+/// upstream does.
+fn bind_mtp_weights(
+    ops: &mut Qwen3Ops<'_>,
+    buffers: &mut UploadedBuffers,
+    mtp: &MtpWeights<'_>,
+    output_norm: &[f32],
+) -> Result<MtpBindings, VulkanError> {
+    let layer = &mtp.layer;
+    let qkv = bind_weight_group(
+        ops,
+        buffers,
+        [
+            (mtp_weight(layer.wq.as_ref(), "query")?, "Qwen3.5 MTP query"),
+            (mtp_weight(layer.wk.as_ref(), "key")?, "Qwen3.5 MTP key"),
+            (mtp_weight(layer.wv.as_ref(), "value")?, "Qwen3.5 MTP value"),
+        ],
+    )?;
+    let prepare_buffers = [
+        buffers.upload_f32(mtp_norm(layer.attn_q_norm.as_ref(), "query norm")?)?,
+        buffers.upload_f32(mtp_norm(layer.attn_k_norm.as_ref(), "key norm")?)?,
+    ];
+    let prepare = ops.bind_buffers(&prepare_buffers)?;
+    let output = bind_weight(
+        ops,
+        buffers,
+        mtp_weight(layer.wo.as_ref(), "attention output")?,
+        "Qwen3.5 MTP attention output",
+    )?;
+    let ffn_gate_up = bind_weight_group(
+        ops,
+        buffers,
+        [
+            (
+                mtp_weight(layer.ffn_gate.as_ref(), "FFN gate")?,
+                "Qwen3.5 MTP FFN gate",
+            ),
+            (
+                mtp_weight(layer.ffn_up.as_ref(), "FFN up")?,
+                "Qwen3.5 MTP FFN up",
+            ),
+        ],
+    )?;
+    let ffn_down = bind_weight(
+        ops,
+        buffers,
+        mtp_weight(layer.ffn_down.as_ref(), "FFN down")?,
+        "Qwen3.5 MTP FFN down",
+    )?;
+    let eh_proj = bind_weight(ops, buffers, &mtp.eh_proj, "Qwen3.5 MTP projection")?;
+    let enorm = ops.bind_buffers(&[buffers.upload_f32(&mtp.enorm)?])?;
+    let hnorm = ops.bind_buffers(&[buffers.upload_f32(&mtp.hnorm)?])?;
+    let attn_norm = ops.bind_buffers(&[buffers.upload_f32(&layer.attn_norm)?])?;
+    let attn_post_norm = ops.bind_buffers(&[buffers.upload_f32(&layer.attn_post_norm)?])?;
+    let head_norm = ops.bind_buffers(&[
+        buffers.upload_f32(mtp.shared_head_norm.as_deref().unwrap_or(output_norm))?
+    ])?;
+    let head = match mtp.shared_head_head.as_ref() {
+        Some(weight) => Some(bind_weight(ops, buffers, weight, "Qwen3.5 MTP vocabulary")?),
+        None => None,
+    };
+    let ffn_width = mtp_weight(layer.ffn_gate.as_ref(), "FFN gate")?.n_out;
+    Ok(MtpBindings {
+        eh_proj,
+        qkv,
+        prepare,
+        output,
+        ffn_gate_up,
+        ffn_down,
+        enorm,
+        hnorm,
+        attn_norm,
+        attn_post_norm,
+        head_norm,
+        head,
+        ffn_width,
+    })
+}
+
+fn mtp_weight<'a>(
+    weight: Option<&'a Weight<'a>>,
+    name: &str,
+) -> Result<&'a Weight<'a>, VulkanError> {
+    weight
+        .ok_or_else(|| VulkanError::UnsupportedShape(format!("missing Qwen3.5 MTP {name} weight")))
+}
+
+fn mtp_norm<'a>(norm: Option<&'a Vec<f32>>, name: &str) -> Result<&'a [f32], VulkanError> {
+    norm.map(Vec::as_slice)
+        .ok_or_else(|| VulkanError::UnsupportedShape(format!("missing Qwen3.5 MTP {name} weight")))
 }
 
 fn device_moe_format(moe: &Qwen35MoeWeights<'_>) -> Option<GpuWeightFormat> {
@@ -3726,15 +4285,24 @@ mod tests {
         let capacity = 7;
         let layout = Qwen35ArenaLayout::new(&config, capacity).unwrap();
 
-        assert_eq!(layout.kv_k.size, 2 * capacity * 4 * 4);
-        assert_eq!(layout.kv_v.size, 2 * capacity * 4 * 4);
+        // The draft head has a KV cache of its own: the layer slot after the
+        // main stack.
+        assert_eq!(layout.kv_k.size, 3 * capacity * 4 * 4);
+        assert_eq!(layout.kv_v.size, 3 * capacity * 4 * 4);
         assert_eq!(layout.conv_state.size, 2 * 2 * 16 * 4);
         assert_eq!(layout.ssm_state.size, 2 * 2 * 4 * 4 * 4);
-        assert_eq!(layout.q8.size, config.n_ff);
-        assert_eq!(layout.q8k.size, config.n_ff);
+        // The quantized activation buffer holds the widest row of the
+        // model: the draft head's projection takes twice the model width.
+        assert_eq!(layout.q8.size, 2 * config.n_embd);
+        assert_eq!(layout.q8k.size, 2 * config.n_embd);
         // A checkpoint with a draft head projects a whole verification batch.
         assert_eq!(layout.logits.size, config.vocab_size * 4);
         assert_eq!(layout.logits_rows.size, config.vocab_size * 4);
+        // The head's own row buffers: one row of the model width each, and
+        // the projection's buffer is twice that wide.
+        assert_eq!(layout.mtp_fused.size, 2 * config.n_embd * 4);
+        assert_eq!(layout.mtp_proj.size, config.n_embd * 4);
+        assert_eq!(layout.mtp_logits.size, config.vocab_size * 4);
         assert!(layout.total_size() >= layout.ssm_state.end());
 
         let mut config = config;
@@ -3769,8 +4337,14 @@ mod tests {
             let ordinary = Qwen35ArenaLayout::new_rows(&config, 7, rows).unwrap();
             assert_eq!(ordinary.mhc_residual.size, 0);
             for streams in [2, 4] {
-                let layout =
-                    Qwen35ArenaLayout::new_rows_with_streams(&config, 7, rows, streams).unwrap();
+                let layout = Qwen35ArenaLayout::new_rows_with_streams(
+                    &config,
+                    7,
+                    rows,
+                    streams,
+                    config.n_ff,
+                )
+                .unwrap();
                 assert_eq!(layout.mhc_residual.size, rows * streams * config.n_embd * 4);
                 assert_eq!(layout.mhc_normed.size, layout.mhc_residual.size);
                 assert_eq!(layout.mhc_logits.size, rows * streams * (2 + streams) * 4);

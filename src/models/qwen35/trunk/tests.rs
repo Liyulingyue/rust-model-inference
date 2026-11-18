@@ -1708,6 +1708,41 @@ fn qwen35_mtp_speculative_matches_greedy_on_the_device() {
     assert!(drafted > accepted, "the fixture has to reject a draft");
 }
 
+/// The draft head has to propose the same tokens wherever it runs.
+///
+/// The head is a block of its own: it has an attention over a cache of its
+/// own, a feed-forward of its own and a vocabulary projection of its own.
+/// On the device it runs over the device's own copy of those weights, so
+/// the two paths have to agree on the drafts -- otherwise the target would
+/// see a different round on each backend.
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_mtp_device_head_matches_the_cpu_head() {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let n_embd = tiny_mtp_session_model().config.n_embd;
+    let tokens = [0u32, 1, 2, 3];
+    let positions = [0usize, 1, 2, 3];
+    // The head's input: the target's hidden states, one row per token.
+    let hidden: Vec<f32> = (0..tokens.len() * n_embd)
+        .map(|index| (index as f32) * 0.125 - 1.0)
+        .collect();
+    let mut cpu = mtp_fixture_session(64, 8, ComputePolicy::Cpu);
+    let mut device = mtp_fixture_session(64, 8, ComputePolicy::Vulkan);
+    // The same catch-up over the same tokens: the head's cache and its
+    // carry-over row have to match too.
+    cpu.mtp_catch_up(&tokens, &positions, &hidden).unwrap();
+    device.mtp_catch_up(&tokens, &positions, &hidden).unwrap();
+    assert_eq!(
+        cpu.mtp_pending_hidden().unwrap(),
+        device.mtp_pending_hidden().unwrap()
+    );
+    let cpu_drafts = cpu.mtp_draft_tokens(7, tokens.len(), 2).unwrap();
+    let device_drafts = device.mtp_draft_tokens(7, tokens.len(), 2).unwrap();
+    assert_eq!(cpu_drafts, device_drafts);
+}
+
 #[test]
 fn qwen35_mixed_boundaries_preserve_prompt_and_decode_state() {
     for len in [1, 2, 3, 63, 64, 65, 127, 128] {

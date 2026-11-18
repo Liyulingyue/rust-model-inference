@@ -484,6 +484,13 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let Some(mtp) = self.model.trunk().mtp.as_ref() else {
             return Err("this checkpoint has no MTP head".into());
         };
+        // On the device the head has a KV cache of its own in the device's
+        // arena, and the catch-up is one batch of rows over it. A head the
+        // device cannot hold stays on the CPU.
+        #[cfg(feature = "vulkan")]
+        if self.gpu.as_ref().is_some_and(|gpu| gpu.has_mtp_head()) {
+            return self.mtp_catch_up_device(tokens, positions, hidden);
+        }
         let Some(cache) = self.mtp_cache.as_mut() else {
             return Err("the MTP head has no KV cache".into());
         };
@@ -534,6 +541,78 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
     /// position `p - 1`, so the first draft of a round needs this row.
     pub fn mtp_pending_hidden(&self) -> Result<&[f32], String> {
         Ok(&self.mtp_pending_hidden)
+    }
+
+    /// Fill the MTP head's KV cache over the committed tokens, on the device.
+    ///
+    /// The head's cache lives in the device's arena, next to the target's
+    /// own: it is the layer slot after the main stack. The rows are the
+    /// committed tokens, and the head pairs each of them with the hidden
+    /// state of the position before it, so the first row of the batch uses
+    /// the carry-over row and every later row the row before it.
+    ///
+    /// The rows are one batch when their positions are consecutive, which is
+    /// the usual case: the attention reads the cache row by row, so a batch
+    /// of consecutive positions is one call.
+    #[cfg(feature = "vulkan")]
+    fn mtp_catch_up_device(
+        &mut self,
+        tokens: &[u32],
+        positions: &[usize],
+        hidden: &[f32],
+    ) -> Result<(), String> {
+        let n_embd = self.model.trunk().config.n_embd;
+        let embeddings = self.embed_tokens(tokens)?;
+        let mut pending = std::mem::take(&mut self.mtp_pending_hidden);
+        if tokens.is_empty() {
+            self.mtp_pending_hidden = pending;
+            return Ok(());
+        }
+        let mut rows = Vec::with_capacity(tokens.len() * n_embd);
+        rows.extend_from_slice(&pending);
+        for index in 1..tokens.len() {
+            rows.extend_from_slice(&hidden[(index - 1) * n_embd..index * n_embd]);
+        }
+        let outcome = {
+            let gpu = match self.gpu.as_mut() {
+                Some(gpu) => gpu,
+                None => {
+                    self.mtp_pending_hidden = pending;
+                    return Err("the Vulkan session went away".into());
+                }
+            };
+            let consecutive = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
+            if consecutive {
+                gpu.mtp_head(&embeddings, &rows, positions[0], false)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            } else {
+                let mut outcome = Ok(());
+                for (index, &position) in positions.iter().enumerate() {
+                    let row = &rows[index * n_embd..(index + 1) * n_embd];
+                    if let Err(error) = gpu
+                        .mtp_head(
+                            &embeddings[index * n_embd..(index + 1) * n_embd],
+                            row,
+                            position,
+                            false,
+                        )
+                        .map_err(|error| error.to_string())
+                    {
+                        outcome = Err(error);
+                        break;
+                    }
+                }
+                outcome
+            }
+        };
+        // The last row of the batch becomes the carry-over row for the next
+        // batch, which is how the head chains across the batch boundary.
+        if !tokens.is_empty() {
+            pending.copy_from_slice(&hidden[(tokens.len() - 1) * n_embd..tokens.len() * n_embd]);
+        }
+        self.mtp_pending_hidden = pending;
+        outcome
     }
 
     /// The target's logits for one row of the last forward pass.
@@ -898,6 +977,13 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let Some(mtp) = self.model.trunk().mtp.as_ref() else {
             return Err("this checkpoint has no MTP head".into());
         };
+        // On the device the head has weights and a KV cache of its own, so
+        // the draft steps run there. A head the device cannot hold stays on
+        // the CPU.
+        #[cfg(feature = "vulkan")]
+        if self.gpu.as_ref().is_some_and(|gpu| gpu.has_mtp_head()) {
+            return self.mtp_draft_tokens_device(token, position, n);
+        }
         let Some(cache) = self.mtp_cache.as_mut() else {
             return Err("the MTP head has no KV cache".into());
         };
@@ -926,6 +1012,41 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
                 // The draft is sampled, so it needs the head's logits.
                 true,
             )?;
+            let next = crate::ops::sampling::argmax(&draft.logits) as u32;
+            drafts.push(next);
+            token = next;
+            position += 1;
+            hidden = draft.hidden;
+        }
+        Ok(drafts)
+    }
+
+    /// Propose the draft tokens, on the device.
+    ///
+    /// The head's weights and its KV cache are on the device, so each draft
+    /// step is one call there: the projection, the attention over the head's
+    /// own cache, the feed-forward and the vocabulary projection.
+    ///
+    /// The chain is the same as on the CPU: the first step takes the
+    /// carry-over row, and every later step takes the head's own hidden
+    /// state.
+    #[cfg(feature = "vulkan")]
+    fn mtp_draft_tokens_device(
+        &mut self,
+        token: u32,
+        position: usize,
+        n: usize,
+    ) -> Result<Vec<u32>, String> {
+        let mut drafts = Vec::with_capacity(n);
+        let mut token = token;
+        let mut position = position;
+        let mut hidden = self.mtp_pending_hidden.clone();
+        for _ in 0..n {
+            let embedding = self.embed_tokens(&[token])?;
+            let gpu = self.gpu.as_mut().ok_or("the Vulkan session went away")?;
+            let draft = gpu
+                .mtp_head(&embedding, &hidden, position, true)
+                .map_err(|error| error.to_string())?;
             let next = crate::ops::sampling::argmax(&draft.logits) as u32;
             drafts.push(next);
             token = next;
