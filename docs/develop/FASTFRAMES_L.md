@@ -3,7 +3,7 @@
 `fastframes_l` 显式架构接入现有 CLI 和 `POST /v1/videos/generations`，复用原生
 Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。当前是**部分验收 / Experimental**：
 16×16 / 5 帧 BF16 的 CPU/Auto/严格 Vulkan 在 CLI/HTTP 各 411 个检查点和视频像素通过；
-F32 CPU 两入口也通过。F16 各后端两入口的检查点通过，但压缩后视频比较失败；Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 数值对齐失败，F32 GPU 和 480p 待验证。
+F32 CPU/Auto/Vulkan 两入口也通过。F16 各后端两入口的检查点通过，但压缩后视频比较失败；Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 数值对齐失败，54 个格式/后端/入口组合已跑完，12 个通过、42 个失败；480p 待验证。
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和
 [逐项矩阵](../../tools/oracle/fastframes_l/matrix.json)。
 
@@ -74,7 +74,7 @@ HTTP 成功返回 `video/mp4`、`Cache-Control: no-store`。可选 JSON 字段�
 ## 内存与限制
 
 最大尺寸/帧数的 F32 KV 约 54 GB，另需权重、特征及缓冲。Vulkan 每八层释放上传缓存，
-避免整个 F32 DiT 常驻 48 GiB 显存；最终峰值尚未实测。F32 矩阵使用仓库已有的
+避免整个 F32 DiT 常驻 48 GiB 显存；小样本设备分配器峰值已记录，完整尺寸进程峰值尚未验证。F32 矩阵使用仓库已有的
 mmap 借用接口，避免复制约 84 GB 权重。实际容器内存上限约 55 GiB，不能以主机
 503 GiB 物理内存推断进程可用内存。
 
@@ -98,4 +98,6 @@ fat-LTO release 编译已完成。关闭插桩后，16×16 / 5 帧 CPU 的三次
 也通过对齐。Auto / 严格 Vulkan 的中位整进程耗时为 106.49 / 553.27 秒；官方受控参考 /
 发布 BF16 配方为 269.16 / 123.76 秒。五组各一次预热、三次测量均完成，12 段原生视频的
 解码像素均通过。线程数、加载边界和共享负载有差异，不能据此宣称独占性能或加速比。
-F32 GPU、480p 质量和独占性能基准尚未验收，保持 Draft/Experimental。
+F32 Auto/严格 Vulkan 的最大相对 RMSE 分别为 `4.775628860976526e-5` /
+`4.0885956235754525e-5`，各入口均通过 411 个检查点，解码视频像素 RMSE 为 0。
+480p 质量和独占性能基准尚未验收，保持 Draft/Experimental。

@@ -280,7 +280,35 @@
         "height": 480,
         "frames": 5,
         "backend": "vulkan",
-        "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71"
+        "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+        "native": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "832",
+            "--height",
+            "480",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "vulkan",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 10845.660709502175,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.log"
+        }
       }
     ],
     "f16-pixel-investigation-results.json": {
@@ -879,6 +907,716 @@
           "published_drift_passed": true
         }
       ]
+    },
+    "quantized-block-replay-results.json": {
+      "scope": "Diagnostic replay of pinned official text blocks using captured native inputs. CPU/short-sequence replay is distinct from the padded GPU acceptance oracle; no full-model acceptance claim.",
+      "official_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "official_source_sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "device": "cpu",
+      "threads": 4,
+      "results": [
+        {
+          "format": "q8_0",
+          "layer": 1,
+          "same_native_input_block_error": {
+            "max_abs": 0.052734375,
+            "rmse": 0.0030870102530630894,
+            "relative_rmse": 2.3028591636053686e-05,
+            "cosine": 0.9999999997355365
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.0654296875,
+            "rmse": 0.0038326164601438454,
+            "relative_rmse": 2.859084062706791e-05,
+            "cosine": 0.9999999996014216
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 0.763671875,
+            "rmse": 0.04319246846690555,
+            "relative_rmse": 0.00032221042597635875,
+            "cosine": 0.9999999481040015
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 6,
+          "same_native_input_block_error": {
+            "max_abs": 0.04300117492675781,
+            "rmse": 0.004240977672956084,
+            "relative_rmse": 2.429029919840053e-05,
+            "cosine": 0.9999999997063613
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.0267333984375,
+            "rmse": 0.003631476080026594,
+            "relative_rmse": 2.0799731025967355e-05,
+            "cosine": 0.9999999997837569
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 1.2760009765625,
+            "rmse": 0.07781681435361291,
+            "relative_rmse": 0.0004457054850932493,
+            "cosine": 0.9999999008303125
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 12,
+          "same_native_input_block_error": {
+            "max_abs": 0.056896209716796875,
+            "rmse": 0.005379883337898599,
+            "relative_rmse": 1.8990960295477427e-05,
+            "cosine": 0.9999999998197941
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.1436767578125,
+            "rmse": 0.012682010782050323,
+            "relative_rmse": 4.476999380541027e-05,
+            "cosine": 0.9999999990164995
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 2.1277084350585938,
+            "rmse": 0.12878134024633275,
+            "relative_rmse": 0.00045462347447623166,
+            "cosine": 0.9999998983014919
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 17,
+          "same_native_input_block_error": {
+            "max_abs": 0.0357666015625,
+            "rmse": 0.002133148774794276,
+            "relative_rmse": 6.611600142536248e-06,
+            "cosine": 0.9999999999781912
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.2916259765625,
+            "rmse": 0.02617605030565254,
+            "relative_rmse": 8.110905387984274e-05,
+            "cosine": 0.9999999967108884
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 10.1552734375,
+            "rmse": 0.43213991918143274,
+            "relative_rmse": 0.0013390278357216024,
+            "cosine": 0.9999991415649181
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 18,
+          "same_native_input_block_error": {
+            "max_abs": 0.154296875,
+            "rmse": 0.010793803341967476,
+            "relative_rmse": 3.2239118316123155e-05,
+            "cosine": 0.9999999994803201
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.1153411865234375,
+            "rmse": 0.007495983833626928,
+            "relative_rmse": 2.239069294903665e-05,
+            "cosine": 0.9999999997493552
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 8.9736328125,
+            "rmse": 0.5162151778359524,
+            "relative_rmse": 0.0015419477681776997,
+            "cosine": 0.999998813705197
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 22,
+          "same_native_input_block_error": {
+            "max_abs": 0.403564453125,
+            "rmse": 0.014947794735543092,
+            "relative_rmse": 2.1384423777337058e-05,
+            "cosine": 0.9999999997718223
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.43975830078125,
+            "rmse": 0.01676481397506658,
+            "relative_rmse": 2.397071248211576e-05,
+            "cosine": 0.9999999997129606
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 39.14453125,
+            "rmse": 1.4272674583158855,
+            "relative_rmse": 0.002040739487432002,
+            "cosine": 0.9999980669903717
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 23,
+          "same_native_input_block_error": {
+            "max_abs": 0.22027587890625,
+            "rmse": 0.010329141525357239,
+            "relative_rmse": 1.326059083081708e-05,
+            "cosine": 0.9999999999120939
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.515869140625,
+            "rmse": 0.020104420184009073,
+            "relative_rmse": 2.5786774809203715e-05,
+            "cosine": 0.9999999996693603
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 58.478515625,
+            "rmse": 1.9186868185430013,
+            "relative_rmse": 0.00246098840286423,
+            "cosine": 0.999997378819156
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 1,
+          "same_native_input_block_error": {
+            "max_abs": 0.0087890625,
+            "rmse": 0.00040280204981439887,
+            "relative_rmse": 3.016105915446707e-06,
+            "cosine": 0.9999999999954885
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.026505470275878906,
+            "rmse": 0.0022285750538394893,
+            "relative_rmse": 1.668811024657854e-05,
+            "cosine": 0.999999999860778
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 0.38623046875,
+            "rmse": 0.034856966754716265,
+            "relative_rmse": 0.0002610174169641962,
+            "cosine": 0.99999996759096
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 6,
+          "same_native_input_block_error": {
+            "max_abs": 0.0562744140625,
+            "rmse": 0.0027235375486209046,
+            "relative_rmse": 1.5666903586774504e-05,
+            "cosine": 0.9999999998781146
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.005855560302734375,
+            "rmse": 0.00041869316460166816,
+            "relative_rmse": 2.408697339960948e-06,
+            "cosine": 0.9999999999971697
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 3.250244140625,
+            "rmse": 0.1528769489860396,
+            "relative_rmse": 0.0008794848626543639,
+            "cosine": 0.9999996168287996
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 12,
+          "same_native_input_block_error": {
+            "max_abs": 0.004085540771484375,
+            "rmse": 0.00027024413046807915,
+            "relative_rmse": 9.632524687655947e-07,
+            "cosine": 0.9999999999995365
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.095947265625,
+            "rmse": 0.005839351620253299,
+            "relative_rmse": 2.080497030446623e-05,
+            "cosine": 0.9999999997839489
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 6.077392578125,
+            "rmse": 0.2971943435166758,
+            "relative_rmse": 0.0010588708975966007,
+            "cosine": 0.9999995263822554
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 17,
+          "same_native_input_block_error": {
+            "max_abs": 0.0302734375,
+            "rmse": 0.0022492270249362956,
+            "relative_rmse": 7.03726927292456e-06,
+            "cosine": 0.9999999999754465
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.84716796875,
+            "rmse": 0.03228331129693007,
+            "relative_rmse": 0.00010103145830588928,
+            "cosine": 0.9999999949336813
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 22.710693359375,
+            "rmse": 1.0260143626708613,
+            "relative_rmse": 0.0032109385047277366,
+            "cosine": 0.999994876947841
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 18,
+          "same_native_input_block_error": {
+            "max_abs": 0.0137939453125,
+            "rmse": 0.0005249854527686525,
+            "relative_rmse": 1.576516121881219e-06,
+            "cosine": 0.9999999999987638
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.9306640625,
+            "rmse": 0.047570028421940296,
+            "relative_rmse": 0.00014278859959984067,
+            "cosine": 0.9999999898182593
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 65.650634765625,
+            "rmse": 1.9774689514794455,
+            "relative_rmse": 0.005935670667030438,
+            "cosine": 0.9999824728899126
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 22,
+          "same_native_input_block_error": {
+            "max_abs": 0.739013671875,
+            "rmse": 0.03791553454243392,
+            "relative_rmse": 5.1645542778042046e-05,
+            "cosine": 0.9999999986664311
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.86572265625,
+            "rmse": 0.050731606627304165,
+            "relative_rmse": 3.9102286428338756e-05,
+            "cosine": 0.9999999992365937
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 35711.2109375,
+            "rmse": 783.8478070775278,
+            "relative_rmse": 0.6041646126790414,
+            "cosine": 0.8440104208589453
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 23,
+          "same_native_input_block_error": {
+            "max_abs": 0.02459716796875,
+            "rmse": 0.001649973588965011,
+            "relative_rmse": 2.0319880824138077e-06,
+            "cosine": 0.9999999999979352
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.7825546264648438,
+            "rmse": 0.026459892711170042,
+            "relative_rmse": 1.952684684326151e-05,
+            "cosine": 0.9999999998095598
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 36266.6806640625,
+            "rmse": 794.5386861650261,
+            "relative_rmse": 0.5863529155294382,
+            "cosine": 0.8471392632561627
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 1,
+          "same_native_input_block_error": {
+            "max_abs": 0.1513671875,
+            "rmse": 0.005529852450258322,
+            "relative_rmse": 4.1290890884515606e-05,
+            "cosine": 0.9999999991547255
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.00390625,
+            "rmse": 6.073778052768475e-05,
+            "relative_rmse": 4.5367083141795523e-07,
+            "cosine": 0.9999999999998972
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 2.4561767578125,
+            "rmse": 0.1018247204546738,
+            "relative_rmse": 0.0007605629508723444,
+            "cosine": 0.9999997637413722
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 6,
+          "same_native_input_block_error": {
+            "max_abs": 0.004856228828430176,
+            "rmse": 0.00045525489865099866,
+            "relative_rmse": 2.6100328123760725e-06,
+            "cosine": 0.9999999999965988
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.059783935546875,
+            "rmse": 0.00594494181212358,
+            "relative_rmse": 3.409181772074334e-05,
+            "cosine": 0.9999999994211884
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 3.205078125,
+            "rmse": 0.16028695054359252,
+            "relative_rmse": 0.0009191803172576397,
+            "cosine": 0.9999996104479694
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 12,
+          "same_native_input_block_error": {
+            "max_abs": 0.153076171875,
+            "rmse": 0.012483489724378873,
+            "relative_rmse": 4.4262513555286815e-05,
+            "cosine": 0.9999999990207411
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.09908294677734375,
+            "rmse": 0.009615402941534963,
+            "relative_rmse": 3.406801248871968e-05,
+            "cosine": 0.9999999994201088
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 10.3330078125,
+            "rmse": 0.39317182197691486,
+            "relative_rmse": 0.0013930339292867898,
+            "cosine": 0.9999993017515219
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 17,
+          "same_native_input_block_error": {
+            "max_abs": 0.386688232421875,
+            "rmse": 0.01821390350939339,
+            "relative_rmse": 5.661712287818738e-05,
+            "cosine": 0.9999999983980211
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.2568359375,
+            "rmse": 0.013086816139398917,
+            "relative_rmse": 4.065436198575214e-05,
+            "cosine": 0.9999999991737678
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 24.133544921875,
+            "rmse": 1.0492495681557334,
+            "relative_rmse": 0.003259507224891488,
+            "cosine": 0.9999948800567854
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 18,
+          "same_native_input_block_error": {
+            "max_abs": 0.001953125,
+            "rmse": 3.548989033015772e-05,
+            "relative_rmse": 1.0632247247169425e-07,
+            "cosine": 0.9999999999999941
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.986572265625,
+            "rmse": 0.040515122037608715,
+            "relative_rmse": 0.00012142027681414825,
+            "cosine": 0.9999999926614871
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 47.77874755859375,
+            "rmse": 1.8122811201375115,
+            "relative_rmse": 0.005431247993474857,
+            "cosine": 0.9999853185804324
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 22,
+          "same_native_input_block_error": {
+            "max_abs": 1.04541015625,
+            "rmse": 0.06246755312537946,
+            "relative_rmse": 9.054559811931801e-05,
+            "cosine": 0.9999999959072435
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.3759765625,
+            "rmse": 0.030966992726329606,
+            "relative_rmse": 4.483323333447722e-05,
+            "cosine": 0.9999999989960785
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 183.83984375,
+            "rmse": 5.270830900873845,
+            "relative_rmse": 0.00763097643138364,
+            "cosine": 0.999971544203051
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 23,
+          "same_native_input_block_error": {
+            "max_abs": 0.029296875,
+            "rmse": 0.0014266084587532227,
+            "relative_rmse": 1.8531231196323374e-06,
+            "cosine": 0.9999999999982854
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.1737213134765625,
+            "rmse": 0.006597320303452991,
+            "relative_rmse": 8.552163722868495e-06,
+            "cosine": 0.9999999999634313
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 283.38330078125,
+            "rmse": 7.977943063132495,
+            "relative_rmse": 0.01034187702117808,
+            "cosine": 0.9999485176999365
+          }
+        }
+      ],
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "script_sha256": "6b1e19c1202fec1dae566f0d659f7256e246648c976b5c7157d0f3e56b9efcd0",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "-u",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/replay_quantized_blocks.py"
+      ],
+      "completed": true,
+      "single_block_thresholds": {
+        "relative_rmse_max": 0.005,
+        "cosine_min": 0.9999,
+        "all_21_passed": true,
+        "does_not_replace_failed_full_model_gates": true
+      },
+      "input_provenance": {
+        "q8_0": {
+          "gguf": {
+            "format": "q8_0",
+            "size": 22274854208,
+            "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "native_trace_sha256": "93da0d70bee09769b4d3ba072233eae3cbb66e7720e7d988be6cded1f75f6501",
+          "controlled_manifest_sha256": "29bc96dea3554822cc3367efe236ceedcd24904c3b7b5c407563e0a01139cca7"
+        },
+        "q4_k": {
+          "gguf": {
+            "format": "q4_k",
+            "size": 11813453120,
+            "sha256": "541c03d997e76cbb48579c8071a3990dc2fd850975344b32ef0e09ab3140f07a",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "native_trace_sha256": "543ac6446a9f5342a7b091efb60e7d5bc9ff8691fff2b34ca3d3d1feddb3dbf8",
+          "controlled_manifest_sha256": "5b798aaa49460b8c009685b7f1727c0436ddc907566b6af94f8bbbdb4fae9f85"
+        },
+        "q6_k": {
+          "gguf": {
+            "format": "q6_k",
+            "size": 17208109376,
+            "sha256": "c8fc66953258f6869cd32b58b291398f58cab8dde671fb4218992e83f0ed94f8",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "native_trace_sha256": "87c49299acbb2b839075a03b8a81e84c0a6a15fcc35e2615c53d4bc5d024e4aa",
+          "controlled_manifest_sha256": "f18f7b1a132fe7a069af42b57a364bfc845f8d5daaa12dea6488c82e6a4fb009"
+        }
+      }
+    },
+    "http-concurrency-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18149"
+      ],
+      "body": {
+        "prompt": "A red ball rolls on a table.",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "fps": 16,
+        "seed": 17
+      },
+      "scope": "Real BF16 CPU HTTP busy and client-disconnect lifecycle, isolated port",
+      "passed": true,
+      "concurrent_request": {
+        "status": 429,
+        "elapsed_seconds": 0.03897511400282383
+      },
+      "immediately_after_disconnect": {
+        "status": 429,
+        "elapsed_seconds": 0.0008800514042377472
+      },
+      "probes": [
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007597822695970535,
+          "sent_seconds_after_disconnect": 1.001212451606989
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008532516658306122,
+          "sent_seconds_after_disconnect": 2.0020646806806326
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007802937179803848,
+          "sent_seconds_after_disconnect": 3.0029989760369062
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.01635296642780304,
+          "sent_seconds_after_disconnect": 4.003862364217639
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008118804544210434,
+          "sent_seconds_after_disconnect": 5.020303228870034
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.000806732103228569,
+          "sent_seconds_after_disconnect": 6.02120815962553
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0028655212372541428,
+          "sent_seconds_after_disconnect": 7.022097332403064
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007495321333408356,
+          "sent_seconds_after_disconnect": 8.025048406794667
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.005824577063322067,
+          "sent_seconds_after_disconnect": 9.025902671739459
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007954109460115433,
+          "sent_seconds_after_disconnect": 10.03184668533504
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0011625681072473526,
+          "sent_seconds_after_disconnect": 11.032726844772696
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.005947249010205269,
+          "sent_seconds_after_disconnect": 12.033978460356593
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007449109107255936,
+          "sent_seconds_after_disconnect": 13.040024667978287
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007411129772663116,
+          "sent_seconds_after_disconnect": 14.040853140875697
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007318519055843353,
+          "sent_seconds_after_disconnect": 15.04168876633048
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0012193266302347183,
+          "sent_seconds_after_disconnect": 16.04250712133944
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007012337446212769,
+          "sent_seconds_after_disconnect": 17.043842734768987
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0010472778230905533,
+          "sent_seconds_after_disconnect": 18.07750364392996
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008135400712490082,
+          "sent_seconds_after_disconnect": 19.078649239614606
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007733013480901718,
+          "sent_seconds_after_disconnect": 20.079569432884455
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007404312491416931,
+          "sent_seconds_after_disconnect": 21.080429883673787
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0009431913495063782,
+          "sent_seconds_after_disconnect": 22.081257259473205
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008531417697668076,
+          "sent_seconds_after_disconnect": 23.082275934517384
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008340217173099518,
+          "sent_seconds_after_disconnect": 24.08321207948029
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008818916976451874,
+          "sent_seconds_after_disconnect": 25.084112918004394
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008116327226161957,
+          "sent_seconds_after_disconnect": 26.085097055882215
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007959045469760895,
+          "sent_seconds_after_disconnect": 27.085973316803575
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.000806022435426712,
+          "sent_seconds_after_disconnect": 28.08683598972857
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007954835891723633,
+          "sent_seconds_after_disconnect": 29.08773247152567
+        },
+        {
+          "status": 200,
+          "elapsed_seconds": 67.88807088322937,
+          "sent_seconds_after_disconnect": 30.088622257113457
+        }
+      ],
+      "completed_generations": {
+        "fastframes.noise": 2,
+        "fastframes.pixel_tokens": 2
+      },
+      "first_pixel_before_second_token_ids": true,
+      "decoded_bytes": 3840,
+      "elapsed_seconds": 138.29384766705334
     }
   }
 }

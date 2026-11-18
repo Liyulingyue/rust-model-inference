@@ -1,8 +1,8 @@
 # FastFrames-L oracle
 
-**Experimental: BF16 CPU/Auto/Vulkan and F32 CPU pass CLI/HTTP checkpoints and
+**Experimental: BF16/F32 CPU/Auto/Vulkan pass CLI/HTTP checkpoints and
 decoded MP4 comparison at 16×16 / 5 frames. F16 passes checkpoints but fails
-decoded-video gates. Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have failed numeric gates. Remaining acceptance
+decoded-video gates. Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have failed numeric gates. All 54 transports ran (12 passed, 42 failed); 480p quality acceptance
 is incomplete.** See [validation](validation.md), [matrix](matrix.json),
 [observed results](observed-results.json) and [performance](performance.json).
 

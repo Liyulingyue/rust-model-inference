@@ -1,7 +1,8 @@
 # FastFrames-L validation — 2026-11-19
 
-**Experimental / partial acceptance. BF16 CPU/Auto/Vulkan and F32 CPU pass both transports at 16×16 / 5 frames. F16 passes checkpoints but fails decoded-video gates on all three backends. Quantized gates have failed.**
-The remaining format/backend/transport gates are incomplete in [matrix.json](matrix.json).
+**Experimental / partial acceptance. BF16 and F32 CPU/Auto/Vulkan pass both transports at 16×16 / 5 frames. F16 passes checkpoints but fails decoded-video gates on all three backends. Quantized gates have failed.**
+All 54 format/backend/transport combinations completed: 12 passed and 42 failed,
+as retained in [matrix.json](matrix.json).
 Observed summaries and exact transport commands are retained in
 [observed-results.json](observed-results.json). Small reports are retrieved while
 tests run; model weights and full tensor sidecars remain on remote storage.
@@ -47,12 +48,15 @@ does not establish 480p quality, longer cache reuse or other storage formats.
   `59a25d64eee0d6981a9f57db479291f31329d745f644d32c77d09d69938c2735`
   (83,742,203,200 bytes). F16 conversion completed; SHA256 is
   `ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39`.
-  (41,892,093,248 bytes). Remaining formats/backends retain separate matrix gates.
-- Final F32 strict Vulkan CLI also passes all 411 checkpoints: maximum relative
+  (41,892,093,248 bytes). All nine formats retain separate matrix results.
+- Final F32 strict Vulkan CLI and HTTP also pass all 411 checkpoints each: maximum relative
   RMSE **4.0885956235754525e-5**, minimum cosine **0.9999999991869644**, decoded-video
   RMSE **0**. It records 2,202 Vulkan projections and 5,628 submissions, uploads
   366,407,058,496 bytes, and reaches a device-allocator peak of 29,011,415,008 bytes.
-  Its HTTP and Auto cases remain separate pending gates.
+- Final F32 Auto CLI and HTTP pass all 411 checkpoints each: maximum relative
+  RMSE **4.775628860976526e-5**, minimum cosine **0.9999999988828286**, decoded-video
+  RMSE **0**. Each has 143 Vulkan and 2,059 CPU projection records, 395 device
+  submissions, and a device-allocator peak of 28,901,314,496 bytes.
 
 ### F16 decoded-video failure
 
@@ -82,6 +86,16 @@ The remaining source of quantized-path drift is unresolved; no threshold or
 production accumulator was changed to make these cases pass. Exact per-format
 and per-backend values remain in `transport-results.json`.
 
+A separate pinned-official text-block replay uses captured native inputs at layers
+1, 6, 12, 17, 18, 22 and 23. All 21 isolated block comparisons pass: maximum
+relative RMSE is **3.2239118316123155e-5** for Q8_0, **5.1645542778042046e-5**
+for Q4_K and **9.054559811931801e-5** for Q6_K. Replaying captured reference
+inputs on short-sequence CPU instead of the acceptance oracle's padded GPU
+sequence differs by at most **1.4278859959984067e-4**. This narrows the observed
+problem toward accumulated drift; it does not prove the complete quantized path
+correct or replace any failed full-model gate. The source hash, per-layer metrics
+and replay boundary are retained in `supplemental-results.json`.
+
 Q4_K CPU first exceeds tolerance at `fastframes.text.18` (relative RMSE
 **0.005935670667030438**); its worst full-model relative RMSE is
 **0.6519903473918246**, and decoded-video RMSE is **0.03717332830546875**.
@@ -109,7 +123,11 @@ is **0.007592180372839715**, cosine **0.9999269925418053**, passing the same lim
 This exercises nonzero spatial positions and consumes repaired KV in a later
 latent frame. The same-input published-BF16 recipe drift also passes its separate RMSE limit:
 **0.011251397167858146** ≤ 0.08. The 832×480 / 5-frame strict Vulkan case is
-running; it has no completed numerical or quality result yet.
+still awaiting official comparison; native generation exited 0 after **10,845.66 seconds**
+with 411 numeric checkpoints. This traced release-fast process overlapped the
+format matrix and other host work, so its elapsed time is diagnostic rather
+than an isolated release benchmark. No completed 480p numerical or quality result
+is claimed yet.
 Commands and supplementary measurements are in [supplemental-results.json](supplemental-results.json).
 
 The earlier BF16 result (relative RMSE 4.240734428259513e-5) preceded final oracle
@@ -155,12 +173,24 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
 | Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. Fat-LTO release compilation subsequently completed; binary hashes are in `supplemental-results.json`. |
-| GitHub CI | Run `44380234054` on head `6e8d89f30` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| GitHub CI | Run `44384011235` on head `3a30e9ccc` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
 checks. Local logs live under ignored `target/fastframes/`, including baseline,
 regression, tokenizer-independent checks and metadata inventories.
+
+### Real HTTP busy and disconnect lifecycle
+
+A private-port BF16 CPU server (`--threads 4`) passed a real client-disconnect
+check. A concurrent request returned **429**; immediately after closing the first
+client with a TCP reset, the next request still returned **429**. After that
+computation finished, a new request returned **200** and decoded to the expected
+**3,840 RGB bytes**. The trace contains two noise/pixel-token generations, with
+the first pixel-token event before the second token-ID event. This confirms the
+permit remained held through cancelled computation; the two-generation check
+took **138.29 seconds** under shared load. Commands, response timings and trace
+ordering are retained in `supplemental-results.json#http-concurrency-results.json`.
 
 ### Release timing samples
 
@@ -213,9 +243,16 @@ existing TODO-044 correctness check), and may retry/repair on CPU. This retains
 substantial CPU attention work at 480p. Explicit projection failures in strict
 Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
 
+Shared follow-up S1 belongs to the `src/ops/nn.rs`, `src/ops/kernel/vulkan.rs`
+and `src/vulkan/ops.rs` maintainers: add grouped/depthwise device Conv3D, which
+the existing kernel rejects. Shared follow-up S2 belongs to the attention runtime
+maintainers in `src/ops/nn.rs` and `src/ops/kernel/vulkan.rs`: repair TODO-044 before
+removing duplicate CPU computation. A model-local adapter cannot supply those
+missing shared capabilities; this PR retains the CPU paths and correctness check.
+
 - Fixed prompt cleaning and actual tokenizer vocabulary/hash validation.
 - Bounded GPU weight uploads to eight DiT blocks; full F32 DiT cannot all reside in
-  48 GiB. Device execution occurred, but final peak memory remains unmeasured.
+  48 GiB. Device allocator peaks are retained per transport; full-size host/process peaks remain unmeasured.
 - Kept output publication atomic/no-clobber, private temporary directories and the
   HTTP generation permit alive through cancellation until computation finishes.
 - Removed Auto initialization-as-execution reporting; actual operators must appear
@@ -233,8 +270,9 @@ Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
 ## Remaining acceptance
 
 All nine independent format oracles and all quantized CPU/Auto/strict Vulkan
-CLI/HTTP cases have completed; failed gates remain unresolved. Finish F32's
-running GPU transports and the 480p five-frame case. The nine-frame spatial/KV
+CLI/HTTP cases have completed; failed gates remain unresolved. All 54 format ×
+backend × transport cases are complete (12 passed, 42 failed). Finish the 480p
+five-frame case. The real HTTP busy/disconnect check passed. The nine-frame spatial/KV
 diagnostic passes. Retain F16 decoded-video and all six quantized numeric/video
 failures. Small diagnostic performance and published-BF16 drift are now measured;
 480p quality/drift, full-size peak memory and clean isolated benchmarks remain.
