@@ -88,7 +88,7 @@ The **post-APG-fix seven-step F32 Vulkan chain passes all seven gates**: final N
 
 ## Real CLI and HTTP matrix
 
-All 27 requested backend/storage combinations have real CLI/HTTP transport evidence. CLI/HTTP verification means exit 0 / HTTP 200, decoded 33×35 PNG, one step, seed 42, prompt `猫`; four malformed requests return 400. This is transport coverage, independent of the numerical gate above. CLI and HTTP PNG bytes also match for every completed row. Detailed commands, request bodies, timings and observed device submissions are in [matrix_results.json](matrix_results.json).
+All 27 requested backend/storage combinations have real CLI/HTTP transport evidence. CLI/HTTP verification means exit 0 / HTTP 200, decoded 33×35 PNG, one step, seed 42, prompt `猫`; four semantically invalid request bodies return 400 (blank prompt, `n != 1`, invalid `size`, or `size` conflicting with `width`/`height`); the matrix records their status codes only. Deserialization failures such as unknown fields are rejected by the JSON extractor and are not part of those four. This is transport coverage, independent of the numerical gate above. CLI and HTTP PNG bytes also match for every completed row. Detailed commands, successful request bodies, timings and observed device submissions are in [matrix_results.json](matrix_results.json).
 
 ```sh
 target/release-fast/rust-model-inference --model models/pjit-21k/pjit-FORMAT.gguf \
@@ -185,7 +185,7 @@ The model-local projection chunk was increased from 64 to 256 rows to reduce syn
 
 ## Checks, review and remaining ownership
 
-- Remote final model/CLI tests: 9 passed, 3 asset-dependent tests ignored; real asset tests are recorded separately above. Final inference/server release-fast and full release builds passed (7m51s / 18m25s); final F16 Auto CLI/HTTP smoke passed with equal PNG bytes and 349 observed device submissions. Four CLI-only server flags were rejected before loading components (exit 1, the existing backend-build error convention).
+- Remote final model/CLI tests: 9 passed, 3 asset-dependent tests ignored; real asset tests are recorded separately above. Final inference/server release-fast and full release builds passed (7m51s / 18m25s); final F16 Auto CLI/HTTP smoke passed with equal PNG bytes and 349 observed device submissions. Four CLI-only server flags were rejected before loading components (exit 2, matching the other server option-validation failures).
 - Python converter/oracle helper checks: 7 passed, including cleanup and racing-output protection; touched Rust formatting and diff checks passed.
 - Historical full library suite: 1651 passed / 47 failed / 230 ignored versus starting-base 1642 / 51 / 228. All failure names existed at that base. Final pre-rebase Vulkan suite: 1667 / 35 / 231, again no new failure names; [regression.json](regression.json) retains the lists.
 - Clippy has ten deny-level errors in unchanged ERNIE/Pig/FunASR/Qwen-vision/YuE2/torch28 sources matching the starting base.
