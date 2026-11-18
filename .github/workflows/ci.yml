@@ -50,6 +50,12 @@ jobs:
       - run: 'cargo test --locked --lib ops::audio::'
       - run: cargo test --locked --lib unlimited_ocr
       - run: cargo test --locked --lib pivo
+      - run: cargo test --locked --lib woof
+      - name: Woof conversion and download regressions
+        run: |
+          python3 -m venv target/woof-ci-venv
+          target/woof-ci-venv/bin/python -m pip install -r tools/oracle/underdog_woof/requirements.txt
+          target/woof-ci-venv/bin/python -m unittest tools.converter.underdog_woof.test_convert_underdog_woof
       - run: cargo test --locked --test pivo_cli
       - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'
       - run: cargo test --locked --test unlimited_ocr_cli
@@ -78,6 +84,7 @@ jobs:
       - run: cargo check --locked --all-targets
       - run: cargo check --locked --all-targets --features vulkan,parity-trace
       - run: 'cargo test --locked --features vulkan --lib compute::tests::'
+      - run: cargo test --locked --features vulkan --lib woof
       - run: cargo test --locked --features vulkan --lib legacy_auto_requires_gpu_opt_in_before_initializing
       - run: cargo test --locked --features vulkan --lib batched_linear_layout_
       # Shape validation only -- no device needed, so it runs here. A Q8_0
