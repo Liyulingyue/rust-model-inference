@@ -1,6 +1,6 @@
 # FastFrames-L validation — 2026-11-19
 
-**Experimental / partial acceptance. BF16 CPU/Auto/Vulkan and F32 CPU pass both transports at 16×16 / 5 frames. F16 CPU passes checkpoints but fails decoded-video gates.**
+**Experimental / partial acceptance. BF16 CPU/Auto/Vulkan and F32 CPU pass both transports at 16×16 / 5 frames. F16 passes checkpoints but fails decoded-video gates on all three backends. Quantized gates have failed.**
 The remaining format/backend/transport gates are incomplete in [matrix.json](matrix.json).
 Observed summaries and exact transport commands are retained in
 [observed-results.json](observed-results.json). Small reports are retrieved while
@@ -65,9 +65,8 @@ No thresholds or production arithmetic were changed to hide the failure.
 
 ### Quantized implementation failures
 
-Q8_0 and Q4_0 fail the unchanged checkpoint and decoded-video gates in both
-transports on CPU, Auto and strict Vulkan. Q4_1 CPU and strict Vulkan also fail;
-its Auto case is tracked independently. Q8_0 CPU first fails at `fastframes.text`
+Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K fail the unchanged checkpoint and decoded-video gates in both
+transports on CPU, Auto and strict Vulkan. Q8_0 CPU first fails at `fastframes.text`
 (relative RMSE **0.024168239126007365**, cosine **0.9997082747515944**); worst full
 checkpoint relative RMSE is **0.06915133836694705**. The first 24 text-block
 checkpoints individually pass, with final pre-normalization relative RMSE
@@ -77,6 +76,20 @@ of prior differences rather than a final-normalization implementation error.
 The remaining source of quantized-path drift is unresolved; no threshold or
 production accumulator was changed to make these cases pass. Exact per-format
 and per-backend values remain in `transport-results.json`.
+
+Q4_K CPU first exceeds tolerance at `fastframes.text.18` (relative RMSE
+**0.005935670667030438**); its worst full-model relative RMSE is
+**0.6519903473918246**, and decoded-video RMSE is **0.03717332830546875**.
+Its strict Vulkan and Auto transports also fail; this is not accepted as
+ordinary storage-quality loss. The independently reconstructed Q4_K recipe's
+raw-RGB drift versus the BF16 controlled baseline is separately **0.061805**.
+
+Q5_K CPU first fails at final text output (relative RMSE **0.046764759439796216**),
+with worst full-model relative RMSE **0.11004985784146036** and decoded-video
+RMSE **0.031042289968687298**. Q6_K CPU first fails at text block 18 (relative
+RMSE **0.005431247993474857**), with worst full-model relative RMSE
+**0.12235495926964259** and decoded-video RMSE **0.029655849925988575**.
+Both formats also fail on Auto and strict Vulkan through CLI and HTTP.
 
 F16 Auto and strict Vulkan also pass all 411 checkpoints in both transports,
 but fail decoded-video gates. Their maximum checkpoint relative RMSE is
@@ -136,13 +149,29 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | Comparator noise gate, macOS | 3 passed; differing input noise is rejected even if inside floating tolerances. |
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
-| Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. The optional fat-LTO release build was deferred to free memory for acceptance. |
-| GitHub CI | Run `44350924455` on head `43cd440eb` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. Fat-LTO release compilation subsequently completed; binary hashes are in `supplemental-results.json`. |
+| GitHub CI | Run `44365312347` on head `2c850d41e` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
 checks. Local logs live under ignored `target/fastframes/`, including baseline,
 regression, tokenizer-independent checks and metadata inventories.
+
+### Release timing samples
+
+The earlier fat-LTO deferral is superseded by successful release compilation.
+At 16×16 / 5 frames, three native CPU processes with tracing disabled took
+**63.40 / 73.74 / 78.48 seconds** (median **73.74 seconds**, including load and
+encoding). Their process peak RSS ranged from **27.95 to 31.34 GB**; this is
+process RSS, separate from the shared cgroup and device totals. The completed
+CPU, Auto and strict Vulkan each completed three measured processes. Auto took
+**99.86 / 106.49 / 110.53 seconds**; strict Vulkan took
+**544.67 / 553.27 / 824.41 seconds**. Official repeats are still running.
+The completed native timing videos match controlled BF16 decoded pixels exactly.
+These samples share the host
+with acceptance and conversion work, so they are diagnostic timings, without
+a clean performance or speedup claim. Per-process commands and memory boundaries
+are retained in [performance.json](performance.json).
 
 ## Review and repairs
 

@@ -531,6 +531,33 @@
           "rmse": 0.07404414063429274,
           "relative_rmse": 0.15334212528305308,
           "cosine": 0.9895139645283072
+        },
+        {
+          "format": "q4_k",
+          "gguf_sha256": "541c03d997e76cbb48579c8071a3990dc2fd850975344b32ef0e09ab3140f07a",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.33725490196078434,
+          "rmse": 0.061804991271307466,
+          "relative_rmse": 0.12799539076902353,
+          "cosine": 0.9918292078055071
+        },
+        {
+          "format": "q5_k",
+          "gguf_sha256": "2d8190faca35ae9ed37126d51efdcefbf39aae94228b7b789944a371d3e10455",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.2784313725490196,
+          "rmse": 0.032771175186533934,
+          "relative_rmse": 0.06786764770417228,
+          "cosine": 0.9977989238084379
+        },
+        {
+          "format": "q6_k",
+          "gguf_sha256": "c8fc66953258f6869cd32b58b291398f58cab8dde671fb4218992e83f0ed94f8",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.1215686274509804,
+          "rmse": 0.02115429424643419,
+          "relative_rmse": 0.0438096034449609,
+          "cosine": 0.9991827501527523
         }
       ]
     },
@@ -579,6 +606,153 @@
         "relative_rmse": 0.024168239126007365,
         "cosine": 0.9997082747515944
       }
+    },
+    "release-build-completed-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "profile": "release, fat LTO",
+      "completion_log": "    Finished `release` profile [optimized + debuginfo] target(s) in 6m 04s",
+      "artifacts": [
+        {
+          "binary": "rust-model-inference",
+          "size": 37219224,
+          "sha256": "12231c3a570f98e5c29f29c32107a45e5722278175f40b27ca6beb5d85ebe749",
+          "mtime_epoch": 1795025201.7699785
+        },
+        {
+          "binary": "rust-model-server",
+          "size": 29232136,
+          "sha256": "663231b9f53a573f40625410110d47cc09bcdf2bcec5d210d5b163ce2d3b22a0",
+          "mtime_epoch": 1795019249.2339966
+        }
+      ]
+    },
+    "release-pixels-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Fat-LTO release outputs versus same-noise controlled BF16 reference; checkpoint tracing disabled for these timing samples",
+      "decoded_rmse_max": 0.01,
+      "decoded_cosine_min": 0.9999,
+      "results": [
+        {
+          "file": "target/fastframes/timing-auto-0.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-auto-1.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-auto-2.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-auto-3.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-0.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-1.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-2.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-3.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-0.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-1.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-2.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-3.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        }
+      ]
     }
   }
 }
