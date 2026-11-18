@@ -5182,12 +5182,16 @@ Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
 `tools/oracle/ovisocr3/README.md`、`docs/develop/SUPPORTED_MODELS.md`、
 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
 
-### TODO-069: MTP / DSpark 投机解码 —— 契约已查清，qwen35 的 MTP 已实现，其余未做
+### TODO-069: MTP / DSpark 投机解码 —— qwen35 的 MTP 与 DSpark 已实现，EAGLE3 / standalone draft 未做
 
 **状态**：⚠️ 调研完成（2026-11-11）。**`qwen35` 稠密档的 MTP 起草头与验证/接受
 回路已实现**（见 TODO-072 与 PR #241：草稿逐 token 与 pinned llama.cpp 一致，
-接受率 0.58 vs 0.53，投机解码与 greedy 逐 token 相同）；DSpark / DFlash /
-EAGLE3 仍未实现。
+接受率 0.58 vs 0.53，投机解码与 greedy 逐 token 相同）；**DSpark / DFlash
+sidecar 的起草侧与验证侧也已端到端实现**（`src/models/dflash/`，目标为
+`qwen35` 系：per-layer 输入 hidden 捕获 → DFlash 编码器注入 → 噪声块去噪 →
+Markov/conf 头 → 批量验证 + KV/状态回滚；CLI `--dspark-model`，与
+llama.cpp `b96806d` 的 `draft-dspark` 对同一 prompt 逐 token 一致）；EAGLE3 /
+standalone draft 仍未实现。
 
 **背景**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 是 2026-09-23 的设计稿。
 按上游 llama.cpp 的 pin `b96806d` 重新核对了一遍契约，并盘点了真实模型里
