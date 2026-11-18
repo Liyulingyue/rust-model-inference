@@ -2295,12 +2295,17 @@ fn gpu_attention_enabled() -> bool {
     })
 }
 
-/// `RUST_GPU_F16_REF=0` puts the refiner stacks back on the CPU row path.
+/// `RUST_GPU_F16=0` keeps every F16 projection on the CPU row path.
+///
+/// The name used to be `RUST_GPU_F16_REF` and it used to switch the refiner
+/// stacks only. It now switches all of them, because the main stack can
+/// take them: the FFN down projection is the exception and stays on the CPU
+/// whatever this says.
 #[cfg(feature = "vulkan")]
-fn f16_refiner_enabled() -> bool {
+fn f16_projections_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("RUST_GPU_F16_REF")
+        std::env::var("RUST_GPU_F16")
             .map(|value| value != "0")
             .unwrap_or(true)
     })
@@ -2323,7 +2328,7 @@ fn f16_refiner_resident_only() -> bool {
 /// Upload and bind this block's projections, once per render.
 ///
 /// The main stack is Q8_0 and binds all five. The two refiner stacks are F16 in
-/// the GGUF and bind nothing unless `RUST_GPU_F16_REF` is set, so by default
+/// the GGUF and bind nothing unless the F16 projections are enabled, so by default
 /// every refiner projection falls through to the per-row CPU path below.
 #[cfg(feature = "vulkan")]
 fn bind_block_weights(
@@ -2337,7 +2342,7 @@ fn bind_block_weights(
     let mut bound = std::collections::HashSet::new();
     // The F16 weights get uploaded either way when this is set; only the
     // decision to dispatch on them changes, which is the whole point.
-    let resident_only = f16_refiner_resident_only() && f16_refiner_enabled();
+    let resident_only = f16_refiner_resident_only() && f16_projections_enabled();
     for (projection, name) in [
         (Projection::Qkv, &block.qkv),
         (Projection::Out, &block.out),
@@ -2382,7 +2387,28 @@ fn bind_block_weights(
             // total did not move and the regression is not explained. The slot
             // is not stable enough across instrumentation changes to attribute
             // it, so this stays opt-in until it is.
-            GGMLType::F16 if f16_refiner_enabled() && layer < 2 * REFINER_LAYERS => {
+            GGMLType::F16 if f16_projections_enabled() => {
+                // The FFN down projection is the one projection the device
+                // path cannot take in F16. The CPU path writes it with
+                // `linear_into_scaled(.., 1.0 / 128.0)`, which scales the
+                // activations down before they are rounded to F16 -- and
+                // rounding is what has a range. The device path has no such
+                // pre-scale, so the F16 intermediate is rounded as it stands:
+                // at the second step of a render it is around 3.6e6, which is
+                // past the 65504 an F16 holds, and the projection came back
+                // with 53760 infinities in it. Those infinities are the
+                // NaNs: the next block's tokens came back with them, and the
+                // flow with them.
+                //
+                // The matmul is linear, so scaling the input changes nothing
+                // but the rounding -- which is exactly what has to change. The
+                // device path has no way to scale the FFN intermediate (it
+                // never leaves the device), so the projection stays on the
+                // CPU row path for the main stack, where the pre-scale is
+                // already part of the contract.
+                if matches!(projection, Projection::W2) && layer >= 2 * REFINER_LAYERS {
+                    continue;
+                }
                 crate::vulkan::ops::GpuWeightFormat::F16
             }
             _ => continue,
@@ -2465,7 +2491,8 @@ fn run_block_gpu(
         for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
             *value += *bias;
         }
-        Some(split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?)
+        let split = split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?;
+        Some(split)
     } else {
         if time.is_some() {
             return Err("Unexpected Z-Image AdaLN input".into());
