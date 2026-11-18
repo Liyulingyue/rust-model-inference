@@ -1,43 +1,53 @@
-# FastFrames-L validation — 2026-11-18
+# FastFrames-L validation — 2026-11-19
 
-**Experimental / partial acceptance. BF16 CPU alignment passed at 16×16 / 5 frames.**
+**Experimental / partial acceptance. Final-code BF16/F32 CPU CLI and HTTP pass at 16×16 / 5 frames.**
 The remaining format/backend/transport gates are incomplete in [matrix.json](matrix.json).
-Observed summaries are retained in [observed-results.json](observed-results.json);
-model raw sidecars could not be retrieved after SSH interruptions. Final Linux
-engineering logs from the fresh replacement host were retrieved separately.
+Observed summaries and exact transport commands are retained in
+[observed-results.json](observed-results.json). Small reports are retrieved while
+tests run; model weights and full tensor sidecars remain on remote storage.
 JEV and text-token streaming do not apply to this video-generation contract.
 
 ## Real-model evidence
 
 The same BF16 GGUF was consumed by Rust CPU and independently reconstructed
 pinned official forwards, using F32 activations/KV and the identical noise file.
-All **411** full checkpoints passed: maximum relative RMSE **4.240734428259513e-5**,
-minimum cosine **0.9999999991360493**. Limits, fixed before execution, are relative
+Both final-code **CLI and HTTP** pass all **411** full checkpoints: maximum relative
+RMSE **2.794884733482099e-5**, minimum cosine **0.9999999997176138**.
+Limits, fixed before execution, are relative
 RMSE ≤ 0.005 and cosine ≥ 0.9999. This covers umT5, every DiT block through the
 multi-frame rollout, repaired K/V and decoder pixel tokens. Token IDs match.
-It does not establish final RGB/MP4 quality or other storage formats.
+The decoded MP4 comparison also passes: RGB24 / 255 RMSE **0**, cosine
+**0.9999999999999999**, 3,840 decoded bytes per video. Both implementations' RGB
+was encoded with the same libx264 settings before decoding. This diagnostic case
+does not establish 480p quality, longer cache reuse or other storage formats.
 
 - BF16 GGUF: 41,892,093,248 bytes,
   SHA256 `d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9`.
-- Native CPU CLI exited successfully and emitted the requested MP4.
-- A separate seed-only BF16 CPU CLI run succeeded; the actual HTTP request returned
-  200 and MP4. HTTP numerical comparison and decoded-video checks remain unverified.
-- Strict Vulkan executed at least 4,737 device submissions. A 238-checkpoint prefix
+- Native CPU CLI exited successfully. The actual HTTP request returned 200,
+  `Content-Type: video/mp4`, `Cache-Control: no-store`; both videos decoded correctly.
+- Final strict Vulkan CLI also completed and passed all 411 checkpoints: maximum
+  relative RMSE **2.5552589342221195e-5**, minimum cosine **0.9999999998047929**;
+  decoded MP4 pixel RMSE **0**. Its 2,202 Vulkan operator records and 5,628 device
+  submissions prove execution. Actual Vulkan HTTP is still pending.
+- On an earlier host, strict Vulkan executed at least 4,737 device submissions. A 238-checkpoint prefix
   compared with CPU without failure (worst relative RMSE 3.988701595524663e-5).
-  The last observed trace had 274 records. No completed device rollout, refiner,
-  decoder or MP4 result was observed; this is **not a Vulkan acceptance pass**.
-- F32 and F16 conversion completed; F16 SHA256 is
+  The last observed trace had 274 records. That incomplete result did not establish
+  device acceptance; the final-code CLI run above now supersedes this limitation.
+- Final F32 CPU CLI and HTTP both pass all 411 official checkpoints after the mmap
+  repair (maximum relative RMSE 2.794884733482099e-5, minimum cosine
+  0.9999999997176138), with decoded MP4 pixel RMSE 0. F32 SHA256 is
+  `59a25d64eee0d6981a9f57db479291f31329d745f644d32c77d09d69938c2735`
+  (83,742,203,200 bytes). F16 conversion completed; SHA256 is
   `ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39`.
-  The F32 manifest was observed, but its hash was not retrieved. Q8 conversion was
-  running when the replacement endpoint disconnected. Remaining formats are unverified.
+  (41,892,093,248 bytes). Remaining formats/backends retain separate matrix gates.
 
-The completed BF16 CPU result remains evidence for its measured revision, not
-an unrun final rerun. A fresh replacement container subsequently completed all
-direct ModelScope downloads, final model/tokenizer tests and the final native
-Vulkan/parity build. It also disconnected during BF16 conversion, before any new
-full-model result was observed. Release-build and conversion completion are unknown;
-the disconnect is not diagnosed as OOM. Retrieved engineering logs are under
-`target/fastframes/port36085/`; no model payloads were copied to the Mac.
+The earlier BF16 result (relative RMSE 4.240734428259513e-5) preceded final oracle
+hardening. The 2026-11-19 run supersedes that limitation: source head
+`b44d4b3019fc900ad17b76e61deee98e8b08bf71` passed final provenance, exact shared
+noise, CLI/HTTP checkpoints and decoded-video checks. All eight pinned source and
+tokenizer assets were downloaded and SHA256-verified directly on the new host.
+Reports are retained under `target/fastframes/port31667/`; earlier engineering logs
+remain under `target/fastframes/port36085/`. No disconnect is diagnosed as OOM.
 
 ## Assets and host
 
@@ -73,8 +83,8 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | Comparator noise gate, macOS | 3 passed; differing input noise is rejected even if inside floating tolerances. |
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
-| Latest Linux Vulkan/parity binaries | All nine bins built successfully on the fresh replacement host with the final F32 mmap-loader repair. The separate release build was interrupted; completion is unknown. |
-| GitHub CI | Run `44335831236` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. The optional fat-LTO release build was deferred to free memory for acceptance. |
+| GitHub CI | Run `44340649724` on source head `b44d4b301` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
@@ -101,7 +111,7 @@ Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
   prepared activation rounding and Q4_1's independently rounded Q8_1 sum term.
 - Enforced exact input noise for comparison, retained numeric tolerances for lossy
   compute, and added wrapper/tokenizer/dependency provenance. Final provenance
-  additions have syntax/unit checks but await a full remote rerun.
+  additions passed the final BF16 CPU CLI/HTTP full-model rerun.
 - Found that the generic F32 loader copies all ~84 GB of weights. The model-local
   loader now uses the existing borrowed F32 API; a pointer-identity/invalid-storage
   test failed before repair, then passed with the other 12 model tests. Remote disconnect cause
@@ -109,10 +119,10 @@ Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
 
 ## Remaining acceptance
 
-Recover the remote assets/logs; rerun after the final loader/oracle repairs.
-Complete each independently decoded format oracle and CPU/Auto/strict Vulkan,
+Finish the running independent format oracles and CPU/Auto/strict Vulkan matrix,
 with actual CLI and HTTP separately. Compare shared noise, discrete tokens,
-checkpoint counts and numeric results; decode MP4s. Run published-BF16 drift,
+checkpoint counts and numeric results; decode MP4s. Exercise at least nine frames
+to consume repaired KV in a subsequent latent frame. Run published-BF16 drift,
 480p multi-frame quality, peak memory and clean same-host repeated CPU/Vulkan/reference
 benchmarks. Existing trace-inclusive reference timings are not speedup evidence.
 Keep Draft/Experimental until these gates pass.

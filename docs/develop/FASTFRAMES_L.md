@@ -2,8 +2,8 @@
 
 `fastframes_l` 显式架构接入现有 CLI 和 `POST /v1/videos/generations`，复用原生
 Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。当前是**部分验收 / Experimental**：
-16×16 / 5 帧 BF16 CPU 的 411 个检查点全部对齐，实际 HTTP 已返回 MP4；其余精度、
-完整 GPU/HTTP 对齐及 480p 质量仍待验证。
+16×16 / 5 帧 BF16 的 CPU CLI/HTTP 和严格 Vulkan CLI 各 411 个检查点全部对齐，视频像素也通过；
+F32 CPU 两入口也各 411 个检查点和视频像素通过；其余精度、Vulkan HTTP/Auto 及 480p 质量仍待验证。
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和
 [逐项矩阵](../../tools/oracle/fastframes_l/matrix.json)。
 
@@ -77,11 +77,11 @@ HTTP 成功返回 `video/mp4`、`Cache-Control: no-store`。可选 JSON 字段�
 mmap 借用接口，避免复制约 84 GB 权重。实际容器内存上限约 55 GiB，不能以主机
 503 GiB 物理内存推断进程可用内存。
 
-2026-11-18 在替换 SSH 端口后完成 BF16/F32/F16 转换、BF16 CPU Oracle 和实际 HTTP；
-随后远端再次拒绝连接，剩余任务最终状态和原始证据未能取回。新容器上已重下全部源权重，
-最终 Linux 模型测试 13 项、真实 tokenizer 测试及 11 项 Python 检查均通过，包含 F32
-mmap 修复的九个 Vulkan/parity 二进制构建成功；但 BF16 转换期间连接又被关闭，尚未观察到
-新的完整模型结果，不能据此判断为 OOM。GitHub CI 三项作业已通过。BF16 CPU 最大相对 RMSE
-为 `4.240734428259513e-5`，最低 cosine 为 `0.9999999991360493`，优于预设
-`0.005 / 0.9999` 门槛。Vulkan 仅有部分设备执行与前缀对齐证据。最终 F32 加载路径的完整推理、
-其余格式/入口数值、480p 多帧质量和无插桩性能仍需远端复测，保持 Draft/Experimental。
+2026-11-19 在新的授权主机上重下并校验全部源文件，完成最终代码的 BF16 CPU CLI/HTTP
+对齐：双方各 411 个检查点通过，最大相对 RMSE 为 `2.794884733482099e-5`，最低 cosine
+为 `0.9999999997176138`，优于预设 `0.005 / 0.9999` 门槛。视频经相同编码再解码后像素
+RMSE 为 0。F32 的 mmap 加载路径也已在 CLI/HTTP 通过同样的 411 个检查点和视频像素检查。
+此前 Linux 模型测试 13 项、真实 tokenizer 及 11 项 Python 检查均通过，九个 Vulkan/parity
+二进制构建成功，GitHub CI 三项作业通过。严格 Vulkan CLI 也已完整通过 411 个检查点，
+最大相对 RMSE 为 `2.5552589342221195e-5`，视频像素 RMSE 为 0；完整设备/HTTP/Auto 矩阵、
+更长的 KV 复用、480p 质量和无插桩性能尚未验收，保持 Draft/Experimental。

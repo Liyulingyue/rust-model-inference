@@ -1,7 +1,7 @@
 {
-  "date": "2026-11-18",
+  "date": "2026-11-19",
   "status": "未运行",
-  "reason": "Replacement SSH endpoints disconnected; the latest fresh host disconnected during conversion/release build. No clean repeated native/reference benchmark completed.",
+  "reason": "Final-code full-model acceptance resumed on a fresh authorized host. No clean repeated native/reference benchmark has completed; optional fat-LTO compilation was deferred to free memory during acceptance.",
   "host": {
     "logical_cpus": 128,
     "ram_gib_approx": 503,
@@ -42,7 +42,47 @@
       "recipe": "BF16 GGUF controlled F32",
       "device": "cuda",
       "elapsed_seconds": 190.21348341926932
+    },
+    {
+      "recipe": "final BF16 native CPU CLI, release-fast",
+      "elapsed_seconds": 70.00480451993644,
+      "boundary": "process wall clock, includes load, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final BF16 native CPU HTTP, release-fast",
+      "elapsed_seconds": 27.78959423303604,
+      "boundary": "request wall clock, includes graph load, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final same-GGUF BF16 official controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 483.7055835220963,
+      "boundary": "generation includes streamed weights and checkpoint/RGB I/O; initial hashes excluded"
+    },
+    {
+      "recipe": "final F32 native CPU CLI, release-fast",
+      "elapsed_seconds": 586.4098542202264,
+      "boundary": "process wall clock, mmap paging under shared memory contention, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final F32 native CPU HTTP, release-fast",
+      "elapsed_seconds": 111.4729998651892,
+      "boundary": "request wall clock, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final BF16 native strict Vulkan CLI, release-fast",
+      "elapsed_seconds": 1054.6179829854518,
+      "boundary": "process wall clock, includes model load, trace/log I/O and encoding; shared host/cgroup contention",
+      "device_submissions": 5628,
+      "static_upload_bytes": 183203529792,
+      "device_allocator_peak_bytes": 15003422672
+    },
+    {
+      "recipe": "final same-GGUF F32 official controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 569.1979734543711,
+      "boundary": "traced_including_checkpoint_io_and_streamed_weights; initial hash verification excluded"
     }
   ],
-  "trace_timing_limit": "Includes streamed dequantization/uploads and checkpoint/RGB I/O; not a latency/speedup benchmark."
+  "trace_timing_limit": "Shared host/cgroup contention, different load/encode boundaries and checkpoint I/O. These are diagnostic run times, not clean benchmarks or evidence of a speedup."
 }
