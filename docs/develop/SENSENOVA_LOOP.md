@@ -5,13 +5,17 @@ factor 2. The explicit `sensenova_loop` model reuses shared Qwen3.5 CPU SIMD and
 Vulkan kernels, retaining independent state for all 56 visits of 32 physical layers.
 See the [pinned contract and reproduction commands](../../tools/oracle/sensenova_loop/README.md).
 
-Status on 2026-11-19: **Experimental / partial validation**. The
+Status on 2026-11-19: **Experimental / partial adaptation**. The
 [108-row matrix](../../tools/oracle/sensenova_loop/release-matrix.csv) records
-18 passed, 6 failed and 84 pending
+18 passed, 44 failed and 46 pending
 combinations across nine text storage formats, three backends, text/image
 generation and JEV. Implementation, CLI, HTTP and numeric verification are
 separate. F32 text passes all 570 official state/logit gates on each backend,
 with exact tokenizer and greedy IDs. Auto/Vulkan execute device submissions.
+F16 and BF16 text/image each pass 570/172 gates on all three backends. Block
+formats still have full-model gate failures; Q4_0 CPU text and device image
+cases also have greedy divergence. Fixed-input quantized projection probes pass all 252 comparisons,
+but do not clear those full-model failures. No numerical gate was widened.
 F32 single-image greedy and final logits pass, but intermediate states exceed
 the original gates. Injecting the exact native vision output into the official
 decoder now passes all 172 checks after correcting GDN epsilon placement;

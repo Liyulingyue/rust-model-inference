@@ -1,9 +1,9 @@
 # SenseNova Loop 9B release validation
 
 Date: 2026-11-19 (Asia/Shanghai). Base: `44527e5ad`.
-Status: **Experimental / partial validation**.
+Status: **Experimental / partial adaptation**.
 The 108-row [coverage matrix](release-matrix.csv) currently has 18 passed,
-6 failed and 84 pending combinations. Implementation and
+44 failed and 46 pending combinations. Implementation and
 verification status are separate. [Machine-readable results](release-results.json)
 retain numeric metrics, interface comparisons, exported hashes and failure names.
 
@@ -80,25 +80,52 @@ New references write actual device placement to `execution.json`, retained in
 the result JSON. The original F32 text reference used all-ROCm. The exact
 recorded placement of newer references takes precedence over command flags.
 
-| Storage | Fixture | Requested | Checks / failed | Worst relative RMSE | Greedy |
-| --- | --- | --- | ---: | ---: | --- |
-| F32 | text | cpu | 570 / 0 | 1.23433e-05 | exact |
-| F32 | text | auto | 570 / 0 | 1.1838e-05 | exact |
-| F32 | text | vulkan | 570 / 0 | 1.1838e-05 | exact |
-| F32 | image | cpu | 172 / 46 | 0.000369287 | exact |
-| F32 | image | auto | 172 / 46 | 0.000368799 | exact |
-| F32 | image | vulkan | 172 / 46 | 0.000368799 | exact |
-| F16 | text | cpu | 570 / 0 | 0.00217805 | exact |
-| F16 | text | auto | 570 / 0 | 0.00185394 | exact |
-| F16 | text | vulkan | 570 / 0 | 0.00185394 | exact |
-| F16 | image | cpu | 172 / 0 | 0.00255879 | exact |
-| F16 | image | auto | 172 / 0 | 0.00252029 | exact |
-| F16 | image | vulkan | 172 / 0 | 0.00252029 | exact |
-| BF16 | text | cpu | 570 / 0 | 1.08455e-05 | exact |
-| BF16 | text | auto | 570 / 0 | 1.16453e-05 | exact |
-| BF16 | text | vulkan | 570 / 0 | 1.16453e-05 | exact |
-| BF16 | image | cpu | 172 / 0 | 0.000101511 | exact |
-| BF16 | image | auto | 172 / 0 | 9.99252e-05 | exact |
+| Storage | Fixture | Requested | Raw checks / failed | Same-prefix checks / failed | Worst raw relative RMSE | Greedy |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| F32 | text | cpu | 570 / 0 | 570 / 0 | 1.23433e-05 | exact |
+| F32 | text | auto | 570 / 0 | 570 / 0 | 1.1838e-05 | exact |
+| F32 | text | vulkan | 570 / 0 | 570 / 0 | 1.1838e-05 | exact |
+| F32 | image | cpu | 172 / 46 | 172 / 46 | 0.000369287 | exact |
+| F32 | image | auto | 172 / 46 | 172 / 46 | 0.000368799 | exact |
+| F32 | image | vulkan | 172 / 46 | 172 / 46 | 0.000368799 | exact |
+| F16 | text | cpu | 570 / 0 | 570 / 0 | 0.00217805 | exact |
+| F16 | text | auto | 570 / 0 | 570 / 0 | 0.00185394 | exact |
+| F16 | text | vulkan | 570 / 0 | 570 / 0 | 0.00185394 | exact |
+| F16 | image | cpu | 172 / 0 | 172 / 0 | 0.00255879 | exact |
+| F16 | image | auto | 172 / 0 | 172 / 0 | 0.00252029 | exact |
+| F16 | image | vulkan | 172 / 0 | 172 / 0 | 0.00252029 | exact |
+| BF16 | text | cpu | 570 / 0 | 570 / 0 | 1.08455e-05 | exact |
+| BF16 | text | auto | 570 / 0 | 570 / 0 | 1.16453e-05 | exact |
+| BF16 | text | vulkan | 570 / 0 | 570 / 0 | 1.16453e-05 | exact |
+| BF16 | image | cpu | 172 / 0 | 172 / 0 | 0.000101511 | exact |
+| BF16 | image | auto | 172 / 0 | 172 / 0 | 9.99252e-05 | exact |
+| BF16 | image | vulkan | 172 / 0 | 172 / 0 | 9.99252e-05 | exact |
+| Q8_0 | text | cpu | 570 / 121 | 570 / 121 | 0.0822453 | exact |
+| Q8_0 | text | auto | 570 / 102 | 570 / 102 | 0.0860444 | exact |
+| Q8_0 | text | vulkan | 570 / 102 | 570 / 102 | 0.0860444 | exact |
+| Q8_0 | image | cpu | 172 / 39 | 172 / 39 | 0.106571 | exact |
+| Q8_0 | image | auto | 172 / 43 | 172 / 43 | 0.0918748 | exact |
+| Q8_0 | image | vulkan | 172 / 43 | 172 / 43 | 0.0918748 | exact |
+| Q4_0 | text | cpu | 570 / 116 | 570 / 116 | 0.099507 | different |
+| Q4_0 | text | auto | 570 / 111 | 570 / 111 | 0.098862 | exact |
+| Q4_0 | text | vulkan | 570 / 111 | 570 / 111 | 0.098862 | exact |
+| Q4_0 | image | cpu | 172 / 49 | 172 / 49 | 0.089328 | exact |
+| Q4_0 | image | auto | 172 / 132 | 58 / 18 | 1.28148 | different |
+| Q4_0 | image | vulkan | 172 / 132 | 58 / 18 | 1.28148 | different |
+| Q4_1 | text | cpu | 570 / 120 | 570 / 120 | 0.0987963 | exact |
+| Q4_1 | text | auto | 570 / 112 | 570 / 112 | 0.109673 | exact |
+| Q4_1 | text | vulkan | 570 / 112 | 570 / 112 | 0.109673 | exact |
+| Q4_1 | image | cpu | 172 / 56 | 172 / 56 | 0.1261 | exact |
+| Q4_1 | image | auto | 172 / 50 | 172 / 50 | 0.117876 | exact |
+| Q4_1 | image | vulkan | 172 / 50 | 172 / 50 | 0.117876 | exact |
+| Q4_K | text | cpu | 570 / 405 | 570 / 405 | 0.18309 | exact |
+
+After greedy divergence, subsequent inputs differ. Raw comparisons and their
+original failures are retained, with `same_input_prefix` identifying checks
+through the first divergence. The same-prefix columns bound implementation
+comparison to equal inputs; later raw errors include the changed token prefix.
+Greedy divergence still fails acceptance. No gate or prior failed result was
+removed; the comparator's regression test covers this distinction.
 
 F32 text produces `[9419,0,2500,628,353,7543,488,3242]` (`Hello! How can I assist you today`),
 Chinese `[109430]` and Unicode `[34]` in all three native backends and the official reference.
@@ -120,14 +147,29 @@ pass is implied.
 
 | Storage/fixture | Case | Prefill max abs | Relative RMSE | Cosine | First greedy difference step |
 | --- | ---: | ---: | ---: | ---: | --- |
+| q4_0-image | 0 | 5.69387 | 0.393946 | 0.9191544 | 0 |
+| q4_0 | 0 | 6.78244 | 0.576585 | 0.8321515 | 3 |
+| q4_0 | 1 | 5.2738 | 0.42048 | 0.90883 | None |
+| q4_0 | 2 | 6.06293 | 0.446079 | 0.8957483 | 0 |
 | f16 | 0 | 0.000139236 | 1.22267e-05 | 1 | None |
 | f16 | 1 | 8.39233e-05 | 6.93078e-06 | 1 | None |
 | f16 | 2 | 8.67248e-05 | 7.00278e-06 | 1 | None |
+| q8_0 | 0 | 1.26603 | 0.0930795 | 0.995663 | None |
+| q8_0 | 1 | 0.648081 | 0.0554285 | 0.9984628 | None |
+| q8_0 | 2 | 0.969611 | 0.0637552 | 0.9979999 | None |
+| q4_k | 0 | 6.1979 | 0.539022 | 0.8668642 | 3 |
+| q4_k | 1 | 4.45351 | 0.479486 | 0.9093961 | None |
+| q4_k | 2 | 4.98178 | 0.359219 | 0.940106 | None |
 | bf16 | 0 | 0.00012958 | 1.08498e-05 | 1 | None |
 | bf16 | 1 | 8.30889e-05 | 7.34619e-06 | 1 | None |
 | bf16 | 2 | 0.00011158 | 7.4136e-06 | 1 | None |
 | f16-image | 0 | 0.000115275 | 1.00235e-05 | 1 | None |
 | bf16-image | 0 | 0.000109673 | 5.85333e-06 | 1 | None |
+| q8_0-image | 0 | 0.64336 | 0.0476247 | 0.9989632 | None |
+| q4_1-image | 0 | 5.41467 | 0.353224 | 0.9364004 | None |
+| q4_1 | 0 | 6.51692 | 0.571521 | 0.8304392 | 3 |
+| q4_1 | 1 | 4.7297 | 0.404388 | 0.9187831 | None |
+| q4_1 | 2 | 4.89885 | 0.377515 | 0.9321547 | None |
 
 ### F32 image discrepancy
 
@@ -200,6 +242,41 @@ metadata records every hooked projection; embeddings and F32 mHC stay outside
 the activation hook. The numeric gates are unchanged. Quality relative to the
 original F32 checkpoint includes both weight and activation loss in these runs.
 
+Replacing chunk prefill with the official recurrent GDN does not clear Q8_0:
+text fails 120/570 checks on CPU and 113/570 on Auto/Vulkan; image fails 36/172
+and 32/172 respectively. Those independent-input diagnostics retain exact
+greedy IDs, and do not replace acceptance references.
+
+An additional independent official CPU reference uses the same Q8_0 GGUF,
+activation QDQ and the same three input prefills as the recorded ROCm reference.
+Comparing the two official placements themselves fails
+19 of 171
+original lossy gates. The first failure is
+`loop.visit.48`; the worst relative RMSE
+is 0.09590495912509847 at final
+logits, with the same first greedy token in all three cases. This establishes
+reference cross-device variation beyond the fixed whole-model gate; it does
+not prove every native discrepancy has the same cause. The metrics are in
+`official_device_diagnostic`. No threshold was widened and no native failure
+was converted to a pass.
+
+The activation-aware Q8_0 reference still fails 121/570 text checks on CPU and
+102/570 on Auto/Vulkan. Image comparisons fail 39/172 on CPU and 43/172 on the
+device backends; greedy IDs remain exact. Q4_0 also fails full-model gates,
+with greedy divergence in CPU text and device image cases. Adding QDQ did not clear acceptance, and
+these failures remain in the numerical table and coverage matrix.
+
+A separate fixed-input diagnostic samples 21 real projections per block format
+from physical layers 0, 15, 31 and the output head, with 64 evenly selected
+output rows and four seeded F32 input rows. Independent gguf-py decoding,
+NumPy input QDQ and PyTorch CPU Linear are compared with the shared native CPU
+kernel and strict Vulkan projection execution. All 252 comparisons pass the
+diagnostic relative-RMSE gate of 5e-5; the worst observed value is 1.22e-6.
+The device probe asserts successful dispatch and records 253 submissions.
+This bounds the sampled projection error; it does not explain or clear the
+full-model failures. Shapes, input generation, per-format metrics and remote
+evidence paths are retained in `projection_diagnostic` in the results.
+
 ## Interfaces and review fixes
 
 Every completed interface combination runs real CLI text/image generation,
@@ -242,6 +319,8 @@ Review fixes:
     the existing marker expansion and count its net tokens during preflight.
 11. Keep SenseNova BF16 on the existing SIMD/F32-input kernel, preserving the
     shared family's legacy activation contract through the default loader.
+12. Identify equal-input checkpoints after greedy divergence while retaining
+    all original raw comparisons; later error includes different token prefixes.
 
 Q8_0 real-model fallback/boundary probes pass: process-local invalid Vulkan ICD
 settings produce Auto CPU execution and strict Vulkan failure, without changing
@@ -271,8 +350,8 @@ was not benchmarked.
 
 ## Engineering regression and performance
 
-Python converter/quantizer/comparator/independent-reference checks: **88 passed**
-on the host; Mac: **87 passed / 1 CUDA-dependent test skipped**.
+Python converter/quantizer/comparator/independent-reference checks: **89 passed**
+on the host; Mac: **88 passed / 1 CUDA-dependent test skipped**.
 Rustfmt and compile checks pass. Final remote focused checks: **18 passed,
 1 ignored**; isolated tracing-lock regression: **1 passed**. Full library:
 **1715 passed / 25 failed / 260 ignored**, versus baseline **1708 / 25 / 259**;
@@ -297,6 +376,20 @@ Same-host text process wall, including loading and tracing:
 | BF16 | native | cpu | 34.643 | 15,964,692 |
 | BF16 | native | auto -> Vulkan | 85.211 | 16,036,636 |
 | BF16 | native | vulkan | 85.031 | 16,036,012 |
+| Q8_0 | official PyTorch | ROCm | 86.366 | 28,879,568 |
+| Q8_0 | native | cpu | 28.178 | 8,712,712 |
+| Q8_0 | native | auto -> Vulkan | 73.473 | 8,775,808 |
+| Q8_0 | native | vulkan | 72.750 | 8,778,464 |
+| Q4_0 | official PyTorch | ROCm | 78.876 | 29,062,308 |
+| Q4_0 | native | cpu | 28.798 | 4,832,668 |
+| Q4_0 | native | auto -> Vulkan | 70.051 | 4,908,388 |
+| Q4_0 | native | vulkan | 71.542 | 4,906,800 |
+| Q4_1 | official PyTorch | ROCm | 118.156 | 29,192,248 |
+| Q4_1 | native | cpu | 28.534 | 5,316,672 |
+| Q4_1 | native | auto -> Vulkan | 72.381 | 5,389,344 |
+| Q4_1 | native | vulkan | 73.382 | 5,392,404 |
+| Q4_K | official PyTorch | ROCm | 95.158 | 29,183,992 |
+| Q4_K | native | cpu | 28.797 | 4,831,756 |
 | F32 | official PyTorch (recorded placement) | ROCm decoder; CPU input/head | 28.442 | 29,193,116 |
 
 The native F32 text runner creates three sessions, cumulatively uploading
@@ -308,6 +401,8 @@ release-build throughput or capacity estimates. In particular, the earlier
 by this run; its difference must not be attributed to the GDN fix.
 See [performance.json](performance.json) for text/image process times, RSS,
 conversion observations and device counters.
+Q4_K/Q5_K/Q6_K native CPU, Auto and Vulkan numeric runs execute concurrently;
+their process times include that contention and cannot rank backend latency.
 
 Baseline failure names (also retained in the result JSON):
 

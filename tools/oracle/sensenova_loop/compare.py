@@ -61,6 +61,7 @@ def compare(oracle, native, *, lossy=False):
         summary["generated_exact"] &= generated == fixture["generated"]
         offset = 0
         for step, info in enumerate(fixture["steps"]):
+            same_input_prefix = generated[:step] == fixture["generated"][:step]
             rows = info["rows"]
             for visit, shape in enumerate(info["visits"]):
                 name = f"loop.visit.{visit}"
@@ -81,6 +82,7 @@ def compare(oracle, native, *, lossy=False):
                         "case": case,
                         "step": step,
                         "name": name,
+                        "same_input_prefix": same_input_prefix,
                         **metrics(actual, expected, lossy=lossy),
                     }
                 )
@@ -94,6 +96,7 @@ def compare(oracle, native, *, lossy=False):
                     "case": case,
                     "step": step,
                     "name": "loop.logits",
+                    "same_input_prefix": same_input_prefix,
                     **metrics(actual, expected, lossy=lossy),
                 }
             )
@@ -108,9 +111,13 @@ def compare(oracle, native, *, lossy=False):
                     "case": case,
                     "step": 0,
                     "name": "vision.output",
+                    "same_input_prefix": True,
                     **metrics(actual, expected),
                 }
             )
+    comparable = [row for row in summary["checks"] if row["same_input_prefix"]]
+    summary["same_input_prefix_checkpoints"] = len(comparable)
+    summary["same_input_prefix_failed"] = sum(not row["pass"] for row in comparable)
     summary["pass"] = summary["generated_exact"] and all(
         row["pass"] for row in summary["checks"]
     )
@@ -133,6 +140,8 @@ if __name__ == "__main__":
                 "pass": summary["pass"],
                 "generated_exact": summary["generated_exact"],
                 "checkpoints": len(summary["checks"]),
+                "same_input_prefix_checkpoints": summary["same_input_prefix_checkpoints"],
+                "same_input_prefix_failed": summary["same_input_prefix_failed"],
                 "failed": len(failed),
                 "first_failure": next(iter(failed), None),
                 "worst": max(summary["checks"], key=lambda r: r["relative_rmse"]),
