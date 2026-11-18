@@ -50,6 +50,26 @@ impl TokenCommitState {
         self.committed_len
     }
 
+    /// Move the committed length back to `len`.
+    ///
+    /// A speculative round commits a batch of rows and only learns afterwards
+    /// how many of them the target accepts. The rejected rows are still in
+    /// the device cache, but nothing reads them before the next chunk
+    /// overwrites them, so rewinding the length is enough.
+    pub(crate) fn truncate(&mut self, len: usize) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("cannot rewind a pending Vulkan chunk".into());
+        }
+        if len > self.committed_len {
+            return Err(format!(
+                "cannot rewind the Vulkan committed length from {} to {len}",
+                self.committed_len
+            ));
+        }
+        self.committed_len = len;
+        Ok(())
+    }
+
     pub(crate) fn reset(&mut self) {
         self.committed_len = 0;
         self.pending = None;
@@ -88,6 +108,18 @@ mod tests {
         state.reset();
         assert_eq!(state.committed_len(), 0);
         state.begin(0, 3).unwrap();
+    }
+
+    #[test]
+    fn truncate_rewinds_a_committed_batch_but_not_past_it() {
+        let mut state = TokenCommitState::new(4, 10);
+        state.begin(4, 3).unwrap();
+        state.commit();
+        state.truncate(5).unwrap();
+        assert_eq!(state.committed_len(), 5);
+        assert!(state.truncate(6).is_err());
+        state.begin(5, 1).unwrap();
+        assert!(state.truncate(4).is_err());
     }
 }
 

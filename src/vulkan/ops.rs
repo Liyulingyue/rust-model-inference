@@ -66,6 +66,10 @@ const PIVO_SILU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_silu.spv"
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
+/// Register-tiled Q4_0 matmul: the weight is read once per (output column,
+/// k-block) and reused across a tile of tokens.
+const Q4_0_MATMUL_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q4_0_matmul_tiled_dp4a.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
 const Q4_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
@@ -225,6 +229,9 @@ const QWEN35_MOE_ROUTE: usize = 41;
 const QWEN35_MOE_REDUCE: usize = 42;
 const Q5_K_MATMUL_COOPERATIVE: usize = 43;
 const SENSENOVA_MHC: usize = 44;
+/// The register-tiled Q4_0 matmul. It follows the operator table's last
+/// entry, so the index has to follow the table length.
+const Q4_0_MATMUL_TILED: usize = 74;
 
 // The AuK VAE decoder operators.
 //
@@ -421,6 +428,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "pivo_conv1d",
     "pivo_swiglu",
     "pivo_silu",
+    "q4_0_matmul_tiled_dp4a",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -546,7 +554,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 74] = [
+const OPERATOR_SHADERS: [&[u8]; 75] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -621,6 +629,7 @@ const OPERATOR_SHADERS: [&[u8]; 74] = [
     PIVO_CONV1D_SHADER,
     PIVO_SWIGLU_SHADER,
     PIVO_SILU_SHADER,
+    Q4_0_MATMUL_TILED_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4504,11 +4513,20 @@ impl<'a> Qwen3Ops<'a> {
         input_stride: usize,
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
-        if format == GpuWeightFormat::Q8_0
-            && token_rows > 1
-            && self.q8_tiled
-            && tiled_matmul_enabled()
-        {
+        // The Q8_0 kernel is the tiled one for a multi-row forward: the
+        // tiled kernel shares the weight across the rows of a tile, and the
+        // per-row kernel reads it once per row.
+        //
+        // The Q4_0 kernel is tiled the same way. Its per-row kernel reads
+        // the weight once per row and multiplies the four-bit values one at
+        // a time; the tiled one reads it once per (column, k-block) and
+        // uses the packed dot product. A single row is still the per-row
+        // kernel's: the tile's staging is then pure overhead.
+        let tiled = match format {
+            GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0 => token_rows > 1,
+            _ => false,
+        };
+        if tiled && self.q8_tiled && tiled_matmul_enabled() {
             return self.record_weight_matmul_tiled_rows(
                 commands,
                 bindings,
@@ -4844,7 +4862,7 @@ impl<'a> Qwen3Ops<'a> {
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
         }
-        if format != GpuWeightFormat::Q8_0 || !self.q8_tiled {
+        if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0) || !self.q8_tiled {
             return self.record_weight_matmul_ordinary_rows(
                 commands,
                 bindings,
@@ -4898,7 +4916,16 @@ impl<'a> Qwen3Ops<'a> {
         // register file holds, so 32 is where the curve turns.
         // AVX2 needs eight accumulators per output; four tokens fit the same
         // 32-register budget as NEON/scalar's 32 tokens.
-        let tokens = if push[14] == 8 { 4 } else { 32 };
+        //
+        // The Q4_0 kernel has one tile size: 32 tokens. Its dot product is
+        // a single integer per group, so it has no AVX2 reduction layout.
+        let tokens = if format == GpuWeightFormat::Q4_0 {
+            32
+        } else if push[14] == 8 {
+            4
+        } else {
+            32
+        };
         let tiles = token_rows.div_ceil(tokens);
         let dispatch = row_dispatch(
             columns.div_ceil(64),
@@ -4920,16 +4947,20 @@ impl<'a> Qwen3Ops<'a> {
         // so neither one tests `reduction_mode` inside the token loop.
         // The transposed layout has its own twin of every tiled kernel:
         // the arithmetic is the same, only the weight bytes sit elsewhere.
-        let tiled_pipeline = match (
-            q8_dot_mode(),
-            bindings.weight_layout == GpuWeightLayout::Transposed,
-        ) {
-            (8, false) => Q8_MATMUL_GROUPED_TILED,
-            (0, false) => Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
-            (_, false) => Q8_MATMUL_GROUPED_TILED_WIDE,
-            (8, true) => Q8_MATMUL_GROUPED_TILED_TRANSPOSED,
-            (0, true) => Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED,
-            (_, true) => Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED,
+        let tiled_pipeline = if format == GpuWeightFormat::Q4_0 {
+            Q4_0_MATMUL_TILED
+        } else {
+            match (
+                q8_dot_mode(),
+                bindings.weight_layout == GpuWeightLayout::Transposed,
+            ) {
+                (8, false) => Q8_MATMUL_GROUPED_TILED,
+                (0, false) => Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                (_, false) => Q8_MATMUL_GROUPED_TILED_WIDE,
+                (8, true) => Q8_MATMUL_GROUPED_TILED_TRANSPOSED,
+                (0, true) => Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED,
+                (_, true) => Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED,
+            }
         };
         self.record_linear_dispatch(commands, tiled_pipeline, bindings, &push, dispatch);
         Ok(())
@@ -10783,6 +10814,11 @@ mod tests {
                 Q8_MATMUL_GROUPED_SHADER,
             ),
             (Q4_0_MATMUL, "q4_0_matmul", Q4_0_MATMUL_SHADER),
+            (
+                Q4_0_MATMUL_TILED,
+                "q4_0_matmul_tiled_dp4a",
+                Q4_0_MATMUL_TILED_SHADER,
+            ),
             (Q4_1_MATMUL, "q4_1_matmul", Q4_1_MATMUL_SHADER),
             (Q5_0_MATMUL, "q5_0_matmul", Q5_0_MATMUL_SHADER),
             (Q5_1_MATMUL, "q5_1_matmul", Q5_1_MATMUL_SHADER),
@@ -11566,6 +11602,92 @@ mod tests {
     fn vulkan_q8_quantization_matches_cpu_bits() {
         let context = crate::vulkan::VulkanContext::new().unwrap();
         super::check_quantize_tie_even(&context).unwrap();
+    }
+
+    /// The tiled Q4_0 kernel has to be the per-row kernel's, bit for bit.
+    ///
+    /// The per-row kernel reads the weight once per (output column, token
+    /// row) pair and multiplies the four-bit values one at a time; the
+    /// tiled one reads it once per (output column, k-block) and uses the
+    /// packed dot product. The arithmetic is the same, so the results have
+    /// to be the same: the integer sum of the 32 products is exact, and
+    /// the float part keeps the per-row kernel's order, (sum * weight
+    /// scale) * activation scale, added per block.
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
+        use super::*;
+        const WIDTH: usize = 256;
+        const OUTPUTS: usize = 129;
+        for rows in [1usize, 2, 3, 5] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, rows * WIDTH * 4).unwrap();
+            let q8 = region(&mut cursor, rows * WIDTH).unwrap();
+            let scales = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
+            let sums = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
+            let output = f32_region(&mut cursor, rows * OUTPUTS * 4).unwrap();
+            let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+            let mut ops = Qwen3Ops::new_with_size(context, cursor, 2).unwrap();
+            let weight = synthetic_weight(GpuWeightFormat::Q4_0, WIDTH, OUTPUTS);
+            let buffer = unsafe { ops.context.upload_static(&weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q4_0])
+                .unwrap();
+            let values: Vec<f32> = (0..rows * WIDTH)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+
+            let mut ordinary = vec![0.0f32; rows * OUTPUTS];
+            let mut tiled = vec![0.0f32; rows * OUTPUTS];
+            for (target, tiled_kernel) in [(&mut ordinary, false), (&mut tiled, true)] {
+                ops.write_f32(input, &values).unwrap();
+                ops.write_f32(output, &vec![f32::NAN; rows * OUTPUTS])
+                    .unwrap();
+                let commands = TokenCommands::begin(ops.context).unwrap();
+                let recorded = if tiled_kernel {
+                    ops.record_weight_matmul_tiled_rows(
+                        &commands,
+                        bindings,
+                        input,
+                        q8,
+                        scales,
+                        sums,
+                        q8,
+                        scales,
+                        &[(output, OUTPUTS, OUTPUTS * 4)],
+                        WIDTH,
+                        rows,
+                        WIDTH,
+                    )
+                } else {
+                    ops.record_weight_matmul_ordinary_rows(
+                        &commands,
+                        bindings,
+                        input,
+                        q8,
+                        scales,
+                        sums,
+                        q8,
+                        scales,
+                        &[(output, OUTPUTS, OUTPUTS * 4)],
+                        WIDTH,
+                        rows,
+                        WIDTH,
+                    )
+                };
+                recorded.unwrap();
+                commands.submit_and_wait().unwrap();
+                ops.read_f32_into(output, target).unwrap();
+            }
+            for (index, (ordinary, tiled)) in ordinary.iter().zip(&tiled).enumerate() {
+                assert_eq!(
+                    ordinary.to_bits(),
+                    tiled.to_bits(),
+                    "rows={rows} value {index}"
+                );
+            }
+            unsafe { ops.context.destroy_completed_buffers(&[buffer]) }.unwrap();
+        }
     }
 
     #[test]

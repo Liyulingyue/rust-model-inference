@@ -222,8 +222,8 @@ struct Adapter {
 
 /// Mmaps the frozen checkpoint. Each request selects one adapter without mutating the model.
 pub(crate) struct D3Encoder {
-    source: SafetensorSource,
-    readout: SafetensorSource,
+    source: Arc<dyn TensorSource>,
+    readout: Arc<dyn TensorSource>,
     adapters: HashMap<String, Adapter>,
     layers: Vec<Layer>,
     final_norm: Vec<f32>,
@@ -357,8 +357,53 @@ impl D3Encoder {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         let model_config = json_file(&base_root.join("config.json"))?;
-        let config = Config::parse(&model_config)?;
         let decision = json_file(&base_root.join("decision_config.json"))?;
+        Self::from_parts(
+            Some(adapter),
+            &model_config,
+            &decision,
+            Arc::new(tensor::open_weights(base_root)?),
+            Arc::new(SafetensorSource::open(&[
+                base_root.join("readout.safetensors")
+            ])?),
+            pool,
+            None,
+        )
+    }
+
+    /// The same frozen D3 graph, without Vela adapters. Storage and F32 execution are independent.
+    pub(crate) fn standalone(
+        model_config: &Value,
+        decision: &Value,
+        source: Arc<dyn TensorSource>,
+        readout: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let mut model = Self::from_parts(
+            None,
+            model_config,
+            decision,
+            source,
+            readout,
+            pool,
+            Some(false),
+        )?;
+        // The standalone protocol enforces the validated/request limit before forwarding.
+        model.decision_max_length = model.max_length;
+        Ok(model)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        adapter: Option<&Path>,
+        model_config: &Value,
+        decision: &Value,
+        source: Arc<dyn TensorSource>,
+        readout: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+        activation_bf16: Option<bool>,
+    ) -> Result<Self, String> {
+        let config = Config::parse(model_config)?;
         if decision["format_version"] != 1
             || decision["pooling"] != "last"
             || decision["readout_dtype"] != "float32"
@@ -390,35 +435,38 @@ impl D3Encoder {
                 .ok_or("invalid d3 validated_length")?
                 .min(max_length)
         };
-        let source = tensor::open_weights(base_root)?;
         require_shape(
-            &source,
+            source.as_ref(),
             "language_model.embed_tokens.weight",
             &[config.vocab, config.hidden],
         )?;
-        let bf16 = match source
-            .tensor_info("language_model.embed_tokens.weight")
-            .unwrap()
-            .ggml_type
-        {
-            GGMLType::BF16 => true,
-            GGMLType::F32 => false,
-            other => return Err(format!("unsupported d3 activation dtype {other:?}")),
+        let bf16 = if let Some(bf16) = activation_bf16 {
+            bf16
+        } else {
+            match source
+                .tensor_info("language_model.embed_tokens.weight")
+                .unwrap()
+                .ggml_type
+            {
+                GGMLType::BF16 => true,
+                GGMLType::F32 => false,
+                other => return Err(format!("unsupported d3 activation dtype {other:?}")),
+            }
         };
         let mut layers = Vec::with_capacity(config.layers.len());
         let matrix = |name: &str, output: usize, input: usize| {
-            require_shape(&source, name, &[output, input])
+            require_shape(source.as_ref(), name, &[output, input])
         };
         for (i, &full) in config.layers.iter().enumerate() {
             let p = format!("language_model.layers.{i}");
             let input_norm = norm_weight(
-                &source,
+                source.as_ref(),
                 &format!("{p}.input_layernorm.weight"),
                 config.hidden,
                 true,
             )?;
             let post_norm = norm_weight(
-                &source,
+                source.as_ref(),
                 &format!("{p}.post_attention_layernorm.weight"),
                 config.hidden,
                 true,
@@ -451,13 +499,13 @@ impl D3Encoder {
                 matrix(&format!("{p}.self_attn.o_proj.weight"), config.hidden, qw)?;
                 Mixer::Full {
                     q_norm: norm_weight(
-                        &source,
+                        source.as_ref(),
                         &format!("{p}.self_attn.q_norm.weight"),
                         config.head_dim,
                         true,
                     )?,
                     k_norm: norm_weight(
-                        &source,
+                        source.as_ref(),
                         &format!("{p}.self_attn.k_norm.weight"),
                         config.head_dim,
                         true,
@@ -490,26 +538,29 @@ impl D3Encoder {
                     vw,
                 )?;
                 require_shape(
-                    &source,
+                    source.as_ref(),
                     &format!("{p}.linear_attn.conv1d.weight"),
                     &[cw, 1, config.conv],
                 )?;
                 Mixer::Delta {
-                    conv: tensor::values(&source, &format!("{p}.linear_attn.conv1d.weight"))?,
+                    conv: tensor::values(
+                        source.as_ref(),
+                        &format!("{p}.linear_attn.conv1d.weight"),
+                    )?,
                     a_log: norm_weight(
-                        &source,
+                        source.as_ref(),
                         &format!("{p}.linear_attn.A_log"),
                         config.value_heads,
                         false,
                     )?,
                     dt_bias: norm_weight(
-                        &source,
+                        source.as_ref(),
                         &format!("{p}.linear_attn.dt_bias"),
                         config.value_heads,
                         false,
                     )?,
                     norm: norm_weight(
-                        &source,
+                        source.as_ref(),
                         &format!("{p}.linear_attn.norm.weight"),
                         config.value_dim,
                         false,
@@ -522,10 +573,17 @@ impl D3Encoder {
                 mixer,
             });
         }
-        let final_norm = norm_weight(&source, "language_model.norm.weight", config.hidden, true)?;
-        let readout = SafetensorSource::open(&[base_root.join("readout.safetensors")])?;
-        require_shape(&readout, "weight", &[255, config.hidden])?;
-        let vela = json_file(&adapter.join("vela3_config.json"))?;
+        let final_norm = norm_weight(
+            source.as_ref(),
+            "language_model.norm.weight",
+            config.hidden,
+            true,
+        )?;
+        require_shape(readout.as_ref(), "weight", &[255, config.hidden])?;
+        let vela = adapter
+            .map(|path| json_file(&path.join("vela3_config.json")))
+            .transpose()?
+            .unwrap_or_else(|| serde_json::json!({"adapters":{}}));
         let gated_noncausal = match vela["decisions"]["attention"].as_str() {
             None | Some("prefix_bidir") => false,
             Some("noncausal") => true,
@@ -543,7 +601,11 @@ impl D3Encoder {
             }
             adapters.insert(
                 name.clone(),
-                Adapter::load(&adapter.join(file), &source, info)?,
+                Adapter::load(
+                    &adapter.ok_or("missing Vela adapter directory")?.join(file),
+                    source.as_ref(),
+                    info,
+                )?,
             );
         }
         let generation_head = if vela["definitions"]["writer"] == "grafted_head" {
@@ -553,7 +615,7 @@ impl D3Encoder {
             if Path::new(file).components().count() != 1 {
                 return Err("grafted head filename must be local".into());
             }
-            let path = adapter.join(file);
+            let path = adapter.ok_or("missing Vela adapter directory")?.join(file);
             if path.is_file() {
                 let head = SafetensorSource::open(&[path])?;
                 require_shape(&head, "lm_head.weight", &[config.vocab, config.hidden])?;
@@ -596,10 +658,45 @@ impl D3Encoder {
 
     pub(crate) fn prepare_images(&self, images: &[Value]) -> Result<D3Images, String> {
         vision::prepare(
-            &self.source,
+            self.source.as_ref(),
             &self.vision_config,
             Arc::clone(&self.pool),
             images,
+        )
+    }
+
+    pub(crate) fn prepare_images_f32(&self, images: &[Value]) -> Result<D3Images, String> {
+        vision::prepare_with_gelu(
+            self.source.as_ref(),
+            &self.vision_config,
+            Arc::clone(&self.pool),
+            images,
+            true,
+        )
+    }
+
+    pub(crate) fn prepare_video_f32(&self, frames: &[image::RgbImage]) -> Result<D3Images, String> {
+        vision::prepare_frames(
+            self.source.as_ref(),
+            &self.vision_config,
+            Arc::clone(&self.pool),
+            frames,
+        )
+    }
+
+    pub(crate) fn media_input(
+        &self,
+        ids: &[u32],
+        images: &D3Images,
+        videos: &D3Images,
+        video_token: u32,
+    ) -> Result<D3ImageInput, String> {
+        vision::expand_media(
+            self,
+            ids,
+            images,
+            self.image_token.ok_or("d3 config has no image token")?,
+            Some((videos, video_token)),
         )
     }
 
@@ -663,6 +760,33 @@ impl D3Encoder {
         }
     }
 
+    /// Explicit row readouts for standalone System One spatial questions.
+    pub(crate) fn decide_readouts(
+        &self,
+        ids: &[u32],
+        image: Option<&D3ImageInput>,
+        state: usize,
+        readouts: &[(usize, usize)],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        self.validate_decision_length(ids.len())?;
+        let hidden = if let Some(image) = image {
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::token_ids("vela3.d3.tokens", ids));
+            self.hidden_embeddings(&image.embeddings, &image.positions, None, Some(state))?
+        } else {
+            self.hidden_mode(ids, None, Mask::Prefix(state))?
+        };
+        readouts
+            .iter()
+            .map(|&(row, count)| {
+                if row >= ids.len() {
+                    return Err("d3 readout row exceeds prompt".into());
+                }
+                self.readout_logits(&hidden[..(row + 1) * self.config.hidden], count)
+            })
+            .collect()
+    }
+
     fn rounded(&self, value: f32) -> f32 {
         if self.bf16 {
             bf16::from_f32(value).to_f32()
@@ -691,7 +815,7 @@ impl D3Encoder {
         adapter: Option<&Adapter>,
     ) -> Result<Vec<f32>, String> {
         let mut y = tensor::linear(
-            &self.source,
+            self.source.as_ref(),
             &format!("language_model.{module}.weight"),
             x,
             rows,
@@ -722,7 +846,11 @@ impl D3Encoder {
         self.validate_length(ids.len())?;
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::token_ids("vela3.d3.tokens", ids));
-        let x = tensor::embed(&self.source, "language_model.embed_tokens.weight", ids)?;
+        let x = tensor::embed(
+            self.source.as_ref(),
+            "language_model.embed_tokens.weight",
+            ids,
+        )?;
         let positions: Vec<_> = (0..ids.len()).map(|i| [i; 3]).collect();
         self.forward(x, &positions, adapter, mask)
     }
@@ -1052,7 +1180,7 @@ impl D3Encoder {
             return Err("d3 decision requires 1..=255 options".into());
         }
         let last = &hidden[hidden.len() - self.config.hidden..];
-        let mut logits = tensor::linear(&self.readout, "weight", last, 1, &self.pool)?;
+        let mut logits = tensor::linear(self.readout.as_ref(), "weight", last, 1, &self.pool)?;
         logits.truncate(option_count);
         for value in &mut logits {
             *value /= self.temperature;
@@ -1071,7 +1199,7 @@ impl D3Encoder {
             tensor::linear(head, "lm_head.weight", last, 1, &self.pool)
         } else if self.config.tied {
             tensor::linear(
-                &self.source,
+                self.source.as_ref(),
                 "language_model.embed_tokens.weight",
                 last,
                 1,

@@ -67,6 +67,21 @@ pub struct Qwen35Scratchpad {
     pub recurrent_replay: Vec<RecurrentReplay>,
     /// Whether the forward pass captures the recurrent layers' projections.
     pub capture_recurrent_replay: bool,
+    /// The logits of every row of the last forward pass, when the forward
+    /// projected them all at once.
+    ///
+    /// The vocabulary matrix is 1.3 GB in Q8_0, so projecting the rows of a
+    /// forward pass one at a time reads it once per row. A caller that needs
+    /// the logits of several rows -- a speculative verification needs the
+    /// target's answer at every drafted position -- asks for them all at
+    /// once and reads them from here.
+    pub logits_rows: Vec<f32>,
+    /// Whether the forward pass should project the logits of every row
+    /// instead of only its last one.
+    pub collect_all_logits: bool,
+    /// Whether the last forward pass projected every row's logits into
+    /// `logits_rows`.
+    pub logits_rows_collected: bool,
     pub matmul_out: Vec<f32>,
     pub q8k_buf: Vec<quant::BlockQ8K>,
     pub q8_buf: Vec<u8>,
@@ -112,6 +127,9 @@ impl Qwen35Scratchpad {
             ffn_gate_buf: vec![0.0; max_tokens * n_ff],
             recurrent_replay: Vec::new(),
             capture_recurrent_replay: false,
+            logits_rows: Vec::new(),
+            collect_all_logits: false,
+            logits_rows_collected: false,
             conv_states: (0..n_layer).map(|_| vec![0.0; d_conv * conv_dim]).collect(),
             ssm_states: (0..n_layer)
                 .map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim])

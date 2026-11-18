@@ -1,0 +1,15 @@
+{
+  "test": "vulkan::ops::tests::batched_linear_device_rows_match_and_reuse_weights",
+  "reproduction_command": "cargo test --locked --profile release-fast --features vulkan,parity-trace --lib batched_linear_device_rows_match_and_reuse_weights -- --ignored --nocapture --test-threads=1",
+  "shared_test_source_unchanged_from_base": true,
+  "recorded_output": "\nrunning 1 test\ntest vulkan::ops::tests::batched_linear_device_rows_match_and_reuse_weights ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'vulkan::ops::tests::batched_linear_device_rows_match_and_reuse_weights' (91428) panicked at src/vulkan/ops.rs:13117:22:\ncalled `Result::unwrap()` on an `Err` value: InitFailed(\"The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    vulkan::ops::tests::batched_linear_device_rows_match_and_reuse_weights\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1915 filtered out; finished in 4.98s\n\n",
+  "earlier_official_gpu_attempt": {
+    "status": "interrupted",
+    "reason": "cgroup memory at 59,052,056,576 / 59,055,800,320 bytes during weight loading; preserve running same-weight oracle",
+    "pid": 68502
+  },
+  "limitations": [
+    "The shared test failed outside the D3 graph.",
+    "The earlier official GPU attempt ran concurrently with a CPU Oracle and was interrupted before inference; it is not an isolated GPU memory or performance measurement."
+  ]
+}

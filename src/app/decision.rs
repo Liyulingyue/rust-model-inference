@@ -1,11 +1,11 @@
-//! THX-02 decision entry points.
+//! Native decision entry points.
 //!
 //! Two shapes reach the same engine, and the difference is the protocol
 //! rather than the model. The native request carries one state and several
 //! typed questions, and the JEV adapter ([`jev`]) drives the same engine
-//! through the shared `--jev` and `/v1/jev/*` routes, so THX-02 answers a
+//! through the shared `--jev` and `/v1/jev/*` routes, so each backend answers a
 //! scorer request the way every other model does. The model semantics live
-//! in [`crate::models::thx02`].
+//! in [`crate::models::decision`].
 
 pub mod jev;
 
@@ -18,14 +18,14 @@ use serde_json::{json, Value};
 use super::CliOptions;
 use crate::core::thread_pool::ComputePool;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::thx02::{validate_request, Engine, ARCH};
+use crate::models::decision::Engine;
 use crate::TensorSource;
 
 pub(crate) fn validate_options(options: &CliOptions) -> Result<(), String> {
     let mode = if options.decision_request.is_some() {
         "--decision-request"
     } else {
-        "THX-02 decisions"
+        "native decisions"
     };
     if options.model.as_os_str().is_empty() {
         return Err(format!("{mode} requires --model"));
@@ -62,7 +62,7 @@ pub(crate) fn validate_options(options: &CliOptions) -> Result<(), String> {
         }
     }
     if options.effective_max_context() == 0 {
-        return Err("THX-02 --max-context must be greater than zero".into());
+        return Err("decision --max-context must be greater than zero".into());
     }
     Ok(())
 }
@@ -73,11 +73,6 @@ pub(crate) fn from_source(
     n_threads: usize,
 ) -> Result<Engine, String> {
     validate_options(options)?;
-    if super::arch_of(source.as_ref()) != ARCH {
-        return Err(format!(
-            "THX-02 decisions require general.architecture={ARCH:?}"
-        ));
-    }
     let thinker = options
         .decision_thinker
         .as_deref()
@@ -87,10 +82,23 @@ pub(crate) fn from_source(
                 .map_err(|error| format!("decision thinker {}: {error}", path.display()))
         })
         .transpose()?;
-    Engine::new(
+    Engine::from_source(
+        &options.model,
         source,
         thinker,
         Arc::new(ComputePool::new(n_threads)),
+        n_threads,
+        options.effective_max_context(),
+        options.compute_policy(),
+    )
+}
+
+pub(crate) fn from_path(options: &CliOptions, n_threads: usize) -> Result<Engine, String> {
+    validate_options(options)?;
+    Engine::from_path(
+        &options.model,
+        options.decision_thinker.as_deref(),
+        n_threads,
         options.effective_max_context(),
         options.compute_policy(),
     )
@@ -148,13 +156,24 @@ pub fn run_cli(options: &CliOptions, n_threads: usize) -> Result<(), String> {
     };
     let mut request: Value =
         serde_json::from_str(&text).map_err(|error| format!("decision request JSON: {error}"))?;
-    validate_request(&request)?;
+    let source: Option<Arc<dyn TensorSource>> =
+        if crate::models::decision::is_model_directory(&options.model) {
+            None
+        } else {
+            Some(Arc::from(
+                open_model_source(&options.model, ComponentRole::Llm).map_err(|error| {
+                    format!("decision model {}: {error}", options.model.display())
+                })?,
+            ))
+        };
+    crate::models::decision::validate_request(&options.model, source.as_deref(), &request)?;
     normalize_cli_images(&mut request)?;
-    let source = Arc::from(
-        open_model_source(&options.model, ComponentRole::Llm)
-            .map_err(|error| format!("decision model {}: {error}", options.model.display()))?,
-    );
-    let result = from_source(options, source, n_threads)?.decide(&request)?;
+    let engine = if let Some(source) = source {
+        from_source(options, source, n_threads)?
+    } else {
+        from_path(options, n_threads)?
+    };
+    let result = engine.decide(&request)?;
     println!(
         "{}",
         serde_json::to_string(&result).map_err(|error| error.to_string())?
