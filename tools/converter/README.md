@@ -7,6 +7,7 @@
 
 ```
 converter/
+├── arktts/       ← Audio8-TTS-Realistic-Air BF16 主模型 / F32 codec 转换器
 ├── breeze/       ← 原版与扩展精度转换器
 ├── bge/          ← BAAI BGE 文本和视觉 embedding 转换器
 ├── clm/          ← Contrastive-LM 投影头转换器和测试
@@ -26,6 +27,7 @@ converter/
 
 | 路径 | 备注 |
 |---|---|
+| `arktts/convert_arktts.py` | [Audio8-TTS-Realistic-Air](arktts/README.md)：保留主模型 BF16 payload，展开 codec weight norm，导出共享 bundle ID 的配套 GGUF |
 | `breeze/convert_breeze_plain.py` | 原版未量化导出 |
 | `breeze/convert_breeze.py` | 支持 `--quant bf16/f16/f32/q8_0/q4_0/q4_mixed` 和 `--codec-quant f32/q8_0` |
 | `bge/convert_bge.py` | BAAI `bge-*` 的 BERT/XLM-R、Mistral、Qwen2/Qwen3、Gemma2 权重转换；支持单文件/分片 safetensors 与 PyTorch ZIP `.bin`，输出 `F32` 或 `Q8_0` |
