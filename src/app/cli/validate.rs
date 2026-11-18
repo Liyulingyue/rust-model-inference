@@ -605,6 +605,26 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if options.max_tokens == Some(0) {
         return Err("--audio requires --max-tokens greater than 0".into());
     }
+    // One speculative draft axis at a time: the runtime implements the MTP
+    // head, the DSpark sidecar, and the n-gram lookup as exclusive decode
+    // paths, so stacked flags would leave one silently dead. A n-gram
+    // budget below the lookup size is rejected the same way — llama.cpp's
+    // ngram-simple never drafts there.
+    if options.effective_ngram_draft() > 0 {
+        if options.effective_mtp_draft() > 0 || options.dspark_model.is_some() {
+            return Err(
+                "--ngram-draft cannot be combined with --mtp-draft or --dspark-model".into(),
+            );
+        }
+        if options.effective_ngram_draft() < options.effective_ngram_lookup() {
+            return Err(format!(
+                "--ngram-draft {} is below the lookup size {}: ngram-simple drafts \
+                 nothing when the draft length is under the lookup size",
+                options.effective_ngram_draft(),
+                options.effective_ngram_lookup()
+            ));
+        }
+    }
     Ok(())
 }
 

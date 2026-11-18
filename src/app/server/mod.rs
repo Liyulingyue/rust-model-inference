@@ -1754,6 +1754,8 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     .with_prefill_batch_size(prefill_batch_size)
     .with_mtp_draft(options.effective_mtp_draft())
     .with_dspark_model(dspark)
+    .with_ngram_draft(options.effective_ngram_draft())
+    .with_ngram_lookup(options.effective_ngram_lookup())
     .with_mmproj(mmp);
     // A requested-but-unsatisfiable DSpark sidecar is a startup error, not a
     // log line: the user asked for speculative decoding, and quietly serving
@@ -1763,6 +1765,10 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .dspark_model
         .as_deref()
         .is_some_and(|path| !path.is_empty());
+    // The n-gram draft has no sidecar to open, but the same rule holds: the
+    // user asked for speculative decoding, so a runtime that cannot provide
+    // it is a startup error, not a plain decode behind the flag.
+    let ngram_requested = options.effective_ngram_draft() > 0;
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
             Ok(runtime) => {
@@ -1772,7 +1778,8 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
             Err(error)
                 if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
                     || arch == crate::models::sensenova_loop::ARCH
-                    || dspark_requested =>
+                    || dspark_requested
+                    || ngram_requested =>
             {
                 return Err(error)
             }

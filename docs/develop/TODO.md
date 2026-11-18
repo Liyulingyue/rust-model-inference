@@ -5193,7 +5193,7 @@ Sage-A1.5、MiniCPM-V 4.7 35B-A3B 六个家族都复测过了。
 `tools/oracle/ovisocr3/README.md`、`docs/develop/SUPPORTED_MODELS.md`、
 [GGML_PARITY_BOUNDARY.md](GGML_PARITY_BOUNDARY.md)。
 
-### TODO-069: MTP / DSpark 投机解码 —— qwen35 的 MTP 与 DSpark 已实现，EAGLE3 / standalone draft 未做
+### TODO-069: MTP / DSpark / n-gram 投机解码 —— qwen35 的 MTP、DSpark 与 n-gram 已实现，EAGLE3 未做
 
 **状态**：⚠️ 调研完成（2026-11-11）。**`qwen35` 稠密档的 MTP 起草头与验证/接受
 回路已实现**（见 TODO-072 与 PR #241：草稿逐 token 与 pinned llama.cpp 一致，
@@ -5205,8 +5205,15 @@ Markov/conf 头 → 批量验证 + KV/状态回滚；**入口 CLI `--dspark-mode
 哨兵 `cli_and_http_agree_on_dspark_speculative_decode` 断言 CLI/HTTP 逐字节
 一致且与 greedy 输出相同）），与 llama.cpp `b96806d` 的 `draft-dspark` 对同一
 prompt 逐 token 一致，复现记录见
-[tools/oracle/dspark/README.md](../../tools/oracle/dspark/README.md)；EAGLE3 /
-standalone draft 仍未实现（standalone draft 已决定不做，见下）。
+[tools/oracle/dspark/README.md](../../tools/oracle/dspark/README.md)；**n-gram
+self-speculative（上游 `ngram-simple`）也已实现**（`src/core/ngram.rs` 移植
++ `HybridSession::{ngram_speculative_step, ngram_generate}` 复用同一验证/回滚
+机制，无需第二份权重；CLI `--ngram-draft N` / `--ngram-lookup N` 与 HTTP
+`--serve --ngram-draft` 经 `RuntimeOptions::with_ngram_draft/with_ngram_lookup`
+接线，哨兵 `cli_and_http_agree_on_ngram_speculative_decode` 断言 CLI/HTTP
+一致且与 greedy 相同；oracle 侧 `--spec-type ngram-simple` 的输出与其 plain
+greedy byte 级一致——同一契约两侧成立，fresh 跨引擎对拍被 chat 模板差异
+挡住，与 DSpark 轮同因）；EAGLE3 仍未实现（standalone draft 决定不做，见下）。
 
 **背景**：[SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 是 2026-09-23 的设计稿。
 按上游 llama.cpp 的 pin `b96806d` 重新核对了一遍契约，并盘点了真实模型里
@@ -5256,11 +5263,20 @@ standalone draft 仍未实现（standalone draft 已决定不做，见下）。
   `--serve --dspark-model` 都走 `RuntimeOptions::with_dspark_model`：
   `build_text_runtime` 对非 `qwen35` target 显式报错（flag 不静默丢弃），
   设备路径显式报错，temp>0 / 带图请求在请求时显式报错。
+- **n-gram（本次）**：`src/core/ngram.rs` 是上游
+  `common_ngram_simple_draft` 的逐行移植（含其全部边界：位置 0 是 not-found
+  哨兵、倒序搜索跳过当前出现、`copy_max < size_n` 不起草、
+  `cur_len <= n+m+1` 不起草），单测钉住每条边界；session 侧
+  `ngram_speculative_step` / `ngram_generate` 与 dspark step 共享同一
+  greedy 验证与 KV/recurrent 回滚。入口门控与 dspark 同构：非 `qwen35`
+  显式报错、Vulkan 显式报错、与 `--mtp-draft`/`--dspark-model` 叠加显式
+  报错、`ngram_draft < ngram_lookup` 显式报错（上游在该区间永不起草）；
+  Qwen3.5-2B 实测 `--ngram-draft 8 --ngram-lookup 4`：48 token 47 轮
+  （1/8 草稿接受——接受率本质上是工作负载相关的，重复文本才起草）。
 - **standalone draft（draft-simple）决定不做**：所有可跑 target 已有更强的
-  draft 轴（27B 有 MTP、2B 有 DSpark）；standalone 是谱系最弱形态（无 target
-  内部状态 + draft 自身 autoregressive），且缺跨 arch 的 KV 回滚基建。若未来
-  要加新轴，优先 n-gram（上游 `ngram-simple` / `ngram-map-k` 已有实现可对拍，
-  且不需要第二份权重）。
+  draft 轴（27B 有 MTP、2B 有 DSpark、qwen35 全系有 n-gram）；standalone 是
+  谱系最弱形态（无 target 内部状态 + draft 自身 autoregressive），且缺跨 arch
+  的 KV 回滚基建。
 - **设备路径的 DSpark 仍不可用**：Vulkan forward 无 per-layer 捕获
   （`dspark_gpu_guard` 显式拒绝），是 TODO-072 之外的下一个设备侧活。
 

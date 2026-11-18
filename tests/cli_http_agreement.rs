@@ -96,6 +96,7 @@ fn cli_text(
     temperature: f32,
     thinking: bool,
     dspark: Option<&std::path::Path>,
+    ngram: Option<(usize, usize)>,
 ) -> Option<String> {
     // The CLI's `--thinking` flag and the server's `enable_thinking` field
     // must be set explicitly: the two fronts default differently
@@ -118,6 +119,10 @@ fn cli_text(
         .arg(CONTEXT.to_string());
     if let Some(sidecar) = dspark {
         command.arg("--dspark-model").arg(sidecar);
+    }
+    if let Some((draft, lookup)) = ngram {
+        command.arg("--ngram-draft").arg(draft.to_string());
+        command.arg("--ngram-lookup").arg(lookup.to_string());
     }
     command.arg(if thinking {
         "--thinking"
@@ -159,6 +164,7 @@ fn http_text(
     prompt: &str,
     thinking: Option<bool>,
     dspark: Option<&'static GGUFLoader>,
+    ngram: Option<(usize, usize)>,
 ) -> String {
     let arch = loader
         .metadata("general.architecture")
@@ -183,6 +189,12 @@ fn http_text(
             .with_max_context(CONTEXT)
             .with_dspark_model(
                 dspark.map(|sidecar| Arc::new(LeakedLoader(sidecar)) as Arc<dyn TensorSource>),
+            )
+            .with_ngram_draft(ngram.map(|(draft, _)| draft).unwrap_or(0))
+            .with_ngram_lookup(
+                ngram
+                    .map(|(_, lookup)| lookup)
+                    .unwrap_or(rust_model_inference::core::ngram::NGRAM_SIMPLE_SIZE_N),
             )
             .with_mmproj(mmp());
     let mut runtime = build_text_runtime(&arch, options)
@@ -294,10 +306,10 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     };
     for &thinking in thinking_modes {
         for temperature in [0.0f32] {
-            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, thinking, None) else {
+            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, thinking, None, None) else {
                 panic!("CLI failed: arch={arch} thinking={thinking} temperature={temperature}");
             };
-            let http = http_text(loader, temperature, &[], PROMPT, Some(thinking), None);
+            let http = http_text(loader, temperature, &[], PROMPT, Some(thinking), None, None);
             if cli != http {
                 // Where the texts first differ. A split at char 0 means a
                 // forward-path divergence (wrong tokens from step one); a split
@@ -354,18 +366,62 @@ fn cli_and_http_agree_on_dspark_speculative_decode() {
     let sidecar_loader: &'static GGUFLoader = Box::leak(Box::new(
         GGUFLoader::from_file(&sidecar).expect("RMI_AGREEMENT_DSPARK must point at a GGUF"),
     ));
-    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, false, Some(&sidecar)) else {
+    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, false, Some(&sidecar), None) else {
         panic!("CLI failed with --dspark-model: arch={arch}");
     };
-    let http = http_text(loader, 0.0, &[], PROMPT, None, Some(sidecar_loader));
+    let http = http_text(loader, 0.0, &[], PROMPT, None, Some(sidecar_loader), None);
     assert_eq!(
         cli, http,
         "CLI and HTTP disagree under --dspark-model\nCLI : {cli:?}\nHTTP: {http:?}"
     );
-    let plain = http_text(loader, 0.0, &[], PROMPT, None, None);
+    let plain = http_text(loader, 0.0, &[], PROMPT, None, None, None);
     assert_eq!(
         http, plain,
         "dspark speculative decode changed the greedy tokens\nplain: {plain:?}"
+    );
+}
+
+#[test]
+fn cli_and_http_agree_on_ngram_speculative_decode() {
+    // The entry-coverage check for the n-gram self-speculative draft: the
+    // CLI's `--ngram-draft` and the runtime the server builds must produce
+    // the same tokens, and both must match the plain greedy decode — the
+    // lookup may change how many forward passes the tokens take, never
+    // which tokens come out.
+    //
+    // The sizes are deliberately small (draft 4, lookup 3, against the
+    // upstream defaults of 48/12): the sentinel prompt is short, and the
+    // length guard needs cur_len > n + m + 1 tokens of history before the
+    // lookup can draft at all.
+    let Some(path) = model_path() else {
+        eprintln!("skipping: set RMI_AGREEMENT_MODEL to a GGUF to run this check");
+        return;
+    };
+    let loader: &'static GGUFLoader = Box::leak(Box::new(
+        GGUFLoader::from_file(&path).expect("RMI_AGREEMENT_MODEL must point at a GGUF"),
+    ));
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if arch != "qwen35" {
+        eprintln!("skipping: ngram agreement needs the qwen35 target, got {arch}");
+        return;
+    }
+    let ngram = (4usize, 3usize);
+    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, false, None, Some(ngram)) else {
+        panic!("CLI failed with --ngram-draft: arch={arch}");
+    };
+    let http = http_text(loader, 0.0, &[], PROMPT, None, None, Some(ngram));
+    assert_eq!(
+        cli, http,
+        "CLI and HTTP disagree under --ngram-draft\nCLI : {cli:?}\nHTTP: {http:?}"
+    );
+    let plain = http_text(loader, 0.0, &[], PROMPT, None, None, None);
+    assert_eq!(
+        http, plain,
+        "ngram speculative decode changed the greedy tokens\nplain: {plain:?}"
     );
 }
 
@@ -448,7 +504,15 @@ fn cli_and_http_agree_on_image_input() {
     // vision-compatible `build_prompt` treats the missing toggle the same
     // way on both fronts (the CLI's `--thinking` does not reach the
     // multimodal path, and the vision builders ignore the flag entirely).
-    let http = http_text(loader, 0.0, &[agreement_image()], IMAGE_PROMPT, None, None);
+    let http = http_text(
+        loader,
+        0.0,
+        &[agreement_image()],
+        IMAGE_PROMPT,
+        None,
+        None,
+        None,
+    );
     assert_eq!(
         cli, http,
         "CLI and HTTP disagree on image input\nCLI : {cli:?}\nHTTP: {http:?}"
