@@ -1,0 +1,188 @@
+{
+  "date": "2026-11-11",
+  "status": "measured same-host release warm single-forward baseline",
+  "host": {
+    "cpu": "AMD EPYC 9334 32-Core Processor",
+    "logical_cpus": 128,
+    "memory_limit": "59055800320",
+    "cpu_quota": "1600000 100000",
+    "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "torch": "2.9.1+gitff65f5b",
+    "hip": "7.2.53211-e1a6bc5663",
+    "gpu": "AMD Radeon Graphics",
+    "gpu_vram_bytes": 51522830336,
+    "gpu_cus": 48
+  },
+  "input": {
+    "width": 33,
+    "height": 35,
+    "text_tokens": 18,
+    "batch": 1,
+    "timestep": 750,
+    "weight": "F32"
+  },
+  "method": "Four predictions with one resident session/model; report first separately and median of the remaining three. F32 stored weights and F32 arithmetic, identical BF16-rounded 33x35 input, 18 caption tokens, batch 1, eight CPU threads. PyTorch checkpoint hooks and disk writes disabled inside timed forwards.",
+  "measurements": [
+    {
+      "runtime": "Rust cpu",
+      "profile": "release",
+      "returncode": 0,
+      "seconds_samples": [
+        1.359203,
+        0.771232,
+        0.742627,
+        0.835585
+      ],
+      "session_seconds": [
+        "0.000342"
+      ],
+      "warm_median_seconds": 0.771232,
+      "cold_first_forward_seconds": 1.359203
+    },
+    {
+      "runtime": "Rust vulkan",
+      "profile": "release",
+      "returncode": 0,
+      "seconds_samples": [
+        25.166955,
+        3.05817,
+        3.096702,
+        3.011355
+      ],
+      "session_seconds": [
+        "0.015838"
+      ],
+      "warm_median_seconds": 3.05817,
+      "cold_first_forward_seconds": 25.166955
+    },
+    {
+      "runtime": "PyTorch ROCm F32",
+      "returncode": 0,
+      "oracle_commit": "95403933f3727abe947977c75915a53292e1d841",
+      "device": "cuda",
+      "seconds": 0.19802286475896835,
+      "seconds_samples": [
+        1.3225161079317331,
+        0.19757463410496712,
+        0.19773073494434357,
+        0.19802286475896835
+      ],
+      "checkpoints": false,
+      "native_bf16": false,
+      "width": 33,
+      "height": 35,
+      "text_tokens": 18,
+      "gguf": null,
+      "activation_quant": false,
+      "warm_median_seconds": 0.19773073494434357,
+      "cold_first_forward_seconds": 1.3225161079317331
+    }
+  ],
+  "limitations": [
+    "Container has a 16-CPU quota and 55 GiB memory limit despite reporting 128 logical CPUs and about 500 GiB host memory.",
+    "Other workloads share this host; a repository-local CPU quantization worker was active. These samples are a reference, not an isolated-machine guarantee.",
+    "Rust Vulkan is hybrid: CPU normalization/RoPE/elementwise operations and synchronous projection upload/readback; the caption encoder is excluded from this DiT-only benchmark.",
+    "Default-resolution generation timings are reported separately from this small-forward fixture."
+  ],
+  "historical_cold_diagnostics": [
+    {
+      "runtime": "Rust CPU",
+      "profile": "release-fast",
+      "seconds": 7.803182,
+      "scope": "session creation and one prediction; cold/contended"
+    },
+    {
+      "runtime": "Rust Vulkan",
+      "profile": "release-fast",
+      "seconds": 44.780257,
+      "scope": "session creation, cold 8.7 GB weight upload and one prediction; 244 submissions"
+    },
+    {
+      "runtime": "official PyTorch ROCm F32",
+      "seconds": 2.341076,
+      "scope": "forward with checkpoint hooks and disk writes; model already loaded"
+    },
+    {
+      "runtime": "official PyTorch ROCm BF16 autocast",
+      "seconds": 5.183166,
+      "scope": "forward with checkpoint hooks and disk writes; different activation precision"
+    }
+  ],
+  "benchmark_revision": "5d3459ed7bde66ed3472f11a110d60c79967b3e3",
+  "large_input_semantic_check": {
+    "command": [
+      "target/release-fast/deps/rust_model_inference-06ef2980a1c6a2c6",
+      "pjit_released_dit_matches_fixture",
+      "--ignored",
+      "--nocapture"
+    ],
+    "returncode": 0,
+    "chunk_rows": 256,
+    "previous_chunk_rows": 64,
+    "optimization": "cache spatial RoPE phases and batch 256 rows",
+    "max_abs": 0.0,
+    "rmse": 0.0,
+    "nrmse": 0.0,
+    "cosine": 1.0000000000000018,
+    "passed": true,
+    "seconds_samples": [
+      95.174674,
+      84.527502
+    ],
+    "timing_limitation": "Concurrent default generation and shared-host workloads; timings are not comparable to previous single-forward samples and do not establish a speedup."
+  },
+  "default_f16_generation": {
+    "command": [
+      "target/release-fast/rust-model-inference",
+      "--model",
+      "models/pjit-21k/pjit-f16.gguf",
+      "--text-encoder",
+      "models/Qwen3.5-4B/text-bf16.gguf",
+      "--prompt",
+      "A red cube on a white table.",
+      "--width",
+      "1024",
+      "--height",
+      "1024",
+      "--steps",
+      "50",
+      "--seed",
+      "42",
+      "--threads",
+      "8",
+      "--compute",
+      "cpu",
+      "--out",
+      "target/pjit-default1024-f16.png",
+      "--overwrite"
+    ],
+    "returncode": 0,
+    "seconds": 5428.649304276332,
+    "size": [
+      1024,
+      1024
+    ],
+    "scope": "Full CLI: BF16 caption CPU prefixes, F16 DiT on eight CPU threads, 50 APG/Euler steps, tracing and PNG. Contended host. Oracle replay excludes caption encoding and does extra diagnostic forwards; do not compare those wall times as a speed ratio."
+  },
+  "default_oracle_diagnostic_replay": {
+    "command": [
+      ".venv/bin/python",
+      "tools/oracle/pjit/sample_reference.py",
+      "--oracle",
+      "target/pjit-oracle",
+      "--weights",
+      "models/pjit-21k",
+      "--gguf",
+      "models/pjit-21k/pjit-f16.gguf",
+      "--trace",
+      "target/pjit-default1024-f16-final.jsonl",
+      "--output",
+      "target/pjit-default1024-f16-metrics.json",
+      "--batch-one-baseline"
+    ],
+    "returncode": 0,
+    "seconds": 405.65913602523506,
+    "scope": "Includes model/decoded-weight loading, batch-two chain, same-input DiT/Euler/APG replay and a separate batch-one baseline; excludes caption encoding. Diagnostic timing, not a comparable generation benchmark."
+  }
+}
