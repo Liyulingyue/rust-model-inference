@@ -1,6 +1,6 @@
 pub mod clip_config;
 
-use crate::core::tensor::{optional_f32_tensor_bytes, GGMLType, TensorSource};
+use crate::core::tensor::{optional_f32_tensor_bytes, GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 use crate::ops::{
@@ -597,14 +597,18 @@ impl<'a> VisionPrecomputed<'a> {
             .transpose()?;
         let preserve_f32 = source
             .metadata("sensenova_loop.source_config_sha256")
-            .is_some();
+            .is_some()
+            || matches!(
+                source.metadata("clip.vision.preserve_f32"),
+                Some(MetaValue::Bool(true))
+            );
         if preserve_f32
             && (patch_weight.ggml_type != GGMLType::F32
                 || !patch_weight_1
                     .as_ref()
                     .is_some_and(|w| w.ggml_type == GGMLType::F32))
         {
-            return Err("SenseNova vision requires two F32 temporal patch weights".into());
+            return Err("F32 vision requires two F32 temporal patch weights".into());
         }
         let patch_weight_f16 = (!preserve_f32)
             .then(|| f32_weight_as_f16(&patch_weight))
@@ -1060,6 +1064,27 @@ impl<'a> VisionEncoder<'a> {
             scratch,
             pool,
             gelu_ggml_f16_inplace,
+        )
+    }
+
+    /// Preserve F32 activations for paired frames in native Transformers graphs.
+    pub(crate) fn encode_pair_f32_gelu(
+        &self,
+        frame_a: &[f32],
+        frame_b: &[f32],
+        img_w: usize,
+        img_h: usize,
+        scratch: &mut VisionScratchpad,
+        pool: &Arc<ComputePool>,
+    ) -> Result<VisionGrid, String> {
+        self.encode_pair_with_gelu(
+            frame_a,
+            frame_b,
+            img_w,
+            img_h,
+            scratch,
+            pool,
+            crate::ops::gelu_inplace,
         )
     }
 
