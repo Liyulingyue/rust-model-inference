@@ -25,6 +25,7 @@ use crate::core::prefill::{
 };
 use crate::core::scratchpad::KvCache;
 use crate::core::thread_pool::ComputePool;
+use crate::models::dflash::DflashSession;
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen35::{commit_shadow_state_chunk, Qwen35VulkanSession};
 
@@ -1576,6 +1577,321 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
             accepted,
             drafted,
         })
+    }
+
+    // ---- DSpark: a DFlash sidecar drafts, the target verifies ----
+
+    /// Enable the per-layer input capture a DFlash sidecar reads.
+    ///
+    /// `layers` are the sidecar's `dflash.target_layers`, in its order: the
+    /// draft's encoder fuses the states in exactly that order, so a layer's
+    /// capture slot is its index in the list.
+    fn dspark_set_capture(&mut self, layers: &[usize]) -> Result<(), String> {
+        let (n_layer, n_embd) = {
+            let cfg = &self.model.trunk().config;
+            (cfg.n_layer_impl(), cfg.n_embd)
+        };
+        for &layer in layers {
+            if layer >= n_layer {
+                return Err(format!(
+                    "the DSpark sidecar reads target layer {layer}, but the target implements {n_layer} layers"
+                ));
+            }
+        }
+        let max_rows = self.prefill_batch_size;
+        let mut capture_at = vec![None; n_layer];
+        for (slot, &layer) in layers.iter().enumerate() {
+            capture_at[layer] = Some(slot);
+        }
+        self.scratch.dspark_capture_at = capture_at;
+        self.scratch.dspark_active = true;
+        self.scratch.dspark_hidden = vec![0.0f32; layers.len() * max_rows * n_embd];
+        Ok(())
+    }
+
+    /// Fuse the captured per-layer inputs into the encoder's row layout and
+    /// inject them into the draft's KV cache.
+    ///
+    /// Every row of the target's forward batch is injected — accepted and
+    /// rejected verification rows alike — exactly as upstream's `process()`
+    /// does: a rejected row's entry is overwritten by the next draft block,
+    /// which starts at the corrected position and spans the whole rejected
+    /// range.
+    fn dspark_inject(
+        &mut self,
+        dflash: &mut DflashSession<'_, '_>,
+        rows: usize,
+        positions: &[usize],
+    ) -> Result<(), String> {
+        if positions.len() != rows {
+            return Err(format!(
+                "Qwen3.5 DSpark injection: {rows} rows but {} positions",
+                positions.len()
+            ));
+        }
+        let (n_embd, n_extract) = {
+            let cfg = &self.model.trunk().config;
+            let n_extract = self
+                .scratch
+                .dspark_capture_at
+                .iter()
+                .filter(|slot| slot.is_some())
+                .count();
+            (cfg.n_embd, n_extract)
+        };
+        let n_embd_enc = dflash.n_embd_enc();
+        if n_embd_enc != n_extract * n_embd {
+            return Err(format!(
+                "the DSpark sidecar fuses {n_embd_enc} values but the capture holds {n_extract} layers of {n_embd}"
+            ));
+        }
+        let mut fused = vec![0.0f32; rows * n_embd_enc];
+        for row in 0..rows {
+            for slot in 0..n_extract {
+                let src = slot * rows * n_embd + row * n_embd;
+                let dst = row * n_embd_enc + slot * n_embd;
+                if src + n_embd > self.scratch.dspark_hidden.len() {
+                    return Err(
+                        "the DSpark capture buffer is smaller than the forward chunk".into(),
+                    );
+                }
+                fused[dst..dst + n_embd]
+                    .copy_from_slice(&self.scratch.dspark_hidden[src..src + n_embd]);
+            }
+        }
+        dflash.inject_target_features(&fused, positions, &self.pool)
+    }
+
+    /// Prefill the prompt and seed the DSpark draft's KV cache with it.
+    ///
+    /// Like [`Self::prefill_with_mtp`], every chunk also runs through the
+    /// draft — the DFlash encoder turns the target's per-layer hidden states
+    /// into the draft's own keys and values — so the draft block's attention
+    /// covers the committed positions before the first draft.
+    ///
+    /// Text-only: the draft is fed token ids, so the image path (whose rows
+    /// are projected embeddings) cannot use it.
+    pub fn prefill_with_dspark(
+        &mut self,
+        dflash: &mut DflashSession<'_, '_>,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+    ) -> Result<Vec<f32>, String> {
+        self.dspark_gpu_guard()?;
+        let layers: Vec<usize> = dflash.weights.config.target_layers.clone();
+        self.dspark_set_capture(&layers)?;
+        let mut logits = Vec::new();
+        for range in prefill_chunks(token_ids.len(), self.prefill_batch_size) {
+            let ids = &token_ids[range.clone()];
+            let chunk_positions = &positions[range.clone()];
+            let stepped = self.step_with_tokens(ids, chunk_positions);
+            logits = stepped?;
+            let flat: Vec<usize> = chunk_positions.iter().map(|p| p[0]).collect();
+            self.dspark_inject(dflash, ids.len(), &flat)?;
+        }
+        Ok(logits)
+    }
+
+    /// One speculative step with a DFlash / DSpark sidecar.
+    ///
+    /// Mirrors [`Self::mtp_speculative_step`]: `token` is the token the
+    /// target sampled at `position`, the sidecar drafts up to `n` tokens as
+    /// one `[anchor, MASK, ...]` block, the target verifies them in a
+    /// single forward pass over `[token, draft_0, ...]`, and a rejected
+    /// draft is rolled back by restoring the recurrent state, truncating
+    /// the KV cache and replaying the recurrent layers over the committed
+    /// rows.
+    pub fn dspark_speculative_step(
+        &mut self,
+        dflash: &mut DflashSession<'_, '_>,
+        token: u32,
+        position: usize,
+        n: usize,
+    ) -> Result<MtpStep, String> {
+        self.dspark_gpu_guard()?;
+        let n_draft = n.min(dflash.n_draft_max());
+        if n_draft == 0 {
+            return Ok(MtpStep {
+                tokens: vec![token],
+                next: token,
+                accepted: 0,
+                drafted: 0,
+            });
+        }
+        if !self.scratch.dspark_active {
+            return Err(
+                "the DSpark capture is not configured: prefill_with_dspark must run first"
+                    .into(),
+            );
+        }
+        // The draft: the sidecar denoises one block after the anchor.
+        let draft = dflash.draft_block(token, position, n_draft, dflash.p_min(), &self.pool)?;
+        let drafts = draft.tokens;
+
+        // The verification: the target runs the anchor and the whole draft
+        // in one forward pass.
+        let mut batch = Vec::with_capacity(drafts.len() + 1);
+        batch.push(token);
+        batch.extend_from_slice(&drafts);
+        let positions: Vec<[usize; 4]> = (0..batch.len())
+            .map(|offset| {
+                let p = position + offset;
+                [p, p, p, 0]
+            })
+            .collect();
+
+        // Same as the MTP verification: the recurrent state has to be saved
+        // before the pass, because a rejected draft cannot be undone by
+        // truncating the KV cache alone.
+        self.save_mtp_state();
+        let embeddings = self.embed_tokens(&batch)?;
+        let processed_before = self.processed_tokens;
+        self.prepare_recurrent_capture(batch.len());
+        if batch.len() > self.prefill_batch_size {
+            return Err(format!(
+                "the Qwen3.5 DSpark draft batch of {} rows does not fit in the chunk size {}",
+                batch.len(),
+                self.prefill_batch_size
+            ));
+        }
+        self.scratch.collect_all_logits = true;
+        let last_logits = self.step(&embeddings, batch.len(), &positions)?;
+        self.scratch.collect_all_logits = false;
+        self.mtp_logits_ready = self.scratch.logits_rows_collected;
+        self.scratch.capture_recurrent_replay = false;
+
+        // The target's own continuation: the logits of row `i` say what the
+        // target would produce at the position of draft `i`. Greedy, like
+        // the MTP path.
+        let mut accepted = 0usize;
+        let mut next = 0u32;
+        loop {
+            let logits = if accepted + 1 == batch.len() {
+                last_logits.clone()
+            } else {
+                self.logits_row(accepted)?
+            };
+            let sampled = crate::ops::sampling::argmax(&logits) as u32;
+            if accepted < drafts.len() && sampled == drafts[accepted] {
+                accepted += 1;
+                continue;
+            }
+            next = sampled;
+            break;
+        }
+        let mut tokens = Vec::with_capacity(accepted + 1);
+        tokens.push(token);
+        tokens.extend_from_slice(&drafts[..accepted]);
+
+        // The draft context has to see the same positions as the target:
+        // every row of the verification batch is injected, accepted or not.
+        let flat: Vec<usize> = positions.iter().map(|p| p[0]).collect();
+        self.dspark_inject(dflash, batch.len(), &flat)?;
+
+        // The rejected drafts left their KV and their recurrent state
+        // behind: same rollback as the MTP path.
+        if accepted < drafts.len() {
+            self.restore_mtp_state();
+            let cfg = &self.model.trunk().config;
+            let k_dim = cfg.n_embd_head() * cfg.n_head_kv;
+            super::scratch::kv_cache_truncate(
+                &mut self.kv_cache,
+                cfg.n_layer_impl(),
+                k_dim,
+                position + accepted + 1,
+                position + batch.len(),
+            );
+            let keep = accepted + 1;
+            self.model
+                .trunk()
+                .replay_recurrent_state(keep, &mut self.scratch, &self.pool)?;
+            self.processed_tokens = processed_before + keep;
+            self.next_position = position + keep;
+        }
+
+        Ok(MtpStep {
+            tokens,
+            next,
+            accepted,
+            drafted: drafts.len(),
+        })
+    }
+
+    /// Generate `max_tokens` tokens with a DFlash / DSpark sidecar drafting.
+    ///
+    /// Same shape as [`Self::mtp_generate`]: greedy only — a sampled token
+    /// would need the rejection scheme of speculative sampling, which is a
+    /// different piece of work.
+    pub fn dspark_generate(
+        &mut self,
+        dflash: &mut DflashSession<'_, '_>,
+        prompt_tokens: &[u32],
+        prompt_positions: &[[usize; 4]],
+        max_tokens: usize,
+        n_drafts: usize,
+    ) -> Result<MtpGeneration, String> {
+        if max_tokens == 0 {
+            return Ok(MtpGeneration::default());
+        }
+        let logits = self.prefill_with_dspark(dflash, prompt_tokens, prompt_positions)?;
+        self.dspark_generate_after_prefill(dflash, logits, prompt_positions, max_tokens, n_drafts)
+    }
+
+    /// Generate with the sidecar, starting from a prefill that already ran
+    /// ([`Self::prefill_with_dspark`]).
+    pub fn dspark_generate_after_prefill(
+        &mut self,
+        dflash: &mut DflashSession<'_, '_>,
+        logits: Vec<f32>,
+        prompt_positions: &[[usize; 4]],
+        max_tokens: usize,
+        n_drafts: usize,
+    ) -> Result<MtpGeneration, String> {
+        if max_tokens == 0 {
+            return Ok(MtpGeneration::default());
+        }
+        let mut position = prompt_positions
+            .last()
+            .map(|p| p[0].saturating_add(1))
+            .unwrap_or(0);
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        let mut out: Vec<u32> = Vec::with_capacity(max_tokens);
+        let mut rounds = 0usize;
+        let mut accepted = 0usize;
+        let mut drafted = 0usize;
+        while out.len() < max_tokens {
+            let step = self.dspark_speculative_step(dflash, bonus, position, n_drafts)?;
+            rounds += 1;
+            accepted += step.accepted;
+            drafted += step.drafted;
+            position += step.tokens.len();
+            bonus = step.next;
+            for token in step.tokens {
+                out.push(token);
+                if out.len() >= max_tokens {
+                    break;
+                }
+            }
+        }
+        Ok(MtpGeneration {
+            tokens: out,
+            rounds,
+            accepted,
+            drafted,
+        })
+    }
+
+    /// The DSpark path currently runs the target on the CPU: the device
+    /// forward does not capture the per-layer inputs the draft's encoder
+    /// needs. Supporting it is the device-parity TODO.
+    fn dspark_gpu_guard(&self) -> Result<(), String> {
+        #[cfg(feature = "vulkan")]
+        if self.gpu.is_some() {
+            return Err(
+                "DSpark speculative decoding currently requires the CPU target path".into(),
+            );
+        }
+        Ok(())
     }
 
     /// Embed + step in a single call (the common prefill/decode pattern for

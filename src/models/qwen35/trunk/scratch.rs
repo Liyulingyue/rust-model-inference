@@ -82,6 +82,20 @@ pub struct Qwen35Scratchpad {
     /// Whether the last forward pass projected every row's logits into
     /// `logits_rows`.
     pub logits_rows_collected: bool,
+    /// DSpark: which capture slot each target layer's input hidden states
+    /// are copied into (`None` = not captured).
+    ///
+    /// A DFlash / DSpark sidecar reads the target's hidden state at the
+    /// input of a handful of its layers (`dflash.target_layers`), fused.
+    /// The trunk copies the residual stream at the top of those layers'
+    /// iterations — the same rows `llama_get_embeddings_layer_inp` hands
+    /// upstream's draft encoder.
+    pub dspark_capture_at: Vec<Option<usize>>,
+    /// Whether any layer's input is being captured.
+    pub dspark_active: bool,
+    /// The captured input hidden states of one forward chunk,
+    /// `[capture slot][token][n_embd]`.
+    pub dspark_hidden: Vec<f32>,
     pub matmul_out: Vec<f32>,
     pub q8k_buf: Vec<quant::BlockQ8K>,
     pub q8_buf: Vec<u8>,
@@ -130,6 +144,9 @@ impl Qwen35Scratchpad {
             logits_rows: Vec::new(),
             collect_all_logits: false,
             logits_rows_collected: false,
+            dspark_capture_at: Vec::new(),
+            dspark_active: false,
+            dspark_hidden: Vec::new(),
             conv_states: (0..n_layer).map(|_| vec![0.0; d_conv * conv_dim]).collect(),
             ssm_states: (0..n_layer)
                 .map(|_| vec![0.0; num_v_heads * head_v_dim * head_v_dim])

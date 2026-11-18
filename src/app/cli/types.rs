@@ -73,6 +73,9 @@ pub struct CliOptions {
     /// decoding round. `None` (or zero) keeps the plain one-token-at-a-time
     /// decode.
     pub mtp_draft: Option<usize>,
+    /// A DFlash / DSpark sidecar GGUF: when set, the decode becomes a
+    /// speculative one with the sidecar drafting (`--dspark-model`).
+    pub dspark_model: Option<String>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     /// Astronex output latent-frame count. `--frames` remains reserved for

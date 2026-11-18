@@ -14,6 +14,12 @@
 - 图像：需要配套的 F16 mmproj；视觉塔始终在 CPU 上跑。
 - MTP 投机解码：CLI `--mtp-draft N`（每轮起草 N 个 token；仅 greedy、仅纯文本
   prompt——图像路径的 prompt 行是投影后的 embedding，拿不到 token id）。
+- DSpark 投机解码（Qwen3.5-2B 实测）：CLI `--dspark-model <sidecar.gguf>`
+  （可选 `--mtp-draft N` 指定每轮草稿数，默认 8；与 MTP 同样仅 greedy、仅纯文本
+  prompt、目标走 CPU 路径）。sidecar 是独立的 `dflash` 架构 GGUF（如
+  `Qwen3.5-2B-DSpark`），起草 token 与 pinned llama.cpp `b96806d` 的
+  `--spec-type draft-dspark` 逐 token 一致；实现与验证记录见
+  [SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md)。
 
 ## CPU：与 pinned llama.cpp 的对拍
 

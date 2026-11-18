@@ -1243,6 +1243,7 @@ fn main() {
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
                 options.effective_mtp_draft(),
+                options.dspark_model.as_deref().map(std::path::Path::new),
                 &jinja_options,
             ));
         } else if options.embedding {

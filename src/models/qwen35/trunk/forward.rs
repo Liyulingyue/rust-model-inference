@@ -268,6 +268,18 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let layer = &self.layers[il];
             let is_recr = cfg.is_recurrent[il];
 
+            // DSpark: the sidecar's encoder reads this layer's input hidden
+            // states. The residual stream at the top of the iteration is
+            // exactly the layer's input — the same rows
+            // `llama_get_embeddings_layer_inp` hands upstream's draft.
+            if scratch.dspark_active {
+                if let Some(slot) = scratch.dspark_capture_at.get(il).copied().flatten() {
+                    let at = slot * n_tokens * n_embd;
+                    scratch.dspark_hidden[at..at + n_tokens * n_embd]
+                        .copy_from_slice(&scratch.x[..n_tokens * n_embd]);
+                }
+            }
+
             for t in 0..n_tokens {
                 let off = t * n_embd;
                 scratch.normed_buf[off..off + n_embd]
