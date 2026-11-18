@@ -156,6 +156,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--dspark-model" => {
+                let value = args.get(i + 1).ok_or("Missing value for --dspark-model")?;
+                let path = std::path::Path::new(value);
+                if !path.exists() {
+                    return Err(format!("--dspark-model file not found: {value}"));
+                }
+                options.dspark_model = Some(value.to_string());
+                i += 1;
+            }
             "--steps" => {
                 let value = args.get(i + 1).ok_or("Missing value for --steps")?;
                 options.steps = Some(

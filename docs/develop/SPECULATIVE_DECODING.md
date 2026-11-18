@@ -12,8 +12,19 @@
 > contract is now spelled out in "The upstream contract" below, the survey
 > of models that actually ship these heads is in "Which models ship them",
 > and the status of the three pieces this repository already has is in
-> "What this repository already has". Nothing here is implemented yet:
-> the whole feature is tracked as TODO-069.
+> "What this repository already has".
+>
+> **Implemented 2026-11-18**: the MTP path (PR #241 / #250, `qwen35`
+> trunk, see TODO-072) and the **DSpark end-to-end path** described by this
+> document: `src/models/dflash/` carries the sidecar trunk
+> (encoder-injection, block denoising, Markov / confidence heads), the
+> `qwen35` trunk captures its layers' input hidden states for the encoder,
+> and `HybridSession::{prefill_with_dspark, dspark_speculative_step,
+> dspark_generate}` drives the rounds with the same verify/rollback
+> machinery as the MTP path. Entry point: CLI `--dspark-model <sidecar>`.
+> Draft tokens match `llama-server --spec-type draft-dspark` (b96806d)
+> token for token on Qwen3.5-2B + its DSpark sidecar. EAGLE3 and the
+> standalone draft remain unimplemented.
 
 ## Why
 
@@ -427,6 +438,30 @@ publishers follow that convention: `unsloth/Qwen3.8-Flash-Next-GGUF` ships an
   softmax".
 
 What is missing is the draft side and the loop. See TODO-069.
+
+## What this repository has now (the implemented paths)
+
+- **MTP** (`qwen35` trunk): the head lives in the checkpoint itself
+  (`nextn` tensors), `HybridSession::mtp_speculative_step` drafts from the
+  target's hidden state, verifies in one batched forward and rolls back the
+  KV cache / recurrent state on rejection. See TODO-072 for the parity and
+  throughput numbers (CPU and device).
+- **DSpark / DFlash sidecar** (`src/models/dflash/`, driven by the `qwen35`
+  trunk): the sidecar is a separate GGUF (`--dspark-model`), so the target
+  captures the input hidden states of the layers named by
+  `dflash.target_layers` (a `scratchpad` capture the trunk's layer loop
+  fills — the repo-side equivalent of `llama_get_embeddings_layer_inp`),
+  the DFlash encoder turns them into the draft's own KV rows
+  (`DflashSession::inject_target_features`), and `draft_block` denoises one
+  `[anchor, MASK × (block-1)]` block through the two DSpark heads (Markov
+  bias chained on the previously committed token, the confidence head's
+  `p_min` gate, greedy pick, `d2t` scatter onto the target's vocabulary).
+  The verification and rollback reuse the MTP machinery
+  (`dspark_speculative_step`); every row of every target forward —
+  prefill chunk or verification batch — is injected, exactly as
+  upstream's `process()` does, so a rejected row's KV entry is overwritten
+  by the next block, which starts at the corrected position.
+- **EAGLE3 and the standalone draft**: still not implemented.
 
 ## Which models ship them
 

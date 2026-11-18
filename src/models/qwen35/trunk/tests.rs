@@ -671,6 +671,143 @@ fn qwen35_mtp_speculative_decoding_matches_greedy() {
 }
 
 #[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_DFLASH_SIDECAR"]
+fn qwen35_dspark_speculative_decoding_matches_greedy() {
+    // Speculative decoding has to produce exactly the tokens the target
+    // would have produced on its own -- that is the whole point of the
+    // verify/accept loop. The number that says whether the DSpark sidecar
+    // is any good is the acceptance rate: how many of the drafted tokens
+    // the target accepted.
+    //
+    // The prompt is tokenised with the target's own embedded tokenizer so
+    // the ids mean the same tokens on both sides.
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let sidecar_path = std::env::var("RMI_DFLASH_SIDECAR").expect("RMI_DFLASH_SIDECAR must be set");
+    let steps: usize = std::env::var("RMI_QWEN35_DSPARK_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16);
+    let drafts_per_step: usize = std::env::var("RMI_QWEN35_DSPARK_DRAFTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let sidecar_source = crate::open_model_source(
+        std::path::Path::new(&sidecar_path),
+        crate::ComponentRole::Llm,
+    )
+    .unwrap();
+    let tokenizer = crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })
+    .unwrap();
+    let tokens = tokenizer.encode(
+        "The capital of France is",
+        crate::core::tokenizer::EncodeOptions::default(),
+    );
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must tokenize to at least one token"
+    );
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    // The verification writes the KV of the rejected drafts too, so the
+    // caches have to hold the whole run.
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps * (drafts_per_step + 1) + 2);
+    let pool = session_pool();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    // The scratchpad is sized for the larger of the prompt chunk and the
+    // verification batch (the anchor plus the draft).
+    let batch = tokens.len().max(drafts_per_step + 1);
+
+    // The reference: the target on its own.
+    let mut greedy: Vec<u32> = Vec::with_capacity(steps);
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut position = tokens.len();
+        for _ in 0..steps {
+            let token = crate::ops::sampling::argmax(&logits) as u32;
+            greedy.push(token);
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+            position += 1;
+        }
+    }
+
+    // The same run with the sidecar drafting.
+    let mut speculative: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    let mut rounds = 0usize;
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let dflash_weights =
+            crate::models::dflash::trunk::weights::load_weights(sidecar_source.as_ref()).unwrap();
+        let token_embd = crate::models::dflash::trunk::weights::load_weight(
+            source.as_ref(),
+            "token_embd.weight",
+        )
+        .unwrap();
+        // The draft context has to cover the whole run: the draft block
+        // attends over the committed positions.
+        let mut dflash = crate::models::dflash::DflashSession::new(
+            dflash_weights,
+            token_embd,
+            pool.n_threads(),
+            n_ctx,
+            batch,
+        );
+
+        let logits = session
+            .prefill_with_dspark(&mut dflash, &tokens, &positions)
+            .unwrap();
+        let mut position = tokens.len();
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        while speculative.len() < steps {
+            let step = session
+                .dspark_speculative_step(&mut dflash, bonus, position, drafts_per_step)
+                .unwrap();
+            accepted += step.accepted;
+            drafted += step.drafted;
+            rounds += 1;
+            position += step.tokens.len();
+            bonus = step.next;
+
+            for token in step.tokens {
+                speculative.push(token);
+                if speculative.len() >= steps {
+                    break;
+                }
+            }
+        }
+        eprintln!("Qwen3.5 DSpark acceptance: {accepted}/{drafted} over {rounds} rounds");
+    }
+
+    for (index, (speculative_token, greedy_token)) in
+        speculative.iter().zip(greedy.iter()).enumerate()
+    {
+        assert_eq!(
+            speculative_token, greedy_token,
+            "DSpark speculative decoding diverged from greedy at step {index}"
+        );
+    }
+    assert!(
+        accepted >= 1,
+        "the sidecar never had a draft accepted across {rounds} rounds"
+    );
+}
+
+#[test]
 #[ignore = "requires RMI_QWEN35_MODEL"]
 fn qwen38_q4_0_model_metadata_and_load() {
     let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");

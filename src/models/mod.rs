@@ -17,6 +17,7 @@ pub mod clm;
 pub mod d3_turbo;
 pub mod decision;
 pub mod decoder_embedding;
+pub mod dflash;
 pub mod diffusion;
 pub mod dory;
 pub mod dots;
