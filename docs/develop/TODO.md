@@ -5985,19 +5985,48 @@ F32 档能加载并出图 ✓✓（CPU 13.4~15.4 s ✓✓ / 设备 5.2~5.4 s ✓
 （`record_diy_attention_full` ✓✓，全部录进**同一个** command buffer ✓✓，
 中间只有 `compute_barrier` ✓✓）。
 
-**还没排除** ✓✓：那两个着色器里是哪一个 ✓✓，或者里面的哪一段 ✓✓。
-两个着色器的 barrier 看着都是齐的 ✓✓（`attention_scores_tiled.comp` 每个 key 段前后各一个
-✓✓、两遍折叠之间一个 ✓✓；`qk_norm_rope_interleaved.comp` 的归一化读写之间一个 ✓✓），
-所以要么漏的是某一种**跨 dispatch 的读写依赖** ✓✓，要么是着色器里有一条没看见的路径 ✓✓。
+**算子级测试：三段都单独跑过，都确定** ✓✓（新增在 `src/vulkan/zimage_probe.rs` ✓✓，
+`RUST_ZIMAGE_VK_PROBE=1` 才跑 ✓✓）：
+
+| 单跑的一段 | 同一输入连跑 8 次 |
+|---|---|
+| `attention_scores_tiled`（含 kv_write ✓✓） | **8/8 逐位相同** ✓✓ |
+| 融合的 Q/K norm + RoPE ✓✓ | **8/8 逐位相同** ✓✓ |
+| 整条 attention 链（kv_write → scores → softmax → values）✓✓ | **8/8 逐位相同** ✓✓ |
+
+⇒ **三个着色器单独跑都没有竞态** ✓✓ ⇒ 竞态在**它们之外** ✓✓。
+
+**逐 block 探针查到了竞态的样子** ✓✓（临时加在 `z_image/dit.rs` 上，测完已删 ✓✓）：
+每次运行打出每个 block 的 attention 输出指纹 ✓✓（求和 + 最大绝对值 + 前 4 个值 ✓✓），
+两次运行对比 ⇒ **分叉从某一个 block 开始** ✓✓（实测分别落在 layer 4 / 5 / 8 / 15 / 31 ✓✓
+⇒ 与时序有关 ✓✓，不是固定的那一层 ✓✓）。
+
+⇒ **而且不是「算错」，是「读早了」** ✓✓：出问题的那个 block，它的 attention 输出
+**前 4 个值和上一个 block 一模一样** ✓✓（例：某次运行的 layer 8 输出
+`head=[3.9762678, -0.04423639, 1.6983759, -1.7022396]` ✓✓，
+与另一次运行的 layer 7 **逐位相同** ✓✓），
+而求和与前一个 block 不同 ✓✓ ⇒ **缓冲区是「新旧混在一起」的** ✓✓
+⇒ **读回拷贝和设备的 values dispatch 撞上了** ✓✓
+（有时整块都是旧的 ✓✓，有时只有一部分是旧的 ✓✓ ⇒ 拷贝发生在 dispatch 写到一半的时候 ✓✓）。
+
+⇒ **这与「屏障」无关** ✓✓：三个着色器内部、段与段之间、链与链之间都各有屏障 ✓✓，
+而单独跑都确定 ✓✓ ⇒ **要么某次提交里根本没有那个 dispatch** ✓✓，
+要么**读回的拷贝没有排在那个 dispatch 之后** ✓✓。
+（提交机制本身看起来是对的：`submit_commands` 会 `end_command_buffer` → `reset_fences` →
+`queue_submit` → `wait_for_fences` ✓✓，命令缓冲与 fence 都在互斥锁下 ✓✓。）
 
 **下一步** ✓✓：
 
-1. **算子级测试**：把 `attention_scores_tiled` 这一段单独抽出来，同一份输入连跑 N 次 ✓✓，
-   比对输出 ✓✓（`src/vulkan/zimage_probe.rs` 已经演示了怎么手工摆 arena ✓✓，
-   `Qwen3Ops::new_device_local_with_size` + 手摆 region 就能复现那一段 ✓✓）。
-   N 次都相同 ⇒ 竞态在着色器之间 ✓✓；N 次里有不同 ⇒ 就是这个着色器 ✓✓。
-2. 同样地单测 `qk_norm_rope_interleaved` ✓✓（它的归一化是**单 lane 串行**的 ✓✓，
-   按理最不容易出错 ✓✓，所以更可能是**跨 dispatch** 的问题 ✓✓）。
+1. **在提交层查**：给 `submit_commands` 加一条断言 —— 提交前检查命令缓冲里
+   确实记录了该有的 dispatch ✓✓（`recorded_dispatches` 计数已经有 ✓✓，
+   但它是全局的 ✓✓，要按提交分组才有用 ✓✓）；同时在 `record_diy_attention` 之后
+   立刻读回 `attention_out` 的前几个值 ✓✓，与提交后的值比对 ✓✓ ——
+   若提交后立刻读是对的、而几微秒后 `run_block_gpu` 再读却变了 ✓✓，
+   那就是**读回路径**的问题 ✓✓（`read_f32_into` 的 staging 拷贝 ✓✓），
+   否则就是**提交丢 dispatch** ✓✓。
+2. 若提交确实带了那个 dispatch ✓✓，查 `read_f32_into` 的 staging 拷贝路径 ✓✓：
+   它把 arena 拷到 staging 再由主机读 ✓✓，拷贝本身也在同一个队列上 ✓✓，
+   理论上排在 compute 之后 ✓✓ —— 但**读到的「新旧混合」说明它没有** ✓✓。
 3. 修好之前，**文档里不能再写「同一 seed 两次设备运行逐位相同」** ✓✓ ——
    那句话是**样本太少**得出的 ✓✓（同一份二进制连跑 3 次恰好相同 ✓✓），
    已更正 ✓✓（`docs/MODEL_LIST.md` ✓✓、`docs/develop/SUPPORTED_MODELS.md` ✓✓）。
@@ -6007,7 +6036,12 @@ CPU 与设备的 PSNR 维持 ≥ 40 dB ✓✓。
 
 **关联**：`src/models/diffusion/z_image/dit_gpu.rs`（`record_diy_attention` ✓✓）、
 `src/vulkan/ops.rs`（`record_diy_attention_full` ✓✓、`record_diy_attention_scores` ✓✓、
-`record_softmax_rows` ✓✓、`record_attention_values_rows` ✓✓、`compute_barrier` ✓✓）、
+`record_softmax_rows` ✓✓、`record_attention_values_rows` ✓✓、`compute_barrier` ✓✓、
+`read_f32_into` ✓✓）、`src/vulkan.rs`（`submit_commands` ✓✓、`compute_barrier` ✓✓）、
+`src/vulkan/zimage_probe.rs`（本轮新增的三个算子级探针 ✓✓：
+`tiled_attention_scores_are_reproducible` ✓✓、
+`fused_qk_norm_rope_is_reproducible` ✓✓、
+`diy_attention_chain_is_reproducible` ✓✓）、
 `shaders/glsl/attention_scores_tiled.comp` ✓✓、`shaders/glsl/softmax.comp` ✓✓、
 `shaders/glsl/attention_values.comp` ✓✓、
 [TODO-076](#todo-076-z-image-的-f16-dit-档在设备路径上第二步全-nan--根因是设备端没有-cpu-那份-1128-的预缩放)（同一套设备路径的其它缺口 ✓✓）。

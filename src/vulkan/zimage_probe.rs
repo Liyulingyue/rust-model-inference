@@ -234,3 +234,343 @@ fn run_probe() -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Is the tiled attention-score kernel reproducible?
+///
+/// The Z-Image device path is not: the same binary, the same seed and the
+/// same spec give different PNGs from run to run, and the fork is in the
+/// device attention chain. This is the only shader in that chain that
+/// Z-Image has of its own (ERNIE uses the standard scores kernel plus the
+/// same softmax and values kernels, and its device path is reproducible).
+///
+/// So run that one stage over the same input several times and compare the
+/// scores it writes. Every pass equal means the race is between the stages,
+/// not inside this shader.
+#[test]
+fn tiled_attention_scores_are_reproducible() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_scores_probe().expect("tiled scores probe unavailable");
+}
+
+fn run_scores_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    // 128x128 with a 32-token context: 96 rows, which is what the device
+    // path sees at that spec.
+    const ROWS: usize = 96;
+    const PASSES: usize = 8;
+
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let qkv = region(ROWS * QKV * 4, 4);
+    let cache_k = region(ROWS * HIDDEN * 4, 4);
+    let cache_v = region(ROWS * HIDDEN * 4, 4);
+    let scratch = region(ROWS * HIDDEN * 4, 4);
+    let scores = region(ROWS * HEADS * ROWS * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+
+    let input: Vec<f32> = (0..ROWS * QKV)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+    ops.write_f32(qkv, &input).map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<f32>> = None;
+    for pass in 0..PASSES {
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        ops.record_diy_attention_scores(
+            &commands, qkv, cache_k, cache_v, scratch, scores, QKV, HEADS, HEADS, HEAD_WIDTH, ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut buffer = vec![0.0f32; ROWS * HEADS * ROWS];
+        ops.read_f32_into(scores, &mut buffer)
+            .map_err(|e| e.to_string())?;
+        match &reference {
+            None => reference = Some(buffer),
+            Some(first) => {
+                let mut mismatches = 0usize;
+                let mut first_at = None;
+                for (index, (left, right)) in first.iter().zip(buffer.iter()).enumerate() {
+                    if left != right {
+                        mismatches += 1;
+                        if first_at.is_none() {
+                            first_at = Some((index, *left, *right));
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    let (index, left, right) = first_at.expect("mismatch without a position");
+                    eprintln!(
+                        "pass {pass}: {mismatches} of {} scores differ; first at {index}: {left} vs {right}",
+                        first.len()
+                    );
+                    return Err(format!(
+                        "the tiled scores kernel gave a different answer on pass {pass} \
+                         ({mismatches} of {} scores differ)",
+                        first.len()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{PASSES} passes over the same input: every score identical");
+    Ok(())
+}
+
+/// Is the fused Q/K norm and RoPE reproducible?
+///
+/// The tiled scores kernel is reproducible on its own (see the test above),
+/// so the other Z-Image-only shader in the device attention path is the one
+/// that folds the Q/K norm and the RoPE into the projection's output. It
+/// rewrites the QKV region in place, so every pass starts from the same
+/// input again.
+#[test]
+fn fused_qk_norm_rope_is_reproducible() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_qk_norm_rope_probe().expect("Q/K norm and RoPE probe unavailable");
+}
+
+fn run_qk_norm_rope_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    const ROWS: usize = 96;
+    const PASSES: usize = 8;
+
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let qkv = region(ROWS * QKV * 4, 4);
+    let rope = region(ROWS * HEAD_WIDTH * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+
+    // The Q and K norms are one gamma per head dimension each.
+    let q_norm: Vec<f32> = (0..HEAD_WIDTH)
+        .map(|i| 1.0 + (i % 7) as f32 * 0.01)
+        .collect();
+    let k_norm: Vec<f32> = (0..HEAD_WIDTH)
+        .map(|i| 0.5 + (i % 5) as f32 * 0.01)
+        .collect();
+    let q_bytes: Vec<u8> = q_norm.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let k_bytes: Vec<u8> = k_norm.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let q_buffer = unsafe { context.upload_static(&q_bytes) }.map_err(|e| e.to_string())?;
+    let k_buffer = unsafe { context.upload_static(&k_bytes) }.map_err(|e| e.to_string())?;
+    let bindings = ops
+        .bind_weight_buffers(
+            &[q_buffer, k_buffer],
+            &[GpuWeightFormat::F32, GpuWeightFormat::F32],
+        )
+        .map_err(|e| e.to_string())?;
+
+    let input: Vec<f32> = (0..ROWS * QKV)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+    let rope_table: Vec<f32> = (0..ROWS * HEAD_WIDTH)
+        .map(|i| ((i % 61) as f32 / 61.0) - 0.5)
+        .collect();
+    ops.write_f32(rope, &rope_table)
+        .map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<f32>> = None;
+    for pass in 0..PASSES {
+        // The kernel rewrites the QKV region in place, so the input goes back
+        // in before every pass.
+        ops.write_f32(qkv, &input).map_err(|e| e.to_string())?;
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        ops.record_qk_norm_rope_interleaved_rows(
+            &commands,
+            bindings,
+            qkv,
+            qkv,
+            HEADS,
+            HEADS,
+            HEAD_WIDTH,
+            rope,
+            QKV,
+            QKV,
+            HIDDEN,
+            crate::models::diffusion::z_image::dit::QK_RMS_EPSILON,
+            true,
+            true,
+            ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut buffer = vec![0.0f32; ROWS * QKV];
+        ops.read_f32_into(qkv, &mut buffer)
+            .map_err(|e| e.to_string())?;
+        match &reference {
+            None => reference = Some(buffer),
+            Some(first) => {
+                let mut mismatches = 0usize;
+                let mut first_at = None;
+                for (index, (left, right)) in first.iter().zip(buffer.iter()).enumerate() {
+                    if left != right {
+                        mismatches += 1;
+                        if first_at.is_none() {
+                            first_at = Some((index, *left, *right));
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    let (index, left, right) = first_at.expect("mismatch without a position");
+                    eprintln!(
+                        "pass {pass}: {mismatches} of {} values differ; first at {index}: {left} vs {right}",
+                        first.len()
+                    );
+                    return Err(format!(
+                        "the fused Q/K norm and RoPE gave a different answer on pass {pass} \
+                         ({mismatches} of {} values differ)",
+                        first.len()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{PASSES} passes over the same input: every value identical");
+    Ok(())
+}
+
+/// Is the whole device attention chain reproducible?
+///
+/// The two Z-Image-only shaders are reproducible on their own, and so is the
+/// stage that writes the scores. Run the chain -- the K/V copy, the scores,
+/// the softmax and the value reduction -- over the same input several times
+/// and compare the attention output it leaves in the arena.
+#[test]
+fn diy_attention_chain_is_reproducible() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_chain_probe().expect("attention chain probe unavailable");
+}
+
+fn run_chain_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    const ROWS: usize = 96;
+    const PASSES: usize = 8;
+
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let qkv = region(ROWS * QKV * 4, 4);
+    let cache_k = region(ROWS * HIDDEN * 4, 4);
+    let cache_v = region(ROWS * HIDDEN * 4, 4);
+    let scratch = region(ROWS * HIDDEN * 4, 4);
+    let scores = region(ROWS * HEADS * ROWS * 4, 4);
+    let out = region(ROWS * HIDDEN * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+
+    let input: Vec<f32> = (0..ROWS * QKV)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+    ops.write_f32(qkv, &input).map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<f32>> = None;
+    for pass in 0..PASSES {
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        ops.record_diy_attention_full(
+            &commands, qkv, cache_k, cache_v, scratch, scores, out, QKV, HEADS, HEADS, HEAD_WIDTH,
+            ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut buffer = vec![0.0f32; ROWS * HIDDEN];
+        ops.read_f32_into(out, &mut buffer)
+            .map_err(|e| e.to_string())?;
+        match &reference {
+            None => reference = Some(buffer),
+            Some(first) => {
+                let mut mismatches = 0usize;
+                let mut first_at = None;
+                for (index, (left, right)) in first.iter().zip(buffer.iter()).enumerate() {
+                    if left != right {
+                        mismatches += 1;
+                        if first_at.is_none() {
+                            first_at = Some((index, *left, *right));
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    let (index, left, right) = first_at.expect("mismatch without a position");
+                    eprintln!(
+                        "pass {pass}: {mismatches} of {} values differ; first at {index}: {left} vs {right}",
+                        first.len()
+                    );
+                    return Err(format!(
+                        "the attention chain gave a different answer on pass {pass} \
+                         ({mismatches} of {} values differ)",
+                        first.len()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{PASSES} passes over the same input: every value identical");
+    Ok(())
+}
