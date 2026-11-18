@@ -82,6 +82,46 @@
       "device": "cuda",
       "elapsed_seconds": 569.1979734543711,
       "boundary": "traced_including_checkpoint_io_and_streamed_weights; initial hash verification excluded"
+    },
+    {
+      "recipe": "final BF16 native vulkan CLI, release-fast",
+      "elapsed_seconds": 1054.6179829854518,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final BF16 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 1182.3752782531083,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final BF16 native auto CLI, release-fast",
+      "elapsed_seconds": 248.4602637514472,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final BF16 native auto HTTP, release-fast",
+      "elapsed_seconds": 156.7257447130978,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
     }
   ],
   "trace_timing_limit": "Shared host/cgroup contention, different load/encode boundaries and checkpoint I/O. These are diagnostic run times, not clean benchmarks or evidence of a speedup."

@@ -1,8 +1,8 @@
 # FastFrames-L oracle
 
-**Experimental: final-code BF16/F32 CPU CLI/HTTP and BF16 strict Vulkan CLI passed 411 checkpoints and decoded
-MP4 comparison at 16×16 / 5 frames; remaining
-acceptance is incomplete.** See [validation](validation.md), [matrix](matrix.json),
+**Experimental: BF16 CPU/Auto/Vulkan and F32 CPU pass CLI/HTTP checkpoints and
+decoded MP4 comparison at 16×16 / 5 frames. F16 CPU passes checkpoints but fails
+decoded-video gates. Remaining acceptance is incomplete.** See [validation](validation.md), [matrix](matrix.json),
 [observed results](observed-results.json) and [performance](performance.json).
 
 Read-only reference: `apple-aiml-research/ml-fastframes` commit
@@ -19,7 +19,8 @@ SDPA. `--gguf` independently decodes effective weights with `gguf` and reconstru
 source grouped/convolution layouts. Prepared projections reproduce the native
 operator contract: F16 inputs round to F16, Q formats use independent Q8_0/Q8_K
 activation QDQ, and Q4_1 retains the separately rounded Q8_1 sum term. These last
-format-specific paths have small regression checks, not full-model acceptance yet.
+format-specific paths have regression checks; per-format full-model results and
+failed gates are recorded separately in the matrix.
 
 `--recipe published` retains BF16 casts while substituting an available PyTorch
 SDPA backend for NVIDIA-only cuDNN on AMD. Its drift is separate; this is not an

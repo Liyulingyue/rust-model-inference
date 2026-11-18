@@ -1,0 +1,298 @@
+{
+  "date": "2026-11-19",
+  "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+  "scope": "Supplementary diagnostics; checkpoint pass does not override a failed decoded-video gate. Tensor payloads stay remote.",
+  "reports": {
+    "fallback-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Auto fallback with missing Vulkan ICD, distinct from actual Auto device acceptance",
+      "process_environment": {
+        "VK_DRIVER_FILES": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/missing-icd.json",
+        "VK_ICD_FILENAMES": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/missing-icd.json"
+      },
+      "auto": {
+        "format": "bf16",
+        "backend": "auto",
+        "model": {
+          "format": "bf16",
+          "size": 41892093248,
+          "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 88.12854862958193,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "comparison": {
+            "passed": true,
+            "checkpoints": 411,
+            "max_relative_rmse": 2.794884733482099e-05,
+            "min_cosine": 0.9999999997176138,
+            "first_failure": null
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2203
+          },
+          "pixels": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          }
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1829,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 58.38349624350667,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18144"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-http.log",
+          "comparison": {
+            "passed": true,
+            "checkpoints": 411,
+            "max_relative_rmse": 2.794884733482099e-05,
+            "min_cosine": 0.9999999997176138,
+            "first_failure": null
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2203
+          },
+          "pixels": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          }
+        }
+      },
+      "strict_unavailable": {
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--compute",
+          "vulkan",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/strict.mp4"
+        ],
+        "exit_code": 2,
+        "stderr": "--compute vulkan requires a usable Vulkan device: compute device failure: Vulkan init failed: Unable to find a Vulkan driver\n"
+      }
+    },
+    "extended-results.json": [
+      {
+        "case": "bf16-32x32-9frames-cpu",
+        "width": 32,
+        "height": 32,
+        "frames": 9,
+        "backend": "cpu",
+        "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+        "native": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "32",
+            "--height",
+            "32",
+            "--video-frames",
+            "9",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 161.78088029287755,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.log"
+        },
+        "controlled_reference": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "32",
+            "--height",
+            "32",
+            "--frames",
+            "9",
+            "--seed",
+            "17",
+            "--recipe",
+            "controlled",
+            "--gguf",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-reference-bf16-32x32-9frames-cpu"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 742.5322114098817,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-reference-bf16-32x32-9frames-cpu.log"
+        },
+        "comparison": {
+          "passed": true,
+          "checkpoints": 578,
+          "max_relative_rmse": 7.116039816112045e-05,
+          "min_cosine": 0.9999999975714114,
+          "first_failure": null
+        },
+        "pixels": {
+          "max_abs": 0.09019607843137256,
+          "rmse": 0.007592180372839715,
+          "relative_rmse": 0.012085716537673437,
+          "cosine": 0.9999269925418053
+        }
+      }
+    ],
+    "f16-pixel-investigation-results.json": {
+      "raw_rgb_vs_official": {
+        "max_abs": 0.0039215686274510775,
+        "rmse": 0.0007434191611815244,
+        "relative_rmse": 0.0015396502915748739,
+        "cosine": 0.9999988157999307
+      },
+      "reencode_vs_native_mp4": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0
+      },
+      "decoded_original_vs_official": {
+        "max_abs": 0.07450980392156858,
+        "rmse": 0.014410152859932579,
+        "relative_rmse": 0.03013650488225897,
+        "cosine": 0.9995483949878057
+      },
+      "different_u8_components": 138,
+      "total_u8_components": 3840,
+      "max_u8_difference": 1,
+      "native_frame_info": [
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   0 pts:      0 pts_time:0       duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:1 type:I checksum:FE49DEE7 plane_checksum:[CF39A240 BC151DC3 DCF51EE4] mean:[162 119 124] stdev:[41.9 16.9 13.5]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   1 pts:   1024 pts_time:0.0625  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:A6EB7A3A plane_checksum:[99873358 3D712943 D1081D9F] mean:[51 165 118] stdev:[8.3 3.1 4.7]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   2 pts:   2048 pts_time:0.125   duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:I checksum:DEDF9278 plane_checksum:[34804F09 4F1529AD 689C19C2] mean:[79 167 103] stdev:[13.2 3.4 9.4]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   3 pts:   3072 pts_time:0.1875  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:96B09CF1 plane_checksum:[ACD85C4C 4AC629C6 043B16DF] mean:[92 167 91] stdev:[13.1 2.7 8.0]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   4 pts:   4096 pts_time:0.25    duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:2E3FA85E plane_checksum:[24DB6BB9 3DA52922 A2F01383] mean:[108 165 78] stdev:[16.7 3.6 11.1]"
+      ],
+      "reference_frame_info": [
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   0 pts:      0 pts_time:0       duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:1 type:I checksum:FC76DEE8 plane_checksum:[CD60A240 BC151DC3 DCFB1EE5] mean:[162 119 124] stdev:[41.9 16.9 13.0]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   1 pts:   1024 pts_time:0.0625  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:A80F7A3D plane_checksum:[99873358 3DD52946 D1081D9F] mean:[51 165 118] stdev:[8.3 2.6 4.7]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   2 pts:   2048 pts_time:0.125   duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:I checksum:E8C39286 plane_checksum:[37644F17 4F1529AD 689C19C2] mean:[79 167 103] stdev:[13.2 3.4 9.4]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   3 pts:   3072 pts_time:0.1875  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:EEF39C5F plane_checksum:[45FB5C06 4107296B 06E916EE] mean:[92 166 92] stdev:[13.5 2.9 8.3]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   4 pts:   4096 pts_time:0.25    duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:509BA8F0 plane_checksum:[2E6C6BC0 3AB82946 B22813EA] mean:[108 165 80] stdev:[16.6 3.4 11.1]"
+      ]
+    },
+    "format-quality-results.json": {
+      "scope": "16x16, 5 frames; same-noise format recipe drift against BF16 storage controlled-F32 baseline, using official RGB before encoding",
+      "includes": "Effective weight quantization and per-format prepared activation rounding; distinct from native implementation error",
+      "quality_acceptance": "Diagnostic only; no per-format full-resolution quality pass claimed",
+      "results": [
+        {
+          "format": "bf16",
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "shared_noise_exact": true
+        },
+        {
+          "format": "f32",
+          "max_abs": 0.007843137254901933,
+          "rmse": 0.0017708227321753377,
+          "relative_rmse": 0.0036672951961515157,
+          "cosine": 0.9999932775998749,
+          "shared_noise_exact": true
+        }
+      ]
+    }
+  }
+}

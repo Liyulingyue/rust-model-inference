@@ -2,8 +2,8 @@
 
 `fastframes_l` 显式架构接入现有 CLI 和 `POST /v1/videos/generations`，复用原生
 Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。当前是**部分验收 / Experimental**：
-16×16 / 5 帧 BF16 的 CPU CLI/HTTP 和严格 Vulkan CLI 各 411 个检查点全部对齐，视频像素也通过；
-F32 CPU 两入口也各 411 个检查点和视频像素通过；其余精度、Vulkan HTTP/Auto 及 480p 质量仍待验证。
+16×16 / 5 帧 BF16 的 CPU/Auto/严格 Vulkan 在 CLI/HTTP 各 411 个检查点和视频像素通过；
+F32 CPU 两入口也通过。F16 CPU 两入口的检查点通过，但压缩后视频比较失败；其余格式和 480p 仍待验证。
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和
 [逐项矩阵](../../tools/oracle/fastframes_l/matrix.json)。
 
@@ -82,6 +82,13 @@ mmap 借用接口，避免复制约 84 GB 权重。实际容器内存上限约 5
 为 `0.9999999997176138`，优于预设 `0.005 / 0.9999` 门槛。视频经相同编码再解码后像素
 RMSE 为 0。F32 的 mmap 加载路径也已在 CLI/HTTP 通过同样的 411 个检查点和视频像素检查。
 此前 Linux 模型测试 13 项、真实 tokenizer 及 11 项 Python 检查均通过，九个 Vulkan/parity
-二进制构建成功，GitHub CI 三项作业通过。严格 Vulkan CLI 也已完整通过 411 个检查点，
-最大相对 RMSE 为 `2.5552589342221195e-5`，视频像素 RMSE 为 0；完整设备/HTTP/Auto 矩阵、
-更长的 KV 复用、480p 质量和无插桩性能尚未验收，保持 Draft/Experimental。
+二进制构建成功，GitHub CI 三项作业通过。严格 Vulkan 两入口最大相对 RMSE 为
+`2.5552589342221195e-5`，Auto 为 `2.5236295358634716e-5`，视频像素 RMSE 均为 0。
+无设备时 Auto 的 CPU 回退也通过，严格 Vulkan 明确报错。
+
+32×32 / 9 帧 CPU 用例通过 578 个检查点，覆盖非零空间位置和后续帧使用修复的 KV；
+视频 RMSE 为 `0.00759218`，cosine 为 `0.99992699`，均通过原门槛。
+F16 CPU 两入口均通过 411 个检查点，但压缩后视频 RMSE 为 `0.01441015`、cosine 为
+`0.99954839`，未通过 `0.01 / 0.9999` 门槛。编码前 RGB 最大只差 `1/255`、RMSE
+为 `0.00074342`；独立重编码验证了 H.264 对微小差异的放大，原阈值和失败记录保留。
+其余格式/设备矩阵、480p 质量和无插桩性能尚未验收，保持 Draft/Experimental。

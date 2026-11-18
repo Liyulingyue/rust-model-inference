@@ -1,6 +1,6 @@
 # FastFrames-L validation — 2026-11-19
 
-**Experimental / partial acceptance. Final-code BF16/F32 CPU CLI and HTTP pass at 16×16 / 5 frames.**
+**Experimental / partial acceptance. BF16 CPU/Auto/Vulkan and F32 CPU pass both transports at 16×16 / 5 frames. F16 CPU passes checkpoints but fails decoded-video gates.**
 The remaining format/backend/transport gates are incomplete in [matrix.json](matrix.json).
 Observed summaries and exact transport commands are retained in
 [observed-results.json](observed-results.json). Small reports are retrieved while
@@ -25,10 +25,18 @@ does not establish 480p quality, longer cache reuse or other storage formats.
   SHA256 `d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9`.
 - Native CPU CLI exited successfully. The actual HTTP request returned 200,
   `Content-Type: video/mp4`, `Cache-Control: no-store`; both videos decoded correctly.
-- Final strict Vulkan CLI also completed and passed all 411 checkpoints: maximum
+- Final strict Vulkan CLI and HTTP completed and passed all 411 checkpoints each: maximum
   relative RMSE **2.5552589342221195e-5**, minimum cosine **0.9999999998047929**;
   decoded MP4 pixel RMSE **0**. Its 2,202 Vulkan operator records and 5,628 device
-  submissions prove execution. Actual Vulkan HTTP is still pending.
+  submissions per transport prove execution. These counts cover instrumented
+  projections, not every operation in the hybrid graph.
+- Real Auto CLI and HTTP pass all 411 checkpoints each: maximum relative RMSE
+  **2.5236295358634716e-5**, minimum cosine **0.9999999997347359**, decoded-video
+  RMSE **0**. Each has 143 Vulkan and 2,059 CPU projection trace records.
+- With process-local Vulkan ICD paths pointing to a missing file, Auto CLI and
+  HTTP pass all 411 checkpoints and decoded-video RMSE 0, with zero device and
+  2,203 CPU projection records. Strict Vulkan exits 2 with a driver-initialization
+  error and creates no output. This fallback check is separate from device acceptance.
 - On an earlier host, strict Vulkan executed at least 4,737 device submissions. A 238-checkpoint prefix
   compared with CPU without failure (worst relative RMSE 3.988701595524663e-5).
   The last observed trace had 274 records. That incomplete result did not establish
@@ -40,6 +48,29 @@ does not establish 480p quality, longer cache reuse or other storage formats.
   (83,742,203,200 bytes). F16 conversion completed; SHA256 is
   `ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39`.
   (41,892,093,248 bytes). Remaining formats/backends retain separate matrix gates.
+
+### F16 decoded-video failure
+
+Both CPU transports generate valid MP4s and pass all 411 checkpoints (maximum
+relative RMSE **0.001728212584007973**, minimum cosine **0.9999988745859908**).
+Both fail the unchanged decoded-video limits: RMSE **0.014410152859932579** > 0.01
+and cosine **0.9995483949878057** < 0.9999. The matrix records **失败**.
+
+Reconstructed native RGB before encoding differs from official RGB by at most
+**1/255** (138 of 3,840 components, RMSE **0.0007434191611815244**, cosine
+**0.9999988157999307**). Independently re-encoding those native pixels produces
+exactly the decoded production pixels. This identifies lossy H.264 amplification
+of small F16 differences; it does not establish an output-layout or encoder bug.
+No thresholds or production arithmetic were changed to hide the failure.
+
+### Spatial and repaired-cache diagnostic
+
+BF16 CPU at **32×32 / 9 frames** passes **578** checkpoints, maximum relative RMSE
+**7.116039816112045e-5**, minimum cosine **0.9999999975714114**. Decoded-video RMSE
+is **0.007592180372839715**, cosine **0.9999269925418053**, passing the same limits.
+This exercises nonzero spatial positions and consumes repaired KV in a later
+latent frame. Published-BF16 drift and 480p acceptance remain separate gates.
+Commands and supplementary measurements are in [supplemental-results.json](supplemental-results.json).
 
 The earlier BF16 result (relative RMSE 4.240734428259513e-5) preceded final oracle
 hardening. The 2026-11-19 run supersedes that limitation: source head
@@ -84,7 +115,7 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
 | Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. The optional fat-LTO release build was deferred to free memory for acceptance. |
-| GitHub CI | Run `44340649724` on source head `b44d4b301` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| GitHub CI | Run `44350924455` on head `43cd440eb` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
@@ -121,8 +152,9 @@ Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
 
 Finish the running independent format oracles and CPU/Auto/strict Vulkan matrix,
 with actual CLI and HTTP separately. Compare shared noise, discrete tokens,
-checkpoint counts and numeric results; decode MP4s. Exercise at least nine frames
-to consume repaired KV in a subsequent latent frame. Run published-BF16 drift,
+checkpoint counts and numeric results; decode MP4s. The nine-frame spatial/KV
+diagnostic above passes; larger cases remain. Retain the F16 decoded-video failure.
+Run published-BF16 drift,
 480p multi-frame quality, peak memory and clean same-host repeated CPU/Vulkan/reference
 benchmarks. Existing trace-inclusive reference timings are not speedup evidence.
 Keep Draft/Experimental until these gates pass.
