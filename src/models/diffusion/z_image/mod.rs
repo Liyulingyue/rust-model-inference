@@ -1198,7 +1198,7 @@ mod tests {
     #[test]
     fn linear_rejects_unsupported_matrix_type() {
         let source =
-            TestSource::default().with_raw_tensor("w", &[2, 2], GGMLType::F32, vec![0; 16]);
+            TestSource::default().with_raw_tensor("w", &[2, 2], GGMLType::Q4_0, vec![0; 16]);
         let error = linear_into(
             &source,
             "w",
@@ -1210,7 +1210,37 @@ mod tests {
             &ComputePool::new(1),
         )
         .unwrap_err();
-        assert_eq!(error, "Unsupported matrix type F32 for w");
+        assert_eq!(error, "Unsupported matrix type Q4_0 for w");
+    }
+
+    #[test]
+    fn linear_reads_f32_weights_as_they_are() {
+        // The F32 tier of the DiT stores its refiner and its embedders in
+        // F32; the loader takes the format the file declares.
+        let source = TestSource::default().with_raw_tensor(
+            "w",
+            &[2, 2],
+            GGMLType::F32,
+            [1.0f32, 2.0, 3.0, 4.0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        );
+        // The weight is one row of `n_in` per output, like every other
+        // format: row 0 is (1, 2) and row 1 is (3, 4).
+        let mut output = [0.0; 2];
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &[1.0; 2],
+            &mut output,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+        assert_eq!(output, [3.0, 7.0]);
     }
 
     #[test]
