@@ -1,6 +1,6 @@
 # FastFrames-L validation — 2026-11-19
 
-**Experimental / partial acceptance. BF16 and F32 CPU/Auto/Vulkan pass both transports at 16×16 / 5 frames. F16 passes checkpoints but fails decoded-video gates on all three backends. Quantized gates have failed.**
+**Experimental / partial acceptance. BF16 and F32 CPU/Auto/Vulkan pass both transports at 16×16 / 5 frames. F16 passes checkpoints but fails decoded-video gates on all three backends. Quantized gates have failed. The 480p case passes checkpoints but fails decoded-video cosine and published-BF16 drift gates.**
 All 54 format/backend/transport combinations completed: 12 passed and 42 failed,
 as retained in [matrix.json](matrix.json).
 Observed summaries and exact transport commands are retained in
@@ -122,13 +122,45 @@ BF16 CPU at **32×32 / 9 frames** passes **578** checkpoints, maximum relative R
 is **0.007592180372839715**, cosine **0.9999269925418053**, passing the same limits.
 This exercises nonzero spatial positions and consumes repaired KV in a later
 latent frame. The same-input published-BF16 recipe drift also passes its separate RMSE limit:
-**0.011251397167858146** ≤ 0.08. The 832×480 / 5-frame strict Vulkan case is
-still awaiting official comparison; native generation exited 0 after **10,845.66 seconds**
-with 411 numeric checkpoints. This traced release-fast process overlapped the
-format matrix and other host work, so its elapsed time is diagnostic rather
-than an isolated release benchmark. No completed 480p numerical or quality result
-is claimed yet.
+**0.011251397167858146** ≤ 0.08. The completed 832×480 / 5-frame strict Vulkan case is recorded separately below.
 Commands and supplementary measurements are in [supplemental-results.json](supplemental-results.json).
+
+### Completed 480p diagnostic — failed quality gates
+
+BF16 strict Vulkan at **832×480 / 5 frames** generated a valid MP4 and passed
+all **411** full-model checkpoints: maximum relative RMSE
+**0.003756432053285011**, minimum cosine **0.9999929447946526**. Decoded-video
+RMSE **0.008177586129195849** passes 0.01, but cosine
+**0.9998758482355368** fails 0.9999. The case therefore remains **失败**.
+
+Before encoding, native RGB versus the controlled official RGB has RMSE
+**0.000387182768588293**, cosine **0.9999997259876185**; 50,845 of 5,990,400
+components differ, by at most **6/255**. Independently unpatchifying the official
+pixel tokens reproduces its RGB exactly. Independently rebuilding and encoding
+the native pixel tokens reproduces the production MP4's decoded pixels exactly.
+This supports H.264 amplification of small input differences rather than a
+layout/encoder wiring error; the original failed compressed-video gate is retained.
+
+The controlled and published-BF16 recipes also exceed their separate quality
+drift limit: raw-RGB RMSE **0.10040362877346713** > **0.08**, cosine
+**0.9815560650382746**. Native raw RGB versus the same published recipe is
+**0.10039486713436548**. This recipe gap is present in the official forwards
+independently of the native encoder; published-quality acceptance remains failed.
+The published run used benchmark mode (RGB only, no checkpoint claim).
+
+Native generation exited 0 after **10,845.66 seconds** using traced release-fast;
+the controlled traced official process took **535.40 seconds** and the published
+benchmark-mode process **115.54 seconds**. Different profiles, tracing/loading
+boundaries and concurrent host work prevent a clean speedup or isolated latency
+claim. The native trace records **2,211** Vulkan projection events, **5,640**
+submissions and a device-allocator peak of **17,215,993,808 bytes**. These are
+projection/device-allocation measurements, separate from full host/process peaks.
+
+The ahead-of-native references used the exact native noise and pinned assets.
+Only a verified duplicate reference process was stopped after native exit 0;
+no native computation or unrelated project was signalled. Completed reference
+manifests, hashes, reuse boundary and both failed quality gates are retained in
+`supplemental-results.json`; full payloads remain remote.
 
 The earlier BF16 result (relative RMSE 4.240734428259513e-5) preceded final oracle
 hardening. The 2026-11-19 run supersedes that limitation: source head
@@ -173,7 +205,7 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
 | Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. Fat-LTO release compilation subsequently completed; binary hashes are in `supplemental-results.json`. |
-| GitHub CI | Run `44384011235` on head `3a30e9ccc` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| GitHub CI | Run `44390529400` on head `37a996adc` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
@@ -269,12 +301,18 @@ missing shared capabilities; this PR retains the CPU paths and correctness check
 
 ## Remaining acceptance
 
-All nine independent format oracles and all quantized CPU/Auto/strict Vulkan
-CLI/HTTP cases have completed; failed gates remain unresolved. All 54 format ×
-backend × transport cases are complete (12 passed, 42 failed). Finish the 480p
-five-frame case. The real HTTP busy/disconnect check passed. The nine-frame spatial/KV
-diagnostic passes. Retain F16 decoded-video and all six quantized numeric/video
-failures. Small diagnostic performance and published-BF16 drift are now measured;
-480p quality/drift, full-size peak memory and clean isolated benchmarks remain.
-The 832×480/81-frame default has about 53.67 GB of F32 KV alone and is not exercised
-under this shared 55 GiB cgroup. Keep Draft/Experimental until the gates pass.
+All scheduled format oracles and native CPU/Auto/strict Vulkan CLI/HTTP cases
+completed: the tiny matrix has 12 passed and 42 failed transports. The nine-frame
+spatial/KV and real HTTP busy/disconnect checks pass. The completed 480p case
+passes all checkpoints but fails compressed-video cosine and published-BF16 drift.
+Retain and resolve the F16 decoded-video, six quantized numeric/video, and 480p
+quality failures before readiness; isolated block/raw-pixel checks do not replace
+them. Continue investigation at the first prepared-activation split for quantized
+paths, and validate any proposed codec/precision-recipe repair against the fixed
+output gates rather than changing thresholds or production accumulation to match bits.
+
+Shared follow-ups S1/S2 above retain the missing grouped device convolution and
+TODO-044 attention-runtime work with their module owners. Full host/process peak
+memory and clean isolated benchmarks remain unverified. The 832×480/81-frame
+default has about 53.67 GB of F32 KV alone and is not exercised under this shared
+55 GiB cgroup. Keep Draft/Experimental until the failed gates are resolved.

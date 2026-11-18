@@ -2,8 +2,8 @@
 
 **Experimental: BF16/F32 CPU/Auto/Vulkan pass CLI/HTTP checkpoints and
 decoded MP4 comparison at 16×16 / 5 frames. F16 passes checkpoints but fails
-decoded-video gates. Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have failed numeric gates. All 54 transports ran (12 passed, 42 failed); 480p quality acceptance
-is incomplete.** See [validation](validation.md), [matrix](matrix.json),
+decoded-video gates. Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have failed numeric gates. All 54 transports ran (12 passed, 42 failed). The 480p checkpoints pass,
+but decoded-video cosine and published-BF16 drift fail their quality gates.** See [validation](validation.md), [matrix](matrix.json),
 [observed results](observed-results.json) and [performance](performance.json).
 
 Read-only reference: `apple-aiml-research/ml-fastframes` commit
@@ -73,7 +73,8 @@ Checkpoints cover text, patches, each DiT block, flow/x0, repaired K/V and pixel
 tokens. Raw reference pixels are retained but skipped by the comparator because
 native traces contain pixel tokens. Independent transform tests cover that layout;
 final RGB/MP4 quality remains a separate gate (the final BF16 CPU diagnostic
-CLI/HTTP case passes it; 480p is pending). Benchmark mode has no checkpoints
+CLI/HTTP case passes it; the completed 480p case fails decoded cosine and
+published-BF16 drift). Benchmark mode has no checkpoints
 and cannot be used as parity evidence.
 
 ## Timing

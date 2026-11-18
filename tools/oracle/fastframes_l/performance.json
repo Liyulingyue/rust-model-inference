@@ -1154,5 +1154,82 @@
     "Native and reference requested thread counts differ",
     "Assigned-device VRAM includes other processes",
     "832x480/81frames remains untested under the 55 GiB cgroup limit"
-  ]
+  ],
+  "extended_480p_diagnostic": {
+    "case": "bf16-832x480-5frames-vulkan",
+    "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+    "scope": "Single traced release-fast native process and completed official references under shared host/cgroup/device load; different profiles, tracing and loading boundaries; not an isolated release benchmark or a speedup comparison",
+    "native": {
+      "profile": "release-fast, parity and compute trace enabled",
+      "process_seconds": 10845.660709502175,
+      "boundary": "Whole process including model load, checkpoint/compute tracing and MP4 encoding",
+      "binary_sha256": "f1c4f5a2996395d1d4cf0ad68fc536883f9547a335a16fac3bfd881eecf4f73c",
+      "device_allocator_peak_bytes": 17215993808,
+      "backend_evidence": {
+        "vulkan_operator_records": 2211,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5640, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 121086047268, host_read_bytes: 110108897408, transfer_submissions: 2861, live_allocation_bytes: 8546070064, peak_allocation_bytes: 17215993808 }",
+        "scope": "Instrumented projections; fixed CPU attention and depthwise stages remain documented separately"
+      }
+    },
+    "references": {
+      "controlled": {
+        "process_seconds": 535.401931386441,
+        "generation_region_seconds": 391.9104803428054,
+        "generation_boundary": "traced_including_checkpoint_io_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "checkpoint_count": 412,
+        "process_boundary": "Whole Python process including pinned asset hashing, wrapper setup and generation"
+      },
+      "published": {
+        "process_seconds": 115.54489267244935,
+        "generation_region_seconds": 57.605546997860074,
+        "generation_boundary": "generation_including_rgb_transfer_write_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "checkpoint_count": 0,
+        "process_boundary": "Whole Python process including pinned asset hashing, wrapper setup and generation"
+      }
+    },
+    "acceptance": {
+      "case": "bf16-832x480-5frames-vulkan",
+      "format": "bf16",
+      "requested_backend": "vulkan",
+      "transport": "cli",
+      "width": 832,
+      "height": 480,
+      "frames": 5,
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "implementation": "已实现",
+      "validation": "失败",
+      "checkpoints": {
+        "passed": true,
+        "checkpoints": 411,
+        "max_relative_rmse": 0.003756432053285011,
+        "min_cosine": 0.9999929447946526,
+        "first_failure": null
+      },
+      "decoded_video": {
+        "max_abs": 0.20784313725490194,
+        "rmse": 0.008177586129195849,
+        "relative_rmse": 0.015758214165296283,
+        "cosine": 0.9998758482355368,
+        "rmse_max": 0.01,
+        "cosine_min": 0.9999,
+        "passed": false
+      },
+      "published_bf16_drift": {
+        "max_abs": 1.0,
+        "rmse": 0.10040362877346713,
+        "relative_rmse": 0.1921561748261572,
+        "cosine": 0.9815560650382746,
+        "rmse_max": 0.08,
+        "passed": false
+      },
+      "acceptance_passed": false,
+      "evidence": "supplemental-results.json#reports/extended-results.json"
+    },
+    "evidence": "supplemental-results.json#reports/480-reference-provenance-results.json",
+    "speedup": null,
+    "full_process_peak_rss_bytes": null
+  }
 }
