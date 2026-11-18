@@ -753,6 +753,132 @@
           "passed": true
         }
       ]
+    },
+    "timing-reference-quality-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Benchmark-mode official raw RGB versus controlled BF16 acceptance baseline; no checkpoint acceptance claim; published drift uses its predeclared separate quality gate",
+      "results": [
+        {
+          "kind": "controlled",
+          "warmup": true,
+          "directory": "target/fastframes/timing-controlled-0",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "controlled",
+          "warmup": false,
+          "directory": "target/fastframes/timing-controlled-1",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "controlled",
+          "warmup": false,
+          "directory": "target/fastframes/timing-controlled-2",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "controlled",
+          "warmup": false,
+          "directory": "target/fastframes/timing-controlled-3",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "published",
+          "warmup": true,
+          "directory": "target/fastframes/timing-published-0",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        },
+        {
+          "kind": "published",
+          "warmup": false,
+          "directory": "target/fastframes/timing-published-1",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        },
+        {
+          "kind": "published",
+          "warmup": false,
+          "directory": "target/fastframes/timing-published-2",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        },
+        {
+          "kind": "published",
+          "warmup": false,
+          "directory": "target/fastframes/timing-published-3",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        }
+      ]
     }
   }
 }

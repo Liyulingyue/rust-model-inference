@@ -48,6 +48,11 @@ does not establish 480p quality, longer cache reuse or other storage formats.
   (83,742,203,200 bytes). F16 conversion completed; SHA256 is
   `ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39`.
   (41,892,093,248 bytes). Remaining formats/backends retain separate matrix gates.
+- Final F32 strict Vulkan CLI also passes all 411 checkpoints: maximum relative
+  RMSE **4.0885956235754525e-5**, minimum cosine **0.9999999991869644**, decoded-video
+  RMSE **0**. It records 2,202 Vulkan projections and 5,628 submissions, uploads
+  366,407,058,496 bytes, and reaches a device-allocator peak of 29,011,415,008 bytes.
+  Its HTTP and Auto cases remain separate pending gates.
 
 ### F16 decoded-video failure
 
@@ -150,7 +155,7 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
 | Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. Fat-LTO release compilation subsequently completed; binary hashes are in `supplemental-results.json`. |
-| GitHub CI | Run `44365312347` on head `2c850d41e` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| GitHub CI | Run `44380234054` on head `6e8d89f30` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
@@ -166,12 +171,36 @@ encoding). Their process peak RSS ranged from **27.95 to 31.34 GB**; this is
 process RSS, separate from the shared cgroup and device totals. The completed
 CPU, Auto and strict Vulkan each completed three measured processes. Auto took
 **99.86 / 106.49 / 110.53 seconds**; strict Vulkan took
-**544.67 / 553.27 / 824.41 seconds**. Official repeats are still running.
+**544.67 / 553.27 / 824.41 seconds**. Official repeats have also completed.
 The completed native timing videos match controlled BF16 decoded pixels exactly.
 These samples share the host
 with acceptance and conversion work, so they are diagnostic timings, without
 a clean performance or speedup claim. Per-process commands and memory boundaries
 are retained in [performance.json](performance.json).
+Strict Vulkan's traced BF16 case uploads **183.20 GB** and submits **5,628**
+device commands, versus Auto's **13.86 GB** and **395** submissions. Bounded
+eight-block caches trade memory for repeated uploads, and strict mode offloads
+small projections that Auto leaves on CPU. These measured costs explain part
+of the gap; this is not a controlled attribution benchmark. At 480p, the shared
+full CPU attention check adds a separate substantial cost.
+
+| Case | Median whole-process seconds | Median reference generation-region seconds |
+| --- | ---: | ---: |
+| Native CPU | 73.74 | Not separately measured |
+| Native Auto | 106.49 | Not separately measured |
+| Native strict Vulkan | 553.27 | Not separately measured |
+| Official controlled, same BF16 GGUF | 269.16 | 164.54 |
+| Official published BF16 recipe | 123.76 | 55.77 |
+
+Each case has one warmup and three measured processes. Native requested 24
+threads, reference requested 8; the shared cgroup has a 16-core quota. Reference
+whole-process times include source hashing and initialization, while its
+generation region includes streamed weights and RGB writes. Native load and
+generation are not separately timed. Assigned-device VRAM samples include other
+processes. These limits prevent a clean speedup claim. All four controlled timing
+outputs reproduce the acceptance raw RGB; published-BF16 raw-RGB drift is
+**0.004773227941892371** in all four runs, passing its separate **0.08** gate.
+This is diagnostic quality evidence, without benchmark-mode checkpoint claims.
 
 ## Review and repairs
 
@@ -203,11 +232,11 @@ Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
 
 ## Remaining acceptance
 
-Finish the running independent format oracles and CPU/Auto/strict Vulkan matrix,
-with actual CLI and HTTP separately. Compare shared noise, discrete tokens,
-checkpoint counts and numeric results; decode MP4s. The nine-frame spatial/KV
-diagnostic above passes; larger cases remain. Retain the F16 decoded-video failure.
-Run published-BF16 drift,
-480p multi-frame quality, peak memory and clean same-host repeated CPU/Vulkan/reference
-benchmarks. Existing trace-inclusive reference timings are not speedup evidence.
-Keep Draft/Experimental until these gates pass.
+All nine independent format oracles and all quantized CPU/Auto/strict Vulkan
+CLI/HTTP cases have completed; failed gates remain unresolved. Finish F32's
+running GPU transports and the 480p five-frame case. The nine-frame spatial/KV
+diagnostic passes. Retain F16 decoded-video and all six quantized numeric/video
+failures. Small diagnostic performance and published-BF16 drift are now measured;
+480p quality/drift, full-size peak memory and clean isolated benchmarks remain.
+The 832×480/81-frame default has about 53.67 GB of F32 KV alone and is not exercised
+under this shared 55 GiB cgroup. Keep Draft/Experimental until the gates pass.

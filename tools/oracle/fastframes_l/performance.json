@@ -1,7 +1,7 @@
 {
   "date": "2026-11-19",
-  "status": "部分运行",
-  "reason": "Fat-LTO release build completed. Trace-free repeated diagnostic samples run under concurrent acceptance/conversion load; clean isolated performance and speedup remain unverified.",
+  "status": "诊断采样完成",
+  "reason": "All five cases completed one warmup and three trace-free measured processes under shared load. Different timing boundaries and thread counts preclude a clean speedup claim; isolated/full-size benchmarks remain unverified.",
   "host": {
     "logical_cpus": 128,
     "ram_gib_approx": 503,
@@ -67,16 +67,29 @@
     },
     {
       "kind": "controlled",
-      "measured_processes": 2,
+      "measured_processes": 3,
       "required_measured_processes": 3,
-      "median_process_seconds": 265.23765726201236,
+      "median_process_seconds": 269.1550020631403,
       "minimum_process_seconds": 261.32031246088445,
-      "maximum_process_seconds": 269.1550020631403,
+      "maximum_process_seconds": 405.51179391145706,
       "process_peak_rss_bytes": 41908609024,
-      "assigned_device_total_peak_bytes": 29460291584,
+      "assigned_device_total_peak_bytes": 51265810432,
       "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
       "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes",
-      "median_generation_seconds": 162.70225812867284
+      "median_generation_seconds": 164.54098080284894
+    },
+    {
+      "kind": "published",
+      "measured_processes": 3,
+      "required_measured_processes": 3,
+      "median_process_seconds": 123.76492368988693,
+      "minimum_process_seconds": 114.06787221878767,
+      "maximum_process_seconds": 139.13796873018146,
+      "process_peak_rss_bytes": 43606003712,
+      "assigned_device_total_peak_bytes": 48499585024,
+      "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+      "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes",
+      "median_generation_seconds": 55.76876113191247
     }
   ],
   "latency_seconds": null,
@@ -898,7 +911,248 @@
         "peak_rss_bytes": 41908609024,
         "assigned_gpu_total_peak_bytes": 24062283776,
         "generation_seconds": 164.54098080284894
+      },
+      {
+        "kind": "controlled",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "controlled",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-controlled-3",
+          "--gguf",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+        ],
+        "exit_code": 0,
+        "process_seconds": 405.51179391145706,
+        "peak_rss_bytes": 36902424576,
+        "assigned_gpu_total_peak_bytes": 51265810432,
+        "generation_seconds": 293.0905694011599
+      },
+      {
+        "kind": "published",
+        "warmup": true,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-0"
+        ],
+        "exit_code": 0,
+        "process_seconds": 154.22436434589326,
+        "peak_rss_bytes": 43608920064,
+        "assigned_gpu_total_peak_bytes": 49243639808,
+        "generation_seconds": 75.26721983402967
+      },
+      {
+        "kind": "published",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-1"
+        ],
+        "exit_code": 0,
+        "process_seconds": 139.13796873018146,
+        "peak_rss_bytes": 43606003712,
+        "assigned_gpu_total_peak_bytes": 48499585024,
+        "generation_seconds": 64.36805121041834
+      },
+      {
+        "kind": "published",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-2"
+        ],
+        "exit_code": 0,
+        "process_seconds": 123.76492368988693,
+        "peak_rss_bytes": 43605471232,
+        "assigned_gpu_total_peak_bytes": 43570843648,
+        "generation_seconds": 55.76876113191247
+      },
+      {
+        "kind": "published",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-3"
+        ],
+        "exit_code": 0,
+        "process_seconds": 114.06787221878767,
+        "peak_rss_bytes": 43598303232,
+        "assigned_gpu_total_peak_bytes": 16853671936,
+        "generation_seconds": 54.913178492337465
       }
-    ]
-  }
+    ],
+    "summaries": {
+      "cpu": {
+        "median_process_seconds": 73.73649789020419
+      },
+      "auto": {
+        "median_process_seconds": 106.49002285301685
+      },
+      "vulkan": {
+        "median_process_seconds": 553.2745343726128
+      },
+      "controlled": {
+        "median_process_seconds": 269.1550020631403
+      },
+      "published": {
+        "median_process_seconds": 123.76492368988693
+      }
+    }
+  },
+  "known_transfer_work": [
+    {
+      "case": "BF16 strict Vulkan, traced 16x16/5frames",
+      "static_upload_bytes": 183203529792,
+      "submissions": 5628,
+      "scope": "Measured trace counters for the same production sources; timing repeats disable the logs"
+    },
+    {
+      "case": "BF16 Auto, traced 16x16/5frames",
+      "static_upload_bytes": 13864272960,
+      "submissions": 395,
+      "scope": "Measured trace counters for the same production sources; timing repeats disable the logs"
+    },
+    "The model rebuilds its upload cache every eight DiT blocks to fit F32 on a 48 GiB device, so later steps upload weights again. Strict mode also offloads small projections that Auto keeps on CPU."
+  ],
+  "threading": {
+    "native_requested_threads": 24,
+    "reference_threads": 8,
+    "shared_cpu_cgroup_quota_cores": 16
+  },
+  "verification_limits": [
+    "Concurrent conversion/acceptance load; no isolated benchmark",
+    "Native generation and model loading are not timed separately",
+    "Native and reference requested thread counts differ",
+    "Assigned-device VRAM includes other processes",
+    "832x480/81frames remains untested under the 55 GiB cgroup limit"
+  ]
 }
