@@ -5729,18 +5729,31 @@ qwen3 塔是这一族里剩下的那个例外 ✓✓。
 1. **共享算子**：设备的浮点 matmul 要能接住「带预缩放的中间量」✓✓ ⇒
    具体缺口是**设备端没有缩放激活的入口** ✓✓（`record_ffn` 记 W2 时只能原样上传 ✓✓），
    补上以后 FFN 的下投影也能留在设备上 ✓✓。
-2. **F32 档加载不了** ✗✗：`z-image-turbo-f32.gguf` 也在 `models/z-image-gguf-mine/` ✓✓，
-   但 `validate_dit` 把张量的格式**写死**了 —— bias/norm 一组要 F32 ✓✓、矩阵一组要 F16 ✓✓ ——
-   于是 F32 档在加载时就报错：`Invalid tensor cap_embedder.1.weight: shape [2560, 3840]
-   type F32; expected [2560, 3840] F16` ✓✓。
-   ⇒ **这是加载器缺口，不是设备缺口** ✓✓，与 Qwen-Image-2.1 那个「格式该由张量自己声明」
-   是同一类问题 ✓✓（[TODO-075](#todo-075-qwen-image-21-的基础版设备路径--现在能跑了但与-cpu-的差异和那个偶发的首轮差异都还没定位) ✓✓）：
-   校验要接受 F16/F32 两个格式 ✓✓，加载要按张量声明的格式读 ✓✓。
-   ⇒ 修好之后 F32 档还有第二件事：**设备端没有 F32 的绑定** ✓✓
-   （`bind_block_weights` 的 `_ => continue` ✓✓），而设备其实有 BF16/F32 的转置浮点 matmul ✓✓，
+2. **F32 档的加载缺口已修** ✓✓：`z-image-turbo-f32.gguf` 也在 `models/z-image-gguf-mine/` ✓✓，
+   但它原先**加载不了** —— `validate_dit` 把张量的格式**写死**了 ✓✓（bias/norm 一组要 F32 ✓✓、
+   矩阵一组要 F16 ✓✓），于是加载时就报错：`Invalid tensor cap_embedder.1.weight:
+   shape [2560, 3840] type F32; expected [2560, 3840] F16` ✓✓。
+   ⇒ **那是加载器缺口，不是设备缺口** ✓✓，与 Qwen-Image-2.1 那个「格式该由张量自己声明」
+   是同一类问题 ✓✓（[TODO-075](#todo-075-qwen-image-21-的基础版设备路径--现在能跑了但与-cpu-的差异和那个偶发的首轮差异都还没定位) ✓✓）。
+   ⇒ **已修** ✓✓：校验按张量自己声明的格式来 ✓✓（`validate_dit` 的矩阵组接受 F16|F32 ✓✓、
+   `require_matrix` 接受 F16|Q8_0|F32 ✓✓），加载按 dtype 分派 ✓✓
+   （`linear_into` 新增 F32 分支，走 `F32Kernel` + `forward_f32_rows_dispatch` ✓✓，
+   scale 的约定与 F16/Q8_0 两支一致：先缩放输入、输出再除回来 ✓✓；
+   `force_f32_linear_into` 也按 dtype 读，F32 直接按 f32 读而不是从 F16 放宽 ✓✓）。
+   ⇒ **但这个「F32 档」其实是混合格** ✓✓：453 个张量 = **F32 271 + Q8_0 180 + F16 2** ✓✓ ——
+   180 个 Q8_0 是**主栈** 30 层 × 6 个矩阵（qkv/out/w1/w2/w3/adaLN_modulation.0 ✓✓），
+   F32 的是 **refiner**（`context_refiner.*` ✓✓）与两个 embedder（`cap_embedder.1` / `x_embedder` ✓✓），
+   2 个 F16 是 `cap_pad_token` / `x_pad_token` ✓✓
+   ⇒ **没有哪一档的主栈是 F32** ✓✓ ⇒ 「F32 档的主栈上设备」这件事压根不存在 ✓✓
+   （Q8_0 档与 F32 档的主栈是同一份 Q8_0 ✓✓，F32 档只把 refiner 与 embedder 换成了 F32 ✓✓）。
+   ⇒ 实测（128×128 / 2 步 / seed 42 ✓✓）：CPU denoise **13.4~15.4 s** ✓✓，
+   设备（`--gpu`）denoise **5.18~5.37 s** ✓✓，严格 `--compute vulkan` 同样出图 ✓✓
+   （`backend=partial mode=vae` ✓✓）；CPU 与设备的 PNG 差 **33.10 dB** ✓✓，
+   与 Q8_0 档 CPU 的差 **29.17 dB** ✓✓（两份文件只差 refiner/embedder 的精度 ✓✓）。
+   ⇒ **设备端还差 F32 的绑定** ✓✓（`bind_block_weights` 的 `_ => continue` ✓✓）：
+   它的主栈是 Q8_0 所以照常上设备 ✓✓（`RUST_GPU_DIAG=1` 量到 `projections=150` ✓✓），
+   但 refiner 的 F32 矩阵留在 CPU ✓✓；设备其实有 BF16/F32 的转置浮点 matmul ✓✓，
    要用它需要主机侧把 F32 权重转置后再传 ✓✓（共享算子的布局约定 ✓✓）。
-   ⇒ 本轮**没有**修这一项 ✓✓：F32 档是本地转换的实验资产，不是仓库发布的权重 ✓✓，
-   而「多权重量化」这一维对 Z-Image 已经由 Q8_0 与 F16 两档覆盖 ✓✓。
 3. **设备 attention 与 CPU 差 ~1%** ✓✓：这是**与 F16 无关**的差异 ✓✓ ——
    Q8_0 档的设备路径同样有它（PSNR 49.7 dB ≈ 1% 相对误差 ✓✓），
    根因在共享的 attention kernel ✓✓，本轮没有动它 ✓✓。
@@ -5751,9 +5764,69 @@ Q8_0 档 128×128 / 2 步的 denoise 量到过 **1.86 s / 3.37 s / 8.35 s** ✓�
 （本轮所有引用的数字都重测过三次 ✓✓）。
 
 **验收**：Z-Image 的 F16 档在 `--gpu` 下出图且与 CPU 的 PSNR ≥ 40 dB ✓✓（58.33 dB ✓✓）；
-F16 主栈的四个投影在设备上跑完一步且结果有限 ✓✓；FFN 的下投影留在 CPU ✓✓。
+F16 主栈的四个投影在设备上跑完一步且结果有限 ✓✓；FFN 的下投影留在 CPU ✓✓；
+F32 档能加载并出图 ✓✓（CPU 13.4~15.4 s ✓✓ / 设备 5.2~5.4 s ✓✓，
+与 Q8_0 档 CPU 的差 29.17 dB ✓✓ —— 只差 refiner/embedder 的精度 ✓✓）。
 
 **关联**：`src/models/diffusion/z_image/dit.rs`（`bind_block_weights` ✓✓、
 `f16_projections_enabled` ✓✓）、`src/models/diffusion/z_image/dit_gpu.rs`
 （`record_ffn` ✓✓、缺预缩放的地方 ✓✓）、
 [TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)（同一套「按权重量化格式选后端」的结论 ✓✓）。
+
+### TODO-077: Z-Image 的设备路径不可复现 —— 同一 seed 的两次设备运行会出不同的图
+
+**状态**：🔴 **未定位**（2026-11-18 新发现）。已定位到「设备的 attention 链」这一层，
+再往里（哪一段、还是屏障不够）还没定。
+
+**现象**（Q8_0 档 ✓✓，`models/z-image-gguf-mine/z-image-turbo-q8_0.gguf` ✓✓，
+128×128 / 2 步 / seed 42 ✓✓，`--gpu` ✓✓）：
+
+| 连跑次数 | 不同的 PNG | 说明 |
+|---|---|---|
+| 8 次 | **5 个** | 多数输出占 4/8 ✓✓ |
+| 6 次（1 步） | **2 个** | ⇒ 不是跨步的状态 ✓✓ |
+| 8 次（`RUST_GPU_ATTENTION=0`） | **1 个** | ⇒ **分叉在设备的 attention** ✓✓ |
+| 8 次（`RUST_GPU_F16=0`） | **5 个** | ⇒ 与融合的 QKV/RoPE 无关 ✓✓ |
+| 6 次（`RUST_GPU_TILED=0`） | **4 个** | ⇒ 与 tiled matmul 无关 ✓✓ |
+
+⇒ 差异幅度从**末位舍入**（PSNR 65.6 dB、max_abs 1 ✓✓）到**整张图都不同**
+（PSNR 23.1 dB、max_abs 154 ✓✓）都有 ✓✓ ⇒ 不是固定的某个系数写错 ✓✓，
+更像**读到了竞态下的数据** ✓✓。
+
+**已排除** ✓✓：
+
+1. **CPU 路径是确定的** ✓✓：F32 档 CPU 连跑 4 次逐位相同 ✓✓。
+2. **文本编码器不在设备上** ✓✓：`RUST_GPU_TEXT` 默认关 ✓✓，编码在 CPU ✓✓。
+3. **不是设备路径的通病** ✓✓：ERNIE-Image Q8_0 档的设备路径（256×256 / 2 步）
+   连跑 4 次**逐位相同** ✓✓（它走的是标准的 `record_attention_rows` ✓✓，
+   而 Z-Image 走自己的 `record_diy_attention_full` ✓✓）。
+4. **VAE 不是源头** ✓✓：关掉设备 attention 之后 VAE 照旧在设备上 ✓✓，而那时是确定的 ✓✓。
+
+⇒ **所以分叉在 Z-Image 特有的那条 attention 链上** ✓✓：
+`kv_write` → `attention_scores_tiled` → `softmax` → `attention_values` ✓✓
+（`record_diy_attention_full` ✓✓，全部录进**同一个** command buffer ✓✓，
+中间只有 `compute_barrier` ✓✓）。
+
+**还没排除** ✓✓：四段里是哪一段 ✓✓，或者 `compute_barrier` 的
+`src_access_mask = SHADER_WRITE` ✓✓ 对**读后写**（WAR）的场景不够 ✓✓ ——
+softmax 那一段正好是「读分数、写回概率」 ✓✓。
+
+**下一步** ✓✓：
+
+1. 在四段之间插 `submit_and_wait`（而不是只 `barrier`）✓✓，
+   看不确定性能不能消失 —— 能消失就是屏障/可见性问题 ✓✓，不能就是某个着色器内部 ✓✓。
+2. 若定位到着色器 ✓✓，把该段单独抽出来做「同一输入跑 N 次」的算子级测试 ✓✓
+   （仓库已有 `vulkan::ops::tests` 一类的算子测试 ✓✓，可以照那个形状写 ✓✓）。
+3. 修好之前，**文档里不能再写「同一 seed 两次设备运行逐位相同」** ✓✓ ——
+   那句话是**样本太少**得出的 ✓✓（同一份二进制连跑 3 次恰好相同 ✓✓），
+   已更正 ✓✓（`docs/MODEL_LIST.md` ✓✓、`docs/develop/SUPPORTED_MODELS.md` ✓✓）。
+
+**验收**：Z-Image 的设备路径在同一规格下连跑 8 次**逐位相同** ✓✓；
+CPU 与设备的 PSNR 维持 ≥ 40 dB ✓✓。
+
+**关联**：`src/models/diffusion/z_image/dit_gpu.rs`（`record_diy_attention` ✓✓）、
+`src/vulkan/ops.rs`（`record_diy_attention_full` ✓✓、`record_diy_attention_scores` ✓✓、
+`record_softmax_rows` ✓✓、`record_attention_values_rows` ✓✓、`compute_barrier` ✓✓）、
+`shaders/glsl/attention_scores_tiled.comp` ✓✓、`shaders/glsl/softmax.comp` ✓✓、
+`shaders/glsl/attention_values.comp` ✓✓、
+[TODO-076](#todo-076-z-image-的-f16-dit-档在设备路径上第二步全-nan--根因是设备端没有-cpu-那份-1128-的预缩放)（同一套设备路径的其它缺口 ✓✓）。
