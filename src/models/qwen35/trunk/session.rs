@@ -85,8 +85,9 @@ pub struct HybridSession<'a, 'm, M: HybridTrunkModel<'m>> {
     /// Whether the next forward should project every row's logits. The
     /// verification reads the target's answer at each drafted position.
     mtp_collect_logits: bool,
-    /// Whether the next forward should capture the recurrent layers' input.
-    /// The device rollback replays the recurrent state from it.
+    /// Whether the next forward should capture the recurrent layers'
+    /// projections. The device rollback replays the recurrent state from
+    /// them.
     mtp_collect_capture: bool,
     /// Whether the last forward projected the logits of every row, so that
     /// the verification can read them instead of projecting them again.
@@ -702,8 +703,9 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         let embeddings = self.embed_tokens(&batch)?;
         let processed_before = self.processed_tokens;
         // Capture the recurrent layers' projections: the CPU rollback replays
-        // only those layers instead of the whole model. The device keeps no
-        // such capture and replays the committed rows instead.
+        // only those layers instead of the whole model. The device keeps its
+        // own capture of the same projections and replays the state update
+        // from them.
         if !on_device {
             self.prepare_recurrent_capture(batch.len());
         }
@@ -724,7 +726,7 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         self.mtp_collect_hidden = on_device;
         self.mtp_collect_logits = on_device;
         // The device rollback replays the recurrent state, which needs the
-        // recurrent layers' input: the chunk captures it.
+        // recurrent layers' projections: the chunk captures them.
         self.mtp_collect_capture = on_device;
         let last_logits = self.step(&embeddings, batch.len(), &positions)?;
         self.scratch.collect_all_logits = false;
@@ -832,10 +834,10 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
     /// drafted row, accepted or not, and that state cannot be truncated the
     /// way the KV cache can. So the round puts the saved copy back and
     /// replays the committed rows over the recurrent layers: the chunk
-    /// captured each recurrent layer's input, and the state update consumes
-    /// nothing else. The layers the state belongs to read a fraction of the
-    /// weights the whole model does, so the replay is much cheaper than
-    /// running the model again.
+    /// captured each recurrent layer's projections, and the state update
+    /// consumes nothing else. The projections are the expensive half -- they
+    /// read the recurrent layers' weights -- so replaying only the state
+    /// update leaves a fraction of the cost of running the model again.
     #[cfg(feature = "vulkan")]
     fn mtp_replay_device(
         &mut self,
