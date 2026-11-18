@@ -63,13 +63,35 @@ exactly the decoded production pixels. This identifies lossy H.264 amplification
 of small F16 differences; it does not establish an output-layout or encoder bug.
 No thresholds or production arithmetic were changed to hide the failure.
 
+### Quantized implementation failures
+
+Q8_0 and Q4_0 fail the unchanged checkpoint and decoded-video gates in both
+transports on CPU, Auto and strict Vulkan. Q4_1 CPU and strict Vulkan also fail;
+its Auto case is tracked independently. Q8_0 CPU first fails at `fastframes.text`
+(relative RMSE **0.024168239126007365**, cosine **0.9997082747515944**); worst full
+checkpoint relative RMSE is **0.06915133836694705**. The first 24 text-block
+checkpoints individually pass, with final pre-normalization relative RMSE
+**0.00246098840286423**. Independent final-RMSNorm reconstruction agrees with
+each implementation within relative RMSE **6.5e-8**, identifying amplification
+of prior differences rather than a final-normalization implementation error.
+The remaining source of quantized-path drift is unresolved; no threshold or
+production accumulator was changed to make these cases pass. Exact per-format
+and per-backend values remain in `transport-results.json`.
+
+F16 Auto and strict Vulkan also pass all 411 checkpoints in both transports,
+but fail decoded-video gates. Their maximum checkpoint relative RMSE is
+**0.001529806115542585** and **0.0013954515093433373** respectively; decoded-video
+RMSE is **0.011841220411469965** and **0.013809123119434285** respectively.
+
 ### Spatial and repaired-cache diagnostic
 
 BF16 CPU at **32×32 / 9 frames** passes **578** checkpoints, maximum relative RMSE
 **7.116039816112045e-5**, minimum cosine **0.9999999975714114**. Decoded-video RMSE
 is **0.007592180372839715**, cosine **0.9999269925418053**, passing the same limits.
 This exercises nonzero spatial positions and consumes repaired KV in a later
-latent frame. Published-BF16 drift and 480p acceptance remain separate gates.
+latent frame. The same-input published-BF16 recipe drift also passes its separate RMSE limit:
+**0.011251397167858146** ≤ 0.08. The 832×480 / 5-frame strict Vulkan case is
+running; it has no completed numerical or quality result yet.
 Commands and supplementary measurements are in [supplemental-results.json](supplemental-results.json).
 
 The earlier BF16 result (relative RMSE 4.240734428259513e-5) preceded final oracle
@@ -108,7 +130,7 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | --- | --- |
 | Native model tests, macOS arm64 | 13 passed / 1 ignored after the tokenizer and F32 borrowing fixes. |
 | Final native model tests, fresh Linux host | 13 passed / 1 ignored on commit `f61e7833f6c86a834e3ae3c68d0b9eefcaee173b`, built with Vulkan/parity trace; the pinned real-tokenizer test passed separately. |
-| Transport validation | Two tests passed for unsupported flags, geometry, unknown JSON fields and CLI/server boundaries. |
+| Transport validation | Two unit tests passed. Real HTTP checks also return 400 for unknown model, empty prompt, invalid width/frames and 422 for unknown fields. Real CLI rejects invalid width, steps and KV override without creating output files. |
 | Real tokenizer, Linux | 11 official fixture cases including Unicode, mojibake, HTML, ANSI and truncation; RED on the incorrect vocabulary assumption, then GREEN. Tokenizer has 256,300 entries, embedding has 256,384 rows. |
 | Python converter/comparator/streaming, Linux | Final fresh-host run: 11 passed, including exact shared noise, parallel/serial encoded-byte equality, streamed reload and F16/Q4_1 activation semantics. Earlier host: 10 passed before the noise gate. |
 | Comparator noise gate, macOS | 3 passed; differing input noise is rejected even if inside floating tolerances. |
@@ -128,7 +150,9 @@ A separate review and subsequent self-review covered pinned official schedule,
 cache writes, grouped refiner orientation/norm, causal decoder layout and both transports.
 The shared Vulkan Conv3D rejects groups != 1, so the decoder depthwise convolutions
 are explicitly CPU work; only projections/attention have device paths. Shared
-attention may retry/repair on CPU, whereas explicit projection failures in strict
+attention computes a full CPU reference even for a healthy GPU result (the
+existing TODO-044 correctness check), and may retry/repair on CPU. This retains
+substantial CPU attention work at 480p. Explicit projection failures in strict
 Vulkan return errors; this is a hybrid graph, not a fully device-resident graph.
 
 - Fixed prompt cleaning and actual tokenizer vocabulary/hash validation.

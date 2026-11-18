@@ -122,7 +122,171 @@
         "cpu_operator_records": 2059,
         "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
       }
+    },
+    {
+      "recipe": "final F16 native vulkan CLI, release-fast",
+      "elapsed_seconds": 770.6477586999536,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final F16 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 524.1638943403959,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final F16 native auto CLI, release-fast",
+      "elapsed_seconds": 97.61926568113267,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final F16 native auto HTTP, release-fast",
+      "elapsed_seconds": 97.75809125974774,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native vulkan CLI, release-fast",
+      "elapsed_seconds": 129.89652653038502,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 97326875712, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 4126386736, peak_allocation_bytes: 8478740432 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 129.4166516698897,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 97326875712, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 4126386736, peak_allocation_bytes: 8478740432 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native auto CLI, release-fast",
+      "elapsed_seconds": 70.90239183604717,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 7365395520, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 7909019568, peak_allocation_bytes: 8076136384 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native auto HTTP, release-fast",
+      "elapsed_seconds": 59.96971791237593,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 7365395520, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 7909019568, peak_allocation_bytes: 8076136384 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native vulkan CLI, release-fast",
+      "elapsed_seconds": 60.96507947705686,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51525993536, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2450270768, peak_allocation_bytes: 4998909904 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 72.3407538253814,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51525993536, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2450270768, peak_allocation_bytes: 4998909904 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native auto CLI, release-fast",
+      "elapsed_seconds": 31.259000269696116,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native auto HTTP, release-fast",
+      "elapsed_seconds": 25.269877184182405,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native vulkan CLI, release-fast",
+      "elapsed_seconds": 88.45538113079965,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 57251103808, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2659785264, peak_allocation_bytes: 5433888720 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 80.62498133815825,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 57251103808, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2659785264, peak_allocation_bytes: 5433888720 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native auto CLI, release-fast",
+      "elapsed_seconds": 65.62667769379914,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4332586048, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4876210096, peak_allocation_bytes: 4974514112 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native auto HTTP, release-fast",
+      "elapsed_seconds": 82.11022517457604,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4332586048, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4876210096, peak_allocation_bytes: 4974514112 }"
+      }
     }
   ],
-  "trace_timing_limit": "Shared host/cgroup contention, different load/encode boundaries and checkpoint I/O. These are diagnostic run times, not clean benchmarks or evidence of a speedup."
+  "trace_timing_limit": "Shared host/cgroup contention, different load/encode boundaries and checkpoint I/O. These are diagnostic run times, not clean benchmarks or evidence of a speedup.",
+  "known_cpu_work": [
+    "umT5 relative-bias attention, normalization, RoPE, modulation/layout and depthwise convolution",
+    "Shared try_attention always computes full CPU attention for TODO-044 validation, even when the device output passes; it may additionally retry or return CPU values."
+  ]
 }

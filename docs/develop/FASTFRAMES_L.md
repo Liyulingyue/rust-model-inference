@@ -3,7 +3,7 @@
 `fastframes_l` 显式架构接入现有 CLI 和 `POST /v1/videos/generations`，复用原生
 Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。当前是**部分验收 / Experimental**：
 16×16 / 5 帧 BF16 的 CPU/Auto/严格 Vulkan 在 CLI/HTTP 各 411 个检查点和视频像素通过；
-F32 CPU 两入口也通过。F16 CPU 两入口的检查点通过，但压缩后视频比较失败；其余格式和 480p 仍待验证。
+F32 CPU 两入口也通过。F16 各后端两入口的检查点通过，但压缩后视频比较失败；Q8_0/Q4_0/Q4_1 数值对齐失败，其余格式和 480p 待验证。
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和
 [逐项矩阵](../../tools/oracle/fastframes_l/matrix.json)。
 
@@ -22,7 +22,8 @@ F32 CPU 两入口也通过。F16 CPU 两入口的检查点通过，但压缩后�
 - `cpu`、`auto`、严格 `vulkan` 共用计算图。GPU 复用共享投影和 attention
   分发；文本 relative-bias attention、norm、RoPE、调制、布局和 decoder depthwise
   convolution 使用 CPU。共享 Vulkan Conv3D 目前只接受 groups=1，不能声称此处卷积已上 GPU。
-  严格投影失败返回错误。用 `RMI_COMPUTE_TRACE=1` 取证，设备初始化不是执行证据。
+  共享 attention 对健康 GPU 结果也会完整计算 CPU 参考以执行既有 TODO-044 校验，
+  大尺寸保留显著 CPU 开销。严格投影失败返回错误。用 `RMI_COMPUTE_TRACE=1` 取证，设备初始化不是执行证据。
 - 首 latent frame 4 步，其余 2 步；首帧 clean pass 重写 KV，后续由 refiner 修复 KV。
 - 宽高是 16 的倍数，最大 832×480；1–81 帧、1–60 fps。默认 832×480/81 帧/16 fps。
   小尺寸仅用于诊断。JEV、文本 token streaming 不适用于该视频生成契约。
@@ -87,7 +88,8 @@ RMSE 为 0。F32 的 mmap 加载路径也已在 CLI/HTTP 通过同样的 411 个
 无设备时 Auto 的 CPU 回退也通过，严格 Vulkan 明确报错。
 
 32×32 / 9 帧 CPU 用例通过 578 个检查点，覆盖非零空间位置和后续帧使用修复的 KV；
-视频 RMSE 为 `0.00759218`，cosine 为 `0.99992699`，均通过原门槛。
+视频 RMSE 为 `0.00759218`，cosine 为 `0.99992699`，均通过原门槛；相对官方 BF16 配方的
+像素 RMSE 为 `0.01125140`，也通过独立的 `0.08` 门槛。
 F16 CPU 两入口均通过 411 个检查点，但压缩后视频 RMSE 为 `0.01441015`、cosine 为
 `0.99954839`，未通过 `0.01 / 0.9999` 门槛。编码前 RGB 最大只差 `1/255`、RMSE
 为 `0.00074342`；独立重编码验证了 H.264 对微小差异的放大，原阈值和失败记录保留。

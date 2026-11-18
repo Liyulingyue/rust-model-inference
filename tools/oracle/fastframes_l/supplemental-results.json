@@ -231,7 +231,56 @@
           "rmse": 0.007592180372839715,
           "relative_rmse": 0.012085716537673437,
           "cosine": 0.9999269925418053
+        },
+        "published_reference": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "32",
+            "--height",
+            "32",
+            "--frames",
+            "9",
+            "--seed",
+            "17",
+            "--recipe",
+            "published",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-published-bf16-32x32-9frames-cpu"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 380.80959446914494,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-published-bf16-32x32-9frames-cpu.log"
+        },
+        "published_drift": {
+          "max_abs": 0.0980392156862745,
+          "rmse": 0.011251397167858146,
+          "relative_rmse": 0.01779351554733961,
+          "cosine": 0.9998425441558143,
+          "rmse_max": 0.08
         }
+      },
+      {
+        "case": "bf16-832x480-5frames-vulkan",
+        "width": 832,
+        "height": 480,
+        "frames": 5,
+        "backend": "vulkan",
+        "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71"
       }
     ],
     "f16-pixel-investigation-results.json": {
@@ -293,6 +342,243 @@
           "shared_noise_exact": true
         }
       ]
+    },
+    "http-boundary-results.json": {
+      "scope": "Actual HTTP and CLI invalid-input handling; no generation or cancellation/concurrency claim",
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "server_command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+        "--threads",
+        "1",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18256"
+      ],
+      "http": [
+        {
+          "request": {
+            "prompt": "a",
+            "model": "not-the-loaded-model"
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"Unknown model\"}}"
+        },
+        {
+          "request": {
+            "prompt": " "
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"prompt must contain 1..=65536 bytes\"}}"
+        },
+        {
+          "request": {
+            "prompt": "a",
+            "width": 17
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60\"}}"
+        },
+        {
+          "request": {
+            "prompt": "a",
+            "frames": 82
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60\"}}"
+        },
+        {
+          "request": {
+            "prompt": "a",
+            "steps": 1
+          },
+          "expected_status": 422,
+          "status": 422,
+          "response": "Failed to deserialize the JSON body into the target type: steps: unknown field `steps`, expected one of `prompt`, `model`, `width`, `height`, `frames`, `fps`, `seed` at line 1 column 23"
+        }
+      ],
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "a",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/boundary-width.mp4",
+            "--video-frames",
+            "5",
+            "--height",
+            "16",
+            "--compute",
+            "cpu",
+            "--width",
+            "17"
+          ],
+          "exit_code": 1,
+          "stderr": "Inference error: FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60\n",
+          "output_exists": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "a",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/boundary-steps.mp4",
+            "--video-frames",
+            "5",
+            "--height",
+            "16",
+            "--compute",
+            "cpu",
+            "--steps",
+            "1"
+          ],
+          "exit_code": 1,
+          "stderr": "Inference error: FastFrames-L does not support --steps\n",
+          "output_exists": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "a",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/boundary-kv-cache.mp4",
+            "--video-frames",
+            "5",
+            "--height",
+            "16",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16"
+          ],
+          "exit_code": 1,
+          "stderr": "Inference error: FastFrames-L does not support --kv-cache\n",
+          "output_exists": false
+        }
+      ]
+    },
+    "effective-format-quality-results.json": {
+      "scope": "Official raw RGB before encoding at 16x16/5frames; same-noise effective-format drift vs BF16 controlled-F32 baseline",
+      "boundary": "Includes storage quantization and prepared-activation recipe; diagnostic only, separate from native implementation error and full-resolution quality",
+      "results": [
+        {
+          "format": "bf16",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0000000000000002
+        },
+        {
+          "format": "f32",
+          "gguf_sha256": "59a25d64eee0d6981a9f57db479291f31329d745f644d32c77d09d69938c2735",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.007843137254901933,
+          "rmse": 0.0017708227321753377,
+          "relative_rmse": 0.0036672951961515157,
+          "cosine": 0.9999932775998749
+        },
+        {
+          "format": "f16",
+          "gguf_sha256": "ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.007843137254901933,
+          "rmse": 0.0017977569432247305,
+          "relative_rmse": 0.0037230747504789154,
+          "cosine": 0.999993069894151
+        },
+        {
+          "format": "q8_0",
+          "gguf_sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.04313725490196074,
+          "rmse": 0.008125040048600518,
+          "relative_rmse": 0.016826596924339132,
+          "cosine": 0.9998659995539856
+        },
+        {
+          "format": "q4_0",
+          "gguf_sha256": "4fb5d484abc09f19b26bcece217c30dbb05227bf3384d65ee12a911aad3baa60",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.611764705882353,
+          "rmse": 0.07676210773656451,
+          "relative_rmse": 0.15897091438562724,
+          "cosine": 0.9873200219950757
+        },
+        {
+          "format": "q4_1",
+          "gguf_sha256": "f8f236c6fbf92e75cc9bbc3a6a74d4bb139f7e23a2eddfcbd3e0b542cf7eea17",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.36078431372549025,
+          "rmse": 0.07404414063429274,
+          "relative_rmse": 0.15334212528305308,
+          "cosine": 0.9895139645283072
+        }
+      ]
+    },
+    "q8-norm-investigation-results.json": {
+      "native_norm_vs_independent": {
+        "max_abs": 1.1920928955078125e-07,
+        "rmse": 4.452866633458177e-09,
+        "relative_rmse": 6.345244102547456e-08,
+        "cosine": 0.9999999999999983
+      },
+      "oracle_norm_vs_independent": {
+        "max_abs": 5.960464477539063e-08,
+        "rmse": 4.552330415237982e-09,
+        "relative_rmse": 6.479511113971075e-08,
+        "cosine": 0.9999999999999973
+      },
+      "normalized_block_difference": {
+        "max_abs": 0.010055214166641235,
+        "rmse": 0.0016979956665259192,
+        "relative_rmse": 0.024168240855061602,
+        "cosine": 0.9997082747363032
+      },
+      "raw_block_difference": {
+        "max_abs": 58.478515625,
+        "rmse": 1.9186868185430013,
+        "relative_rmse": 0.00246098840286423,
+        "cosine": 0.9999973788191555
+      }
+    },
+    "q8-prefix-results.json": {
+      "scope": "Incomplete Q8_0 CPU diagnostic prefix; not case acceptance",
+      "checkpoints": 203,
+      "first_failed": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "max_abs": 0.010055199265480042,
+        "rmse": 0.00023730209097359275,
+        "relative_rmse": 0.024168239126007365,
+        "cosine": 0.9997082747515944
+      },
+      "worst": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "max_abs": 0.010055199265480042,
+        "rmse": 0.00023730209097359275,
+        "relative_rmse": 0.024168239126007365,
+        "cosine": 0.9997082747515944
+      }
     }
   }
 }
