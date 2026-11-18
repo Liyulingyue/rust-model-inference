@@ -14,6 +14,7 @@ use crate::compute::ComputePolicy;
 use super::forward::RecurrentInput;
 use super::session::required_token_count;
 use super::session::Qwen35Session;
+use super::weights::MtpWeights;
 use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
@@ -575,17 +576,24 @@ fn qwen35_mtp_speculative_decoding_matches_greedy() {
         .min(tokens.len() + steps * (drafts_per_step + 1) + 2);
     let pool = session_pool();
     let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    // `RMI_QWEN35_MTP_DEVICE=1` runs the target on the device; the draft
+    // head stays on the CPU either way. Without the flag the session uses
+    // whatever the build and the machine offer.
+    #[cfg(feature = "vulkan")]
+    let policy = if std::env::var("RMI_QWEN35_MTP_DEVICE").is_ok_and(|value| value == "1") {
+        crate::compute::ComputePolicy::Vulkan
+    } else {
+        crate::compute::ComputePolicy::legacy()
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let policy = crate::compute::ComputePolicy::legacy();
 
     // The reference: the target on its own.
     let mut greedy: Vec<u32> = Vec::with_capacity(steps);
     {
-        let mut session = Qwen35Session::new_with_prefill_batch_size(
-            &mut model,
-            n_ctx,
-            tokens.len(),
-            pool.clone(),
-        )
-        .unwrap();
+        let mut session =
+            Qwen35Session::new_with_compute(&mut model, n_ctx, tokens.len(), pool.clone(), policy)
+                .unwrap();
         let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
         let mut position = tokens.len();
         for _ in 0..steps {
@@ -604,21 +612,22 @@ fn qwen35_mtp_speculative_decoding_matches_greedy() {
     let mut drafted = 0usize;
     let mut rounds = 0usize;
     {
-        let mut session = Qwen35Session::new_with_prefill_batch_size(
-            &mut model,
-            n_ctx,
-            tokens.len(),
-            pool.clone(),
-        )
-        .unwrap();
-        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut session =
+            Qwen35Session::new_with_compute(&mut model, n_ctx, tokens.len(), pool.clone(), policy)
+                .unwrap();
+        #[cfg(all(test, feature = "vulkan"))]
+        eprintln!(
+            "Qwen3.5 MTP target backend: {}",
+            if session.gpu_enabled_for_test() {
+                "vulkan"
+            } else {
+                "cpu"
+            }
+        );
         // The draft context has to cover the prompt before the first draft:
-        // the draft block attends over the committed positions.
-        let prompt_hidden = session.last_hidden(tokens.len()).unwrap().to_vec();
-        let prompt_positions: Vec<usize> = (0..tokens.len()).collect();
-        session
-            .mtp_catch_up(&tokens, &prompt_positions, &prompt_hidden)
-            .unwrap();
+        // the draft block attends over the committed positions. The prefill
+        // hands the head the target's hidden state of every prompt row.
+        let mut logits = session.prefill_with_mtp(&tokens, &positions).unwrap();
 
         let mut position = tokens.len();
         let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
@@ -1530,6 +1539,208 @@ fn mixed_fixture_session(
     let model = Box::leak(Box::new(tiny_mixed_session_model()));
     model.config.n_ctx = capacity;
     Qwen35Session::new_with_compute(model, capacity, batch_size, session_pool(), policy).unwrap()
+}
+
+/// A tiny model with an MTP draft head.
+///
+/// The main stack has a recurrent layer, so a rejected draft has to put the
+/// state back, and the head is a dense block like the main stack's.
+fn tiny_mtp_session_model() -> Qwen35Model<'static> {
+    let mut model = tiny_mixed_session_model();
+    let n_embd = model.config.n_embd;
+    let vocab_size = model.config.vocab_size;
+    // The head sits after the main stack: it is the block the nextn tensors
+    // turn into a draft head.
+    model.config.n_layer = 3;
+    model.config.n_nextn = 1;
+    model.config.is_recurrent = vec![false, true];
+    let mk_weight = |n_in, n_out| f32_test_weight(vec![0.1; n_in * n_out], n_in, n_out);
+    // The target's answer depends on the token it read: the output weight
+    // picks out the components of the hidden state, so the target's choice
+    // changes from step to step. The head has its own projection and
+    // proposes its own token, so some of its drafts are accepted and some
+    // are rejected -- which is the case the round has to recover from.
+    let mut output_weight = vec![0.0f32; n_embd * vocab_size];
+    for index in 0..n_embd.min(vocab_size) {
+        output_weight[index * vocab_size + index] = 1.0;
+    }
+    model.output_weight = f32_test_weight(output_weight, n_embd, vocab_size);
+    let mut head_weight = vec![0.0f32; n_embd * vocab_size];
+    for row in head_weight.chunks_exact_mut(vocab_size) {
+        row[1] = 1.0e6;
+    }
+    let head_layer = Qwen35LayerWeights {
+        attn_norm: vec![1.0; n_embd],
+        attn_post_norm: vec![1.0; n_embd],
+        wq: Some(mk_weight(n_embd, 2 * n_embd)),
+        wk: Some(mk_weight(n_embd, n_embd)),
+        wv: Some(mk_weight(n_embd, n_embd)),
+        wo: Some(mk_weight(n_embd, n_embd)),
+        attn_q_norm: Some(vec![1.0; n_embd]),
+        attn_k_norm: Some(vec![1.0; n_embd]),
+        wqkv: None,
+        wqkv_gate: None,
+        ssm_conv1d: None,
+        ssm_dt: None,
+        ssm_a: None,
+        ssm_beta: None,
+        ssm_alpha: None,
+        ssm_norm: None,
+        ssm_out: None,
+        ffn_gate: Some(mk_weight(n_embd, n_embd)),
+        ffn_up: Some(mk_weight(n_embd, n_embd)),
+        ffn_down: Some(mk_weight(n_embd, n_embd)),
+        moe: None,
+    };
+    model.mtp = Some(MtpWeights {
+        layer: head_layer,
+        // The head fuses the normalized embedding and the normalized hidden
+        // state, so its projection takes twice the width.
+        eh_proj: mk_weight(2 * n_embd, n_embd),
+        enorm: vec![1.0; n_embd],
+        hnorm: vec![1.0; n_embd],
+        // The main model's output weight and norm are the head's own, except
+        // for the projection: the head gets its own, so it proposes a token
+        // the target never picks.
+        shared_head_head: Some(f32_test_weight(head_weight, n_embd, vocab_size)),
+        shared_head_norm: None,
+    });
+    model
+}
+
+fn mtp_fixture_session(
+    capacity: usize,
+    batch_size: usize,
+    policy: ComputePolicy,
+) -> Qwen35Session<'static, 'static> {
+    let model = Box::leak(Box::new(tiny_mtp_session_model()));
+    model.config.n_ctx = capacity;
+    Qwen35Session::new_with_compute(model, capacity, batch_size, session_pool(), policy).unwrap()
+}
+
+/// The greedy continuation of a prompt, as the target produces it.
+fn mtp_fixture_greedy(policy: ComputePolicy, tokens: &[u32], steps: usize) -> Vec<u32> {
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    let mut session = mtp_fixture_session(tokens.len() + steps + 8, tokens.len(), policy);
+    let mut logits = session.step_with_tokens(tokens, &positions).unwrap();
+    let mut position = tokens.len();
+    let mut generated = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let token = crate::ops::sampling::argmax(&logits) as u32;
+        generated.push(token);
+        logits = session
+            .step_with_tokens(&[token], &[[position, position, position, 0]])
+            .unwrap();
+        position += 1;
+    }
+    generated
+}
+
+/// The same continuation, produced by the draft head.
+///
+/// The counters say how the round went: how many drafts the target
+/// accepted, and how many it rejected. A rejected draft is the interesting
+/// case, because the round has to put the recurrent state back.
+fn mtp_fixture_speculative(
+    policy: ComputePolicy,
+    tokens: &[u32],
+    steps: usize,
+    drafts: usize,
+) -> (Vec<u32>, usize, usize) {
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    let mut session = mtp_fixture_session(
+        tokens.len() + steps * (drafts + 1) + 8,
+        tokens.len(),
+        policy,
+    );
+    let logits = session.prefill_with_mtp(tokens, &positions).unwrap();
+    let mut position = tokens.len();
+    let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+    let mut generated: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    while generated.len() < steps {
+        let step = session
+            .mtp_speculative_step(bonus, position, drafts)
+            .unwrap();
+        position += step.tokens.len();
+        bonus = step.next;
+        accepted += step.accepted;
+        drafted += step.drafted;
+        for token in step.tokens {
+            generated.push(token);
+            if generated.len() >= steps {
+                break;
+            }
+        }
+    }
+    (generated, accepted, drafted)
+}
+
+/// The draft head must not change what the target produces.
+///
+/// The head proposes, the target decides: a speculative round has to commit
+/// exactly the tokens the target would have produced on its own, whether it
+/// runs on the CPU or on the device. On the device the round is the harder
+/// one: it reads the target's answer at every drafted position, and a
+/// rejected draft has to put the recurrent state back.
+#[test]
+fn qwen35_mtp_speculative_matches_greedy_on_the_cpu() {
+    let tokens = [0u32, 1, 2, 3];
+    let greedy = mtp_fixture_greedy(ComputePolicy::Cpu, &tokens, 8);
+    let (speculative, accepted, drafted) =
+        mtp_fixture_speculative(ComputePolicy::Cpu, &tokens, 8, 2);
+    assert_eq!(speculative, greedy);
+    assert!(drafted > accepted, "the fixture has to reject a draft");
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_mtp_speculative_matches_greedy_on_the_device() {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let tokens = [0u32, 1, 2, 3];
+    let greedy = mtp_fixture_greedy(ComputePolicy::Vulkan, &tokens, 8);
+    let (speculative, accepted, drafted) =
+        mtp_fixture_speculative(ComputePolicy::Vulkan, &tokens, 8, 2);
+    assert_eq!(speculative, greedy);
+    assert!(drafted > accepted, "the fixture has to reject a draft");
+}
+
+/// The draft head has to propose the same tokens wherever it runs.
+///
+/// The head is a block of its own: it has an attention over a cache of its
+/// own, a feed-forward of its own and a vocabulary projection of its own.
+/// On the device it runs over the device's own copy of those weights, so
+/// the two paths have to agree on the drafts -- otherwise the target would
+/// see a different round on each backend.
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_mtp_device_head_matches_the_cpu_head() {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let n_embd = tiny_mtp_session_model().config.n_embd;
+    let tokens = [0u32, 1, 2, 3];
+    let positions = [0usize, 1, 2, 3];
+    // The head's input: the target's hidden states, one row per token.
+    let hidden: Vec<f32> = (0..tokens.len() * n_embd)
+        .map(|index| (index as f32) * 0.125 - 1.0)
+        .collect();
+    let mut cpu = mtp_fixture_session(64, 8, ComputePolicy::Cpu);
+    let mut device = mtp_fixture_session(64, 8, ComputePolicy::Vulkan);
+    // The same catch-up over the same tokens: the head's cache and its
+    // carry-over row have to match too.
+    cpu.mtp_catch_up(&tokens, &positions, &hidden).unwrap();
+    device.mtp_catch_up(&tokens, &positions, &hidden).unwrap();
+    assert_eq!(
+        cpu.mtp_pending_hidden().unwrap(),
+        device.mtp_pending_hidden().unwrap()
+    );
+    let cpu_drafts = cpu.mtp_draft_tokens(7, tokens.len(), 2).unwrap();
+    let device_drafts = device.mtp_draft_tokens(7, tokens.len(), 2).unwrap();
+    assert_eq!(cpu_drafts, device_drafts);
 }
 
 #[test]

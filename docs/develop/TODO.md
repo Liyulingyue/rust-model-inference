@@ -5327,14 +5327,24 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
 **关联**：`src/ops/kernel/q8_0/ggml.rs`、`src/ops/kernel/q8_0/dispatch.rs`、
 `tools/converter/neohorse/README.md`、`docs/develop/SUPPORTED_MODELS.md`。
 
-### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 上的投机解码已经比 greedy 快
+### TODO-072: Qwen3.8-27B 的 MTP 起草头已与 llama.cpp 对平，CPU 与设备路径上的投机解码都比 greedy 快
 
 **状态**：✅ 起草头 + 验证/接受回路已实现，与 pinned llama.cpp **逐轮同草稿**；
 接受率 0.54 vs 0.53。✅ CPU 上也有收益了：批量 Q8_0 kernel（`sdot`）+ 不用重算
-投影的回滚之后，2 个草稿的投机解码比 greedy 快约 22%（4.67 s vs 5.98 s，只算解码
-段是 3.20 s vs 4.39 s，1.37 倍）。⚠ 目标前向是**访存**瓶颈（一遍前向要把 29 GB
-的 Q8_0 权重读一遍），所以收益是 1.3 倍而不是 llama.cpp 在设备路径上的倍数级
-（草稿头目前只在 CPU 上跑）。
+投影的回滚 + 按批做词表投影之后，2 个草稿的投机解码比 greedy 快约 27%
+（4.28 s vs 5.86 s，只算解码段是 2.81 s vs 4.39 s，1.56 倍）。✅ **设备路径也能
+跑投机解码了**：目标前向在 Vulkan 上，设备把每一行的 hidden 与词表投影一次性交
+回来（设备一次读一遍词表矩阵，而不是每行一遍）。✅ **起草头也搬上设备了**：它
+是主栈之后的一个稠密块，设备侧有它自己的权重、自己的 KV cache 槽位、自己的
+norm 与 FFN，catch-up 是一批行。真模型上投机解码产出的 token 与 greedy **逐个
+相同**（Q8_0 档接受率 0.54，与 CPU 一致）。设备回滚也改成了「只重放状态更新」
+（chunk 捕获每个循环层的投影，回滚时用它重放 conv + SSM scan），代价从一次完整
+前向降到一次状态更新重放（Q4_0 档实测 1.54 s → 0.02 s；设备上的 137 ms →
+20～26 ms）。⚠ **Q8_0 与 Q4_0 档上设备的投机解码都比 greedy 快约 1.55 倍**
+（2 个草稿；Q8_0 的 decode 段 8.1 s vs 12.6 s，Q4_0 是 7.8 s vs 12.1 s）。⚠ 前提
+是**多行前向在设备上足够便宜**：Q8_0 与 Q4_0 都有 tiled kernel（权重跨行共享），
+所以验证那一遍的 3 行 ≈ 1 行；其余权重档位（Q4_1 / Q5_0 / Q4_K / Q6_K …）还没有，
+那些档位的多行前向要付 N 倍权重流量，投机解码在设备上没有收益。
 
 **做了什么**：
 
@@ -5374,6 +5384,57 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
   （`--temp 0`）、只支持纯文本 prompt（视觉路径的 prompt 行是投影后的 embedding，
   拿不到 token id）。HTTP（`--serve --mtp-draft N`）走同一条路：温度为 0 的请求
   走投机解码，其余请求照旧逐 token 解码。
+
+**设备路径上的投机解码**（PR #250）：
+
+- 设备一次前向只交回**最后一行**的 hidden 与 logits，投机解码需要的是**每一行**
+  的：验证要知道目标在每个草稿位置会产出什么（每一行的词表投影），起草头要把
+  草稿接在上一行的 hidden 后面（每一行的 hidden），catch-up 要用每个已提交位置
+  的 hidden 填起草头的 KV cache。于是设备侧加了两条采集路径：
+  - `normed` 区（本来就是 `rows × n_embd`）：整块归一化并把每一行读回来；
+  - `logits_rows` 区（`rows × vocab`，只在**有 MTP 头**的 checkpoint 上分配）：
+    整批行一次词表投影。投影的输入按 `n_embd` 跨步、输出按 `vocab` 跨步，现有
+    的批量 kernel（`q8_matmul_tiled_dp4a.comp` 与 `q8_matmul_transposed.comp`）
+    已经是这个写法，所以**不用改 shader**。
+  - 两条采集是分开的：catch-up 只要 hidden（预填时不需要为一整批 prompt 行去读
+    1.3 GB 的词表矩阵），验证才要 logits。
+- **起草头现在也跑在设备上**：起草头是主栈之后的一个稠密块，有自己的注意力、
+  自己的 FFN、自己的 norm 和**自己的 KV cache**。设备侧现在也录它：
+  - 它的 KV cache 是设备 arena 里主栈之后的那一层槽位（`kv_k` / `kv_v` 多一
+    层），起草头的注意力读写的是自己的槽位，不是目标的 key。
+  - 它的 `eh_proj` 吃的是「归一化后的 embedding ‖ 归一化后的 hidden state」。
+    设备没有 concat shader，所以**两个 norm 各写进同一个 buffer 的两半**，
+    投影再按 `2 × n_embd` 的行宽读这一块——不用新增 shader，也不用把权重拆成
+    两份上传。
+  - 起草头的词表投影复用设备上**已有的** `output.weight`（checkpoint 没有给
+    起草头自己的 `shared_head_head` 时，upstream 也是这么做的），所以不用再传
+    一份 1.3 GB。
+  - **catch-up 是一批行**：验证那一批已提交的位置在设备上是一遍起草头（多行的
+    起草头注意力按行做因果遮罩），不是每行一遍。
+  - 起草头的权重如果设备放不下（不支持的格式），起草头**留在 CPU 上**，目标仍然
+    跑在设备上。
+- **设备上的回滚只重放状态更新**：CPU 路径回滚时只重放循环状态（捕获投影后重放
+  状态更新，见 PR #248）。设备侧现在也走这条路：chunk 在跑的时候把**每个循环层
+  的投影**（投影后的 q/k/v、gate、beta/alpha）留在设备上的一份 capture 区里，回滚
+  时把保存的循环状态上传回去，再用捕获的投影**只重放 conv + SSM scan**。
+  - 捕获的是**投影**而不是层的输入：投影要读循环层的权重（48 层 × 65 MB ≈ 3.1 GB），
+    是状态更新里贵的那一半。捕获输入的话，回滚得把投影重算一遍——实测那一半就占
+    回滚的 122 ms（总共 137 ms）。捕获投影之后，回滚只跑状态更新本身。
+  - 循环层的状态更新只吃它自己的投影，所以重放它就够了，不必重跑整个模型（更不必
+    重跑 FFN 和输出投影）。代价从「一次完整前向」降到「一次状态更新重放」：Q4_0 档
+    实测 **1.54 s → 0.02 s**（设备上的 137 ms → **20～26 ms**）。
+  - capture 区只给**有 MTP 头**的 checkpoint 分配（每个循环层四个投影各一行槽位），
+    Qwen3.8-27B 是 48 × 64 × (10240 + 6144 + 48 + 48) × 4 B ≈ 198 MB。
+- **真模型验证**（Qwen3.8-27B Q4_0，`unsloth/Qwen3.8-27B-GGUF`，设备路径）：
+  投机解码产出的 token 与 greedy **逐个相同**（16 个生成 token），接受率 0.50。
+  同一模型在 CPU 上也逐个相同，接受率 0.60（Q4_0 的设备 kernel 与 CPU kernel
+  舍入不同，所以两条路径的 greedy token 之间可能有一两个不同，这是量化档的
+  既有现象，与投机解码无关）。
+- **tiny 模型的单测**（`qwen35_mtp_speculative_matches_greedy_on_the_cpu` /
+  `..._on_the_device`）：一个带 MTP 头、带循环层的极小模型，目标在 CPU 与设备
+  两条路径上跑，投机解码的 token 必须与 greedy 逐个相同。fixture 的起草头被
+  故意做成「提出一个目标永远不会选的 token」，于是**每一轮都被拒**，回滚与重放
+  的分支必然被执行到。
 
 **实测**（Qwen3.8-27B Q8_0，19 token 的 chat prompt，16 个生成 token，
 `--mtp-draft 4`）：
@@ -5416,36 +5477,130 @@ per-lane 的分组方式会改变最后一位。`src/ops/kernel/q8_0/ggml.rs` �
    `output.weight` 是 248320 × 5120）、catch-up 的头前向、验证那一遍的词表行。
    现在只读用得到的词表行（catch-up 的行没人采样，验证在第一个不匹配处就停），
    一轮从 1.35 s 降到 0.85 s，回滚再降 0.07 s/轮。
+6. **验证侧的词表投影曾经一行一次**：验证要知道目标在每个草稿位置会产出什么，
+   所以要读那一批行的 logits，而每一行的投影都要把 1.3 GB 的 `output.weight`
+   重读一遍。现在目标前向按批投影那一批行（批量 kernel 与 per-row kernel 逐位
+   相同），一遍只读一次词表矩阵；catch-up 也不再跑草稿头的 FFN（它只写 KV
+   cache，FFN 到不了 cache）。一轮省 0.03 s，整段生成省 5%。
 
 合起来的实测（19 token chat prompt，生成 16 token，8 线程；这组数字叠在批量
-Q8_0 kernel、`sdot` 与便宜回滚之上）。这台机器的负载会漂，所以对比一律用
-**交替跑**的两个二进制（`sdot` vs `sdot` + 便宜回滚），取中位数：
+Q8_0 kernel、`sdot`、便宜回滚与按批词表投影之上）。这台机器的负载会漂，所以对比
+一律用**交替跑**的两个二进制，取中位数：
 
 | 路径 | 整段生成 |
 | --- | --- |
-| greedy | 5.98 s（prefill 1.47 s + decode 4.39 s） |
-| 投机，2 个草稿 | **4.67 s**（中位数；采样 4.17–5.32 s；接受率 0.83） |
-| 投机，2 个草稿（没有便宜回滚） | 5.45 s（中位数；采样 5.38–6.35 s） |
+| greedy | 5.86 s（prefill 1.47 s + decode 4.39 s） |
+| 投机，2 个草稿 | **4.28 s**（中位数；采样 4.24–4.29 s；接受率 0.83） |
+| 投机，2 个草稿（没有按批词表投影） | 4.53 s（中位数；采样 4.50–4.57 s） |
+| 投机，2 个草稿（连便宜回滚都没有） | 5.45 s（中位数；采样 5.38–6.35 s） |
 | 投机，3 个草稿 | 4.96 s / 5.01 s（接受率 0.72） |
 | 投机，4 个草稿 | 5.39 s / 5.51 s（接受率 0.54） |
 
-即：**2 个草稿时比 greedy 快约 22%**（只算解码段是 3.20 s vs 4.39 s，1.37 倍），
-而便宜回滚本身又省掉 14%（5.45 s → 4.67 s）。草稿再多反而更慢（一轮的行数是
-线性涨的，收益是对数涨的，而且每个草稿都要付一次 1.3 GB 的词表投影）。
+即：**2 个草稿时比 greedy 快约 27%**（只算解码段是 2.81 s vs 4.39 s，1.56 倍）；
+便宜回滚省掉 14%（5.45 s → 4.67 s），按批词表投影再省 5%（4.53 s → 4.28 s）。
+草稿再多反而更慢（一轮的行数是线性涨的，收益是对数涨的，而且每个草稿都要
+付一次 1.3 GB 的词表投影）。
 llama.cpp 在同一台机器上没有这个收益（它的 MTP decode 262 ms/token，就是单
 token decode 的量级）——差别在于它没有把 Q8_0 的权重读取在批次内共享。
-一轮 36 GB 的流量里，目标前向占 29 GB（跑不掉），草稿头占 3.4 GB，catch-up
-占 1.2 GB，词表投影占 5.2 GB。还能省的有三处：一是目标侧那一遍词表投影可以
-按批做（验证的几行现在是一行一次投影，每次重读 1.3 GB 的 `output.weight`；
-一次批量投影只读一遍）；二是 catch-up 只需要刷新草稿头的 KV cache，不必跑完
-整个头（现在连 FFN 一起跑了）；三是让草稿头跑到设备上（现在只跑 CPU）。
+一轮 34 GB 的流量里，目标前向占 29 GB（跑不掉），草稿头占 3.4 GB，catch-up
+占 0.5 GB，词表投影占 3.9 GB（目标侧那遍已经按批做，一遍只读一次 1.3 GB 的
+`output.weight`；草稿头的每个草稿仍要单独读一遍）。还能省的有一处：草稿头的
+词表投影（每个草稿一遍 1.3 GB，而草稿之间是串行的——下一个草稿要用上一个草稿的
+token，所以没法合并）。
+
+**设备路径上的实测**（18 token 的 chat prompt，32 个生成 token，
+`--compute vulkan`，8 线程；交替跑取中位数。这台机器的负载会漂，所以对比
+一律交替跑）：
+
+Qwen3.8-27B **Q8_0**（29 GB 权重）：
+
+| 草稿数 | 轮数 | 接受率 | 目标前向次数 | prefill | decode | 合计 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0（greedy） | 31 | – | 31 | 0.7 s | 12.6 s | 13.3 s |
+| 2 | 14 | 64.3% | 14 | 0.7 s | **8.1 s** | **8.8 s** |
+
+Qwen3.8-27B **Q4_0**（16 GB 权重）：
+
+| 草稿数 | 轮数 | 接受率 | 目标前向次数 | prefill | decode | 合计 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0（greedy） | 31 | – | 31 | 1.8 s | 12.1 s | 13.9 s |
+| 2 | 13 | 73.1% | 13 | 1.8 s | **7.8 s** | **9.6 s** |
+| 4 | 12 | 41.7% | 12 | 1.8 s | 9.3 s | 11.2 s |
+
+即：两个权重档上，**2 个草稿的设备投机解码都比 greedy 快约 1.55 倍**
+（decode 段）。4 个草稿接受率掉到 41.7%，多出来的轮次把收益吃掉一些。
+
+（这台机器的背景负载会漂，所以上表的绝对值随时间变；对比一律交替跑，
+取同一轮里的相对值。同一台机器上，起草头搬上设备之前是 12.3 s vs 9.1 s
+（1.35 倍），起草头搬上设备之后是 12.3 s vs 8.4 s（1.45 倍）——起草头每步的
+24 ms 词表投影是那 0.7 s 差的主要来源；再把回滚从 137 ms 降到 20 ms 之后是
+12.1 s vs 7.8 s（1.55 倍）。）
+
+**一轮里各部分的实测**（Q4_0 档，2 个草稿，13 轮，decode 7.8 s = 600 ms/轮）：
+
+| 部分 | 每轮 | 占比 |
+| --- | --- | --- |
+| 目标前向（3 行） | 530 ms | 88% |
+| 起草头 2 步（设备上） | 30 ms | 5% |
+| catch-up（3 行） | 3 ms | 0.5% |
+| 回滚（9/13 轮有拒绝） | 20～26 ms | 3.5%（按摊薄算） |
+
+所以现在**目标前向本身是瓶颈**：它读 17 GB 权重却只跑出 32 GB/s，而起草头那次
+词表投影读 1 GB 能跑出 100 GB/s——前向不是带宽瓶颈，是每层十来个 dispatch 的
+串行开销（64 层 × ~0.8 ms/层）。要再往上得动 dispatch 的粒度（把 norm 融进
+matmul 的 prologue、把残差 add 融进下一个 matmul……），那是个大重构。
+
+另外，起草头在 CPU 上并不便宜：实测每步 24 ms、catch-up 每行 1.5 ms（Q4_0 档，
+8 线程）——每一步都是一遍 1.3 GB 的词表投影。**起草头搬上设备之后**这一步几乎
+不要钱了：Q4_0 档的设备投机解码从 9.1 s 降到 8.4 s（decode 段）。
+
+**多行前向在设备上有多贵，取决于权重格式**——这条决定了投机解码在设备上有没有
+收益：
+
+- **Q8_0**：多行 matmul 走 tiled kernel（`q8_matmul_tiled_dp4a.comp`），**权重在
+  行之间共享**，多一行几乎不花钱。验证那一遍是 3 行 ≈ 1 行的代价，于是「少跑几遍
+  前向」的收益完整保留。
+- **Q4_0**：原来只有逐行 GEMV（`q4_0_matmul.comp`：每个 `(输出行, token 行)`
+  组合自己把权重行重读一遍，而且 32 个 MAC 全是标量），于是多行前向要付 N 倍权重
+  流量，投机解码在设备上**没有收益**（打平）。
+  现在补上了 Q4_0 的 tiled kernel（`q4_0_matmul_tiled_dp4a.comp`）：权重按
+  `(输出列, k-block)` 读一次、在 tile 的多行之间共享，4-bit 解包后用打包点积。
+  算术与逐行 kernel **逐位相同**（整数和精确，浮点部分保持 `(和 × 权重 scale) ×
+  激活 scale`、逐块相加的顺序），新测试用同一份权重比 1～5 行逐位对拍。
+  实测设备前向：1 行 0.39 s（保持逐行 kernel，tile 的 staging 在单行时是纯开销）、
+  3 行 0.81 s → **0.51 s**、8 行 2.07 s → **0.82 s**。于是 Q4_0 上的设备投机
+  解码从「打平」变成 **1.35 倍**。
 
 **已知边界**：
 
-- 起草头只跑 CPU：设备路径目前不导出 hidden state，`mtp_speculative_step` 在
-  Vulkan 路径下直接报错。
-- CPU 上前向是访存瓶颈，投机解码的收益只有 1.3 倍（见上面的实测）；要多草稿
+- 起草头的**词表投影每个草稿仍要单独读一遍词表矩阵**（Q4_0 档的 `output.weight`
+  是 Q6_K，约 1.04 GB；Q8_0 档是 1.27 GB）：草稿之间是串行的（下一个草稿要用上一个
+  草稿的 token），没法合并成一批。这是 MTP 的算法本身如此，不是实现的取舍；它在
+  设备上只占一轮的 5%，不值得动。
+- 设备的**多行前向**对 Q8_0 与 Q4_0 都便宜了（两者都有 tiled kernel，权重跨行
+  共享）；但 Q4_1 / Q5_0 / Q5_1 / Q4_K / Q5_K / Q6_K 档还没有，那些档位的多行
+  前向仍然要付 N 倍权重流量，投机解码在设备上没有收益。
+- 设备的**单行 decode 比 CPU 慢**：Q4_0 档实测 404 ms/token vs CPU 的 187 ms
+  （8 线程，17 GB 权重），Q8_0 档 406 ms vs 274 ms。设备的优势在**多行**（3 行
+  175 ms/行、8 行 103 ms/行，都比 CPU 快，tiled kernel 让多行共享一次权重读取），
+  所以设备路径的价值在批量（预填、投机解码的验证），不在单行解码。
+- 剩下的三块都是**大活**，按性价比排在后面：
+  1. **per-row GEMV 的访存效率**：设备单行只跑到 44 GB/s（Q4_0）/ 74 GB/s
+     （Q8_0），而 CPU 是 91 / 106 GB/s，设备自己的大词表投影能跑 104 GB/s——
+     模型的 matmul 只跑到了设备自身能力的三四成。现在的 per-row kernel 是
+     「一个 lane 负责一个输出列」，于是 64 个 lane 各读不同的权重行，访存不合并；
+     tiled kernel 用共享内存 staging 解决了它，但只在多行时启用。要让单行也快，
+     得换个读法，同时**保住每列的累加顺序**（否则破坏与 CPU 的逐位一致）。
+  2. **算子融合**：把 norm 融进 matmul 的 prologue、把残差 add 融进下一个
+     norm。前向里每层十来个 dispatch，64 层就是六百多个；但融合要么改归约顺序
+     （norm 的 Kahan 修正树形归约是这个仓库与 CPU 逐位一致的基础），要么只融
+     不改数值的那部分（add+norm），收益减半。风险与收益不对称，放最后。
+  3. **其它权重档位的 tiled kernel**（Q4_1 / Q5_0 / Q5_1 / Q4_K / Q5_K /
+     Q6_K）：纯覆盖面，加速不了手上的 checkpoint。
+- CPU 上前向是访存瓶颈，投机解码的收益只有 1.4 倍（见上面的实测）；要多草稿
   才有倍数收益的话，得先让每个草稿的词表投影不再单独读一遍 1.3 GB。
+- 设备路径的投机解码要求整批草稿（`1 + N` 行）装进一个 chunk（默认 64 行），
+  否则报错：每一行的 hidden 与 logits 都得留在前向之后。
 - 只有稠密 `qwen35` 装载 MTP 头；`qwen35moe` 的 nextn 走专家，是另一张图。
 - TODO-069（MTP / DSpark 契约）在 PR #235 的分支上，
   `docs/develop/SPECULATIVE_DECODING.md` 由那个 PR 拥有，本条不重复它的内容。
@@ -5459,6 +5614,19 @@ RMI_QWEN35_PROMPT_TOKENS=248045,846,198,95826,110827,98419,108829,113672,119721,
 RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 \
 cargo test --locked --profile release-fast --features parity-trace --lib qwen35_mtp -- --ignored --nocapture
 
+# 同一件事跑在设备上：加 --features vulkan 与 RMI_QWEN35_MTP_DEVICE=1
+RMI_QWEN35_MODEL=<Qwen3.8-27B-Q4_0.gguf> \
+RMI_QWEN35_PROMPT_TOKENS=248045,846,198,95826,110827,98419,108829,113672,119721,1710,248046,198,248045,74455,198,248068,271,248069,271 \
+RMI_QWEN35_MTP_STEPS=16 RMI_QWEN35_MTP_DRAFTS=4 RMI_QWEN35_MTP_DEVICE=1 \
+cargo test --locked --profile release-fast --features "parity-trace,vulkan" \
+  --lib qwen35_mtp_speculative -- --ignored --nocapture
+
+# 设备上的性能：交替跑 greedy 与 MTP，看 [pipeline-timing] 与 [mtp] 两行
+target/release-fast/rust-model-inference --model <gguf> --prompt "..." \
+  --max-tokens 32 --temp 0 --compute vulkan --threads 8 --mtp-draft 0
+target/release-fast/rust-model-inference --model <gguf> --prompt "..." \
+  --max-tokens 32 --temp 0 --compute vulkan --threads 8 --mtp-draft 2
+
 # llama.cpp 参照：同一模型、同一 prompt、同一 n_max
 llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv 5
 # 然后用同样的 token 数组打 /completion，日志里的 "draft candidate" 就是草稿
@@ -5467,4 +5635,5 @@ llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv
 **关联**：`src/models/qwen35/trunk/mtp.rs`、`src/models/qwen35/trunk/session.rs`、
 `src/models/qwen35/trunk/forward.rs`、`src/models/qwen35/trunk/weights.rs`、
 `src/models/qwen35/trunk/scratch.rs`、`src/ops/kernel/q8_0/neon.rs`、
+`src/vulkan/qwen35.rs`、`src/compute/state.rs`、
 `docs/develop/SUPPORTED_MODELS.md`。

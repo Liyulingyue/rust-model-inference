@@ -2084,8 +2084,14 @@ pub(super) fn run_multimodal_with_video_ref(
             .iter()
             .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
             .collect::<Result<Vec<u32>, String>>()?;
-        let generation = session.mtp_generate(&ids, &prompt_positions, max_tokens, mtp_draft)?;
-        t_decode += t0.elapsed().as_secs_f64();
+        // The prefill and the rounds are timed apart: the prefill reads the
+        // whole model once, the rounds read it once per round.
+        let logits = session.prefill_with_mtp(&ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation =
+            session.mtp_generate_after_prefill(logits, &prompt_positions, max_tokens, mtp_draft)?;
+        t_decode += t1.elapsed().as_secs_f64();
         decode_evals += generation.rounds;
         eprintln!(
             "[mtp] {} rounds, {}/{} drafts accepted ({:.1}%)",

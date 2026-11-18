@@ -7,7 +7,10 @@ use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::compute::state::TokenCommitState;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
-use crate::models::qwen35::trunk::{config::Qwen35Moe, weights::Qwen35MoeWeights};
+use crate::models::qwen35::trunk::{
+    config::Qwen35Moe,
+    weights::{MtpWeights, Qwen35MoeWeights},
+};
 use crate::models::qwen35::{Qwen35Config, Qwen35Model};
 use crate::ops::kernel::Weight;
 
@@ -175,6 +178,62 @@ pub(crate) fn commit_shadow_state_chunk(
     Ok(())
 }
 
+/// Put the recurrent state the device reports into the host shadow.
+///
+/// The state is the one thing a rollback has to restore, and it does not
+/// come with a KV delta: the keys of the committed rows are already in the
+/// cache, because the verification wrote them and they do not depend on
+/// the state the rollback puts back.
+pub(crate) fn commit_shadow_recurrent_state(
+    conv_states: &mut [Vec<f32>],
+    ssm_states: &mut [Vec<f32>],
+    conv_state: &[f32],
+    ssm_state: &[f32],
+) -> Result<(), String> {
+    let conv_len = conv_states.iter().try_fold(0usize, |count, state| {
+        count
+            .checked_add(state.len())
+            .ok_or_else(|| "Qwen3.5 convolution shadow length overflow".to_string())
+    })?;
+    if conv_state.len() != conv_len {
+        return Err(format!(
+            "Invalid Qwen3.5 Vulkan convolution state: got {}, expected {conv_len}",
+            conv_state.len()
+        ));
+    }
+    let ssm_len = ssm_states.iter().try_fold(0usize, |count, state| {
+        count
+            .checked_add(state.len())
+            .ok_or_else(|| "Qwen3.5 SSM shadow length overflow".to_string())
+    })?;
+    if ssm_state.len() != ssm_len {
+        return Err(format!(
+            "Invalid Qwen3.5 Vulkan SSM state: got {}, expected {ssm_len}",
+            ssm_state.len()
+        ));
+    }
+    if conv_state
+        .iter()
+        .chain(ssm_state)
+        .any(|value| !value.is_finite())
+    {
+        return Err("Qwen3.5 Vulkan replay produced a non-finite shadow state".into());
+    }
+    let mut offset = 0;
+    for shadow in conv_states {
+        let end = offset + shadow.len();
+        shadow.copy_from_slice(&conv_state[offset..end]);
+        offset = end;
+    }
+    offset = 0;
+    for shadow in ssm_states {
+        let end = offset + shadow.len();
+        shadow.copy_from_slice(&ssm_state[offset..end]);
+        offset = end;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct Qwen35ArenaLayout {
     x: ArenaRegion,
@@ -204,6 +263,50 @@ struct Qwen35ArenaLayout {
     moe_scores: ArenaRegion,
     moe_status: ArenaRegion,
     logits: ArenaRegion,
+    /// The logits of every row of a chunk, when the caller asked for them.
+    ///
+    /// A speculative verification needs the target's answer at each drafted
+    /// position, so it needs one vocabulary projection per row. They are
+    /// projected into this region in a single dispatch and read back
+    /// together. Only a checkpoint with an MTP head gets the region.
+    logits_rows: ArenaRegion,
+    /// The projections of every recurrent layer, captured while a chunk
+    /// runs.
+    ///
+    /// The recurrent state update consumes the layer's projections, so a
+    /// rollback that has them can replay the state update alone: the short
+    /// convolution and the SSM scan. The projections themselves read the
+    /// layer's weights, which is the expensive half, so a rollback that
+    /// recomputed them paid for the recurrent layers a second time.
+    ///
+    /// One slot per recurrent layer, in the order the layers run. The four
+    /// regions are the four outputs of the projection: the raw query, key
+    /// and value, the gate, and the two state coefficients.
+    capture_qkv: ArenaRegion,
+    capture_z: ArenaRegion,
+    capture_beta: ArenaRegion,
+    capture_alpha: ArenaRegion,
+    /// The draft head's row buffers.
+    ///
+    /// The head is a dense block of its own with a KV cache of its own, and
+    /// it runs a batch of rows at a time: the catch-up over a verification
+    /// batch is one batch of rows, not one call per row.
+    ///
+    /// The two norms the head starts with write into the two halves of one
+    /// buffer, so the projection sees them side by side the way the CPU
+    /// trunk's concatenation does.
+    mtp_embed_in: ArenaRegion,
+    mtp_hidden_in: ArenaRegion,
+    mtp_fused: ArenaRegion,
+    mtp_proj: ArenaRegion,
+    mtp_attn_input: ArenaRegion,
+    mtp_ffn_input: ArenaRegion,
+    mtp_ffn_gate: ArenaRegion,
+    mtp_ffn_up: ArenaRegion,
+    mtp_ffn_out: ArenaRegion,
+    mtp_output: ArenaRegion,
+    /// The head's own vocabulary projection, one row of logits.
+    mtp_logits: ArenaRegion,
     rope: ArenaRegion,
     q8: ArenaRegion,
     q8_scales: ArenaRegion,
@@ -234,7 +337,7 @@ impl Qwen35ArenaLayout {
     }
 
     fn new_rows(config: &Qwen35Config, capacity: usize, rows: usize) -> Result<Self, VulkanError> {
-        Self::new_rows_with_streams(config, capacity, rows, 0)
+        Self::new_rows_with_streams(config, capacity, rows, 0, config.n_ff)
     }
 
     fn new_rows_with_streams(
@@ -242,9 +345,20 @@ impl Qwen35ArenaLayout {
         capacity: usize,
         rows: usize,
         streams: usize,
+        head_ffn: usize,
     ) -> Result<Self, VulkanError> {
         let layer_count = config.n_layer_impl();
         let head_dim = config.n_embd_head();
+        // The recurrent layers are the ones whose state a rollback has to
+        // put back, so they are the ones whose projections are captured.
+        let recurrent_layers = config
+            .is_recurrent
+            .iter()
+            .filter(|recurrent| **recurrent)
+            .count();
+        // The draft head has a KV cache of its own: it attends over the
+        // committed and the drafted positions, not over the target's keys.
+        let head_layers = usize::from(config.n_nextn > 0);
         let value_heads = config.ssm_dt_rank;
         let ffn_width = config
             .moe
@@ -295,9 +409,19 @@ impl Qwen35ArenaLayout {
             .max(ffn_width)
             .max(expert_ff)
             .max(dense_q)
-            .max(value_dim);
-        let kv_cache = qwen35_product("KV cache", &[layer_count, capacity, dense_kv])?;
-        let kv_delta = qwen35_product("KV delta", &[layer_count, rows, dense_kv])?;
+            .max(value_dim)
+            // The draft head's projection takes twice the model width -- the
+            // normalized embedding and the normalized hidden state side by
+            // side -- and its feed-forward has a width of its own.
+            .max(if config.n_nextn > 0 {
+                2 * config.n_embd
+            } else {
+                0
+            })
+            .max(head_ffn);
+        let kv_cache =
+            qwen35_product("KV cache", &[layer_count + head_layers, capacity, dense_kv])?;
+        let kv_delta = qwen35_product("KV delta", &[layer_count + head_layers, rows, dense_kv])?;
         let conv_state = qwen35_product(
             "convolution state",
             &[layer_count, config.ssm_d_conv, conv_dim],
@@ -347,6 +471,79 @@ impl Qwen35ArenaLayout {
             qwen35_product("FFN outputs", &[ffn_rows, config.n_embd])?,
         )?;
         let logits = qwen35_f32_region(&mut cursor, config.vocab_size)?;
+        // The MTP verification projects the whole batch at once. A checkpoint
+        // without a draft head never asks for more than the last row, so it
+        // does not pay for the buffer.
+        let logits_rows = qwen35_f32_region(
+            &mut cursor,
+            if config.n_nextn > 0 {
+                qwen35_product("row logits", &[rows, config.vocab_size])?
+            } else {
+                0
+            },
+        )?;
+        // The projections of every recurrent layer, captured while the chunk
+        // runs. A rejected draft has to put the recurrent state back, and
+        // the state update consumes the layer's projections: with them at
+        // hand, the rollback replays the short convolution and the SSM scan
+        // alone, without reading the layer's weights again. Only a
+        // checkpoint with a draft head ever needs them.
+        let capture_rows = if config.n_nextn > 0 {
+            recurrent_layers
+        } else {
+            0
+        };
+        let capture_qkv = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("recurrent capture", &[capture_rows, rows, conv_dim])?,
+        )?;
+        let capture_z = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("recurrent capture", &[capture_rows, rows, value_dim])?,
+        )?;
+        let capture_beta = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("recurrent capture", &[capture_rows, rows, value_heads])?,
+        )?;
+        let capture_alpha = qwen35_f32_region(
+            &mut cursor,
+            qwen35_product("recurrent capture", &[capture_rows, rows, value_heads])?,
+        )?;
+        // The draft head's own row buffers. The head runs a batch of rows at
+        // a time -- the catch-up over a verification batch is one batch --
+        // so the buffers are sized for a whole batch. A checkpoint without a
+        // draft head does not pay for them.
+        //
+        // The head's projection takes the normalized embedding and the
+        // normalized hidden state side by side, and the device has no
+        // concatenation: the two norms write into the two halves of one
+        // buffer instead, which is the same layout the projection reads.
+        let head_rows = if config.n_nextn > 0 { rows } else { 0 };
+        let mut head_region = |width| {
+            qwen35_f32_region(
+                &mut cursor,
+                qwen35_product("draft head row buffer", &[head_rows, width])?,
+            )
+        };
+        let mtp_embed_in = head_region(config.n_embd)?;
+        let mtp_hidden_in = head_region(config.n_embd)?;
+        let mtp_fused = head_region(2 * config.n_embd)?;
+        let mtp_proj = head_region(config.n_embd)?;
+        let mtp_attn_input = head_region(config.n_embd)?;
+        let mtp_ffn_input = head_region(config.n_embd)?;
+        let mtp_ffn_gate = head_region(head_ffn)?;
+        let mtp_ffn_up = head_region(head_ffn)?;
+        let mtp_ffn_out = head_region(config.n_embd)?;
+        let mtp_output = head_region(config.n_embd)?;
+        // The head's own vocabulary projection: one row of logits.
+        let mtp_logits = qwen35_f32_region(
+            &mut cursor,
+            if config.n_nextn > 0 {
+                config.vocab_size
+            } else {
+                0
+            },
+        )?;
         let quant_rows = qwen35_product("quantized rows", &[rows, quant_len.div_ceil(4) * 4])?;
         let q8 = qwen35_region(&mut cursor, quant_rows)?;
         let q8_scales = qwen35_f32_region(
@@ -414,6 +611,22 @@ impl Qwen35ArenaLayout {
             moe_scores,
             moe_status,
             logits,
+            logits_rows,
+            capture_qkv,
+            capture_z,
+            capture_beta,
+            capture_alpha,
+            mtp_embed_in,
+            mtp_hidden_in,
+            mtp_fused,
+            mtp_proj,
+            mtp_attn_input,
+            mtp_ffn_input,
+            mtp_ffn_gate,
+            mtp_ffn_up,
+            mtp_ffn_out,
+            mtp_output,
+            mtp_logits,
             rope,
             q8,
             q8_scales,
@@ -563,6 +776,52 @@ struct RecurrentBindings {
     output: OperatorBindings,
 }
 
+/// Where a recurrent layer's projections land.
+///
+/// The projection has four outputs: the raw query, key and value, the gate,
+/// and the two state coefficients. The forward writes them into the
+/// capture, so a rollback can replay the state update from them.
+#[derive(Clone, Copy)]
+struct RecurrentProjection {
+    qkv: ArenaRegion,
+    z: ArenaRegion,
+    beta: ArenaRegion,
+    alpha: ArenaRegion,
+}
+
+/// The draft head's weights, as the device sees them.
+///
+/// The head is a dense block of its own with a KV cache of its own, and
+/// its projection fuses the normalized embedding with the normalized hidden
+/// state. The device has no concat, so the two norms write their results
+/// into the two halves of one buffer and the projection reads that buffer.
+#[derive(Clone, Copy)]
+struct MtpBindings {
+    /// `nextn.eh_proj`: the projection of the two normalized halves.
+    eh_proj: OperatorBindings,
+    /// The head block's own attention: the queries, the keys and the values,
+    /// their norms, and the output projection.
+    qkv: WeightBindings<3>,
+    prepare: OperatorBindings,
+    output: OperatorBindings,
+    /// The head block's feed-forward.
+    ffn_gate_up: WeightBindings<2>,
+    ffn_down: OperatorBindings,
+    /// The norms: the embedding, the hidden state, the attention input, the
+    /// feed-forward input and the head's own.
+    enorm: OperatorBindings,
+    hnorm: OperatorBindings,
+    attn_norm: OperatorBindings,
+    attn_post_norm: OperatorBindings,
+    head_norm: OperatorBindings,
+    /// The head's own vocabulary projection. `None` means the main model's
+    /// output weight is used, exactly as upstream does.
+    head: Option<OperatorBindings>,
+    /// The width of the head's feed-forward. A checkpoint may give the head
+    /// a feed-forward of its own width.
+    ffn_width: usize,
+}
+
 #[derive(Clone, Copy)]
 enum AttentionBindings {
     Dense(DenseBindings),
@@ -614,8 +873,23 @@ struct MhcBindings {
     routers: Vec<[MhcRouterBindings; 2]>,
 }
 
+/// The draft head's output.
+///
+/// The head proposes a token and hands its own hidden state to the next
+/// draft step, so both come back from one call.
+pub(crate) struct Qwen35MtpHead {
+    /// The logits of the row, when the caller asked for them.
+    pub(crate) logits: Vec<f32>,
+    /// The head's hidden state, after the head norm.
+    pub(crate) hidden: Vec<f32>,
+}
+
 pub(crate) struct Qwen35GpuChunkResult<'a> {
     pub(crate) logits: &'a [f32],
+    /// The normalized hidden state of every row of the chunk.
+    pub(crate) normed: &'a [f32],
+    /// The logits of every row, when the session was asked to collect them.
+    pub(crate) logits_rows: &'a [f32],
     pub(crate) k_delta: &'a [f32],
     pub(crate) v_delta: &'a [f32],
     pub(crate) conv_state: &'a [f32],
@@ -629,6 +903,8 @@ pub(crate) struct Qwen35VulkanSession {
     layers: Vec<LayerBindings>,
     plan: Vec<usize>,
     mhc: Option<MhcBindings>,
+    /// The draft head's weights, when the checkpoint has a head.
+    mtp: Option<MtpBindings>,
     output_norm: OperatorBindings,
     output: OperatorBindings,
     layout: Qwen35ArenaLayout,
@@ -640,6 +916,18 @@ pub(crate) struct Qwen35VulkanSession {
     commit_state: TokenCommitState,
     rope: Vec<f32>,
     logits: Vec<f32>,
+    /// Whether the next chunk normalizes and returns every row's hidden
+    /// state. The MTP head needs a hidden state per position, both to chain
+    /// its drafts and to fill its cache from a prompt.
+    collect_normed: bool,
+    /// Whether the next chunk projects every row's logits. A speculative
+    /// verification reads the target's answer at each drafted position.
+    collect_logits: bool,
+    /// Whether the next chunk captures the recurrent layers' projections.
+    /// A rollback replays the recurrent state from them.
+    collect_capture: bool,
+    normed_rows: Vec<f32>,
+    logits_rows: Vec<f32>,
     k_delta: Vec<f32>,
     v_delta: Vec<f32>,
     conv_state: Vec<f32>,
@@ -711,8 +999,16 @@ impl Qwen35VulkanSession {
         let config = model.config.clone();
         let layer_count = config.n_layer_impl();
         let streams = routing.as_ref().map_or(0, |r| r.settings.streams);
-        let layout =
-            Qwen35ArenaLayout::new_rows_with_streams(&config, capacity, max_rows, streams)?;
+        // The draft head has a feed-forward of its own, and its width is the
+        // head's own: a checkpoint may give it a different one.
+        let head_ffn = model
+            .mtp
+            .as_ref()
+            .and_then(|mtp| mtp.layer.ffn_gate.as_ref())
+            .map_or(config.n_ff, |weight| weight.n_out);
+        let layout = Qwen35ArenaLayout::new_rows_with_streams(
+            &config, capacity, max_rows, streams, head_ffn,
+        )?;
         let descriptor_capacity = model.layers.iter().try_fold(3usize, |count, layer| {
             let experts = layer
                 .moe
@@ -727,6 +1023,12 @@ impl Qwen35VulkanSession {
         })?;
         let descriptor_capacity = descriptor_capacity
             .checked_add(routing.as_ref().map_or(0, |r| 1 + r.routers.len() * 4))
+            .ok_or(VulkanError::OutOfMemory)?;
+        // The draft head needs a descriptor set per weight and per norm of
+        // its own: its projection, its attention, its feed-forward, its five
+        // norms and, when it has one, its vocabulary matrix.
+        let descriptor_capacity = descriptor_capacity
+            .checked_add(usize::from(model.mtp.is_some()) * 16)
             .ok_or(VulkanError::OutOfMemory)?;
         // Host routing reads between recordings; keep its arena mapped.
         let host_routed = model
@@ -976,6 +1278,21 @@ impl Qwen35VulkanSession {
             &model.output_weight,
             "Qwen3.5 output",
         )?;
+        // The draft head, when the checkpoint has one. It is a dense block
+        // of its own with a KV cache of its own. A head whose weights the
+        // device cannot hold stays on the CPU: the target still runs here.
+        let mtp = match model.mtp.as_ref() {
+            Some(mtp) => match bind_mtp_weights(&mut ops, &mut buffers, mtp, &model.output_norm) {
+                Ok(bindings) => Some(bindings),
+                Err(error) => {
+                    eprintln!(
+                        "[GPU] Qwen3.5 Vulkan draft head unavailable: {error}. The head runs on the CPU."
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let dense_kv = config
             .n_head_kv
             .checked_mul(config.n_embd_head())
@@ -996,6 +1313,14 @@ impl Qwen35VulkanSession {
         let vocab = config.vocab_size;
         let rope_dim = config.rope_dimension_count;
 
+        let normed_count = qwen35_product("normed rows", &[max_rows, config.n_embd])?;
+        // Only a checkpoint with a draft head ever collects row logits.
+        let logits_rows_count = if config.n_nextn > 0 {
+            qwen35_product("row logits", &[max_rows, vocab])?
+        } else {
+            0
+        };
+
         Ok(Some(Self {
             context,
             ops,
@@ -1003,6 +1328,7 @@ impl Qwen35VulkanSession {
             layers,
             plan,
             mhc,
+            mtp,
             output_norm,
             output,
             layout,
@@ -1014,6 +1340,11 @@ impl Qwen35VulkanSession {
             commit_state: TokenCommitState::new(0, capacity),
             rope: vec![0.0; qwen35_product("mRoPE rows", &[rope_dim, max_rows])?],
             logits: vec![0.0; vocab],
+            collect_normed: false,
+            collect_logits: false,
+            collect_capture: false,
+            normed_rows: vec![0.0; normed_count],
+            logits_rows: vec![0.0; logits_rows_count],
             k_delta: vec![0.0; delta_count],
             v_delta: vec![0.0; delta_count],
             conv_state: vec![0.0; conv_count],
@@ -1056,6 +1387,16 @@ impl Qwen35VulkanSession {
         }
         Ok(Qwen35GpuChunkResult {
             logits: &self.logits,
+            normed: if self.collect_normed || self.mhc.is_some() {
+                &self.normed_rows[..rows * self.config.n_embd]
+            } else {
+                &[]
+            },
+            logits_rows: if self.collect_logits {
+                &self.logits_rows[..rows * self.config.vocab_size]
+            } else {
+                &[]
+            },
             k_delta: &self.k_delta[..count],
             v_delta: &self.v_delta[..count],
             conv_state: &self.conv_state,
@@ -1117,6 +1458,149 @@ impl Qwen35VulkanSession {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// The recurrent layer's projection: the queries, the keys and the
+    /// values, the gate, and the two state coefficients.
+    ///
+    /// These are the rows the recurrent state update consumes. They are the
+    /// expensive half of the update -- they read the layer's weights -- so a
+    /// rollback keeps them instead of computing them again.
+    fn record_recurrent_projection(
+        &self,
+        commands: &TokenCommands<'_>,
+        recurrent: &RecurrentBindings,
+        input: ArenaRegion,
+        rows: usize,
+        out: RecurrentProjection,
+    ) -> Result<(), VulkanError> {
+        let config = &self.config;
+        let value_heads = config.ssm_dt_rank;
+        self.record_weight_group(
+            commands,
+            recurrent.qkv_gate_beta,
+            input,
+            [
+                (out.qkv, config.conv_dim()),
+                (out.z, config.value_dim()),
+                (out.beta, value_heads),
+            ],
+            config.n_embd,
+            rows,
+        )?;
+        self.record_weights(
+            commands,
+            recurrent.alpha,
+            input,
+            &[(out.alpha, value_heads)],
+            config.n_embd,
+            rows,
+        )
+    }
+
+    /// The recurrent layer's state update: the short convolution and the
+    /// SSM scan.
+    ///
+    /// The layer's output is not part of it: the output projection and the
+    /// feed-forward below the attention feed the *next* layer, and a
+    /// rollback that only puts the state back does not need them. That is
+    /// what lets the rollback replay the recurrent layers alone.
+    ///
+    /// `projection` is where the layer's projections are: the forward
+    /// writes them into the capture, a rollback reads them back from it.
+    fn record_recurrent_state_update(
+        &self,
+        commands: &TokenCommands<'_>,
+        layer_index: usize,
+        recurrent: &RecurrentBindings,
+        projection: RecurrentProjection,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let config = &self.config;
+        let conv_dim = config.conv_dim();
+        let key_dim = config.key_dim();
+        let value_dim = config.value_dim();
+        let value_heads = config.ssm_dt_rank;
+        let recurrent_head_dim = config.head_v_dim();
+        let layer_count = config.n_layer_impl();
+        self.ops.record_qwen35_recurrent_conv(
+            commands,
+            recurrent.convolution,
+            projection.qkv,
+            self.layout.q,
+            self.layout.k,
+            self.layout.v,
+            self.layout.conv_state,
+            layer_index,
+            layer_count,
+            conv_dim,
+            key_dim,
+            value_dim,
+            config.ssm_d_conv,
+            config.ssm_n_group,
+            value_heads,
+            recurrent_head_dim,
+            config.norm_eps,
+            rows,
+        )?;
+        self.ops.record_qwen35_recurrent_ssm_layout(
+            commands,
+            recurrent.ssm,
+            self.layout.q,
+            self.layout.k,
+            self.layout.v,
+            projection.z,
+            projection.beta,
+            projection.alpha,
+            self.layout.attn,
+            self.layout.ssm_state,
+            layer_index,
+            layer_count,
+            config.ssm_n_group,
+            value_heads,
+            recurrent_head_dim,
+            config.norm_eps,
+            rows,
+            self.mhc.is_some(),
+        )
+    }
+
+    /// The captured projections of one recurrent layer.
+    ///
+    /// The capture has one slot per recurrent layer, in the order the
+    /// layers run, and each slot holds the layer's projections for every
+    /// row of the chunk.
+    fn capture_projection(&self, recurrent_index: usize) -> RecurrentProjection {
+        let config = &self.config;
+        RecurrentProjection {
+            qkv: self.capture_block(self.layout.capture_qkv, recurrent_index, config.conv_dim()),
+            z: self.capture_block(self.layout.capture_z, recurrent_index, config.value_dim()),
+            beta: self.capture_block(
+                self.layout.capture_beta,
+                recurrent_index,
+                config.ssm_dt_rank,
+            ),
+            alpha: self.capture_block(
+                self.layout.capture_alpha,
+                recurrent_index,
+                config.ssm_dt_rank,
+            ),
+        }
+    }
+
+    /// One recurrent layer's slot in a capture region.
+    fn capture_block(
+        &self,
+        region: ArenaRegion,
+        recurrent_index: usize,
+        width: usize,
+    ) -> ArenaRegion {
+        let rows = self.max_rows;
+        let stride = rows * width * 4;
+        ArenaRegion {
+            offset: region.offset + recurrent_index * stride,
+            size: stride,
         }
     }
 
@@ -1455,6 +1939,9 @@ impl Qwen35VulkanSession {
         // submission short enough for the drivers to honour every dispatch.
         const MAX_DISPATCHES_PER_CHUNK: usize = 16;
         let mut chunk_start = self.ops.recorded_dispatch_count();
+        // The recurrent layers in the order they run: the capture has one
+        // slot for each of them.
+        let mut recurrent_index = 0usize;
         for (layer_index, &physical) in self.plan.iter().enumerate() {
             let bindings = &self.layers[physical];
             let routed = self
@@ -1553,69 +2040,38 @@ impl Qwen35VulkanSession {
                     )?;
                 }
                 AttentionBindings::Recurrent(recurrent) => {
-                    self.record_weight_group(
-                        &commands,
-                        recurrent.qkv_gate_beta,
-                        self.layout.normed,
-                        [
-                            (self.layout.raw_qkv, conv_dim),
-                            (self.layout.z, value_dim),
-                            (self.layout.beta, value_heads),
-                        ],
-                        config.n_embd,
-                        rows,
-                    )?;
-                    self.record_weights(
-                        &commands,
-                        recurrent.alpha,
-                        self.layout.normed,
-                        &[(self.layout.alpha, value_heads)],
-                        config.n_embd,
-                        rows,
-                    )?;
                     #[cfg(test)]
                     let scan_rows = failure.map_or(rows, |row| row + 1);
                     #[cfg(not(test))]
                     let scan_rows = rows;
-                    self.ops.record_qwen35_recurrent_conv(
+                    // The projections go into the capture when the caller
+                    // wants them: a rollback replays the state update from
+                    // them instead of reading the layer's weights again.
+                    let projection = if self.collect_capture {
+                        let captured = self.capture_projection(recurrent_index);
+                        recurrent_index += 1;
+                        captured
+                    } else {
+                        RecurrentProjection {
+                            qkv: self.layout.raw_qkv,
+                            z: self.layout.z,
+                            beta: self.layout.beta,
+                            alpha: self.layout.alpha,
+                        }
+                    };
+                    self.record_recurrent_projection(
                         &commands,
-                        recurrent.convolution,
-                        self.layout.raw_qkv,
-                        self.layout.q,
-                        self.layout.k,
-                        self.layout.v,
-                        self.layout.conv_state,
-                        layer_index,
-                        layer_count,
-                        conv_dim,
-                        key_dim,
-                        value_dim,
-                        config.ssm_d_conv,
-                        config.ssm_n_group,
-                        value_heads,
-                        recurrent_head_dim,
-                        config.norm_eps,
+                        &recurrent,
+                        self.layout.normed,
                         scan_rows,
+                        projection,
                     )?;
-                    self.ops.record_qwen35_recurrent_ssm_layout(
+                    self.record_recurrent_state_update(
                         &commands,
-                        recurrent.ssm,
-                        self.layout.q,
-                        self.layout.k,
-                        self.layout.v,
-                        self.layout.z,
-                        self.layout.beta,
-                        self.layout.alpha,
-                        self.layout.attn,
-                        self.layout.ssm_state,
                         layer_index,
-                        layer_count,
-                        config.ssm_n_group,
-                        value_heads,
-                        recurrent_head_dim,
-                        config.norm_eps,
+                        &recurrent,
+                        projection,
                         scan_rows,
-                        self.mhc.is_some(),
                     )?;
                     #[cfg(feature = "parity-trace")]
                     if self.mhc.is_none()
@@ -1852,7 +2308,14 @@ impl Qwen35VulkanSession {
             offset: self.layout.x.offset + last_offset,
             size: self.layout.x.size - last_offset,
         };
-        let head_input = if self.mhc.is_some() {
+        // The MTP head reads the target's hidden state at every row of the
+        // chunk: a draft chains from the row before it, and a catch-up
+        // refreshes the head's cache from every committed row. Normalize all
+        // of them when the caller collects rows, and always hand the rows
+        // back so the caller can keep a hidden state per row.
+        let collect_logits = self.collect_logits;
+        let normalize_rows = self.mhc.is_some() || self.collect_normed || collect_logits;
+        if normalize_rows {
             self.ops.record_rms_norm_rows(
                 &commands,
                 self.output_norm,
@@ -1864,10 +2327,6 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.n_embd,
             )?;
-            ArenaRegion {
-                offset: self.layout.normed.offset + last_offset,
-                size: self.layout.normed.size - last_offset,
-            }
         } else {
             self.ops.record_rms_norm(
                 &commands,
@@ -1877,15 +2336,34 @@ impl Qwen35VulkanSession {
                 config.n_embd,
                 config.norm_eps,
             )?;
+        }
+        let last_normed = ArenaRegion {
+            offset: self.layout.normed.offset + last_offset,
+            size: self.layout.normed.size - last_offset,
+        };
+        // `record_rms_norm` writes the last row at the base of the buffer;
+        // the multi-row form leaves it at its own offset.
+        let head_input = if collect_logits {
+            self.layout.normed
+        } else if self.mhc.is_some() || self.collect_normed {
+            last_normed
+        } else {
             self.layout.normed
         };
+        let projection_rows = if collect_logits { rows } else { 1 };
         commands.submit_and_wait()?;
         #[cfg(feature = "parity-trace")]
         self.trace_region(
             "result_norm",
             None,
             cache_position,
-            self.layout.normed,
+            // The single-row form leaves the row at the base of the buffer;
+            // the multi-row form leaves it at its own offset.
+            if normalize_rows {
+                last_normed
+            } else {
+                self.layout.normed
+            },
             config.n_embd,
             false,
         )?;
@@ -1894,27 +2372,59 @@ impl Qwen35VulkanSession {
             self.trace_rows("loop.norm", None, self.layout.normed, rows, config.n_embd)?;
         }
         let commands = TokenCommands::begin(self.context)?;
+        // One projection for the whole chunk, or one for its last row. The
+        // vocabulary matrix is the same either way; the batched form reads
+        // it once instead of once per row.
+        let output_region = if collect_logits {
+            self.layout.logits_rows
+        } else {
+            self.layout.logits
+        };
         self.record_weights(
             &commands,
             self.output,
             head_input,
-            &[(self.layout.logits, config.vocab_size)],
+            &[(output_region, config.vocab_size)],
             config.n_embd,
-            1,
+            projection_rows,
         )?;
         commands.submit_and_wait()?;
 
         #[cfg(feature = "parity-trace")]
-        self.trace_region(
-            "result_output",
-            None,
-            cache_position,
-            self.layout.logits,
-            config.vocab_size,
-            false,
-        )?;
-        self.ops
-            .read_f32_into(self.layout.logits, &mut self.logits)?;
+        {
+            let traced = if collect_logits {
+                ArenaRegion {
+                    offset: self.layout.logits_rows.offset + (rows - 1) * config.vocab_size * 4,
+                    size: config.vocab_size * 4,
+                }
+            } else {
+                self.layout.logits
+            };
+            self.trace_region(
+                "result_output",
+                None,
+                cache_position,
+                traced,
+                config.vocab_size,
+                false,
+            )?;
+        }
+        if collect_logits {
+            let logits_count = qwen35_product("row logits", &[rows, config.vocab_size])?;
+            self.ops.read_f32_into(
+                self.layout.logits_rows,
+                &mut self.logits_rows[..logits_count],
+            )?;
+            self.logits
+                .copy_from_slice(&self.logits_rows[(rows - 1) * config.vocab_size..logits_count]);
+        } else {
+            self.ops
+                .read_f32_into(self.layout.logits, &mut self.logits)?;
+        }
+        if normalize_rows {
+            self.ops
+                .read_f32_into(self.layout.normed, &mut self.normed_rows[..input_count])?;
+        }
         #[cfg(feature = "parity-trace")]
         if self.mhc.is_some() {
             crate::parity_trace::report(crate::parity_trace::checkpoint_row(
@@ -1949,6 +2459,10 @@ impl Qwen35VulkanSession {
                 .chain(&self.ssm_state)
                 .any(|v| !v.is_finite())
             || hidden.iter().any(|v| !v.is_finite())
+            || (normalize_rows
+                && self.normed_rows[..input_count]
+                    .iter()
+                    .any(|v| !v.is_finite()))
         {
             return Err(VulkanError::UnsupportedShape(
                 "Qwen3.5 Vulkan chunk produced non-finite output".into(),
@@ -1959,6 +2473,415 @@ impl Qwen35VulkanSession {
 
     pub(crate) fn commit_token(&mut self) {
         self.commit_state.commit();
+    }
+
+    /// Whether the draft head runs on the device.
+    ///
+    /// A checkpoint whose head the device cannot hold keeps the head on the
+    /// CPU, so the caller has to ask before it hands the head over.
+    pub(crate) fn has_mtp_head(&self) -> bool {
+        self.mtp.is_some()
+    }
+
+    /// Run the draft head on the device.
+    ///
+    /// `embeddings` holds one embedding per row and `hidden` the hidden state
+    /// of the position *before* each row's token: the head pairs the token at
+    /// a position with the state of the position before it, the way the CPU
+    /// trunk's head does.
+    ///
+    /// The rows run as one batch: the catch-up over a verification batch is
+    /// one call here, not one call per row.
+    ///
+    /// `want_output` says whether the rows are sampled. A row that only
+    /// fills the head's cache is never sampled, so it stops after the
+    /// attention: neither the feed-forward nor the vocabulary projection
+    /// reaches the cache.
+    pub(crate) fn mtp_head(
+        &mut self,
+        embeddings: &[f32],
+        hidden: &[f32],
+        base_position: usize,
+        want_output: bool,
+    ) -> Result<Qwen35MtpHead, VulkanError> {
+        let Some(mtp) = self.mtp.as_ref() else {
+            return Err(VulkanError::UnsupportedShape(
+                "this checkpoint has no MTP draft head".into(),
+            ));
+        };
+        let config = &self.config;
+        let n_embd = config.n_embd;
+        if n_embd == 0 || embeddings.len() % n_embd != 0 || hidden.len() != embeddings.len() {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "invalid Qwen3.5 MTP head input: {} embeddings, {} hidden values",
+                embeddings.len(),
+                hidden.len()
+            )));
+        }
+        let rows = embeddings.len() / n_embd;
+        if rows == 0 || rows > self.max_rows {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "Qwen3.5 MTP head batch of {rows} rows does not fit the chunk size {}",
+                self.max_rows
+            )));
+        }
+        if want_output && rows != 1 {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 MTP head samples one row at a time".into(),
+            ));
+        }
+        let head_dim = config.n_embd_head();
+        let dense_q = config
+            .n_head
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let dense_kv = config
+            .n_head_kv
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let dense_raw_q = dense_q.checked_mul(2).ok_or(VulkanError::OutOfMemory)?;
+        let layer_count = config.n_layer_impl();
+        // The head has a KV cache of its own: it attends over the committed
+        // and the drafted positions, not over the target's keys. Its cache
+        // is the layer slot after the main stack.
+        let head_layer = layer_count;
+        let head_layer_count = layer_count + 1;
+        let rope_dim = config.rope_dimension_count;
+
+        self.ops.write_f32(self.layout.mtp_embed_in, embeddings)?;
+        self.ops.write_f32(self.layout.mtp_hidden_in, hidden)?;
+        for (row, position) in (base_position..base_position + rows).enumerate() {
+            fill_mrope_layout(
+                &mut self.rope[row * rope_dim..(row + 1) * rope_dim],
+                [position, position, position, 0],
+                config.rope_dimension_sections,
+                config.rope_freq_base,
+                self.mhc.is_some(),
+            )
+            .map_err(VulkanError::UnsupportedShape)?;
+        }
+        self.ops
+            .write_f32(self.layout.rope, &self.rope[..rows * rope_dim])?;
+
+        let mut commands = TokenCommands::begin(self.context)?;
+
+        // The two norms write into the two halves of one buffer, so the
+        // projection sees the normalized embedding and the normalized hidden
+        // state side by side -- the concatenation the CPU trunk builds.
+        self.ops.record_rms_norm_rows(
+            &commands,
+            mtp.enorm,
+            self.layout.mtp_embed_in,
+            self.layout.mtp_fused,
+            n_embd,
+            config.norm_eps,
+            rows,
+            n_embd,
+            2 * n_embd,
+        )?;
+        let hidden_half = ArenaRegion {
+            offset: self.layout.mtp_fused.offset + n_embd * 4,
+            size: self.layout.mtp_fused.size - n_embd * 4,
+        };
+        self.ops.record_rms_norm_rows(
+            &commands,
+            mtp.hnorm,
+            self.layout.mtp_hidden_in,
+            hidden_half,
+            n_embd,
+            config.norm_eps,
+            rows,
+            n_embd,
+            2 * n_embd,
+        )?;
+        self.record_weights(
+            &commands,
+            mtp.eh_proj,
+            self.layout.mtp_fused,
+            &[(self.layout.mtp_proj, n_embd)],
+            2 * n_embd,
+            rows,
+        )?;
+
+        // The attention block: the head's own weights, the head's own cache.
+        self.ops.record_rms_norm_rows(
+            &commands,
+            mtp.attn_norm,
+            self.layout.mtp_proj,
+            self.layout.mtp_attn_input,
+            n_embd,
+            config.norm_eps,
+            rows,
+            n_embd,
+            n_embd,
+        )?;
+        self.record_weight_group(
+            &commands,
+            mtp.qkv,
+            self.layout.mtp_attn_input,
+            [
+                (self.layout.raw_qkv, dense_raw_q),
+                (self.layout.raw_k, dense_kv),
+                (self.layout.v, dense_kv),
+            ],
+            n_embd,
+            rows,
+        )?;
+        self.ops.record_qwen35_dense_prepare(
+            &commands,
+            mtp.prepare,
+            self.layout.raw_qkv,
+            self.layout.raw_k,
+            self.layout.v,
+            self.layout.q,
+            self.layout.z,
+            self.layout.kv_k,
+            self.layout.kv_v,
+            self.layout.kv_delta_k,
+            self.layout.kv_delta_v,
+            self.layout.rope,
+            head_layer,
+            head_layer_count,
+            base_position,
+            self.capacity,
+            config.n_head,
+            config.n_head_kv,
+            head_dim,
+            rope_dim,
+            config.norm_eps,
+            rows,
+        )?;
+        self.ops.record_qwen35_attention(
+            &commands,
+            self.layout.q,
+            self.layout.z,
+            self.layout.kv_k,
+            self.layout.kv_v,
+            self.layout.attn,
+            head_layer,
+            head_layer_count,
+            base_position,
+            self.capacity,
+            config.n_head,
+            config.n_head_kv,
+            head_dim,
+            rows,
+        )?;
+        self.record_weights(
+            &commands,
+            mtp.output,
+            self.layout.attn,
+            &[(self.layout.projection, n_embd)],
+            dense_q,
+            rows,
+        )?;
+        self.ops.record_add_rows(
+            &commands,
+            self.layout.mtp_proj,
+            self.layout.projection,
+            n_embd,
+            rows,
+        )?;
+
+        if want_output {
+            // The feed-forward, then the head's own norm and its vocabulary
+            // projection.
+            self.ops.record_rms_norm_rows(
+                &commands,
+                mtp.attn_post_norm,
+                self.layout.mtp_proj,
+                self.layout.mtp_ffn_input,
+                n_embd,
+                config.norm_eps,
+                rows,
+                n_embd,
+                n_embd,
+            )?;
+            self.record_weight_group(
+                &commands,
+                mtp.ffn_gate_up,
+                self.layout.mtp_ffn_input,
+                [
+                    (self.layout.mtp_ffn_gate, mtp.ffn_width),
+                    (self.layout.mtp_ffn_up, mtp.ffn_width),
+                ],
+                n_embd,
+                rows,
+            )?;
+            self.ops.record_silu_mul_rows(
+                &commands,
+                self.layout.mtp_ffn_gate,
+                self.layout.mtp_ffn_up,
+                mtp.ffn_width,
+                rows,
+            )?;
+            self.record_weights(
+                &commands,
+                mtp.ffn_down,
+                self.layout.mtp_ffn_gate,
+                &[(self.layout.mtp_ffn_out, n_embd)],
+                mtp.ffn_width,
+                rows,
+            )?;
+            self.ops.record_add_rows(
+                &commands,
+                self.layout.mtp_proj,
+                self.layout.mtp_ffn_out,
+                n_embd,
+                rows,
+            )?;
+            self.ops.record_rms_norm_rows(
+                &commands,
+                mtp.head_norm,
+                self.layout.mtp_proj,
+                self.layout.mtp_output,
+                n_embd,
+                config.norm_eps,
+                rows,
+                n_embd,
+                n_embd,
+            )?;
+            let head = mtp.head.unwrap_or(self.output);
+            self.record_weights(
+                &commands,
+                head,
+                self.layout.mtp_output,
+                &[(self.layout.mtp_logits, config.vocab_size)],
+                n_embd,
+                rows,
+            )?;
+        }
+        commands.submit_and_wait()?;
+
+        let mut head_hidden = vec![0.0; rows * n_embd];
+        if want_output {
+            self.ops
+                .read_f32_into(self.layout.mtp_output, &mut head_hidden)?;
+        }
+        let mut logits = Vec::new();
+        if want_output {
+            logits = vec![0.0; config.vocab_size];
+            self.ops
+                .read_f32_into(self.layout.mtp_logits, &mut logits)?;
+        }
+        if head_hidden.iter().any(|value| !value.is_finite())
+            || logits.iter().any(|value| !value.is_finite())
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 Vulkan MTP head produced non-finite output".into(),
+            ));
+        }
+        Ok(Qwen35MtpHead {
+            logits,
+            hidden: head_hidden,
+        })
+    }
+
+    /// Ask the next chunk to hand back per-row hidden states and logits.
+    ///
+    /// A speculative verification needs both; a prefill catch-up only needs
+    /// the hidden states, and projecting a whole prompt batch would read the
+    /// 1.3 GB vocabulary matrix for rows nobody looks at.
+    pub(crate) fn set_collect(&mut self, normed: bool, logits: bool) {
+        self.collect_normed = normed;
+        self.collect_logits = logits;
+    }
+
+    /// Ask the next chunk to capture the recurrent layers' projections.
+    ///
+    /// The capture is what lets a rollback replay the recurrent state
+    /// instead of the whole model.
+    pub(crate) fn set_collect_capture(&mut self, capture: bool) {
+        self.collect_capture = capture;
+    }
+
+    /// Put the recurrent state back to the one a saved copy holds.
+    ///
+    /// The shadow arrays the host keeps are the same layout the device uses
+    /// (one flat run of layers), so the copy is a straight upload.
+    pub(crate) fn restore_recurrent_state(
+        &mut self,
+        conv: &[f32],
+        ssm: &[f32],
+    ) -> Result<(), VulkanError> {
+        if conv.len() != self.conv_state.len() || ssm.len() != self.ssm_state.len() {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "Qwen3.5 Vulkan recurrent state restore needs {} + {} values, got {} + {}",
+                self.conv_state.len(),
+                self.ssm_state.len(),
+                conv.len(),
+                ssm.len()
+            )));
+        }
+        self.ops.write_f32(self.layout.conv_state, conv)?;
+        self.ops.write_f32(self.layout.ssm_state, ssm)
+    }
+
+    /// Move the committed length back after a rejected draft.
+    ///
+    /// The rejected rows stay in the device cache, but the next chunk starts
+    /// at `position` and overwrites them before anything reads them.
+    pub(crate) fn rewind(&mut self, position: usize) -> Result<(), VulkanError> {
+        self.commit_state
+            .truncate(position)
+            .map_err(VulkanError::UnsupportedShape)
+    }
+
+    /// Put the recurrent state back where the committed rows leave it.
+    ///
+    /// The verification advanced the state over every drafted row, and the
+    /// state cannot be truncated the way the KV cache can. So the round
+    /// puts the saved copy back and replays the committed rows over the
+    /// recurrent layers alone: the chunk captured each recurrent layer's
+    /// projections, and the state update consumes nothing else.
+    ///
+    /// Replaying the state update instead of the projections is what makes
+    /// the rollback cheap: the projections read the recurrent layers'
+    /// weights, which is the expensive half of the update, and the layers
+    /// the state belongs to read a fraction of the weights the model does.
+    ///
+    /// The caller has to restore the saved state first
+    /// ([`Self::restore_recurrent_state`]) and rewind the committed length
+    /// afterwards.
+    pub(crate) fn replay_recurrent_rows<'a>(
+        &'a mut self,
+        keep: usize,
+    ) -> Result<(&'a [f32], &'a [f32]), VulkanError> {
+        if keep == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 Vulkan recurrent replay needs at least one row".into(),
+            ));
+        }
+        if !self.collect_capture {
+            return Err(VulkanError::UnsupportedShape(
+                "Qwen3.5 Vulkan recurrent replay needs the captured layer projections".into(),
+            ));
+        }
+        let commands = TokenCommands::begin(self.context)?;
+        let mut recurrent_index = 0usize;
+        for (layer_index, &physical) in self.plan.iter().enumerate() {
+            let bindings = &self.layers[physical];
+            let AttentionBindings::Recurrent(recurrent) = &bindings.attention else {
+                continue;
+            };
+            // The captured projections of this layer, and only the rows the
+            // round commits. The projections themselves are not replayed:
+            // they are the ones that read the layer's weights.
+            self.record_recurrent_state_update(
+                &commands,
+                layer_index,
+                recurrent,
+                self.capture_projection(recurrent_index),
+                keep,
+            )?;
+            recurrent_index += 1;
+        }
+        commands.submit_and_wait()?;
+        self.ops
+            .read_f32_into(self.layout.conv_state, &mut self.conv_state)?;
+        self.ops
+            .read_f32_into(self.layout.ssm_state, &mut self.ssm_state)?;
+        Ok((&self.conv_state, &self.ssm_state))
     }
 
     pub(crate) fn abort_token(&mut self) {
@@ -2080,6 +3003,103 @@ fn bind_weight_group<const N: usize>(
         .try_into()
         .map_err(|_| VulkanError::OutOfMemory)?;
     Ok(WeightBindings::Split(split))
+}
+
+/// Upload the draft head's weights.
+///
+/// The head is a dense block of its own: it has an attention of its own, a
+/// feed-forward of its own and norms of its own, and it attends over a KV
+/// cache of its own. Its vocabulary projection is the main model's output
+/// weight unless the checkpoint gives it one of its own, exactly as
+/// upstream does.
+fn bind_mtp_weights(
+    ops: &mut Qwen3Ops<'_>,
+    buffers: &mut UploadedBuffers,
+    mtp: &MtpWeights<'_>,
+    output_norm: &[f32],
+) -> Result<MtpBindings, VulkanError> {
+    let layer = &mtp.layer;
+    let qkv = bind_weight_group(
+        ops,
+        buffers,
+        [
+            (mtp_weight(layer.wq.as_ref(), "query")?, "Qwen3.5 MTP query"),
+            (mtp_weight(layer.wk.as_ref(), "key")?, "Qwen3.5 MTP key"),
+            (mtp_weight(layer.wv.as_ref(), "value")?, "Qwen3.5 MTP value"),
+        ],
+    )?;
+    let prepare_buffers = [
+        buffers.upload_f32(mtp_norm(layer.attn_q_norm.as_ref(), "query norm")?)?,
+        buffers.upload_f32(mtp_norm(layer.attn_k_norm.as_ref(), "key norm")?)?,
+    ];
+    let prepare = ops.bind_buffers(&prepare_buffers)?;
+    let output = bind_weight(
+        ops,
+        buffers,
+        mtp_weight(layer.wo.as_ref(), "attention output")?,
+        "Qwen3.5 MTP attention output",
+    )?;
+    let ffn_gate_up = bind_weight_group(
+        ops,
+        buffers,
+        [
+            (
+                mtp_weight(layer.ffn_gate.as_ref(), "FFN gate")?,
+                "Qwen3.5 MTP FFN gate",
+            ),
+            (
+                mtp_weight(layer.ffn_up.as_ref(), "FFN up")?,
+                "Qwen3.5 MTP FFN up",
+            ),
+        ],
+    )?;
+    let ffn_down = bind_weight(
+        ops,
+        buffers,
+        mtp_weight(layer.ffn_down.as_ref(), "FFN down")?,
+        "Qwen3.5 MTP FFN down",
+    )?;
+    let eh_proj = bind_weight(ops, buffers, &mtp.eh_proj, "Qwen3.5 MTP projection")?;
+    let enorm = ops.bind_buffers(&[buffers.upload_f32(&mtp.enorm)?])?;
+    let hnorm = ops.bind_buffers(&[buffers.upload_f32(&mtp.hnorm)?])?;
+    let attn_norm = ops.bind_buffers(&[buffers.upload_f32(&layer.attn_norm)?])?;
+    let attn_post_norm = ops.bind_buffers(&[buffers.upload_f32(&layer.attn_post_norm)?])?;
+    let head_norm = ops.bind_buffers(&[
+        buffers.upload_f32(mtp.shared_head_norm.as_deref().unwrap_or(output_norm))?
+    ])?;
+    let head = match mtp.shared_head_head.as_ref() {
+        Some(weight) => Some(bind_weight(ops, buffers, weight, "Qwen3.5 MTP vocabulary")?),
+        None => None,
+    };
+    let ffn_width = mtp_weight(layer.ffn_gate.as_ref(), "FFN gate")?.n_out;
+    Ok(MtpBindings {
+        eh_proj,
+        qkv,
+        prepare,
+        output,
+        ffn_gate_up,
+        ffn_down,
+        enorm,
+        hnorm,
+        attn_norm,
+        attn_post_norm,
+        head_norm,
+        head,
+        ffn_width,
+    })
+}
+
+fn mtp_weight<'a>(
+    weight: Option<&'a Weight<'a>>,
+    name: &str,
+) -> Result<&'a Weight<'a>, VulkanError> {
+    weight
+        .ok_or_else(|| VulkanError::UnsupportedShape(format!("missing Qwen3.5 MTP {name} weight")))
+}
+
+fn mtp_norm<'a>(norm: Option<&'a Vec<f32>>, name: &str) -> Result<&'a [f32], VulkanError> {
+    norm.map(Vec::as_slice)
+        .ok_or_else(|| VulkanError::UnsupportedShape(format!("missing Qwen3.5 MTP {name} weight")))
 }
 
 fn device_moe_format(moe: &Qwen35MoeWeights<'_>) -> Option<GpuWeightFormat> {
@@ -3348,15 +4368,44 @@ mod tests {
         let capacity = 7;
         let layout = Qwen35ArenaLayout::new(&config, capacity).unwrap();
 
-        assert_eq!(layout.kv_k.size, 2 * capacity * 4 * 4);
-        assert_eq!(layout.kv_v.size, 2 * capacity * 4 * 4);
+        // The draft head has a KV cache of its own: the layer slot after the
+        // main stack.
+        assert_eq!(layout.kv_k.size, 3 * capacity * 4 * 4);
+        assert_eq!(layout.kv_v.size, 3 * capacity * 4 * 4);
         assert_eq!(layout.conv_state.size, 2 * 2 * 16 * 4);
         assert_eq!(layout.ssm_state.size, 2 * 2 * 4 * 4 * 4);
-        assert_eq!(layout.q8.size, config.n_ff);
-        assert_eq!(layout.q8k.size, config.n_ff);
+        // The quantized activation buffer holds the widest row of the
+        // model: the draft head's projection takes twice the model width.
+        assert_eq!(layout.q8.size, 2 * config.n_embd);
+        assert_eq!(layout.q8k.size, 2 * config.n_embd);
+        // A checkpoint with a draft head projects a whole verification batch.
+        assert_eq!(layout.logits.size, config.vocab_size * 4);
+        assert_eq!(layout.logits_rows.size, config.vocab_size * 4);
+        // The head's own row buffers: one row of the model width each, and
+        // the projection's buffer is twice that wide.
+        assert_eq!(layout.mtp_fused.size, 2 * config.n_embd * 4);
+        assert_eq!(layout.mtp_proj.size, config.n_embd * 4);
+        assert_eq!(layout.mtp_logits.size, config.vocab_size * 4);
+        // The capture keeps the recurrent layers' projections: one slot per
+        // recurrent layer, one row of each projection's width.
+        let recurrent = config
+            .is_recurrent
+            .iter()
+            .filter(|recurrent| **recurrent)
+            .count();
+        assert_eq!(layout.capture_qkv.size, recurrent * config.conv_dim() * 4);
+        assert_eq!(layout.capture_z.size, recurrent * config.value_dim() * 4);
+        assert_eq!(layout.capture_beta.size, recurrent * config.ssm_dt_rank * 4);
+        assert_eq!(layout.capture_alpha.size, layout.capture_beta.size);
         assert!(layout.total_size() >= layout.ssm_state.end());
 
         let mut config = config;
+        config.n_nextn = 0;
+        let layout = Qwen35ArenaLayout::new_rows(&config, 7, 3).unwrap();
+        assert_eq!(layout.logits_rows.size, 0, "no draft head, no row buffer");
+        assert_eq!(layout.capture_qkv.size, 0, "no draft head, no capture");
+        let mut config = config;
+        config.n_nextn = 1;
         config.moe = Some(crate::models::qwen35::trunk::config::Qwen35Moe {
             n_expert: 32,
             n_expert_used: 8,
@@ -3383,8 +4432,14 @@ mod tests {
             let ordinary = Qwen35ArenaLayout::new_rows(&config, 7, rows).unwrap();
             assert_eq!(ordinary.mhc_residual.size, 0);
             for streams in [2, 4] {
-                let layout =
-                    Qwen35ArenaLayout::new_rows_with_streams(&config, 7, rows, streams).unwrap();
+                let layout = Qwen35ArenaLayout::new_rows_with_streams(
+                    &config,
+                    7,
+                    rows,
+                    streams,
+                    config.n_ff,
+                )
+                .unwrap();
                 assert_eq!(layout.mhc_residual.size, rows * streams * config.n_embd * 4);
                 assert_eq!(layout.mhc_normed.size, layout.mhc_residual.size);
                 assert_eq!(layout.mhc_logits.size, rows * streams * (2 + streams) * 4);
