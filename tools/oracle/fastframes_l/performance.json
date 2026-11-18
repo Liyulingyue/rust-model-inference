@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-18",
+  "status": "未运行",
+  "reason": "Replacement SSH endpoint disconnected; no clean repeated native/reference benchmark completed.",
+  "host": {
+    "logical_cpus": 128,
+    "ram_gib_approx": 503,
+    "gpu": "AMD gfx1100, device 0x744b",
+    "vram_gib_approx": 48,
+    "cgroup_memory_limit_bytes": 59055800320
+  },
+  "required_comparisons": [
+    "native release CPU",
+    "native release Auto with execution evidence",
+    "native release strict Vulkan",
+    "official controlled F32",
+    "official BF16 with AMD SDPA substitution"
+  ],
+  "required_cases": [
+    "16x16, 5 frames shared-noise",
+    "832x480, 81 frames quality/performance"
+  ],
+  "timing": {
+    "warmup": true,
+    "minimum_repetitions": 3,
+    "synchronize_gpu": true,
+    "disable_checkpoint_io": true,
+    "record_model_load_separately": true
+  },
+  "measurements": [],
+  "latency_seconds": null,
+  "speedup": null,
+  "peak_rss_bytes": null,
+  "peak_vram_bytes": null,
+  "observed_trace_runs": [
+    {
+      "recipe": "raw-source controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 140.06697715446353
+    },
+    {
+      "recipe": "BF16 GGUF controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 190.21348341926932
+    }
+  ],
+  "trace_timing_limit": "Includes streamed dequantization/uploads and checkpoint/RGB I/O; not a latency/speedup benchmark."
+}

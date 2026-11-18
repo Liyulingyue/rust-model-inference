@@ -8,6 +8,7 @@ mod image_generation;
 mod prediction;
 mod rerank;
 mod speech;
+mod video_generation;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -82,6 +83,7 @@ fn hy_transcription_task<T: Send + 'static>(
 enum Backend {
     Text(TextBackend),
     Pjit(image_generation::PjitBackend),
+    Video(video_generation::VideoBackend),
     /// A WeVisOne text model: a Qwen3-VL release with a coordinate
     /// vocabulary and a separate pixel decoder. It serves the ordinary
     /// text routes and adds the image prediction route.
@@ -1159,6 +1161,15 @@ fn build_backend(
             )?,
         )));
     }
+    if let Ok(source) = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+    {
+        if crate::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
+            return Ok(Arc::new(Backend::Video(video_generation::build(
+                options,
+                Arc::from(source),
+            )?)));
+        }
+    }
     let decision_source =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
@@ -2095,7 +2106,16 @@ pub fn run_server() {
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
             .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
-    if pjit_invocation {
+    let video_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|s| crate::models::diffusion::fastframes_l::matches_model(s.as_ref()));
+    if video_invocation {
+        if let Err(error) = crate::app::video_generation::options(&options, true) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if pjit_invocation {
         if let Err(error) = crate::app::diffusion::pjit_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
@@ -2157,6 +2177,7 @@ pub fn run_server() {
         Backend::ArkTts(_) => "arktts",
         Backend::Auk(_) => "auk",
         Backend::Pjit(_) => "pjit",
+        Backend::Video(_) => "video-generation",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -2182,6 +2203,10 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::Video(_) => router.route(
+            "/v1/videos/generations",
+            post(video_generation::generate).layer(DefaultBodyLimit::max(128 * 1024)),
+        ),
         Backend::Pjit(_) => {
             router.route("/v1/images/generations", post(image_generation::generate))
         }

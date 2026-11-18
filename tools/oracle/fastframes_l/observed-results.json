@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-18",
+  "status": "Experimental / partial acceptance",
+  "evidence_kind": "Observed command results; remote raw artifacts could not be retrieved after SSH disconnected",
+  "host": {"logical_cpus":128,"physical_ram_gib_approx":503,"cgroup_memory_limit_bytes":59055800320,"gpu":"AMD Radeon Graphics (RADV NAVI31), gfx1100","vram_gib_approx":48},
+  "bf16_gguf": {"size":41892093248,"sha256":"d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9"},
+  "f16_gguf": {"size":41892093248,"sha256":"ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39"},
+  "bf16_cpu_alignment": {
+    "passed":true,"width":16,"height":16,"frames":5,"fps":16,"seed":17,"threads":24,
+    "prompt":"A red ball rolls on a table.",
+    "noise":"Exact shared noise.f32 from the raw-source reference; both runs consumed the same file",
+    "oracle":"Pinned official forwards, streamed BF16 GGUF weights widened to F32, PyTorch CUDA/ROCm SDPA",
+    "checkpoints":411,"max_relative_rmse":0.00004240734428259513,"min_cosine":0.9999999991360493,
+    "thresholds":{"relative_rmse_max":0.005,"cosine_min":0.9999},
+    "cli_exit_code":0,
+    "remote_trace":"target/fastframes/native-bf16-cpu.jsonl",
+    "remote_reference":"target/fastframes/reference-bf16/manifest.json",
+    "remote_comparison":"target/fastframes/comparison-bf16-cpu.json",
+    "limit":"Before final oracle provenance/noise hardening and the F32-only mmap-loader fix; final full-model rerun pending"
+  },
+  "bf16_cpu_http": {"status":200,"remote_log":"target/fastframes/cpu-matrix-driver.log","numeric_validation":"未运行","limit":"Server returned MP4; headers, decode summary and parity sidecars were not retrieved before disconnection"},
+  "bf16_vulkan_partial": {
+    "completed":false,"validation":"未运行",
+    "observed_submissions":4737,"observed_static_uploads":2419,"observed_trace_records":274,
+    "compared_prefix_checkpoints":238,"prefix_max_relative_rmse_vs_cpu":0.00003988701595524663,
+    "prefix_first_failure":null,
+    "remote_log":"target/fastframes/native-bf16-vulkan.log",
+    "limit":"Actual device execution established for the text/DiT prefix; no complete Vulkan rollout, refiner, decoder or MP4 result observed"
+  },
+  "reference_traced_timing": [
+    {"recipe":"raw-source controlled F32","device":"cuda","elapsed_seconds":140.06697715446353},
+    {"recipe":"same-GGUF BF16 storage controlled F32","device":"cuda","elapsed_seconds":190.21348341926932}
+  ],
+  "timing_limit":"Both include streamed weights and checkpoint/RGB I/O; they are not benchmark or speedup results",
+  "interruption":"The replacement SSH endpoint first worked, then began returning Connection refused; no remote recovery mutation was attempted"
+}

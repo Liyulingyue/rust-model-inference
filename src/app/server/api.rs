@@ -1840,6 +1840,7 @@ fn backend_label(b: &Backend) -> &'static str {
         Backend::ArkTts(_) => "arktts",
         Backend::Auk(_) => "auk",
         Backend::Pjit(_) => "pjit",
+        Backend::Video(_) => "video-generation",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
