@@ -195,9 +195,15 @@ fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result
     if info.dims != dims {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    // The format belongs to the file, not to the loader: the Q8_0 DiT stores
+    // its main stack in Q8_0, the F16 one in F16, and the F32 one keeps that
+    // stack in Q8_0 while the refiner and the embedders are F32.
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::F32
+    ) {
         return Err(format!(
-            "Invalid {name} type: expected F16 or Q8_0, got {:?}",
+            "Invalid {name} type: expected F16, Q8_0 or F32, got {:?}",
             info.ggml_type
         ));
     }
@@ -248,6 +254,8 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     ] {
         super::common::require_tensor(source, name, &[dims], GGMLType::F32)?;
     }
+    // The weights of the DiT come as F16 in one file and as F32 in another;
+    // the loader reads whichever the file declares.
     for (name, dims) in [
         ("cap_embedder.1.weight", [2560, 3840]),
         ("cap_pad_token", [3840, 1]),
@@ -258,7 +266,12 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("x_embedder.weight", [64, 3840]),
         ("x_pad_token", [3840, 1]),
     ] {
-        super::common::require_tensor(source, name, &dims, GGMLType::F16)?;
+        crate::core::tensor::require_tensor_meta(
+            source,
+            name,
+            &dims,
+            &[GGMLType::F16, GGMLType::F32],
+        )?;
     }
     for layer in 0..2 {
         validate_refiner(source, &format!("context_refiner.{layer}"), false)?;
@@ -635,7 +648,10 @@ fn linear_into_scaled_impl(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::F32
+    ) {
         return Err(format!(
             "Unsupported matrix type {:?} for {name}",
             info.ggml_type
@@ -683,6 +699,54 @@ fn linear_into_scaled_impl(
                 F16Kernel::new(weight)
                     .forward_scaled_rows(values, out, n_in, n_out, scale_copy, buffer, ith, nth);
             });
+        }
+        GGMLType::F32 => {
+            // The F32 weights of the F32 DiT: the same row-partitioned shape
+            // as the F16 branch, with the kernel that reads f32 weights. The
+            // scale follows the same contract as the other two formats: it
+            // multiplies the input before the multiply and the output divides
+            // it out again, so only the rounding differs.
+            if scale != 1.0 {
+                q8.scaled.resize(n_in, 0.0);
+                for (scaled, &value) in q8.scaled.iter_mut().zip(input) {
+                    *scaled = value * scale;
+                }
+            }
+            let Some(kernel) =
+                crate::ops::kernel::f32::F32Kernel::from_le_bytes(bytes, n_in, n_out)
+            else {
+                return Err(format!("Invalid {name} byte length"));
+            };
+            let weight = crate::ops::kernel::Kernel::f32_slice(&kernel)
+                .ok_or_else(|| format!("Invalid {name} weight layout"))?;
+            let weight_ptr = weight.as_ptr() as usize;
+            let weight_len = weight.len();
+            let scaled_input = if scale == 1.0 {
+                input.as_ptr()
+            } else {
+                q8.scaled.as_ptr()
+            } as usize;
+            let input_len = n_in;
+            let output_ptr = output.as_mut_ptr() as usize;
+            let output_len = output.len();
+            let threads = pool.n_threads();
+            pool.compute(move |ith, nth| {
+                let values =
+                    unsafe { std::slice::from_raw_parts(scaled_input as *const f32, input_len) };
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, output_len) };
+                let weight =
+                    unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, weight_len) };
+                crate::ops::kernel::f32::forward_f32_rows_dispatch(
+                    weight, values, out, n_in, n_out, ith, nth,
+                );
+            });
+            if scale != 1.0 {
+                let inverse_scale = scale.recip();
+                for value in output {
+                    *value *= inverse_scale;
+                }
+            }
         }
         GGMLType::Q8_0 => {
             if scale == 1.0 {

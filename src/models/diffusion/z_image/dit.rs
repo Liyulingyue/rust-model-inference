@@ -284,7 +284,7 @@ fn force_f32_linear_into(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if info.ggml_type != GGMLType::F16 {
+    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::F32) {
         return Err(format!("Invalid {name} type for force-F32 linear"));
     }
     let bytes = source
@@ -294,14 +294,32 @@ fn force_f32_linear_into(
         return Err(format!("Invalid {name} byte length"));
     }
     scratch.force_f32_row.resize(n_in, 0.0);
-    let row_bytes = n_in
-        .checked_mul(2)
-        .ok_or_else(|| format!("Invalid {name} row byte size"))?;
-    for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
-        for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
-            *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+    match info.ggml_type {
+        GGMLType::F16 => {
+            let row_bytes = n_in
+                .checked_mul(2)
+                .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+            for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+                for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
+                    *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+                }
+                *output = dot_f32(&scratch.force_f32_row, input, n_in);
+            }
         }
-        *output = dot_f32(&scratch.force_f32_row, input, n_in);
+        GGMLType::F32 => {
+            // The F32 file stores the weights as f32 already, so the row is
+            // read as it is rather than widened from F16.
+            let row_bytes = n_in
+                .checked_mul(4)
+                .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+            for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+                for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(4)) {
+                    *value = f32::from_le_bytes(chunk.try_into().unwrap());
+                }
+                *output = dot_f32(&scratch.force_f32_row, input, n_in);
+            }
+        }
+        _ => unreachable!(),
     }
     Ok(())
 }
