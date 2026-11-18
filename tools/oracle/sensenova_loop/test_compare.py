@@ -7,6 +7,11 @@ from tools.oracle.sensenova_loop.compare import metrics, compare
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_lossy_gates_accept_small_error_and_reject_wrong_direction(self):
+        self.assertFalse(metrics([1.01, 2.0], [1.0, 2.0])["pass"])
+        self.assertTrue(metrics([1.01, 2.0], [1.0, 2.0], lossy=True)["pass"])
+        self.assertFalse(metrics([-1.0, -2.0], [1.0, 2.0], lossy=True)["pass"])
+
     def test_accepts_roundoff_but_rejects_real_error(self):
         self.assertTrue(metrics([1.000001, 2.0], [1.0, 2.0])["pass"])
         self.assertFalse(metrics([1.1, 2.0], [1.0, 2.0])["pass"])

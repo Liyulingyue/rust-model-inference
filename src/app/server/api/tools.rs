@@ -230,24 +230,54 @@ pub fn build_prompt(
     } else {
         jinja
     };
-    // `--jinja` renders the model's own chat template for a multi-turn
-    // conversation. Deliberately gated to plain text turns with no tools:
-    //
-    //  * `tools` is not plumbed through the Jinja context yet, so a
-    //    tool-bearing request must keep the hand-written renderer.
-    //  * image turns need `<|vision_start|>` markers and image slicing that
-    //    the template does not describe; dropping the `attached_images`
-    //    return would silently feed the model text only.
-    //
-    // Both are fallbacks, never silent behaviour changes.
-    if tools.is_empty() && !messages.iter().any(|m| !m.images.is_empty()) {
+    let last_user = messages.iter().rposition(|m| m.role == "user");
+    if matches!(arch, "qwen35" | "qwen35moe" | "sensenova_loop")
+        && messages
+            .iter()
+            .enumerate()
+            .any(|(index, message)| !message.images.is_empty() && Some(index) != last_user)
+    {
+        return Err("Image input is supported only in the final user message".into());
+    }
+    // SenseNova's template emits one image marker; the runtime expands it after resize.
+    // Tool-bearing requests retain the existing renderer until Jinja supports tools.
+    let has_images = messages.iter().any(|m| !m.images.is_empty());
+    if tools.is_empty() && (!has_images || arch == crate::models::sensenova_loop::ARCH) {
+        let attached_images: Vec<Vec<u8>> = messages
+            .iter()
+            .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+            .collect();
         let messages: Vec<crate::prompt::jinja::ChatMessage> = messages
             .iter()
-            .map(|m| crate::prompt::jinja::ChatMessage {
-                role: m.role.clone(),
-                content: serde_json::Value::String(m.text.clone()),
+            .map(|m| {
+                let content = if m.images.is_empty() {
+                    serde_json::Value::String(m.text.clone())
+                } else {
+                    let mut parts = Vec::new();
+                    let mut offset = 0;
+                    for image in &m.images {
+                        let end = image.text_offset.unwrap_or(0);
+                        let text = m
+                            .text
+                            .get(offset..end)
+                            .ok_or("invalid image/text content ordering")?;
+                        if !text.is_empty() {
+                            parts.push(json!({"type":"text", "text":text}));
+                        }
+                        parts.push(json!({"type":"image"}));
+                        offset = end;
+                    }
+                    if offset < m.text.len() {
+                        parts.push(json!({"type":"text", "text":&m.text[offset..]}));
+                    }
+                    Value::Array(parts)
+                };
+                Ok(crate::prompt::jinja::ChatMessage {
+                    role: m.role.clone(),
+                    content,
+                })
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
         let ids = crate::prompt::jinja::conversation_tokens_with(
             tokenizer,
             compiled_jinja,
@@ -260,20 +290,30 @@ pub fn build_prompt(
         // the compile on every request even on a cache hit -- defeating the
         // cache -- and made a `--chat-template-file` request fail after
         // startup if the file was removed.
+        let ids = if ids.is_some() {
+            ids
+        } else {
+            crate::prompt::jinja::conversation_tokens(
+                tokenizer,
+                jinja,
+                &|k| source.metadata(k).cloned(),
+                &messages,
+                true,
+                enable_thinking.unwrap_or(false),
+            )?
+        };
         if let Some(ids) = ids {
-            return Ok((ids, Vec::new()));
-        }
-        // Fallback for callers that did not pre-resolve (the JEV HTTP
-        // endpoints pass no compiled template).
-        if let Some(ids) = crate::prompt::jinja::conversation_tokens(
-            tokenizer,
-            jinja,
-            &|k| source.metadata(k).cloned(),
-            &messages,
-            true,
-            enable_thinking.unwrap_or(false),
-        )? {
-            return Ok((ids, Vec::new()));
+            if has_images {
+                let marker = tokenizer
+                    .special_token_id("image_pad")
+                    .ok_or("Required token missing: <|image_pad|>")?;
+                if ids.iter().filter(|&&id| id == marker).count() != attached_images.len() {
+                    return Err(
+                        "Chat template must emit one image placeholder per attached image".into(),
+                    );
+                }
+            }
+            return Ok((ids, attached_images));
         }
     }
 
@@ -478,15 +518,6 @@ pub fn build_prompt(
     validate_tools(tools, choice)?;
     if messages.is_empty() {
         return Err("No messages provided".into());
-    }
-    let last_user = messages.iter().rposition(|m| m.role == "user");
-    if matches!(arch, "qwen35" | "qwen35moe" | "sensenova_loop")
-        && messages
-            .iter()
-            .enumerate()
-            .any(|(index, message)| !message.images.is_empty() && Some(index) != last_user)
-    {
-        return Err("Image input is supported only in the final user message".into());
     }
     // Collect the attached images up front: the `turns` flattening below keeps
     // only (role, text), and the local `messages` binding is later shadowed by
@@ -1351,9 +1382,20 @@ mod tests {
                 char::from_u32(cp).unwrap().to_string()
             })
             .collect();
-        tokens.extend(["<|im_start|>", "<|im_end|>", "<think>", "</think>"].map(str::to_owned));
+        tokens.extend(
+            [
+                "<|im_start|>",
+                "<|im_end|>",
+                "<think>",
+                "</think>",
+                "<|vision_start|>",
+                "<|image_pad|>",
+                "<|vision_end|>",
+            ]
+            .map(str::to_owned),
+        );
         let mut types = vec![MetaValue::Uint32(1); 256];
-        types.extend(vec![MetaValue::Uint32(3); 4]);
+        types.extend(vec![MetaValue::Uint32(3); 7]);
         let metadata: HashMap<String, MetaValue> = HashMap::from([
             (
                 "tokenizer.ggml.model".into(),
@@ -1408,6 +1450,67 @@ mod tests {
             call_id: None,
             images: vec![],
         }]
+    }
+
+    #[test]
+    fn sensenova_image_template_matches_cli_and_preserves_attachments() {
+        let tokenizer = tokenizer();
+        let template = crate::prompt::jinja::JinjaChatTemplate::compile(
+            "custom: {% for m in messages %}{{m.role}}:{% if m.content is string %}{{m.content}}{% else %}{% for p in m.content %}{% if p.type == 'image' %}<|vision_start|><|image_pad|><|vision_end|>{% else %}{{p.text}}{% endif %}{% endfor %}{% endif %}{% endfor %}", "image test",
+        ).unwrap();
+        let mut messages = user_message();
+        messages[0]
+            .images
+            .push(super::super::image_input::ImageRef::new(
+                vec![1, 2],
+                "image",
+            ));
+        let render = |messages: &[Message], template: &crate::prompt::jinja::JinjaChatTemplate| {
+            build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                "sensenova_loop",
+                messages,
+                &[],
+                &ToolChoice::None,
+                Some(false),
+                &Default::default(),
+                Some(template),
+            )
+        };
+        let (ids, images) = render(&messages, &template).unwrap();
+        assert_eq!(images, vec![vec![1, 2]]);
+        let marker = tokenizer.special_token_id("image_pad").unwrap();
+        let cli = crate::prompt::jinja::media_conversation_tokens(
+            &tokenizer,
+            Some(&template),
+            marker,
+            &[crate::prompt::jinja::MediaPart::image(1)],
+            &messages[0].text,
+            None,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ids, cli);
+        messages[0].images[0].text_offset = Some(3);
+        let ordered = render(&messages, &template).unwrap().0;
+        assert!(tokenizer
+            .decode(&ordered, true)
+            .contains("que<|vision_start|><|image_pad|><|vision_end|>stion"));
+        messages[0].images[0].text_offset = Some(usize::MAX);
+        assert!(render(&messages, &template)
+            .unwrap_err()
+            .contains("ordering"));
+        messages[0].images[0].text_offset = None;
+        let dropped = crate::prompt::jinja::JinjaChatTemplate::compile("dropped", "bad").unwrap();
+        assert!(render(&messages, &dropped)
+            .unwrap_err()
+            .contains("one image placeholder"));
+        messages.push(user_message().remove(0));
+        assert!(render(&messages, &template)
+            .unwrap_err()
+            .contains("final user message"));
     }
 
     #[test]

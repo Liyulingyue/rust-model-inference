@@ -34,6 +34,17 @@ def _cases():
     }
 
 
+@pytest.mark.parametrize("fmt", ["q4_k", "q6_k"])
+@pytest.mark.parametrize("value", [-1.875, -0.125, 0.0, 0.125, 1.875])
+def test_constant_blocks_preserve_their_value(fmt, value):
+    gguf = pytest.importorskip("gguf")
+    values = np.full(256, value, dtype=np.float32)
+    payload = kquants.quantize_k(fmt, values)
+    kind = gguf.GGMLQuantizationType.Q4_K if fmt == "q4_k" else gguf.GGMLQuantizationType.Q6_K
+    decoded = gguf.quants.dequantize(np.frombuffer(payload, dtype=np.uint8), kind)
+    np.testing.assert_allclose(decoded, values, atol=0.002, rtol=0.002)
+
+
 @pytest.mark.parametrize(
     "case,expected",
     [
@@ -120,20 +131,20 @@ def test_q5_k_empty_and_incomplete_blocks():
 @pytest.mark.parametrize(
     "case,expected",
     [
-        ("uniform", "33279e3509f8e3dc1ded5d363a8876051feb45e44dfbc74fa6e360e6f33c587d"),
+        ("uniform", "f7b0d58bff518b78a8084540b134244c5cb97d7c98a2fe94c3d756af722f4098"),
         ("zeros", "9e33403d6e41598a790d339e0efdb72ed9b1700e04655543a888a30a50c9f517"),
-        ("positive", "37c7468967c85da6e0fd583aef2b49144fef531850ae6a2f75fc37e544a049d1"),
-        ("negative", "dc711fe936c85f713e5d824458d9fdab79539804ca44d2cae1029f07bd9100de"),
-        ("ties", "cecdacceec30dda0a4e8a82e004ac4ffccd370f75d38f483b3d62d4b5a311ea0"),
-        ("mixed_scales", "afebcce3b9f5ee1d2b3548ecf70285d52190a9696f77edb2e05c78c337b11925"),
-        ("strided", "c34a89badcced3ea44bb2944ae795c3ab920904880629db51226dca19176a3d2"),
-        ("ordered_sum", "213f156ba9e957ed08898038c572ca4359698019b82ee52c2894beab76673443"),
-        ("underflow", "ee8aebeada7b3f4e889df9005e49784b89387b083246a7d35f01fa7f11688795"),
-        ("f32_rounding", "7ec8850037a47ecbb18bee6641fd942876f37dc97d4d1cce768ab2d1791ba3f9"),
+        ("positive", "6f50afa88f668506927af1c5180ba2c452e3ba9e341d70d0912016b5da9c62f9"),
+        ("negative", "5d36834042713bce933d49d7693e8505a4d982883f4d5e8ea02ca79b5ad07a8a"),
+        ("ties", "d4736ee6e0a64db8e33c708e625eff1131bad08d8c5785c0a8d7dc578aae964e"),
+        ("mixed_scales", "4769c14b6639cbf269cd32ed09b6a982b2cbc05633d700b30e390dbe35b6bef8"),
+        ("strided", "81675b3cc469dd4103559251b4ae8c3cb00ba9e41ba332c1d89e3b7ed5736928"),
+        ("ordered_sum", "3b180eb12bc6f8fa6f08435483f58e2b4605397e99c54ee89658584562e1fa6e"),
+        ("underflow", "49e7dfe29da4fc62559907a1035397c850fb1a8c44003d40f02343c6d3a4acc3"),
+        ("f32_rounding", "ad42b3cd34e1851bccdfb7e3f050befcd778a54dcc30f622e497b361b0cdc03a"),
     ],
 )
 def test_q6_k_preserves_scalar_payload(case, expected):
-    """Payload digests captured from the scalar encoder at e7f0cc8."""
+    """Layout snapshots with the valid -128 subscale; values are checked above."""
     values = _values()
     amplitude = np.float32(3.7654008865356445)
     subblock_values = amplitude * (

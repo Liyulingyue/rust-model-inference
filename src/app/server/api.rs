@@ -1715,8 +1715,11 @@ pub async fn jev_score(
         positive,
         threads,
         prefill_batch_size,
-        // Template-mandatory architectures resolve their checkpoint template in the scorer.
-        crate::prompt::jinja::Options::default(),
+        state
+            .model
+            .text_backend()
+            .map(|text| text.chat_template.as_ref().clone())
+            .unwrap_or_default(),
         state
             .model
             .text_backend()
@@ -1792,7 +1795,11 @@ async fn jev_grouped(
         mode,
         threads,
         prefill_batch_size,
-        crate::prompt::jinja::Options::default(),
+        state
+            .model
+            .text_backend()
+            .map(|text| text.chat_template.as_ref().clone())
+            .unwrap_or_default(),
         state
             .model
             .text_backend()
@@ -1888,21 +1895,9 @@ fn jev_error(status: StatusCode, message: String) -> Response {
 // ============================================================================
 // Multimodal JEV endpoints (`/v1/jev/image`, `/v1/jev/image_grouped`)
 //
-// Pragmatic implementation: Qwen3.5 + CLIP/Qwen2.5-Omni multimodal does
-// not yet have a logits-only forward pass (only `model.generate()`),
-// so true argmax-over-labels scoring is unavailable. We approximate
-// it with `max_new_tokens=1` generation: the model sees a `<image>` +
-// "Question: ... A. opt1 B. opt2 ... Answer:" prompt and produces
-// the most-likely label token as the first generated token. The
-// returned `score` / `probs` are derived from the post-generation
-// char-matches, not from logits — so the JSON mirrors the text JEV
-// shape but the underlying inference is autoregressive.
-//
-// For grouped (`/v1/jev/image_grouped`), each group is its own
-// forward pass with a separate prompt (`Should camera move left?
-// yes/no`), so N groups = N forward passes per request. The 0.8B
-// model on this 5-second machine takes ~1.4s per pass, so a 4-axis
-// request is ~5-6s end-to-end.
+// Both modes read final-position logits from the shared multimodal forward.
+// Single mode normalizes over A..Z candidates; grouped mode normalizes each
+// group independently after one forward per question, sharing CLI payloads.
 //
 // Both endpoints require `--mmproj` at server startup; without it
 // they return 400 with a clear error message.
@@ -2462,6 +2457,13 @@ async fn run_multimodal_text_only(
     let max_context = state_for_max_ctx(&state)?;
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
+    let chat_template = Arc::clone(
+        &state
+            .model
+            .text_backend()
+            .ok_or("image JEV requires a text backend")?
+            .compiled_chat_template,
+    );
 
     super::compute_task(state.compute, move || match arch.as_str() {
         // Same arch set the CLI `--jev --image` gate accepts; see
@@ -2500,8 +2502,7 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
-                // This endpoint has no chat-template switch, so no template.
-                None,
+                chat_template.as_ref().as_ref(),
             )
         }
         other => Err(format!(

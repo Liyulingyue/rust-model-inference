@@ -817,7 +817,10 @@ impl HybridTextRuntime {
         let arch = arch_of(&source);
         if arch == crate::models::sensenova_loop::ARCH {
             if let Some(mmproj) = &options.mmproj {
-                crate::models::sensenova_loop::validate_projector(mmproj.as_ref())?;
+                crate::models::sensenova_loop::validate_components(
+                    source.as_ref(),
+                    mmproj.as_ref(),
+                )?;
             }
         }
         let mut model = crate::models::hybrid::HybridTextModel::from_source(source.as_ref())?;
@@ -911,11 +914,26 @@ impl TextRuntime for HybridTextRuntime {
                      token budget; downscale the image before sending"
                 ));
             }
-            // Use the encoder's resize contract without executing the vision model.
-            prompt_len = prompt_len
-                .checked_add(vision_tokens)
-                .and_then(|length| length.checked_add(2))
-                .ok_or("context length overflow")?;
+            let placeholders = self
+                .tokenizer
+                .special_token_id("image_pad")
+                .map_or(0, |marker| {
+                    token_ids.iter().filter(|&&id| id == marker).count()
+                });
+            // Templates already include the marker and vision delimiters.
+            prompt_len = if placeholders > 0 {
+                if placeholders != images.len() {
+                    return Err("Image placeholder count does not match attached images".into());
+                }
+                prompt_len
+                    .checked_sub(placeholders)
+                    .and_then(|length| length.checked_add(vision_tokens))
+            } else {
+                prompt_len
+                    .checked_add(vision_tokens)
+                    .and_then(|length| length.checked_add(2))
+            }
+            .ok_or("context length overflow")?;
         }
         let capacity = prompt_len
             .checked_add(max_new_tokens)
@@ -1460,6 +1478,14 @@ mod tests {
             runtime.generate(&request, &mut sink).unwrap_err(),
             "request needs 82 tokens, exceeds context limit 64"
         );
+        let marker = runtime.tokenizer.special_token_id("image_pad").unwrap();
+        runtime
+            .validate_request(&[marker], &request.images, 0)
+            .unwrap();
+        assert!(runtime
+            .validate_request(&[marker, marker], &request.images, 0)
+            .unwrap_err()
+            .contains("placeholder count"));
         request.images.push(request.images[0].clone());
         assert!(runtime
             .validate_request(&request.token_ids, &request.images, request.max_new_tokens)
@@ -1555,7 +1581,7 @@ mod tests {
                 "tokenizer.ggml.tokens".to_string(),
                 crate::core::tensor::MetaValue::Array(
                     crate::core::tensor::MetaValueType::String,
-                    ["u", "s", "e", "r", "\u{010a}", "H", "i"]
+                    ["u", "s", "e", "r", "\u{010a}", "H", "i", "<|image_pad|>"]
                         .map(|v| crate::core::tensor::MetaValue::String(v.into()))
                         .to_vec(),
                 ),
@@ -1564,7 +1590,7 @@ mod tests {
                 "tokenizer.ggml.token_type".to_string(),
                 crate::core::tensor::MetaValue::Array(
                     crate::core::tensor::MetaValueType::Uint32,
-                    [1u32, 1, 1, 1, 1, 1, 1]
+                    [1u32, 1, 1, 1, 1, 1, 1, 3]
                         .map(crate::core::tensor::MetaValue::Uint32)
                         .to_vec(),
                 ),
@@ -1673,33 +1699,39 @@ impl HybridTextRuntime {
             ));
         }
 
-        // 2. Splice the placeholder run into the user turn, right after the
-        //    `user\n` role tokens and BEFORE the user's text — exactly where
-        //    the CLI's multimodal path puts them
-        //    (`append_qwen_message_tokens(..., "user", [vision][pad…][vision][text])`).
-        //    Getting this position wrong silently blinds the model: it answered
-        //    "black" for a solid-blue image when the run sat outside the turn.
-        //    `tools.rs` builds the turn as `` `user\n` <text> ``,
-        //    so the insert point is (first ``) + 1 + len(encode("user\n")).
-        let mut user_prefix = vec![im_start];
-        user_prefix.extend(self.tokenizer.encode(
-            "user\n",
-            crate::core::tokenizer::EncodeOptions {
-                add_special: false,
-                parse_special: false,
-            },
-        ));
-        let insert_at = prompt_ids
-            .windows(user_prefix.len())
-            .rposition(|window| window == user_prefix)
-            .map(|start| start + user_prefix.len())
-            .ok_or("Image prompt requires a user turn")?;
-        let mut ids = Vec::with_capacity(prompt_ids.len() + n_vis_total + 2);
-        ids.extend_from_slice(&prompt_ids[..insert_at]);
-        ids.push(vision_start);
-        ids.extend(std::iter::repeat(image_pad).take(n_vis_total));
-        ids.push(vision_end);
-        ids.extend_from_slice(&prompt_ids[insert_at..]);
+        let ids = if prompt_ids.contains(&image_pad) {
+            let counts: Vec<_> = grids.iter().map(|grid| grid.token_count()).collect();
+            crate::prompt::jinja::expand_vision_placeholders(prompt_ids, image_pad, &counts)?
+        } else {
+            // 2. Splice the placeholder run into the user turn, right after the
+            //    `user\n` role tokens and BEFORE the user's text — exactly where
+            //    the CLI's multimodal path puts them
+            //    (`append_qwen_message_tokens(..., "user", [vision][pad…][vision][text])`).
+            //    Getting this position wrong silently blinds the model: it answered
+            //    "black" for a solid-blue image when the run sat outside the turn.
+            //    `tools.rs` builds the turn as `` `user\n` <text> ``,
+            //    so the insert point is (first ``) + 1 + len(encode("user\n")).
+            let mut user_prefix = vec![im_start];
+            user_prefix.extend(self.tokenizer.encode(
+                "user\n",
+                crate::core::tokenizer::EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ));
+            let insert_at = prompt_ids
+                .windows(user_prefix.len())
+                .rposition(|window| window == user_prefix)
+                .map(|start| start + user_prefix.len())
+                .ok_or("Image prompt requires a user turn")?;
+            let mut ids = Vec::with_capacity(prompt_ids.len() + n_vis_total + 2);
+            ids.extend_from_slice(&prompt_ids[..insert_at]);
+            ids.push(vision_start);
+            ids.extend(std::iter::repeat(image_pad).take(n_vis_total));
+            ids.push(vision_end);
+            ids.extend_from_slice(&prompt_ids[insert_at..]);
+            ids
+        };
 
         // 3. m-rope positions over the expanded ids.
         let (positions, _next) =

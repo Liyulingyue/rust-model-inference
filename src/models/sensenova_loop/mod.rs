@@ -1,4 +1,5 @@
 //! Shared physical Qwen3.5 weights with independent caches for every Loop visit.
+pub(crate) mod rope;
 #[cfg(test)]
 mod tests;
 
@@ -13,6 +14,26 @@ use serde::Deserialize;
 pub const ARCH: &str = "sensenova_loop";
 pub const SOURCE_CONFIG_SHA256: &str =
     "3069b497e0a9ba70b1f74561831cbab0df0ccc4247f3ae106054c1632360ef51";
+pub const RELEASE_CONFIG_SHA256: &str =
+    "614dbd44b3a7fba8cd3adf5118b91ee40d51765b874de9dfadf67ea4e16ba68e";
+
+fn gdn_l2_norm(x: &mut [f32], eps: f32) {
+    let scale = (crate::ops::dot_f32(x, x, x.len()) + eps).sqrt().recip();
+    for value in x {
+        *value *= scale;
+    }
+}
+
+fn load_projection<'a>(source: &'a dyn TensorSource, name: &str) -> Option<Weight<'a>> {
+    let mut weight = load_weight(source, name)?;
+    if source.tensor_info(name)?.ggml_type == GGMLType::BF16 {
+        // SenseNova uses normal BF16 SIMD arithmetic, without ggml activation rounding.
+        weight.kernel = Box::new(crate::ops::kernel::bf16::BF16Kernel::new(
+            source.tensor_slice(name)?,
+        ));
+    }
+    Some(weight)
+}
 
 pub fn validate_projector(source: &dyn TensorSource) -> Result<(), String> {
     if source
@@ -23,16 +44,37 @@ pub fn validate_projector(source: &dyn TensorSource) -> Result<(), String> {
             .metadata("clip.projector_type")
             .and_then(|v| v.to_string_val())
             != Some("qwen3vl_merger")
-        || source
-            .metadata("sensenova_loop.source_config_sha256")
-            .and_then(|v| v.to_string_val())
-            != Some(SOURCE_CONFIG_SHA256)
+        || !matches!(
+            source
+                .metadata("sensenova_loop.source_config_sha256")
+                .and_then(|v| v.to_string_val()),
+            Some(SOURCE_CONFIG_SHA256 | RELEASE_CONFIG_SHA256)
+        )
         || source
             .metadata("clip.vision.projection_dim")
             .and_then(|v| v.to_u64())
             != Some(4096)
     {
         return Err("SenseNova Loop requires its matching vision projector".into());
+    }
+    Ok(())
+}
+
+pub fn validate_components(
+    decoder: &dyn TensorSource,
+    projector: &dyn TensorSource,
+) -> Result<(), String> {
+    validate_projector(projector)?;
+    let identity = |source: &dyn TensorSource| {
+        source
+            .metadata("sensenova_loop.source_config_sha256")
+            .and_then(|v| v.to_string_val())
+            .map(str::to_owned)
+    };
+    if identity(decoder) != identity(projector) {
+        return Err(
+            "SenseNova Loop decoder and vision projector have different source configs".into(),
+        );
     }
     Ok(())
 }
@@ -125,12 +167,14 @@ pub struct StreamRouting<'a, 'm> {
     pub(crate) plan: &'a [usize],
     pub(crate) settings: &'a MhcSettings,
     pub(crate) routers: &'a [(Router<'m>, Router<'m>)],
+    pub(crate) rope: Option<&'a rope::YarnRope>,
 }
 pub struct SenseNovaLoopModel<'a> {
     pub trunk: HybridTrunk<'a>,
     plan: Vec<usize>,
     settings: MhcSettings,
     routers: Vec<(Router<'a>, Router<'a>)>,
+    rope: Option<rope::YarnRope>,
 }
 
 /// Validate one tensor's shape, storage type and payload length.
@@ -221,12 +265,13 @@ impl<'a> SenseNovaLoopModel<'a> {
             }
         }
         let rope = &text["rope_parameters"];
+        let yarn =
+            self::rope::YarnRope::from_config(text, cfg.rope_dimension_count, cfg.rope_freq_base)?;
         let sections = serde_json::json!(&cfg.rope_dimension_sections[..3]);
         if text["hidden_act"] != "silu"
             || text["attention_bias"] != false
             || text["attn_output_gate"] != true
             || text["tie_word_embeddings"] != false
-            || rope["rope_type"] != "default"
             || rope["mrope_interleaved"] != true
             || rope["mrope_section"] != sections
             || cfg.rope_dimension_sections[3] != 0
@@ -331,7 +376,7 @@ impl<'a> SenseNovaLoopModel<'a> {
             };
             routers.push((load("mhc_attn")?, load("mhc_ffn")?));
         }
-        let mut trunk = HybridTrunk::load_trunk(source, cfg.clone(), false)?;
+        let mut trunk = HybridTrunk::load_trunk_with(source, cfg.clone(), false, load_projection)?;
         cfg.is_recurrent = plan.iter().map(|&p| cfg.is_recurrent[p]).collect();
         cfg.n_layer = plan.len();
         trunk.config = cfg;
@@ -340,6 +385,7 @@ impl<'a> SenseNovaLoopModel<'a> {
             plan,
             settings,
             routers,
+            rope: yarn,
         })
     }
 }
@@ -471,6 +517,7 @@ impl<'m> HybridTrunkModel<'m> for SenseNovaLoopModel<'m> {
             plan: &self.plan,
             settings: &self.settings,
             routers: &self.routers,
+            rope: self.rope.as_ref(),
         })
     }
     fn forward_at(
@@ -492,6 +539,16 @@ impl<'m> HybridTrunkModel<'m> for SenseNovaLoopModel<'m> {
         }
         let mut hidden = scratch.x[..rows * h].to_vec();
         trace("loop.embedding", rows, h, &hidden);
+        let coefficients = self.rope.as_ref().map(|rope| {
+            let mut values = vec![0.0; rows * t.config.rope_dimension_count];
+            for (row, &position) in values
+                .chunks_exact_mut(t.config.rope_dimension_count)
+                .zip(positions)
+            {
+                rope.fill_coefficients(row, position, t.config.rope_dimension_sections);
+            }
+            values
+        });
         for (visit, &physical) in self.plan.iter().enumerate() {
             let layer = &t.layers[physical];
             let routed = (m.start..m.end).contains(&physical);
@@ -529,13 +586,16 @@ impl<'m> HybridTrunkModel<'m> for SenseNovaLoopModel<'m> {
                         pool,
                         false,
                         true,
+                        Some(gdn_l2_norm),
                         #[cfg(feature = "parity-trace")]
                         false,
                     )?
                 } else {
-                    t.forward_dense_attn_layer(
+                    t.forward_dense_attn_layer_with(
+                        layer,
                         physical,
                         visit,
+                        t.config.n_layer,
                         &branch,
                         rows,
                         kv,
@@ -544,6 +604,7 @@ impl<'m> HybridTrunkModel<'m> for SenseNovaLoopModel<'m> {
                         positions,
                         Some(base),
                         true,
+                        coefficients.as_deref(),
                         #[cfg(feature = "parity-trace")]
                         false,
                     )

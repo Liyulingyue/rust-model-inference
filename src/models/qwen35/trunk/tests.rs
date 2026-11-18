@@ -1304,6 +1304,7 @@ fn hf_gdn_heads_repeat_in_pairs_and_visit_caches_are_independent() {
                     &pool,
                     false,
                     hf_order,
+                    None,
                     #[cfg(feature = "parity-trace")]
                     false,
                 )
@@ -1350,6 +1351,7 @@ fn qwen35_recurrent_replay_restores_the_state_after_the_accepted_rows() {
             &pool,
             false,
             false,
+            None,
             #[cfg(feature = "parity-trace")]
             false,
         )
@@ -1370,6 +1372,7 @@ fn qwen35_recurrent_replay_restores_the_state_after_the_accepted_rows() {
             &pool,
             false,
             false,
+            None,
             #[cfg(feature = "parity-trace")]
             false,
         )

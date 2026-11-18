@@ -178,9 +178,8 @@ def _qkx2_batch(x: np.ndarray, weights: np.ndarray) -> tuple[np.ndarray, np.ndar
     evaluated at once along a trailing axis.  Returns ``(scale, min, L)`` with
     ``L`` shaped like ``x``.
 
-    The reference accumulates in F64 while its input is F32, and the candidate
-    that wins changes with the last bits of the sum, so the reductions stay in
-    F64 and the per-element order matches the scalar loop.
+    Retain the scalar Python encoder's F64 search convention. Its payload is
+    not claimed bitwise identical to ggml's F32 scale search.
     """
     xd = x.astype(np.float64)
     wd = weights.astype(np.float64)
@@ -190,20 +189,19 @@ def _qkx2_batch(x: np.ndarray, weights: np.ndarray) -> tuple[np.ndarray, np.ndar
     safe_span = np.where(span == 0.0, 1.0, span)
     sum_w = wd.sum(axis=2)
     sum_x = (wd * xd).sum(axis=2)
-    sum_x2 = (wd * xd * xd).sum(axis=2)
 
     # is=0 seed, mirroring the reference's first estimate.
     isc0 = 15.0 / safe_span
     L0 = np.clip(np.floor(isc0[..., None] * (xd - lo[..., None]) + 0.5), 0, 15)
-    scale0 = np.where(sum_x2 > 0.0, sum_x / np.maximum((wd * L0 * L0).sum(axis=2), 1e-300), 1.0 / isc0)
+    scale0 = np.where(span == 0.0, 0.0, 1.0 / isc0)
     resid0 = scale0[..., None] * L0 + lo[..., None] - xd
     best_err = (wd * resid0 * resid0).sum(axis=2)
     best_scale = scale0
     best_min = lo
     best_L = L0
 
-    steps = np.arange(1, 21, dtype=np.float64)
-    # (blocks, 8, 1, 20) candidate scales so the sweep lands on the trailing
+    steps = np.arange(0, 21, dtype=np.float64)
+    # (blocks, 8, 1, 21) candidate scales so the sweep lands on the trailing
     # axis opposite the 32 values.
     isc = (-1.0 + 0.1 * steps + 15.0)[None, None, None, :] / safe_span[..., None, None]
     Lc = np.clip(
@@ -388,8 +386,7 @@ def _qkx2_quants_q5(
     candidate is evaluated at once along a trailing axis.  Returns
     ``(scale, min, L)`` with ``L`` shaped like ``x``.
 
-    Unlike the Q4_K port, this one follows the reference exactly: the first
-    estimate is ``iscale = nmax/span`` with ``scale = 1/iscale``, and the
+    The first estimate is ``iscale = nmax/span`` with ``scale = 1/iscale``, and the
     candidate sweep covers ``is = 0..nstep`` inclusive.  The reductions stay in
     F64, as in the other ports.
     """
@@ -605,7 +602,7 @@ def _q6k_batch(blocks: np.ndarray) -> np.ndarray:
     inverse = -128.0 / np.where(active_blocks, max_scale, 1.0)
     scale = np.where(active_blocks, 1.0 / inverse, 0.0).astype("<f2")
     stored = np.clip(
-        _nearest_int(inverse.astype(np.float32)[:, None] * scales.astype(np.float32)), -127, 127
+        _nearest_int(inverse.astype(np.float32)[:, None] * scales.astype(np.float32)), -128, 127
     ).astype(np.int8)
     sub_scales = scale.astype(np.float32)[:, None] * stored.astype(np.float32)
     subblocks = blocks.reshape(block_count, 16, 16)

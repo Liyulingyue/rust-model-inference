@@ -93,11 +93,14 @@ void main() {
                     : (k_square - k_next) + k_sum;
                 k_sum = k_next;
             }
-            // Upstream's `ggml_l2_norm`: the scale is 1 / max(sqrt(sum), eps),
-            // so the epsilon floors the norm instead of being added inside the
-            // square root.
-            inverse_q = min(inverse_sqrt_f32(q_sum + q_correction), 1.0 / pc.eps);
-            inverse_k = min(inverse_sqrt_f32(k_sum + k_correction), 1.0 / pc.eps);
+            if (pc.phase == 2u) {
+                // SenseNova's Transformers contract adds epsilon to the squared norm.
+                inverse_q = inverse_sqrt_f32((q_sum + q_correction) + pc.eps);
+                inverse_k = inverse_sqrt_f32((k_sum + k_correction) + pc.eps);
+            } else {
+                inverse_q = min(inverse_sqrt_f32(q_sum + q_correction), 1.0 / pc.eps);
+                inverse_k = min(inverse_sqrt_f32(k_sum + k_correction), 1.0 / pc.eps);
+            }
         }
         barrier();
 

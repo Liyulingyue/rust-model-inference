@@ -871,6 +871,7 @@ struct MhcBindings {
     shape: MhcShape,
     norm: OperatorBindings,
     routers: Vec<[MhcRouterBindings; 2]>,
+    rope: Option<crate::models::sensenova_loop::rope::YarnRope>,
 }
 
 /// The draft head's output.
@@ -1258,6 +1259,7 @@ impl Qwen35VulkanSession {
                 end: m.end,
                 norm,
                 routers,
+                rope: routing.rope.cloned(),
                 shape: MhcShape {
                     width: config.n_embd,
                     streams: m.streams,
@@ -1543,6 +1545,7 @@ impl Qwen35VulkanSession {
             recurrent_head_dim,
             config.norm_eps,
             rows,
+            self.mhc.is_some(),
         )?;
         self.ops.record_qwen35_recurrent_ssm_layout(
             commands,
@@ -1907,6 +1910,15 @@ impl Qwen35VulkanSession {
             None => None,
         };
         for (row, &position) in positions.iter().enumerate() {
+            if let Some(rope) = self.mhc.as_ref().and_then(|m| m.rope.as_ref()) {
+                rope.fill_coefficients(
+                    &mut self.rope[row * config.rope_dimension_count
+                        ..(row + 1) * config.rope_dimension_count],
+                    position,
+                    config.rope_dimension_sections,
+                );
+                continue;
+            }
             fill_mrope_layout(
                 &mut self.rope
                     [row * config.rope_dimension_count..(row + 1) * config.rope_dimension_count],
@@ -2229,13 +2241,15 @@ impl Qwen35VulkanSession {
             if self.mhc.is_some() {
                 let name = format!("loop.visit.{layer_index}");
                 if crate::parity_trace::enabled(&name) {
-                    commands = commands.flush()?;
+                    // Staged readback acquires the submission lock itself.
+                    commands.submit_and_wait()?;
                     let (region, width) = routed
                         .filter(|m| physical + 1 != m.end)
                         .map_or((self.layout.x, config.n_embd), |m| {
                             (self.layout.mhc_residual, config.n_embd * m.shape.streams)
                         });
                     self.trace_rows(&name, None, region, rows, width)?;
+                    commands = TokenCommands::begin(self.context)?;
                 }
             }
             #[cfg(feature = "parity-trace")]
@@ -2292,14 +2306,6 @@ impl Qwen35VulkanSession {
                     }
                 }
                 commands = TokenCommands::begin(self.context)?;
-            }
-            #[cfg(feature = "parity-trace")]
-            {
-                let name = format!("l_out-{layer_index}");
-                if self.mhc.is_none() && crate::parity_trace::enabled(&name) {
-                    commands = commands.flush()?;
-                    self.trace_rows(&name, Some(layer_index), self.layout.x, rows, config.n_embd)?;
-                }
             }
         }
 
