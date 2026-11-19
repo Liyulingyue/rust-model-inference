@@ -182,7 +182,7 @@ Vulkan BF16 dot 路径在 64 线程组中打包独立输出行，并让四帧共
 每个输出仍保留 CPU 的 FMA 流、归约顺序和标量尾部。RADV NAVI31 上，256 帧
 NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致；AR 耗时基本不变，
 该 NAR 样例仍略慢于四线程 CPU。计时条件与完整生成检查见
-[YuE2 Vulkan 优化记录](../develop/VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
+[YuE2 Vulkan 优化记录](../develop/VULKAN_RADV_VALIDATIONS.md)。
 
 这些优化不更换权重、不减少扩散步数，也不修改采样参数。可用以下回归检查
 逐位一致性及中间 logits 的省略行为（不需要下载模型）。

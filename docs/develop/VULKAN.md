@@ -43,13 +43,13 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 这些是投影级 offload，Edge0 的整图 Vulkan 资格仍为 false。共享投影按格式和 host 输入/输出预算
 分块，各投影持有自己的上传缓存和 arena；Z-Image VAE 的 F16 卷积独立共享 CHW arena。
 全图融合仍需测量。真实 RADV 模型、算子、成品和计时记录见
-[2026-10-07 实机验证](VULKAN_RADV_VALIDATION_2026-10-07.md)；其他设备和未列出的格式仍需验证。
+[2026-10-07 实机验证](VULKAN_RADV_VALIDATIONS.md)；其他设备和未列出的格式仍需验证。
 
 YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值合约和长前缀执行问题，
 已停用；隔离生命周期测试不能证明整图可用。
 BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
 RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
-详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
+详见 [YuE2 优化记录](VULKAN_RADV_VALIDATIONS.md)。
 Z-Image VAE 的 F16 卷积复用 register-tiled F16 shader，每组覆盖 32 个像素、64 个输出通道。
 GPU 直接读取 CHW 的 1×1 / 3×3 输入并零填边界，融合 bias 后按 CHW 写回，省去 CPU im2col
 和输出转置。整个 VAE 共享可增长的 arena 与最多 64 份不可变权重缓存；常规设备每层只提交一次。
@@ -65,7 +65,7 @@ RGB 最大字节误差 2、MAE 0.045631、PSNR 61.536 dB，与分块 GPU 的已�
 BF16/F32 VAE 分支、归一化、激活、空间 attention 和上采样保留原有计算。
 AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
 重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
-实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)。
+实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_RADV_VALIDATIONS.md)。
 
 投影在调用线程上同步完成，之后才执行 SiLU、bias 或 residual。GPU 失败或拒绝 shape 时，
 CPU 重算该投影的全部输出；不混用已经成功的前几个 tile。`RMI_SCALAR=1`、

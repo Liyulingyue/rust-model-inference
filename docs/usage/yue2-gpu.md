@@ -2,7 +2,7 @@
 
 Normal `--gpu --yue2` sessions offload matrix projections while retaining CPU
 attention, state operations and the BF16 rounding boundaries. See the
-[2026-10-07 RADV verification](../develop/VULKAN_RADV_VALIDATION_2026-10-07.md).
+[2026-10-07 RADV verification](../develop/VULKAN_RADV_VALIDATIONS.md).
 
 The legacy whole-AR executor (`src/vulkan/yue2.rs`) is disabled in normal
 sessions: its delayed initialization dropped the prefix KV, and after fixing
