@@ -1880,6 +1880,207 @@ impl<'a, 'm, M: HybridTrunkModel<'m>> HybridSession<'a, 'm, M> {
         })
     }
 
+    // ---- n-gram: the committed history drafts, the target verifies ----
+
+    /// The n-gram path, like the DSpark path, runs the target on the CPU:
+    /// the verify/rollback machinery below is shared with the MTP device
+    /// path, but that wiring has not been exercised for n-gram rounds.
+    fn ngram_gpu_guard(&self) -> Result<(), String> {
+        #[cfg(feature = "vulkan")]
+        if self.gpu.is_some() {
+            return Err("ngram speculative decoding currently requires the CPU target path".into());
+        }
+        Ok(())
+    }
+
+    /// One speculative step with an n-gram draft: `token` is the token the
+    /// target sampled at `position` and `drafts` are the tokens the
+    /// [`crate::core::ngram`] lookup proposed for the positions after it.
+    ///
+    /// Mirrors [`Self::dspark_speculative_step`] minus the sidecar: the
+    /// same batched greedy verification, the same KV / recurrent-state
+    /// rollback on rejection. An empty `drafts` (the lookup found nothing)
+    /// degenerates into the plain one-token step — the verification batch
+    /// is the bonus token alone, whose logits are the target's own next
+    /// token — so the n-gram path can never diverge from greedy.
+    pub fn ngram_speculative_step(
+        &mut self,
+        token: u32,
+        position: usize,
+        drafts: &[u32],
+    ) -> Result<MtpStep, String> {
+        self.ngram_gpu_guard()?;
+        // The verification: the target runs the bonus token and the whole
+        // draft in one forward pass.
+        let mut batch = Vec::with_capacity(drafts.len() + 1);
+        batch.push(token);
+        batch.extend_from_slice(drafts);
+        let positions: Vec<[usize; 4]> = (0..batch.len())
+            .map(|offset| {
+                let p = position + offset;
+                [p, p, p, 0]
+            })
+            .collect();
+
+        // Same as the MTP / DSpark verification: the recurrent state has
+        // to be saved before the pass, because a rejected draft cannot be
+        // undone by truncating the KV cache alone.
+        self.save_mtp_state();
+        let embeddings = self.embed_tokens(&batch)?;
+        let processed_before = self.processed_tokens;
+        self.prepare_recurrent_capture(batch.len());
+        if batch.len() > self.prefill_batch_size {
+            return Err(format!(
+                "the Qwen3.5 ngram draft batch of {} rows does not fit in the chunk size {}",
+                batch.len(),
+                self.prefill_batch_size
+            ));
+        }
+        self.scratch.collect_all_logits = true;
+        let last_logits = self.step(&embeddings, batch.len(), &positions)?;
+        self.scratch.collect_all_logits = false;
+        self.mtp_logits_ready = self.scratch.logits_rows_collected;
+        self.scratch.capture_recurrent_replay = false;
+
+        // The target's own continuation: the logits of row `i` say what
+        // the target would produce at the position of draft `i`. Greedy,
+        // like the MTP path.
+        let mut accepted = 0usize;
+        let mut next = 0u32;
+        loop {
+            let logits = if accepted + 1 == batch.len() {
+                last_logits.clone()
+            } else {
+                self.logits_row(accepted)?
+            };
+            let sampled = crate::ops::sampling::argmax(&logits) as u32;
+            if accepted < drafts.len() && sampled == drafts[accepted] {
+                accepted += 1;
+                continue;
+            }
+            next = sampled;
+            break;
+        }
+        let mut tokens = Vec::with_capacity(accepted + 1);
+        tokens.push(token);
+        tokens.extend_from_slice(&drafts[..accepted]);
+
+        // The rejected drafts left their KV and their recurrent state
+        // behind: same rollback as the MTP / DSpark paths. The n-gram
+        // lookup has no state of its own — its "draft model" is the
+        // committed token history the caller maintains.
+        if accepted < drafts.len() {
+            self.restore_mtp_state();
+            let cfg = &self.model.trunk().config;
+            let k_dim = cfg.n_embd_head() * cfg.n_head_kv;
+            super::scratch::kv_cache_truncate(
+                &mut self.kv_cache,
+                cfg.n_layer_impl(),
+                k_dim,
+                position + accepted + 1,
+                position + batch.len(),
+            );
+            let keep = accepted + 1;
+            self.model
+                .trunk()
+                .replay_recurrent_state(keep, &mut self.scratch, &self.pool)?;
+            self.processed_tokens = processed_before + keep;
+            self.next_position = position + keep;
+        }
+
+        Ok(MtpStep {
+            tokens,
+            next,
+            accepted,
+            drafted: drafts.len(),
+        })
+    }
+
+    /// Generate `max_tokens` tokens with the committed history drafting
+    /// (llama.cpp's `ngram-simple`).
+    ///
+    /// Same shape as [`Self::mtp_generate`] and [`Self::dspark_generate`]:
+    /// greedy only. The lookup runs every round over the prompt plus the
+    /// tokens committed so far (without the bonus token the target just
+    /// sampled — exactly the history llama.cpp's `spec_prompt` holds).
+    pub fn ngram_generate(
+        &mut self,
+        prompt_tokens: &[u32],
+        prompt_positions: &[[usize; 4]],
+        max_tokens: usize,
+        config: &crate::core::ngram::NgramSimpleConfig,
+    ) -> Result<MtpGeneration, String> {
+        self.ngram_gpu_guard()?;
+        if max_tokens == 0 {
+            return Ok(MtpGeneration::default());
+        }
+        // Plain prefill: the n-gram draft has no state to prime.
+        let logits = self.step_with_tokens(prompt_tokens, prompt_positions)?;
+        self.ngram_generate_after_prefill(
+            logits,
+            prompt_tokens,
+            prompt_positions,
+            max_tokens,
+            config,
+        )
+    }
+
+    /// Generate `max_tokens` tokens with the committed history drafting,
+    /// starting from a prefill that already ran.
+    ///
+    /// The prompt's logits are the ones the prefill produced: the first
+    /// round's bonus token comes from them. A caller that wants to time the
+    /// prefill apart from the rounds uses this instead of
+    /// [`Self::ngram_generate`]; `prompt_tokens` seeds the lookup history.
+    pub fn ngram_generate_after_prefill(
+        &mut self,
+        logits: Vec<f32>,
+        prompt_tokens: &[u32],
+        prompt_positions: &[[usize; 4]],
+        max_tokens: usize,
+        config: &crate::core::ngram::NgramSimpleConfig,
+    ) -> Result<MtpGeneration, String> {
+        self.ngram_gpu_guard()?;
+        if max_tokens == 0 {
+            return Ok(MtpGeneration::default());
+        }
+        let mut position = prompt_positions
+            .last()
+            .map(|p| p[0].saturating_add(1))
+            .unwrap_or(0);
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        // The lookup history: the prompt plus the committed tokens, without
+        // the bonus token (upstream's `spec_prompt` / `id_last` split).
+        let mut history: Vec<u32> = Vec::with_capacity(prompt_tokens.len() + max_tokens);
+        history.extend_from_slice(prompt_tokens);
+        let mut out: Vec<u32> = Vec::with_capacity(max_tokens);
+        let mut rounds = 0usize;
+        let mut accepted = 0usize;
+        let mut drafted = 0usize;
+        while out.len() < max_tokens {
+            let drafts = crate::core::ngram::ngram_simple_draft(config, &history, bonus);
+            let step = self.ngram_speculative_step(bonus, position, &drafts)?;
+            rounds += 1;
+            accepted += step.accepted;
+            drafted += step.drafted;
+            position += step.tokens.len();
+            bonus = step.next;
+            history.extend_from_slice(&step.tokens);
+            for token in step.tokens {
+                out.push(token);
+                if out.len() >= max_tokens {
+                    break;
+                }
+            }
+        }
+        Ok(MtpGeneration {
+            tokens: out,
+            rounds,
+            accepted,
+            drafted,
+        })
+    }
+
     /// The DSpark path currently runs the target on the CPU: the device
     /// forward does not capture the per-layer inputs the draft's encoder
     /// needs. Supporting it is the device-parity TODO.
