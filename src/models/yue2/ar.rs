@@ -3446,8 +3446,13 @@ mod performance_tests {
 
     #[cfg(feature = "vulkan")]
     #[test]
-    #[ignore = "requires a Vulkan device and RUST_GPU_MIN_OUTPUTS=0: the shapes below are smaller than the default 16K output threshold, so the device declines them unless the threshold is lowered"]
+    #[ignore = "requires a Vulkan device; run alone with --test-threads=1 (it lowers RUST_GPU_MIN_OUTPUTS for its small shapes)"]
     fn vulkan_yue2_bf16_rounds_after_bias_across_tiles() {
+        // These shapes are smaller than the default 16K output threshold, so
+        // the device would decline them. Lower the threshold here instead of
+        // requiring the caller's shell; the mutation is process-wide, hence
+        // the run-alone note above.
+        std::env::set_var("RUST_GPU_MIN_OUTPUTS", "0");
         crate::ops::enable_gpu();
         let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
         let bytes: &'static [u8] = Box::leak(
