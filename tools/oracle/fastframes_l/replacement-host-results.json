@@ -1,0 +1,2280 @@
+{
+  "date": "2026-11-19",
+  "status": "Experimental / partial; fixed gates retained",
+  "scope": "Replacement host: corrected-oracle BF16/F16/Q8_0 reruns. The original 54-case matrix remains historical evidence, not a corrected-wrapper rerun of all nine formats.",
+  "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
+  "source_state": "Preserved Rust production binaries compiled at source_head; oracle repair is identified by before/after wrapper hashes below.",
+  "environment": {
+    "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
+    "cpu_logical": 128,
+    "cpu_max": "1600000 100000",
+    "cgroup_memory_max_bytes": 59055800320,
+    "gpu_card": "card7",
+    "gpu_render_node": "renderD134",
+    "vram_total_bytes": 51522830336,
+    "python": "3.12.3",
+    "packages": {
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "transformers": "4.57.1",
+      "tokenizers": "0.22.2",
+      "gguf": "0.18.0",
+      "safetensors": "0.7.0",
+      "ftfy": "6.3.1",
+      "imageio-ffmpeg": "0.8.1"
+    },
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "ffmpeg_version": "ffmpeg version n9.0.2-17-g2a571b6068-20260930 Copyright (c) 2000-2026 the FFmpeg developers",
+    "official_pinned_files_verified": 20,
+    "binary_sha256": {
+      "rust-model-inference": "4bb08f010271b260a45cd6cbbf6daaf6fc6c9858f275ea482ff00549448de431",
+      "rust-model-server": "2334d40a2219218bcf8f7e8dd307f9c2a74139c3a3ff5043c8a0f4e7e12308c7"
+    },
+    "public_cli_matches_preserved_baseline": true,
+    "production_text_source_restored": true,
+    "build_profile": "release-fast",
+    "features": [
+      "vulkan",
+      "parity-trace"
+    ],
+    "other_task_observed": "/workspace/rust-model-inference-sensenova-loop-9b",
+    "benchmark_limit": "Shared host/cgroup/GPU and release-fast build; timings are diagnostic process durations, not isolated release performance",
+    "weights_and_tensor_payloads": "Remote storage only; local collection contains explicit small JSON/log reports",
+    "cgroup_memory_events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "host_label": "2026-11-19 replacement Linux instance"
+  },
+  "source_downloads": {
+    "files": [
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/FastFrames-L/fastframes-l/dit.safetensors",
+        "size": 28577096680,
+        "sha256": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/FastFrames-L/fastframes-l/kv_refiner.safetensors",
+        "size": 1780342784,
+        "sha256": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/FastFrames-L/fastframes-l/pixel_decoder.safetensors",
+        "size": 286952688,
+        "sha256": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth",
+        "size": 11361920418,
+        "sha256": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B/google/umt5-xxl/tokenizer.json",
+        "size": 16837417,
+        "sha256": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B/google/umt5-xxl/tokenizer_config.json",
+        "size": 61728,
+        "sha256": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B/google/umt5-xxl/special_tokens_map.json",
+        "size": 6623,
+        "sha256": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d"
+      },
+      {
+        "path": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B/google/umt5-xxl/spiece.model",
+        "size": 4548313,
+        "sha256": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      }
+    ],
+    "resumed_ranges": 0,
+    "elapsed_seconds_this_attempt": 127.08746998400602,
+    "transport": "ModelScope pinned revision, 16 range streams, full SHA256 verification"
+  },
+  "format_restoration": {
+    "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
+    "results": [
+      {
+        "format": "q8_0",
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.converter.fastframes_l.convert_fastframes_l",
+          "--model-dir",
+          "models/FastFrames-L",
+          "--text-dir",
+          "models/Wan2.1-T2V-14B",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+          "--format",
+          "q8_0"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 239.35977386399463
+      },
+      {
+        "format": "bf16",
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.converter.fastframes_l.convert_fastframes_l",
+          "--model-dir",
+          "models/FastFrames-L",
+          "--text-dir",
+          "models/Wan2.1-T2V-14B",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--format",
+          "bf16"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 239.479160072995
+      },
+      {
+        "format": "f16",
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.converter.fastframes_l.convert_fastframes_l",
+          "--model-dir",
+          "models/FastFrames-L",
+          "--text-dir",
+          "models/Wan2.1-T2V-14B",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-f16.gguf",
+          "--format",
+          "f16"
+        ],
+        "exit_code": 0,
+        "elapsed_seconds": 279.9006149869965
+      }
+    ]
+  },
+  "oracle_repair": {
+    "before_sha256": "7e66bdae6e8d31f66e2aba00c190f09b2cd4190fdade47e06ede86885bb4b4cd",
+    "after_sha256": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4",
+    "defect": "PyTorch scalar/tensor division rounds reciprocal before multiplication and can change activation integer codes; explicit tensor/tensor division preserves the intended F32 division contract.",
+    "diagnostic": {
+      "results": [
+        {
+          "device": "cpu",
+          "different_inverses": 25167,
+          "different_codes": 4,
+          "total_codes": 3200000,
+          "fixture_input_bits": [
+            3214565680,
+            3214511692,
+            3202573431,
+            1069867796,
+            1066599942,
+            3216800644,
+            1066239163,
+            3212521752,
+            3215179503,
+            1059029414,
+            3196600292,
+            3214726010,
+            3204629104,
+            3213627556,
+            3203566570,
+            3187558922,
+            1052246757,
+            1057982311,
+            3213083065,
+            1066797166,
+            3213484410,
+            3208379646,
+            1063682517,
+            1066476422,
+            1066120626,
+            3213424243,
+            3215580435,
+            3209586140,
+            3198803490,
+            1051725897,
+            3218479713,
+            3174319929
+          ],
+          "lane": 7,
+          "reverse_codes": [
+            -92,
+            -91,
+            -34,
+            117,
+            87,
+            -112,
+            84,
+            -75,
+            -97,
+            47,
+            -20,
+            -93,
+            -39,
+            -83,
+            -36,
+            -9,
+            27,
+            43,
+            -78,
+            89,
+            -82,
+            -56,
+            68,
+            86,
+            83,
+            -81,
+            -101,
+            -61,
+            -25,
+            26,
+            -127,
+            -3
+          ],
+          "explicit_codes": [
+            -92,
+            -91,
+            -34,
+            117,
+            87,
+            -112,
+            84,
+            -74,
+            -97,
+            47,
+            -20,
+            -93,
+            -39,
+            -83,
+            -36,
+            -9,
+            27,
+            43,
+            -78,
+            89,
+            -82,
+            -56,
+            68,
+            86,
+            83,
+            -81,
+            -101,
+            -61,
+            -25,
+            26,
+            -127,
+            -3
+          ]
+        },
+        {
+          "device": "cuda",
+          "different_inverses": 25167,
+          "different_codes": 4,
+          "total_codes": 3200000,
+          "fixture_input_bits": [
+            3214565680,
+            3214511692,
+            3202573431,
+            1069867796,
+            1066599942,
+            3216800644,
+            1066239163,
+            3212521752,
+            3215179503,
+            1059029414,
+            3196600292,
+            3214726010,
+            3204629104,
+            3213627556,
+            3203566570,
+            3187558922,
+            1052246757,
+            1057982311,
+            3213083065,
+            1066797166,
+            3213484410,
+            3208379646,
+            1063682517,
+            1066476422,
+            1066120626,
+            3213424243,
+            3215580435,
+            3209586140,
+            3198803490,
+            1051725897,
+            3218479713,
+            3174319929
+          ],
+          "lane": 7,
+          "reverse_codes": [
+            -92,
+            -91,
+            -34,
+            117,
+            87,
+            -112,
+            84,
+            -75,
+            -97,
+            47,
+            -20,
+            -93,
+            -39,
+            -83,
+            -36,
+            -9,
+            27,
+            43,
+            -78,
+            89,
+            -82,
+            -56,
+            68,
+            86,
+            83,
+            -81,
+            -101,
+            -61,
+            -25,
+            26,
+            -127,
+            -3
+          ],
+          "explicit_codes": [
+            -92,
+            -91,
+            -34,
+            117,
+            87,
+            -112,
+            84,
+            -74,
+            -97,
+            47,
+            -20,
+            -93,
+            -39,
+            -83,
+            -36,
+            -9,
+            27,
+            43,
+            -78,
+            89,
+            -82,
+            -56,
+            68,
+            86,
+            83,
+            -81,
+            -101,
+            -61,
+            -25,
+            26,
+            -127,
+            -3
+          ]
+        }
+      ]
+    },
+    "scale_division_diagnostic": {
+      "scope": "Direct tensor/tensor F32 division versus PyTorch scalar divisor; diagnostic, not model acceptance",
+      "results": [
+        {
+          "device": "cpu",
+          "blocks": 100000,
+          "seed": 34721,
+          "different_scalar_divisor_f32_scales": 0,
+          "different_scalar_divisor_f16_scales": 0,
+          "reverse_one_division_vs_reciprocal_differences": 0
+        },
+        {
+          "device": "cuda",
+          "blocks": 100000,
+          "seed": 34721,
+          "different_scalar_divisor_f32_scales": 4376,
+          "different_scalar_divisor_f16_scales": 0,
+          "reverse_one_division_vs_reciprocal_differences": 0
+        }
+      ]
+    },
+    "red": {
+      "command": "python -m unittest tools.oracle.fastframes_l.test_streaming.StreamingTests.test_activation_quantization_divides_before_rounding_codes",
+      "failed_q_format_subtests": 6,
+      "failed_q4_1_sum_correction": true,
+      "remote_report": "division-regression-red.log",
+      "sha256": "f4296b8d247b1bcc4a5120a15fbcd59ee832064c24cd1dbbc95c1cad14d16851"
+    },
+    "green": {
+      "label": "tests",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "-m",
+        "unittest",
+        "tools.oracle.fastframes_l.test_streaming",
+        "tools.oracle.fastframes_l.test_compare",
+        "tools.converter.fastframes_l.test_convert"
+      ],
+      "exit_code": 0,
+      "process_seconds": 2.769698342992342
+    },
+    "green_test_count": 12,
+    "production_arithmetic_and_acceptance_thresholds_changed": false
+  },
+  "text_diagnostics_before_repair": [
+    {
+      "kind": "native",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+        "--model",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+        "--prompt",
+        "A red ball rolls on a table.",
+        "--width",
+        "16",
+        "--height",
+        "16",
+        "--video-frames",
+        "5",
+        "--fps",
+        "16",
+        "--seed",
+        "17",
+        "--threads",
+        "16",
+        "--compute",
+        "cpu",
+        "--out",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/resume-q8_0-cpu.mp4"
+      ],
+      "exit_code": 0,
+      "process_seconds": 22.937480804001098,
+      "final": null
+    },
+    {
+      "kind": "cpu-short",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/probe_text_reference.py",
+        "--device",
+        "cpu",
+        "--native",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/resume-q8_0-cpu.jsonl",
+        "--output",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/text-probe-cpu-short"
+      ],
+      "exit_code": 0,
+      "process_seconds": 54.11257119300717,
+      "all_text_gates_passed": false,
+      "final": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "native_comparison": {
+          "max_abs": 0.012329965829849243,
+          "rmse": 0.00026976355733120697,
+          "relative_rmse": 0.027505965520378088,
+          "cosine": 0.9996224106175492
+        },
+        "passed": false
+      }
+    },
+    {
+      "kind": "cuda-padded",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/probe_text_reference.py",
+        "--device",
+        "cuda",
+        "--native",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/resume-q8_0-cpu.jsonl",
+        "--output",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/text-probe-cuda-padded",
+        "--padded"
+      ],
+      "exit_code": 0,
+      "process_seconds": 34.827671024002484,
+      "all_text_gates_passed": false,
+      "final": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "native_comparison": {
+          "max_abs": 0.010055199265480042,
+          "rmse": 0.00023730209097359275,
+          "relative_rmse": 0.02419608933396201,
+          "cosine": 0.9997082747515935
+        },
+        "passed": false
+      }
+    },
+    {
+      "kind": "cuda-short",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/probe_text_reference.py",
+        "--device",
+        "cuda",
+        "--native",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/resume-q8_0-cpu.jsonl",
+        "--output",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/text-probe-cuda-short"
+      ],
+      "exit_code": 0,
+      "process_seconds": 36.26947293199191,
+      "all_text_gates_passed": false,
+      "final": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "native_comparison": {
+          "max_abs": 0.010496817529201508,
+          "rmse": 0.0002480205280327152,
+          "relative_rmse": 0.02528897587170363,
+          "cosine": 0.9996804464735207
+        },
+        "passed": false
+      }
+    }
+  ],
+  "text_diagnostics_after_repair": [
+    {
+      "scope": "Official text-only diagnostic; neither a full-model nor a video-quality acceptance run",
+      "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
+      "script_sha256": "e387379d17ff24ee380b4435548c37f0c521409c1709beb2112c5b4fd5331a83",
+      "official_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "official_source_sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "gguf": {
+        "format": "q8_0",
+        "size": 22274854208,
+        "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+        "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+      },
+      "device": "cpu",
+      "padded": false,
+      "threads": 8,
+      "torch": "2.9.1+gitff65f5b",
+      "tokens": [
+        320,
+        4062,
+        11142,
+        14347,
+        281,
+        369,
+        289,
+        8338,
+        274,
+        1
+      ],
+      "thresholds": {
+        "relative_rmse_max": 0.005,
+        "cosine_min": 0.9999
+      },
+      "elapsed_seconds": 37.2638750319893,
+      "completed": true,
+      "all_text_gates_passed": false,
+      "remote_report": "text-division-fix-cpu-short/results.json",
+      "sha256": "4e045956b3ceeac244f28216e36cbb88f0d18280da928ba0943ff0a1977b18fa",
+      "checkpoints": 25,
+      "first_failure": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "file": "fastframes.text.f32",
+        "native_comparison": {
+          "max_abs": 0.014238744974136353,
+          "rmse": 0.0002714521295574015,
+          "relative_rmse": 0.027678137810408173,
+          "cosine": 0.9996175592002213
+        },
+        "passed": false
+      },
+      "final": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "file": "fastframes.text.f32",
+        "native_comparison": {
+          "max_abs": 0.014238744974136353,
+          "rmse": 0.0002714521295574015,
+          "relative_rmse": 0.027678137810408173,
+          "cosine": 0.9996175592002213
+        },
+        "passed": false
+      },
+      "max_relative_rmse": 0.027678137810408173
+    },
+    {
+      "scope": "Official text-only diagnostic; neither a full-model nor a video-quality acceptance run",
+      "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
+      "script_sha256": "e387379d17ff24ee380b4435548c37f0c521409c1709beb2112c5b4fd5331a83",
+      "official_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "official_source_sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "gguf": {
+        "format": "q8_0",
+        "size": 22274854208,
+        "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+        "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+      },
+      "device": "cuda",
+      "padded": true,
+      "threads": 8,
+      "torch": "2.9.1+gitff65f5b",
+      "tokens": [
+        320,
+        4062,
+        11142,
+        14347,
+        281,
+        369,
+        289,
+        8338,
+        274,
+        1
+      ],
+      "thresholds": {
+        "relative_rmse_max": 0.005,
+        "cosine_min": 0.9999
+      },
+      "elapsed_seconds": 18.893260263008415,
+      "completed": true,
+      "all_text_gates_passed": false,
+      "remote_report": "text-division-fix-cuda-padded/results.json",
+      "sha256": "c8dcffb95611d9926e0b0961f897b8b044a5d51d41ab8513b4aa55a23e958616",
+      "checkpoints": 25,
+      "first_failure": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "file": "fastframes.text.f32",
+        "native_comparison": {
+          "max_abs": 0.01500336080789566,
+          "rmse": 0.00027173067235464497,
+          "relative_rmse": 0.027706538935648083,
+          "cosine": 0.9996163526862266
+        },
+        "passed": false
+      },
+      "final": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "file": "fastframes.text.f32",
+        "native_comparison": {
+          "max_abs": 0.01500336080789566,
+          "rmse": 0.00027173067235464497,
+          "relative_rmse": 0.027706538935648083,
+          "cosine": 0.9996163526862266
+        },
+        "passed": false
+      },
+      "max_relative_rmse": 0.027706538935648083
+    },
+    {
+      "scope": "Official text-only diagnostic; neither a full-model nor a video-quality acceptance run",
+      "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
+      "script_sha256": "e387379d17ff24ee380b4435548c37f0c521409c1709beb2112c5b4fd5331a83",
+      "official_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "official_source_sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "gguf": {
+        "format": "q8_0",
+        "size": 22274854208,
+        "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+        "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+      },
+      "device": "cuda",
+      "padded": false,
+      "threads": 8,
+      "torch": "2.9.1+gitff65f5b",
+      "tokens": [
+        320,
+        4062,
+        11142,
+        14347,
+        281,
+        369,
+        289,
+        8338,
+        274,
+        1
+      ],
+      "thresholds": {
+        "relative_rmse_max": 0.005,
+        "cosine_min": 0.9999
+      },
+      "elapsed_seconds": 18.42370978600229,
+      "completed": true,
+      "all_text_gates_passed": false,
+      "remote_report": "text-division-fix-cuda-short/results.json",
+      "sha256": "f22150d0663a991b4121789bb3ada623895104aaeb5dcfee7d6051dadcdf2e36",
+      "checkpoints": 25,
+      "first_failure": {
+        "name": "fastframes.text.21",
+        "shape": [
+          1,
+          10,
+          4096
+        ],
+        "file": "fastframes.text.21.f32",
+        "native_comparison": {
+          "max_abs": 100.6904296875,
+          "rmse": 3.0162853312794704,
+          "relative_rmse": 0.005214530578202727,
+          "cosine": 0.9999887444076884
+        },
+        "passed": false
+      },
+      "final": {
+        "name": "fastframes.text",
+        "shape": [
+          1,
+          512,
+          4096
+        ],
+        "file": "fastframes.text.f32",
+        "native_comparison": {
+          "max_abs": 0.0130845308303833,
+          "rmse": 0.00030716505674640925,
+          "relative_rmse": 0.031319543468054364,
+          "cosine": 0.999509972032232
+        },
+        "passed": false
+      },
+      "max_relative_rmse": 0.031319543468054364
+    }
+  ],
+  "trace_only_instrumentation": {
+    "scope": "Temporary checkpoint calls only; production arithmetic is unchanged",
+    "original_sha256": "33bd9d7fee4e89459e67ad36c389654ca7d7e99890f21a37d3c2e62f6d3120f1",
+    "instrumented_sha256": "e2bd6f5b62b233171a1ed015542c53b45e64d8769599d7f53b80d2187506d8f5",
+    "patch_sha256": "dd99055f63036086fb83e5d152c8923d6ee34237c18c16c799d2c015eecda44c",
+    "patch": "--- a/src/models/diffusion/fastframes_l/text.rs\n+++ b/src/models/diffusion/fastframes_l/text.rs\n@@ -62,9 +62,12 @@\n     for (&id, row) in ids.iter().zip(x.chunks_exact_mut(D)) {\n         g.linear[\"text.token_embedding\"].embedding_lookup(id, row)?;\n     }\n+    trace(\"probe.text.embedding\", &x);\n     for layer in 0..24 {\n+        trace(&format!(\"probe.text.{layer}.input\"), &x);\n         let p = format!(\"text.blocks.{layer}\");\n         let h = rms_norm_rows(&x, n, &g.floats[&format!(\"{p}.norm1.weight\")], 1e-6)?;\n+        trace(&format!(\"probe.text.{layer}.norm1\"), &h);\n         let [q, k, v] = Linear::forward_group(\n             [\n                 &g.linear[&format!(\"{p}.attn.q\")],\n@@ -75,6 +78,9 @@\n             &h,\n             n,\n         )?;\n+        trace(&format!(\"probe.text.{layer}.q\"), &q);\n+        trace(&format!(\"probe.text.{layer}.k\"), &k);\n+        trace(&format!(\"probe.text.{layer}.v\"), &v);\n         let embedding = &g.floats[&format!(\"{p}.pos_embedding.embedding.weight\")];\n         let mut bias = vec![0.; 64 * n * n];\n         for head in 0..64 {\n@@ -100,9 +106,12 @@\n                 scale: 1.,\n             },\n         )?;\n+        trace(&format!(\"probe.text.{layer}.attended\"), &h);\n         let h = linear(g, ex, &format!(\"{p}.attn.o\"), &h)?;\n+        trace(&format!(\"probe.text.{layer}.o\"), &h);\n         residual(&mut x, &h, None);\n         let h = rms_norm_rows(&x, n, &g.floats[&format!(\"{p}.norm2.weight\")], 1e-6)?;\n+        trace(&format!(\"probe.text.{layer}.norm2\"), &h);\n         let [mut gate, up] = Linear::forward_group(\n             [\n                 &g.linear[&format!(\"{p}.ffn.gate.0\")],\n@@ -112,11 +121,16 @@\n             &h,\n             n,\n         )?;\n+        trace(&format!(\"probe.text.{layer}.gate\"), &gate);\n+        trace(&format!(\"probe.text.{layer}.up\"), &up);\n         gelu_approx_inplace(&mut gate);\n+        trace(&format!(\"probe.text.{layer}.gelu\"), &gate);\n         for (a, b) in gate.iter_mut().zip(up) {\n             *a *= b;\n         }\n+        trace(&format!(\"probe.text.{layer}.product\"), &gate);\n         let h = linear(g, ex, &format!(\"{p}.ffn.fc2\"), &gate)?;\n+        trace(&format!(\"probe.text.{layer}.down\"), &h);\n         residual(&mut x, &h, None);\n         trace(&format!(\"fastframes.text.{layer}\"), &x);\n     }\n",
+    "production_source_and_binary_restored": true,
+    "first_boundary_failure_before_repair": {
+      "name": "probe.text.1.product",
+      "shape": [
+        1,
+        10,
+        10240
+      ],
+      "file": "probe.text.1.product.f32",
+      "native_comparison": {
+        "max_abs": 0.03606557846069336,
+        "rmse": 0.0013109142934433285,
+        "relative_rmse": 0.005045972065068292,
+        "cosine": 0.9999872700673597
+      },
+      "passed": false
+    }
+  },
+  "same_native_input_projection_replays": {
+    "scope": "Same native inputs, independently dequantized GGUF and PyTorch linear; not full-model acceptance",
+    "effective_weights_sha256": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4",
+    "results": [
+      {
+        "layer": 0,
+        "projection": "q",
+        "max_abs": 3.5762786865234375e-07,
+        "rmse": 3.7416603960266925e-08,
+        "relative_rmse": 3.9390657581992236e-07,
+        "cosine": 0.9999999999999234
+      },
+      {
+        "layer": 0,
+        "projection": "k",
+        "max_abs": 2.384185791015625e-06,
+        "rmse": 2.7504744413640154e-07,
+        "relative_rmse": 3.668872429244545e-07,
+        "cosine": 0.9999999999999335
+      },
+      {
+        "layer": 0,
+        "projection": "v",
+        "max_abs": 7.62939453125e-06,
+        "rmse": 2.2267986190630056e-07,
+        "relative_rmse": 3.32622681648775e-07,
+        "cosine": 0.9999999999999435
+      },
+      {
+        "layer": 0,
+        "projection": "o",
+        "max_abs": 0.000732421875,
+        "rmse": 1.5323703248066936e-05,
+        "relative_rmse": 2.81298973585573e-07,
+        "cosine": 0.9999999999999608
+      },
+      {
+        "layer": 0,
+        "projection": "gate",
+        "max_abs": 2.384185791015625e-06,
+        "rmse": 2.2904292827701948e-07,
+        "relative_rmse": 3.1295235305502264e-07,
+        "cosine": 0.9999999999999483
+      },
+      {
+        "layer": 0,
+        "projection": "up",
+        "max_abs": 2.6226043701171875e-06,
+        "rmse": 2.1826085472644372e-07,
+        "relative_rmse": 3.605718230413773e-07,
+        "cosine": 0.9999999999999322
+      },
+      {
+        "layer": 0,
+        "projection": "down",
+        "max_abs": 0.000732421875,
+        "rmse": 9.825342083348154e-06,
+        "relative_rmse": 3.828951231047329e-07,
+        "cosine": 0.9999999999999294
+      },
+      {
+        "layer": 1,
+        "projection": "q",
+        "max_abs": 6.258487701416016e-07,
+        "rmse": 4.8088894021968e-08,
+        "relative_rmse": 4.031691579711508e-07,
+        "cosine": 0.9999999999999194
+      },
+      {
+        "layer": 1,
+        "projection": "k",
+        "max_abs": 3.933906555175781e-06,
+        "rmse": 3.97079486440217e-07,
+        "relative_rmse": 4.683533599728078e-07,
+        "cosine": 0.9999999999998913
+      },
+      {
+        "layer": 1,
+        "projection": "v",
+        "max_abs": 3.337860107421875e-06,
+        "rmse": 2.0045574609397779e-07,
+        "relative_rmse": 3.7892173259476196e-07,
+        "cosine": 0.9999999999999282
+      },
+      {
+        "layer": 1,
+        "projection": "o",
+        "max_abs": 0.000732421875,
+        "rmse": 1.236384325532497e-05,
+        "relative_rmse": 3.2692839394271053e-07,
+        "cosine": 0.9999999999999465
+      },
+      {
+        "layer": 1,
+        "projection": "gate",
+        "max_abs": 2.6226043701171875e-06,
+        "rmse": 2.772854231954785e-07,
+        "relative_rmse": 3.415589954771974e-07,
+        "cosine": 0.9999999999999377
+      },
+      {
+        "layer": 1,
+        "projection": "up",
+        "max_abs": 2.384185791015625e-06,
+        "rmse": 2.650950914662142e-07,
+        "relative_rmse": 4.001536110882409e-07,
+        "cosine": 0.9999999999999176
+      },
+      {
+        "layer": 1,
+        "projection": "down",
+        "max_abs": 0.0013427734375,
+        "rmse": 1.4488324798629418e-05,
+        "relative_rmse": 4.25971734068344e-07,
+        "cosine": 0.999999999999909
+      },
+      {
+        "layer": 12,
+        "projection": "q",
+        "max_abs": 3.5762786865234375e-07,
+        "rmse": 4.38105704283534e-08,
+        "relative_rmse": 4.006430233178638e-07,
+        "cosine": 0.9999999999999211
+      },
+      {
+        "layer": 12,
+        "projection": "k",
+        "max_abs": 3.814697265625e-06,
+        "rmse": 3.4060824198527884e-07,
+        "relative_rmse": 4.372464597501259e-07,
+        "cosine": 0.9999999999999056
+      },
+      {
+        "layer": 12,
+        "projection": "v",
+        "max_abs": 1.9073486328125e-06,
+        "rmse": 2.4820383814449436e-07,
+        "relative_rmse": 4.959657988753818e-07,
+        "cosine": 0.9999999999998773
+      },
+      {
+        "layer": 12,
+        "projection": "o",
+        "max_abs": 9.1552734375e-05,
+        "rmse": 2.28139686338746e-06,
+        "relative_rmse": 3.1375747367843736e-07,
+        "cosine": 0.9999999999999506
+      },
+      {
+        "layer": 12,
+        "projection": "gate",
+        "max_abs": 3.814697265625e-06,
+        "rmse": 4.0997575334703117e-07,
+        "relative_rmse": 3.7267282731471366e-07,
+        "cosine": 0.9999999999999305
+      },
+      {
+        "layer": 12,
+        "projection": "up",
+        "max_abs": 4.76837158203125e-06,
+        "rmse": 3.963113780575759e-07,
+        "relative_rmse": 4.356911242066375e-07,
+        "cosine": 0.9999999999999026
+      },
+      {
+        "layer": 12,
+        "projection": "down",
+        "max_abs": 0.000244140625,
+        "rmse": 4.0823188813076916e-06,
+        "relative_rmse": 4.787005095136287e-07,
+        "cosine": 0.9999999999998858
+      },
+      {
+        "layer": 23,
+        "projection": "q",
+        "max_abs": 5.364418029785156e-07,
+        "rmse": 6.16297600739413e-08,
+        "relative_rmse": 4.5543887661822405e-07,
+        "cosine": 0.9999999999998965
+      },
+      {
+        "layer": 23,
+        "projection": "k",
+        "max_abs": 3.5762786865234375e-06,
+        "rmse": 4.910483679307978e-07,
+        "relative_rmse": 4.3841389653563925e-07,
+        "cosine": 0.9999999999999043
+      },
+      {
+        "layer": 23,
+        "projection": "v",
+        "max_abs": 4.76837158203125e-06,
+        "rmse": 6.281405009206716e-07,
+        "relative_rmse": 4.496185850373175e-07,
+        "cosine": 0.9999999999998995
+      },
+      {
+        "layer": 23,
+        "projection": "o",
+        "max_abs": 0.0001068115234375,
+        "rmse": 6.459627354314246e-06,
+        "relative_rmse": 4.633432233936278e-07,
+        "cosine": 0.9999999999998932
+      },
+      {
+        "layer": 23,
+        "projection": "gate",
+        "max_abs": 5.7220458984375e-06,
+        "rmse": 8.037812884478813e-07,
+        "relative_rmse": 3.5962732202999187e-07,
+        "cosine": 0.999999999999936
+      },
+      {
+        "layer": 23,
+        "projection": "up",
+        "max_abs": 2.47955322265625e-05,
+        "rmse": 1.0996565148283026e-06,
+        "relative_rmse": 3.7834108842897175e-07,
+        "cosine": 0.9999999999999268
+      },
+      {
+        "layer": 23,
+        "projection": "down",
+        "max_abs": 0.003173828125,
+        "rmse": 4.598683624298228e-05,
+        "relative_rmse": 3.6540142616916287e-07,
+        "cosine": 0.9999999999999342
+      }
+    ],
+    "completed": true
+  },
+  "first_normalization_quantization": {
+    "scope": "First text normalization, before any quantized projection; independent normalization rounding may cross activation code boundaries",
+    "normalization_comparison": {
+      "max_abs": 5.960464477539063e-08,
+      "rmse": 2.580232805840835e-09,
+      "relative_rmse": 3.696763401182618e-08,
+      "cosine": 0.9999999999999993
+    },
+    "activation_code_differences": 1,
+    "activation_codes": 40960,
+    "prepared_activation_comparison": {
+      "max_abs": 0.0068359375,
+      "rmse": 3.377676944149575e-05,
+      "relative_rmse": 0.00048393443640826016,
+      "cosine": 0.9999998829041626
+    },
+    "changed_code_indices": [
+      [
+        520,
+        13
+      ]
+    ]
+  },
+  "transport_rerun": {
+    "geometry": {
+      "width": 16,
+      "height": 16,
+      "frames": 5,
+      "fps": 16,
+      "seed": 17
+    },
+    "expected_transports": 18,
+    "attempted_transports": 10,
+    "completed_transports": 10,
+    "numeric_comparison_transports": 6,
+    "passed": 2,
+    "failed": 8,
+    "numeric_failed": 4,
+    "device_execution_failed": 4,
+    "blocked_not_run": 8,
+    "pending": 0,
+    "results": [
+      {
+        "format": "bf16",
+        "backend": "cpu",
+        "model": {
+          "format": "bf16",
+          "size": 41892093248,
+          "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-cpu-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 72.96122835100687,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-cpu-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-cpu-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "comparison": {
+            "passed": true,
+            "report": "/workspace/rust-model-inference-fastframes/target/fastframes/final-comparison-bf16-cpu-cli.json",
+            "checkpoints": 411,
+            "max_relative_rmse": 2.794884733482099e-05,
+            "min_cosine": 0.9999999997176138,
+            "first_failure": null
+          },
+          "decoded_pixel_comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999,
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/reference.mp4",
+            "rmse_max": 0.01,
+            "cosine_min": 0.9999,
+            "passed": true,
+            "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
+          }
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1829,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 59.18891605301178,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18161"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-cpu-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-cpu-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "comparison": {
+            "passed": true,
+            "report": "/workspace/rust-model-inference-fastframes/target/fastframes/final-comparison-bf16-cpu-http.json",
+            "checkpoints": 411,
+            "max_relative_rmse": 2.794884733482099e-05,
+            "min_cosine": 0.9999999997176138,
+            "first_failure": null
+          },
+          "decoded_pixel_comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999,
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/reference.mp4",
+            "rmse_max": 0.01,
+            "cosine_min": 0.9999,
+            "passed": true,
+            "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
+          }
+        }
+      },
+      {
+        "format": "f16",
+        "backend": "cpu",
+        "model": {
+          "format": "f16",
+          "size": 41892093248,
+          "sha256": "ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-f16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-f16-cpu-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 53.65089344899752,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-f16-cpu-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-f16-cpu-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "comparison": {
+            "passed": true,
+            "report": "/workspace/rust-model-inference-fastframes/target/fastframes/final-comparison-f16-cpu-cli.json",
+            "checkpoints": 411,
+            "max_relative_rmse": 0.001728212584007973,
+            "min_cosine": 0.9999988745859908,
+            "first_failure": null
+          },
+          "decoded_pixel_comparison": {
+            "max_abs": 0.07450980392156858,
+            "rmse": 0.014410152859932579,
+            "relative_rmse": 0.03013650488225897,
+            "cosine": 0.9995483949878057,
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-f16/reference.mp4",
+            "rmse_max": 0.01,
+            "cosine_min": 0.9999,
+            "passed": false,
+            "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
+          }
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1834,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 30.80061346499133,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-f16.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18161"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-f16-cpu-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-f16-cpu-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "comparison": {
+            "passed": true,
+            "report": "/workspace/rust-model-inference-fastframes/target/fastframes/final-comparison-f16-cpu-http.json",
+            "checkpoints": 411,
+            "max_relative_rmse": 0.001728212584007973,
+            "min_cosine": 0.9999988745859908,
+            "first_failure": null
+          },
+          "decoded_pixel_comparison": {
+            "max_abs": 0.07450980392156858,
+            "rmse": 0.014410152859932579,
+            "relative_rmse": 0.03013650488225897,
+            "cosine": 0.9995483949878057,
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-f16/reference.mp4",
+            "rmse_max": 0.01,
+            "cosine_min": 0.9999,
+            "passed": false,
+            "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
+          }
+        }
+      },
+      {
+        "format": "q8_0",
+        "backend": "cpu",
+        "model": {
+          "format": "q8_0",
+          "size": 22274854208,
+          "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-cpu-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 32.26536967299762,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-cpu-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-cpu-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "comparison": {
+            "passed": false,
+            "report": "/workspace/rust-model-inference-fastframes/target/fastframes/final-comparison-q8_0-cpu-cli.json",
+            "checkpoints": 411,
+            "max_relative_rmse": 0.07609434268844385,
+            "min_cosine": 0.9971288417629252,
+            "first_failure": {
+              "name": "fastframes.text",
+              "occurrence": 0,
+              "passed": false,
+              "max_abs": 0.01500336080789566,
+              "rmse": 0.00027173067235464497,
+              "relative_rmse": 0.027697485017157433,
+              "cosine": 0.9996163526862266
+            }
+          },
+          "decoded_pixel_comparison": {
+            "max_abs": 0.1686274509803921,
+            "rmse": 0.02451650235264669,
+            "relative_rmse": 0.05101013387952288,
+            "cosine": 0.9987163813940811,
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-q8_0/reference.mp4",
+            "rmse_max": 0.01,
+            "cosine_min": 0.9999,
+            "passed": false,
+            "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
+          }
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1828,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 19.241532432002714,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18161"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-cpu-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-cpu-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "comparison": {
+            "passed": false,
+            "report": "/workspace/rust-model-inference-fastframes/target/fastframes/final-comparison-q8_0-cpu-http.json",
+            "checkpoints": 411,
+            "max_relative_rmse": 0.07609434268844385,
+            "min_cosine": 0.9971288417629252,
+            "first_failure": {
+              "name": "fastframes.text",
+              "occurrence": 0,
+              "passed": false,
+              "max_abs": 0.01500336080789566,
+              "rmse": 0.00027173067235464497,
+              "relative_rmse": 0.027697485017157433,
+              "cosine": 0.9996163526862266
+            }
+          },
+          "decoded_pixel_comparison": {
+            "max_abs": 0.1686274509803921,
+            "rmse": 0.02451650235264669,
+            "relative_rmse": 0.05101013387952288,
+            "cosine": 0.9987163813940811,
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-q8_0/reference.mp4",
+            "rmse_max": 0.01,
+            "cosine_min": 0.9999,
+            "passed": false,
+            "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
+          }
+        }
+      },
+      {
+        "format": "q8_0",
+        "backend": "auto",
+        "model": {
+          "format": "q8_0",
+          "size": 22274854208,
+          "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 24.987359283986734,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+            "[GPU] Vulkan disabled after error: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>. Falling back to CPU."
+          ],
+          "log_sha256": "d70db5bd94b4d40679bff5e7daa3ca0590a37bc5750e574a704a8a7495b5c587",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "[GPU] Warmup done in 4.3s",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Auto; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost / CPU fallback",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate",
+          "output_exists": true
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1828,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 23.11169193900423,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18162"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+            "[2026-11-19T01:43:53Z INFO  rust_model_inference::compute::linear] compute linear: CPU fallback: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>",
+            "[GPU] Vulkan disabled after error: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>. Falling back to CPU."
+          ],
+          "log_sha256": "1b62113593b875f60ec377fa41728bfb291a135e47d5837c9290182455a9461a",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "Model 'FastFrames-L-q8_0' loaded (mode=video-generation, host=127.0.0.1, port=18162)",
+            "Server listening on http://127.0.0.1:18162",
+            "[GPU] Warmup done in 4.3s",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Auto; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost / CPU fallback",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate"
+        },
+        "physical_device_acceptance_passed": false
+      },
+      {
+        "format": "bf16",
+        "backend": "vulkan",
+        "model": {
+          "format": "bf16",
+          "size": 41892093248,
+          "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "vulkan",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-cli.mp4"
+          ],
+          "exit_code": 1,
+          "elapsed_seconds": 5.444614858002751,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-cli.jsonl",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 0,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+            "Inference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>"
+          ],
+          "log_sha256": "283858ac55791b374edf971a25a5aa14e7cdec510b414719a99e3ef3c70a9cdb",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "[GPU] Warmup done in 4.3s",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate",
+          "output_exists": false
+        },
+        "http": {
+          "status": 500,
+          "error": "{\"error\":{\"message\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}}",
+          "elapsed_seconds": 0.2953260900103487,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "vulkan",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18163"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 0,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+          ],
+          "log_sha256": "5b3cb6a74febd779acac3d8309d13940a284cd9772edec64d138c57c0d416ced",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "[GPU] Warmup done in 4.2s",
+            "Model 'FastFrames-L-bf16' loaded (mode=video-generation, host=127.0.0.1, port=18163)",
+            "Server listening on http://127.0.0.1:18163",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate"
+        },
+        "physical_device_acceptance_passed": false
+      }
+    ]
+  },
+  "reference_provenance": {
+    "bf16": {
+      "remote_report": "final-reference-bf16/manifest.json",
+      "sha256": "7483008fc0313b5da913347ae8328c49b8719dbcf95413d898b8719d8fe3a10c",
+      "manifest": {
+        "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+        "reference_files_verified": true,
+        "wrapper_sha256": {
+          "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+          "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+          "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+        },
+        "tokenizer_sha256": {
+          "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+          "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+          "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+          "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+        },
+        "checkpoint_sha256": {
+          "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+          "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+          "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+          "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+          "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+        },
+        "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+        "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+        "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "recipe": "controlled",
+        "device": "cuda",
+        "torch": "2.9.1+gitff65f5b",
+        "numpy": "2.1.2",
+        "ftfy": "6.3.1",
+        "dependencies": {
+          "transformers": "4.57.1",
+          "tokenizers": "0.22.2",
+          "gguf": "0.18.0",
+          "safetensors": "0.7.0"
+        },
+        "elapsed_seconds": 155.46571770499577,
+        "args": {
+          "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "model_dir": "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "text_dir": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16",
+          "gguf": "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "noise": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-cpu-cli.jsonl.fastframes.noise.f32",
+          "width": 16,
+          "height": 16,
+          "frames": 5,
+          "prompt": "A red ball rolls on a table.",
+          "seed": 17,
+          "threads": 8,
+          "recipe": "controlled",
+          "device": "cuda",
+          "benchmark": false
+        }
+      },
+      "checkpoint_count": 412
+    },
+    "f16": {
+      "remote_report": "final-reference-f16/manifest.json",
+      "sha256": "b56194164965150f06f7db70b31eafcbe395f8f99efb33b8a71d5cbeeed9fc05",
+      "manifest": {
+        "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+        "reference_files_verified": true,
+        "wrapper_sha256": {
+          "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+          "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+          "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+        },
+        "tokenizer_sha256": {
+          "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+          "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+          "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+          "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+        },
+        "checkpoint_sha256": {
+          "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+          "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+          "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+          "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+          "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+        },
+        "gguf_sha256": "ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39",
+        "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+        "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "recipe": "controlled",
+        "device": "cuda",
+        "torch": "2.9.1+gitff65f5b",
+        "numpy": "2.1.2",
+        "ftfy": "6.3.1",
+        "dependencies": {
+          "transformers": "4.57.1",
+          "tokenizers": "0.22.2",
+          "gguf": "0.18.0",
+          "safetensors": "0.7.0"
+        },
+        "elapsed_seconds": 288.97913231200073,
+        "args": {
+          "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "model_dir": "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "text_dir": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-f16",
+          "gguf": "/workspace/rust-model-inference-fastframes/models/FastFrames-L-f16.gguf",
+          "noise": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-f16-cpu-cli.jsonl.fastframes.noise.f32",
+          "width": 16,
+          "height": 16,
+          "frames": 5,
+          "prompt": "A red ball rolls on a table.",
+          "seed": 17,
+          "threads": 8,
+          "recipe": "controlled",
+          "device": "cuda",
+          "benchmark": false
+        }
+      },
+      "checkpoint_count": 412
+    },
+    "q8_0": {
+      "remote_report": "final-reference-q8_0/manifest.json",
+      "sha256": "007cc89864ce8ce9393df93700324e7657d5ac56cfb664e20a500b9f915549a1",
+      "manifest": {
+        "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+        "reference_files_verified": true,
+        "wrapper_sha256": {
+          "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+          "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+          "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+        },
+        "tokenizer_sha256": {
+          "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+          "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+          "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+          "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+        },
+        "checkpoint_sha256": {
+          "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+          "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+          "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+          "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+          "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+        },
+        "gguf_sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+        "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+        "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "recipe": "controlled",
+        "device": "cuda",
+        "torch": "2.9.1+gitff65f5b",
+        "numpy": "2.1.2",
+        "ftfy": "6.3.1",
+        "dependencies": {
+          "transformers": "4.57.1",
+          "tokenizers": "0.22.2",
+          "gguf": "0.18.0",
+          "safetensors": "0.7.0"
+        },
+        "elapsed_seconds": 210.4499240849982,
+        "args": {
+          "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "model_dir": "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "text_dir": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-q8_0",
+          "gguf": "/workspace/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+          "noise": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-cpu-cli.jsonl.fastframes.noise.f32",
+          "width": 16,
+          "height": 16,
+          "frames": 5,
+          "prompt": "A red ball rolls on a table.",
+          "seed": 17,
+          "threads": 8,
+          "recipe": "controlled",
+          "device": "cuda",
+          "benchmark": false
+        }
+      },
+      "checkpoint_count": 412
+    }
+  },
+  "limits": [
+    "Q8 text still fails after the oracle repair; same-input projection checks and one changed activation code do not establish full-model correctness.",
+    "FFmpeg 9.0.2 differs from the earlier environment, whose codec version was not captured; cross-host pixel changes are not a production repair.",
+    "Other six formats and extended 480p/9-frame cases were not rerun on this replacement host; retain historical results and their original wrapper provenance.",
+    "Shared host/cgroup/GPU and release-fast binaries prevent isolated release-performance claims; the 81-frame 480p default remains untested.",
+    "Physical GPU reruns hit hard recovery/device lost, including an unchanged upstream shared F32/BF16 test. This isolates the failure from FastFrames weights, without proving whether the remaining cause is driver, hardware or shared device implementation."
+  ],
+  "cpu_controller_completed": true,
+  "device_controller_completed": false,
+  "device_loss": {
+    "remote_report": "device-loss-results.json",
+    "sha256": "27c394088954cb151773af6e75c13dd3e1c688d83d1ecb817e0efc5dcd92038b",
+    "scope": "Physical Vulkan execution failures on the replacement instance; initialization, valid CPU-fallback video and software-ICD tests are not physical-GPU acceptance",
+    "gpu": "RADV NAVI31; card7/renderD134",
+    "driver_packages": [
+      "libdrm-amdgpu1:amd64\t2.4.125-1ubuntu0.1~24.04.1",
+      "libvulkan1:amd64\t1.3.275.0-1build1",
+      "mesa-vulkan-drivers:amd64\t25.2.8-0ubuntu0.24.04.1"
+    ],
+    "cgroup_memory_events": "low 0\nhigh 0\nmax 4\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "kernel_log_access": "dmesg: read kernel buffer failed: Operation not permitted",
+    "no_gpu_reset_or_global_driver_changes_performed": true,
+    "not_run_due_to_same_device_blocker": [
+      {
+        "format": "bf16",
+        "backend": "auto",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "bf16",
+        "backend": "auto",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "auto",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "auto",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "vulkan",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "vulkan",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "q8_0",
+        "backend": "vulkan",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "q8_0",
+        "backend": "vulkan",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      }
+    ],
+    "shared_control": {
+      "scope": "Existing upstream shared LinearExecutor F32/BF16 test; no FastFrames model or weights used",
+      "upstream_base": "44527e5ad2ca979518a0f13c2b70dc2c0b78fddc",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+        "compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 4.370732120005414,
+      "test_binary_sha256": "fee6389197eb4236dfbd98cf57cdbb63b6b2323174e62bff8b68db1209afc45c",
+      "shared_source_sha256": {
+        "src/compute/linear.rs": "0014cfb7bff2365106b75006c312850632e1687a4e65ec4c310eaabe4e1356b8",
+        "src/vulkan/ops.rs": "37437760dccefb1b9c6c0e49ce65c52e3a6ccf52b09d3bcd25e2c192c65de25c",
+        "src/ops/kernel/vulkan.rs": "ed94efe73fa362b943bfbe4e96ecb842a03d07263a9b927d52e5570dc8e33c29"
+      },
+      "log": "\nrunning 1 test\ntest compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches' (48714) panicked at src/compute/linear.rs:686:13:\nassertion `left == right` failed\n  left: [Cpu, Cpu, Cpu, Cpu]\n right: [Vulkan, Vulkan, Vulkan, Vulkan]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.34s\n\n",
+      "shared_sources_match_upstream_base": true
+    },
+    "failed_transport_cases": "transport_rerun.results entries with backend != cpu",
+    "serial_retries": {
+      "remote_report": "serial-device-retry-results.json",
+      "sha256": "d049a03992b76993cb0745193847589a33776958933216e823df27c56b1ab4c5",
+      "scope": "Fresh serial subprocesses after no visible GPU clients and less than 128 MiB allocated VRAM; physical exclusivity is not established",
+      "gpu": "RADV NAVI31; card7/renderD134",
+      "runs": [
+        {
+          "label": "shared-control-1",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+            "compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "elapsed_seconds": 4.3205278599925805,
+          "preflight": [
+            {
+              "time": "2026-11-19T01:58:33Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:36Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:39Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            }
+          ],
+          "postflight": {
+            "time": "2026-11-19T01:58:43Z",
+            "visible_gpu_clients": [],
+            "gpu_busy_percent": 100,
+            "mem_info_vram_used": 26759168,
+            "mem_info_vram_total": 51522830336
+          },
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/shared-control-1.log",
+          "log_sha256": "8957f1b394f04dfe0f08b116d762b7301f455e5852cc1785b1f1ba941a82fdd2",
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+          ],
+          "log_tail": "\nrunning 1 test\ntest compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches' (48934) panicked at src/compute/linear.rs:686:13:\nassertion `left == right` failed\n  left: [Cpu, Cpu, Cpu, Cpu]\n right: [Vulkan, Vulkan, Vulkan, Vulkan]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.28s\n\n"
+        },
+        {
+          "label": "shared-control-2",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+            "compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "elapsed_seconds": 4.420966650999617,
+          "preflight": [
+            {
+              "time": "2026-11-19T01:58:43Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:46Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:49Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            }
+          ],
+          "postflight": {
+            "time": "2026-11-19T01:58:53Z",
+            "visible_gpu_clients": [],
+            "gpu_busy_percent": 100,
+            "mem_info_vram_used": 26759168,
+            "mem_info_vram_total": 51522830336
+          },
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/shared-control-2.log",
+          "log_sha256": "696dc8fa65549098ca1331f46e6d50338e5346fa6b95a575a545edd9f0b53f3b",
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+          ],
+          "log_tail": "\nrunning 1 test\ntest compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches' (48939) panicked at src/compute/linear.rs:686:13:\nassertion `left == right` failed\n  left: [Cpu, Cpu, Cpu, Cpu]\n right: [Vulkan, Vulkan, Vulkan, Vulkan]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.38s\n\n"
+        },
+        {
+          "label": "bf16-strict-transports",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/run_backend_matrix_resumed.py",
+            "vulkan",
+            "bf16"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 10.630712443991797,
+          "preflight": [
+            {
+              "time": "2026-11-19T01:58:53Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:56Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:59Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            }
+          ],
+          "postflight": {
+            "time": "2026-11-19T01:59:10Z",
+            "visible_gpu_clients": [],
+            "gpu_busy_percent": 100,
+            "mem_info_vram_used": 26759168,
+            "mem_info_vram_total": 51522830336
+          },
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/bf16-strict-transports.log",
+          "log_sha256": "ba8784437ee82d34a0ddb5027e2823608964ce1193d9468f80e46b35e9408079",
+          "device_error_lines": [],
+          "log_tail": "bf16 vulkan CLI 1\nbf16 vulkan HTTP 500\n"
+        }
+      ],
+      "completed": true,
+      "shared_control_sha256": "fee6389197eb4236dfbd98cf57cdbb63b6b2323174e62bff8b68db1209afc45c",
+      "transport_harness": {
+        "original_sha256": "a55a2c506c2548ba566ea3ce3d49ffc517b51816bd7cd5cdf92ed2db282e4e81",
+        "retry_sha256": "8de0e5edae1c13a6a1f1228cdd57cad1540fa9489a17de97048c32539da0d920",
+        "change": "Evidence output directory only; original preserved binaries and arguments"
+      },
+      "cases": [
+        {
+          "format": "bf16",
+          "backend": "vulkan",
+          "model": {
+            "format": "bf16",
+            "size": 41892093248,
+            "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "cli": {
+            "command": [
+              "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+              "--model",
+              "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+              "--prompt",
+              "A red ball rolls on a table.",
+              "--width",
+              "16",
+              "--height",
+              "16",
+              "--video-frames",
+              "5",
+              "--fps",
+              "16",
+              "--seed",
+              "17",
+              "--threads",
+              "24",
+              "--compute",
+              "vulkan",
+              "--out",
+              "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-cli.mp4"
+            ],
+            "exit_code": 1,
+            "elapsed_seconds": 5.197688543004915,
+            "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-cli.log",
+            "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-cli.jsonl",
+            "log_sha256": "588a33d75789dc701b716336aabb90df8dcee1b55a789e4276bbefd8f4d8140e",
+            "device_error_lines": [
+              "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+              "Inference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>"
+            ],
+            "backend_evidence": {
+              "vulkan_operator_records": 0,
+              "cpu_operator_records": 0,
+              "last_device_counters": null
+            },
+            "log_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nFastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+          },
+          "http": {
+            "status": 500,
+            "error": "{\"error\":{\"message\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}}",
+            "elapsed_seconds": 0.28059824999945704,
+            "command": [
+              "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+              "--model",
+              "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+              "--threads",
+              "24",
+              "--compute",
+              "vulkan",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "18163"
+            ],
+            "body": {
+              "prompt": "A red ball rolls on a table.",
+              "width": 16,
+              "height": 16,
+              "frames": 5,
+              "fps": 16,
+              "seed": 17
+            },
+            "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-http.jsonl",
+            "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-http.log",
+            "log_sha256": "5b3cb6a74febd779acac3d8309d13940a284cd9772edec64d138c57c0d416ced",
+            "device_error_lines": [
+              "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+            ],
+            "backend_evidence": {
+              "vulkan_operator_records": 0,
+              "cpu_operator_records": 0,
+              "last_device_counters": null
+            },
+            "log_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\nModel 'FastFrames-L-bf16' loaded (mode=video-generation, host=127.0.0.1, port=18163)\nServer listening on http://127.0.0.1:18163\n[GPU] Q8_0 matmul: packed int8 dot product\nFastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n"
+          }
+        }
+      ]
+    },
+    "single_projection_retry": {
+      "remote_report": "single-projection-device-retry-results.json",
+      "sha256": "54f537ee9a40f1e38ba4d523292a44fc4d1a518ebd2a71652caa59587087b29f",
+      "scope": "Fresh low-level Vulkan F32/BF16 single-projection control, no model/weights; visible clients sampled during execution; physical exclusivity not established",
+      "test_binary_sha256": "fee6389197eb4236dfbd98cf57cdbb63b6b2323174e62bff8b68db1209afc45c",
+      "before": {
+        "time": "2026-11-19T01:59:56Z",
+        "visible_gpu_clients": [],
+        "gpu_busy_percent": 100,
+        "mem_info_vram_used": 26759168
+      },
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+        "video_gpu_float_projection_preserves_range_and_partial_tiles",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "test_pid": 49076,
+      "exit_code": 101,
+      "elapsed_seconds": 4.566282123996643,
+      "after": {
+        "time": "2026-11-19T02:00:01Z",
+        "visible_gpu_clients": [],
+        "gpu_busy_percent": 100,
+        "mem_info_vram_used": 26759168
+      },
+      "log": "/workspace/rust-model-inference-fastframes/target/fastframes/single-projection-device-retry.log",
+      "log_sha256": "67fb2f49d7c1dae821f4a6e333f19a6b836c2a376d0be85d85690564c8c5259b",
+      "log_tail": "\nrunning 1 test\ntest vulkan::ops::video_gpu_tests::video_gpu_float_projection_preserves_range_and_partial_tiles ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'vulkan::ops::video_gpu_tests::video_gpu_float_projection_preserves_range_and_partial_tiles' (49077) panicked at src/vulkan/ops.rs:3292:18:\ncalled `Result::unwrap()` on an `Err` value: InitFailed(\"The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    vulkan::ops::video_gpu_tests::video_gpu_float_projection_preserves_range_and_partial_tiles\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.31s\n\n",
+      "observation_summary": {
+        "sample_count": 18,
+        "first_sample_time": "2026-11-19T01:59:56Z",
+        "last_sample_time": "2026-11-19T02:00:01Z",
+        "other_visible_gpu_clients": [],
+        "gpu_busy_percent_range": [
+          100,
+          100
+        ],
+        "vram_used_bytes_range": [
+          26759168,
+          36630528
+        ]
+      }
+    },
+    "concurrency_limit": "Serial fresh processes after empty visible GPU-client/low-VRAM windows still fail; single-projection samples show no other visible GPU clients. Busy percentage remains 100 and external host contexts are not observable, so physical exclusivity and root cause are not established."
+  },
+  "device_controller_state": "Stopped after device-execution failure; unchanged shared control reproduced it; remaining physical-device cases are blocked"
+}

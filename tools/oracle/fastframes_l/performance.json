@@ -1,0 +1,1235 @@
+{
+  "date": "2026-11-19",
+  "status": "诊断采样完成",
+  "reason": "All five cases completed one warmup and three trace-free measured processes under shared load. Different timing boundaries and thread counts preclude a clean speedup claim; isolated/full-size benchmarks remain unverified.",
+  "host": {
+    "logical_cpus": 128,
+    "ram_gib_approx": 503,
+    "gpu": "AMD gfx1100, device 0x744b",
+    "vram_gib_approx": 48,
+    "cgroup_memory_limit_bytes": 59055800320,
+    "cpu_cgroup_quota_cores": 16
+  },
+  "required_comparisons": [
+    "native release CPU",
+    "native release Auto with execution evidence",
+    "native release strict Vulkan",
+    "official controlled F32",
+    "official BF16 with AMD SDPA substitution"
+  ],
+  "required_cases": [
+    "16x16, 5 frames shared-noise",
+    "832x480, 81 frames quality/performance"
+  ],
+  "timing": {
+    "warmup": true,
+    "minimum_repetitions": 3,
+    "synchronize_gpu": true,
+    "disable_checkpoint_io": true,
+    "record_model_load_separately": true
+  },
+  "measurements": [
+    {
+      "kind": "cpu",
+      "measured_processes": 3,
+      "required_measured_processes": 3,
+      "median_process_seconds": 73.73649789020419,
+      "minimum_process_seconds": 63.397700717672706,
+      "maximum_process_seconds": 78.48442462831736,
+      "process_peak_rss_bytes": 31337136128,
+      "assigned_device_total_peak_bytes": 48897548288,
+      "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+      "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes"
+    },
+    {
+      "kind": "auto",
+      "measured_processes": 3,
+      "required_measured_processes": 3,
+      "median_process_seconds": 106.49002285301685,
+      "minimum_process_seconds": 99.86277609877288,
+      "maximum_process_seconds": 110.53445016406476,
+      "process_peak_rss_bytes": 36920078336,
+      "assigned_device_total_peak_bytes": 29986516992,
+      "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+      "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes"
+    },
+    {
+      "kind": "vulkan",
+      "measured_processes": 3,
+      "required_measured_processes": 3,
+      "median_process_seconds": 553.2745343726128,
+      "minimum_process_seconds": 544.6745390016586,
+      "maximum_process_seconds": 824.4099704641849,
+      "process_peak_rss_bytes": 38880161792,
+      "assigned_device_total_peak_bytes": 51401502720,
+      "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+      "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes"
+    },
+    {
+      "kind": "controlled",
+      "measured_processes": 3,
+      "required_measured_processes": 3,
+      "median_process_seconds": 269.1550020631403,
+      "minimum_process_seconds": 261.32031246088445,
+      "maximum_process_seconds": 405.51179391145706,
+      "process_peak_rss_bytes": 41908609024,
+      "assigned_device_total_peak_bytes": 51265810432,
+      "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+      "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes",
+      "median_generation_seconds": 164.54098080284894
+    },
+    {
+      "kind": "published",
+      "measured_processes": 3,
+      "required_measured_processes": 3,
+      "median_process_seconds": 123.76492368988693,
+      "minimum_process_seconds": 114.06787221878767,
+      "maximum_process_seconds": 139.13796873018146,
+      "process_peak_rss_bytes": 43606003712,
+      "assigned_device_total_peak_bytes": 48499585024,
+      "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+      "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes",
+      "median_generation_seconds": 55.76876113191247
+    }
+  ],
+  "latency_seconds": null,
+  "speedup": null,
+  "peak_rss_bytes": null,
+  "peak_vram_bytes": null,
+  "observed_trace_runs": [
+    {
+      "recipe": "raw-source controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 140.06697715446353
+    },
+    {
+      "recipe": "BF16 GGUF controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 190.21348341926932
+    },
+    {
+      "recipe": "final BF16 native CPU CLI, release-fast",
+      "elapsed_seconds": 70.00480451993644,
+      "boundary": "process wall clock, includes load, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final BF16 native CPU HTTP, release-fast",
+      "elapsed_seconds": 27.78959423303604,
+      "boundary": "request wall clock, includes graph load, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final same-GGUF BF16 official controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 483.7055835220963,
+      "boundary": "generation includes streamed weights and checkpoint/RGB I/O; initial hashes excluded"
+    },
+    {
+      "recipe": "final F32 native CPU CLI, release-fast",
+      "elapsed_seconds": 586.4098542202264,
+      "boundary": "process wall clock, mmap paging under shared memory contention, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final F32 native CPU HTTP, release-fast",
+      "elapsed_seconds": 111.4729998651892,
+      "boundary": "request wall clock, parity/compute logs and MP4 encoding"
+    },
+    {
+      "recipe": "final BF16 native strict Vulkan CLI, release-fast",
+      "elapsed_seconds": 1054.6179829854518,
+      "boundary": "process wall clock, includes model load, trace/log I/O and encoding; shared host/cgroup contention",
+      "device_submissions": 5628,
+      "static_upload_bytes": 183203529792,
+      "device_allocator_peak_bytes": 15003422672
+    },
+    {
+      "recipe": "final same-GGUF F32 official controlled F32",
+      "device": "cuda",
+      "elapsed_seconds": 569.1979734543711,
+      "boundary": "traced_including_checkpoint_io_and_streamed_weights; initial hash verification excluded"
+    },
+    {
+      "recipe": "final BF16 native vulkan CLI, release-fast",
+      "elapsed_seconds": 1054.6179829854518,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final BF16 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 1182.3752782531083,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final BF16 native auto CLI, release-fast",
+      "elapsed_seconds": 248.4602637514472,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final BF16 native auto HTTP, release-fast",
+      "elapsed_seconds": 156.7257447130978,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; not a clean benchmark",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final F16 native vulkan CLI, release-fast",
+      "elapsed_seconds": 770.6477586999536,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final F16 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 524.1638943403959,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      }
+    },
+    {
+      "recipe": "final F16 native auto CLI, release-fast",
+      "elapsed_seconds": 97.61926568113267,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final F16 native auto HTTP, release-fast",
+      "elapsed_seconds": 97.75809125974774,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native vulkan CLI, release-fast",
+      "elapsed_seconds": 129.89652653038502,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 97326875712, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 4126386736, peak_allocation_bytes: 8478740432 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 129.4166516698897,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 97326875712, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 4126386736, peak_allocation_bytes: 8478740432 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native auto CLI, release-fast",
+      "elapsed_seconds": 70.90239183604717,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 7365395520, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 7909019568, peak_allocation_bytes: 8076136384 }"
+      }
+    },
+    {
+      "recipe": "final Q8_0 native auto HTTP, release-fast",
+      "elapsed_seconds": 59.96971791237593,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 7365395520, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 7909019568, peak_allocation_bytes: 8076136384 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native vulkan CLI, release-fast",
+      "elapsed_seconds": 60.96507947705686,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51525993536, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2450270768, peak_allocation_bytes: 4998909904 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 72.3407538253814,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51525993536, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2450270768, peak_allocation_bytes: 4998909904 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native auto CLI, release-fast",
+      "elapsed_seconds": 31.259000269696116,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      }
+    },
+    {
+      "recipe": "final Q4_0 native auto HTTP, release-fast",
+      "elapsed_seconds": 25.269877184182405,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native vulkan CLI, release-fast",
+      "elapsed_seconds": 88.45538113079965,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 57251103808, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2659785264, peak_allocation_bytes: 5433888720 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native vulkan HTTP, release-fast",
+      "elapsed_seconds": 80.62498133815825,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 57251103808, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2659785264, peak_allocation_bytes: 5433888720 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native auto CLI, release-fast",
+      "elapsed_seconds": 65.62667769379914,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4332586048, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4876210096, peak_allocation_bytes: 4974514112 }"
+      }
+    },
+    {
+      "recipe": "final Q4_1 native auto HTTP, release-fast",
+      "elapsed_seconds": 82.11022517457604,
+      "boundary": "Traced wall clock including graph load, checkpoint/log I/O, encoding and shared cgroup/device contention; failed numeric/video gates do not establish acceptance",
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4332586048, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4876210096, peak_allocation_bytes: 4974514112 }"
+      }
+    }
+  ],
+  "trace_timing_limit": "Shared host/cgroup contention, different load/encode boundaries and checkpoint I/O. These are diagnostic run times, not clean benchmarks or evidence of a speedup.",
+  "known_cpu_work": [
+    "umT5 relative-bias attention, normalization, RoPE, modulation/layout and depthwise convolution",
+    "Shared try_attention always computes full CPU attention for TODO-044 validation, even when the device output passes; it may additionally retry or return CPU values."
+  ],
+  "release_build": {
+    "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+    "profile": "release, fat LTO",
+    "completion_log": "    Finished `release` profile [optimized + debuginfo] target(s) in 6m 04s",
+    "artifacts": [
+      {
+        "binary": "rust-model-inference",
+        "size": 37219224,
+        "sha256": "12231c3a570f98e5c29f29c32107a45e5722278175f40b27ca6beb5d85ebe749",
+        "mtime_epoch": 1795025201.7699785
+      },
+      {
+        "binary": "rust-model-server",
+        "size": 29232136,
+        "sha256": "663231b9f53a573f40625410110d47cc09bcdf2bcec5d210d5b163ce2d3b22a0",
+        "mtime_epoch": 1795019249.2339966
+      }
+    ]
+  },
+  "diagnostic_timing_samples": {
+    "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+    "profile": "release, fat LTO",
+    "scope": "Same-host repeated diagnostic timings under ongoing acceptance/conversion contention; not a clean speedup comparison",
+    "sampling": "One warmup then three measured processes per case; no checkpoint or compute trace I/O",
+    "native_boundary": "Whole CLI process, including model load, generation and MP4 encoding",
+    "reference_boundary": "Whole oracle process plus separately recorded generation region including streamed weights and RGB writes; hash and eager initialization excluded from generation region",
+    "memory_boundary": "wait4 process peak RSS; GPU high-water sample is assigned-device total including other processes",
+    "runs": [
+      {
+        "kind": "cpu",
+        "warmup": true,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "cpu",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-cpu-0.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 70.66055428236723,
+        "peak_rss_bytes": 33322786816,
+        "assigned_gpu_total_peak_bytes": 34840088576,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "cpu",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "cpu",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-cpu-1.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 63.397700717672706,
+        "peak_rss_bytes": 31337136128,
+        "assigned_gpu_total_peak_bytes": 40277823488,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "cpu",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "cpu",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-cpu-2.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 73.73649789020419,
+        "peak_rss_bytes": 27947970560,
+        "assigned_gpu_total_peak_bytes": 44668604416,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "cpu",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "cpu",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-cpu-3.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 78.48442462831736,
+        "peak_rss_bytes": 29331537920,
+        "assigned_gpu_total_peak_bytes": 48897548288,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "auto",
+        "warmup": true,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "auto",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-auto-0.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 125.9731035772711,
+        "peak_rss_bytes": 26422063104,
+        "assigned_gpu_total_peak_bytes": 49413144576,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "auto",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "auto",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-auto-1.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 99.86277609877288,
+        "peak_rss_bytes": 36920078336,
+        "assigned_gpu_total_peak_bytes": 29986516992,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "auto",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "auto",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-auto-2.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 106.49002285301685,
+        "peak_rss_bytes": 36287115264,
+        "assigned_gpu_total_peak_bytes": 26841505792,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "auto",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "auto",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-auto-3.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 110.53445016406476,
+        "peak_rss_bytes": 35537326080,
+        "assigned_gpu_total_peak_bytes": 28634431488,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "vulkan",
+        "warmup": true,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "vulkan",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-vulkan-0.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 639.9512622784823,
+        "peak_rss_bytes": 32254586880,
+        "assigned_gpu_total_peak_bytes": 20896440320,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "vulkan",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "vulkan",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-vulkan-1.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 544.6745390016586,
+        "peak_rss_bytes": 37647147008,
+        "assigned_gpu_total_peak_bytes": 17556643840,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "vulkan",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "vulkan",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-vulkan-2.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 553.2745343726128,
+        "peak_rss_bytes": 38880161792,
+        "assigned_gpu_total_peak_bytes": 16518512640,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "vulkan",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--fps",
+          "16",
+          "--seed",
+          "17",
+          "--threads",
+          "24",
+          "--compute",
+          "vulkan",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-vulkan-3.mp4"
+        ],
+        "exit_code": 0,
+        "process_seconds": 824.4099704641849,
+        "peak_rss_bytes": 26568011776,
+        "assigned_gpu_total_peak_bytes": 51401502720,
+        "decoded_bytes": 3840
+      },
+      {
+        "kind": "controlled",
+        "warmup": true,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "controlled",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-controlled-0",
+          "--gguf",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+        ],
+        "exit_code": 0,
+        "process_seconds": 430.33103096857667,
+        "peak_rss_bytes": 37540052992,
+        "assigned_gpu_total_peak_bytes": 20872044544,
+        "generation_seconds": 318.8704838808626
+      },
+      {
+        "kind": "controlled",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "controlled",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-controlled-1",
+          "--gguf",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+        ],
+        "exit_code": 0,
+        "process_seconds": 269.1550020631403,
+        "peak_rss_bytes": 35290312704,
+        "assigned_gpu_total_peak_bytes": 29460291584,
+        "generation_seconds": 160.86353545449674
+      },
+      {
+        "kind": "controlled",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "controlled",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-controlled-2",
+          "--gguf",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+        ],
+        "exit_code": 0,
+        "process_seconds": 261.32031246088445,
+        "peak_rss_bytes": 41908609024,
+        "assigned_gpu_total_peak_bytes": 24062283776,
+        "generation_seconds": 164.54098080284894
+      },
+      {
+        "kind": "controlled",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "controlled",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-controlled-3",
+          "--gguf",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+        ],
+        "exit_code": 0,
+        "process_seconds": 405.51179391145706,
+        "peak_rss_bytes": 36902424576,
+        "assigned_gpu_total_peak_bytes": 51265810432,
+        "generation_seconds": 293.0905694011599
+      },
+      {
+        "kind": "published",
+        "warmup": true,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-0"
+        ],
+        "exit_code": 0,
+        "process_seconds": 154.22436434589326,
+        "peak_rss_bytes": 43608920064,
+        "assigned_gpu_total_peak_bytes": 49243639808,
+        "generation_seconds": 75.26721983402967
+      },
+      {
+        "kind": "published",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-1"
+        ],
+        "exit_code": 0,
+        "process_seconds": 139.13796873018146,
+        "peak_rss_bytes": 43606003712,
+        "assigned_gpu_total_peak_bytes": 48499585024,
+        "generation_seconds": 64.36805121041834
+      },
+      {
+        "kind": "published",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-2"
+        ],
+        "exit_code": 0,
+        "process_seconds": 123.76492368988693,
+        "peak_rss_bytes": 43605471232,
+        "assigned_gpu_total_peak_bytes": 43570843648,
+        "generation_seconds": 55.76876113191247
+      },
+      {
+        "kind": "published",
+        "warmup": false,
+        "command": [
+          "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+          "-m",
+          "tools.oracle.fastframes_l.run_reference",
+          "--reference",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+          "--model-dir",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+          "--text-dir",
+          "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+          "--noise",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/final-reference-bf16/noise.f32",
+          "--device",
+          "cuda",
+          "--threads",
+          "8",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--frames",
+          "5",
+          "--seed",
+          "17",
+          "--recipe",
+          "published",
+          "--benchmark",
+          "--output",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/timing-published-3"
+        ],
+        "exit_code": 0,
+        "process_seconds": 114.06787221878767,
+        "peak_rss_bytes": 43598303232,
+        "assigned_gpu_total_peak_bytes": 16853671936,
+        "generation_seconds": 54.913178492337465
+      }
+    ],
+    "summaries": {
+      "cpu": {
+        "median_process_seconds": 73.73649789020419
+      },
+      "auto": {
+        "median_process_seconds": 106.49002285301685
+      },
+      "vulkan": {
+        "median_process_seconds": 553.2745343726128
+      },
+      "controlled": {
+        "median_process_seconds": 269.1550020631403
+      },
+      "published": {
+        "median_process_seconds": 123.76492368988693
+      }
+    }
+  },
+  "known_transfer_work": [
+    {
+      "case": "BF16 strict Vulkan, traced 16x16/5frames",
+      "static_upload_bytes": 183203529792,
+      "submissions": 5628,
+      "scope": "Measured trace counters for the same production sources; timing repeats disable the logs"
+    },
+    {
+      "case": "BF16 Auto, traced 16x16/5frames",
+      "static_upload_bytes": 13864272960,
+      "submissions": 395,
+      "scope": "Measured trace counters for the same production sources; timing repeats disable the logs"
+    },
+    "The model rebuilds its upload cache every eight DiT blocks to fit F32 on a 48 GiB device, so later steps upload weights again. Strict mode also offloads small projections that Auto keeps on CPU."
+  ],
+  "threading": {
+    "native_requested_threads": 24,
+    "reference_threads": 8,
+    "shared_cpu_cgroup_quota_cores": 16
+  },
+  "verification_limits": [
+    "Concurrent conversion/acceptance load; no isolated benchmark",
+    "Native generation and model loading are not timed separately",
+    "Native and reference requested thread counts differ",
+    "Assigned-device VRAM includes other processes",
+    "832x480/81frames remains untested under the 55 GiB cgroup limit"
+  ],
+  "extended_480p_diagnostic": {
+    "case": "bf16-832x480-5frames-vulkan",
+    "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+    "scope": "Single traced release-fast native process and completed official references under shared host/cgroup/device load; different profiles, tracing and loading boundaries; not an isolated release benchmark or a speedup comparison",
+    "native": {
+      "profile": "release-fast, parity and compute trace enabled",
+      "process_seconds": 10845.660709502175,
+      "boundary": "Whole process including model load, checkpoint/compute tracing and MP4 encoding",
+      "binary_sha256": "f1c4f5a2996395d1d4cf0ad68fc536883f9547a335a16fac3bfd881eecf4f73c",
+      "device_allocator_peak_bytes": 17215993808,
+      "backend_evidence": {
+        "vulkan_operator_records": 2211,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5640, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 121086047268, host_read_bytes: 110108897408, transfer_submissions: 2861, live_allocation_bytes: 8546070064, peak_allocation_bytes: 17215993808 }",
+        "scope": "Instrumented projections; fixed CPU attention and depthwise stages remain documented separately"
+      }
+    },
+    "references": {
+      "controlled": {
+        "process_seconds": 535.401931386441,
+        "generation_region_seconds": 391.9104803428054,
+        "generation_boundary": "traced_including_checkpoint_io_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "checkpoint_count": 412,
+        "process_boundary": "Whole Python process including pinned asset hashing, wrapper setup and generation"
+      },
+      "published": {
+        "process_seconds": 115.54489267244935,
+        "generation_region_seconds": 57.605546997860074,
+        "generation_boundary": "generation_including_rgb_transfer_write_and_streamed_weights",
+        "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+        "checkpoint_count": 0,
+        "process_boundary": "Whole Python process including pinned asset hashing, wrapper setup and generation"
+      }
+    },
+    "acceptance": {
+      "case": "bf16-832x480-5frames-vulkan",
+      "format": "bf16",
+      "requested_backend": "vulkan",
+      "transport": "cli",
+      "width": 832,
+      "height": 480,
+      "frames": 5,
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "implementation": "已实现",
+      "validation": "失败",
+      "checkpoints": {
+        "passed": true,
+        "checkpoints": 411,
+        "max_relative_rmse": 0.003756432053285011,
+        "min_cosine": 0.9999929447946526,
+        "first_failure": null
+      },
+      "decoded_video": {
+        "max_abs": 0.20784313725490194,
+        "rmse": 0.008177586129195849,
+        "relative_rmse": 0.015758214165296283,
+        "cosine": 0.9998758482355368,
+        "rmse_max": 0.01,
+        "cosine_min": 0.9999,
+        "passed": false
+      },
+      "published_bf16_drift": {
+        "max_abs": 1.0,
+        "rmse": 0.10040362877346713,
+        "relative_rmse": 0.1921561748261572,
+        "cosine": 0.9815560650382746,
+        "rmse_max": 0.08,
+        "passed": false
+      },
+      "acceptance_passed": false,
+      "evidence": "supplemental-results.json#reports/extended-results.json"
+    },
+    "evidence": "supplemental-results.json#reports/480-reference-provenance-results.json",
+    "speedup": null,
+    "full_process_peak_rss_bytes": null
+  }
+}

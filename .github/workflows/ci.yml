@@ -42,6 +42,13 @@ jobs:
       - run: cargo test --locked --test nemotron_reuse_cli
       - run: cargo test --locked --lib pjit
       - run: cargo test --locked --lib image_generation
+      - name: FastFrames-L model, transport and oracle regressions
+        run: |
+          cargo test --locked --lib fastframes_l
+          cargo test --locked --lib video_generation
+          python3 -m venv target/fastframes-ci-venv
+          target/fastframes-ci-venv/bin/python -m pip install numpy==2.3.4
+          target/fastframes-ci-venv/bin/python -m unittest tools.oracle.fastframes_l.test_compare
       - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
       - run: python3 -m unittest discover -s tools/oracle/minicpmv -p 'test_*.py'
       - run: cargo test --locked --lib ggml_dots_honor_scalar_dispatch

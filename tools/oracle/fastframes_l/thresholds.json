@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "contract": "controlled F32 arithmetic with the same effective weights; relative RMSE divides by reference RMS",
+  "floating_implementation": {"relative_rmse_max": 0.005, "cosine_min": 0.9999},
+  "quantized_implementation": {"relative_rmse_max": 0.005, "cosine_min": 0.9999},
+  "pixel_implementation": {"rmse_max": 0.01, "cosine_min": 0.9999},
+  "published_bf16_recipe": {"pixel_rmse_max": 0.08, "status": "quality comparison, distinct from implementation alignment"},
+  "notes": ["Discrete token IDs, tensor shapes, layouts and schedule entries are exact.", "Lossy reductions, BF16 casts, SIMD and Vulkan are measured numerically, never required to be bitwise equal.", "Quality loss relative to the floating source is recorded separately from an independently dequantized format oracle."]
+}
