@@ -254,6 +254,7 @@
     "corrected_effective_weights_sha256": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4",
     "repair": "Explicit tensor/tensor activation quantization division; production Rust arithmetic and thresholds unchanged",
     "corrected_wrapper_rerun": "replacement-host-results.json",
-    "historical_quantized_metrics": "Retained pre-repair evidence; Q8_0 is rerun separately. Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have not been rerun with the corrected wrapper."
+    "historical_quantized_metrics": "Retained pre-repair evidence; Q8_0 is rerun separately. Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have not been rerun with the corrected wrapper.",
+    "replacement_gpu_status": "Device lost on latest instance, including unchanged shared controls and serial retries; physical exclusivity unproven. Original successful GPU metrics remain historical."
   }
 }

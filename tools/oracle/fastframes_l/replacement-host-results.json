@@ -3,7 +3,7 @@
   "status": "Experimental / partial; fixed gates retained",
   "scope": "Replacement host: corrected-oracle BF16/F16/Q8_0 reruns. The original 54-case matrix remains historical evidence, not a corrected-wrapper rerun of all nine formats.",
   "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
-  "source_state": "Preserved Rust production binaries at source_head; uncommitted oracle repair is identified by before/after wrapper hashes below.",
+  "source_state": "Preserved Rust production binaries compiled at source_head; oracle repair is identified by before/after wrapper hashes below.",
   "environment": {
     "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
     "cpu_logical": 128,
@@ -1049,10 +1049,15 @@
       "seed": 17
     },
     "expected_transports": 18,
-    "completed_transports": 6,
+    "attempted_transports": 10,
+    "completed_transports": 10,
+    "numeric_comparison_transports": 6,
     "passed": 2,
-    "failed": 4,
-    "pending": 12,
+    "failed": 8,
+    "numeric_failed": 4,
+    "device_execution_failed": 4,
+    "blocked_not_run": 8,
+    "pending": 0,
     "results": [
       {
         "format": "bf16",
@@ -1456,6 +1461,246 @@
             "scope": "Both official and native RGB encoded with the same libx264 settings, then decoded to RGB24 / 255"
           }
         }
+      },
+      {
+        "format": "q8_0",
+        "backend": "auto",
+        "model": {
+          "format": "q8_0",
+          "size": 22274854208,
+          "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 24.987359283986734,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+            "[GPU] Vulkan disabled after error: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>. Falling back to CPU."
+          ],
+          "log_sha256": "d70db5bd94b4d40679bff5e7daa3ca0590a37bc5750e574a704a8a7495b5c587",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "[GPU] Warmup done in 4.3s",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Auto; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost / CPU fallback",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate",
+          "output_exists": true
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1828,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 23.11169193900423,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-q8_0.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18162"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-q8_0-auto-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2202,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+            "[2026-11-19T01:43:53Z INFO  rust_model_inference::compute::linear] compute linear: CPU fallback: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>",
+            "[GPU] Vulkan disabled after error: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>. Falling back to CPU."
+          ],
+          "log_sha256": "1b62113593b875f60ec377fa41728bfb291a135e47d5837c9290182455a9461a",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "Model 'FastFrames-L-q8_0' loaded (mode=video-generation, host=127.0.0.1, port=18162)",
+            "Server listening on http://127.0.0.1:18162",
+            "[GPU] Warmup done in 4.3s",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Auto; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=Q8_0 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost / CPU fallback",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate"
+        },
+        "physical_device_acceptance_passed": false
+      },
+      {
+        "format": "bf16",
+        "backend": "vulkan",
+        "model": {
+          "format": "bf16",
+          "size": 41892093248,
+          "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "vulkan",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-cli.mp4"
+          ],
+          "exit_code": 1,
+          "elapsed_seconds": 5.444614858002751,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-cli.jsonl",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 0,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+            "Inference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>"
+          ],
+          "log_sha256": "283858ac55791b374edf971a25a5aa14e7cdec510b414719a99e3ef3c70a9cdb",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "[GPU] Warmup done in 4.3s",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate",
+          "output_exists": false
+        },
+        "http": {
+          "status": 500,
+          "error": "{\"error\":{\"message\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}}",
+          "elapsed_seconds": 0.2953260900103487,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "vulkan",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18163"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/matrix-bf16-vulkan-http.log",
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 0,
+            "last_device_counters": null
+          },
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+          ],
+          "log_sha256": "5b3cb6a74febd779acac3d8309d13940a284cd9772edec64d138c57c0d416ced",
+          "startup_lines": [
+            "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+            "[GPU] Warming up Vulkan pipeline (driver JIT)...",
+            "[GPU] Warmup done in 4.2s",
+            "Model 'FastFrames-L-bf16' loaded (mode=video-generation, host=127.0.0.1, port=18163)",
+            "Server listening on http://127.0.0.1:18163",
+            "[GPU] Q8_0 matmul: packed int8 dot product",
+            "FastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            "compute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10"
+          ],
+          "physical_device_validation": "失败：device lost",
+          "numerical_comparison": "Not run after device-execution failure; CPU acceptance is separate"
+        },
+        "physical_device_acceptance_passed": false
       }
     ]
   },
@@ -1644,9 +1889,392 @@
   "limits": [
     "Q8 text still fails after the oracle repair; same-input projection checks and one changed activation code do not establish full-model correctness.",
     "FFmpeg 9.0.2 differs from the earlier environment, whose codec version was not captured; cross-host pixel changes are not a production repair.",
-    "Other six formats and extended 480p/9-frame cases were not rerun on port 33162; retain historical results and their original wrapper provenance.",
-    "Shared host/cgroup/GPU and release-fast binaries prevent isolated release-performance claims; the 81-frame 480p default remains untested."
+    "Other six formats and extended 480p/9-frame cases were not rerun on this replacement host; retain historical results and their original wrapper provenance.",
+    "Shared host/cgroup/GPU and release-fast binaries prevent isolated release-performance claims; the 81-frame 480p default remains untested.",
+    "Physical GPU reruns hit hard recovery/device lost, including an unchanged upstream shared F32/BF16 test. This isolates the failure from FastFrames weights, without proving whether the remaining cause is driver, hardware or shared device implementation."
   ],
   "cpu_controller_completed": true,
-  "device_controller_completed": false
+  "device_controller_completed": false,
+  "device_loss": {
+    "remote_report": "device-loss-results.json",
+    "sha256": "27c394088954cb151773af6e75c13dd3e1c688d83d1ecb817e0efc5dcd92038b",
+    "scope": "Physical Vulkan execution failures on the replacement instance; initialization, valid CPU-fallback video and software-ICD tests are not physical-GPU acceptance",
+    "gpu": "RADV NAVI31; card7/renderD134",
+    "driver_packages": [
+      "libdrm-amdgpu1:amd64\t2.4.125-1ubuntu0.1~24.04.1",
+      "libvulkan1:amd64\t1.3.275.0-1build1",
+      "mesa-vulkan-drivers:amd64\t25.2.8-0ubuntu0.24.04.1"
+    ],
+    "cgroup_memory_events": "low 0\nhigh 0\nmax 4\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "kernel_log_access": "dmesg: read kernel buffer failed: Operation not permitted",
+    "no_gpu_reset_or_global_driver_changes_performed": true,
+    "not_run_due_to_same_device_blocker": [
+      {
+        "format": "bf16",
+        "backend": "auto",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "bf16",
+        "backend": "auto",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "auto",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "auto",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "vulkan",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "f16",
+        "backend": "vulkan",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "q8_0",
+        "backend": "vulkan",
+        "transport": "cli",
+        "validation": "未运行（共享设备丢失阻塞）"
+      },
+      {
+        "format": "q8_0",
+        "backend": "vulkan",
+        "transport": "http",
+        "validation": "未运行（共享设备丢失阻塞）"
+      }
+    ],
+    "shared_control": {
+      "scope": "Existing upstream shared LinearExecutor F32/BF16 test; no FastFrames model or weights used",
+      "upstream_base": "44527e5ad2ca979518a0f13c2b70dc2c0b78fddc",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+        "compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "elapsed_seconds": 4.370732120005414,
+      "test_binary_sha256": "fee6389197eb4236dfbd98cf57cdbb63b6b2323174e62bff8b68db1209afc45c",
+      "shared_source_sha256": {
+        "src/compute/linear.rs": "0014cfb7bff2365106b75006c312850632e1687a4e65ec4c310eaabe4e1356b8",
+        "src/vulkan/ops.rs": "37437760dccefb1b9c6c0e49ce65c52e3a6ccf52b09d3bcd25e2c192c65de25c",
+        "src/ops/kernel/vulkan.rs": "ed94efe73fa362b943bfbe4e96ecb842a03d07263a9b927d52e5570dc8e33c29"
+      },
+      "log": "\nrunning 1 test\ntest compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches' (48714) panicked at src/compute/linear.rs:686:13:\nassertion `left == right` failed\n  left: [Cpu, Cpu, Cpu, Cpu]\n right: [Vulkan, Vulkan, Vulkan, Vulkan]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.34s\n\n",
+      "shared_sources_match_upstream_base": true
+    },
+    "failed_transport_cases": "transport_rerun.results entries with backend != cpu",
+    "serial_retries": {
+      "remote_report": "serial-device-retry-results.json",
+      "sha256": "d049a03992b76993cb0745193847589a33776958933216e823df27c56b1ab4c5",
+      "scope": "Fresh serial subprocesses after no visible GPU clients and less than 128 MiB allocated VRAM; physical exclusivity is not established",
+      "gpu": "RADV NAVI31; card7/renderD134",
+      "runs": [
+        {
+          "label": "shared-control-1",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+            "compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "elapsed_seconds": 4.3205278599925805,
+          "preflight": [
+            {
+              "time": "2026-11-19T01:58:33Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:36Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:39Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            }
+          ],
+          "postflight": {
+            "time": "2026-11-19T01:58:43Z",
+            "visible_gpu_clients": [],
+            "gpu_busy_percent": 100,
+            "mem_info_vram_used": 26759168,
+            "mem_info_vram_total": 51522830336
+          },
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/shared-control-1.log",
+          "log_sha256": "8957f1b394f04dfe0f08b116d762b7301f455e5852cc1785b1f1ba941a82fdd2",
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+          ],
+          "log_tail": "\nrunning 1 test\ntest compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches' (48934) panicked at src/compute/linear.rs:686:13:\nassertion `left == right` failed\n  left: [Cpu, Cpu, Cpu, Cpu]\n right: [Vulkan, Vulkan, Vulkan, Vulkan]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.28s\n\n"
+        },
+        {
+          "label": "shared-control-2",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+            "compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "elapsed_seconds": 4.420966650999617,
+          "preflight": [
+            {
+              "time": "2026-11-19T01:58:43Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:46Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:49Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            }
+          ],
+          "postflight": {
+            "time": "2026-11-19T01:58:53Z",
+            "visible_gpu_clients": [],
+            "gpu_busy_percent": 100,
+            "mem_info_vram_used": 26759168,
+            "mem_info_vram_total": 51522830336
+          },
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/shared-control-2.log",
+          "log_sha256": "696dc8fa65549098ca1331f46e6d50338e5346fa6b95a575a545edd9f0b53f3b",
+          "device_error_lines": [
+            "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+          ],
+          "log_tail": "\nrunning 1 test\ntest compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches' (48939) panicked at src/compute/linear.rs:686:13:\nassertion `left == right` failed\n  left: [Cpu, Cpu, Cpu, Cpu]\n right: [Vulkan, Vulkan, Vulkan, Vulkan]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compute::linear::tests::linear_gpu_group_preserves_mixed_formats_across_batches\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.38s\n\n"
+        },
+        {
+          "label": "bf16-strict-transports",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/run_backend_matrix_resumed.py",
+            "vulkan",
+            "bf16"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 10.630712443991797,
+          "preflight": [
+            {
+              "time": "2026-11-19T01:58:53Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:56Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            },
+            {
+              "time": "2026-11-19T01:58:59Z",
+              "visible_gpu_clients": [],
+              "gpu_busy_percent": 100,
+              "mem_info_vram_used": 26759168,
+              "mem_info_vram_total": 51522830336
+            }
+          ],
+          "postflight": {
+            "time": "2026-11-19T01:59:10Z",
+            "visible_gpu_clients": [],
+            "gpu_busy_percent": 100,
+            "mem_info_vram_used": 26759168,
+            "mem_info_vram_total": 51522830336
+          },
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/bf16-strict-transports.log",
+          "log_sha256": "ba8784437ee82d34a0ddb5027e2823608964ce1193d9468f80e46b35e9408079",
+          "device_error_lines": [],
+          "log_tail": "bf16 vulkan CLI 1\nbf16 vulkan HTTP 500\n"
+        }
+      ],
+      "completed": true,
+      "shared_control_sha256": "fee6389197eb4236dfbd98cf57cdbb63b6b2323174e62bff8b68db1209afc45c",
+      "transport_harness": {
+        "original_sha256": "a55a2c506c2548ba566ea3ce3d49ffc517b51816bd7cd5cdf92ed2db282e4e81",
+        "retry_sha256": "8de0e5edae1c13a6a1f1228cdd57cad1540fa9489a17de97048c32539da0d920",
+        "change": "Evidence output directory only; original preserved binaries and arguments"
+      },
+      "cases": [
+        {
+          "format": "bf16",
+          "backend": "vulkan",
+          "model": {
+            "format": "bf16",
+            "size": 41892093248,
+            "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "cli": {
+            "command": [
+              "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-inference",
+              "--model",
+              "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+              "--prompt",
+              "A red ball rolls on a table.",
+              "--width",
+              "16",
+              "--height",
+              "16",
+              "--video-frames",
+              "5",
+              "--fps",
+              "16",
+              "--seed",
+              "17",
+              "--threads",
+              "24",
+              "--compute",
+              "vulkan",
+              "--out",
+              "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-cli.mp4"
+            ],
+            "exit_code": 1,
+            "elapsed_seconds": 5.197688543004915,
+            "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-cli.log",
+            "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-cli.jsonl",
+            "log_sha256": "588a33d75789dc701b716336aabb90df8dcee1b55a789e4276bbefd8f4d8140e",
+            "device_error_lines": [
+              "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.",
+              "Inference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>"
+            ],
+            "backend_evidence": {
+              "vulkan_operator_records": 0,
+              "cpu_operator_records": 0,
+              "last_device_counters": null
+            },
+            "log_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[GPU] Q8_0 matmul: packed int8 dot product\nFastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+          },
+          "http": {
+            "status": 500,
+            "error": "{\"error\":{\"message\":\"compute device failure: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\"}}",
+            "elapsed_seconds": 0.28059824999945704,
+            "command": [
+              "/workspace/rust-model-inference-fastframes/target/fastframes/production-binaries/rust-model-server",
+              "--model",
+              "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+              "--threads",
+              "24",
+              "--compute",
+              "vulkan",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "18163"
+            ],
+            "body": {
+              "prompt": "A red ball rolls on a table.",
+              "width": 16,
+              "height": 16,
+              "frames": 5,
+              "fps": 16,
+              "seed": 17
+            },
+            "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-http.jsonl",
+            "log": "/workspace/rust-model-inference-fastframes/target/fastframes/serial-device-retry/matrix-bf16-vulkan-http.log",
+            "log_sha256": "5b3cb6a74febd779acac3d8309d13940a284cd9772edec64d138c57c0d416ced",
+            "device_error_lines": [
+              "radv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery."
+            ],
+            "backend_evidence": {
+              "vulkan_operator_records": 0,
+              "cpu_operator_records": 0,
+              "last_device_counters": null
+            },
+            "log_tail": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\nModel 'FastFrames-L-bf16' loaded (mode=video-generation, host=127.0.0.1, port=18163)\nServer listening on http://127.0.0.1:18163\n[GPU] Q8_0 matmul: packed int8 dot product\nFastFrames-L: requested_compute=Vulkan; activations/KV=F32; text relative-bias attention and normalization on CPU\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\ncompute scope=host_linear mode=Prepared format=BF16 shape=4096x4096 rows=10\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n"
+          }
+        }
+      ]
+    },
+    "single_projection_retry": {
+      "remote_report": "single-projection-device-retry-results.json",
+      "sha256": "54f537ee9a40f1e38ba4d523292a44fc4d1a518ebd2a71652caa59587087b29f",
+      "scope": "Fresh low-level Vulkan F32/BF16 single-projection control, no model/weights; visible clients sampled during execution; physical exclusivity not established",
+      "test_binary_sha256": "fee6389197eb4236dfbd98cf57cdbb63b6b2323174e62bff8b68db1209afc45c",
+      "before": {
+        "time": "2026-11-19T01:59:56Z",
+        "visible_gpu_clients": [],
+        "gpu_busy_percent": 100,
+        "mem_info_vram_used": 26759168
+      },
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/build/rust-model-inference/99b54b5d9466df1d/out/rust_model_inference-99b54b5d9466df1d",
+        "video_gpu_float_projection_preserves_range_and_partial_tiles",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "test_pid": 49076,
+      "exit_code": 101,
+      "elapsed_seconds": 4.566282123996643,
+      "after": {
+        "time": "2026-11-19T02:00:01Z",
+        "visible_gpu_clients": [],
+        "gpu_busy_percent": 100,
+        "mem_info_vram_used": 26759168
+      },
+      "log": "/workspace/rust-model-inference-fastframes/target/fastframes/single-projection-device-retry.log",
+      "log_sha256": "67fb2f49d7c1dae821f4a6e333f19a6b836c2a376d0be85d85690564c8c5259b",
+      "log_tail": "\nrunning 1 test\ntest vulkan::ops::video_gpu_tests::video_gpu_float_projection_preserves_range_and_partial_tiles ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\n\nthread 'vulkan::ops::video_gpu_tests::video_gpu_float_projection_preserves_range_and_partial_tiles' (49077) panicked at src/vulkan/ops.rs:3292:18:\ncalled `Result::unwrap()` on an `Err` value: InitFailed(\"The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    vulkan::ops::video_gpu_tests::video_gpu_float_projection_preserves_range_and_partial_tiles\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2007 filtered out; finished in 4.31s\n\n",
+      "observation_summary": {
+        "sample_count": 18,
+        "first_sample_time": "2026-11-19T01:59:56Z",
+        "last_sample_time": "2026-11-19T02:00:01Z",
+        "other_visible_gpu_clients": [],
+        "gpu_busy_percent_range": [
+          100,
+          100
+        ],
+        "vram_used_bytes_range": [
+          26759168,
+          36630528
+        ]
+      }
+    },
+    "concurrency_limit": "Serial fresh processes after empty visible GPU-client/low-VRAM windows still fail; single-projection samples show no other visible GPU clients. Busy percentage remains 100 and external host contexts are not observable, so physical exclusivity and root cause are not established."
+  },
+  "device_controller_state": "Stopped after device-execution failure; unchanged shared control reproduced it; remaining physical-device cases are blocked"
 }

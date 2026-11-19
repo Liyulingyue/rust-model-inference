@@ -1,7 +1,11 @@
 # FastFrames-L validation — 2026-11-19
 
-**Experimental / partial acceptance. BF16 and F32 CPU/Auto/Vulkan pass both transports at 16×16 / 5 frames. F16 passes checkpoints but fails decoded-video gates on all three backends. Quantized gates have failed. The 480p case passes checkpoints but fails decoded-video cosine and published-BF16 drift gates.**
-All 54 format/backend/transport combinations completed: 12 passed and 42 failed,
+**Experimental / partial acceptance. The original 54-case matrix passed BF16/F32
+on CPU/Auto/Vulkan at 16×16 / 5 frames. Corrected-wrapper CPU reruns pass BF16;
+F16/Q8_0 still fail output gates. Physical Vulkan reruns on the latest instance
+fail with device lost, including shared controls and serial retries. The earlier
+480p case failed decoded-video cosine and published-BF16 drift gates.**
+All 54 original format/backend/transport combinations completed: 12 passed and 42 failed,
 as retained in [matrix.json](matrix.json).
 Observed summaries and exact transport commands are retained in
 [observed-results.json](observed-results.json). Small reports are retrieved while
@@ -52,7 +56,42 @@ passes all checkpoints but fails decoded RMSE **0.014410152859932579** and cosin
 transports reproduce the same metrics. These supersede the original wrapper's
 Q8_0 CPU values for this rerun; the original failed measurements remain retained.
 
-## Real-model evidence
+### Latest physical-device blocker and serial retries
+
+The replacement-host plan is three formats × CPU/Auto/Vulkan × CLI/HTTP,
+or 18 transports. Six CPU numerical/video comparisons completed: **2 passed,
+4 failed**. Four device transports were attempted and failed execution;
+the other **8 remain unrun because of the same device blocker**. There are no
+running or pending cases. Repeated diagnostics below do not count as extra
+distinct matrix entries.
+
+Q8_0 Auto CLI exits 0 and HTTP returns 200, but both have **0 Vulkan / 2,202 CPU**
+projection records after RADV reports `context is lost` / `hard recovery`.
+These valid fallback videos are not GPU acceptance. BF16 strict Vulkan instead
+exits **1** on CLI and returns **500** over HTTP, with no Vulkan projection records.
+Mesa is 25.2.8; no missing ICD was found. The existing upstream
+`linear_gpu_group_preserves_mixed_formats_across_batches` test reproduces the
+same hard recovery without loading FastFrames or any model weights. Its three
+shared source files match upstream base `44527e5ad2ca979518a0f13c2b70dc2c0b78fddc`
+byte for byte; hashes and exact commands are retained in the replacement report.
+
+After the concurrent-work concern was raised, two fresh shared-test processes
+were run serially after three samples each showed no visible GPU client and
+about 26 MB allocated VRAM. Both still failed (4.32 / 4.42 seconds). BF16 strict
+CLI/HTTP were retried in the same conditions and again returned exit 1 / HTTP 500.
+A separate low-level `video_gpu_float_projection_preserves_range_and_partial_tiles`
+control also failed in 4.57 seconds, at the first F32 projection. Its 18 samples
+showed no other visible GPU client, and allocated VRAM was 26.8–36.6 MB.
+The physical busy counter stayed at 100%, and external host contexts are not
+observable from this container: **physical exclusivity and the root cause remain
+unproven**. This does not identify driver, hardware, concurrency or shared runtime
+as the cause. No GPU reset, driver change or interruption of other work was used.
+
+The original successful Vulkan runs below are earlier-instance evidence, not
+successful reruns on this instance. Resume the remaining eight device transports
+after a shared control executes on the physical GPU; retain the fixed gates.
+
+## Original full-matrix real-model evidence
 
 The same BF16 GGUF was consumed by Rust CPU and independently reconstructed
 pinned official forwards, using F32 activations/KV and the identical noise file.
@@ -244,12 +283,12 @@ No other projects, system Python, shell rc, GPU reset or remote service restart 
 | Final native model tests, fresh Linux host | 13 passed / 1 ignored on commit `f61e7833f6c86a834e3ae3c68d0b9eefcaee173b`, built with Vulkan/parity trace; the pinned real-tokenizer test passed separately. |
 | Transport validation | Two unit tests passed. Real HTTP checks also return 400 for unknown model, empty prompt, invalid width/frames and 422 for unknown fields. Real CLI rejects invalid width, steps and KV override without creating output files. |
 | Real tokenizer, Linux | 11 official fixture cases including Unicode, mojibake, HTML, ANSI and truncation; RED on the incorrect vocabulary assumption, then GREEN. Tokenizer has 256,300 entries, embedding has 256,384 rows. |
-| Python converter/comparator/streaming, Linux | Final fresh-host run: 11 passed, including exact shared noise, parallel/serial encoded-byte equality, streamed reload and F16/Q4_1 activation semantics. Earlier host: 10 passed before the noise gate. |
+| Python converter/comparator/streaming, Linux | Latest corrected-wrapper run: 12 passed, including the activation-division regression. Original full-matrix host: 11 passed, including exact shared noise, parallel/serial encoded-byte equality, streamed reload and F16/Q4_1 activation semantics. |
 | Comparator noise gate, macOS | 3 passed; differing input noise is rejected even if inside floating tolerances. |
 | macOS full regression | Base: 1611 passed / 13 failed / 117 ignored. Final modified: 1626 passed / identical 13 failures / 118 ignored. Includes final F32 borrowing and ignored-tokenizer checks. |
 | Linux full regression | Base: 1581 passed / 14 failed / 118 ignored. Modified: 1595 passed / identical 14 failures / 118 ignored. Failure names compared exactly. |
 | Latest Linux Vulkan/parity binaries | All nine bins built successfully on the prior replacement host with the final F32 mmap-loader repair; inference/server rebuilt on the current host. Fat-LTO release compilation subsequently completed; binary hashes are in `supplemental-results.json`. |
-| GitHub CI | Run `44390529400` on head `37a996adc` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
+| GitHub CI | Run `44439369662` on oracle-repair head `041a4d297` passed Rustfmt, x86 dispatch regressions (including FastFrames model/transport/comparator checks), and Vulkan compile/shaders. |
 | Cargo formatting and binary inventory | Formatting passed; original nine binary targets retained. No external Rust acceleration dependency added. |
 
 Historical regression failures were compared by name; they are not newly passing
@@ -345,8 +384,12 @@ missing shared capabilities; this PR retains the CPU paths and correctness check
 
 ## Remaining acceptance
 
-All scheduled format oracles and native CPU/Auto/strict Vulkan CLI/HTTP cases
-completed: the tiny matrix has 12 passed and 42 failed transports. The nine-frame
+All originally scheduled format oracles and native CPU/Auto/strict Vulkan CLI/HTTP cases
+completed: the historical tiny matrix has 12 passed and 42 failed transports. The
+latest corrected-wrapper plan has six complete CPU comparisons, four failed device
+attempts and eight device transports blocked/unrun, as detailed above. Serial
+shared and single-projection controls still lose the device; a healthy shared
+control is required before resuming physical Vulkan acceptance. The nine-frame
 spatial/KV and real HTTP busy/disconnect checks pass. The completed 480p case
 passes all checkpoints but fails compressed-video cosine and published-BF16 drift.
 Retain and resolve the F16 decoded-video, six quantized numeric/video, and 480p

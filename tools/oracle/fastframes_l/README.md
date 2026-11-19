@@ -1,10 +1,18 @@
 # FastFrames-L oracle
 
-**Experimental: BF16/F32 CPU/Auto/Vulkan pass CLI/HTTP checkpoints and
+**Experimental / partial: original BF16/F32 CPU/Auto/Vulkan pass CLI/HTTP checkpoints and
 decoded MP4 comparison at 16×16 / 5 frames. F16 passes checkpoints but fails
 decoded-video gates. Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have failed numeric gates. All 54 transports ran (12 passed, 42 failed). The 480p checkpoints pass,
 but decoded-video cosine and published-BF16 drift fail their quality gates.** See [validation](validation.md), [matrix](matrix.json),
 [observed results](observed-results.json) and [performance](performance.json).
+
+Corrected-wrapper reruns on the latest instance pass BF16 CPU CLI/HTTP; F16/Q8_0
+still fail fixed output gates. Physical Vulkan attempts fail with device lost,
+including unchanged shared controls, two fresh serial retries and a low-level
+single-projection test sampled without other visible GPU clients. Physical
+exclusivity is unproven. Of 18 planned transports, six have complete numerical
+comparisons, four failed device execution and eight remain blocked/unrun.
+Earlier successful GPU runs do not establish acceptance on this instance.
 
 Read-only reference: `apple-aiml-research/ml-fastframes` commit
 `6044a56f44bffec500d04f2c21be3c5066891431`. The runner verifies 20 pinned

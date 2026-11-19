@@ -32,7 +32,17 @@
     "source_head": "66bfae5fdaa885b4676a287bc4d93a4083901f43",
     "evidence": "replacement-host-results.json",
     "scope": "BF16/F16/Q8_0 corrected-wrapper transport reruns and quantization-boundary diagnostics; original full matrix is retained separately",
-    "status": "Experimental / partial; Q8 text still fails after the oracle division repair",
-    "production_arithmetic_or_threshold_changes": false
+    "status": "Experimental / partial; BF16 CPU passes, F16/Q8_0 fail; physical Vulkan device lost persists on serial shared/single-projection controls",
+    "production_arithmetic_or_threshold_changes": false,
+    "transport_summary": {
+      "expected": 18,
+      "numeric_compared": 6,
+      "passed": 2,
+      "numeric_failed": 4,
+      "device_execution_failed": 4,
+      "blocked_not_run": 8,
+      "pending": 0
+    },
+    "gpu_concurrency_limit": "No other visible client during the sampled single-projection retry; physical exclusivity and root cause unproven"
   }
 }

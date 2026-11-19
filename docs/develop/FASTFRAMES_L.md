@@ -2,7 +2,7 @@
 
 `fastframes_l` 显式架构接入现有 CLI 和 `POST /v1/videos/generations`，复用原生
 Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。当前是**部分验收 / Experimental**：
-16×16 / 5 帧 BF16 的 CPU/Auto/严格 Vulkan 在 CLI/HTTP 各 411 个检查点和视频像素通过；
+首次矩阵中，16×16 / 5 帧 BF16 的 CPU/Auto/严格 Vulkan 在 CLI/HTTP 各 411 个检查点和视频像素通过；
 F32 CPU/Auto/Vulkan 两入口也通过。F16 各后端两入口的检查点通过，但压缩后视频比较失败；Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 数值对齐失败，54 个格式/后端/入口组合已跑完，12 个通过、42 个失败；480p 检查点通过，但压缩视频和 BF16 配方漂移超阈值。
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和
 [逐项矩阵](../../tools/oracle/fastframes_l/matrix.json)。
@@ -12,6 +12,13 @@ Q8 文本仍超出原容差。相同原生输入的 28 个独立投影复算相�
 首层归一化的微小误差已导致一个激活量化码变化。
 [新机复测记录](../../tools/oracle/fastframes_l/replacement-host-results.json) 单独保存修复后的
 BF16/F16/Q8_0 CLI/HTTP 验收，不覆盖历史失败；生产计算和阈值未调整。
+
+新机计划的 18 个入口组合中，6 项 CPU 数值/视频比较完成（BF16 两项通过，F16/Q8_0
+四项失败），4 项设备执行失败，另 8 项因 device lost 阻塞未运行。Q8 Auto 虽生成视频，
+实际为 0 次 Vulkan / 2,202 次 CPU 投影；BF16 严格模式 CLI 退出 1、HTTP 500。
+无模型权重的上游共享测试、两次串行复测和底层单投影测试也触发 hard recovery。
+后者运行期间 18 次采样未发现其他可见 GPU 客户端；物理 GPU 独占及故障根因仍不能确认。
+此前 GPU 通过属于旧实例记录，新实例 GPU 尚未验收通过；详见新机复测记录。
 
 ## 契约
 
