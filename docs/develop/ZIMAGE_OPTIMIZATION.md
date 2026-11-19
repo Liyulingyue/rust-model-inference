@@ -1,5 +1,10 @@
 # Z-Image 性能分析 & 优化方向
 
+> **状态（2026-11-19）**：性能视角**已被 [`ZIMAGE_STATUS.md`](ZIMAGE_STATUS.md)
+> 取代**（其 64×64 baseline、SIMD/CPU 侧的分析基于早期形态）。本文保留的
+> 理由：`TODO.md` 的 TODO-035（decoder 侧 `exp_accurate` 补偿取舍）引本文的
+> 复现数据与完整推导作为数值证据。读性能结论请以 STATUS 文档为准。
+
 > 本文档基于 `src/models/diffusion/z_image/{mod,text,dit,vae}.rs` 的实测 profile + 代码审查得出。
 > 测试条件：64×64 分辨率、5 步、seed=42、8 线程、`AVX2+FMA`。
 > **真实场景将使用 1024×1024**：latent token 数从 64 → 16384（×256），所有 per-token 工作按线性放大。

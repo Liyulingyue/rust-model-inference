@@ -172,6 +172,20 @@ Qwen3.5-0.8B Q8_0 + Qwen3.5-0.8B-mmproj-F16 + 448×448 图像，CPU 与 Vulkan �
   不等于设备损坏。idle 未确认的资源不能释放。legacy matvec 保留原看门狗；
   新会话按 Cpu/Auto/Vulkan 分别执行 CPU、事务回退、显式报错。
 
+### 设计取舍（2026-09-04 立项时的决策；原 `VULKAN_INFERENCE_DESIGN.md` 已删除，内容吸收至此）
+
+Vulkan 路径按「增量式 Vulkan 专用执行器」落地：设备 buffer、pipeline、命令录制和
+GPU KV 状态归 Vulkan session 所有，CPU 模型始终是回退路径与正确性 oracle。当时
+否决过的两个替代方案，结论至今仍然成立：
+
+- 只扩展逐 matmul 的 offload 路径——消不掉提交、fence 和 CPU 往返的主导开销；
+- 在跑通一条完整 Vulkan 路径之前先引入通用 graph / backend 抽象——会在没有验证
+  抽象的情况下改动所有模型。
+
+非目标（同样沿用）：不做 CUDA / 原生 Metal / ROCm / wgpu / 通用 backend 抽象
+（wgpu 是独立的实验 feature）；不改模型文件；不宣称「所有模型都有 GPU 支持」，
+支持范围按架构 × 张量格式矩阵逐格报告。
+
 ## 跨厂商统一验收流程
 
 MoltenVK、Intel ANV、AMD RADV 和 NVIDIA 使用同一套命令，不为某个驱动放宽误差门限或删减

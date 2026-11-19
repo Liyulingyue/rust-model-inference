@@ -1,4 +1,7 @@
-# openjev` — Qwen3.5 + 3-class NLI head
+# `openjev` — Qwen3.5 + 3-class NLI head
+
+> 协议/工具侧的 OpenJEV 对照（`--jev` CLI 与 HTTP 入口）见
+> [`jev.md`](jev.md) §11；本文只记录 `openjev/` **模型** 的适配。
 
 `openjev/` is `Qwen/Qwen3.5` (0.8B / 2B / 4B / 35B-A3B) finetuned as an NLI
 cross-encoder over `(premise, hypothesis)` pairs. The repo ships only HF

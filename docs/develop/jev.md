@@ -364,6 +364,10 @@ per-group softmax（MultiSelect / BlockChoice）：
 
 ## 11. 与 OpenJEV 的差异
 
+> 另有 [`openjev-nli.md`](openjev-nli.md)：`openjev/` **模型**（Qwen3.5 + NLI
+> 分类头，`tools/converter/openjev/` 转换器 + qwen35 score head 接线）的适配
+> 记录，与本节的 OpenJEV **协议/工具**对照是两回事。
+
 | 维度 | 本实现 | OpenJEV |
 |---|---|---|
 | Model | 任何本地 GGUF（trunk-specific） | 锁定 Qwen3-4B-Instruct-2507 |

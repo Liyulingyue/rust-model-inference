@@ -369,7 +369,8 @@ PR / commit：
 
 **Q5_K 当前状态**：只完成合成 kernel parity，未纳入端到端模型支持矩阵。
 
-详见 [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md)。
+详见 [`VULKAN.md`](VULKAN.md)（含设计取舍与历史硬件矩阵；2026-09 的
+`VULKAN_INFERENCE_{DESIGN,PLAN}.md` 已被其吸收并删除）。
 
 ### 7.2 wgpu（`--features wgpu`，实验性）
 
@@ -434,7 +435,7 @@ PR / commit：
 - [`SUPPORTED_MODELS.md`](SUPPORTED_MODELS.md) — 每个具体型号的"已验证格式 + Oracle + 限制"
 - [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md) — trunk + sibling 目录约定与依赖方向
 - [`KV_CACHE_DESIGN.md`](KV_CACHE_DESIGN.md) — KV cache 共享条件 + 三种生命周期
-- [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md) — Vulkan 后端
+- [`VULKAN.md`](VULKAN.md) — Vulkan 后端（含设计取舍；旧 DESIGN/PLAN 两文档已吸收删除）
 - [`PARALLEL_MATMUL_SAFETY.md`](PARALLEL_MATMUL_SAFETY.md) — Issue 4（`compute_unchecked` 形式别名违规）
 - [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md) — "标量为底 + 后端注册表"
 - [`LFM25_OPTIMIZATION.md`](LFM25_OPTIMIZATION.md) / [`LFM25_MOE_OPTIMIZATION.md`](LFM25_MOE_OPTIMIZATION.md) / [`ZIMAGE_OPTIMIZATION.md`](ZIMAGE_OPTIMIZATION.md) — 子模型/子方向专项
