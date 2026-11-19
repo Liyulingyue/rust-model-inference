@@ -1742,3 +1742,157 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+pub(crate) fn pjit_options(
+    options: &crate::app::CliOptions,
+) -> Result<crate::models::diffusion::pjit::PjitOptions, String> {
+    if let Some(flag) = options.supplied_flags.iter().find(|flag| {
+        !matches!(
+            flag.as_str(),
+            "--model"
+                | "--text-encoder"
+                | "--prompt"
+                | "--negative-prompt"
+                | "--width"
+                | "--height"
+                | "--resolution"
+                | "--steps"
+                | "--seed"
+                | "--cfg"
+                | "--cfg-scale"
+                | "--noise"
+                | "--out"
+                | "--overwrite"
+                | "--threads"
+                | "--compute"
+                | "--gpu"
+                | "--serve"
+        )
+    }) {
+        return Err(format!("P-JiT does not support {flag}"));
+    }
+    if options.vae.is_some()
+        || options.mmproj.is_some()
+        || options.image.is_some()
+        || options.video.is_some()
+        || options.audio.is_some()
+        || !options.references.is_empty()
+        || options.edit
+        || options.tts
+        || options.jev
+        || options.rerank
+        || options.embedding
+        || options.yue2
+        || options.dreamx
+        || options.astronex
+        || options.max_tokens.is_some()
+        || options.temperature.is_some()
+        || options.top_k.is_some()
+        || options.top_p.is_some()
+        || options.kv_format_explicit
+        || options.qwen_image_turbo
+    {
+        return Err("P-JiT accepts text-to-image inputs only; VAE, media, KV and text generation options are unsupported".into());
+    }
+    if options.cfg.is_some() && options.cfg_scale.is_some() {
+        return Err("Choose one of --cfg and --cfg-scale".into());
+    }
+    if options.seed.is_some_and(|s| s < 0) {
+        return Err("P-JiT requires a non-negative --seed".into());
+    }
+    let defaults = crate::models::diffusion::pjit::PjitOptions::default();
+    let result = crate::models::diffusion::pjit::PjitOptions {
+        width: options
+            .width
+            .or(options.resolution)
+            .unwrap_or(defaults.width),
+        height: options
+            .height
+            .or(options.resolution)
+            .unwrap_or(defaults.height),
+        steps: options.steps.unwrap_or(defaults.steps),
+        seed: options.seed.unwrap_or(0) as u64,
+        guidance: options
+            .cfg
+            .or(options.cfg_scale)
+            .unwrap_or(defaults.guidance),
+        negative_prompt: options.negative_prompt.clone().unwrap_or_default(),
+    };
+    result.validate()?;
+    Ok(result)
+}
+
+pub fn run_pjit_cli(
+    source: Arc<dyn TensorSource>,
+    options: &crate::app::CliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    let request = pjit_options(options)?;
+    let prompt = options
+        .prompt
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+        .ok_or("P-JiT requires --prompt")?;
+    let out = options.out.as_deref().ok_or("P-JiT requires --out")?;
+    if out.exists() && !options.overwrite {
+        return Err(format!("Output already exists: {}", out.display()));
+    }
+    let text = options
+        .text_encoder
+        .as_deref()
+        .ok_or("P-JiT requires --text-encoder (Qwen3.5-4B GGUF)")?;
+    let text = Arc::from(open_model_source(text, ComponentRole::Llm).map_err(|e| e.to_string())?);
+    let noise = options.noise.as_deref().map(read_f32_file).transpose()?;
+    crate::app::init_rayon_global_pool(n_threads);
+    let pipeline = crate::models::diffusion::pjit::PjitPipeline::load(source, text, n_threads)?;
+    let started = Instant::now();
+    let rgb = pipeline.generate(prompt, &request, noise.as_deref())?;
+    write_png_atomically(out, &rgb, options.overwrite)?;
+    println!(
+        "P-JiT image saved to {} in {:.3}s",
+        out.display(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod pjit_tests {
+    use super::*;
+    #[test]
+    fn pjit_rejects_ignored_flags_and_conflicting_guidance() {
+        for extra in [
+            vec!["--fps", "24"],
+            vec!["--jinja"],
+            vec!["--guidance", "2"],
+            vec!["--cfg", "2", "--cfg-scale", "3"],
+            vec!["--seed", "-1"],
+        ] {
+            let args: Vec<String> = [vec!["rmi", "--model", "pjit.gguf"], extra]
+                .concat()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            let options = crate::app::parse_cli_options(&args).unwrap();
+            assert!(pjit_options(&options).is_err(), "{args:?}");
+        }
+        let args: Vec<_> = [
+            "rmi",
+            "--model",
+            "pjit.gguf",
+            "--width",
+            "33",
+            "--height",
+            "35",
+            "--steps",
+            "7",
+            "--cfg",
+            "15",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let options = pjit_options(&crate::app::parse_cli_options(&args).unwrap()).unwrap();
+        assert_eq!((options.width, options.height, options.steps), (33, 35, 7));
+    }
+}

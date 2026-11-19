@@ -12,8 +12,43 @@
 > contract is now spelled out in "The upstream contract" below, the survey
 > of models that actually ship these heads is in "Which models ship them",
 > and the status of the three pieces this repository already has is in
-> "What this repository already has". Nothing here is implemented yet:
-> the whole feature is tracked as TODO-069.
+> "What this repository already has".
+>
+> **Implemented 2026-11-18**: the MTP path (PR #241 / #250, `qwen35`
+> trunk, see TODO-072) and the **DSpark end-to-end path** described by this
+> document: `src/models/dflash/` carries the sidecar trunk
+> (encoder-injection, block denoising, Markov / confidence heads), the
+> `qwen35` trunk captures its layers' input hidden states for the encoder,
+> and `HybridSession::{prefill_with_dspark, dspark_speculative_step,
+> dspark_generate}` drives the rounds with the same verify/rollback
+> machinery as the MTP path. Entry points: CLI `--dspark-model <sidecar>`
+> and HTTP `--serve --dspark-model <sidecar>` (both wired through
+> `RuntimeOptions::with_dspark_model`; `build_text_runtime` rejects
+> non-`qwen35` targets and device paths at startup, and non-greedy or
+> image-bearing requests at request time, instead of dropping the flag).
+> Draft tokens match `llama-server --spec-type draft-dspark` (b96806d)
+> token for token on Qwen3.5-2B + its DSpark sidecar. EAGLE3 and the
+> standalone draft remain unimplemented.
+>
+> **Also implemented 2026-11-18, the n-gram axis**: llama.cpp's
+> `ngram-simple`, the one draft strategy that needs neither a second model
+> nor extra weights — the committed token history proposes the draft
+> (`src/core/ngram.rs`, a line-by-line port of
+> `common_ngram_simple_draft` including its boundaries: position 0 is the
+> not-found sentinel, the backwards search skips the occurrence the round
+> sits on, `copy_max < size_n` and `cur_len <= n + m + 1` draft nothing),
+> and `HybridSession::{ngram_speculative_step, ngram_generate}` verifies
+> the proposal with the same batched-greedy verify/rollback machinery as
+> MTP / DSpark — a round with no lookup match degenerates into the plain
+> one-token step, so the output is always the greedy output. Entry points:
+> CLI `--ngram-draft N` / `--ngram-lookup N` and HTTP
+> `--serve --ngram-draft N` (`RuntimeOptions::with_ngram_draft /
+> with_ngram_lookup`, with the same gate shape: non-`qwen35`, device
+> paths, stacking with `--mtp-draft`/`--dspark-model`, budgets below the
+> lookup size, non-greedy and image-bearing requests all fail explicitly).
+> Acceptance is workload-dependent (repetitive text is where n-grams recur):
+> on Qwen3.5-2B, `--ngram-draft 8 --ngram-lookup 4` on a repeating prompt
+> runs 48 tokens in 47 rounds with 1/8 drafts accepted.
 
 ## Why
 
@@ -35,6 +70,7 @@ exclusive — any one can be combined with any other:
 | **MTP** (Multi-Token Prediction, DeepSeek-V3 style) | 1 token | N future logits | main model + N MTP heads (`nextn.eh_proj` + `nextn.hnorm` + `nextn.enorm`) |
 | **DFlash** (Qwen3 style) | 1 token + main hidden state at `target_layers` | K candidate tokens | main model + `dflash_attn_conv_*` + `dflash_selector_*` |
 | **DSpark** (DFlash + Markov head) | same as DFlash | K candidate tokens (better calibrated) | DFlash + `dsv4_hc_mult` + `dspark_markov_rank` |
+| **n-gram** (llama.cpp `ngram-simple`) | the committed token history | K tokens that followed a previous occurrence | none — no second model, no extra weights |
 | **EAGLE3** | 1 token + main hidden state at `target_layers` (concat multi-layer) | K candidate tokens | small auxiliary EAGLE3 model (`ctx_dft`) |
 | **Standalone draft** | 1 token | K candidate tokens | a separate small LLM (`ctx_dft`) |
 
@@ -427,6 +463,30 @@ publishers follow that convention: `unsloth/Qwen3.8-Flash-Next-GGUF` ships an
   softmax".
 
 What is missing is the draft side and the loop. See TODO-069.
+
+## What this repository has now (the implemented paths)
+
+- **MTP** (`qwen35` trunk): the head lives in the checkpoint itself
+  (`nextn` tensors), `HybridSession::mtp_speculative_step` drafts from the
+  target's hidden state, verifies in one batched forward and rolls back the
+  KV cache / recurrent state on rejection. See TODO-072 for the parity and
+  throughput numbers (CPU and device).
+- **DSpark / DFlash sidecar** (`src/models/dflash/`, driven by the `qwen35`
+  trunk): the sidecar is a separate GGUF (`--dspark-model`), so the target
+  captures the input hidden states of the layers named by
+  `dflash.target_layers` (a `scratchpad` capture the trunk's layer loop
+  fills — the repo-side equivalent of `llama_get_embeddings_layer_inp`),
+  the DFlash encoder turns them into the draft's own KV rows
+  (`DflashSession::inject_target_features`), and `draft_block` denoises one
+  `[anchor, MASK × (block-1)]` block through the two DSpark heads (Markov
+  bias chained on the previously committed token, the confidence head's
+  `p_min` gate, greedy pick, `d2t` scatter onto the target's vocabulary).
+  The verification and rollback reuse the MTP machinery
+  (`dspark_speculative_step`); every row of every target forward —
+  prefill chunk or verification batch — is injected, exactly as
+  upstream's `process()` does, so a rejected row's KV entry is overwritten
+  by the next block, which starts at the corrected position.
+- **EAGLE3 and the standalone draft**: still not implemented.
 
 ## Which models ship them
 

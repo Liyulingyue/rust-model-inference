@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir=$(cd "$(dirname "$0")/.." && pwd)
 shader_names=(
+    arktts
     dory
     dory_matmul
     q8_matmul
@@ -13,6 +14,7 @@ shader_names=(
     quantize_q8_k
     q8_matmul_grouped
     q4_0_matmul
+    q4_0_matmul_tiled_dp4a
     q4_1_matmul
     q4_k_matmul
     q4_k_matmul_cooperative

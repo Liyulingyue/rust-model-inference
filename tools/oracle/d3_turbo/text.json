@@ -1,0 +1,16 @@
+{
+  "state": "The package arrived on time, but the glass inside was broken. 客户要求退款。",
+  "questions": {
+    "sentiment": {
+      "type": "choice",
+      "instructions": "What is the customer's overall sentiment?",
+      "criteria": {"positive": "Satisfied", "negative": "Dissatisfied", "neutral": "Neither"}
+    },
+    "refund": {"type": "noul", "instructions": "Does the customer request a refund?"},
+    "quality": {
+      "type": "score",
+      "instructions": "Rate the condition of the delivered item.",
+      "criteria": ["broken", "damaged", "perfect"]
+    }
+  }
+}

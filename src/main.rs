@@ -17,6 +17,8 @@ Chat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja
 
 PiVo-1.4M: --tts --model pivo-F32.gguf --prompt TEXT --out speech.wav [--voice Pi|Vo] [--speed 0.5..2] [--pronunciations JSON] | English, 16 kHz mono; bundled vocoder, no --mmproj; CPU/Auto; HTTP /v1/audio/speech; see tools/oracle/pivo/README.md
 
+Underdog-Woof: --tts --model woof-f32.gguf --prompt TEXT --out speech.wav [--voice juno|mira] [--seed U32] [--temperature 0.5] | English, 24 kHz mono; bundled decoder, no --mmproj; HTTP /v1/audio/speech accepts voice, seed, temperature, normalize and response_format wav|pcm
+
 AuK TTS mode: --model auk-base-f16.gguf --vae auk-vae-f32.gguf [--text-encoder qwen2.5-omni-3b-q8_0.gguf] --prompt \"<TEXT>\" --out speech.wav [--steps N (default 32)] [--resolution SR (default 24000)] [--duration-seconds N (default 1)] [--cfg-scale α (default 2.0)] [--auk-sway α (default -1.0, sway-warped time grid)] [--auk-flash (pin the AuK-Flash recipe: 4 steps, cfg 0, official time grid)] [--instruction \"<voice/style>\" (instruct TTS)] [--ref-audio ref.wav (CFMEdit reference voice with audio tower)] | 24 kHz mono speech generation";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchMode {
@@ -175,6 +177,11 @@ fn main() {
         ));
         return;
     }
+    if options.jev && rust_model_inference::models::decision::is_model_directory(&options.model) {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::decision::jev::run_jev_cli(None, &options, n_threads));
+        return;
+    }
     // A native JEV model must validate its flags before another task loads components.
     let early_jev_source: Option<Arc<dyn TensorSource>> = if options.jev {
         open_model_source(&options.model, ComponentRole::Llm)
@@ -183,13 +190,12 @@ fn main() {
     } else {
         None
     };
-    if let Some(source) = early_jev_source
-        .as_ref()
-        .filter(|source| app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH)
-    {
+    if let Some(source) = early_jev_source.as_ref().filter(|source| {
+        rust_model_inference::models::decision::is_arch(&app::arch_of(source.as_ref()))
+    }) {
         app::init_rayon_global_pool(n_threads);
         app::run_or_exit(app::decision::jev::run_jev_cli(
-            source.clone(),
+            Some(source.clone()),
             &options,
             n_threads,
         ));
@@ -258,6 +264,14 @@ fn main() {
     {
         eprintln!("--qwen-image-turbo requires a Qwen-Image-2.1 DiT GGUF");
         std::process::exit(2);
+    }
+    if let Some(source) = early_source.as_ref().filter(|s| {
+        s.metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("pjit")
+    }) {
+        app::run_or_exit(app::run_pjit_cli(source.clone(), &options, n_threads));
+        return;
     }
     if let Some(source) = early_source.as_ref().filter(|s| {
         s.metadata("general.architecture")
@@ -641,9 +655,9 @@ fn main() {
     let model_path = options.model.as_path();
     let source: Arc<dyn TensorSource> =
         early_source.unwrap_or_else(|| Arc::from(open_or_exit(model_path, ComponentRole::Llm)));
-    if app::arch_of(source.as_ref()) == rust_model_inference::models::thx02::ARCH {
+    if rust_model_inference::models::decision::is_arch(&app::arch_of(source.as_ref())) {
         app::run_or_exit(app::decision::jev::run_jev_cli(
-            source.clone(),
+            Some(source.clone()),
             &options,
             n_threads,
         ));
@@ -674,6 +688,12 @@ fn main() {
         .metadata("general.architecture")
         .and_then(MetaValue::to_string_val)
         .unwrap_or_default();
+    if rust_model_inference::models::arktts::is_arktts_arch(&arch) {
+        app::run_or_exit(Err(
+            "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
+        ));
+        return;
+    }
     if arch == "mage_flow" {
         app::run_or_exit(app::run_mage_flow_cli(source, &options, n_threads));
         return;
@@ -977,10 +997,10 @@ fn main() {
     {
         // Omni → TTS post-processor pipeline: when both the multimodal
         // media path AND a TTS model + mmproj are present, route the
-        // generated reply through Qwen3-TTS to produce a 24 kHz WAV
-        // alongside the text. The TTS layer is opt-in so the existing
-        // text-only multimodal flow is unchanged for users without a
-        // bundled TTS model.
+        // generated reply through the TTS model (Qwen3-TTS or
+        // Audio8-TTS-Realistic-Air) to produce a WAV alongside the text.
+        // The TTS layer is opt-in so the existing text-only multimodal
+        // flow is unchanged for users without a bundled TTS model.
         if let (Some(tts_model_path), Some(tts_mmproj_path)) = (tts_model, tts_mmproj) {
             let wav_out = match options
                 .out
@@ -1003,7 +1023,10 @@ fn main() {
                 audio,
                 prompt,
                 max_tokens,
-                temperature,
+                // Pass the raw flag: the Omni reply keeps the greedy
+                // fallback for media prompts, the TTS stage keeps its own
+                // model default when the user did not choose one.
+                options.temperature,
                 options.threads,
                 prefill_batch_size,
                 options.effective_max_context(),
@@ -1216,6 +1239,35 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
+        // The speculative-decode flags exist only on the qwen35 trunk path;
+        // an arch that never receives them would silently drop the flag, so
+        // they are gated here with the same rule the runtime applies. The
+        // MTP head is a checkpoint property (the hybrid archs' session
+        // errors when it is missing); the DSpark sidecar and the n-gram
+        // lookup need the qwen35 trunk's verify/rollback machinery.
+        if options.effective_mtp_draft() > 0
+            && !matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop")
+        {
+            app::run_or_exit(Err(format!(
+                "--mtp-draft needs the hybrid trunk; architecture {arch} has no \
+                 speculative decode path"
+            )));
+            return;
+        }
+        if options.dspark_model.is_some() && arch != "qwen35" {
+            app::run_or_exit(Err(format!(
+                "--dspark-model needs the qwen35 trunk target; architecture {arch} has no \
+                 DSpark verify path"
+            )));
+            return;
+        }
+        if options.effective_ngram_draft() > 0 && arch != "qwen35" {
+            app::run_or_exit(Err(format!(
+                "--ngram-draft needs the qwen35 trunk target; architecture {arch} has no \
+                 speculative verify path"
+            )));
+            return;
+        }
         if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             // `--mtp-draft` turns the decode into a speculative one: the
             // MTP draft head proposes tokens and the target verifies them.
@@ -1234,6 +1286,9 @@ fn main() {
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
                 options.effective_mtp_draft(),
+                options.dspark_model.as_deref().map(std::path::Path::new),
+                options.effective_ngram_draft(),
+                options.effective_ngram_lookup(),
                 &jinja_options,
             ));
         } else if options.embedding {
@@ -1330,6 +1385,20 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
+        // The speculative-decode flags have no interactive implementation;
+        // gate them here instead of letting the interactive loop drop them
+        // silently (the arch rules are the prompt mode's / the runtime's).
+        if options.effective_mtp_draft() > 0
+            || options.dspark_model.is_some()
+            || options.effective_ngram_draft() > 0
+        {
+            app::run_or_exit(Err(
+                "speculative decoding (--mtp-draft / --dspark-model / --ngram-draft) is \
+                 not available in interactive mode; use --prompt or --serve"
+                    .into(),
+            ));
+            return;
+        }
         if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),

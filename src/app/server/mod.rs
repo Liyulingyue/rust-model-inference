@@ -1,9 +1,11 @@
 pub mod api;
 mod audio;
+mod audio_speech;
 mod auk;
 mod decision;
 mod forecast;
 mod geometry;
+mod image_generation;
 mod prediction;
 mod rerank;
 mod speech;
@@ -80,6 +82,7 @@ fn hy_transcription_task<T: Send + 'static>(
 
 enum Backend {
     Text(TextBackend),
+    Pjit(image_generation::PjitBackend),
     /// A WeVisOne text model: a Qwen3-VL release with a coordinate
     /// vocabulary and a separate pixel decoder. It serves the ordinary
     /// text routes and adds the image prediction route.
@@ -92,9 +95,11 @@ enum Backend {
     Audio8(Audio8Backend),
     AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
     Tts(TtsBackend),
+    ArkTts(audio_speech::Backend),
     /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
     /// text frontend, the acoustic decoder and the bundled vocoder.
     Pivo(speech::PivoBackend),
+    UnderdogWoof(speech::UnderdogWoofBackend),
     /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
     /// and an optional Qwen2.5-Omni text encoder. It serves the audio
     /// speech routes.
@@ -104,7 +109,7 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
-    Decision(crate::models::thx02::Engine),
+    Decision(crate::models::decision::Engine),
 }
 
 impl Backend {
@@ -1152,10 +1157,34 @@ fn build_backend(
     options.validate_compute_mode()?;
     options.compute_policy().check_build()?;
     let _scope = options.compute_policy().enter_legacy_scope();
+    if crate::models::decision::is_model_directory(&options.model) {
+        return Ok(Arc::new(Backend::Decision(
+            crate::app::decision::from_path(
+                options,
+                resolve_thread_count(
+                    options.threads,
+                    std::thread::available_parallelism()
+                        .map(usize::from)
+                        .unwrap_or(1),
+                ),
+            )?,
+        )));
+    }
     let decision_source =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
-            .filter(|source| crate::app::arch_of(source.as_ref()) == crate::models::thx02::ARCH);
+            .filter(|source| {
+                crate::models::decision::is_arch(&crate::app::arch_of(source.as_ref()))
+            });
+    let image_source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+        .ok()
+        .filter(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    if let Some(source) = image_source {
+        return Ok(Arc::new(Backend::Pjit(image_generation::build(
+            options,
+            Arc::from(source),
+        )?)));
+    }
     if let Some(source) = decision_source {
         let available = std::thread::available_parallelism()
             .map(usize::from)
@@ -1186,6 +1215,23 @@ fn build_backend(
         })));
     }
     if options.tts {
+        if crate::app::tts::is_underdog_woof_model(&options.model) {
+            let defaults = crate::app::tts::underdog_woof_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|error| error.to_string())?;
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1);
+            let model = Arc::new(crate::models::underdog_woof::Model::from_source(
+                Arc::from(source),
+                resolve_thread_count(options.threads, available),
+                options.compute_policy(),
+            )?);
+            return Ok(Arc::new(Backend::UnderdogWoof(
+                speech::UnderdogWoofBackend { model, defaults },
+            )));
+        }
         if crate::models::pivo::matches_model(&options.model) {
             let defaults = crate::app::tts::pivo_request(options)?;
             let source =
@@ -1202,6 +1248,17 @@ fn build_backend(
                 model,
                 defaults,
             })));
+        }
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        if source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("arktts")
+        {
+            return Ok(Arc::new(Backend::ArkTts(audio_speech::Backend::load(
+                options, source,
+            )?)));
         }
         if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
             return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
@@ -1607,6 +1664,11 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
         .and_then(crate::MetaValue::to_string_val)
         .map(str::to_string)
         .unwrap_or_default();
+    if crate::models::arktts::is_arktts_arch(&arch) {
+        return Err(
+            "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
+        );
+    }
     let phi3_dims = if arch == "phi3" {
         Some((
             raw_source
@@ -1675,6 +1737,16 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
             crate::models::mage_vl::validate_components(source.as_ref(), vision.as_ref())?;
         }
     }
+    // The DFlash / DSpark sidecar is an LLM-role GGUF: open it once so the
+    // runtime can borrow it per request. A file that is not a DSpark draft
+    // (or a target without the shared embedding table) fails the runtime
+    // constructor — and therefore this startup — instead of the first
+    // request.
+    let dspark: Option<Arc<dyn TensorSource>> = options
+        .dspark_model
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .map(|path| Arc::from(open_or_exit(std::path::Path::new(path), ComponentRole::Llm)));
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
@@ -1692,7 +1764,22 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
     .with_mtp_draft(options.effective_mtp_draft())
+    .with_dspark_model(dspark)
+    .with_ngram_draft(options.effective_ngram_draft())
+    .with_ngram_lookup(options.effective_ngram_lookup())
     .with_mmproj(mmp);
+    // A requested-but-unsatisfiable DSpark sidecar is a startup error, not a
+    // log line: the user asked for speculative decoding, and quietly serving
+    // plain text (or 501s) behind the flag would be the silent-drop hole the
+    // runtime gate exists to prevent.
+    let dspark_requested = options
+        .dspark_model
+        .as_deref()
+        .is_some_and(|path| !path.is_empty());
+    // The n-gram draft has no sidecar to open, but the same rule holds: the
+    // user asked for speculative decoding, so a runtime that cannot provide
+    // it is a startup error, not a plain decode behind the flag.
+    let ngram_requested = options.effective_ngram_draft() > 0;
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
             Ok(runtime) => {
@@ -1701,7 +1788,9 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
             }
             Err(error)
                 if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
-                    || arch == crate::models::sensenova_loop::ARCH =>
+                    || arch == crate::models::sensenova_loop::ARCH
+                    || dspark_requested
+                    || ngram_requested =>
             {
                 return Err(error)
             }
@@ -2024,7 +2113,10 @@ pub fn run_server() {
         if options.out.is_none() {
             options.out = Some(std::path::PathBuf::from("placeholder.wav"));
         }
-        if options.max_tokens.is_none() && !crate::models::pivo::matches_model(&options.model) {
+        if options.max_tokens.is_none()
+            && !crate::models::pivo::matches_model(&options.model)
+            && !crate::app::tts::is_underdog_woof_model(&options.model)
+        {
             options.max_tokens = Some(128);
         }
     }
@@ -2034,7 +2126,16 @@ pub fn run_server() {
     // invocation, so they are skipped for it, exactly like the main binary
     // does.
     let auk_source = auk::probe_invocation(&options);
-    if auk_source.is_some() {
+    let pjit_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    if pjit_invocation {
+        if let Err(error) = crate::app::diffusion::pjit_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if auk_source.is_some() {
         if let Err(error) = auk::validate_server_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
@@ -2087,8 +2188,10 @@ pub fn run_server() {
         Backend::HySimulMt(_) => "hy-simulmt",
         Backend::Audio8(_) => "audio8",
         Backend::AudioEnhancement(_) => "audio-enhancement",
-        Backend::Tts(_) | Backend::Pivo(_) => "tts",
+        Backend::Tts(_) | Backend::Pivo(_) | Backend::UnderdogWoof(_) => "tts",
+        Backend::ArkTts(_) => "arktts",
         Backend::Auk(_) => "auk",
+        Backend::Pjit(_) => "pjit",
         Backend::Rerank(_) => "rerank",
         Backend::Clm(_) => "clm",
         Backend::Gliner2(_) => "gliner2",
@@ -2115,6 +2218,9 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::Pjit(_) => {
+            router.route("/v1/images/generations", post(image_generation::generate))
+        }
         Backend::WeVisOne(_) => router.merge(api::routes()).route(
             "/v1/prediction",
             post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
@@ -2131,11 +2237,18 @@ pub fn run_server() {
             )
             .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
         Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::ArkTts(_) => router.route(
+            "/v1/audio/speech",
+            post(audio_speech::speech).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
         Backend::AudioEnhancement(_) => router.route(
             "/v1/audio/enhancements",
             post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         ),
         Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
+        Backend::UnderdogWoof(_) => {
+            router.route("/v1/audio/speech", post(speech::synthesize_underdog_woof))
+        }
         Backend::Auk(_) => router
             .route("/v1/audio/speech", post(auk::speech))
             .route("/v1/audio/generations", post(auk::generations)),
@@ -2254,6 +2367,23 @@ mod server_mode_tests {
             model: PathBuf::from(model),
             ..CliOptions::default()
         }
+    }
+
+    #[test]
+    fn woof_backend_selects_its_contract_before_projector_tts() {
+        let fixture = crate::app::tts::tests::WoofMetadataFixture::new();
+        let options = CliOptions {
+            model: fixture.0.clone(),
+            tts: true,
+            serve: true,
+            prompt: Some("placeholder".into()),
+            voice: Some("juno".into()),
+            ..Default::default()
+        };
+        let Err(error) = super::build_backend(&options, None) else {
+            panic!("metadata-only Woof fixture should fail the model contract");
+        };
+        assert!(error.contains("underdog_woof.config"), "{error}");
     }
 
     #[tokio::test]

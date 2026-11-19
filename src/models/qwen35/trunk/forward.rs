@@ -268,6 +268,18 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let layer = &self.layers[il];
             let is_recr = cfg.is_recurrent[il];
 
+            // DSpark: the sidecar's encoder reads this layer's input hidden
+            // states. The residual stream at the top of the iteration is
+            // exactly the layer's input — the same rows
+            // `llama_get_embeddings_layer_inp` hands upstream's draft.
+            if scratch.dspark_active {
+                if let Some(slot) = scratch.dspark_capture_at.get(il).copied().flatten() {
+                    let at = slot * n_tokens * n_embd;
+                    scratch.dspark_hidden[at..at + n_tokens * n_embd]
+                        .copy_from_slice(&scratch.x[..n_tokens * n_embd]);
+                }
+            }
+
             for t in 0..n_tokens {
                 let off = t * n_embd;
                 scratch.normed_buf[off..off + n_embd]
@@ -513,38 +525,66 @@ impl<'a> super::weights::HybridTrunk<'a> {
         #[cfg(not(feature = "parity-trace"))]
         let trace_all = false;
         let mut result = vec![0.0f32; cfg.vocab_size];
-        for row in if trace_all {
-            0..n_tokens
-        } else {
-            n_tokens - 1..n_tokens
-        } {
-            let last_normed = &scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
-            #[cfg(feature = "parity-trace")]
-            parity_trace::report(parity_trace::checkpoint_row(
-                row,
-                "result_norm",
-                None,
-                &[n_embd],
-                last_normed,
-            ));
-            self.output_weight.quantize_and_matmul_with_scratch(
-                last_normed,
-                &mut scratch.q8k_buf,
-                &mut scratch.q8_buf,
-                &mut scratch.scale_buf,
-                &mut scratch.matmul_out,
-                pool,
+        if scratch.collect_all_logits && !trace_all && n_tokens > 1 {
+            // Every row's logits in one projection: the vocabulary matrix is
+            // 1.3 GB in Q8_0, so projecting the rows one at a time reads it
+            // once per row. The batched kernel reads it once and serves the
+            // rows from the tile, and its values are the per-row kernel's.
+            let normed = &scratch.normed_buf[..n_tokens * n_embd];
+            scratch.logits_rows.resize(n_tokens * cfg.vocab_size, 0.0);
+            scratch
+                .prepared
+                .prepare(
+                    normed,
+                    n_tokens,
+                    n_embd,
+                    self.output_weight.needs_q8_0_activation(),
+                    self.output_weight.uses_q8_k(),
+                )
+                .expect("validated Qwen3.5 output projection shape");
+            scratch
+                .prepared
+                .matmul(&self.output_weight, normed, &mut scratch.logits_rows, pool)
+                .expect("validated Qwen3.5 output projection shape");
+            result.copy_from_slice(
+                &scratch.logits_rows[(n_tokens - 1) * cfg.vocab_size..n_tokens * cfg.vocab_size],
             );
-            let n = scratch.matmul_out.len().min(cfg.vocab_size);
-            result[..n].copy_from_slice(&scratch.matmul_out[..n]);
-            #[cfg(feature = "parity-trace")]
-            parity_trace::report(parity_trace::checkpoint_row(
-                row,
-                "result_output",
-                None,
-                &[cfg.vocab_size],
-                &result[..cfg.vocab_size],
-            ));
+            scratch.logits_rows_collected = true;
+        } else {
+            scratch.logits_rows_collected = false;
+            for row in if trace_all {
+                0..n_tokens
+            } else {
+                n_tokens - 1..n_tokens
+            } {
+                let last_normed = &scratch.normed_buf[row * n_embd..(row + 1) * n_embd];
+                #[cfg(feature = "parity-trace")]
+                parity_trace::report(parity_trace::checkpoint_row(
+                    row,
+                    "result_norm",
+                    None,
+                    &[n_embd],
+                    last_normed,
+                ));
+                self.output_weight.quantize_and_matmul_with_scratch(
+                    last_normed,
+                    &mut scratch.q8k_buf,
+                    &mut scratch.q8_buf,
+                    &mut scratch.scale_buf,
+                    &mut scratch.matmul_out,
+                    pool,
+                );
+                let n = scratch.matmul_out.len().min(cfg.vocab_size);
+                result[..n].copy_from_slice(&scratch.matmul_out[..n]);
+                #[cfg(feature = "parity-trace")]
+                parity_trace::report(parity_trace::checkpoint_row(
+                    row,
+                    "result_output",
+                    None,
+                    &[cfg.vocab_size],
+                    &result[..cfg.vocab_size],
+                ));
+            }
         }
         Ok(result)
     }

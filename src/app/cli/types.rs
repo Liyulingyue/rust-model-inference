@@ -76,6 +76,16 @@ pub struct CliOptions {
     /// decoding round. `None` (or zero) keeps the plain one-token-at-a-time
     /// decode.
     pub mtp_draft: Option<usize>,
+    /// A DFlash / DSpark sidecar GGUF: when set, the decode becomes a
+    /// speculative one with the sidecar drafting (`--dspark-model`).
+    pub dspark_model: Option<String>,
+    /// The n-gram self-speculative draft (llama.cpp's `ngram-simple`): the
+    /// committed token history drafts (`--ngram-draft N`, the per-round
+    /// draft length; `None` or zero keeps the plain decode).
+    pub ngram_draft: Option<usize>,
+    /// The lookup n-gram size for `--ngram-draft` (`--ngram-lookup N`;
+    /// `None` rides the upstream default of 12).
+    pub ngram_lookup: Option<usize>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     /// Astronex output latent-frame count. `--frames` remains reserved for
@@ -227,22 +237,28 @@ impl CliOptions {
             return Err("--gpu and --compute cannot be combined".into());
         }
         if self.compute_policy() == ComputePolicy::Vulkan {
-            if let Some(mode) = self.vulkan_partial_mode() {
-                // One line per request: the mode is checked at more than
-                // one layer, and the caller would otherwise see the same
-                // line twice.
-                static WARNED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!(
-                        "compute requested=Vulkan backend=partial mode={mode} \
-                         note=no complete device path for this mode; any \
-                         offloadable parts run on the device"
-                    );
-                }
+            // `--tts` is decided per model: some archs (Audio8) put the
+            // whole graph on the device, so the frontend reports the path
+            // once it has read the architecture.
+            if let Some(mode) = self.vulkan_partial_mode().filter(|mode| *mode != "tts") {
+                warn_partial_device_mode(mode);
             }
         }
         Ok(())
+    }
+
+    /// Whether `--tts` on `arch` runs a partial device path.
+    pub fn tts_device_path_is_partial(&self, arch: &str) -> bool {
+        self.tts
+            && self.compute_policy() == crate::compute::ComputePolicy::Vulkan
+            && !crate::compute::ComputePolicy::has_complete_device_path(arch)
+    }
+
+    /// Report the `--tts` device path now that the architecture is known.
+    pub fn report_tts_device_path(&self, arch: &str) {
+        if self.tts_device_path_is_partial(arch) {
+            warn_partial_device_mode("tts");
+        }
     }
 
     /// The mode whose device path is partial, if the request names one.
@@ -311,6 +327,20 @@ impl CliOptions {
     /// used at all.
     pub fn effective_mtp_draft(&self) -> usize {
         self.mtp_draft.unwrap_or(0)
+    }
+
+    /// How many tokens the n-gram lookup may draft per round (`size_m`).
+    ///
+    /// Zero means the decode stays plain / MTP / DSpark.
+    pub fn effective_ngram_draft(&self) -> usize {
+        self.ngram_draft.unwrap_or(0)
+    }
+
+    /// The lookup n-gram size (`size_n`), upstream's default of 12 when the
+    /// flag is absent.
+    pub fn effective_ngram_lookup(&self) -> usize {
+        self.ngram_lookup
+            .unwrap_or(crate::core::ngram::NGRAM_SIMPLE_SIZE_N)
     }
 
     /// Default max-context cap. Most chat workloads fit in 8K; this
@@ -431,6 +461,19 @@ pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, St
             "Invalid --embedding-output {value:?}; expected summary or raw"
         )),
         None => Err("Missing value for --embedding-output".into()),
+    }
+}
+
+/// One line per request: the mode is checked at more than one layer, and
+/// the caller would otherwise see the same line twice.
+fn warn_partial_device_mode(mode: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode={mode} \
+             note=no complete device path for this mode; any \
+             offloadable parts run on the device"
+        );
     }
 }
 

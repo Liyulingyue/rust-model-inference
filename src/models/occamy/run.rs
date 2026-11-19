@@ -94,6 +94,9 @@ pub fn run_inference(
             tokenizer: tokenizer.clone(),
             mmproj: None,
             mtp_draft: 0,
+            dspark_model: None,
+            ngram_draft: 0,
+            ngram_lookup: crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
         },
     )?;
 
