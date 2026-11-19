@@ -2,10 +2,12 @@
 
 Date: 2026-11-19 (Asia/Shanghai). Base: `44527e5ad`.
 Status: **Experimental / partial adaptation**.
-The 108-row [coverage matrix](release-matrix.csv) currently has 18 passed,
-44 failed and 46 pending combinations. Implementation and
+The 108-row [coverage matrix](release-matrix.csv) currently has 30 passed,
+78 failed and 0 pending combinations. Implementation and
 verification status are separate. [Machine-readable results](release-results.json)
 retain numeric metrics, interface comparisons, exported hashes and failure names.
+
+**Collection interrupted:** SSH to `36.150.116.206:31667` now closes before the handshake. The interface totals below are the last retrieved snapshot. Detached drivers may still be running, but their final results and the four-log stdout fix have not been collected/rechecked. The 108-row aggregate does not mean the interface matrix is complete.
 
 ## Contract and assets
 
@@ -119,6 +121,23 @@ recorded placement of newer references takes precedence over command flags.
 | Q4_1 | image | auto | 172 / 50 | 172 / 50 | 0.117876 | exact |
 | Q4_1 | image | vulkan | 172 / 50 | 172 / 50 | 0.117876 | exact |
 | Q4_K | text | cpu | 570 / 405 | 570 / 405 | 0.18309 | exact |
+| Q4_K | text | auto | 570 / 406 | 570 / 406 | 0.178606 | exact |
+| Q4_K | text | vulkan | 570 / 406 | 570 / 406 | 0.178606 | exact |
+| Q4_K | image | cpu | 172 / 154 | 58 / 40 | 0.885296 | different |
+| Q4_K | image | auto | 172 / 156 | 58 / 42 | 0.881074 | different |
+| Q4_K | image | vulkan | 172 / 156 | 58 / 42 | 0.881074 | different |
+| Q5_K | text | cpu | 570 / 406 | 570 / 406 | 0.192269 | exact |
+| Q5_K | text | auto | 570 / 406 | 570 / 406 | 0.198285 | exact |
+| Q5_K | text | vulkan | 570 / 406 | 570 / 406 | 0.198285 | exact |
+| Q5_K | image | cpu | 172 / 132 | 172 / 132 | 0.176897 | exact |
+| Q5_K | image | auto | 172 / 131 | 172 / 131 | 0.173894 | exact |
+| Q5_K | image | vulkan | 172 / 131 | 172 / 131 | 0.173894 | exact |
+| Q6_K | text | cpu | 570 / 398 | 570 / 398 | 0.182046 | exact |
+| Q6_K | text | auto | 570 / 396 | 570 / 396 | 0.195868 | exact |
+| Q6_K | text | vulkan | 570 / 396 | 570 / 396 | 0.195868 | exact |
+| Q6_K | image | cpu | 172 / 127 | 172 / 127 | 0.177998 | exact |
+| Q6_K | image | auto | 172 / 131 | 172 / 131 | 0.184914 | exact |
+| Q6_K | image | vulkan | 172 / 131 | 172 / 131 | 0.184914 | exact |
 
 After greedy divergence, subsequent inputs differ. Raw comparisons and their
 original failures are retained, with `same_input_prefix` identifying checks
@@ -148,12 +167,14 @@ pass is implied.
 | Storage/fixture | Case | Prefill max abs | Relative RMSE | Cosine | First greedy difference step |
 | --- | ---: | ---: | ---: | ---: | --- |
 | q4_0-image | 0 | 5.69387 | 0.393946 | 0.9191544 | 0 |
+| q5_k-image | 0 | 3.50039 | 0.236829 | 0.9717048 | None |
 | q4_0 | 0 | 6.78244 | 0.576585 | 0.8321515 | 3 |
 | q4_0 | 1 | 5.2738 | 0.42048 | 0.90883 | None |
 | q4_0 | 2 | 6.06293 | 0.446079 | 0.8957483 | 0 |
 | f16 | 0 | 0.000139236 | 1.22267e-05 | 1 | None |
 | f16 | 1 | 8.39233e-05 | 6.93078e-06 | 1 | None |
 | f16 | 2 | 8.67248e-05 | 7.00278e-06 | 1 | None |
+| q6_k-image | 0 | 1.71416 | 0.134711 | 0.9909979 | None |
 | q8_0 | 0 | 1.26603 | 0.0930795 | 0.995663 | None |
 | q8_0 | 1 | 0.648081 | 0.0554285 | 0.9984628 | None |
 | q8_0 | 2 | 0.969611 | 0.0637552 | 0.9979999 | None |
@@ -164,9 +185,16 @@ pass is implied.
 | bf16 | 1 | 8.30889e-05 | 7.34619e-06 | 1 | None |
 | bf16 | 2 | 0.00011158 | 7.4136e-06 | 1 | None |
 | f16-image | 0 | 0.000115275 | 1.00235e-05 | 1 | None |
+| q6_k | 0 | 2.6004 | 0.230822 | 0.973072 | None |
+| q6_k | 1 | 1.62197 | 0.149301 | 0.9897637 | None |
+| q6_k | 2 | 2.51968 | 0.191553 | 0.9835657 | None |
 | bf16-image | 0 | 0.000109673 | 5.85333e-06 | 1 | None |
+| q4_k-image | 0 | 4.50549 | 0.312199 | 0.9505371 | None |
 | q8_0-image | 0 | 0.64336 | 0.0476247 | 0.9989632 | None |
 | q4_1-image | 0 | 5.41467 | 0.353224 | 0.9364004 | None |
+| q5_k | 0 | 4.57247 | 0.360825 | 0.9369516 | 3 |
+| q5_k | 1 | 2.89605 | 0.246857 | 0.9709489 | None |
+| q5_k | 2 | 3.0763 | 0.234923 | 0.97206 | None |
 | q4_1 | 0 | 6.51692 | 0.571521 | 0.8304392 | 3 |
 | q4_1 | 1 | 4.7297 | 0.404388 | 0.9187831 | None |
 | q4_1 | 2 | 4.89885 | 0.377515 | 0.9321547 | None |
@@ -260,10 +288,20 @@ not prove every native discrepancy has the same cause. The metrics are in
 `official_device_diagnostic`. No threshold was widened and no native failure
 was converted to a pass.
 
+Using that official CPU reference as the target also leaves 19/171 prefill
+failures for native CPU and 20/171 for Auto/Vulkan. The CPU comparison first
+fails at visit 49, with worst relative RMSE 0.085675; device comparisons first
+fail at visit 48, with worst relative RMSE 0.097029. First greedy IDs remain
+exact in all three cases. These are prefill diagnostics only, recorded in
+`native_cpu_prefill_diagnostic`. Moving the reference onto CPU does not clear
+the native failures, so cross-device reference variation alone cannot explain
+the entire alignment gap.
+
 The activation-aware Q8_0 reference still fails 121/570 text checks on CPU and
 102/570 on Auto/Vulkan. Image comparisons fail 39/172 on CPU and 43/172 on the
-device backends; greedy IDs remain exact. Q4_0 also fails full-model gates,
-with greedy divergence in CPU text and device image cases. Adding QDQ did not clear acceptance, and
+device backends; greedy IDs remain exact. The other block formats also retain
+full-model failures; the table records greedy divergences and common-input
+counts. Adding QDQ did not clear acceptance, and
 these failures remain in the numerical table and coverage matrix.
 
 A separate fixed-input diagnostic samples 21 real projections per block format
@@ -277,7 +315,20 @@ This bounds the sampled projection error; it does not explain or clear the
 full-model failures. Shapes, input generation, per-format metrics and remote
 evidence paths are retained in `projection_diagnostic` in the results.
 
+The separate CPU embedding diagnostic samples 27 real input/generated token IDs
+in each of the six block formats, comparing native lookup with independent
+gguf-py row decoding. All six sets of 110,592 F32 values pass max_abs <= 1e-7;
+the measured maximum absolute error is zero. This checks the sampled decoding
+contract separately from accumulated whole-model error. IDs, counts and metrics
+are retained in `embedding_diagnostic`.
+
 ## Interfaces and review fixes
+
+All 54/54 native numeric runs
+are recorded; 14/27
+format/backend interface groups are complete. The interface count is checked
+separately because a failed numeric gate can mark a matrix row failed before
+its interface requests run. The custom-template group is additional coverage.
 
 Every completed interface combination runs real CLI text/image generation,
 single/grouped text JEV, single/grouped image JEV, HTTP chat in stream/nonstream
@@ -321,6 +372,14 @@ Review fixes:
     shared family's legacy activation contract through the default loader.
 12. Identify equal-input checkpoints after greedy divergence while retaining
     all original raw comparisons; later error includes different token prefixes.
+13. Move Vulkan Q8_0/Q8_K and attention startup self-check diagnostics to stderr.
+    The real quantized GPU CLI checks exposed invalid `--jev-output json`
+    despite exit code zero. Broken outputs and commands are retained in
+    `historical_jev_stdout_failures`. Affected CLI operations must be rerun and
+    parsed as JSON, then compared with the recorded successful HTTP responses.
+    This changes the diagnostic channel without changing arithmetic. Retry
+    completion is `False`; an unavailable
+    result remains unverified. The first two quantization-log changes compiled remotely; Qwen GPU JSON regression then exposed attention helper diagnostics as well. The final four-log change's remote recheck is pending while SSH is unavailable; see `validation_blockers` for the observed output prefix.
 
 Q8_0 real-model fallback/boundary probes pass: process-local invalid Vulkan ICD
 settings produce Auto CPU execution and strict Vulkan failure, without changing
@@ -390,6 +449,16 @@ Same-host text process wall, including loading and tracing:
 | Q4_1 | native | vulkan | 73.382 | 5,392,404 |
 | Q4_K | official PyTorch | ROCm | 95.158 | 29,183,992 |
 | Q4_K | native | cpu | 28.797 | 4,831,756 |
+| Q4_K | native | auto -> Vulkan | 77.175 | 4,903,220 |
+| Q4_K | native | vulkan | 80.910 | 4,904,108 |
+| Q5_K | official PyTorch | ROCm | 97.364 | 29,113,940 |
+| Q5_K | native | cpu | 28.889 | 5,805,580 |
+| Q5_K | native | auto -> Vulkan | 80.996 | 5,870,424 |
+| Q5_K | native | vulkan | 80.736 | 5,872,212 |
+| Q6_K | official PyTorch | ROCm | 89.887 | 29,077,188 |
+| Q6_K | native | cpu | 27.953 | 6,827,532 |
+| Q6_K | native | auto -> Vulkan | 91.202 | 6,891,824 |
+| Q6_K | native | vulkan | 89.953 | 6,893,596 |
 | F32 | official PyTorch (recorded placement) | ROCm decoder; CPU input/head | 28.442 | 29,193,116 |
 
 The native F32 text runner creates three sessions, cumulatively uploading

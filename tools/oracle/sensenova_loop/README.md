@@ -7,11 +7,14 @@ vision and tokenizer kernels: 32 physical layers execute
 The release's training-only `loop_gate.logits` is validated and omitted because
 the pinned official implementation does not use it. mHC routing stays F32.
 
-**Experimental / partial validation.** Release F32 text passes 570 official
+**Experimental / partial adaptation.** Release F32 text passes 570 official
 state/logit comparisons on each of CPU, Auto and strict Vulkan, with exact
-tokenizer/greedy IDs. F32 single-image greedy and final logits pass, but some
-intermediate states exceed the original gates. The remote precision/interface
-matrix records each completed combination and every remaining failure.
+tokenizer/greedy IDs. F16/BF16 text and image pass 570/172 checks on all three.
+F32 single-image greedy and final logits pass, but some intermediate states
+exceed the original gates. Block formats still fail full-model gates; some cases
+also diverge in greedy IDs. Sampled quantized projection and
+embedding checks pass; those diagnostics do not clear the full-model failures.
+The remote precision/interface matrix records every combination and failure.
 See [release-validation.md](release-validation.md), the per-combination
 [coverage matrix](release-matrix.csv), and [timings](performance.json).
 [validation.md](validation.md) retains historical Preview evidence.

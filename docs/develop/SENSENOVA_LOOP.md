@@ -7,14 +7,18 @@ See the [pinned contract and reproduction commands](../../tools/oracle/sensenova
 
 Status on 2026-11-19: **Experimental / partial adaptation**. The
 [108-row matrix](../../tools/oracle/sensenova_loop/release-matrix.csv) records
-18 passed, 44 failed and 46 pending
+30 passed, 78 failed and 0 pending
 combinations across nine text storage formats, three backends, text/image
 generation and JEV. Implementation, CLI, HTTP and numeric verification are
-separate. F32 text passes all 570 official state/logit gates on each backend,
+separate. The last collected snapshot has
+14/27 complete
+interface groups. **Collection interrupted:** SSH to `36.150.116.206:31667` now closes before the handshake. The interface totals below are the last retrieved snapshot. Detached drivers may still be running, but their final results and the four-log stdout fix have not been collected/rechecked. The 108-row aggregate does not mean the interface matrix is complete.
+
+F32 text passes all 570 official state/logit gates on each backend,
 with exact tokenizer and greedy IDs. Auto/Vulkan execute device submissions.
 F16 and BF16 text/image each pass 570/172 gates on all three backends. Block
-formats still have full-model gate failures; Q4_0 CPU text and device image
-cases also have greedy divergence. Fixed-input quantized projection probes pass all 252 comparisons,
+formats still have full-model gate failures, including greedy divergence in
+some cases. Fixed-input quantized projection probes pass all 252 comparisons,
 but do not clear those full-model failures. No numerical gate was widened.
 F32 single-image greedy and final logits pass, but intermediate states exceed
 the original gates. Injecting the exact native vision output into the official

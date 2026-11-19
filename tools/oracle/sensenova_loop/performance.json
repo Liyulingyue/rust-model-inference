@@ -511,6 +511,226 @@
       "exit_code": 0
     },
     {
+      "name": "native-q4_k-auto",
+      "storage": "Q4_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 77.1748407613486,
+      "peak_rss_kib": 4903220,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-vulkan",
+      "storage": "Q4_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 80.90962931327522,
+      "peak_rss_kib": 4904108,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_k-image-rocm",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 120.96862637624145,
+      "peak_rss_kib": 29194068,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-image-cpu",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 67.12887856177986,
+      "peak_rss_kib": 4937404,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-image-auto",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 126.24410424008965,
+      "peak_rss_kib": 4941876,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-image-vulkan",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 131.93886646814644,
+      "peak_rss_kib": 4940716,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q5_k-rocm",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 97.3644456434995,
+      "peak_rss_kib": 29113940,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-cpu",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 28.888692814856768,
+      "peak_rss_kib": 5805580,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-auto",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 80.99568095616996,
+      "peak_rss_kib": 5870424,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-vulkan",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 80.7360638063401,
+      "peak_rss_kib": 5872212,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q5_k-image-rocm",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 127.8733226954937,
+      "peak_rss_kib": 29192880,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-image-cpu",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 62.63962696120143,
+      "peak_rss_kib": 5905360,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-image-auto",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 132.94813294894993,
+      "peak_rss_kib": 5906820,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-image-vulkan",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 133.3146090004593,
+      "peak_rss_kib": 5909680,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q6_k-rocm",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 89.8868016730994,
+      "peak_rss_kib": 29077188,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-cpu",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 27.952725369483232,
+      "peak_rss_kib": 6827532,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-auto",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 91.20176467299461,
+      "peak_rss_kib": 6891824,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-vulkan",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 89.9532757923007,
+      "peak_rss_kib": 6893596,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q6_k-image-rocm",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 121.2433126848191,
+      "peak_rss_kib": 29159064,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-image-cpu",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 65.16754861548543,
+      "peak_rss_kib": 6940656,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-image-auto",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 140.80403277650476,
+      "peak_rss_kib": 6935964,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-image-vulkan",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 142.3572161961347,
+      "peak_rss_kib": 6937012,
+      "exit_code": 0
+    },
+    {
       "name": "oracle-f32-host-inputs-rocm",
       "storage": "F32",
       "fixture": "text",
@@ -603,6 +823,54 @@
     }
   ],
   "backend_runs": {
+    "native-q6_k-summary": [
+      {
+        "format": "Q6_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q6_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 19639676480,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 6889816784,
+          "peak_allocation_bytes": 7724172000
+        }
+      },
+      {
+        "format": "Q6_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 19639676480,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 6889816784,
+          "peak_allocation_bytes": 7724172000
+        }
+      }
+    ],
     "native-bf16-summary": [
       {
         "format": "BF16",
@@ -648,6 +916,102 @@
           "transfer_submissions": 5436,
           "live_allocation_bytes": 16243950288,
           "peak_allocation_bytes": 18278187744
+        }
+      }
+    ],
+    "native-q4_k-image-summary": [
+      {
+        "format": "Q4_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4502278720,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 4956703952,
+          "peak_allocation_bytes": 5528833248
+        }
+      },
+      {
+        "format": "Q4_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4502278720,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 4956703952,
+          "peak_allocation_bytes": 5528833248
+        }
+      }
+    ],
+    "native-q4_k-summary": [
+      {
+        "format": "Q4_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 13506833984,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 4845535952,
+          "peak_allocation_bytes": 5417665248
+        }
+      },
+      {
+        "format": "Q4_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 13506833984,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 4845535952,
+          "peak_allocation_bytes": 5417665248
         }
       }
     ],
@@ -1131,6 +1495,150 @@
         }
       }
     ],
+    "native-q5_k-summary": [
+      {
+        "format": "Q5_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q5_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 16480333376,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 5836702416,
+          "peak_allocation_bytes": 6535971552
+        }
+      },
+      {
+        "format": "Q5_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 16480333376,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 5836702416,
+          "peak_allocation_bytes": 6535971552
+        }
+      }
+    ],
+    "native-q5_k-image-summary": [
+      {
+        "format": "Q5_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q5_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 5493445184,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 5947870416,
+          "peak_allocation_bytes": 6647139552
+        }
+      },
+      {
+        "format": "Q5_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 5493445184,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 5947870416,
+          "peak_allocation_bytes": 6647139552
+        }
+      }
+    ],
+    "native-q6_k-image-summary": [
+      {
+        "format": "Q6_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q6_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 6546559552,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 7000984784,
+          "peak_allocation_bytes": 7835340000
+        }
+      },
+      {
+        "format": "Q6_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 6546559552,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 7000984784,
+          "peak_allocation_bytes": 7835340000
+        }
+      }
+    ],
     "native-q8_0-image-summary": [
       {
         "format": "Q8_0",
@@ -1239,6 +1747,42 @@
       },
       "cuda_peak_allocated_bytes": 27961073152
     },
+    "oracle-q5_k-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          13
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q5_k-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
+    },
     "oracle-q4_0-rocm": {
       "decoder_device": "cuda",
       "host_inputs": true,
@@ -1328,6 +1872,42 @@
       "threads": 16,
       "seed": 0,
       "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-q6_k-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          14
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q6_k-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
     },
     "oracle-q8_0-rocm": {
       "decoder_device": "cuda",
@@ -1453,6 +2033,42 @@
       "seed": 0,
       "cuda_peak_allocated_bytes": 27956813312
     },
+    "oracle-q6_k-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          14
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q6_k-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
+    },
     "oracle-bf16-image-rocm": {
       "decoder_device": "cuda",
       "host_inputs": true,
@@ -1478,6 +2094,42 @@
       "threads": 16,
       "seed": 0,
       "cuda_peak_allocated_bytes": 27956813312
+    },
+    "oracle-q4_k-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          12
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_k-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
     },
     "oracle-q8_0-image-recurrent-diagnostic": {
       "decoder_device": "cuda",
@@ -1638,6 +2290,42 @@
         "module_mapping_evidence": "target/release-validation/oracle-q4_1-image-rocm/precision-reference.json"
       },
       "cuda_peak_allocated_bytes": 28047659520
+    },
+    "oracle-q5_k-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          13
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q5_k-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
     },
     "oracle-q8_0-recurrent-diagnostic": {
       "decoder_device": "cuda",
