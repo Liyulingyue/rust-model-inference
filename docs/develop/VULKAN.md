@@ -33,7 +33,7 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 | 路径 | 新接入的 Vulkan 部分 | 保留在 CPU 的部分 |
 |---|---|---|
 | Z-Image | 已有 DiT 路径之外，VAE 的 F16 1×1 / 3×3 卷积，包括 shortcut 与 upsample 后卷积 | VAE 归一化、激活、空间 attention、最近邻上采样 |
-| YuE2 | AR/NAR 投影，BF16 投影加 bias 后仍舍入为 BF16；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、音频 VAE；NAR F16 的 Q8 activation 合约暂留 CPU |
+| YuE2 | AR/NAR 投影；分组 q/k/v 用 CPU 的 BF16 dot 归约并在 bias 后回舍入为 BF16；VAE 普通卷积；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、VAE 转置卷积；NAR F16 的 Q8 activation 合约暂留 CPU |
 | Edge0 | MLX affine 4/8-bit（group=64，BF16 scale/bias）投影与 MoE 专家投影；普通 GGUF 矩阵复用已有 shader | LoRA 的低秩修正、recurrent/attention 状态与 MoE 路由合并 |
 | LFM2 / LFM2.5 / LFM2MoE | Q/K/V、输出、FFN、专家、shortconv 输入/输出投影及 LM head | shortconv 状态与卷积、attention、归一化、激活、采样 |
 | Embedding | 通过共享 `Weight` / `PreparedRows` 的 BERT、EmbeddingGemma、Qwen 文本编码投影 | embedding lookup、归一化、pooling，以及未接入该入口的多模态编码器 |
@@ -50,6 +50,10 @@ YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值
 BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
 RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
 详见 [YuE2 优化记录](VULKAN_RADV_VALIDATIONS.md)。
+2026-11-19 用真实权重确认：AR + NAR 在 CPU 与 `--gpu` 下逐位一致
+（`yue2.nar.latents` 16384 个 F32 无差异），整链只余 VAE 设备卷积的 ≤1 个 PCM16
+档位（0.566% 采样）。分组 q/k/v 必须同时启用 `with_cpu_dot_contract()` 与 BF16
+回舍入，缺任一项都会让 98% 以上采样分叉；详见 [YuE2 用法 §3.3](../usage/yue2.md)。
 Z-Image VAE 的 F16 卷积复用 register-tiled F16 shader，每组覆盖 32 个像素、64 个输出通道。
 GPU 直接读取 CHW 的 1×1 / 3×3 输入并零填边界，融合 bias 后按 CHW 写回，省去 CPU im2col
 和输出转置。整个 VAE 共享可增长的 arena 与最多 64 份不可变权重缓存；常规设备每层只提交一次。
@@ -94,7 +98,8 @@ cargo test --profile release-fast --locked --features vulkan --lib \
 以同一 GGUF、prompt/lyrics、seed、batch、context、精度与线程数分别跑 CPU / `--gpu`，
 记录设备和驱动、权重 SHA-256、实际 GPU dispatch、逐层数值、greedy token / embedding 排序、
 歌曲和图像质量。用 `RUST_GPU_DISPATCH_TRACE=1` 核对使用的 shader，冷启动上传与预热计时分开记录。
-YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
+YuE2 的验收口径：AR + NAR 逐位一致（BF16 回舍入 + 分组投影的 CPU dot 契约），
+VAE 设备卷积 ≤1 个 PCM16 档位。
 
 实机修复了 MLX padding 校验、Q8 分组求和顺序和 YuE2 BF16 投影归约。
 三个修改的 shader 通过 validator 与重编译字节比对，完整 manifest hash 校验通过。

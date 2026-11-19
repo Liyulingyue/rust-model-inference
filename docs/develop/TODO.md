@@ -43,14 +43,33 @@ NEON on aarch64; no AVX-512).
       （单样本，仅作量级参考）。
       ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
       "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
-- [ ] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（远大于 VAE 那 1 个档位）** —
-      2026-11-16 实测：同一提示词下 `--compute cpu` 与 `--compute vulkan` 的输出有
-      98.73% 采样不同（max 10512/32767、rms 358.7，可闻）。原因：设备路径下 AR 的
-      **prefill** 走设备（`prefill_on_gpu`），设备端 attention 的累加顺序与 CPU 不同，
-      KV 出现微小差异后 token 就分叉、后面整条链路都不同。VAE 解码阶段本身只差 ≤1 个
-      PCM16 档位（`vae_conv_device_matches_the_cpu_kernel` 在 L20 上通过），但**整链**
-      的差异要大得多。要让设备路径与 CPU 互认，得先定"设备 AR 的数值容差"怎么定
-      （或者把 prefill 也留在 CPU）。
+- [x] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（原记录把原因归到 AR prefill，已证伪）**
+      — ✅ 2026-11-19 定位并修复。
+      原记录（2026-11-16）称"设备路径下 AR 的 prefill 走设备（`prefill_on_gpu`），
+      attention 累加顺序不同导致 token 分叉"。这个原因在本分支不成立：
+      `YuE2ArSession` 构造时就是 `gpu: Some(None)`，AR 的整图设备执行器永久禁用，
+      `prefill_on_gpu` 从未被走到；`yue2.abc.generated_ids` 与
+      `yue2.semantic.generated_ids` 在 cpu 与 auto 下逐位相同（640 + 256 个 token）。
+      真正的分叉点在 NAR 的 q/k/v：`project_qkv_rows` 把三个 BF16 投影合并给共享
+      `LinearExecutor`，而设备端的 `matmul_rows_group` 交回的是**未舍入的 F32**；CPU 的
+      `YuE2Weight::matmul_bf16_cpu` 每个元素都要在 bias 之后 `bf16::from_f32` 回舍入。
+      同时 `GpuMatmulSpec::prepared` 对这些权重选的是"先把 activation 舍入到 BF16"的
+      prepared kernel，相对误差约 4e-3，所以只补回舍入仍与 CPU 不同（实测 98.4% 采样
+      不同）。
+      修复（`src/compute/linear.rs` + `src/models/yue2/nar.rs`）：
+      ① `LinearExecutor::with_cpu_dot_contract()` 让 BF16 组投影走
+      `GpuMatmulMode::Dot`，shader 的四路 FMA stream 与 `dot_bf16_f32_4` 的归约
+      逐位相同；② q/k/v 落盘前按 CPU 契约回舍入到 BF16。两者缺一不可。
+      回归：`compute::linear::tests::grouped_bf16_dot_contract_matches_the_cpu_kernel_bit_for_bit`
+      断言设备输出与 `dot_bf16_f32_4` 的 F32 归约逐位相同（`#[ignore]`，需 Vulkan）。
+      端到端（2026-11-19，真实权重，seed 12300 / steps 1 / max-tokens 256，本机
+      aarch64）：`yue2.nar.latents` 的 16384 个 F32
+      在 cpu 与 auto 下**逐位相同**；wav 只有 0.566% 的采样不同，最大 1 个 PCM16 档位
+      （rms 0.075）。parity-trace 显示残余差异从 VAE 的**第一个设备卷积**开始
+      （`yue2.vae.decoder` layer 0 最大 1.7e-6，逐层放大到输出前约 1e-5）——即设备卷积
+      的归约顺序与 torch 钉住的 CPU 路径不同，属于 §3.4 的既有 VAE 门槛，不再是
+      AR/NAR 的分叉。
+      由此确定的验收口径：**AR + NAR 逐位一致；VAE 设备卷积 ≤1 个 PCM16 档位**。
 - [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
       2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
       整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
@@ -60,19 +79,25 @@ NEON on aarch64; no AVX-512).
       把每层的多个投影合成一次提交（共享 linear executor 已有 `run_group`），以及把
       NAR 的 prefix+velocity 两次前向的合成一次提交；设备侧 GEMV 的效率也需要单独看
       （每 workgroup 64 输出通道 × 32 帧的 tiling 对 rows=1 是否合适）。
-- [ ] **共享卷积的设备路径无复核门槛，YuE2 VAE 设备化后被它吃掉收益** —
-      `ops::nn::conv3d_with_options` 在设备成功后**无条件**用 CPU kernel 复核
+- [x] **共享卷积的设备路径无复核门槛，YuE2 VAE 设备化后被它吃掉收益** —
+      ✅ 2026-11-19 收口。
+      `ops::nn::conv3d_with_options` 原来在设备成功后**无条件**用 CPU kernel 复核
       （`conv3d_matches_cpu`，不符就重试、再不符退回 CPU 重算），而线性路径的复核是
-      门控的（`RMI_GPU_CPU_CHECK`，默认关）。YuE2 的 VAE 设备化如果走 `ops::nn::conv1d`
-      就会因为这次复核变成约 2 倍慢；本分支因此直接调 `ops::kernel::vulkan::try_conv3d`
-      绕过复核，VAE 从 77.0 s 降到 24.7 s（3.1x），输出与 CPU 最多差 1 个 PCM16 档位
-      （0.67% 采样，最大 1/32768）。**但这是一个绕过共享复核的决定**：设备卷积曾经被
-      观测到与 CPU 不一致（代码注释里的原因），绕过意味着 VAE 的设备结果没有逐次复核，
-      只靠端到端对比兜底。要么给卷积复核加一个和线性一样的显式开关（默认关、严格档打开），
-      要么在共享层记录"哪些调用方接受未复核的设备卷积"。
-      另：`src/models/yue2/ar.rs` 的 `vulkan_yue2_bf16_rounds_after_bias_across_tiles`
-      测试规模小于 `RUST_GPU_MIN_OUTPUTS`（默认 16K 输出），默认门槛下设备会拒绝这些
-      投影，必须用 `RUST_GPU_MIN_OUTPUTS=0` 才能跑（已在 2026-11-12 实测确认）。
+      `RMI_GPU_CPU_CHECK` 门控的。现在卷积同样门控：新增
+      `ops::nn::conv_cpu_check_enabled()`，在 `RMI_GPU_CPU_CHECK` 置位或严格档
+      `--compute vulkan` 下为真；`--gpu`（Auto）默认信任设备。复核被打开时行为不变
+      （采样 65,536 个元素、容差 `1e-4 * scale`、不符重试、仍不符退回 CPU 重算）。
+      YuE2 VAE 的 `Conv::forward_device` 直连 `try_conv3d` 绕过了共享层，所以它在**同一
+      开关**下用自身的 pinned CPU 路径复核（容差同为 `1e-4 * scale`），不符就回退 CPU。
+      为什么用自身路径而不是共享 kernel：VAE 的 CPU 参考钉在 torch 上，与共享
+      `conv3d` kernel 的求和顺序不同，用共享 kernel 复核会把正确的设备结果判错。
+      `vulkan_yue2_bf16_rounds_after_bias_across_tiles` 现在自己设
+      `RUST_GPU_MIN_OUTPUTS=0`（原来的 ignore 文案要求调用方在 shell 里设），因此不再
+      依赖外部环境变量；代价是它必须单独跑（进程级变量）。
+      验证（2026-11-19，本机 aarch64 + Vulkan）：`vae::device_tests::vae_conv_device_matches_the_cpu_kernel`
+      与 `ar::performance_tests::vulkan_yue2_bf16_rounds_after_bias_across_tiles` 通过；
+      真实权重下 `RMI_GPU_CPU_CHECK=1 --gpu` 与 `--compute vulkan` 各跑一遍，复核未报
+      不一致、也没有重试日志，输出与不带复核的 `--gpu` 逐字节相同。
 - [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
       2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
       vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor

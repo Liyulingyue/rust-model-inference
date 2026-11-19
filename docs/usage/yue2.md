@@ -185,6 +185,15 @@ NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致�
 该 NAR 样例仍略慢于四线程 CPU。计时条件与完整生成检查见
 [YuE2 Vulkan 优化记录](../develop/VULKAN_RADV_VALIDATIONS.md)。
 
+NAR 的 q/k/v 三个投影由一次 `LinearExecutor::run_group` 提交。设备端的分组投影默认
+走 prepared kernel：它把 activation 先舍入到 BF16（相对误差约 4e-3），并且交回未舍入
+的 F32；CPU 的 `YuE2Weight::matmul_bf16_cpu` 则用原始 F32 输入、四帧共享一次权重、
+最后把结果回舍入到 BF16。为了让设备与 CPU 逐位一致，q/k/v 的 executor 用
+`with_cpu_dot_contract()` 走 `GpuMatmulMode::Dot`（shader 的 FMA stream 与
+`dot_bf16_f32_4` 的归约相同），写回后再按 CPU 契约回舍入 BF16。只补回舍入、不改
+dot 契约，整链仍有 98.4% 采样不同；两者缺一不可。回归：
+`grouped_bf16_dot_contract_matches_the_cpu_kernel_bit_for_bit`。
+
 这些优化不更换权重、不减少扩散步数，也不修改采样参数。可用以下回归检查
 逐位一致性及中间 logits 的省略行为（不需要下载模型）。
 
@@ -195,8 +204,12 @@ NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致�
 （`--compute cpu`，也是默认）完全不变 —— 它有多条按规模选择的实现，并且是
 逐位对齐 reference 的那一条。
 
-设备路径不经过 `ops::nn::conv3d_with_options` 的 CPU 复核（那一层会重算一遍
-卷积，等于把设备收益吃掉），而是直接调用 `try_conv3d`，失败时回落到 CPU。
+设备路径不经过 `ops::nn::conv3d_with_options` 的**默认** CPU 复核（那一层会重算一遍
+卷积，等于把设备收益吃掉），而是直接调用 `try_conv3d`，失败时回落到 CPU。复核现在是
+门控的：`RMI_GPU_CPU_CHECK=1` 或严格档 `--compute vulkan` 打开它，`--gpu`（Auto）
+默认信任设备。打开时 VAE 用自身钉住 torch 的 CPU 路径核对设备卷积（容差
+`1e-4 * scale`），不符就回退 CPU；共享的 `conv3d_with_options` 走同一个开关
+（`ops::nn::conv_cpu_check_enabled`）。
 
 实测（2026-11-12，本机 Linux x86_64 + NVIDIA L20，`--steps 1`，256 latent 帧 /
 10.24 s 音频，8 线程）：
@@ -213,6 +226,14 @@ VAE 快 3 倍，AR/NAR 回到 CPU 路径（见下），所以**整链现在比 C
 设备路径的输出与 CPU 的差异为**最多 1 个 PCM16 档位**（982,912 个采样中
 6,573 个不同，0.67%，最大绝对差 1/32768）—— 不是逐位一致，但对音频是舍入量级。
 
+2026-11-19 在本机 aarch64 上用真实权重复测，
+确认这条残余差异**只来自 VAE**：修好 NAR q/k/v 的 BF16 回舍入与 dot 契约后（见
+§3.3），`yue2.nar.latents` 的 16384 个 F32 在 `--compute cpu` 与 `--gpu` 下逐位相同；
+整链 wav 只有 0.566% 采样不同、最大 1 个 PCM16 档位（rms 0.075）。parity-trace 显示
+差异从 VAE 的第一个设备卷积开始（`yue2.vae.decoder` layer 0 最大 1.7e-6，逐层放大到
+输出前约 1e-5）。验收口径因此是：**AR + NAR 逐位一致，VAE 设备卷积 ≤1 个 PCM16
+档位**。
+
 NAR 的 q/k/v 三个投影共享同一个输入，现在由一次 `LinearExecutor::run_group`
 提交（而不是三次）。实测这一步只省下 ~0.5 s（63.9 s → 63.4 s），因为设备侧的
 成本随**行数**走（每次调用都要读对应权重），合并只减少提交次数；输出与三次分别
@@ -227,9 +248,8 @@ NAR 的 q/k/v 三个投影共享同一个输入，现在由一次 `LinearExecuto
 256 帧 velocity）仍然在设备上。
 
 实机 GPU 回归 `vulkan_yue2_bf16_rounds_after_bias_across_tiles` 用的规模小于
-`RUST_GPU_MIN_OUTPUTS` 默认门槛（16K 输出），设备会拒绝这些投影，所以运行它需要
-`RUST_GPU_MIN_OUTPUTS=0`（2026-11-11 在本机 NVIDIA L20 上实测：默认门槛下该测试因
-"GPU BF16 projection declined" 失败，设为 0 后通过）。
+`RUST_GPU_MIN_OUTPUTS` 默认门槛（16K 输出），设备会拒绝这些投影，所以这个测试自己把
+门槛设成 0（进程级变量，因此它必须单独跑，别和别的 GPU 测试并进同一进程）。
 
 ```bash
 cargo test --profile release-fast --lib models::yue2::ar::performance_tests
