@@ -1,9 +1,10 @@
 //! Qwen3.5 (hybrid Mamba SSM + dense attention) transformer trunk
 //!
-//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
+//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/develop/MODEL_ORGANIZATION.md) §2:
 //! - `config.rs` — `Qwen35Config`
 //! - `weights.rs` — shared `HybridTrunk`, `Qwen35Model` alias, and load helpers
 //! - `forward.rs` — `forward` / `_dense_attn_layer` / `_recurrent_layer` / `_ffn_parallel`
+//! - `mtp.rs` — the MTP draft head (the block after the main stack)
 //! - `session.rs` — shared `HybridSession` and `Qwen35Session` alias
 //! - `scratch.rs` — `Qwen35Scratchpad` + KV cache helpers
 //! - `util.rs` — f16 decode + scalar Mamba helpers
@@ -14,6 +15,7 @@
 pub mod config;
 pub mod forward;
 pub mod moe;
+pub(crate) mod mtp;
 pub mod positions;
 pub mod scratch;
 pub mod session;

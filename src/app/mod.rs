@@ -32,9 +32,9 @@ pub use cli::{
 };
 pub use diffusion::{
     read_f32_file, run_astronex_cli, run_auk_cli, run_dreamx_cli, run_ernie_image_cli,
-    run_flux3_cli, run_longcat_image_edit, run_mage_flow_cli, run_pig_image, run_qwen_image_2_1,
-    run_qwen_image_2_1_cli, run_z_image_cli, write_output_atomically, write_png_atomically,
-    QwenImage21Request,
+    run_flux3_cli, run_longcat_image_edit, run_mage_flow_cli, run_pig_image, run_pjit_cli,
+    run_qwen_image_2_1, run_qwen_image_2_1_cli, run_z_image_cli, write_output_atomically,
+    write_png_atomically, QwenImage21Request,
 };
 pub use jev::{
     build_grouped_payload, build_grouped_system, build_jev_inputs, gliner2_schema,
@@ -56,7 +56,7 @@ pub use qwen_drive::run_qwen_drive_cli;
 pub use selftest::run_self_test;
 pub use text::{
     run_inference, run_interactive, run_interactive_qwen35, run_multimodal,
-    run_multimodal_with_tts_postproc, run_multimodal_with_video,
+    run_multimodal_with_tts_postproc, run_multimodal_with_video, run_multimodal_with_video_and_mtp,
     run_multimodal_with_video_capture_text, run_qwen35_family_multimodal_logits,
     run_qwen3_family_multimodal, run_qwen3_family_multimodal_logits, run_shared_inference,
 };

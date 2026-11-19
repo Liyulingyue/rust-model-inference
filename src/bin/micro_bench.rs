@@ -268,8 +268,132 @@ fn bench(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
     );
 }
 
+/// Compare the Q8_0 kernels that can serve the same shape.
+///
+/// The dispatch picks one of them at runtime (AVX2 / NEON / NEON-dotprod),
+/// and the ones that are not picked are still worth knowing: the NEON
+/// variants differ in both speed and arithmetic (the per-lane grouping of
+/// the integer dot decides the last bit).
+fn bench_variants(n_in: usize, n_out: usize, iterations: usize, seed: u64) {
+    let weight = valid_q8_weights(n_in, n_out, seed);
+    let (input_q8, input_scales) = valid_q8_input(n_in, seed + 1);
+    let mut dispatch_out = vec![0.0f32; n_out];
+    #[cfg(target_arch = "aarch64")]
+    let mut nrc1_out = vec![0.0f32; n_out];
+    let mut ggml_out = vec![0.0f32; n_out];
+
+    fn timed(mut run: impl FnMut(), iterations: usize) -> f64 {
+        for _ in 0..WARMUP {
+            run();
+        }
+        measure_once(&mut run, iterations)
+    }
+
+    let dispatch_time = timed(
+        || {
+            matmul_q8_0_quantized_range(
+                &weight,
+                &input_q8,
+                &input_scales,
+                &mut dispatch_out,
+                n_in,
+                0,
+                n_out,
+            );
+        },
+        iterations,
+    );
+    // The `nrc1` kernel is the ARM fallback: it has no x86 counterpart.
+    #[cfg(target_arch = "aarch64")]
+    let nrc1_time = Some(timed(
+        || {
+            // SAFETY: NEON is available on this target; the kernel only reads the
+            // weight rows and the activation, and writes `n_out` outputs.
+            unsafe {
+                crate::ops::kernel::q8_0::neon::matmul_q8_0_vs_q8_0_neon_nrc1(
+                    &weight,
+                    &input_q8,
+                    &input_scales,
+                    &mut nrc1_out,
+                    n_in,
+                    0,
+                    n_out,
+                );
+            }
+        },
+        iterations,
+    ));
+    #[cfg(not(target_arch = "aarch64"))]
+    let nrc1_time: Option<f64> = None;
+    let ggml_time = timed(
+        || {
+            crate::ops::kernel::q8_0::ggml::matmul_q8_0_vs_q8_0_ggml(
+                &weight,
+                &input_q8,
+                &input_scales,
+                &mut ggml_out,
+                n_in,
+                0,
+                n_out,
+            );
+        },
+        iterations,
+    );
+
+    let gflops = |seconds: f64| (n_in as f64 * n_out as f64 * 2.0) / seconds / 1e9;
+    let identical = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+    let max_diff = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+    match nrc1_time {
+        Some(nrc1_time) => println!(
+            "{:7} x {:7} | dispatch {:7.2}ms {:6.1}GF | nrc1 {:7.2}ms {:6.1}GF | ggml {:7.2}ms {:6.1}GF",
+            n_in,
+            n_out,
+            dispatch_time * 1000.0,
+            gflops(dispatch_time),
+            nrc1_time * 1000.0,
+            gflops(nrc1_time),
+            ggml_time * 1000.0,
+            gflops(ggml_time),
+        ),
+        None => println!(
+            "{:7} x {:7} | dispatch {:7.2}ms {:6.1}GF | ggml {:7.2}ms {:6.1}GF",
+            n_in,
+            n_out,
+            dispatch_time * 1000.0,
+            gflops(dispatch_time),
+            ggml_time * 1000.0,
+            gflops(ggml_time),
+        ),
+    }
+    #[cfg(target_arch = "aarch64")]
+    println!(
+        "           nrc1 vs dispatch: identical={} max_diff={:.3e}",
+        identical(&nrc1_out, &dispatch_out),
+        max_diff(&nrc1_out, &dispatch_out),
+    );
+    println!(
+        "           ggml vs dispatch: identical={} max_diff={:.3e}",
+        identical(&ggml_out, &dispatch_out),
+        max_diff(&ggml_out, &dispatch_out),
+    );
+}
+
 fn main() {
     let check = std::env::args().skip(1).any(|arg| arg == "--check");
+    let variants = std::env::args().skip(1).any(|arg| arg == "--variants");
+    if variants {
+        println!("architecture={}", std::env::consts::ARCH);
+        println!("-- Qwen3.8-27B FFN shape --");
+        bench_variants(5120, 17408, 5, 900);
+        bench_variants(5120, 1024, 20, 901);
+        bench_variants(5120, 12288, 5, 902);
+        return;
+    }
     if check && !cfg!(all(target_arch = "aarch64", target_os = "macos")) {
         eprintln!("--check requires a fixed aarch64-apple-darwin machine");
         std::process::exit(2);

@@ -1305,6 +1305,10 @@ pub fn run_multimodal(
         max_context,
         repetition_penalty,
         None,
+        0,
+        None,
+        0,
+        crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
         jinja,
     )
 }
@@ -1325,6 +1329,55 @@ pub fn run_multimodal_with_video(
     repetition_penalty: f32,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
+    run_multimodal_with_video_and_mtp(
+        llm_source,
+        model_path,
+        mmproj_path,
+        image_path,
+        video_path,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        prefill_batch_size,
+        max_context,
+        repetition_penalty,
+        0,
+        None,
+        0,
+        crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
+        jinja,
+    )
+}
+
+/// The same path with the MTP draft head enabled.
+///
+/// `mtp_draft` is the number of tokens the draft head proposes per
+/// speculative decoding round; zero keeps the plain one-token-at-a-time
+/// decode. `dspark_model` is a DFlash / DSpark sidecar path: when set, the
+/// sidecar drafts instead of the MTP head, and `mtp_draft` (defaulting to 8)
+/// is the per-round draft budget it is clamped to.
+pub fn run_multimodal_with_video_and_mtp(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    mtp_draft: usize,
+    dspark_model: Option<&Path>,
+    ngram_draft: usize,
+    ngram_lookup: usize,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
     run_multimodal_with_video_ref(
         llm_source.as_ref(),
@@ -1341,6 +1394,10 @@ pub fn run_multimodal_with_video(
         max_context,
         repetition_penalty,
         Some(owned_source),
+        mtp_draft,
+        dspark_model,
+        ngram_draft,
+        ngram_lookup,
         jinja,
     )
 }
@@ -1376,6 +1433,10 @@ pub(super) fn run_multimodal_with_video_ref(
     max_context: usize,
     _repetition_penalty: f32,
     model_source: Option<Arc<dyn TensorSource>>,
+    mtp_draft: usize,
+    dspark_model: Option<&Path>,
+    ngram_draft: usize,
+    ngram_lookup: usize,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let arch = llm_source
@@ -1866,10 +1927,87 @@ pub(super) fn run_multimodal_with_video_ref(
     // the session has to be sized by rows, not by tokens.
     let n_prompt = prompt_tokens.len();
     let prompt_rows = prompt_embd.len() / n_embd_row;
-    let max_seq = (prompt_rows + max_tokens)
+    // A DFlash sidecar takes over the drafting when one is named: the MTP
+    // draft count (defaulting to 8, the typical DSpark block size) becomes
+    // the per-round budget, clamped by the sidecar's trained block size.
+    let dspark_drafts = match dspark_model {
+        Some(_) => {
+            if mtp_draft > 0 {
+                mtp_draft
+            } else {
+                8
+            }
+        }
+        None => 0,
+    };
+    // The n-gram lookup drafts when a budget is named. It is exclusive with
+    // the other axes (validated at parse time and by the runtime gate), so
+    // reaching here with ngram_draft > 0 means the other two are off.
+    let ngram_drafts = ngram_draft;
+    // The speculative path writes the KV of the drafted tokens before it
+    // knows whether the target accepts them, so the cache needs room for
+    // one round of drafts on top of the committed tokens.
+    let mtp_overhead = if mtp_draft > 0 || dspark_drafts > 0 || ngram_drafts > 0 {
+        mtp_draft.max(dspark_drafts).max(ngram_drafts) + 1
+    } else {
+        0
+    };
+    let max_seq = (prompt_rows + max_tokens + mtp_overhead)
         .min(config.n_ctx)
         .min(max_context);
     let mut all_tokens = prompt_tokens.clone();
+
+    if mtp_draft > 0 && dspark_drafts == 0 {
+        // The draft head embeds the prompt tokens itself, so it needs the
+        // token ids: the vision path, whose prompt rows are projected
+        // embeddings, cannot use it.
+        if llm.trunk().mtp.is_none() {
+            return Err(
+                "--mtp-draft needs a checkpoint with an MTP draft head (Qwen3.5 dense)".into(),
+            );
+        }
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--mtp-draft needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--mtp-draft needs greedy decoding (--temp 0)".into());
+        }
+    }
+    if dspark_drafts > 0 {
+        // The sidecar embeds the prompt tokens itself (through the target's
+        // embedding table), so it needs the token ids like the MTP head
+        // does: the vision path, whose prompt rows are projected embeddings,
+        // cannot use it.
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--dspark-model needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--dspark-model needs greedy decoding (--temp 0)".into());
+        }
+    }
+    if ngram_drafts > 0 {
+        // Same rule as the sidecar: the lookup runs on token ids, so a
+        // vision prompt (whose rows are projected embeddings) has no history
+        // to look up, and the verification is batched greedy.
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--ngram-draft needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--ngram-draft needs greedy decoding (--temp 0)".into());
+        }
+    }
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
@@ -1896,7 +2034,14 @@ pub(super) fn run_multimodal_with_video_ref(
     let mut t_decode = 0.0;
     let mut decode_evals = 0usize;
 
-    for step in 0..max_tokens {
+    // The speculative path below commits several tokens per round, so the
+    // one-token-at-a-time loop runs zero times when a draft head is on.
+    let plain_steps = if mtp_draft > 0 || dspark_drafts > 0 || ngram_drafts > 0 {
+        0
+    } else {
+        max_tokens
+    };
+    for step in 0..plain_steps {
         let t0 = std::time::Instant::now();
         let tokens = if step == 0 {
             &prompt_tokens
@@ -1998,6 +2143,167 @@ pub(super) fn run_multimodal_with_video_ref(
 
         all_tokens.push(next_token);
     }
+
+    if mtp_draft > 0 && dspark_drafts == 0 {
+        // The speculative path: the MTP draft head proposes tokens and the
+        // target checks them in one forward pass, so a round can commit
+        // more than one token.
+        //
+        // The head embeds the prompt tokens itself, so it needs the token
+        // ids: the vision path, whose prompt rows are projected
+        // embeddings, cannot use it.
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        // The prefill and the rounds are timed apart: the prefill reads the
+        // whole model once, the rounds read it once per round.
+        let logits = session.prefill_with_mtp(&ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation =
+            session.mtp_generate_after_prefill(logits, &prompt_positions, max_tokens, mtp_draft)?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[mtp] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    } else if dspark_drafts > 0 {
+        // The DSpark speculative path: a DFlash sidecar proposes a block of
+        // tokens in one pass and the target checks them in one forward, so
+        // a round can commit more than one token. The sidecar shares the
+        // target's embedding table (llama.cpp's `ctx_other`).
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        let sidecar_source = crate::open_model_source(
+            dspark_model.expect("checked by the guard above"),
+            crate::ComponentRole::Llm,
+        )
+        .map_err(|error| error.to_string())?;
+        let dflash_weights =
+            crate::models::dflash::trunk::weights::load_weights(sidecar_source.as_ref())?;
+        let token_embd =
+            crate::models::dflash::trunk::weights::load_weight(llm_source, "token_embd.weight")
+                .ok_or("the target model has no token_embd.weight for the DSpark sidecar")?;
+        let mut dflash = crate::models::dflash::DflashSession::new(
+            dflash_weights,
+            token_embd,
+            pool.n_threads(),
+            max_seq,
+            prefill_batch_size.max(dspark_drafts + 1),
+        );
+        // The prefill and the rounds are timed apart, like the MTP path.
+        let logits = session.prefill_with_dspark(&mut dflash, &ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation = session.dspark_generate_after_prefill(
+            &mut dflash,
+            logits,
+            &prompt_positions,
+            max_tokens,
+            dspark_drafts,
+        )?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[dspark] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    } else if ngram_drafts > 0 {
+        // The n-gram speculative path: the committed token history
+        // drafts (llama.cpp's `ngram-simple`) and the target verifies the
+        // proposal in one forward per round. No sidecar, no draft head: a
+        // round with no lookup match degenerates into the plain
+        // one-token step, so the output is always the greedy output.
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        let config = crate::core::ngram::NgramSimpleConfig {
+            size_n: ngram_lookup,
+            size_m: ngram_drafts,
+        };
+        // The prefill and the rounds are timed apart, like the MTP path.
+        let logits = session.step_with_tokens(&ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation = session.ngram_generate_after_prefill(
+            logits,
+            &ids,
+            &prompt_positions,
+            max_tokens,
+            &config,
+        )?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[ngram] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    }
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids(
         "qwen35.greedy_token_ids",
@@ -2081,6 +2387,10 @@ mod tests {
             64,
             1.0,
             None,
+            0,
+            None,
+            0,
+            crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
             &crate::prompt::jinja::Options::default(),
         )
         .unwrap_err();

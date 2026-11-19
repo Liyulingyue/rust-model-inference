@@ -1,0 +1,53 @@
+{
+  "status": "measured",
+  "gates": {
+    "probability_abs": 0.02,
+    "confidence_abs": 0.02,
+    "labels_and_usage_exact": true
+  },
+  "scope": "One fixed text choice; official default BF16 CPU versus native F32 CPU, not whole-graph equivalence.",
+  "oracle": {
+    "model": "vllm-sr/d3-turbo",
+    "answers": {
+      "sentiment": {
+        "type": "choice",
+        "choice": "negative",
+        "probabilities": {
+          "positive": 0.0030380580631977324,
+          "negative": 0.9819063406456412,
+          "neutral": 0.015055601291161028
+        },
+        "confidence": 0.9101479474916581
+      }
+    },
+    "usage": {
+      "input_tokens": 117,
+      "output_tokens": 0
+    }
+  },
+  "native": {
+    "model": "vllm-sr/d3-turbo",
+    "answers": {
+      "sentiment": {
+        "type": "choice",
+        "choice": "negative",
+        "probabilities": {
+          "positive": 0.0029988399322218705,
+          "negative": 0.9821544025122161,
+          "neutral": 0.014846757555562036
+        },
+        "confidence": 0.911149984414973
+      }
+    },
+    "usage": {
+      "input_tokens": 117,
+      "output_tokens": 0
+    }
+  },
+  "metrics": {
+    "labels_and_usage_equal": true,
+    "max_probability_abs": 0.00024806186657488905,
+    "max_confidence_abs": 0.0010020369233149085
+  },
+  "passed": true
+}

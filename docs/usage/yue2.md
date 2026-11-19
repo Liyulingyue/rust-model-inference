@@ -185,7 +185,50 @@ NAR velocity 的重复调用从 33.60 降到 12.42 秒，输出原始位一致�
 [YuE2 Vulkan 优化记录](../develop/VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
 
 这些优化不更换权重、不减少扩散步数，也不修改采样参数。可用以下回归检查
-逐位一致性及中间 logits 的省略行为（不需要下载模型）：
+逐位一致性及中间 logits 的省略行为（不需要下载模型）。
+
+### 3.4 VAE 卷积的设备路径
+
+`--compute auto|vulkan` 下，VAE 的**普通卷积**（patch embedding、残差块、输出卷积）
+走共享 `try_conv3d` 上设备；**转置卷积没有设备内核**，始终留在 CPU。CPU 路径
+（`--compute cpu`，也是默认）完全不变 —— 它有多条按规模选择的实现，并且是
+逐位对齐 reference 的那一条。
+
+设备路径不经过 `ops::nn::conv3d_with_options` 的 CPU 复核（那一层会重算一遍
+卷积，等于把设备收益吃掉），而是直接调用 `try_conv3d`，失败时回落到 CPU。
+
+实测（2026-11-12，本机 Linux x86_64 + NVIDIA L20，`--steps 1`，256 latent 帧 /
+10.24 s 音频，8 线程）：
+
+| 阶段 | CPU | Vulkan |
+|---|---:|---:|
+| ABC 采样 | 76.3 s | 74.8 s |
+| semantic 采样 | 116.1 s | 113.6 s |
+| NAR（含 prefix prefill） | 46.2 s | 63.9 s |
+| VAE 解码 | 77.0 s | 25.6 s（3.0x） |
+| **合计** | **315.6 s** | **277.9 s（-12%）** |
+
+VAE 快 3 倍，AR/NAR 回到 CPU 路径（见下），所以**整链现在比 CPU 快 12%**。
+设备路径的输出与 CPU 的差异为**最多 1 个 PCM16 档位**（982,912 个采样中
+6,573 个不同，0.67%，最大绝对差 1/32768）—— 不是逐位一致，但对音频是舍入量级。
+
+NAR 的 q/k/v 三个投影共享同一个输入，现在由一次 `LinearExecutor::run_group`
+提交（而不是三次）。实测这一步只省下 ~0.5 s（63.9 s → 63.4 s），因为设备侧的
+成本随**行数**走（每次调用都要读对应权重），合并只减少提交次数；输出与三次分别
+提交**逐字节相同**。
+
+### 3.5 单行投影不上设备
+
+`GpuLinear::try_matmul` 现在要求 **rows >= 4**：单行是 GEMV，设备侧每个 workgroup
+的派发开销远超 CPU kernel。实测 YuE2 的 lm_head（2048x184704）在设备上
+**~70 ms/次**（rows=1），而 CPU 只需 ~8 ms —— 所以 AR 的逐 token lm_head 现在
+留在 CPU（这也是上面 AR 阶段追平 CPU 的原因）。rows>=4 的批量形状（例如 NAR 的
+256 帧 velocity）仍然在设备上。
+
+实机 GPU 回归 `vulkan_yue2_bf16_rounds_after_bias_across_tiles` 用的规模小于
+`RUST_GPU_MIN_OUTPUTS` 默认门槛（16K 输出），设备会拒绝这些投影，所以运行它需要
+`RUST_GPU_MIN_OUTPUTS=0`（2026-11-11 在本机 NVIDIA L20 上实测：默认门槛下该测试因
+"GPU BF16 projection declined" 失败，设为 0 后通过）。
 
 ```bash
 cargo test --profile release-fast --lib models::yue2::ar::performance_tests

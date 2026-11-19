@@ -11,8 +11,10 @@
 
 use crate::compute::ComputePolicy;
 
+use super::forward::RecurrentInput;
 use super::session::required_token_count;
 use super::session::Qwen35Session;
+use super::weights::MtpWeights;
 use super::*;
 use crate::core::scratchpad::KvCache;
 use crate::core::tensor::GGMLType;
@@ -173,6 +175,7 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         output_norm: vec![1.0; 2],
         output_weight: identity(),
         layers: vec![layer],
+        mtp: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
         cls_score: None,
@@ -266,7 +269,11 @@ fn qwen35_k_quant_weights_reject_non_block_width() {
 
 #[test]
 fn qwen35_gdn_norm_matches_pinned_llama_cpp_numerically() {
-    // Holo4 token 248045, layer 0, head 0; llama.cpp 11fe0215 build_gdn_l2_norm.
+    // Holo4 token 248045, layer 0, head 0, captured from the pinned
+    // llama.cpp b96806d `ggml_l2_norm` (eps = 1e-6). The older golden came
+    // from 11fe0215's `build_gdn_l2_norm`, which put the epsilon inside the
+    // square root; upstream moved it to a floor on the norm, and the two
+    // differ by a few ULP.
     const INPUT_BITS: [u32; 128] = [
         0x3b314673, 0xbcd3cc3c, 0x3ac03a72, 0xbc665313, 0xbb8ce72d, 0x394956d0, 0x3cb3b1a4,
         0x3d2d63a7, 0xbd4432a2, 0x3b9e0daf, 0xbd454c6e, 0xbd0c2a00, 0xbc52b8e4, 0xbc26d947,
@@ -289,25 +296,25 @@ fn qwen35_gdn_norm_matches_pinned_llama_cpp_numerically() {
         0xba2aede9, 0x3c0b4aa0,
     ];
     const EXPECTED_BITS: [u32; 128] = [
-        0x3b1c8cf5, 0xbcbb098c, 0x3aa9c16f, 0xbc4b65ec, 0xbb78dc75, 0x3931cd22, 0x3c9eafc2,
-        0x3d191e75, 0xbd2d42d3, 0x3b8b9375, 0xbd2e3bad, 0xbcf78e57, 0xbc3a1665, 0xbc1357d3,
-        0x3c39cf10, 0x3c5f8f5e, 0xbaea8708, 0x39069b76, 0x3a9fdb13, 0xbb993262, 0xbc24d5d3,
-        0x3c547885, 0xbce60b8b, 0xbb0b7688, 0xbb855130, 0x39541990, 0xbb1a522a, 0xbb9cef04,
-        0xb9f4697c, 0xbc8c3e41, 0x3a259cd0, 0xbbc109b3, 0xbb3f0031, 0xbba270e8, 0xbcbb69ab,
-        0xbb114a54, 0xb9a32db8, 0x3a9dcedf, 0xba9da64a, 0xbc7341d2, 0xb974d3a1, 0x391416f9,
-        0x3981cbaa, 0x3aff2655, 0x3c5b0e7c, 0xbc22baec, 0xbcd12df1, 0x3cac86be, 0xbc89ff3d,
-        0x3c5f6867, 0xba15e0e5, 0xb92bb2ad, 0xbccbea66, 0xba6b0a74, 0x3cd47d56, 0xbab040a9,
-        0x3c8499db, 0xbc040a8a, 0xba0ba5d3, 0xbcbbea78, 0xb8cea990, 0x3a3a65f4, 0xbc90c179,
-        0x3b8f81f0, 0xbb52619f, 0x38ab9aaf, 0xbc21c9ad, 0xbc859ad7, 0xbc47f21e, 0xbb7d8c6e,
-        0x3bff11fb, 0xbc0e16c2, 0xbc4fb721, 0x39018d9a, 0x3d11dbe0, 0xbc1f501b, 0xbbeae823,
-        0xbcf10d53, 0xbc33eaea, 0x3cfb827b, 0x3ae85687, 0x3b70d75e, 0xbca16134, 0x3c9f3acf,
-        0x3baba13e, 0xbc8ef8ac, 0x38edd35a, 0x3b2b1d59, 0xbcece84e, 0xbcc93cdf, 0xbcc921d0,
-        0xbc18e24c, 0xbc5716d3, 0xbbf19686, 0xba3b5a02, 0x3b973642, 0xb8155976, 0x3c07f931,
-        0xbc6d70c0, 0xbd09963f, 0x3c07b748, 0x3ce1f95f, 0x38643bfa, 0xbcb0b553, 0xba1712f2,
-        0x3c869f15, 0xbe3f22fa, 0xbc149e17, 0xbcbf1c52, 0x3d2cbc18, 0xbb24254c, 0x3f77a760,
-        0x3b9e2e71, 0xbc8eb480, 0x3a9f2869, 0xb6954675, 0xbbe09130, 0x3ba9e093, 0x3b438555,
-        0xbc475fa0, 0x3ceb3bad, 0xb9b82605, 0xbc4aa055, 0xbc208311, 0xbcad7fad, 0x3ac7f3c8,
-        0xba16f256, 0x3bf603d1,
+        0x3b1c8cf8, 0xbcbb0990, 0x3aa9c173, 0xbc4b65f0, 0xbb78dc7b, 0x3931cd26, 0x3c9eafc6,
+        0x3d191e78, 0xbd2d42d7, 0x3b8b9378, 0xbd2e3bb1, 0xbcf78e5c, 0xbc3a1669, 0xbc1357d7,
+        0x3c39cf13, 0x3c5f8f61, 0xbaea870d, 0x39069b79, 0x3a9fdb16, 0xbb993265, 0xbc24d5d7,
+        0x3c54788a, 0xbce60b8f, 0xbb0b768b, 0xbb855133, 0x39541995, 0xbb1a522e, 0xbb9cef08,
+        0xb9f46982, 0xbc8c3e44, 0x3a259cd3, 0xbbc109b7, 0xbb3f0035, 0xbba270eb, 0xbcbb69b0,
+        0xbb114a57, 0xb9a32dbc, 0x3a9dcee2, 0xba9da64d, 0xbc7341d8, 0xb974d3a7, 0x391416fc,
+        0x3981cbad, 0x3aff265a, 0x3c5b0e80, 0xbc22baef, 0xbcd12df6, 0x3cac86c2, 0xbc89ff40,
+        0x3c5f686d, 0xba15e0e8, 0xb92bb2b1, 0xbccbea6a, 0xba6b0a79, 0x3cd47d5a, 0xbab040ad,
+        0x3c8499de, 0xbc040a8d, 0xba0ba5d6, 0xbcbbea7c, 0xb8cea995, 0x3a3a65f8, 0xbc90c17d,
+        0x3b8f81f3, 0xbb5261a4, 0x38ab9ab3, 0xbc21c9b1, 0xbc859ada, 0xbc47f222, 0xbb7d8c74,
+        0x3bff1200, 0xbc0e16c5, 0xbc4fb726, 0x39018d9d, 0x3d11dbe3, 0xbc1f501f, 0xbbeae828,
+        0xbcf10d59, 0xbc33eaed, 0x3cfb8280, 0x3ae8568c, 0x3b70d763, 0xbca16137, 0x3c9f3ad3,
+        0x3baba142, 0xbc8ef8af, 0x38edd35f, 0x3b2b1d5c, 0xbcece853, 0xbcc93ce3, 0xbcc921d5,
+        0xbc18e24f, 0xbc5716d7, 0xbbf1968b, 0xba3b5a06, 0x3b973645, 0xb815597a, 0x3c07f934,
+        0xbc6d70c5, 0xbd099642, 0x3c07b74c, 0x3ce1f964, 0x38643bff, 0xbcb0b557, 0xba1712f5,
+        0x3c869f18, 0xbe3f22fe, 0xbc149e1a, 0xbcbf1c56, 0x3d2cbc1c, 0xbb242550, 0x3f77a765,
+        0x3b9e2e75, 0xbc8eb483, 0x3a9f286c, 0xb6954678, 0xbbe09135, 0x3ba9e097, 0x3b43855a,
+        0xbc475fa4, 0x3ceb3bb3, 0xb9b82608, 0xbc4aa058, 0xbc208315, 0xbcad7fb1, 0x3ac7f3cc,
+        0xba16f259, 0x3bf603d6,
     ];
 
     let mut actual = INPUT_BITS.map(f32::from_bits);
@@ -318,15 +325,51 @@ fn qwen35_gdn_norm_matches_pinned_llama_cpp_numerically() {
 }
 
 #[test]
-fn qwen35_gdn_norm_adds_eps_to_sum_of_squares() {
+fn qwen35_gdn_norm_floors_the_norm_at_eps() {
+    // ggml's `ggml_l2_norm` scales by `1 / max(sqrt(sum(x²)), eps)`: the
+    // epsilon floors the norm instead of being added inside the square
+    // root, so a vector far below the epsilon is scaled up to `eps` rather
+    // than to `sqrt(eps)`.
     let mut tiny = [1e-8f32; 128];
     super::util::l2_norm(&mut tiny, 1e-6);
     for value in tiny {
-        assert!((value - 1e-5).abs() < 1e-10, "{value}");
+        assert!((value - 1e-2).abs() < 1e-9, "{value}");
     }
     let mut zero = [0.0; 128];
     super::util::l2_norm(&mut zero, 1e-6);
     assert_eq!(zero, [0.0; 128]);
+}
+
+#[test]
+fn qwen35_gdn_norm_differs_from_the_pre_b96806d_formula_by_eps_over_two_sum() {
+    // llama.cpp used `build_gdn_l2_norm` (`x / sqrt(sum(x^2) + eps)`) before
+    // `b96806d`. The two formulas differ by `eps / (2 * sum)` relative, so a
+    // model compared against a pre-`b96806d` Oracle carries exactly that
+    // error -- it is a formula-version difference, not an implementation
+    // defect.
+    const EPS: f32 = 1e-5;
+    let input: Vec<f32> = (0..128).map(|index| 0.1 + (index as f32) * 0.001).collect();
+    let sum: f64 = input
+        .iter()
+        .map(|value| f64::from(*value) * f64::from(*value))
+        .sum();
+
+    let mut upstream = input.clone();
+    super::util::l2_norm(&mut upstream, EPS);
+    let mut legacy = input.clone();
+    super::util::l2_norm_legacy(&mut legacy, EPS);
+
+    let expected = EPS as f64 / (2.0 * sum);
+    for (upstream, legacy) in upstream.iter().zip(&legacy) {
+        let relative = ((upstream - legacy) / legacy).abs() as f64;
+        // The difference itself is around 1e-7 of a value near 0.1, so the
+        // f32 resolution of the two results bounds how exactly the relative
+        // difference can be measured.
+        assert!(
+            (relative - expected).abs() <= expected * 0.1,
+            "relative difference {relative} is not the expected {expected}"
+        );
+    }
 }
 
 #[test]
@@ -366,6 +409,506 @@ fn qwen35moe_single_token_trace() {
     // beyond it succeeding, because the comparison is done offline by
     // tools/oracle/qwen35/check_moe.py against the oracle's manifest.
     session.step_with_tokens(&tokens, &positions).unwrap();
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
+fn qwen35_mtp_head_drafts_the_token_the_target_would_pick() {
+    // The MTP head is the block after the main stack: it takes the target's
+    // last hidden state and the next token and predicts the token after that.
+    // The number that says whether the head is wired up correctly is the
+    // acceptance rate -- how many drafts the target would have accepted.
+    // llama.cpp reports 0.656 for the same model and prompt
+    // (`llama-server --spec-type draft-mtp`).
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let ids = std::env::var("RMI_QWEN35_PROMPT_TOKENS")
+        .expect("RMI_QWEN35_PROMPT_TOKENS must be a comma-separated list");
+    let tokens: Vec<u32> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("token id must be a u32"))
+        .collect();
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must name at least one token"
+    );
+    let steps: usize = std::env::var("RMI_QWEN35_MTP_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+    let drafts_per_step: usize = std::env::var("RMI_QWEN35_MTP_DRAFTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    assert!(
+        model.mtp.is_some(),
+        "the checkpoint has no MTP head, so there is nothing to draft"
+    );
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps + drafts_per_step + 2);
+    let pool = session_pool();
+    let mut session =
+        Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, tokens.len(), pool).unwrap();
+
+    // Prefill, then keep the target's own greedy sequence as the reference
+    // the drafts are checked against.
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+    // The head's KV cache has to cover the committed prompt before the first
+    // draft: the draft block attends over the committed positions, so a
+    // cache that starts at the first generated token would leave the draft
+    // with almost no context.
+    let prompt_hidden = session.last_hidden(tokens.len()).unwrap().to_vec();
+    let prompt_positions: Vec<usize> = (0..tokens.len()).collect();
+    session
+        .mtp_catch_up(&tokens, &prompt_positions, &prompt_hidden)
+        .unwrap();
+    let mut generated: Vec<u32> = Vec::new();
+    let mut drafts: Vec<Vec<u32>> = Vec::new();
+    let mut position = tokens.len();
+
+    for _ in 0..steps {
+        let token = crate::ops::sampling::argmax(&logits) as u32;
+        generated.push(token);
+
+        // The head runs at the position of the token it is given and pairs it
+        // with the hidden state of the position before it, so its logits are
+        // the token after that one.
+        let proposed = session
+            .mtp_draft_tokens(token, position, drafts_per_step)
+            .unwrap();
+        drafts.push(proposed);
+
+        // Feed the target its own greedy token and keep going.
+        logits = session
+            .step_with_tokens(&[token], &[[position, position, position, 0]])
+            .unwrap();
+        // The committed token now has a hidden state of its own: catch the
+        // head's KV cache up with it so the next draft sees it.
+        let hidden = session.last_hidden_state().unwrap().to_vec();
+        session
+            .mtp_catch_up(&[token], &[position], &hidden)
+            .unwrap();
+        position += 1;
+    }
+
+    // The drafts are checked against the target's own sequence: draft `i` of
+    // step `s` should be the token the target produces at step `s + i + 1`.
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    for (step, proposed) in drafts.iter().enumerate() {
+        for (offset, &token) in proposed.iter().enumerate() {
+            let target = step + offset + 1;
+            drafted += 1;
+            if target < generated.len() && generated[target] == token {
+                accepted += 1;
+            }
+        }
+    }
+    eprintln!("Qwen3.5 MTP target tokens: {generated:?}");
+    eprintln!("Qwen3.5 MTP drafts: {drafts:?}");
+    eprintln!(
+        "Qwen3.5 MTP acceptance = {:.4} ({accepted} accepted / {drafted} drafted)",
+        accepted as f64 / drafted.max(1) as f64
+    );
+    assert!(drafted > 0, "no drafts were produced");
+    // A head that is wired up wrongly drafts noise, and noise is accepted
+    // at the rate of a coin flip at best. llama.cpp measures 0.656 for this
+    // model, so anything below a quarter means the head is not working.
+    assert!(
+        accepted * 4 >= drafted,
+        "MTP acceptance {accepted}/{drafted} is too low for a working draft head"
+    );
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_QWEN35_PROMPT_TOKENS"]
+fn qwen35_mtp_speculative_decoding_matches_greedy() {
+    // Speculative decoding has to produce exactly the tokens the target
+    // would have produced on its own -- that is the whole point of the
+    // verify/accept loop. The number that says whether the draft head is
+    // any good is the acceptance rate: how many of the drafted tokens the
+    // target accepted.
+    //
+    // llama.cpp measures 10/19 for the same model and prompt
+    // (`llama-server --spec-type draft-mtp --spec-draft-n-max 4`).
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let ids = std::env::var("RMI_QWEN35_PROMPT_TOKENS")
+        .expect("RMI_QWEN35_PROMPT_TOKENS must be a comma-separated list");
+    let tokens: Vec<u32> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().expect("token id must be a u32"))
+        .collect();
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must name at least one token"
+    );
+    let steps: usize = std::env::var("RMI_QWEN35_MTP_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16);
+    let drafts_per_step: usize = std::env::var("RMI_QWEN35_MTP_DRAFTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4);
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    assert!(
+        model.mtp.is_some(),
+        "the checkpoint has no MTP head, so there is nothing to draft"
+    );
+    // The verification writes the KV of the rejected drafts too, so the
+    // cache has to hold the whole run.
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps * (drafts_per_step + 1) + 2);
+    let pool = session_pool();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    // `RMI_QWEN35_MTP_DEVICE=1` runs the target on the device; the draft
+    // head stays on the CPU either way. Without the flag the session uses
+    // whatever the build and the machine offer.
+    #[cfg(feature = "vulkan")]
+    let policy = if std::env::var("RMI_QWEN35_MTP_DEVICE").is_ok_and(|value| value == "1") {
+        crate::compute::ComputePolicy::Vulkan
+    } else {
+        crate::compute::ComputePolicy::legacy()
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let policy = crate::compute::ComputePolicy::legacy();
+
+    // The reference: the target on its own.
+    let mut greedy: Vec<u32> = Vec::with_capacity(steps);
+    {
+        let mut session =
+            Qwen35Session::new_with_compute(&mut model, n_ctx, tokens.len(), pool.clone(), policy)
+                .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut position = tokens.len();
+        for _ in 0..steps {
+            let token = crate::ops::sampling::argmax(&logits) as u32;
+            greedy.push(token);
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+            position += 1;
+        }
+    }
+
+    // The same run with the draft head.
+    let mut speculative: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    let mut rounds = 0usize;
+    {
+        let mut session =
+            Qwen35Session::new_with_compute(&mut model, n_ctx, tokens.len(), pool.clone(), policy)
+                .unwrap();
+        #[cfg(all(test, feature = "vulkan"))]
+        eprintln!(
+            "Qwen3.5 MTP target backend: {}",
+            if session.gpu_enabled_for_test() {
+                "vulkan"
+            } else {
+                "cpu"
+            }
+        );
+        // The draft context has to cover the prompt before the first draft:
+        // the draft block attends over the committed positions. The prefill
+        // hands the head the target's hidden state of every prompt row.
+        let mut logits = session.prefill_with_mtp(&tokens, &positions).unwrap();
+
+        let mut position = tokens.len();
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        while speculative.len() < steps {
+            let step = session
+                .mtp_speculative_step(bonus, position, drafts_per_step)
+                .unwrap();
+            accepted += step.accepted;
+            drafted += step.drafted;
+            rounds += 1;
+            position += step.tokens.len();
+            bonus = step.next;
+
+            for token in step.tokens {
+                speculative.push(token);
+                if speculative.len() >= steps {
+                    break;
+                }
+            }
+        }
+    }
+
+    eprintln!("Qwen3.5 MTP greedy tokens: {greedy:?}");
+    eprintln!("Qwen3.5 MTP speculative tokens: {speculative:?}");
+    eprintln!(
+        "Qwen3.5 MTP acceptance = {:.4} ({accepted} accepted / {drafted} drafted, {rounds} rounds)",
+        accepted as f64 / drafted.max(1) as f64
+    );
+
+    assert_eq!(
+        greedy, speculative,
+        "speculative decoding must produce the target's own tokens"
+    );
+    assert!(drafted > 0, "no drafts were produced");
+    // A head that is wired up wrongly drafts noise, and noise is accepted at
+    // the rate of a coin flip at best.
+    assert!(
+        accepted * 4 >= drafted,
+        "MTP acceptance {accepted}/{drafted} is too low for a working draft head"
+    );
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL and RMI_DFLASH_SIDECAR"]
+fn qwen35_dspark_speculative_decoding_matches_greedy() {
+    // Speculative decoding has to produce exactly the tokens the target
+    // would have produced on its own -- that is the whole point of the
+    // verify/accept loop. The number that says whether the DSpark sidecar
+    // is any good is the acceptance rate: how many of the drafted tokens
+    // the target accepted.
+    //
+    // The prompt is tokenised with the target's own embedded tokenizer so
+    // the ids mean the same tokens on both sides.
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let sidecar_path = std::env::var("RMI_DFLASH_SIDECAR").expect("RMI_DFLASH_SIDECAR must be set");
+    let steps: usize = std::env::var("RMI_QWEN35_DSPARK_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16);
+    let drafts_per_step: usize = std::env::var("RMI_QWEN35_DSPARK_DRAFTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8);
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let sidecar_source = crate::open_model_source(
+        std::path::Path::new(&sidecar_path),
+        crate::ComponentRole::Llm,
+    )
+    .unwrap();
+    let tokenizer = crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })
+    .unwrap();
+    let tokens = tokenizer.encode(
+        "The capital of France is",
+        crate::core::tokenizer::EncodeOptions::default(),
+    );
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must tokenize to at least one token"
+    );
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    // The verification writes the KV of the rejected drafts too, so the
+    // caches have to hold the whole run.
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps * (drafts_per_step + 1) + 2);
+    let pool = session_pool();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    // The scratchpad is sized for the larger of the prompt chunk and the
+    // verification batch (the anchor plus the draft).
+    let batch = tokens.len().max(drafts_per_step + 1);
+
+    // The reference: the target on its own.
+    let mut greedy: Vec<u32> = Vec::with_capacity(steps);
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut position = tokens.len();
+        for _ in 0..steps {
+            let token = crate::ops::sampling::argmax(&logits) as u32;
+            greedy.push(token);
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+            position += 1;
+        }
+    }
+
+    // The same run with the sidecar drafting.
+    let mut speculative: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    let mut rounds = 0usize;
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let dflash_weights =
+            crate::models::dflash::trunk::weights::load_weights(sidecar_source.as_ref()).unwrap();
+        let token_embd = crate::models::dflash::trunk::weights::load_weight(
+            source.as_ref(),
+            "token_embd.weight",
+        )
+        .unwrap();
+        // The draft context has to cover the whole run: the draft block
+        // attends over the committed positions.
+        let mut dflash = crate::models::dflash::DflashSession::new(
+            dflash_weights,
+            token_embd,
+            pool.n_threads(),
+            n_ctx,
+            batch,
+        );
+
+        let logits = session
+            .prefill_with_dspark(&mut dflash, &tokens, &positions)
+            .unwrap();
+        let mut position = tokens.len();
+        let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+        while speculative.len() < steps {
+            let step = session
+                .dspark_speculative_step(&mut dflash, bonus, position, drafts_per_step)
+                .unwrap();
+            accepted += step.accepted;
+            drafted += step.drafted;
+            rounds += 1;
+            position += step.tokens.len();
+            bonus = step.next;
+
+            for token in step.tokens {
+                speculative.push(token);
+                if speculative.len() >= steps {
+                    break;
+                }
+            }
+        }
+        eprintln!("Qwen3.5 DSpark acceptance: {accepted}/{drafted} over {rounds} rounds");
+    }
+
+    for (index, (speculative_token, greedy_token)) in
+        speculative.iter().zip(greedy.iter()).enumerate()
+    {
+        assert_eq!(
+            speculative_token, greedy_token,
+            "DSpark speculative decoding diverged from greedy at step {index}"
+        );
+    }
+    assert!(
+        accepted >= 1,
+        "the sidecar never had a draft accepted across {rounds} rounds"
+    );
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL"]
+fn qwen35_ngram_speculative_decoding_matches_greedy() {
+    // Same invariant as the DSpark test, with the token history drafting
+    // instead of a sidecar: the n-gram lookup only changes how many
+    // forward passes the tokens take, never which tokens come out. The
+    // acceptance rate (drafts the target accepted) is what says the
+    // lookup is finding anything at all.
+    //
+    // The prompt is a repeating number sequence so the history contains
+    // real n-gram matches from the start; the small lookup/draft sizes
+    // (4/4, against the upstream defaults of 12/48) keep the required
+    // history length within the prompt.
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let steps: usize = std::env::var("RMI_QWEN35_NGRAM_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(24);
+    let config = crate::core::ngram::NgramSimpleConfig {
+        size_n: 4,
+        size_m: 4,
+    };
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let tokenizer = crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })
+    .unwrap();
+    let tokens = tokenizer.encode(
+        "1 2 3 4 5 6 7 8 9 10 11 12 1 2 3 4 5 6 7 8 9 10 11 12 1 2 3",
+        crate::core::tokenizer::EncodeOptions::default(),
+    );
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must tokenize to at least one token"
+    );
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    // The speculative round writes the KV of the drafted tokens before it
+    // knows whether the target accepts them, so the cache needs one round
+    // of drafts on top of the committed tokens.
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps + config.size_m + 2);
+    let pool = session_pool();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    // The scratchpad is sized for the larger of the prompt chunk and the
+    // verification batch (the bonus token plus the draft).
+    let batch = tokens.len().max(config.size_m + 1);
+
+    // The reference: the target on its own.
+    let mut greedy: Vec<u32> = Vec::with_capacity(steps);
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut position = tokens.len();
+        for _ in 0..steps {
+            let token = crate::ops::sampling::argmax(&logits) as u32;
+            greedy.push(token);
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+            position += 1;
+        }
+    }
+
+    // The same run with the committed history drafting.
+    let mut speculative: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    let mut rounds = 0usize;
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let generation = session
+            .ngram_generate_after_prefill(logits, &tokens, &positions, steps, &config)
+            .unwrap();
+        accepted += generation.accepted;
+        drafted += generation.drafted;
+        rounds += generation.rounds;
+        speculative.extend_from_slice(&generation.tokens[..steps.min(generation.tokens.len())]);
+        eprintln!("Qwen3.5 ngram acceptance: {accepted}/{drafted} over {rounds} rounds");
+    }
+
+    for (index, (speculative_token, greedy_token)) in
+        speculative.iter().zip(greedy.iter()).enumerate()
+    {
+        assert_eq!(
+            speculative_token, greedy_token,
+            "ngram speculative decoding diverged from greedy at step {index}"
+        );
+    }
+    assert!(
+        drafted >= 1,
+        "the lookup never drafted across {rounds} rounds: the history had no \
+         n-gram matches to propose"
+    );
 }
 
 #[test]
@@ -589,6 +1132,7 @@ fn tiny_dense_session_model_with_embedding(
         output_norm: vec![1.0; n_embd],
         output_weight: mk_weight(vocab_size),
         layers: vec![layer],
+        mtp: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
         cls_score: None,
@@ -694,6 +1238,7 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         output_norm: vec![1.0; 256],
         output_weight: q8_weight(32),
         layers: vec![layer],
+        mtp: None,
         #[cfg(feature = "vulkan")]
         gpu: None,
         cls_score: None,
@@ -857,7 +1402,7 @@ fn hf_gdn_heads_repeat_in_pairs_and_visit_caches_are_independent() {
                 .forward_recurrent_layer(
                     0,
                     slot,
-                    &[1., 2., 3., 4.],
+                    RecurrentInput::Project(&[1., 2., 3., 4.]),
                     1,
                     scratch,
                     &pool,
@@ -890,6 +1435,63 @@ fn hf_gdn_heads_repeat_in_pairs_and_visit_caches_are_independent() {
         assert_eq!(scratch.conv_states[1], conv);
         assert_ne!(scratch.ssm_states[0], first);
     }
+}
+
+#[test]
+fn qwen35_recurrent_replay_restores_the_state_after_the_accepted_rows() {
+    let model = tiny_recurrent_session_model();
+    let pool = ComputePool::new(1);
+
+    // The state the committed row leaves behind.
+    let mut committed = Qwen35Scratchpad::new(&model.config, 1);
+    model
+        .forward_recurrent_layer(
+            0,
+            0,
+            RecurrentInput::Project(&[1., 2., 3., 4.]),
+            1,
+            &mut committed,
+            &pool,
+            false,
+            false,
+            #[cfg(feature = "parity-trace")]
+            false,
+        )
+        .unwrap();
+
+    // The verification: the committed row and a draft that gets rejected.
+    // The forward captures what the state update consumes.
+    let mut scratch = Qwen35Scratchpad::new(&model.config, 2);
+    scratch.recurrent_replay.resize_with(1, Default::default);
+    scratch.capture_recurrent_replay = true;
+    model
+        .forward_recurrent_layer(
+            0,
+            0,
+            RecurrentInput::Project(&[1., 2., 3., 4., 5., 6., 7., 8.]),
+            2,
+            &mut scratch,
+            &pool,
+            false,
+            false,
+            #[cfg(feature = "parity-trace")]
+            false,
+        )
+        .unwrap();
+    scratch.capture_recurrent_replay = false;
+    assert_ne!(scratch.ssm_states[0], committed.ssm_states[0]);
+
+    // The rollback: put the state back where the verification found it and
+    // replay the committed row. The state has to come out exactly where the
+    // committed row leaves it -- the replay reuses the captured projections
+    // instead of projecting the row again.
+    scratch.ssm_states[0].fill(0.0);
+    scratch.conv_states[0].fill(0.0);
+    model
+        .replay_recurrent_state(1, &mut scratch, &pool)
+        .unwrap();
+    assert_eq!(scratch.ssm_states[0], committed.ssm_states[0]);
+    assert_eq!(scratch.conv_states[0], committed.conv_states[0]);
 }
 
 fn tiny_mixed_session_model() -> Qwen35Model<'static> {
@@ -1178,6 +1780,208 @@ fn mixed_fixture_session(
     let model = Box::leak(Box::new(tiny_mixed_session_model()));
     model.config.n_ctx = capacity;
     Qwen35Session::new_with_compute(model, capacity, batch_size, session_pool(), policy).unwrap()
+}
+
+/// A tiny model with an MTP draft head.
+///
+/// The main stack has a recurrent layer, so a rejected draft has to put the
+/// state back, and the head is a dense block like the main stack's.
+fn tiny_mtp_session_model() -> Qwen35Model<'static> {
+    let mut model = tiny_mixed_session_model();
+    let n_embd = model.config.n_embd;
+    let vocab_size = model.config.vocab_size;
+    // The head sits after the main stack: it is the block the nextn tensors
+    // turn into a draft head.
+    model.config.n_layer = 3;
+    model.config.n_nextn = 1;
+    model.config.is_recurrent = vec![false, true];
+    let mk_weight = |n_in, n_out| f32_test_weight(vec![0.1; n_in * n_out], n_in, n_out);
+    // The target's answer depends on the token it read: the output weight
+    // picks out the components of the hidden state, so the target's choice
+    // changes from step to step. The head has its own projection and
+    // proposes its own token, so some of its drafts are accepted and some
+    // are rejected -- which is the case the round has to recover from.
+    let mut output_weight = vec![0.0f32; n_embd * vocab_size];
+    for index in 0..n_embd.min(vocab_size) {
+        output_weight[index * vocab_size + index] = 1.0;
+    }
+    model.output_weight = f32_test_weight(output_weight, n_embd, vocab_size);
+    let mut head_weight = vec![0.0f32; n_embd * vocab_size];
+    for row in head_weight.chunks_exact_mut(vocab_size) {
+        row[1] = 1.0e6;
+    }
+    let head_layer = Qwen35LayerWeights {
+        attn_norm: vec![1.0; n_embd],
+        attn_post_norm: vec![1.0; n_embd],
+        wq: Some(mk_weight(n_embd, 2 * n_embd)),
+        wk: Some(mk_weight(n_embd, n_embd)),
+        wv: Some(mk_weight(n_embd, n_embd)),
+        wo: Some(mk_weight(n_embd, n_embd)),
+        attn_q_norm: Some(vec![1.0; n_embd]),
+        attn_k_norm: Some(vec![1.0; n_embd]),
+        wqkv: None,
+        wqkv_gate: None,
+        ssm_conv1d: None,
+        ssm_dt: None,
+        ssm_a: None,
+        ssm_beta: None,
+        ssm_alpha: None,
+        ssm_norm: None,
+        ssm_out: None,
+        ffn_gate: Some(mk_weight(n_embd, n_embd)),
+        ffn_up: Some(mk_weight(n_embd, n_embd)),
+        ffn_down: Some(mk_weight(n_embd, n_embd)),
+        moe: None,
+    };
+    model.mtp = Some(MtpWeights {
+        layer: head_layer,
+        // The head fuses the normalized embedding and the normalized hidden
+        // state, so its projection takes twice the width.
+        eh_proj: mk_weight(2 * n_embd, n_embd),
+        enorm: vec![1.0; n_embd],
+        hnorm: vec![1.0; n_embd],
+        // The main model's output weight and norm are the head's own, except
+        // for the projection: the head gets its own, so it proposes a token
+        // the target never picks.
+        shared_head_head: Some(f32_test_weight(head_weight, n_embd, vocab_size)),
+        shared_head_norm: None,
+    });
+    model
+}
+
+fn mtp_fixture_session(
+    capacity: usize,
+    batch_size: usize,
+    policy: ComputePolicy,
+) -> Qwen35Session<'static, 'static> {
+    let model = Box::leak(Box::new(tiny_mtp_session_model()));
+    model.config.n_ctx = capacity;
+    Qwen35Session::new_with_compute(model, capacity, batch_size, session_pool(), policy).unwrap()
+}
+
+/// The greedy continuation of a prompt, as the target produces it.
+fn mtp_fixture_greedy(policy: ComputePolicy, tokens: &[u32], steps: usize) -> Vec<u32> {
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    let mut session = mtp_fixture_session(tokens.len() + steps + 8, tokens.len(), policy);
+    let mut logits = session.step_with_tokens(tokens, &positions).unwrap();
+    let mut position = tokens.len();
+    let mut generated = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let token = crate::ops::sampling::argmax(&logits) as u32;
+        generated.push(token);
+        logits = session
+            .step_with_tokens(&[token], &[[position, position, position, 0]])
+            .unwrap();
+        position += 1;
+    }
+    generated
+}
+
+/// The same continuation, produced by the draft head.
+///
+/// The counters say how the round went: how many drafts the target
+/// accepted, and how many it rejected. A rejected draft is the interesting
+/// case, because the round has to put the recurrent state back.
+fn mtp_fixture_speculative(
+    policy: ComputePolicy,
+    tokens: &[u32],
+    steps: usize,
+    drafts: usize,
+) -> (Vec<u32>, usize, usize) {
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    let mut session = mtp_fixture_session(
+        tokens.len() + steps * (drafts + 1) + 8,
+        tokens.len(),
+        policy,
+    );
+    let logits = session.prefill_with_mtp(tokens, &positions).unwrap();
+    let mut position = tokens.len();
+    let mut bonus = crate::ops::sampling::argmax(&logits) as u32;
+    let mut generated: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    while generated.len() < steps {
+        let step = session
+            .mtp_speculative_step(bonus, position, drafts)
+            .unwrap();
+        position += step.tokens.len();
+        bonus = step.next;
+        accepted += step.accepted;
+        drafted += step.drafted;
+        for token in step.tokens {
+            generated.push(token);
+            if generated.len() >= steps {
+                break;
+            }
+        }
+    }
+    (generated, accepted, drafted)
+}
+
+/// The draft head must not change what the target produces.
+///
+/// The head proposes, the target decides: a speculative round has to commit
+/// exactly the tokens the target would have produced on its own, whether it
+/// runs on the CPU or on the device. On the device the round is the harder
+/// one: it reads the target's answer at every drafted position, and a
+/// rejected draft has to put the recurrent state back.
+#[test]
+fn qwen35_mtp_speculative_matches_greedy_on_the_cpu() {
+    let tokens = [0u32, 1, 2, 3];
+    let greedy = mtp_fixture_greedy(ComputePolicy::Cpu, &tokens, 8);
+    let (speculative, accepted, drafted) =
+        mtp_fixture_speculative(ComputePolicy::Cpu, &tokens, 8, 2);
+    assert_eq!(speculative, greedy);
+    assert!(drafted > accepted, "the fixture has to reject a draft");
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_mtp_speculative_matches_greedy_on_the_device() {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let tokens = [0u32, 1, 2, 3];
+    let greedy = mtp_fixture_greedy(ComputePolicy::Vulkan, &tokens, 8);
+    let (speculative, accepted, drafted) =
+        mtp_fixture_speculative(ComputePolicy::Vulkan, &tokens, 8, 2);
+    assert_eq!(speculative, greedy);
+    assert!(drafted > accepted, "the fixture has to reject a draft");
+}
+
+/// The draft head has to propose the same tokens wherever it runs.
+///
+/// The head is a block of its own: it has an attention over a cache of its
+/// own, a feed-forward of its own and a vocabulary projection of its own.
+/// On the device it runs over the device's own copy of those weights, so
+/// the two paths have to agree on the drafts -- otherwise the target would
+/// see a different round on each backend.
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn qwen35_mtp_device_head_matches_the_cpu_head() {
+    crate::ops::enable_gpu();
+    assert!(crate::ops::get_vulkan_context().is_some());
+    let n_embd = tiny_mtp_session_model().config.n_embd;
+    let tokens = [0u32, 1, 2, 3];
+    let positions = [0usize, 1, 2, 3];
+    // The head's input: the target's hidden states, one row per token.
+    let hidden: Vec<f32> = (0..tokens.len() * n_embd)
+        .map(|index| (index as f32) * 0.125 - 1.0)
+        .collect();
+    let mut cpu = mtp_fixture_session(64, 8, ComputePolicy::Cpu);
+    let mut device = mtp_fixture_session(64, 8, ComputePolicy::Vulkan);
+    // The same catch-up over the same tokens: the head's cache and its
+    // carry-over row have to match too.
+    cpu.mtp_catch_up(&tokens, &positions, &hidden).unwrap();
+    device.mtp_catch_up(&tokens, &positions, &hidden).unwrap();
+    assert_eq!(
+        cpu.mtp_pending_hidden().unwrap(),
+        device.mtp_pending_hidden().unwrap()
+    );
+    let cpu_drafts = cpu.mtp_draft_tokens(7, tokens.len(), 2).unwrap();
+    let device_drafts = device.mtp_draft_tokens(7, tokens.len(), 2).unwrap();
+    assert_eq!(cpu_drafts, device_drafts);
 }
 
 #[test]

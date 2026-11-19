@@ -147,6 +147,44 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 );
                 i += 1;
             }
+            "--mtp-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --mtp-draft")?;
+                options.mtp_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --mtp-draft value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--dspark-model" => {
+                let value = args.get(i + 1).ok_or("Missing value for --dspark-model")?;
+                let path = std::path::Path::new(value);
+                if !path.exists() {
+                    return Err(format!("--dspark-model file not found: {value}"));
+                }
+                options.dspark_model = Some(value.to_string());
+                i += 1;
+            }
+            "--ngram-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --ngram-draft")?;
+                options.ngram_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --ngram-draft value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--ngram-lookup" => {
+                let value = args.get(i + 1).ok_or("Missing value for --ngram-lookup")?;
+                let lookup = value
+                    .parse::<usize>()
+                    .map_err(|error| format!("Invalid --ngram-lookup value: {error}"))?;
+                if lookup == 0 {
+                    return Err("Invalid --ngram-lookup value: must be at least 1".into());
+                }
+                options.ngram_lookup = Some(lookup);
+                i += 1;
+            }
             "--steps" => {
                 let value = args.get(i + 1).ok_or("Missing value for --steps")?;
                 options.steps = Some(
@@ -600,6 +638,18 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--tts" => options.tts = true,
+            "--voice" => options.voice = Some(required_string_value(args, &mut i, "--voice")?),
+            "--speed" => {
+                options.speed = Some(
+                    required_string_value(args, &mut i, "--speed")?
+                        .parse()
+                        .map_err(|_| "--speed must be a number between 0.5 and 2.0")?,
+                );
+            }
+            "--pronunciations" => {
+                options.pronunciations =
+                    Some(required_string_value(args, &mut i, "--pronunciations")?)
+            }
             "--edit" => options.edit = true,
             "--out" => {
                 let value = args

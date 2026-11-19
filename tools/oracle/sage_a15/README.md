@@ -13,13 +13,54 @@ the selected-probability sum, matching the pinned Oracle's reduction contract.
 
 ## Main synchronization (2026-10-27)
 
-The shared GDN normalization now follows upstream's llama.cpp `11fe0215`
-RMSNorm(eps/n)-then-scale graph, on both CPU and Vulkan. The full-model Sage
-Oracle and performance records below predate this change and remain historical
-evidence against `b96806d`; they do not establish alignment of the merged graph.
-The merge checks cover synthetic CPU/Vulkan prefill and decode for device-routed
+The shared GDN normalization now follows upstream's llama.cpp `b96806d`
+`ggml_l2_norm` graph (the epsilon floors the denominator), on both CPU and
+Vulkan; the `11fe0215` RMSNorm(eps/n)-then-scale form it used in between is
+gone -- a model compared against a pre-`b96806d` Oracle carries the
+`eps / (2 * sum)` difference of the two formulas and is accepted on an
+error bound; `RMI_QWEN35_GDN_LEGACY_NORM=1` (off by default, CPU only)
+reproduces the older arithmetic when a comparison needs it. The full-model Sage
+Oracle and performance records below predate the merge and remain historical
+evidence; they do not establish alignment of the merged graph.
+The merge checks cover synthetic CPU/vulkan prefill and decode for device-routed
 and mixed-format host-routed MoE. Full Sage Oracle replay and AMD performance
 have not been rerun for this synchronization.
+
+## Full Oracle replay after the GDN change (2026-11-12)
+
+The replay that the section above was missing has been run, on Linux aarch64
+(NVIDIA GB10), with the artifacts from the ModelScope link above
+(`Sage-A1.5-Q8_0.gguf`, 37,802,150,112 bytes, SHA-256
+`f7247f6faef3f6c616b953595e1fc7c3fbf257d02d9915af5fdf15e808ea8ee4`; the
+harness re-checks size and hash before it starts). The Oracle is the pinned
+llama.cpp `b96806d` with the scalar softmax build
+(`tools/oracle/sage_a15/build_oracle.sh`: `-U__ARM_NEON -U__SSE2__`,
+`-ffp-contract=off`, the qwen35 trace, qwen35moe ffn-dump and Sage
+sequential-trace patches) and is run with `--no-repack`.
+
+| Input | Processed tokens | Checkpoints | Exact | Lossy | Max relative L2 | Max abs | Four greedy token IDs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Raw `Hello` | 4 | 220 | 16 | 204 | `0` | `0` | `[11, 353, 1044, 4313]` |
+| Chinese templated user turn | 16 | 880 | 64 | 816 | `0` | `0` | `[109266, 6115, 98691, 101009]` |
+
+All 1,100 selected checkpoints are **bitwise** equal: the maximum relative L2
+and the maximum absolute error are `0`, and the minimum cosine is `1`. The
+exact set is the embedding rows and the expert ids/order; the rest are the
+bounded floating-point values the harness keeps numerical assertions for. The
+token ids agree with the Oracle's.
+
+The raw case reproduces the sequence the x86_64 host recorded
+(`[11, 353, 1044, 4313]`), not the older local ARM64 one
+(`[11, 271, 40, 1044]`). The raw prompt is a near tie: the two sequences
+differ from the second token on, and the Oracle build decides it. The Chinese
+case is the same on every host. Both of the older records matched their own
+host's Oracle bitwise, and so does this one -- the sequence difference is a
+property of the prompt, not of the implementation.
+
+So the `qwen35moe` family is aligned with the `b96806d` Oracle again after
+the GDN normalization change. What is still missing here: the AMD
+performance records and the physical-device replay (the Vulkan side of the
+comparison needs the gfx1100 host this repository used before).
 
 ## Artifact contract
 
@@ -113,6 +154,10 @@ default non-thinking Jinja rendering passed against the pinned tokenizer.
 | --- | ---: | ---: | --- |
 | Raw `Hello` | 4 | 220 | `[11, 271, 40, 1044]` |
 | Chinese templated user turn | 16 | 880 | `[109266, 6115, 98691, 101009]` |
+
+(The raw sequence here is from the Oracle build of that day; the 2026-11-12
+replay on the same ISA produces `[11, 353, 1044, 4313]`, the sequence the
+x86_64 host recorded -- see the section above.)
 
 All 1,100 selected checkpoints passed: exact embeddings and expert IDs/order,
 and bounded floating-point values. The observed scalar errors were zero;

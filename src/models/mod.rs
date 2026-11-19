@@ -1,3 +1,4 @@
+pub mod arktts;
 pub mod audio8;
 pub mod bert_family;
 pub mod bge_vl;
@@ -13,7 +14,10 @@ pub mod chat_template {
 }
 
 pub mod clm;
+pub mod d3_turbo;
+pub mod decision;
 pub mod decoder_embedding;
+pub mod dflash;
 pub mod diffusion;
 pub mod dory;
 pub mod dots;
@@ -43,6 +47,7 @@ pub mod nemotron_h;
 pub mod nemotron_reuse;
 pub mod occamy;
 pub mod phi3;
+pub mod pivo;
 pub mod qwen3;
 pub mod qwen35;
 pub mod qwen_drive;
@@ -51,6 +56,7 @@ pub mod sophon_realtime;
 pub mod spark;
 pub mod thx02;
 pub mod timestral;
+pub mod underdog_woof;
 pub mod unlimited_ocr;
 pub mod vela3;
 pub mod vibevoice_asr;

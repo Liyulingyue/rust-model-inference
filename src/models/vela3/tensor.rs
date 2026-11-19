@@ -77,7 +77,15 @@ fn checked<'a>(
         .ok_or_else(|| format!("missing tensor: {name}"))?;
     if !matches!(
         info.ggml_type,
-        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16
+        GGMLType::F32
+            | GGMLType::F16
+            | GGMLType::BF16
+            | GGMLType::Q8_0
+            | GGMLType::Q4_0
+            | GGMLType::Q4_1
+            | GGMLType::Q4K
+            | GGMLType::Q5K
+            | GGMLType::Q6K
     ) {
         return Err(format!(
             "unsupported tensor dtype for {name}: {:?}",
@@ -108,7 +116,7 @@ pub(crate) fn values(source: &dyn TensorSource, name: &str) -> Result<Vec<f32>, 
             .chunks_exact(2)
             .map(|b| f32::from_bits((u16::from_le_bytes(b.try_into().unwrap()) as u32) << 16))
             .collect(),
-        _ => unreachable!(),
+        other => return Err(format!("{name} must be floating point, got {other:?}")),
     };
     if out.iter().any(|x| !x.is_finite()) {
         return Err(format!("non-finite tensor: {name}"));
@@ -153,8 +161,20 @@ pub(crate) fn linear(
     let mut scratch = PreparedRows::new(rows.max(1), width);
     let mut output = vec![0.; count];
     if rows > 0 {
-        scratch.prepare(input, rows, width, false, false)?;
+        scratch.prepare(
+            input,
+            rows,
+            width,
+            weight.needs_q8_0_activation(),
+            weight.uses_q8_k(),
+        )?;
         scratch.matmul(&weight, input, &mut output, pool)?;
+        #[cfg(feature = "vulkan")]
+        if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan
+            && crate::vulkan::gpu_broken()
+        {
+            return Err(format!("Vulkan device failed during projection {name}"));
+        }
     }
     if let Some(stem) = name.strip_suffix(".weight") {
         let bias_name = format!("{stem}.bias");
@@ -188,6 +208,28 @@ pub(crate) fn embed(
         .len()
         .checked_mul(width)
         .ok_or("embedding shape overflow")?;
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16
+    ) {
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            bytes,
+            info.ggml_type,
+            width,
+            vocab,
+        ));
+        let mut output = vec![0.; count];
+        for (&id, row) in ids.iter().zip(output.chunks_exact_mut(width)) {
+            if id as usize >= vocab {
+                return Err(format!("token {id} exceeds {name} vocabulary {vocab}"));
+            }
+            weight.embedding_lookup(id, row);
+        }
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err(format!("non-finite embedding: {name}"));
+        }
+        return Ok(output);
+    }
     let element_bytes = if info.ggml_type == GGMLType::F32 {
         4
     } else {
