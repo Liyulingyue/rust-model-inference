@@ -1122,6 +1122,11 @@ pub fn run_qwen_image_2_1_cli(
     if options.noise.is_some() && options.qwen_latent_file.is_some() {
         return Err("Use only one of --noise and --qwen-latent-file".into());
     }
+    // The DiT GGUF stores its tensors bare while the model reads the
+    // `model.diffusion_model.` prefixed names, so the source answers to
+    // both spellings.
+    let source: Arc<dyn TensorSource> =
+        Arc::new(crate::models::diffusion::qwen_image_2_1::PrefixedSource::new(source));
     validate_dit(source.as_ref())?;
     let vae = QwenImage21Vae::open(vae_path, n_threads)?;
     let mut reference_latents = Vec::new();
@@ -1260,6 +1265,11 @@ pub fn run_qwen_image_2_1_cli(
         crate::models::diffusion::z_image::dit::TorchMt19937::new(options.seed.unwrap_or(42) as u64).fill_normal_sd_cpp(&mut values);
         values
     };
+    // The DiT GGUF stores its tensors bare while the model reads the
+    // `model.diffusion_model.` prefixed names, so the source answers to
+    // both spellings.
+    let source: Arc<dyn TensorSource> =
+        Arc::new(crate::models::diffusion::qwen_image_2_1::PrefixedSource::new(source));
     let mut dit = QwenImage21Dit::load(source, n_threads)?;
     let latent = sample(
         &mut dit,
@@ -1328,6 +1338,11 @@ pub fn run_qwen_image_2_1(
     request: QwenImage21Request,
     n_threads: usize,
 ) -> Result<(), String> {
+    // The DiT GGUF stores its tensors bare while the model reads the
+    // `model.diffusion_model.` prefixed names, so the source answers to
+    // both spellings.
+    let source: Arc<dyn TensorSource> =
+        Arc::new(crate::models::diffusion::qwen_image_2_1::PrefixedSource::new(source));
     validate_dit(source.as_ref())?;
     let config = config_from_source(source.as_ref())?;
     let mut dit = QwenImage21Dit::load(Arc::clone(&source), n_threads)?;
