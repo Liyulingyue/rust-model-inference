@@ -34,6 +34,13 @@ NEON on aarch64; no AVX-512).
       回归：`nar::attention_parity_tests::head_major_layout_preserves_attention_bits`
       证明同一 head 转置前后的 attention 逐位相同（513 行，跨 512 block 边界），
       NAR 的 fixture 也改为真实 head-major 顺序。
+      端到端验证（2026-11-19，本机 aarch64 20 核）：ModelScope 拉 `m-a-p/YuE2-3B`
+      + `m-a-p/YuE2-Vae`（sha256 与 `weights_manifest.json` 一致），`--quant bf16`
+      转换后用 `91cf1ce` 与本次改动两个二进制跑同一命令（seed 12300 / steps 1 /
+      max-tokens 256 / 256 latent 帧）：旧二进制 1 次、新二进制 2 次，三次产出的
+      wav md5 全为 `0e15b221b748c49a498f7aa55836ee70`——布局转置与新的 NEON
+      token-outer 内核端到端逐位一致。同一短配置的墙钟为旧 135.9 s、新 107–118 s
+      （单样本，仅作量级参考）。
       ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
       "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
 - [ ] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（远大于 VAE 那 1 个档位）** —
