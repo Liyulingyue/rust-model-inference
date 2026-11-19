@@ -201,6 +201,18 @@ pub(super) struct GroupedJevRequest {
     mode: GroupedMode,
 }
 
+const MAX_AUDIO_JEV_QUESTIONS: usize = 64;
+
+fn validate_audio_capability(model: &Backend) -> Result<(), String> {
+    let text = model.text_backend().ok_or("server has no text runtime")?;
+    text.runtime
+        .as_ref()
+        .ok_or("server has no text runtime")?
+        .lock()
+        .map_err(|e| e.to_string())?
+        .validate_audio_capability()
+}
+
 fn decode_jev_audio(audio: &str, context_length: usize) -> Result<Vec<f32>, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(audio)
@@ -324,10 +336,16 @@ pub(super) async fn jev(
             (StatusCode::BAD_REQUEST, message.to_string())
         }
         let _permit = permit;
+        if request.questions.len() > MAX_AUDIO_JEV_QUESTIONS {
+            return Err(invalid(format!(
+                "questions must contain at most {MAX_AUDIO_JEV_QUESTIONS} items"
+            )));
+        }
         let text = state
             .model
             .text_backend()
             .ok_or_else(|| invalid("server has no text runtime"))?;
+        validate_audio_capability(state.model.as_ref()).map_err(invalid)?;
         let questions = request
             .questions
             .into_iter()
@@ -376,12 +394,19 @@ pub(super) async fn jev_grouped(
             GroupedMode::MultiSelect => (crate::app::JevMode::MultiSelect, "multi_select"),
             GroupedMode::BlockChoice => (crate::app::JevMode::BlockChoice, "block_choice"),
         };
-        crate::app::jev::prepare_jev_grouped_questions(&request.questions, mode)
-            .map_err(invalid)?;
+        if request.questions.len() > MAX_AUDIO_JEV_QUESTIONS {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("questions must contain at most {MAX_AUDIO_JEV_QUESTIONS} items"),
+            ));
+        }
         let text = state
             .model
             .text_backend()
             .ok_or_else(|| invalid("server has no text runtime".into()))?;
+        validate_audio_capability(state.model.as_ref()).map_err(invalid)?;
+        crate::app::jev::prepare_jev_grouped_questions(&request.questions, mode)
+            .map_err(invalid)?;
         let audio = vec![decode_jev_audio(&request.audio, text.context_length).map_err(invalid)?];
         let results = score_grouped_media(
             state.model.as_ref(),
@@ -447,6 +472,7 @@ pub(super) async fn handle(
             .checked_mul(2560)
             .ok_or("audio sample budget overflow")?
             .min(16_000 * 600);
+        validate_audio_capability(model.as_ref())?;
         let audio = vec![crate::app::media::decode_audio_bytes_bounded(
             &request.bytes()?,
             max_samples,

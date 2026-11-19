@@ -26,6 +26,7 @@ use crate::ops::generation_runtime::{
 };
 use crate::ops::sampling::sample_greedy_or_temperature;
 use crate::ops::sampling::{Lfm2MoeSampler, LlamaSampler};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 /// Runtime-level defaults, kept in ONE place.
@@ -376,6 +377,11 @@ impl TextRuntime for ComputeTextRuntime {
         self.inner.generate(request, sink)
     }
 
+    fn validate_audio_capability(&self) -> Result<(), String> {
+        let _scope = self.policy.enter_legacy_scope();
+        self.inner.validate_audio_capability()
+    }
+
     fn validate_audio_request(
         &self,
         request: &GenerationRequest,
@@ -413,6 +419,18 @@ fn arch_of(source: &Arc<dyn TensorSource>) -> String {
         .and_then(|v| v.to_string_val())
         .map(|value| value.to_string())
         .unwrap_or_default()
+}
+
+fn audio_fingerprint(audio: &[Vec<f32>]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    audio.len().hash(&mut hasher);
+    for samples in audio {
+        samples.len().hash(&mut hasher);
+        for value in samples {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 /// Shared decode helpers used by the adapters below.
@@ -583,6 +601,10 @@ pub struct Qwen3TextRuntime {
     /// Held so capacity / batch come from the one place that owns them.
     options: RuntimeOptions,
     arch: String,
+    audio_cache: Option<(
+        u64,
+        Vec<crate::models::sophon_realtime::audio::AudioEmbeddings>,
+    )>,
 }
 
 impl Qwen3TextRuntime {
@@ -623,6 +645,7 @@ impl Qwen3TextRuntime {
             threads: options.threads,
             options,
             arch,
+            audio_cache: None,
         })
     }
 }
@@ -766,6 +789,10 @@ impl TextRuntime for Qwen3TextRuntime {
         )
     }
 
+    fn validate_audio_capability(&self) -> Result<(), String> {
+        self.audio_decoder().map(|_| ())
+    }
+
     fn validate_audio_request(
         &self,
         request: &GenerationRequest,
@@ -806,13 +833,29 @@ impl TextRuntime for Qwen3TextRuntime {
 
     fn audio_logits(&mut self, ids: &[u32], audio: &[Vec<f32>]) -> Result<Vec<f32>, String> {
         let _scope = self.options.compute.enter_legacy_scope();
-        self.audio_decoder()?.logits(
+        let decoder = crate::models::sophon_realtime::audio::AudioDecoder::new(
+            self.options.source.as_ref(),
+            &self.model,
+            self.mmproj.as_deref(),
+            self.options.capacity_for(self.model.config().n_ctx),
+            self.options.compute,
+        )?;
+        let fingerprint = audio_fingerprint(audio);
+        let encoded = match self.audio_cache.take() {
+            Some((hash, encoded)) if hash == fingerprint => encoded,
+            _ => decoder.encode_audio(audio)?,
+        };
+        let result = decoder.logits_encoded(
             ids,
-            audio,
+            &encoded,
             self.options.kv_format,
             self.options.prefill_batch_size,
             self.options.compute,
-        )
+        );
+        if result.is_ok() {
+            self.audio_cache = Some((fingerprint, encoded));
+        }
+        result
     }
 
     fn logits(&mut self, request: &GenerationRequest) -> Result<Vec<f32>, String> {
@@ -1720,6 +1763,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn audio_fingerprint_reuses_equal_audio_and_separates_changes() {
+        let audio = vec![vec![0.0f32; 8], vec![1.0, -1.0, 0.5]];
+        assert_eq!(
+            super::audio_fingerprint(&audio),
+            super::audio_fingerprint(&audio.clone())
+        );
+        let mut changed = audio.clone();
+        changed[1][1] = -2.0;
+        assert_ne!(
+            super::audio_fingerprint(&audio),
+            super::audio_fingerprint(&changed)
+        );
+        assert_ne!(
+            super::audio_fingerprint(&audio),
+            super::audio_fingerprint(&[vec![0.0f32; 8]])
+        );
+    }
+
     /// The whole point of `RuntimeOptions::defaults`: they must equal what the
     /// CLI resolves for the same (absent) flags. If the CLI changes a default,
     /// this test fails and forces both to move together.
@@ -2001,6 +2063,7 @@ mod tests {
             threads: 1,
             options,
             arch: "qwen3vl".into(),
+            audio_cache: None,
         };
         assert_eq!(runtime.context_length(), 64);
         assert!(runtime

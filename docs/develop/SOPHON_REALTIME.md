@@ -73,7 +73,7 @@ Sophon 默认启用其固定 Jinja 模板。文本、图像、音频 CLI JEV 均
 | /v1/jev/audio_grouped | {audio: raw-base64-audio, context, questions:[{text,groups:[{label,options}]}], mode?: multi_select/block_choice} | 每组独立归一化的候选概率；mode 默认为 multi_select |
 | /v1/audio/speech | {input, voice?, response_format: wav/pcm, stream?} | WAV/raw PCM；stream 为 PCM16 base64 SSE |
 
-音频不接受 URL 或本机文件路径。先取得并发许可，再按上下文和十分钟绝对上限限制解码后的样本；无 ffmpeg 时仅接受 16 kHz mono PCM16 WAV，同样先检查预算。输入错误在开始 SSE 前返回 400；音频对话/JEV 的运行失败返回 500，独立 speech batch 延用 422，已开始流的失败使用 error 事件。batch 与 stream 断连均停止 text sink，随后每个 speech token、Flow block/Euler step 和 HiFT stage/resblock 检查取消；音频 encoder/prefill 内部尚未新增逐层取消。
+音频路由仅在 thinker 搭配 `--tts-model`/`--tts-mmproj` 组成 AudioChat 后端时挂载，其他后端返回 404；单个 `/v1/jev/audio`、`/v1/jev/audio_grouped` 请求最多 64 个问题。音频不接受 URL 或本机文件路径。先检查模型音频能力和问题/上下文预算，再取得并发许可并按上下文和十分钟绝对上限限制解码后的样本；无 ffmpeg 时仅接受 16 kHz mono PCM16 WAV，同样先检查预算。输入错误在开始 SSE 前返回 400；音频对话/JEV 的运行失败返回 500，独立 speech batch 延用 422，已开始流的失败使用 error 事件。batch 与 stream 断连均停止 text sink，随后每个 speech token、Flow block/Euler step 和 HiFT stage/resblock 检查取消；音频 encoder/prefill 内部尚未新增逐层取消。
 
 Grouped JEV 的 `描述:分值` 语法要求分值有限；CLI 与 HTTP 都在推理前拒绝 NaN、正负无穷和溢出值。音频单模式协议继续使用 `/v1/jev/audio`。
 

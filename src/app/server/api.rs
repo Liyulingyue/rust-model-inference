@@ -155,12 +155,6 @@ use std::collections::{HashMap, HashSet};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/chat/completions", post(chat))
-        .route("/v1/audio/chat", post(super::audio_chat::handle))
-        .route("/v1/jev/audio", post(super::audio_chat::jev))
-        .route(
-            "/v1/jev/audio_grouped",
-            post(super::audio_chat::jev_grouped),
-        )
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/responses", post(responses))
@@ -176,6 +170,20 @@ pub fn routes() -> Router<AppState> {
         // with 413 before the handler ever saw it. Matches the ceiling the
         // audio transcription route already uses (64 MB) within the same
         // order of magnitude.
+        .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+}
+
+/// Audio routes require a text runtime with the Sophon audio component.
+/// They are mounted only for `Backend::AudioChat`, so text-only and
+/// vision-only backends answer 404 instead of decoding an upload first.
+pub(super) fn audio_routes() -> Router<AppState> {
+    Router::new()
+        .route("/v1/audio/chat", post(super::audio_chat::handle))
+        .route("/v1/jev/audio", post(super::audio_chat::jev))
+        .route(
+            "/v1/jev/audio_grouped",
+            post(super::audio_chat::jev_grouped),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
 }
 
@@ -1161,6 +1169,9 @@ mod http_tests {
             fn context_length(&self) -> usize {
                 self.capacity
             }
+            fn validate_audio_capability(&self) -> Result<(), String> {
+                Ok(())
+            }
             fn validate_audio_request(
                 &self,
                 request: &GenerationRequest,
@@ -1257,7 +1268,7 @@ mod http_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, routes().with_state(state))
+            axum::serve(listener, routes().merge(audio_routes()).with_state(state))
                 .await
                 .unwrap();
         });
@@ -1430,6 +1441,9 @@ mod http_tests {
             fn context_length(&self) -> usize {
                 1024
             }
+            fn validate_audio_capability(&self) -> Result<(), String> {
+                Ok(())
+            }
             fn validate_audio_request(
                 &self,
                 _: &GenerationRequest,
@@ -1536,6 +1550,9 @@ mod http_tests {
             fn context_length(&self) -> usize {
                 1024
             }
+            fn validate_audio_capability(&self) -> Result<(), String> {
+                Ok(())
+            }
             fn validate_audio_request(
                 &self,
                 _: &GenerationRequest,
@@ -1621,6 +1638,127 @@ mod http_tests {
         }
         std::fs::remove_file(path).unwrap();
     }
+    #[tokio::test]
+    async fn audio_routes_are_mounted_only_for_the_audio_backend() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, routes().with_state(state()))
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        for path in ["/v1/audio/chat", "/v1/jev/audio", "/v1/jev/audio_grouped"] {
+            let response = client
+                .post(format!("http://{address}{path}"))
+                .header("content-type", "application/json")
+                .body("{}")
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn audio_capability_is_checked_before_audio_is_decoded() {
+        struct NoAudio;
+        impl crate::ops::generation_runtime::TextRuntime for NoAudio {
+            fn arch(&self) -> &str {
+                "text"
+            }
+            fn context_length(&self) -> usize {
+                1024
+            }
+            fn validate_audio_capability(&self) -> Result<(), String> {
+                Err("audio model is not loaded".into())
+            }
+            fn generate(
+                &mut self,
+                _: &crate::ops::generation_runtime::GenerationRequest,
+                _: &mut dyn crate::ops::generation_runtime::TokenSink,
+            ) -> Result<crate::ops::generation_runtime::GeneratedText, String> {
+                panic!("audio capability must be rejected before decoding")
+            }
+        }
+        let mut state = state();
+        let Backend::Text(text) = Arc::get_mut(&mut state.model).unwrap() else {
+            unreachable!()
+        };
+        text.runtime = Some(std::sync::Mutex::new(Box::new(NoAudio)));
+        let path = std::env::temp_dir().join(format!(
+            "rmi-audio-capability-{}-{}.jinja",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "{{ messages[0].content }}").unwrap();
+        text.chat_template = Arc::new(crate::prompt::jinja::Options {
+            jinja: true,
+            file: Some(path.clone()),
+        });
+        let body: super::super::audio_chat::JevRequest = serde_json::from_value(json!({
+            "audio": "not-base64",
+            "questions": [{"text": "q", "options": ["a", "b"]}]
+        }))
+        .unwrap();
+        let response = super::super::audio_chat::jev(State(state.clone()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(value["error"], "audio model is not loaded");
+
+        let body: super::super::audio_chat::Request = serde_json::from_value(json!({
+            "audio": "not-base64",
+            "prompt": "x"
+        }))
+        .unwrap();
+        let response = super::super::audio_chat::handle(State(state), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(value["error"], "audio model is not loaded");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn audio_jev_question_budget_is_checked_before_audio_is_decoded() {
+        let questions = vec![json!({"text": "q", "options": ["a", "b"]}); 65];
+        let body: super::super::audio_chat::JevRequest = serde_json::from_value(json!({
+            "audio": "not-base64",
+            "questions": questions
+        }))
+        .unwrap();
+        let response = super::super::audio_chat::jev(State(state()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(value["error"], "questions must contain at most 64 items");
+
+        let questions = vec![
+            json!({
+                "text": "q",
+                "groups": [{"label": "group", "options": ["a", "b"]}]
+            });
+            65
+        ];
+        let body: super::super::audio_chat::GroupedJevRequest = serde_json::from_value(json!({
+            "audio": "not-base64",
+            "mode": "multi_select",
+            "questions": questions
+        }))
+        .unwrap();
+        let response = super::super::audio_chat::jev_grouped(State(state()), Ok(Json(body))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(value["error"], "questions must contain at most 64 items");
+    }
+
     #[tokio::test]
     async fn image_preflight_errors_are_400_before_streaming_or_generation() {
         struct RejectImage;

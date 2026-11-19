@@ -1333,16 +1333,16 @@ fn build_backend(
         )?)));
     }
     let (text, wevisone) = build_text(options)?;
-    if options.tts_model.is_some()
-        && crate::models::sophon_realtime::is_thinker(text.source.as_ref())
-    {
+    if options.tts_model.is_some() {
+        if !crate::models::sophon_realtime::is_thinker(text.source.as_ref()) {
+            return Err(
+                "--tts-model requires a Sophon realtime thinker model with --tts-mmproj".into(),
+            );
+        }
         return Ok(Arc::new(Backend::AudioChat(audio_chat::AudioChatBackend {
             text,
             speech: speech_output::build_postprocessor(options)?,
         })));
-    }
-    if options.voice.is_some() && options.tts_model.is_some() {
-        return Err("--voice with --tts-model requires a packaged-voice speech model".into());
     }
     Ok(Arc::new(match wevisone {
         Some(extra) => Backend::WeVisOne(WeVisOneBackend {
@@ -2260,6 +2260,7 @@ pub fn run_server() {
         }
         Backend::AudioChat(_) => router
             .merge(api::routes())
+            .merge(api::audio_routes())
             .route("/v1/audio/speech", post(speech_output::handle)),
         Backend::WeVisOne(_) => router.merge(api::routes()).route(
             "/v1/prediction",

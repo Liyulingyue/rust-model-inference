@@ -151,6 +151,12 @@ pub trait TextRuntime: Send {
         sink: &mut dyn TokenSink,
     ) -> Result<GeneratedText, String>;
 
+    /// Reject audio requests before the entry point decodes an upload. This
+    /// checks the runtime/component contract only; it must not run inference.
+    fn validate_audio_capability(&self) -> Result<(), String> {
+        Err("this text runtime does not support audio input".into())
+    }
+
     /// Audio is mono 16kHz F32 PCM, in prompt-placeholder order.
     fn validate_audio_request(
         &self,

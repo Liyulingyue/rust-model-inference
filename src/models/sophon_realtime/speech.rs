@@ -166,6 +166,7 @@ impl SpeechEngine {
                 &voice,
                 tokens,
                 finalize,
+                request.stream,
                 &noise,
                 &mut mel_history,
                 &self.pool,
@@ -355,6 +356,7 @@ fn render(
     voice: &Voice,
     tokens: &[u32],
     finalize: bool,
+    streaming: bool,
     noise: &Noise,
     history: &mut MelHistory,
     pool: &ComputePool,
@@ -368,6 +370,7 @@ fn render(
     let mut request = FlowRequest::new(tokens, &voice.speaker, &initial_noise);
     request.prompt_tokens = &voice.tokens;
     request.prompt_mel = &voice.mel;
+    request.streaming = streaming;
     request.finalize = finalize;
     let mel = flow.infer_until(&request, pool, cancelled)?;
     // Flow recomputes the prefix; the reference only commits newly produced mel frames.
