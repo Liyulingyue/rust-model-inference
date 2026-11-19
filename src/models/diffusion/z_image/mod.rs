@@ -173,6 +173,26 @@ pub(crate) enum Component {
     Vae,
 }
 
+/// Recognizes a Z-Image DiT GGUF.
+///
+/// The export tags itself `general.architecture = "pig"`, but the tensor
+/// signature is checked as well: the CLI and the HTTP server both have to
+/// tell a Z-Image DiT from the other diffusion models before they can pick
+/// a pipeline, and a file that carries the wrong tag must still be
+/// recognized rather than silently dispatched elsewhere.
+pub(crate) fn matches_signature(source: &dyn TensorSource) -> bool {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(crate::core::tensor::MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch == "pig" {
+        return true;
+    }
+    source.tensor_info("x_embedder.weight").is_some()
+        && source.tensor_info("cap_embedder.0.weight").is_some()
+        && source.tensor_info("final_layer.linear.weight").is_some()
+}
+
 pub(crate) fn validate_component(
     source: &dyn TensorSource,
     component: Component,
@@ -195,9 +215,15 @@ fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result
     if info.dims != dims {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    // The format belongs to the file, not to the loader: the Q8_0 DiT stores
+    // its main stack in Q8_0, the F16 one in F16, and the F32 one keeps that
+    // stack in Q8_0 while the refiner and the embedders are F32.
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::F32
+    ) {
         return Err(format!(
-            "Invalid {name} type: expected F16 or Q8_0, got {:?}",
+            "Invalid {name} type: expected F16, Q8_0 or F32, got {:?}",
             info.ggml_type
         ));
     }
@@ -248,6 +274,8 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     ] {
         super::common::require_tensor(source, name, &[dims], GGMLType::F32)?;
     }
+    // The weights of the DiT come as F16 in one file and as F32 in another;
+    // the loader reads whichever the file declares.
     for (name, dims) in [
         ("cap_embedder.1.weight", [2560, 3840]),
         ("cap_pad_token", [3840, 1]),
@@ -258,7 +286,12 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("x_embedder.weight", [64, 3840]),
         ("x_pad_token", [3840, 1]),
     ] {
-        super::common::require_tensor(source, name, &dims, GGMLType::F16)?;
+        crate::core::tensor::require_tensor_meta(
+            source,
+            name,
+            &dims,
+            &[GGMLType::F16, GGMLType::F32],
+        )?;
     }
     for layer in 0..2 {
         validate_refiner(source, &format!("context_refiner.{layer}"), false)?;
@@ -635,7 +668,10 @@ fn linear_into_scaled_impl(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::F32
+    ) {
         return Err(format!(
             "Unsupported matrix type {:?} for {name}",
             info.ggml_type
@@ -683,6 +719,54 @@ fn linear_into_scaled_impl(
                 F16Kernel::new(weight)
                     .forward_scaled_rows(values, out, n_in, n_out, scale_copy, buffer, ith, nth);
             });
+        }
+        GGMLType::F32 => {
+            // The F32 weights of the F32 DiT: the same row-partitioned shape
+            // as the F16 branch, with the kernel that reads f32 weights. The
+            // scale follows the same contract as the other two formats: it
+            // multiplies the input before the multiply and the output divides
+            // it out again, so only the rounding differs.
+            if scale != 1.0 {
+                q8.scaled.resize(n_in, 0.0);
+                for (scaled, &value) in q8.scaled.iter_mut().zip(input) {
+                    *scaled = value * scale;
+                }
+            }
+            let Some(kernel) =
+                crate::ops::kernel::f32::F32Kernel::from_le_bytes(bytes, n_in, n_out)
+            else {
+                return Err(format!("Invalid {name} byte length"));
+            };
+            let weight = crate::ops::kernel::Kernel::f32_slice(&kernel)
+                .ok_or_else(|| format!("Invalid {name} weight layout"))?;
+            let weight_ptr = weight.as_ptr() as usize;
+            let weight_len = weight.len();
+            let scaled_input = if scale == 1.0 {
+                input.as_ptr()
+            } else {
+                q8.scaled.as_ptr()
+            } as usize;
+            let input_len = n_in;
+            let output_ptr = output.as_mut_ptr() as usize;
+            let output_len = output.len();
+            let threads = pool.n_threads();
+            pool.compute(move |ith, nth| {
+                let values =
+                    unsafe { std::slice::from_raw_parts(scaled_input as *const f32, input_len) };
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, output_len) };
+                let weight =
+                    unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, weight_len) };
+                crate::ops::kernel::f32::forward_f32_rows_dispatch(
+                    weight, values, out, n_in, n_out, ith, nth,
+                );
+            });
+            if scale != 1.0 {
+                let inverse_scale = scale.recip();
+                for value in output {
+                    *value *= inverse_scale;
+                }
+            }
         }
         GGMLType::Q8_0 => {
             if scale == 1.0 {
@@ -1134,7 +1218,7 @@ mod tests {
     #[test]
     fn linear_rejects_unsupported_matrix_type() {
         let source =
-            TestSource::default().with_raw_tensor("w", &[2, 2], GGMLType::F32, vec![0; 16]);
+            TestSource::default().with_raw_tensor("w", &[2, 2], GGMLType::Q4_0, vec![0; 16]);
         let error = linear_into(
             &source,
             "w",
@@ -1146,7 +1230,37 @@ mod tests {
             &ComputePool::new(1),
         )
         .unwrap_err();
-        assert_eq!(error, "Unsupported matrix type F32 for w");
+        assert_eq!(error, "Unsupported matrix type Q4_0 for w");
+    }
+
+    #[test]
+    fn linear_reads_f32_weights_as_they_are() {
+        // The F32 tier of the DiT stores its refiner and its embedders in
+        // F32; the loader takes the format the file declares.
+        let source = TestSource::default().with_raw_tensor(
+            "w",
+            &[2, 2],
+            GGMLType::F32,
+            [1.0f32, 2.0, 3.0, 4.0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        );
+        // The weight is one row of `n_in` per output, like every other
+        // format: row 0 is (1, 2) and row 1 is (3, 4).
+        let mut output = [0.0; 2];
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &[1.0; 2],
+            &mut output,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+        assert_eq!(output, [3.0, 7.0]);
     }
 
     #[test]
@@ -1262,5 +1376,36 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::matches_signature;
+    use crate::models::diffusion::common::testing::NameOnlySource;
+
+    #[test]
+    fn the_pig_tag_is_enough() {
+        let source = NameOnlySource::new(Some("pig"), &[]);
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn the_tensor_signature_recognizes_a_mis_tagged_file() {
+        let source = NameOnlySource::new(
+            Some("wan"),
+            &[
+                "x_embedder.weight",
+                "cap_embedder.0.weight",
+                "final_layer.linear.weight",
+            ],
+        );
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn another_model_is_not_recognized() {
+        let source = NameOnlySource::new(Some("wan"), &["layers.0.self_attention.to_q.weight"]);
+        assert!(!matches_signature(&source));
     }
 }

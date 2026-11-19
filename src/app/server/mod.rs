@@ -3,6 +3,7 @@ mod audio;
 mod audio_speech;
 mod auk;
 mod decision;
+mod diffusion;
 mod forecast;
 mod image_generation;
 mod prediction;
@@ -41,7 +42,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations] [--model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> selects the image-generation backend (P-JiT, Z-Image, ERNIE-Image): POST /v1/images/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
 
 // =============================================================================
 // Backend types
@@ -82,6 +83,11 @@ fn hy_transcription_task<T: Send + 'static>(
 enum Backend {
     Text(TextBackend),
     Pjit(image_generation::PjitBackend),
+    /// The text-to-image diffusion models: Z-Image and ERNIE-Image. They
+    /// share the image-generation route with P-JiT and differ only in the
+    /// pipeline behind it.
+    Diffusion(diffusion::DiffusionBackend),
+
     /// A WeVisOne text model: a Qwen3-VL release with a coordinate
     /// vocabulary and a separate pixel decoder. It serves the ordinary
     /// text routes and adds the image prediction route.
@@ -111,6 +117,31 @@ enum Backend {
 }
 
 impl Backend {
+    /// The short name of this backend, used in the server's mode label and
+    /// in the error messages that name the loaded model.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Text(_) | Self::WeVisOne(_) => "text",
+            Self::UnlimitedOcr(_) => "unlimited-ocr",
+            Self::Embedding(_) => "embedding",
+            Self::Asr(_) => "asr",
+            Self::HySimulMt(_) => "hy-simulmt",
+            Self::Audio8(_) => "audio8",
+            Self::AudioEnhancement(_) => "audio-enhancement",
+            Self::Tts(_) | Self::Pivo(_) | Self::UnderdogWoof(_) => "tts",
+            Self::ArkTts(_) => "arktts",
+            Self::Auk(_) => "auk",
+            Self::Pjit(_) => "pjit",
+            Self::Diffusion(backend) => backend.label(),
+            Self::Rerank(_) => "rerank",
+            Self::Clm(_) => "clm",
+            Self::Gliner2(_) => "gliner2",
+            Self::Gliner2Boundary(_) => "gliner2-boundary",
+            Self::Timestral(_) => "timestral",
+            Self::Decision(_) => "decision",
+        }
+    }
+
     /// The generic text payload, for the routes every text-capable
     /// backend serves (chat, completions, responses, JEV).
     fn text_backend(&self) -> Option<&TextBackend> {
@@ -1174,6 +1205,29 @@ fn build_backend(
             Arc::from(source),
         )?)));
     }
+    // The text-to-image diffusion models (Z-Image, ERNIE-Image). They are
+    // recognized by their weights rather than by a flag, because the CLI
+    // recognizes them the same way and the two entry points must agree on
+    // what a file is.
+    let diffusion_source =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .filter(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
+    if let Some(source) = diffusion_source {
+        let kind = diffusion::DiffusionKind::detect(source.as_ref())
+            .ok_or("the diffusion model could not be identified")?;
+        let available = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let threads = resolve_thread_count(options.threads, available);
+        // The pipeline is loaded under the policy it will run with, so a
+        // model pinned to the CPU is not loaded for the device either.
+        let policy = diffusion::policy_for(kind, source.as_ref(), options.compute_policy());
+        let _scope = policy.enter_legacy_scope();
+        return Ok(Arc::new(Backend::Diffusion(
+            diffusion::DiffusionBackend::build(options, kind, Arc::from(source), threads)?,
+        )));
+    }
     if let Some(source) = decision_source {
         let available = std::thread::available_parallelism()
             .map(usize::from)
@@ -2122,8 +2176,20 @@ pub fn run_server() {
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
             .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    // The text-to-image diffusion models are recognized by their weights.
+    // Their CLI validator wants --out and --prompt, both of which the
+    // server takes from the request instead.
+    let diffusion_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
     if pjit_invocation {
         if let Err(error) = crate::app::diffusion::pjit_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if diffusion_invocation {
+        if let Err(error) = diffusion::validate_server_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
         }
@@ -2172,32 +2238,25 @@ pub fn run_server() {
         .to_string_lossy()
         .to_string();
 
-    let mode_label = match backend.as_ref() {
-        Backend::Text(_) | Backend::WeVisOne(_) => "text",
-        Backend::UnlimitedOcr(_) => "unlimited-ocr",
-        Backend::Embedding(_) => "embedding",
-        Backend::Asr(_) => "asr",
-        Backend::HySimulMt(_) => "hy-simulmt",
-        Backend::Audio8(_) => "audio8",
-        Backend::AudioEnhancement(_) => "audio-enhancement",
-        Backend::Tts(_) | Backend::Pivo(_) | Backend::UnderdogWoof(_) => "tts",
-        Backend::ArkTts(_) => "arktts",
-        Backend::Auk(_) => "auk",
-        Backend::Pjit(_) => "pjit",
-        Backend::Rerank(_) => "rerank",
-        Backend::Clm(_) => "clm",
-        Backend::Gliner2(_) => "gliner2",
-        Backend::Gliner2Boundary(_) => "gliner2-boundary",
-        Backend::Timestral(_) => "timestral",
-        Backend::Decision(_) => "decision",
-    };
+    let mode_label = backend.label();
     eprintln!(
         "Model '{}' loaded (mode={}, host={}, port={})",
         model_name, mode_label, host, port
     );
 
+    // The backend may narrow the requested policy: a K-quant ERNIE DiT is
+    // slower on the device than on the CPU, so it runs on the CPU the same
+    // way the CLI runs it.
+    let requested = options.compute_policy();
+    let compute = match backend.as_ref() {
+        Backend::Diffusion(backend) => backend.compute_policy(requested),
+        _ => requested,
+    };
+    if compute != requested {
+        eprintln!("compute scope=ernie_image backend=Cpu reason=kquant_weights_slower_on_device");
+    }
     let state = AppState {
-        compute: options.compute_policy(),
+        compute,
         model: backend,
         model_name,
         responses: Arc::new(Mutex::new(api::ResponsesStore::default())),
@@ -2209,7 +2268,7 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
-        Backend::Pjit(_) => {
+        Backend::Pjit(_) | Backend::Diffusion(_) => {
             router.route("/v1/images/generations", post(image_generation::generate))
         }
         Backend::WeVisOne(_) => router.merge(api::routes()).route(
