@@ -127,6 +127,10 @@ impl<'a> Kernel for F16Kernel<'a> {
         self.f32_input = true;
     }
 
+    fn keeps_f32_activation(&self) -> bool {
+        self.f32_input
+    }
+
     fn supports_f16_strict(&self) -> bool {
         true
     }

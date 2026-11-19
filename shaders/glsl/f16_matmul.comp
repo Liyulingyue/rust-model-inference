@@ -62,7 +62,7 @@ void main() {
     // AVX2/F16C dot, and one for the scalar walk. Packing rows until the
     // workgroup is full keeps every thread busy.
     uint lanes_per_row = pc.reduction_mode == 1u ? 32u
-        : (pc.reduction_mode == 2u ? 16u
+        : ((pc.reduction_mode == 2u || pc.reduction_mode == 4u) ? 16u
         : (pc.reduction_mode == 8u ? 8u : 1u));
     uint rows_per_group = 64u / lanes_per_row;
     uint lane = gl_LocalInvocationID.x;
@@ -99,11 +99,12 @@ void main() {
         precise float c = partial[lane_base + 2u] + partial[lane_base + 6u];
         precise float d = partial[lane_base + 3u] + partial[lane_base + 7u];
         sum = (a + b) + (c + d);
-    } else if (pc.reduction_mode == 2u) {
+    } else if (pc.reduction_mode == 2u || pc.reduction_mode == 4u) {
         if (local < 16u && valid_row) {
             // Keep each NEON accumulator's stride and reduction order.
             for (uint idx = local; idx < pc.n_in; idx += 16u) {
-                float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx]));
+                float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx]);
+                if (pc.reduction_mode != 4u) input_value = round_f16_rte(input_value);
                 sum = fma(input_value, f16_decode(weight_f16(slot, row_base + idx)), sum);
             }
         }

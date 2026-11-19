@@ -1,12 +1,12 @@
 # Sophon-Realtime-32B-Tag
 
-状态：**Experimental，部分适配**。F32/F16/BF16 thinker 八步、F32 vision encoder 的 32 个 checkpoint、F32/BF16 音频边界与短语音组件有独立数值证据，F32 CLI 已输出有效 WAV；新 lossless 图像 CLI/HTTP 的 9 项入口检查通过。量化失败和未验证入口见 [逐项记录](../../tools/oracle/sophon_realtime/validation.md) 与 [552 行覆盖矩阵](../../tools/oracle/sophon_realtime/coverage.json)。这不代表完整双工、原生 FP8 或完整 GPU 支持。
+状态：**Experimental，部分适配**。F32/F16/BF16 thinker 八步、F32 vision encoder 的 32 个 checkpoint、F32/BF16 音频边界与短语音组件有独立数值证据，F32 CLI 已输出有效 WAV；新 lossless 图像 CLI/HTTP 的 9 项入口检查通过。量化失败和未验证入口见 [逐项记录](../../tools/oracle/sophon_realtime/validation.md) 与 [覆盖矩阵](../../tools/oracle/sophon_realtime/coverage.json)。这不代表完整双工、原生 FP8 或完整 GPU 支持。
 
-## 远端准备
+## 模型存储与准备
 
-源模型固定为 ModelScope `AdventistsAI/Sophon-Realtime-32B-Tag` revision `990d6a74bbf15c1765a6f7736fa839f423fd5b59`。直接在推理机下载，按 [manifest](../../tools/oracle/sophon_realtime/modelscope-files.json) 校验 size/SHA256。源文件 64 个、42,318,478,677 bytes。检查 `models/` 实际所在文件系统的空间，F32 thinker 导出本身约 131 GB。
+源模型固定为 ModelScope `AdventistsAI/Sophon-Realtime-32B-Tag` revision `990d6a74bbf15c1765a6f7736fa839f423fd5b59`。直接在推理机下载，按 [manifest](../../tools/oracle/sophon_realtime/modelscope-files.json) 校验 size/SHA256。固定 manifest 包含 68 个文件、44,614,289,807 bytes；历史首轮下载其中 64 个文件。检查 `models/` 实际所在文件系统的空间，F32 thinker 导出本身约 131 GB。
 
-验证使用授权 Linux x86_64 机器，SSH 端口以当前会话为准。模型、GGUF 与二进制 checkpoint 全程留在远端。远端能访问 ModelScope 时不经过 Mac；只有 laptop 能访问时用 `curl --fail --location ... | ssh ... 'cat > ...partial'` 转发，启用 pipefail，在远端校验后再改名。不要在 Mac 建模型缓存。
+早期验证使用授权 Linux x86_64 机器，模型与 GGUF 留在远端；只有 laptop 能访问时用 SSH 管道转发并在远端校验。2026-11-19 按用户新的目录约定，本机 M3 Max 的源文件和 GGUF 均放在 `/Users/gouzi/Documents/git/rust-model-inference/models/`；ModelScope 固定 revision，分段续传后仍逐文件校验 size/SHA256。历史远端结果保留各自的主机和构建身份。
 
 转换使用 [现有转换器](../../tools/converter/sophon_realtime/README.md)，支持 F32/F16/BF16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K。原始 thinker 是带 channel scale 的 FP8 权重与动态 FP8 激活；GGUF 是 weight-only 路径，不能把它称为原生 FP8 加速。HiFT 在九种 requested 格式中均实际保存为 F32。
 
@@ -36,7 +36,7 @@
 
 ## CLI
 
-使用仓库原有 `rust-model-inference`，不新增 executable。以下路径均位于远端 checkout；F32 thinker 需要充足内存或 mmap 文件缓存，否则分页会很慢。
+使用仓库原有 `rust-model-inference`，不新增 executable。以下 `MODELS` 指向实际模型目录；本轮本机使用 `/Users/gouzi/Documents/git/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF`。F32 thinker 需要充足内存或 mmap 文件缓存，否则分页会很慢。
 
 ```sh
 BIN=target/release-fast/rust-model-inference
@@ -85,10 +85,25 @@ Tokenizer、shape、控制 token、版本和 stream ordering 精确检查。F32/
 
 九种 thinker 导出均有 CPU/F32-KV 数值记录，分别绑定其实际二进制和主机：F32/F16/BF16 通过，Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 均未过原块量化门槛。替换机 31344 上的新 Q6_K 比较有 7/8 行失败，最大 rRMSE `0.1524552110`、最低 cosine `0.9883425540`；同文件 greedy 8/8 一致。旧机 33367 的最后一项 Q6 结果仍为未知，不能用新运行倒推旧进程结果。CPU 数值记录不代替 HTTP、F16 KV 或 GPU 验证，详见 [thinker-results.json](../../tools/oracle/sophon_realtime/thinker-results.json)。
 
-CPU 走仓库线程池与 SIMD/量化算子。Auto 复用现有分发，须按真实 backend/submission 证据判断；回退 CPU 不代表 GPU 通过。现有 Qwen3-VL resident decoder 已实现 interleaved M-RoPE/DeepStack，设备路径要求 F16 KV 和可用权重格式。最新 Q8_0 文本实测有 714 次设备提交，但未过现有 CPU/GPU 数值门槛；不能宣称完整 GPU 支持。音频 block attention/frontend、causal convolution 和 HiFT spectral 的严格设备路径尚缺共享算子，明确拒绝。后续共享层及顺序见 validation；未以没 GPU 硬件掩盖缺 kernel。
+CPU 走仓库线程池与 SIMD/量化算子。Auto 复用现有分发，须按真实 backend/submission 证据判断；回退 CPU 不代表 GPU 通过。现有 Qwen3-VL resident decoder 已实现 interleaved M-RoPE/DeepStack，设备路径要求 F16 KV 和可用权重格式。最新 Q8_0 文本实测有 714 次设备提交，但未过现有 CPU/GPU 数值门槛；不能宣称完整 GPU 支持。2026-11-19 已补音频 block attention/frontend、causal convolution 与 HiFT STFT/iSTFT 的模型局部混合 Vulkan 路径，取代先前的统一拒绝。布局、归一化、pointwise、采样仍在 CPU；Talker 投影在 GPU，带 bias 的 Qwen2 attention/RoPE/F32 KV 与输出 head 保留 CPU。严格设备错误返回，Auto 丢弃失败结果并重算 CPU。完整模型的设备数值失败仍保留。
 
 Q8_0 thinker 配 F16 KV 的 CPU 文本、图像及单/分组 JEV 已跑通，CLI/HTTP 概率差为 0；图像记录使用历史 F32 存储、内部 Q8 预打包视觉路径，不能冒充纯 F32 数值对齐。量化音频/Flow 存在未过原门槛的结果；F16 talker 旧 prepared 输入舍入路径有极小 margin 的 step 51 greedy 分歧，现已对 talker opt-in F32 prepared activation，并以 F32-activation Oracle 全 81 步通过（rRMSE `4.45308760e-6`、cosine `0.99999999999235`，step 51 两端均为 640）；部分 K talker 在 128-token 边界未 EOS。长 HiFT 的中间检查点仍有失败，尽管最终 waveform 门槛通过。没有广泛听感、任务准确率或真实 full-duplex 质量结论。
 
 新 lossless F32 vision 已用官方 Transformers 4.57.6 `Qwen3VLVisionModel`、相同导出权重、CPU 四线程独立验证，不加载 thinker。固定 32×32 红图按源配置放大到 256×256，得到 64 行、每行 5120 维；1152 宽、27 层视觉塔的 input、27 个 block、三层 DeepStack（8/16/24）及最终投影共 **32/32 通过**，最差 rRMSE `1.26997018e-5`、最低 cosine `0.9999999999195905`，无首分叉；原门槛仍为 `0.001 / 0.999999`。历史默认资产的投影与三层 DeepStack 位哈希也在改动前后完全一致。证据见 [vision-results.json](../../tools/oracle/sophon_realtime/vision-results.json)；其他模型的真实 vision 资产缺失，未声称其真实回归通过。新 lossless 图像组件已配合 Q8_0 thinker/F16 KV，在最新构建通过 CLI/HTTP 的 9 项检查：图像 chat、单/分组 JEV、batch/SSE 与上下文预检；两项 CLI/HTTP 概率差均为 0。Auto/Vulkan vision 数值路径仍待验证；独立 encoder 数值和组合入口功能分别留证。
 
 [performance.json](../../tools/oracle/sophon_realtime/performance.json) 保留同机实测。F32 thinker 八步曾耗时 802 秒，发生分页和资源竞争，不能用作常规吞吐或容量。初始独立 TTS 77 speech tokens / 73,920 samples 用时约 78 秒；release-fast 数字不代表 release 部署性能。严格 Q8_0/F16-KV 设备检查耗时 54.55 秒后因数值门槛失败，含上传与 CPU 校验开销，不能作为吞吐；同 KV 参考性能对比仍待完成。
+
+
+## 2026-11-19 Vulkan 补充
+
+M3 Max / 64 GiB / MoltenVK，`release-fast`、四线程。当前分支已合入主线 `28788d19a`。九种导出精度 × CPU/Auto/Vulkan × audio、Talker、Flow/HiFT，共 **81 个组件组合实际执行**，29 个通过：F32/F16/BF16 的 27 个组合全部通过，另外 Q4_K Talker 的 CPU/严格 Vulkan 两项通过，其 Auto 仍失败。浮点/量化按原容差，Tokenizer/control IDs 精确比较。[vulkan-results.json](../../tools/oracle/sophon_realtime/vulkan-results.json) 记录首个失败、误差、实际设备调用与各构建 SHA256。
+
+F16 Flow 显式保留 F32 激活/累加，修复了先前最后一步 velocity rRMSE `0.001005 > 0.001` 的失败；现有 Oracle 使用对应的 `--activation f32`，没有放宽门槛。其他模型默认 F16 prepared 行为保留。
+
+短组件通过不等于完整语音验收。真实“你好。”、brand_zh、seed 0、greedy 生成 18 个 speech token、17280 样本。F32 CPU/Vulkan 的 token 完全一致。卷积二次自审前，非流式波形 rRMSE `0.2347744`，未通过原 `0.01 / 0.9999 / 0.01` 门槛；按通道归约后降至 `0.1703544`，仍失败。F16 非流式从 `0.31661` 降至 `0.0463668`，仍失败；BF16 降至 `0.0076777`，同输入通过。三档流式 rRMSE 分别为 `0.0062204 / 0.0030469 / 0.0011583`，均通过。Flow mel rRMSE 只有 `2.6214e-5`，在 HiFT 中被放大。同一份真实 mel/激励重放 CPU/Vulkan HiFT，修复前误差 `2.1707e-5`，修复后 `4.3336e-6`；官方 HiFT 分别重放两份输入也产生 `0.2347789` 的差异，各自与 Rust 的同输入比较都通过。这说明输入敏感性，不能把完整链路写成通过。F16/BF16 和所有入口的独立结果见设备报告。
+
+共享修复仅扩展必要接口：Qwen3 session 的显式投影 offload 构造器保留旧构造器默认路径；F16 capability query/设备模式仅用于已有 opt-in；无 shaderFloat64 的设备跳过可选 PiVo FP64 pipeline 初始化，PiVo 调用本身仍明确报错。GPU 初始化恢复后，四项 CPU 专用测试显式选择 CPU，未修改 Yue2/Q8 生产逻辑。完整测试的历史失败、真实旧模型逐位回归和同机组件性能均单独记录。
+
+新 Q4_0 thinker / F32 audio / F16 KV 在 CPU、Auto 下完成音频 CLI、HTTP batch/SSE 和单模式 JEV。各后端 CLI/HTTP 的概率差均为 0；CPU 与 Auto 的概率差为 `0.00033009495`，仍未过 `1e-7` 比较，不能据入口一致性声称后端数值通过。自审还修复了共享 Vulkan 启动诊断污染 CLI JSON 的问题；最终二进制的真实 Auto 音频 JEV 直接输出可解析 JSON，诊断走 stderr，概率保持不变。图像与 grouped JEV 没有在本轮新 Q4 资产上重新验证。
+
+二次自审还加入抵消输入的卷积测试，修复跨通道连续求和丢掉小量的问题；Auto 的卷积 fallback 显式进入 CPU scope，避免重新进入 legacy 设备分发。最后 31 项 Sophon 小测试、Qwen2 bias/F32 KV prefill+decode 和真实 HiFT 同输入重放均通过。新 Q4_0 thinker（18,448,424,064 bytes）CPU 文本可执行，严格 Vulkan 在上传 707 个权重、8 次提交后未过原 logits 门槛（首项相对差 `0.009025858`）；这不是完整模型设备验收通过。新视觉 GGUF SHA256 与已通过 32/32 官方 encoder 检查的 lossless 资产完全相同。

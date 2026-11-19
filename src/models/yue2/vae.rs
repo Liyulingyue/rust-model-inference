@@ -1043,6 +1043,7 @@ mod tests {
 
     #[test]
     fn convolution_fuses_bias_for_torch_matrix_tiles() {
+        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         let input = (0..64 * 32)
             .map(|index| (index % 11) as f32 * 0.01)
             .collect::<Vec<_>>();
@@ -1067,6 +1068,7 @@ mod tests {
 
     #[test]
     fn convolution_matches_torch_strided_tail_k_blocks() {
+        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         let frames = 198;
         let mut input = vec![0.0; 1024 * frames];
         let mut weights = vec![0.0; 1024 * 1024 * 7];
@@ -1119,6 +1121,7 @@ mod tests {
 
     #[test]
     fn convolution_selects_torch_bias_tile_width() {
+        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         let frames = 4_784;
         let input = (0..128 * frames)
             .map(|index| (index % 11) as f32 * 0.01)

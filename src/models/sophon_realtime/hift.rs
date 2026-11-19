@@ -1,5 +1,6 @@
 //! Causal 24 kHz HiFT vocoder with explicit excitation noise for numerical comparisons.
 
+use super::execution::Execution;
 use super::flow::{load_f32, Conv};
 use crate::core::tensor::{require_tensor_type, GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
@@ -13,6 +14,7 @@ pub const SAMPLE_RATE: usize = 24_000;
 pub const SAMPLES_PER_FRAME: usize = 480;
 
 pub struct HiFT<'a> {
+    execution: Execution,
     f0: Vec<Conv>,
     classifier: Linear<'a>,
     source: Linear<'a>,
@@ -25,6 +27,15 @@ pub struct HiFT<'a> {
 }
 
 impl<'a> HiFT<'a> {
+    pub fn load_with_compute(
+        source: &'a dyn TensorSource,
+        compute: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        let mut model = Self::load(source)?;
+        model.execution = Execution::new(compute)?;
+        Ok(model)
+    }
+
     pub fn load(source: &'a dyn TensorSource) -> Result<Self, String> {
         super::require_string(source, "general.architecture", "sophon_realtime_hift")?;
         super::require_string(source, "sophon_realtime.component", "hift")?;
@@ -96,6 +107,7 @@ impl<'a> HiFT<'a> {
             }
         }
         Ok(Self {
+            execution: Execution::cpu(),
             f0: (0..5)
                 .map(|i| {
                     Conv::load(
@@ -127,15 +139,27 @@ impl<'a> HiFT<'a> {
         pool: &ComputePool,
     ) -> Result<Vec<f32>, String> {
         validate_mel(mel, frames, finalize)?;
-        let (mut hidden, rows) =
-            self.f0[0].forward(mel, frames, 0, if finalize { 3 } else { 0 }, 1, 1, pool)?;
+        let (mut hidden, rows) = self.f0[0].forward(
+            mel,
+            frames,
+            0,
+            if finalize { 3 } else { 0 },
+            1,
+            1,
+            pool,
+            &self.execution,
+        )?;
         elu(&mut hidden);
         for layer in &self.f0[1..] {
-            hidden = layer.forward(&hidden, rows, 2, 0, 1, 1, pool)?.0;
+            hidden = layer
+                .forward(&hidden, rows, 2, 0, 1, 1, pool, &self.execution)?
+                .0;
             elu(&mut hidden);
         }
         let hidden = to_rows(&hidden, 512, rows);
-        let mut f0 = self.classifier.forward(pool, &hidden, rows)?;
+        let mut f0 = self
+            .execution
+            .linear(&self.classifier, pool, &hidden, rows)?;
         f0.iter_mut().for_each(|x| *x = x.abs());
         finite("f0", &f0)?;
         trace("f0", &[rows], &f0);
@@ -175,9 +199,9 @@ impl<'a> HiFT<'a> {
             ));
         }
         let harmonics = excitation(&f0, noise)?;
-        let mut source = self
-            .source
-            .forward(pool, &harmonics, f0.len() * SAMPLES_PER_FRAME)?;
+        let mut source =
+            self.execution
+                .linear(&self.source, pool, &harmonics, f0.len() * SAMPLES_PER_FRAME)?;
         source.iter_mut().for_each(|x| *x = x.tanh());
         trace("source", &[source.len()], &source);
         let cropped = crop_channels(mel, MEL, frames, f0.len());
@@ -215,10 +239,18 @@ impl<'a> HiFT<'a> {
         }
         finite("mel", mel)?;
         finite("source", source)?;
-        let (mut spectrum, mut source_frames) = source_spectrum(source)?;
-        let (mut hidden, mut rows) =
-            self.pre
-                .forward(mel, frames, 0, if finalize { 4 } else { 0 }, 1, 1, pool)?;
+        let (mut spectrum, mut source_frames) =
+            source_spectrum_with_compute(source, &self.execution)?;
+        let (mut hidden, mut rows) = self.pre.forward(
+            mel,
+            frames,
+            0,
+            if finalize { 4 } else { 0 },
+            1,
+            1,
+            pool,
+            &self.execution,
+        )?;
         if !finalize {
             let keep = source_frames
                 .checked_sub(480)
@@ -232,8 +264,16 @@ impl<'a> HiFT<'a> {
             let rate = [8, 5, 3][stage];
             hidden = nearest(&hidden, 512 >> stage, rows, rate)?;
             rows *= rate;
-            (hidden, rows) =
-                self.up[stage].forward(&hidden, rows, [15, 10, 6][stage], 0, 1, 1, pool)?;
+            (hidden, rows) = self.up[stage].forward(
+                &hidden,
+                rows,
+                [15, 10, 6][stage],
+                0,
+                1,
+                1,
+                pool,
+                &self.execution,
+            )?;
             if stage == 2 {
                 hidden = reflect_left_one(&hidden, 64, rows)?;
                 rows += 1;
@@ -247,25 +287,32 @@ impl<'a> HiFT<'a> {
                 stride,
                 1,
                 pool,
+                &self.execution,
             )?;
             if rows != conditioning_rows {
                 return Err("HiFT source/mel frame mismatch".into());
             }
-            let conditioning = self.source_blocks[stage].forward(conditioning, rows, pool)?;
+            let conditioning =
+                self.source_blocks[stage].forward(conditioning, rows, pool, &self.execution)?;
             add(&mut hidden, &conditioning)?;
             let mut sum = vec![0.0; hidden.len()];
             for block in &self.blocks[stage * 3..stage * 3 + 3] {
                 super::check_cancelled(cancelled)?;
-                add(&mut sum, &block.forward(hidden.clone(), rows, pool)?)?;
+                add(
+                    &mut sum,
+                    &block.forward(hidden.clone(), rows, pool, &self.execution)?,
+                )?;
             }
             sum.iter_mut().for_each(|x| *x /= 3.0);
             hidden = sum;
             trace(&format!("stage.{stage}"), &[256 >> stage, rows], &hidden);
         }
         leaky(&mut hidden, 0.01);
-        let (spectral, spectral_frames) = self.post.forward(&hidden, rows, 6, 0, 1, 1, pool)?;
+        let (spectral, spectral_frames) =
+            self.post
+                .forward(&hidden, rows, 6, 0, 1, 1, pool, &self.execution)?;
         trace("spectrum", &[18, spectral_frames], &spectral);
-        let mut waveform = waveform(&spectral, spectral_frames)?;
+        let mut waveform = waveform_with_compute(&spectral, spectral_frames, &self.execution)?;
         if !finalize {
             waveform.truncate(
                 waveform
@@ -328,6 +375,7 @@ impl ResBlock {
         mut input: Vec<f32>,
         frames: usize,
         pool: &ComputePool,
+        execution: &Execution,
     ) -> Result<Vec<f32>, String> {
         if input.len() != self.channels * frames {
             return Err("invalid HiFT residual input".into());
@@ -343,11 +391,13 @@ impl ResBlock {
                 1,
                 dilation,
                 pool,
+                execution,
             )?;
             snake(&mut x, frames, &self.second[i].1)?;
-            let (x, _) = self.second[i]
-                .0
-                .forward(&x, frames, self.kernel - 1, 0, 1, 1, pool)?;
+            let (x, _) =
+                self.second[i]
+                    .0
+                    .forward(&x, frames, self.kernel - 1, 0, 1, 1, pool, execution)?;
             add(&mut input, &x)?;
         }
         Ok(input)
@@ -499,6 +549,62 @@ fn excitation(f0: &[f32], noise: &[f32]) -> Result<Vec<f32>, String> {
     Ok(output)
 }
 
+fn source_spectrum_with_compute(
+    source: &[f32],
+    execution: &Execution,
+) -> Result<(Vec<f32>, usize), String> {
+    if source.len() <= 8 {
+        return Err("HiFT excitation too short for reflection STFT".into());
+    }
+    #[cfg(feature = "vulkan")]
+    if let Some(spectrum) = execution.run("sophon_hift_stft", |gpu| {
+        let mut padded = Vec::with_capacity(source.len() + 16);
+        padded.extend((1..=8).rev().map(|n| source[n]));
+        padded.extend_from_slice(source);
+        padded.extend((0..8).map(|n| source[source.len() - 2 - n]));
+        gpu.spectrum(&padded, &hann(), source.len() / 4 + 1, 4, false)
+    })? {
+        return Ok((spectrum, source.len() / 4 + 1));
+    }
+    source_spectrum(source)
+}
+fn waveform_with_compute(
+    spectral: &[f32],
+    frames: usize,
+    execution: &Execution,
+) -> Result<Vec<f32>, String> {
+    if frames < 2 || frames.checked_mul(18) != Some(spectral.len()) {
+        return Err("invalid HiFT output spectrum".into());
+    }
+    #[cfg(feature = "vulkan")]
+    if let Some(wave) = execution.run("sophon_hift_istft", |gpu| {
+        let mut table = hann().to_vec();
+        for cosine in [true, false] {
+            table.extend((0..16).map(|n| {
+                let (s, c) = (std::f32::consts::TAU * n as f32 / 16.0).sin_cos();
+                if cosine {
+                    c
+                } else {
+                    s
+                }
+            }));
+        }
+        let count = (frames - 1)
+            .checked_mul(4)
+            .ok_or("HiFT waveform overflow")?;
+        gpu.custom(
+            3,
+            &[spectral, &table],
+            count,
+            &[u32::try_from(frames).map_err(|_| "HiFT frames overflow")?],
+            count.div_ceil(64),
+        )
+    })? {
+        return Ok(wave);
+    }
+    waveform(spectral, frames)
+}
+
 fn hann() -> [f32; 16] {
     std::array::from_fn(|n| {
         (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / 16.0).cos()) as f32
@@ -613,5 +719,86 @@ mod tests {
         let result = excitation(&[0.], &noise).unwrap();
         assert!(result.iter().all(|v| (*v - 0.02).abs() < 1e-7));
         assert!(excitation(&[1.], &[]).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod device_tests {
+    use super::*;
+    use crate::{compute::ComputePolicy, models::sophon_realtime::tests::assert_close};
+
+    #[test]
+    #[ignore = "requires a hardware Vulkan device"]
+    fn vulkan_hift_spectra_preserve_centering_layout_and_overlap() {
+        let gpu = Execution::new(ComputePolicy::Vulkan).unwrap();
+        for length in [9, 36, 480] {
+            let source: Vec<_> = (0..length).map(|n| (n as f32 * 0.17).sin() * 0.4).collect();
+            let expected = source_spectrum(&source).unwrap();
+            let actual = source_spectrum_with_compute(&source, &gpu).unwrap();
+            assert_eq!(actual.1, expected.1);
+            assert_close(&actual.0, &expected.0);
+            let frames = expected.1;
+            let spectral: Vec<_> = (0..frames * 18)
+                .map(|n| (n as f32 * 0.27).cos() - 2.0)
+                .collect();
+            let expected = waveform(&spectral, frames).unwrap();
+            let actual = waveform_with_compute(&spectral, frames, &gpu).unwrap();
+            assert_eq!(actual.len(), (frames - 1) * 4);
+            assert_close(&actual, &expected);
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a real HiFT GGUF and full CPU speech trace"]
+    fn real_hift_device_replays_identical_inputs() {
+        let path = std::env::var("RMI_SOPHON_HIFT_TRACE").unwrap();
+        let records: Vec<serde_json::Value> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let values = |name: &str| {
+            let row = records.iter().find(|row| row["name"] == name).unwrap();
+            let bytes = std::fs::read(row["binary_path"].as_str().unwrap()).unwrap();
+            bytes
+                .chunks_exact(4)
+                .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let metric = |name: &str, a: &[f32], b: &[f32]| {
+            let e: f64 = a
+                .iter()
+                .zip(b)
+                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                .sum();
+            let n: f64 = b.iter().map(|&v| f64::from(v).powi(2)).sum();
+            println!("{name}: rRMSE={}", (e / n).sqrt());
+        };
+        let execution = Execution::new(ComputePolicy::Vulkan).unwrap();
+        let spectral = values("sophon.hift.spectrum");
+        let frames = spectral.len() / 18;
+        let expected = waveform(&spectral, frames).unwrap();
+        let actual = waveform_with_compute(&spectral, frames, &execution).unwrap();
+        metric("identical spectrum", &actual, &expected);
+        assert_close(&actual, &expected);
+        let source =
+            crate::core::loader::GGUFLoader::from_file(&std::env::var("RMI_SOPHON_HIFT").unwrap())
+                .unwrap();
+        let model = HiFT::load_with_compute(&source, ComputePolicy::Vulkan).unwrap();
+        let mel = values("sophon.flow.mel");
+        let excitation = values("sophon.hift.source");
+        let actual = model
+            .decode(
+                &mel,
+                mel.len() / 80,
+                &excitation,
+                true,
+                &ComputePool::new(4),
+            )
+            .unwrap();
+        let expected = values("sophon.hift.waveform");
+        metric("identical mel and source", &actual, &expected);
+        assert_close(&actual, &expected);
     }
 }

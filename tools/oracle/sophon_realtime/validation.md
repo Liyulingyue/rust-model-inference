@@ -7,7 +7,7 @@ Official Sophon reference: `541d83c29ca68dd5235d2e344a2b72d29e6299c2`.
 Talker scheduler/cleaner reference: `adventists-ai/sophon-realtime` `ffe67b0b239b45f359e618cff0747fb66357d4df`; `talker_tag.py` and `proc.py` are checked against the declared SHA256 values, and the tokenizer wrapper is separately SHA256-pinned.
 Official DuplexJev reference: `b851ea57ba48b351bb9381d6c16d6d10619a9d6b`.
 Historical run host: authorized Linux/x86-64 EPYC 9334, AMD gfx1100 / 51,522,830,336 VRAM bytes, SSH port 33367, 2026-11-11 UTC. That host was subsequently retired.
-Q6_K recovery host: replacement EPYC 9334 at SSH port 31344; its new CPU binary and reference provenance are recorded separately. Model assets and generated weights stay remote. On the replacement host, `/workspace/rust-model-inference` links to `/root/rmi-sophon-artifacts/repo` on the larger root filesystem; the separate workspace capacity is insufficient for widened reference weights.
+Q6_K recovery host: replacement EPYC 9334 at SSH port 31344; its new CPU binary and reference provenance are recorded separately. For those historical runs, model assets and generated weights stay remote. On the replacement host, `/workspace/rust-model-inference` links to `/root/rmi-sophon-artifacts/repo` on the larger root filesystem; the separate workspace capacity is insufficient for widened reference weights.
 
 ## Contract and boundaries
 
@@ -79,7 +79,7 @@ Q8 same-input projection probes pass 12 audio operations (maximum rRMSE 4.9271e-
 | Live full-duplex input/output, text starvation timing, interruption | no session protocol yet | no duplex session protocol yet | Not implemented, layer 2 | Not run |
 | Native dynamic FP8 activations | standard weight-only GGUF | same | Not implemented, layer 2 | Not run; widened FP8 weights are not native FP8 execution |
 | Grouped candidate scoring | --jev-multi / --jev-block for text/image/audio | /v1/jev/grouped, /v1/jev/image_grouped and /v1/jev/audio_grouped | Implemented with shared grouped core, resident runtime and pinned template; nonfinite option scores are rejected before inference | Covered Q8_0 text/image HTTP groups match CLI. Mixed Q6_K thinker/F32 audio CPU single, block_choice and default multi_select CLI/HTTP probability differences are zero; other format/backend rows remain not run |
-| Complete Vulkan | runtime capability gate | same gate at construction/request | Not implemented, shared capability layer 3 | Audio/speech device kernels remain missing. Reviewed Q8_0/F16-KV text executes 714 device submissions, then fails the unchanged CPU/device logit gate; vision GPU not run after that failure |
+| Vulkan | explicit component offload plus existing thinker resident runtime | same model implementation and runtime gates | Audio/Talker/Flow/HiFT mixed execution implemented; resident K-format decoder combinations remain layer 3 | See the 2026-11-19 update below. F32/F16/BF16 short components pass, while complete F32/F16 nonstream speech and Q8_0/Q4_0 thinker device contracts fail; no complete-model acceptance |
 
 All nine requested formats are F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. Eligible matrices use the repository's existing SIMD/prepared-row kernels; accumulation is F32, with per-kernel input QDQ. HiFT stays F32 in every requested export because its tensors do not meet the shared block-quantization policy. Vision stores F32; pure F32 computation additionally requires the new boolean `clip.vision.preserve_f32=true`. Historical exports without that key prepack aligned linears to Q8_0 and dynamically quantize their inputs, with F32 fallback for the 4304-wide FFN-down input. Thinker KV supports F32/F16; talker KV is F32. No new format, backend library or binary target was added.
 
@@ -151,8 +151,68 @@ Code/evidence checkpoint `ef0a969` passes all three jobs in [CI run 43074410523]
 
 1. **This layer:** strict component contracts, all nine converters, weight-only CPU paths, standalone and composed CLI/HTTP entrypoints, independent references, precision/error evidence and review fixes. Experimental status remains while failed and pending rows exist.
 2. **Model/session follow-up, adaptation owner:** combined media, live duplex/starvation/cancellation scheduling, bounded HiFT phase state, native FP8 activation support and broader speech/perceptual quality. Preserve the pinned scheduler/noise contracts and repeat the same numerical gates.
-3. **Shared runtime/backend owner, after layer 1 contracts:** audio block-attention/frontend kernels, causal convolution, STFT/iSTFT and HiFT device orchestration. The existing Qwen3-VL resident decoder already implements interleaved M-RoPE and DeepStack with F16 KV; model-specific validation and any failures are separate from missing audio kernels. Exercise CPU/Auto/strict Vulkan with actual submission evidence and same-host reference timing, then repeat the full precision and entrypoint matrix.
+3. **Shared runtime/backend owner, after layer 1 contracts:** the 2026-11-19 model-local mixed paths now cover audio block attention/frontend, causal convolution and HiFT STFT/iSTFT. Remaining shared work is resident K-format decoder integration and the failed thinker CPU/device logit contract. These cannot be repaired by a Sophon source adapter: it does not own resident weight layouts, device KV commits or decoder execution. Preserve the existing F16-KV interleaved M-RoPE/DeepStack path and repeat the matching-format/entrypoint matrix after those shared fixes. Full device residency and performance optimization remain separate from the implemented mixed execution.
 
 These layers describe remaining work, not a reduction of the intended model scope. The model is only fully adapted after all applicable layers and acceptance rows pass. [performance.json](performance.json) contains measured validation timings; paging/concurrent work and release-fast builds prevent deployment-capacity or GPU speedup conclusions.
 
-The earlier draft incorrectly classified shared Qwen3-VL/DeepStack Vulkan support as missing. Source review confirmed the existing resident decoder implements both and requires F16 KV; the matrix now separates that implemented path from the still-missing audio/HiFT device orchestration. Hardware visibility or eligibility alone is not a validation pass.
+The earlier draft incorrectly classified shared Qwen3-VL/DeepStack Vulkan support as missing. Source review confirmed the existing resident decoder implements both and requires F16 KV. Audio/HiFT orchestration was still missing at that checkpoint; the 2026-11-19 implementation below supersedes that component gap. Hardware visibility or eligibility alone is not a validation pass.
+
+
+## 2026-11-19 M3 Max Vulkan implementation and self-review
+
+This update supersedes the earlier missing audio/speech device-kernel status, **not** any failed complete-model numerical gate. Upstream `main` is merged through `28788d19a16fe170ba2080f7d2ea2983be45acba` (local merge head `905334181`). The host is Apple M3 Max / 64 GiB / MoltenVK, four threads, `release-fast`, features `vulkan,parity-trace`. The user subsequently authorized local weights under `/Users/gouzi/Documents/git/rust-model-inference/models/`; historical remote evidence retains its own host and artifact identity.
+
+The fixed ModelScope manifest has 68 entries / 44,614,289,807 bytes. All 47 locally downloaded source files / 40,331,024,711 bytes pass size/SHA256; the omitted original ONNX/base-checkpoint and demo files are listed separately. All thinker shards and the independently indexed `visual.safetensors` are present. The sixteen main shards contain no visual tensors; the converter documentation now states this correctly. Range downloads keep their state, verify Content-Range, and publish only after the complete hash matches. TLS 1.2 and direct HTTPS resolved the final visual transfer without disabling certificate verification.
+
+New artifacts use the existing streaming converter:
+
+| Asset | Bytes | SHA256 |
+| --- | ---: | --- |
+| thinker-Q4_0.gguf | 18,448,424,064 | `7149d9db0dc60aaecdf41152f8b882e7a4f72af1ee8d575486e45f7fae7b4bac` |
+| vision-lossless-mmproj-F32.gguf | 2,381,090,144 | `38c73644e80b490e5d2ab1669cb0202d97f570f14f9bd8d70166145f411400a0` |
+
+The vision file is byte-identical to the separately validated lossless asset, so its official 32/32 encoder result retains the same artifact identity. The new Q4 thinker text CPU/F16-KV CLI executes two tokens. Strict Vulkan uploads 707 static tensors / 17,993,446,464 bytes and records eight submissions, then **fails** its existing model contract: logit 0 GPU `14.718691`, CPU `14.58703`, absolute error `0.13166046`, relative error `0.009025858`. The initial traced strict attempt was correctly rejected because resident decode forbids active parity tracing; the untraced rerun is the actual device evidence. This does not supersede the historical failed Q4 same-file Oracle or establish complete-model Vulkan support.
+
+### Implemented scope
+
+- Audio encoder/projector: GPU native projections, block attention and frontend spectrum/mel computation. Host padding, layout, normalization and pointwise functions remain explicit.
+- Talker: reuse the shared dense projection-offload session, preserving biased Qwen2 attention/RoPE, F32 KV and the speech output head on CPU. The old Qwen3 constructors keep their default behavior.
+- Flow: GPU projections, grouped causal convolution and chunk attention, with host Euler updates/pointwise functions. F16 explicitly preserves F32 prepared activations; the matching existing Oracle uses `--activation f32`.
+- HiFT: GPU causal convolutions and STFT/iSTFT, with host layout, F0 excitation and pointwise functions. This is mixed execution, not a fully resident device pipeline.
+- Strict errors propagate. Auto discards failed output, disables that component's device and recomputes on CPU; convolution fallback explicitly enters CPU scope to prevent re-entering legacy offload.
+
+A shared initialization defect also required a bounded fix: the optional PiVo FP64 pipeline prevented ordinary projections from initializing on devices without `shaderFloat64`. Such devices now skip that optional pipeline, while PiVo attention itself explicitly rejects unsupported hardware. Three Yue2 convolution tests and the Q8 thread-partition test select CPU for their CPU reference; neither model's production logic changed.
+
+### Numerical and entrypoint results
+
+All **81** audio / Talker / Flow-HiFT × nine formats × CPU/Auto/Vulkan combinations execute. **29** pass their original matching-weight official component gates: all **27 F32/F16/BF16** combinations, plus Q4_K Talker CPU and strict Vulkan. Its Auto row still fails. All 27 Flow/HiFT combinations were rerun after the convolution review. Other block-quantized numerical/greedy failures remain failures, including CPU failures; no threshold was relaxed.
+
+The short component fixture gives Flow and HiFT independent inputs (HiFT uses supplied synthetic mel). It is not a connected synthesis acceptance result. Full “你好。” / brand_zh / greedy / seed 0 produces 18 speech tokens and 17,280 mono 24 kHz samples. CLI and HTTP WAV/PCM have identical PCM within each backend; SSE emits two audio chunks plus a correct done event, and all three invalid request classes return 400. Final Auto and strict Vulkan waveforms agree on this fixture.
+
+| Weight precision | Nonstream CPU/device rRMSE before convolution review | After review | Streaming after review | Unchanged waveform gate |
+| --- | ---: | ---: | ---: | --- |
+| F32 | 0.2347744 | 0.1703544, FAIL | 0.00622035, PASS | rRMSE <= 0.01; cosine >= 0.9999; max_abs <= 0.01 |
+| F16 | 0.3166100 | 0.0463668, FAIL | 0.00304687, PASS | same |
+| BF16 | 0.0154159 | 0.00767771, PASS | 0.00115835, PASS | same |
+
+Self-review reproduced cancellation loss in the original convolution: a channel-local result of 32 became 1 on the device (rRMSE 0.96875). Contiguous kernels now reduce each channel separately; the regression passes without changing its gate. The original F16 Flow last-velocity failure (`0.001005 > 0.001`) was independently repaired by the explicit F32-activation mode, retaining F16 weight storage and unchanged gates.
+
+The complete F32 failure was localized before that convolution fix: Talker IDs match, Flow mel rRMSE is only `2.6214e-5`, then HiFT amplifies it to waveform rRMSE `0.2347747`. Official HiFT on those two different inputs reproduces rRMSE `0.2347789`, while each same-input official/Rust comparison passes. After the fix, replaying identical real mel/source on CPU/device has rRMSE `4.33361e-6`; identical-spectrum iSTFT has `9.36666e-7`. This narrows the issue to input sensitivity and accumulated upstream differences. It does not turn F32/F16 full-pipeline failures into passes or establish perceptual/task quality.
+
+### Regression and reproducibility
+
+The post-main-merge full library snapshot is **1834 passed / 19 failed / 273 ignored** against a separate same-HEAD baseline at **1814 / 38 / 265**. All 19 current failed names are a subset of the baseline; **zero added failures**, 19 resolved. Baseline and modified builds use distinct target directories. This full-suite snapshot precedes the final Sophon-only convolution/fallback review; it is not relabeled as an execution of a later binary.
+
+After that review, the latest protected library passes **31/31** small Sophon tests including real device checks, the Qwen2 Q/K/V-bias + F32-KV prefill/two-decode test, and the real identical-input HiFT replay. The latest ordinary Qwen3-0.6B-Q4_0 CPU CLI regression preserves token IDs and **3,950,336 F32 logit values / 28 records bit-for-bit** against protected base `4b95f3841`. That unchanged-old-model check does not impose bitwise acceptance on new lossy/GPU paths.
+
+CPU-only library/apps check, Rustfmt, diff whitespace and both changed SPIR-V validation/readback checks pass. The original nine Cargo executable targets are unchanged. Clippy is **not green**: the latest build and same-HEAD baseline have the identical ten errors and 1948 warnings; the new visibility and divisibility warnings were corrected rather than suppressing baseline errors. All 830 Rust/Cargo/shader input hashes remain stable through the final build/checks.
+
+The final CLI review also reproduced shared runtime contract diagnostics on stdout, corrupting Auto audio JEV JSON. Only the four runtime-connected diagnostic prints now go to stderr, including the K-quantizer path; the common check's numerical/error behavior is unchanged. A core-contract RED/GREEN run verifies the stream change on real Vulkan. The final ordinary Qwen3 regression still preserves the same 3,950,336 logits and IDs.
+
+The new mixed Q4_0 thinker / F32 audio / F16-KV fixture completes eleven original CPU/Auto CLI/HTTP checks with a 250 ms synthetic tone. Batch and SSE produce the same text/IDs `[1188,52218]`; each backend's CLI/HTTP JEV probability difference is zero. The old Auto stdout is retained as invalid JSON, rather than stripped and counted as a pass. The final `manifestfix-cli` repeats the full Auto audio JEV request in 412.305 seconds: stdout parses directly as JSON, all contract diagnostics are on stderr, and probabilities are unchanged from the original JSON payload (maximum difference zero). Actual GPU frontend/projection/attention and resident-decoder submissions precede the recorded thinker contract failure and CPU replay; the protected HTTP process records 800 cumulative submissions. CPU and Auto choose B, but their probability difference is `0.0003300949465483427`, failing the retained `1e-7` probability comparison. Same-backend interface agreement therefore does not establish CPU/Auto or complete-model numerical acceptance. The four mixed-format rows are separate from the matching-format component matrix; the coverage file now has 556 unique rows. These runs are functional probes, not speech-understanding quality or matching-format Q4-audio acceptance.
+
+Shader CI registration and the hash manifest were repaired as well. The final glslang-built F16 and optimized Sophon modules differ from the numerically validated modules **only in the SPIR-V header's generator identifier word**; all instruction, interface, constant, decoration and bound words are identical. Both changed modules pass validation and byte-for-byte script rebuild checks, and every manifest hash passes. The complete shader script is **not locally green**: both the modified checkout and isolated unmodified baseline fail rebuilding `nemotron_moe_route.spv` at header bound byte 13 with local glslang 16.6. That unrelated module was not rewritten. The final rebuild uses a separate 832-input manifest including the shader script/hash manifest, and reruns the 31 small Sophon device tests and biased Qwen2/F32-KV regression.
+
+[vulkan-results.json](vulkan-results.json) binds distinct initial, F16-fix, reviewed, post-main, convolution-review and final fallback-review binaries to their own tests; it records failure checkpoints, model/input hashes, shader identities, source verification and all failed names. Historical runs are not relabeled with a later source fingerprint. [performance.json](performance.json) contains same-host CPU/device/reference validation wall times, with release-fast and concurrent-resource limitations; they are not deployment throughput or capacity claims.
+
+Remaining acceptance work is explicit: F32/F16 nonstream synthesis, failed block-format/component/thinker numerical gates, resident K-format integration, the still-uncollected old remote Q6/F16-KV reference, broader speech/task quality and layer-2 session/native-FP8 features. The model remains **Experimental / partially adapted**.

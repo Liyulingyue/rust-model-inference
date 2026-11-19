@@ -1,8 +1,8 @@
 //! Portable Qwen3-ASR encoder and the release's stack-2 Ultravox projector.
 
+use super::execution::Execution;
 use crate::core::tensor::{load_f32_tensor, require_tensor_type, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
-use crate::ops::audio::frontend::compute_log_mel_trimmed;
 use crate::ops::audio::transformer::{
     apply_gelu_erf, full_attention_into, layer_norm_rows, reserved_f32, LayerNormWeights,
 };
@@ -192,7 +192,12 @@ impl<'a> Linear<'a> {
             },
         })
     }
-    fn forward(&self, input: &[f32], pool: &ComputePool) -> Result<Vec<f32>, String> {
+    fn forward(
+        &self,
+        input: &[f32],
+        pool: &ComputePool,
+        execution: &Execution,
+    ) -> Result<Vec<f32>, String> {
         let weight = &self.weight;
         if input.is_empty()
             || input.len() % weight.n_in != 0
@@ -203,16 +208,22 @@ impl<'a> Linear<'a> {
         let rows = input.len() / weight.n_in;
         #[cfg(feature = "parity-trace")]
         self.trace("input", &[rows, weight.n_in], input);
-        let mut prepared = PreparedRows::new(rows, weight.n_in);
-        prepared.prepare(
-            input,
-            rows,
-            weight.n_in,
-            weight.needs_q8_0_activation(),
-            weight.uses_q8_k(),
-        )?;
-        let mut output = reserved_f32("audio projection", rows * weight.n_out)?;
-        prepared.matmul(weight, input, &mut output, pool)?;
+        let mut output = if let Some(output) = execution.project(weight, input, rows)? {
+            output
+        } else {
+            let _scope = crate::compute::ComputePolicy::Cpu.cpu_scope();
+            let mut prepared = PreparedRows::new(rows, weight.n_in);
+            prepared.prepare(
+                input,
+                rows,
+                weight.n_in,
+                weight.needs_q8_0_activation(),
+                weight.uses_q8_k(),
+            )?;
+            let mut output = reserved_f32("audio projection", rows * weight.n_out)?;
+            prepared.matmul(weight, input, &mut output, pool)?;
+            output
+        };
         if let Some(bias) = &self.bias {
             for row in output.chunks_exact_mut(weight.n_out) {
                 for (value, bias) in row.iter_mut().zip(bias) {
@@ -274,6 +285,7 @@ impl<'a> Conv<'a> {
         height: usize,
         width: usize,
         pool: &ComputePool,
+        execution: &Execution,
     ) -> Result<Vec<f32>, String> {
         if input.len() != self.channels * height * width {
             return Err("invalid audio convolution shape".into());
@@ -301,7 +313,7 @@ impl<'a> Conv<'a> {
                     }
                 }
             }
-            let mut values = self.linear.forward(&patches, pool)?;
+            let mut values = self.linear.forward(&patches, pool, execution)?;
             apply_gelu_erf(&mut values)?;
             for row in 0..count {
                 for channel in 0..480 {
@@ -325,6 +337,7 @@ struct Block<'a> {
 }
 
 pub struct AudioEncoder<'a> {
+    execution: Execution,
     conv: [Conv<'a>; 3],
     conv_out: Linear<'a>,
     blocks: Vec<Block<'a>>,
@@ -363,11 +376,9 @@ impl<'a> AudioDecoder<'a> {
         if !super::is_thinker(thinker) {
             return Err("this text runtime does not support audio input".into());
         }
-        if compute == crate::compute::ComputePolicy::Vulkan {
-            return Err("Sophon strict Vulkan audio awaits shared block-attention and frontend device kernels".into());
-        }
-        let encoder = AudioEncoder::from_source(
+        let encoder = AudioEncoder::from_source_with_compute(
             component.ok_or("audio input requires --mmproj with the Sophon audio component")?,
+            compute,
         )?;
         Ok(Self {
             encoder,
@@ -495,6 +506,15 @@ impl<'a> AudioDecoder<'a> {
 }
 
 impl<'a> AudioEncoder<'a> {
+    pub fn from_source_with_compute(
+        source: &'a dyn TensorSource,
+        compute: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        let mut model = Self::from_source(source)?;
+        model.execution = Execution::new(compute)?;
+        Ok(model)
+    }
+
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
         super::require_string(source, "general.architecture", "sophon_realtime_audio")?;
         super::require_string(source, "sophon_realtime.component", "audio")?;
@@ -525,6 +545,7 @@ impl<'a> AudioEncoder<'a> {
             });
         }
         Ok(Self {
+            execution: Execution::cpu(),
             conv: [
                 Conv::load(source, 1, 1)?,
                 Conv::load(source, 2, 480)?,
@@ -545,9 +566,6 @@ impl<'a> AudioEncoder<'a> {
         if samples.is_empty() || samples.iter().any(|v| !v.is_finite()) {
             return Err("audio samples must be nonempty and finite".into());
         }
-        if crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan {
-            return Err("Sophon strict Vulkan audio awaits shared block-attention and frontend device kernels".into());
-        }
         let length = samples
             .len()
             .max(320)
@@ -557,8 +575,7 @@ impl<'a> AudioEncoder<'a> {
             * 2560;
         let mut aligned = samples.to_vec();
         aligned.resize(length, 0.0);
-        let mel =
-            compute_log_mel_trimmed(&aligned).map_err(|e| format!("Sophon frontend: {e:?}"))?;
+        let mel = self.execution.log_mel(&aligned)?;
         let mut values = Vec::new();
         for start in (0..mel.frames).step_by(CHUNK) {
             let frames = (mel.frames - start).min(CHUNK);
@@ -573,7 +590,7 @@ impl<'a> AudioEncoder<'a> {
             trace("encoder", &[hidden.len() / HIDDEN, HIDDEN], &hidden);
             let stacked = stack_frames(&hidden, HIDDEN)?;
             let normed = rms_rows(&stacked, &self.pre)?;
-            let first = self.first.forward(&normed, pool)?;
+            let first = self.first.forward(&normed, pool, &self.execution)?;
             let mut activated = reserved_f32("audio SwiGLU", first.len() / 2)?;
             for (input, output) in first
                 .chunks_exact(4096)
@@ -583,9 +600,9 @@ impl<'a> AudioEncoder<'a> {
                     output[i] = input[i] * crate::ops::silu(input[i + 2048]);
                 }
             }
-            let projected = self
-                .second
-                .forward(&rms_rows(&activated, &self.mid)?, pool)?;
+            let projected =
+                self.second
+                    .forward(&rms_rows(&activated, &self.mid)?, pool, &self.execution)?;
             // The released processor uses ceil(mel/16), not the encoder's full 6.5 tokens/s.
             let keep = frames.div_ceil(16) * OUTPUT;
             if keep > projected.len() {
@@ -617,9 +634,9 @@ impl<'a> AudioEncoder<'a> {
                 input[bin * 100..bin * 100 + valid]
                     .copy_from_slice(&features[bin * frames + start..bin * frames + start + valid]);
             }
-            let first = self.conv[0].forward(&input, 128, 100, pool)?;
-            let second = self.conv[1].forward(&first, 64, 50, pool)?;
-            let third = self.conv[2].forward(&second, 32, 25, pool)?;
+            let first = self.conv[0].forward(&input, 128, 100, pool, &self.execution)?;
+            let second = self.conv[1].forward(&first, 64, 50, pool, &self.execution)?;
+            let third = self.conv[2].forward(&second, 32, 25, pool, &self.execution)?;
             let mut rows = reserved_f32("audio CNN transpose", 13 * 7680)?;
             for t in 0..13 {
                 for channel in 0..480 {
@@ -629,7 +646,7 @@ impl<'a> AudioEncoder<'a> {
                     }
                 }
             }
-            let mut projected = self.conv_out.forward(&rows, pool)?;
+            let mut projected = self.conv_out.forward(&rows, pool, &self.execution)?;
             for t in 0..13 {
                 for d in 0..448 {
                     let increment = 10000f64.ln() / 447.0;
@@ -645,32 +662,47 @@ impl<'a> AudioEncoder<'a> {
         let mut normed = Vec::new();
         for (index, block) in self.blocks.iter().enumerate() {
             layer_norm_rows(&hidden, rows, &block.ln1, 1e-5, &mut normed)?;
-            let q = block.q.forward(&normed, pool)?;
-            let k = block.k.forward(&normed, pool)?;
-            let v = block.v.forward(&normed, pool)?;
+            let q = block.q.forward(&normed, pool, &self.execution)?;
+            let k = block.k.forward(&normed, pool, &self.execution)?;
+            let v = block.v.forward(&normed, pool, &self.execution)?;
             let mut attention = reserved_f32("audio attention", hidden.len())?;
             for start in (0..rows).step_by(104) {
                 let end = (start + 104).min(rows);
                 let range = start * HIDDEN..end * HIDDEN;
                 let mut result = Vec::new();
                 let mut scores = Vec::new();
-                full_attention_into(
+                if let Some(values) = self.execution.attention(
                     &q[range.clone()],
                     &k[range.clone()],
                     &v[range.clone()],
-                    end - start,
                     14,
-                    64,
-                    &mut scores,
-                    &mut result,
-                )?;
+                )? {
+                    result = values;
+                } else {
+                    full_attention_into(
+                        &q[range.clone()],
+                        &k[range.clone()],
+                        &v[range.clone()],
+                        end - start,
+                        14,
+                        64,
+                        &mut scores,
+                        &mut result,
+                    )?;
+                }
                 attention[range].copy_from_slice(&result);
             }
-            add(&mut hidden, &block.out.forward(&attention, pool)?);
+            add(
+                &mut hidden,
+                &block.out.forward(&attention, pool, &self.execution)?,
+            );
             layer_norm_rows(&hidden, rows, &block.ln2, 1e-5, &mut normed)?;
-            let mut up = block.up.forward(&normed, pool)?;
+            let mut up = block.up.forward(&normed, pool, &self.execution)?;
             apply_gelu_erf(&mut up)?;
-            add(&mut hidden, &block.down.forward(&up, pool)?);
+            add(
+                &mut hidden,
+                &block.down.forward(&up, pool, &self.execution)?,
+            );
             trace(&format!("block.{index}"), &[rows, HIDDEN], &hidden);
         }
         layer_norm_rows(&hidden, rows, &self.post, 1e-5, &mut normed)?;
@@ -779,8 +811,9 @@ mod tests {
         let audio = crate::ops::audio::frontend::decode_pcm16_wav_any(&std::fs::read(wav).unwrap())
             .unwrap();
         assert_eq!((audio.sample_rate, audio.channels), (16_000, 1));
-        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
-        let encoder = AudioEncoder::from_source(&source).unwrap();
+        let compute = super::super::tests::compute_policy();
+        let _scope = compute.enter_legacy_scope();
+        let encoder = AudioEncoder::from_source_with_compute(&source, compute).unwrap();
         let started = std::time::Instant::now();
         let result = encoder
             .encode(&audio.samples, &ComputePool::new(4))

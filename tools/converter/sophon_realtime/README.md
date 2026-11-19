@@ -21,9 +21,10 @@ production dependency):
 The input can be either the release root or its `thinker/` directory. It requires
 `config.json`, `model.safetensors.index.json` and all indexed shards,
 `tokenizer.json`, and `chat_template.jinja`. The optional vision output also
-requires `preprocessor_config.json`. The release's indexed shards already include
-the complete vision tower; the duplicate standalone `visual.safetensors` is not
-used. Audio and its projector are validated and partitioned, not exported as
+requires `preprocessor_config.json`. The pinned index maps the complete vision tower to the separate
+`visual.safetensors`; the sixteen `model-v15-*` shards contain no visual tensors.
+That indexed seventeenth file is required by the complete-inventory validation,
+even when no vision output is requested. Audio and its projector are validated and partitioned, not exported as
 language decoder tensors. `auxiliary-inventory.json` records their exact pinned
 names, BF16 dtypes and shapes, together with the vision inventory.
 

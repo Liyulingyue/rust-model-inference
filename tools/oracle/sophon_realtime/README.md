@@ -8,7 +8,7 @@ All nine thinker exports have CPU/F32-KV numerical records with separately ident
 
 An additional Q6_K/F16-KV CPU CLI completes eight prediction rows, but its independent reference result and exit remain **UNKNOWN** after SSH transport loss. The matching Rust token IDs are execution evidence only. This pending attempt does not replace the completed F32-KV numerical failure. Exact-head CI for code checkpoint `ef0a969` passes all three jobs; see [regression evidence](shared-regression-results.json).
 
-## Remote assets
+## Asset locations
 
 Download on the inference host. The source supports direct remote ModelScope HTTPS downloads, so neither a Mac model cache nor an intermediate Mac weight file is necessary. Check the filesystem backing `models/`, not just `/`: the validation host's workspace has a separate capacity cap, so GGUF exports use a `models/` symlink backed by its larger remote filesystem.
 
@@ -21,7 +21,7 @@ curl --fail --location "$MODELSCOPE_PINNED_URL" |
 ssh "$REMOTE" 'sha256sum /path/to/checkout/models/source/file.partial'
 ```
 
-The initial validation downloaded 64 selected files directly to the remote host (42,318,478,677 bytes); redundant ONNX flow/batch-tokenizer copies and the documentation image were not required. After that host was retired, the Q6_K recovery downloaded the 16 thinker shards and six small files, then the separately indexed `thinker/visual.safetensors` required by the existing reader: 23 files, 35,935,130,322 bytes, all size/SHA256 checks passing on replacement port 31344. The first missing-visual conversion failure remains recorded separately. Historical component reports retain their original host/artifact identities. No source weights or converted GGUFs were stored on the laptop.
+The initial validation downloaded 64 selected files directly to the remote host (42,318,478,677 bytes); redundant ONNX flow/batch-tokenizer copies and the documentation image were not required. After that host was retired, the Q6_K recovery downloaded the 16 thinker shards and six small files, then the separately indexed `thinker/visual.safetensors` required by the existing reader: 23 files, 35,935,130,322 bytes, all size/SHA256 checks passing on replacement port 31344. The first missing-visual conversion failure remains recorded separately. Historical component reports retain their original host/artifact identities. Those historical remote runs stored no model weights on the laptop. For the authorized 2026-11-19 M3 Max follow-up, source and converted files use `/Users/gouzi/Documents/git/rust-model-inference/models/`, with pinned revision and size/SHA256 checks.
 
 ## Independent thinker oracle
 
@@ -84,3 +84,24 @@ PYTHONPATH=/opt/venv/lib/python3.12/site-packages .venv/bin/python -m unittest \
 ```
 
 Use new output directories for every real comparison. Keep checkpoint binaries, models and generated audio on the inference host; only small JSON reports and logs belong in the review checkout.
+
+
+## Mixed Vulkan follow-up (2026-11-19)
+
+Audio projections, block attention and frontend; Talker projection offload; Flow projections/convolutions/attention; and HiFT convolutions/STFT/iSTFT now execute on Vulkan. Host layout, normalization, pointwise operations and sampling remain explicit; Talker also retains biased Qwen2 attention/RoPE/F32 KV and its output head on CPU. Strict mode propagates device errors. Auto discards a failed operation, recomputes it on CPU and disables that component's device for the session.
+
+All 81 format/component/backend combinations execute; F32/F16/BF16 pass all 27 short component gates. These fixtures run Flow and HiFT independently, with a supplied HiFT mel, and cannot establish connected synthesis acceptance. After convolution review, F32/F16 complete nonstream speech still fails the unchanged CPU/device waveform gate; BF16 nonstream and all three streaming comparisons pass on this one short input. Same-input real HiFT replay and official-reference replay isolate the nonlinear amplification of the small Flow mel differences. Block-quantized failures, including greedy divergence, remain failures. See [vulkan-results.json](vulkan-results.json), [coverage.json](coverage.json), and the latest section of [validation.md](validation.md).
+
+The new mixed Q4_0 thinker/F32 audio/F16-KV CPU/Auto fixture also covers audio CLI, HTTP batch/SSE and single JEV. Same-backend CLI/HTTP probability differences are zero; CPU/Auto probabilities differ by `0.00033009495` and fail the `1e-7` comparison. The final real Auto JEV CLI retest confirms pure JSON stdout after moving runtime contract diagnostics to stderr, with unchanged probabilities. Original invalid stdout remains a failed RED record; these interface probes do not establish backend numerical acceptance or speech quality.
+
+Reproduce device tests with the existing library test target (no new executable):
+
+```sh
+cargo test --locked --profile release-fast --features vulkan,parity-trace \
+  --lib models::sophon_realtime -- --include-ignored --skip real_
+RUST_GPU_MIN_OUTPUTS=0 cargo test --locked --profile release-fast \
+  --features vulkan,parity-trace --lib \
+  projection_session_preserves_qkv_bias_and_f32_kv_across_decode -- --ignored
+```
+
+For real components, set `RMI_SOPHON_COMPUTE=cpu|auto|vulkan` and the existing `RMI_SOPHON_AUDIO`, `RMI_SOPHON_TALKER`, `RMI_SOPHON_FLOW`, `RMI_SOPHON_HIFT`, `RMI_SOPHON_WAV` and `RMI_SOPHON_CODE2WAV_INPUT` paths; run `real_audio_checkpoints`, `real_talker_checkpoints` or `real_code2wav_checkpoints` with `parity-trace`, then use their matching precision Oracle commands above. F16 Flow requires the existing `--activation f32` reference mode. A full CPU speech trace filtered to `sophon.flow.mel,sophon.hift.source,sophon.hift.spectrum,sophon.hift.waveform` can be replayed by `real_hift_device_replays_identical_inputs` using `RMI_SOPHON_HIFT_TRACE` and `RMI_SOPHON_HIFT`.

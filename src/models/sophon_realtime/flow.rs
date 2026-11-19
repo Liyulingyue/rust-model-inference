@@ -1,5 +1,6 @@
 //! CosyVoice3 token/voice conditioning and four-step flow matching.
 
+use super::execution::Execution;
 use crate::core::tensor::{load_f32_tensor, require_tensor_type, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::Weight;
@@ -57,6 +58,7 @@ pub struct FlowConditioning {
 }
 
 pub struct Flow<'a> {
+    execution: Execution,
     embedding: Linear<'a>,
     speaker: Linear<'a>,
     lookahead1: Conv,
@@ -73,6 +75,15 @@ pub struct Flow<'a> {
 }
 
 impl<'a> Flow<'a> {
+    pub fn load_with_compute(
+        source: &'a dyn TensorSource,
+        compute: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        let mut model = Self::load(source)?;
+        model.execution = Execution::new(compute)?;
+        Ok(model)
+    }
+
     pub fn load(source: &'a dyn TensorSource) -> Result<Self, String> {
         super::require_string(source, "general.architecture", "sophon_realtime_flow")?;
         super::require_string(source, "sophon_realtime.component", "flow")?;
@@ -135,6 +146,7 @@ impl<'a> Flow<'a> {
             return Err("Sophon flow requires all left chunks".into());
         }
         Ok(Self {
+            execution: Execution::cpu(),
             embedding: load_linear(source, "input_embedding", MEL, VOCAB, false)?,
             speaker: load_linear(source, "spk_embed_affine_layer", 192, MEL, true)?,
             lookahead1: Conv::load(source, "pre_lookahead_layer.conv1", MEL, DIM, 4, 1)?,
@@ -217,7 +229,7 @@ impl<'a> Flow<'a> {
             .sqrt()
             .max(1e-12);
         let speaker: Vec<f32> = request.speaker.iter().map(|v| v / norm).collect();
-        let speaker = self.speaker.forward(pool, &speaker, 1)?;
+        let speaker = self.execution.linear(&self.speaker, pool, &speaker, 1)?;
         let mut embedded = vec![0.0; token_count * MEL];
         for (row, &token) in embedded
             .chunks_exact_mut(MEL)
@@ -235,13 +247,16 @@ impl<'a> Flow<'a> {
             1,
             1,
             pool,
+            &self.execution,
         )?;
         for v in &mut hidden {
             if *v < 0.0 {
                 *v *= 0.01;
             }
         }
-        let (mut hidden, n2) = self.lookahead2.forward(&hidden, n, 2, 0, 1, 1, pool)?;
+        let (mut hidden, n2) =
+            self.lookahead2
+                .forward(&hidden, n, 2, 0, 1, 1, pool, &self.execution)?;
         if n != valid_tokens || n2 != valid_tokens {
             return Err("invalid flow lookahead shape".into());
         }
@@ -344,9 +359,11 @@ impl<'a> Flow<'a> {
         {
             return Err("invalid flow time or projected speaker".into());
         }
-        let mut time = self.time1.forward(pool, &timestep_features(time), 1)?;
+        let mut time = self
+            .execution
+            .linear(&self.time1, pool, &timestep_features(time), 1)?;
         nn::silu_inplace(&mut time);
-        let mut time = self.time2.forward(pool, &time, 1)?;
+        let mut time = self.execution.linear(&self.time2, pool, &time, 1)?;
         // Every adaptive layer normalizer applies SiLU to the same time embedding.
         nn::silu_inplace(&mut time);
         let mut input = vec![0.0; frames * MEL * 4];
@@ -358,11 +375,15 @@ impl<'a> Flow<'a> {
                 input[t * MEL * 4 + MEL * 3 + c] = conditioning.speaker[c];
             }
         }
-        let mut x = self.input.forward(pool, &input, frames)?;
+        let mut x = self.execution.linear(&self.input, pool, &input, frames)?;
         let position = transpose(&x, frames, DIM);
-        let (mut position, _) = self.pos1.forward(&position, frames, 30, 0, 1, 1, pool)?;
+        let (mut position, _) =
+            self.pos1
+                .forward(&position, frames, 30, 0, 1, 1, pool, &self.execution)?;
         mish(&mut position);
-        let (mut position, _) = self.pos2.forward(&position, frames, 30, 0, 1, 1, pool)?;
+        let (mut position, _) =
+            self.pos2
+                .forward(&position, frames, 30, 0, 1, 1, pool, &self.execution)?;
         mish(&mut position);
         let position = transpose(&position, DIM, frames);
         for (x, p) in x.iter_mut().zip(position) {
@@ -371,11 +392,20 @@ impl<'a> Flow<'a> {
         let ones = vec![1.0; DIM];
         for block in &self.blocks {
             super::check_cancelled(cancelled)?;
-            x = block.forward(x, &time, frames, &ones, &self.inv_freq, streaming, pool)?;
+            x = block.forward(
+                x,
+                &time,
+                frames,
+                &ones,
+                &self.inv_freq,
+                streaming,
+                pool,
+                &self.execution,
+            )?;
         }
-        let modulation = self.norm_out.forward(pool, &time, 1)?;
+        let modulation = self.execution.linear(&self.norm_out, pool, &time, 1)?;
         let x = modulated_norm(&x, frames, &ones, &modulation[DIM..], &modulation[..DIM])?;
-        let mel = self.proj_out.forward(pool, &x, frames)?;
+        let mel = self.execution.linear(&self.proj_out, pool, &x, frames)?;
         let mel = transpose(&mel, frames, MEL);
         validate_mel(&mel, frames, "flow velocity")?;
         Ok(mel)
@@ -431,23 +461,24 @@ impl<'a> Block<'a> {
         inv_freq: &[f32],
         streaming: bool,
         pool: &ComputePool,
+        execution: &Execution,
     ) -> Result<Vec<f32>, String> {
-        let modulation = self.modulation.forward(pool, time, 1)?;
+        let modulation = execution.linear(&self.modulation, pool, time, 1)?;
         let m: Vec<&[f32]> = modulation.chunks_exact(DIM).collect();
         let norm = modulated_norm(&x, frames, ones, m[0], m[1])?;
-        let mut q = self.q.forward(pool, &norm, frames)?;
-        let mut k = self.k.forward(pool, &norm, frames)?;
-        let v = self.v.forward(pool, &norm, frames)?;
+        let mut q = execution.linear(&self.q, pool, &norm, frames)?;
+        let mut k = execution.linear(&self.k, pool, &norm, frames)?;
+        let v = execution.linear(&self.v, pool, &norm, frames)?;
         // The pinned implementation rotates before the head reshape: only head zero.
         rotate_prefix(&mut q, DIM, inv_freq);
         rotate_prefix(&mut k, DIM, inv_freq);
-        let attention = chunk_attention(&q, &k, &v, frames, streaming)?;
-        let attention = self.out.forward(pool, &attention, frames)?;
+        let attention = chunk_attention(&q, &k, &v, frames, streaming, execution)?;
+        let attention = execution.linear(&self.out, pool, &attention, frames)?;
         gated_residual(&mut x, &attention, m[2]);
         let norm = modulated_norm(&x, frames, ones, m[3], m[4])?;
-        let mut ff = self.ff1.forward(pool, &norm, frames)?;
+        let mut ff = execution.linear(&self.ff1, pool, &norm, frames)?;
         nn::gelu_inplace(&mut ff);
-        let ff = self.ff2.forward(pool, &ff, frames)?;
+        let ff = execution.linear(&self.ff2, pool, &ff, frames)?;
         gated_residual(&mut x, &ff, m[5]);
         Ok(x)
     }
@@ -459,12 +490,22 @@ fn chunk_attention(
     v: &[f32],
     frames: usize,
     streaming: bool,
+    execution: &Execution,
 ) -> Result<Vec<f32>, String> {
     let mut output = Vec::with_capacity(q.len());
     let chunk = if streaming { 50 } else { frames };
     for start in (0..frames).step_by(chunk) {
         let end = (start + chunk).min(frames);
         // All left chunks and the complete current chunk are visible, without a token-causal mask.
+        if let Some(values) = execution.attention(
+            &q[start * DIM..end * DIM],
+            &k[..end * DIM],
+            &v[..end * DIM],
+            16,
+        )? {
+            output.extend(values);
+            continue;
+        }
         output.extend(nn::attention_scalar(
             &q[start * DIM..end * DIM],
             &k[..end * DIM],
@@ -584,6 +625,8 @@ fn load_linear<'a>(
             n_in,
             n_out,
         )
+        // F16 input rounding amplifies device reduction differences across the Euler steps.
+        .map(Linear::with_f32_activations)
     }
 }
 
@@ -643,7 +686,7 @@ impl Conv {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn forward(
+    pub(super) fn forward(
         &self,
         input: &[f32],
         frames: usize,
@@ -652,8 +695,54 @@ impl Conv {
         stride: usize,
         dilation: usize,
         pool: &ComputePool,
+        execution: &Execution,
     ) -> Result<(Vec<f32>, usize), String> {
         let (padded, padded_frames) = pad_channels(input, self.input, frames, left_pad, right_pad)?;
+        #[cfg(feature = "vulkan")]
+        if let Some(output) = execution.run("sophon_convolution", |gpu| {
+            if stride == 0 || dilation == 0 {
+                return Err("invalid convolution stride/dilation".into());
+            }
+            let receptive = (self.kernel - 1)
+                .checked_mul(dilation)
+                .and_then(|n| n.checked_add(1))
+                .ok_or("convolution size overflow")?;
+            let rows = padded_frames
+                .checked_sub(receptive)
+                .ok_or("convolution kernel exceeds input")?
+                / stride
+                + 1;
+            let count = rows
+                .checked_mul(self.output)
+                .ok_or("convolution output overflow")?;
+            let parameters = [
+                self.input,
+                self.output,
+                padded_frames,
+                rows,
+                self.kernel,
+                stride,
+                dilation,
+                self.groups,
+            ]
+            .map(u32::try_from)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "convolution dimensions overflow")?;
+            gpu.custom(
+                0,
+                &[&padded, &self.weight, &self.bias],
+                count,
+                &parameters,
+                count.div_ceil(64),
+            )
+        })? {
+            let rows = output.len() / self.output;
+            return Ok((output, rows));
+        }
+        #[cfg(not(feature = "vulkan"))]
+        let _ = execution;
+        let _scope = crate::compute::ComputePolicy::Cpu.cpu_scope();
         let (output, shape) = nn::conv1d(
             pool,
             &padded,
@@ -852,5 +941,106 @@ mod tests {
         }
         assert!(prompt_condition(&prompt, 1).is_err());
         assert!(prompt_condition(&[0.0], 5).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod device_tests {
+    use super::*;
+    use crate::{compute::ComputePolicy, models::sophon_realtime::tests::assert_close};
+
+    #[test]
+    #[ignore = "requires a hardware Vulkan device"]
+    fn vulkan_grouped_convolution_preserves_padding_stride_and_dilation() {
+        let gpu = Execution::new(ComputePolicy::Vulkan).unwrap();
+        let pool = ComputePool::new(2);
+        for groups in [1, 16] {
+            let conv = Conv {
+                input: 32,
+                output: 48,
+                kernel: 3,
+                groups,
+                weight: (0..48 * 32 / groups * 3)
+                    .map(|n| ((n * 13 % 31) as f32 - 15.0) / 128.0)
+                    .collect(),
+                bias: (0..48).map(|n| n as f32 / 53.0).collect(),
+            };
+            let input: Vec<_> = (0..32 * 11)
+                .map(|n| ((n * 17 % 43) as f32 - 21.0) / 32.0)
+                .collect();
+            for (left, right, stride, dilation) in [(2, 0, 1, 1), (0, 2, 2, 1), (4, 0, 1, 2)] {
+                let cpu = conv
+                    .forward(
+                        &input,
+                        11,
+                        left,
+                        right,
+                        stride,
+                        dilation,
+                        &pool,
+                        &Execution::cpu(),
+                    )
+                    .unwrap();
+                let actual = conv
+                    .forward(&input, 11, left, right, stride, dilation, &pool, &gpu)
+                    .unwrap();
+                assert_eq!(actual.1, cpu.1);
+                assert_close(&actual.0, &cpu.0);
+            }
+        }
+
+        // Channel-local reductions must retain the small result of each cancelling kernel.
+        let conv = Conv {
+            input: 32,
+            output: 1,
+            kernel: 3,
+            groups: 1,
+            weight: [1e8, -1e8, 1.0].repeat(32),
+            bias: vec![0.0],
+        };
+        let input = vec![1.0; 32 * 3];
+        let expected = conv
+            .forward(&input, 3, 0, 0, 1, 1, &pool, &Execution::cpu())
+            .unwrap();
+        assert_eq!(expected.0, vec![32.0]);
+        let actual = conv.forward(&input, 3, 0, 0, 1, 1, &pool, &gpu).unwrap();
+        assert_close(&actual.0, &expected.0);
+
+        let auto = Execution::new(ComputePolicy::Auto).unwrap();
+        assert!(auto
+            .run("test", |_| Err("injected device failure".into()))
+            .unwrap()
+            .is_none());
+        let _scope = ComputePolicy::Auto.enter_legacy_scope();
+        let context = ComputePolicy::Auto.context().unwrap().unwrap();
+        let before = context.submission_count();
+        let fallback = conv.forward(&input, 3, 0, 0, 1, 1, &pool, &auto).unwrap();
+        assert_eq!(fallback.0, expected.0);
+        assert_eq!(context.submission_count(), before);
+    }
+
+    #[test]
+    #[ignore = "requires a hardware Vulkan device"]
+    fn vulkan_flow_attention_preserves_complete_current_chunk_and_left_context() {
+        let gpu = Execution::new(ComputePolicy::Vulkan).unwrap();
+        let frames = 53;
+        let values = |offset| {
+            (0..frames * DIM)
+                .map(|n| (((n + offset) * 17 % 127) as f32 - 63.0) / 64.0)
+                .collect::<Vec<_>>()
+        };
+        let (q, k, v) = (values(0), values(19), values(51));
+        for streaming in [false, true] {
+            let expected =
+                chunk_attention(&q, &k, &v, frames, streaming, &Execution::cpu()).unwrap();
+            let actual = chunk_attention(&q, &k, &v, frames, streaming, &gpu).unwrap();
+            assert_close(&actual, &expected);
+        }
+        let mut changed = v.clone();
+        changed[50 * DIM..].fill(100.0);
+        let original = chunk_attention(&q, &k, &v, frames, true, &gpu).unwrap();
+        let changed = chunk_attention(&q, &k, &changed, frames, true, &gpu).unwrap();
+        assert_eq!(&changed[..50 * DIM], &original[..50 * DIM]);
+        assert_ne!(&changed[50 * DIM..], &original[50 * DIM..]);
     }
 }

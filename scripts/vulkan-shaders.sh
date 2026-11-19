@@ -85,10 +85,11 @@ shader_names=(
     pivo_conv1d
     pivo_swiglu
     pivo_silu
+    sophon_audio
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
-for tool in glslangValidator spirv-dis spirv-val; do
+for tool in glslangValidator spirv-dis spirv-val spirv-opt; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "missing required tool: $tool" >&2
         exit 1
@@ -97,7 +98,11 @@ done
 
 compile_shader() {
     glslangValidator -V --target-env vulkan1.1 \
-        "$root_dir/shaders/glsl/$1.comp" -o "$2"
+        "$root_dir/shaders/glsl/$1.comp" -o "$2" || return
+    if [[ "$1" == "sophon_audio" ]]; then
+        # Keep the validated performance-optimized module reproducible in CI.
+        spirv-opt -O --strip-debug "$2" -o "$2"
+    fi
 }
 
 # Compile `name` into `out`, keeping the already checked-in SPIR-V when the

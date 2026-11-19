@@ -47,9 +47,7 @@ impl SpeechEngine {
         if threads == 0 {
             return Err("speech requires at least one thread".into());
         }
-        if compute == ComputePolicy::Vulkan {
-            return Err("strict Vulkan speech awaits shared causal convolution and HiFT spectral device kernels".into());
-        }
+        compute.check_build().map_err(|e| e.to_string())?;
         super::require_string(
             code2wav.as_ref(),
             "general.architecture",
@@ -149,8 +147,8 @@ impl SpeechEngine {
             source: self.code2wav.as_ref(),
             prefix: "hift",
         };
-        let flow = Flow::load(&flow_source)?;
-        let hift = HiFT::load(&hift_source)?;
+        let flow = Flow::load_with_compute(&flow_source, self.compute)?;
+        let hift = HiFT::load_with_compute(&hift_source, self.compute)?;
         let noise = Noise::new(request.seed, request.max_tokens)?;
         let mut tokens = Vec::new();
         let mut waveform = Vec::new();

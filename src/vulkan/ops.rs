@@ -733,6 +733,8 @@ pub(crate) enum GpuMatmulMode {
     RoundedBf16,
     /// Match dot_f16_f16_bytes / dot_bf16_f32 reduction.
     Dot,
+    /// F16 storage with F32 activations and accumulation, without input rounding.
+    F32Activation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -750,7 +752,9 @@ impl From<GpuWeightFormat> for GpuMatmulSpec {
 impl GpuMatmulSpec {
     pub(crate) fn prepared(weight: &crate::ops::kernel::Weight<'_>) -> Result<Self, VulkanError> {
         let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
-        Ok(format.with_mode(if weight.kernel.rounds_bf16_input() {
+        Ok(format.with_mode(if weight.kernel.keeps_f32_activation() {
+            GpuMatmulMode::F32Activation
+        } else if weight.kernel.rounds_bf16_input() {
             GpuMatmulMode::RoundedBf16
         } else {
             GpuMatmulMode::Prepared
@@ -759,7 +763,10 @@ impl GpuMatmulSpec {
     fn validate(self) -> Result<(), VulkanError> {
         match (self.format, self.mode) {
             (_, GpuMatmulMode::Prepared)
-            | (GpuWeightFormat::F16, GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot)
+            | (
+                GpuWeightFormat::F16,
+                GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot | GpuMatmulMode::F32Activation,
+            )
             | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16) => Ok(()),
             _ => Err(VulkanError::UnsupportedShape(
                 "unsupported weight storage/numerical mode combination".into(),
@@ -767,7 +774,11 @@ impl GpuMatmulSpec {
         }
     }
     pub(crate) fn uses_tiled_f16(self) -> bool {
-        self.format == GpuWeightFormat::F16 && self.mode != GpuMatmulMode::Dot
+        self.format == GpuWeightFormat::F16
+            && matches!(
+                self.mode,
+                GpuMatmulMode::Prepared | GpuMatmulMode::RoundedInputF32
+            )
     }
 }
 
@@ -2986,6 +2997,11 @@ impl PivoRuntime {
         window: usize,
         causal: bool,
     ) -> Result<(), VulkanError> {
+        if !self.ops.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo attention requires shaderFloat64".into(),
+            ));
+        }
         let q_stride = q_heads * head_dim;
         let kv_stride = kv_heads * head_dim;
         let push = [
@@ -3756,10 +3772,10 @@ pub(crate) fn build_operator_pipelines(
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
-                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE | PIVO_ATTENTION
             ) && !context.shader_float64
             {
-                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
+                // Optional FP64 kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
                 ATTENTION_SCORES_SHADER
             } else {
@@ -8039,6 +8055,9 @@ fn matmul_rows_push(
         }
         push[1] = 8;
     }
+    if format == GpuWeightFormat::F16 && bindings.weight_mode == GpuMatmulMode::F32Activation {
+        push[1] = 4;
+    }
     if format == GpuWeightFormat::BF16 && bindings.weight_mode != GpuMatmulMode::RoundedBf16 {
         push[1] = if crate::ops::has_avx2_fma() && n_in >= 8 {
             8
@@ -8158,7 +8177,7 @@ fn matmul_rows_push(
         // 32 for the parity tree, 16 for NEON, 8 for AVX2/F16C, 1 for scalar.
         let rows_per_group = match push[1] {
             1 => 2,
-            2 => 4,
+            2 | 4 => 4,
             8 => 8,
             _ => 64,
         };
@@ -10263,7 +10282,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
             expected[index].d.to_bits(),
         ));
     }
-    println!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
+    eprintln!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
     Ok(())
 }
 
@@ -10350,7 +10369,7 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
             expected_scales[index].to_bits()
         ));
     }
-    println!(
+    eprintln!(
         "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
         COUNT / 32
     );
@@ -10484,7 +10503,7 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
             expected.to_bits()
         ));
     }
-    println!("operator=attention_value_reduction exact=true");
+    eprintln!("operator=attention_value_reduction exact=true");
     Ok(())
 }
 
@@ -10765,7 +10784,7 @@ fn check_close(
             first_bad = Some((index, gpu, cpu, absolute, relative));
         }
     }
-    println!(
+    eprintln!(
         "operator={name} max_abs={max_absolute:.3e} max_rel={max_relative:.3e} first_bad={:?}",
         first_bad.map(|value| value.0)
     );

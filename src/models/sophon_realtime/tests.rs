@@ -2,6 +2,41 @@ use super::*;
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo};
 use std::collections::HashMap;
 
+pub(super) fn compute_policy() -> crate::compute::ComputePolicy {
+    match std::env::var("RMI_SOPHON_COMPUTE")
+        .as_deref()
+        .unwrap_or("cpu")
+    {
+        "cpu" => crate::compute::ComputePolicy::Cpu,
+        "auto" => crate::compute::ComputePolicy::Auto,
+        "vulkan" => crate::compute::ComputePolicy::Vulkan,
+        other => panic!("invalid RMI_SOPHON_COMPUTE={other}"),
+    }
+}
+
+#[cfg(feature = "vulkan")]
+pub(super) fn assert_close(actual: &[f32], expected: &[f32]) {
+    assert_eq!(actual.len(), expected.len());
+    let mut error = 0.0f64;
+    let mut norm = 0.0f64;
+    let mut actual_norm = 0.0f64;
+    let mut dot = 0.0f64;
+    for (&a, &b) in actual.iter().zip(expected) {
+        assert!(a.is_finite() && b.is_finite());
+        let (a, b) = (f64::from(a), f64::from(b));
+        error += (a - b).powi(2);
+        norm += b * b;
+        actual_norm += a * a;
+        dot += a * b;
+    }
+    let relative_rmse = (error / norm.max(1e-30)).sqrt();
+    let cosine = dot / (norm * actual_norm).sqrt().max(1e-30);
+    assert!(
+        relative_rmse <= 0.001 && cosine >= 0.999999,
+        "rRMSE={relative_rmse}, cosine={cosine}"
+    );
+}
+
 #[test]
 #[ignore = "requires remote pinned flow/HiFT GGUFs and independent Oracle input fixture"]
 fn real_code2wav_checkpoints() {
@@ -26,11 +61,12 @@ fn real_code2wav_checkpoints() {
             .collect()
     };
     let pool = crate::core::thread_pool::ComputePool::new(4);
-    let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+    let compute = compute_policy();
+    let _scope = compute.enter_legacy_scope();
     let flow_source =
         crate::core::loader::GGUFLoader::from_file(&std::env::var("RMI_SOPHON_FLOW").unwrap())
             .unwrap();
-    let flow = flow::Flow::load(&flow_source).unwrap();
+    let flow = flow::Flow::load_with_compute(&flow_source, compute).unwrap();
     let tokens = ids("tokens");
     let prompt_tokens = ids("prompt_tokens");
     let prompt_mel = floats("prompt_mel");
@@ -64,7 +100,7 @@ fn real_code2wav_checkpoints() {
     let hift_source =
         crate::core::loader::GGUFLoader::from_file(&std::env::var("RMI_SOPHON_HIFT").unwrap())
             .unwrap();
-    let hift = hift::HiFT::load(&hift_source).unwrap();
+    let hift = hift::HiFT::load_with_compute(&hift_source, compute).unwrap();
     let hift_finalize = input["hift_finalize"].as_bool().unwrap_or(true);
     let mel_frames = input["mel_frames"].as_u64().unwrap() as usize;
     assert!(hift

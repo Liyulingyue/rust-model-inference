@@ -1,0 +1,88 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) buffer Arena { float data[]; };
+layout(push_constant) uniform Params {
+    uint op,a,b,c,out_offset,count;
+    uint p0,p1,p2,p3,p4,p5,p6,p7,p8,grid;
+} pc;
+shared float dots[64];
+shared float maximum, denominator, old_scale, new_scale;
+
+void main() {
+    uint group=gl_WorkGroupID.x+gl_WorkGroupID.y*pc.grid;
+    uint lane=gl_LocalInvocationID.x;
+    if(pc.op!=1 && group>=(pc.count-1)/64+1) return;
+    uint i=group*64+lane;
+    if(pc.op==1) {
+        if(group>=pc.p0*pc.p2) return;
+        uint query=group/pc.p2, head=group%pc.p2, width=pc.p2*64;
+        float value=0.0;
+        if(lane==0) { maximum=-3.402823466e38; denominator=0.0; }
+        barrier();
+        for(uint key=0;key<pc.p1;key++) {
+            dots[lane]=data[pc.a+query*width+head*64+lane]*data[pc.b+key*width+head*64+lane];
+            barrier();
+            for(uint stride=32;stride>0;stride>>=1) { if(lane<stride) dots[lane]+=dots[lane+stride]; barrier(); }
+            if(lane==0) {
+                float score=dots[0]*0.125, next_max=max(maximum,score);
+                old_scale=exp(maximum-next_max); new_scale=exp(score-next_max);
+                denominator=denominator*old_scale+new_scale; maximum=next_max;
+            }
+            barrier();
+            value=value*old_scale+data[pc.c+key*width+head*64+lane]*new_scale;
+            barrier();
+        }
+        data[pc.out_offset+query*width+head*64+lane]=value/denominator;
+        return;
+    }
+    if(i>=pc.count) return;
+    if(pc.op==0) {
+        uint channel=i/pc.p3, time=i%pc.p3;
+        uint in_group=pc.p0/pc.p7, base=(channel/(pc.p1/pc.p7))*in_group;
+        precise float value=data[pc.c+channel];
+        // Reduce contiguous kernels per channel instead of one long, cancellation-prone sum.
+        for(uint c=0;c<in_group;c++) {
+            precise float partial=pc.p6==1 ? 0.0:value;
+            for(uint tap=0;tap<pc.p4;tap++)
+                partial+=data[pc.a+(base+c)*pc.p2+time*pc.p5+tap*pc.p6]*data[pc.b+(channel*in_group+c)*pc.p4+tap];
+            value=pc.p6==1 ? value+partial:partial;
+        }
+        data[pc.out_offset+i]=value;
+    } else if(pc.op==2) {
+        uint bins=pc.p0/2+1, bin=(i/pc.p1)%bins, time=i%pc.p1;
+        precise float re=0.0, im=0.0, re_error=0.0, im_error=0.0;
+        for(uint t=0;t<pc.p0;t++) {
+            float sample_value=data[pc.a+time*pc.p2+t]*data[pc.b+t];
+            uint twiddle=(bin*t)%pc.p0;
+            float r=sample_value*data[pc.b+pc.p0+twiddle]-re_error;
+            float next_re=re+r; re_error=(next_re-re)-r; re=next_re;
+            float s=-sample_value*data[pc.b+pc.p0*2+twiddle]-im_error;
+            float next_im=im+s; im_error=(next_im-im)-s; im=next_im;
+        }
+        data[pc.out_offset+i]=pc.p3!=0 ? re*re+im*im : (i<bins*pc.p1 ? re:im);
+    } else if(pc.op==3) {
+        // Each sample_value gathers its overlapping frames; no floating-point atomics.
+        uint sample_value=i+8, first=sample_value>=15 ? (sample_value-15+3)/4 : 0;
+        uint last=min(sample_value/4,pc.p0-1);
+        precise float sum=0.0, envelope=0.0;
+        for(uint frame=first;frame<=last;frame++) {
+            uint n=sample_value-frame*4;
+            precise float value=0.0;
+            for(uint k=0;k<9;k++) {
+                float mag=min(exp(data[pc.a+k*pc.p0+frame]),100.0);
+                float phase=sin(data[pc.a+(k+9)*pc.p0+frame]);
+                uint twiddle=(k*n)%16;
+                float term=mag*(cos(phase)*data[pc.b+16+twiddle]-sin(phase)*data[pc.b+32+twiddle]);
+                value+=term*((k==0||k==8)?1.0:2.0);
+            }
+            float window=data[pc.b+n];
+            sum+=value*(window/16.0); envelope+=window*window;
+        }
+        data[pc.out_offset+i]=sum/envelope;
+    } else if(pc.op==4) {
+        uint mel=i/pc.p0, frame=i%pc.p0;
+        precise float sum=0.0;
+        for(uint bin=0;bin<201;bin++) sum+=data[pc.a+bin*pc.p0+frame]*data[pc.b+mel*201+bin];
+        data[pc.out_offset+i]=log(max(sum,1e-10))/log(10.0);
+    }
+}

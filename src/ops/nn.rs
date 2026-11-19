@@ -124,6 +124,11 @@ impl<'a> Linear<'a> {
         self.weight.n_out
     }
 
+    pub(crate) fn with_f32_activations(mut self) -> Self {
+        self.weight.kernel.use_f32_activation();
+        self
+    }
+
     pub(crate) fn binding(&self) -> LinearBinding<'_, 'a> {
         LinearBinding {
             weight: &self.weight,

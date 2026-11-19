@@ -1211,3 +1211,58 @@ fn hidden_sequence_preserves_every_f32_kv_row() {
         })
         .is_err());
 }
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires hardware Vulkan; run with RUST_GPU_MIN_OUTPUTS=0"]
+fn projection_session_preserves_qkv_bias_and_f32_kv_across_decode() {
+    use crate::compute::ComputePolicy;
+    assert_eq!(crate::ops::kernel::vulkan::min_gpu_matmul_outputs(), 0);
+    let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+    let mut model = deterministic_session_model(16);
+    model.config.architecture = "qwen2".into();
+    model.config.has_qkv_bias = true;
+    let layer = &mut model.layers[0];
+    layer.q_bias = Some(vec![0.01; 32]);
+    layer.k_bias = Some(vec![-0.02; 32]);
+    layer.v_bias = Some(vec![0.03; 32]);
+    let mut cpu = Qwen3Session::new_with_projection_compute(
+        &model,
+        16,
+        KvFormat::F32,
+        crate::KvLifecycle::Ephemeral,
+        ComputePolicy::Cpu,
+    )
+    .unwrap();
+    for policy in [ComputePolicy::Auto, ComputePolicy::Vulkan] {
+        cpu.reset_kv();
+        let mut gpu = Qwen3Session::new_with_projection_compute(
+            &model,
+            16,
+            KvFormat::F32,
+            crate::KvLifecycle::Ephemeral,
+            policy,
+        )
+        .unwrap();
+        for ids in [&[0, 1, 2][..], &[3][..], &[4][..]] {
+            let base = cpu.kv_state().seq_len;
+            let positions: Vec<_> = (base..base + ids.len()).map(|p| [p, p, p, 0]).collect();
+            let input = || Qwen3Input {
+                token_ids: ids,
+                positions: &positions,
+                embeddings: None,
+                deepstack_embeddings: None,
+            };
+            let expected = cpu.forward_logits(input(), 2).unwrap().0;
+            let before = context.submission_count();
+            let actual = gpu.forward_logits(input(), 2).unwrap().0;
+            assert!(context.submission_count() > before);
+            assert!(actual
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 1e-5));
+            assert!(matches!(gpu.kv_state().cache, KvCache::F32(_)));
+            assert_eq!(gpu.kv_state().seq_len, cpu.kv_state().seq_len);
+        }
+    }
+}

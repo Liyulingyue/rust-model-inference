@@ -15,6 +15,9 @@ pub const ARCH: &str = "sophon_realtime";
 pub const SOURCE_REVISION: &str = "990d6a74bbf15c1765a6f7736fa839f423fd5b59";
 
 pub mod audio;
+#[cfg(feature = "vulkan")]
+mod device;
+mod execution;
 pub mod flow;
 pub mod hift;
 pub mod speech;

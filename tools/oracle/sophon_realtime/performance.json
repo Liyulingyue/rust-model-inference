@@ -366,5 +366,343 @@
     ],
     "existing_path": "Qwen3-VL resident decoder executes on gfx1100: 714 submissions, 707 static uploads. The width cap is fixed; reviewed logit0 abs error 0.054603577 exceeds the existing atol=rtol=0.002 contract."
   },
-  "release_capacity_benchmark": "not run; release-fast numbers must not be presented as release capacity"
+  "release_capacity_benchmark": "not run; release-fast numbers must not be presented as release capacity",
+  "m3_max_vulkan_2026_11_19": {
+    "host": "Apple M3 Max 64 GiB / macOS / MoltenVK",
+    "profile": "release-fast",
+    "threads": 4,
+    "phase": "whole process wall clock, includes Python/Rust model initialization; same matching weights and fixture; not isolated throughput",
+    "conditions": "Concurrent model transfers, compilation and other validation; numbers are references only, no deployment speedup claim. Short Flow and HiFT use independent mel input, not complete synthesis.",
+    "component_runs": [
+      {
+        "component": "code2wav",
+        "compute": "cpu",
+        "rust_exit": 0,
+        "seconds": 17.07779570890125,
+        "trace": "target/sophon-vulkan/code2wav-cpu-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 6.6687870000023395
+      },
+      {
+        "component": "code2wav",
+        "compute": "vulkan",
+        "rust_exit": 0,
+        "seconds": 7.543160500004888,
+        "trace": "target/sophon-vulkan/code2wav-vulkan-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 8.133201124961488
+      },
+      {
+        "component": "code2wav",
+        "compute": "auto",
+        "rust_exit": 0,
+        "seconds": 6.783973249956034,
+        "trace": "target/sophon-vulkan/code2wav-auto-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 5.780462375027128
+      },
+      {
+        "component": "audio",
+        "compute": "cpu",
+        "rust_exit": 0,
+        "seconds": 2.795402375049889,
+        "trace": "target/sophon-vulkan/audio-cpu-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 6.2710354999871925
+      },
+      {
+        "component": "audio",
+        "compute": "vulkan",
+        "rust_exit": 0,
+        "seconds": 2.402144332998432,
+        "trace": "target/sophon-vulkan/audio-vulkan-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 7.922234792029485
+      },
+      {
+        "component": "audio",
+        "compute": "auto",
+        "rust_exit": 0,
+        "seconds": 2.6034277089638636,
+        "trace": "target/sophon-vulkan/audio-auto-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 6.411360708996654
+      },
+      {
+        "component": "talker",
+        "compute": "cpu",
+        "rust_exit": 0,
+        "seconds": 12.925783167011105,
+        "trace": "target/sophon-vulkan/talker-cpu-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 10.879170542000793
+      },
+      {
+        "component": "talker",
+        "compute": "vulkan",
+        "rust_exit": 0,
+        "seconds": 10.725429208017886,
+        "trace": "target/sophon-vulkan/talker-vulkan-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 18.761689624981955
+      },
+      {
+        "component": "talker",
+        "compute": "auto",
+        "rust_exit": 0,
+        "seconds": 16.19111187499948,
+        "trace": "target/sophon-vulkan/talker-auto-f32-benchmark.jsonl",
+        "oracle_exit": 0,
+        "oracle_seconds": 13.389356500003487
+      }
+    ],
+    "independent_reference": "Pinned official PyTorch CPU execution in component_runs; no full Talker-to-waveform official benchmark measured.",
+    "evidence": "vulkan-results.json",
+    "speech_cli_seconds_before_convolution_review": [
+      {
+        "precision": "F32",
+        "policy": "cpu",
+        "seconds": 78.78410962503403,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": true
+      },
+      {
+        "precision": "F32",
+        "policy": "vulkan",
+        "seconds": 11.735911416937597,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": false
+      },
+      {
+        "precision": "F32",
+        "policy": "auto",
+        "seconds": 12.111720041953959,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": false
+      },
+      {
+        "precision": "F16",
+        "policy": "cpu",
+        "seconds": 30.0843345830217,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": true
+      },
+      {
+        "precision": "F16",
+        "policy": "vulkan",
+        "seconds": 7.630614125053398,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": false
+      },
+      {
+        "precision": "F16",
+        "policy": "auto",
+        "seconds": 7.468954415991902,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": false
+      },
+      {
+        "precision": "BF16",
+        "policy": "cpu",
+        "seconds": 29.86141850007698,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": true
+      },
+      {
+        "precision": "BF16",
+        "policy": "vulkan",
+        "seconds": 12.56790720904246,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": false
+      },
+      {
+        "precision": "BF16",
+        "policy": "auto",
+        "seconds": 11.11050545796752,
+        "tokens": 18,
+        "samples": 17280,
+        "nonstream_cpu_device_gate_pass": false
+      }
+    ],
+    "speech_after_convolution_review": {
+      "binary_sha256": {
+        "convfix-cli": "bc174e53fa725c3d77bd5a7d4039baa1ad7223afbf72a08768dbb20b21149fd2",
+        "convfix-server": "bf07148788c043dd15b4aedd57ec08652cea1821bbf5ce7fc841409039e39050"
+      },
+      "runs": [
+        {
+          "precision": "F32",
+          "policy": "vulkan",
+          "cli_seconds": 19.95814933301881,
+          "http_wav_seconds": 18.244577916921116,
+          "http_pcm_seconds": 15.157669208012521,
+          "http_stream_seconds": 22.182437042007223,
+          "speech_tokens": 18,
+          "samples": 17280,
+          "nonstream_cpu_device_gate_pass": false,
+          "stream_cpu_device_gate_pass": true
+        },
+        {
+          "precision": "F32",
+          "policy": "auto",
+          "cli_seconds": 16.169147082953714,
+          "http_wav_seconds": 15.463840582990088,
+          "http_pcm_seconds": 14.984879749943502,
+          "http_stream_seconds": 21.613778042024933,
+          "speech_tokens": 18,
+          "samples": 17280,
+          "nonstream_cpu_device_gate_pass": false,
+          "stream_cpu_device_gate_pass": true
+        },
+        {
+          "precision": "F16",
+          "policy": "vulkan",
+          "cli_seconds": 16.672325292020105,
+          "http_wav_seconds": 14.176212582970038,
+          "http_pcm_seconds": 13.051067041000351,
+          "http_stream_seconds": 17.039255499956198,
+          "speech_tokens": 18,
+          "samples": 17280,
+          "nonstream_cpu_device_gate_pass": false,
+          "stream_cpu_device_gate_pass": true
+        },
+        {
+          "precision": "F16",
+          "policy": "auto",
+          "cli_seconds": 9.801812540972605,
+          "http_wav_seconds": 10.405256542027928,
+          "http_pcm_seconds": 12.625764833996072,
+          "http_stream_seconds": 22.64523012493737,
+          "speech_tokens": 18,
+          "samples": 17280,
+          "nonstream_cpu_device_gate_pass": false,
+          "stream_cpu_device_gate_pass": true
+        },
+        {
+          "precision": "BF16",
+          "policy": "vulkan",
+          "cli_seconds": 27.236571333021857,
+          "http_wav_seconds": 39.31832237506751,
+          "http_pcm_seconds": 18.79752958402969,
+          "http_stream_seconds": 31.031329415971413,
+          "speech_tokens": 18,
+          "samples": 17280,
+          "nonstream_cpu_device_gate_pass": true,
+          "stream_cpu_device_gate_pass": true
+        },
+        {
+          "precision": "BF16",
+          "policy": "auto",
+          "cli_seconds": 17.653319916920736,
+          "http_wav_seconds": 18.977077916031703,
+          "http_pcm_seconds": 19.738013416994363,
+          "http_stream_seconds": 33.07594916690141,
+          "speech_tokens": 18,
+          "samples": 17280,
+          "nonstream_cpu_device_gate_pass": true,
+          "stream_cpu_device_gate_pass": true
+        }
+      ],
+      "condition": "Six post-convolution-review Auto/Vulkan runs; CPU reference remains the protected reviewed CPU run. Functional/timing evidence is distinct from failed complete waveform gates. Concurrent validation and cold uploads included; no throughput or speedup claim."
+    },
+    "thinker_q4_audio_entrypoints": {
+      "component_formats": {
+        "thinker": "Q4_0",
+        "audio": "F32"
+      },
+      "kv": "F16",
+      "binary_sha256": {
+        "convfix-cli": "bc174e53fa725c3d77bd5a7d4039baa1ad7223afbf72a08768dbb20b21149fd2",
+        "convfix-server": "bf07148788c043dd15b4aedd57ec08652cea1821bbf5ce7fc841409039e39050"
+      },
+      "runs": [
+        {
+          "label": "thinker-q4-cpu-audio",
+          "kind": "cli",
+          "exit": 0,
+          "seconds": 41.91506529203616
+        },
+        {
+          "label": "thinker-q4-cpu-audio-jev",
+          "kind": "cli",
+          "exit": 0,
+          "seconds": 207.33685845904984
+        },
+        {
+          "label": "thinker-q4-cpu-http",
+          "kind": "http_chat",
+          "stream": false,
+          "status": 200,
+          "seconds": 37.66953549999744
+        },
+        {
+          "label": "thinker-q4-cpu-http",
+          "kind": "http_chat",
+          "stream": true,
+          "status": 200,
+          "seconds": 37.936991249909624
+        },
+        {
+          "label": "thinker-q4-cpu-http",
+          "kind": "http_jev",
+          "status": 200,
+          "seconds": 166.80785291688517
+        },
+        {
+          "label": "thinker-q4-auto-text",
+          "kind": "cli",
+          "exit": 0,
+          "seconds": 75.43692100001499
+        },
+        {
+          "label": "thinker-q4-auto-audio",
+          "kind": "cli",
+          "exit": 0,
+          "seconds": 90.76972904219292
+        },
+        {
+          "label": "thinker-q4-auto-audio-jev",
+          "kind": "cli",
+          "exit": 0,
+          "seconds": 422.37977366591804
+        },
+        {
+          "label": "thinker-q4-auto-http",
+          "kind": "http_chat",
+          "stream": false,
+          "status": 200,
+          "seconds": 145.88580787507817
+        },
+        {
+          "label": "thinker-q4-auto-http",
+          "kind": "http_chat",
+          "stream": true,
+          "status": 200,
+          "seconds": 96.7926683339756
+        },
+        {
+          "label": "thinker-q4-auto-http",
+          "kind": "http_jev",
+          "status": 200,
+          "seconds": 421.41837058309466
+        }
+      ],
+      "condition": "Includes cold device upload and failed resident contract CPU replay; not device numerical acceptance or generation throughput. The original Auto CLI diagnostics corrupted stdout; final JSON retest has a separate artifact."
+    },
+    "final_auto_audio_jev_json_retest": {
+      "seconds": 412.3054953329265,
+      "binary_sha256": "44942deaa2db88726a843f1ae5d19563dca8ea61552c5ddd290e4778a49da64a",
+      "pass_gate": true,
+      "max_probability_difference_from_pre_fix": 0.0,
+      "condition": "Final manifestfix CLI, same 250ms tone and Q4_0-thinker/F32-audio/F16-KV; runtime diagnostics moved to stderr; concurrent checks, no capacity claim."
+    }
+  }
 }

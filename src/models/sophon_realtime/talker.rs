@@ -349,7 +349,7 @@ impl Talker {
             .and_then(|n| n.checked_add(max_speech_tokens * 2 + 8))
             .filter(|&n| n <= self.decoder.config.n_ctx)
             .ok_or("talker context budget exceeded")?;
-        let mut session = Qwen3Session::new_with_compute(
+        let mut session = Qwen3Session::new_with_projection_compute(
             &self.decoder,
             capacity,
             KvFormat::F32,
@@ -635,7 +635,14 @@ mod tests {
         let text = std::env::var("RMI_SOPHON_TEXT")
             .unwrap_or_else(|_| "你好，欢迎使用语音助手。[breath]".into());
         let tokens = model
-            .generate_tokens(&text, 128, 0.0, 0, ComputePolicy::Cpu, |_| true)
+            .generate_tokens(
+                &text,
+                128,
+                0.0,
+                0,
+                super::super::tests::compute_policy(),
+                |_| true,
+            )
             .unwrap();
         assert!(!tokens.tokens.is_empty());
         assert!(tokens.tokens.iter().all(|&v| v < SPEECH));

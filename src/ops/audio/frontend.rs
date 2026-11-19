@@ -256,7 +256,7 @@ fn slaney_mel_hz(mel: f64) -> f64 {
     }
 }
 
-fn mel_filters() -> Result<&'static [f32], AsrAudioError> {
+pub(crate) fn mel_filters() -> Result<&'static [f32], AsrAudioError> {
     static FILTERS: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
     if let Some(filters) = FILTERS.get() {
         return Ok(filters);

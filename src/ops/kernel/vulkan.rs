@@ -1828,6 +1828,10 @@ impl Kernel for VulkanKernel<'_> {
         self.inner.use_f32_activation();
     }
 
+    fn keeps_f32_activation(&self) -> bool {
+        self.inner.keeps_f32_activation()
+    }
+
     fn supports_f16_strict(&self) -> bool {
         self.inner.supports_f16_strict()
     }
