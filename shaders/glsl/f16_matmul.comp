@@ -58,12 +58,12 @@ void main() {
     uint token_row = gl_WorkGroupID.z / pc.group_count;
     uint slot = gl_WorkGroupID.z % pc.group_count;
     // Each mode needs exactly as many lanes as its CPU reduction uses:
-    // 32 for the half-precision tree, 16 for the NEON accumulator, 8 for the
-    // AVX2/F16C dot, and one for the scalar walk. Packing rows until the
+    // 32 for the half-precision tree; F32 activations use 4 NEON or 16 AVX2 lanes.
+    // The rounded-input modes retain 16 NEON or 8 AVX2/F16C lanes. Packing rows until the
     // workgroup is full keeps every thread busy.
     uint lanes_per_row = pc.reduction_mode == 1u ? 32u
-        : (pc.reduction_mode == 2u ? 16u
-        : (pc.reduction_mode == 8u ? 8u : 1u));
+        : ((pc.reduction_mode == 2u || pc.reduction_mode == 16u) ? 16u
+        : (pc.reduction_mode == 8u ? 8u : (pc.reduction_mode == 4u ? 4u : 1u)));
     uint rows_per_group = 64u / lanes_per_row;
     uint lane = gl_LocalInvocationID.x;
     uint local = lane % lanes_per_row;
@@ -99,11 +99,53 @@ void main() {
         precise float c = partial[lane_base + 2u] + partial[lane_base + 6u];
         precise float d = partial[lane_base + 3u] + partial[lane_base + 7u];
         sum = (a + b) + (c + d);
+    } else if (pc.reduction_mode == 4u) {
+        uint end = pc.n_in / 4u * 4u;
+        if (valid_row) {
+            for (uint index = local; index < end; index += 4u) {
+                float x = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
+                sum = fma(x, f16_decode(weight_f16(slot, row_base + index)), sum);
+            }
+        }
+        partial[lane] = sum;
+        barrier();
+        if (local != 0u || !valid_row) return;
+        sum = (partial[lane_base] + partial[lane_base + 1u])
+            + (partial[lane_base + 2u] + partial[lane_base + 3u]);
+        for (uint index = end; index < pc.n_in; index++) {
+            float x = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
+            sum += x * f16_decode(weight_f16(slot, row_base + index));
+        }
+    } else if (pc.reduction_mode == 16u) {
+        uint end = pc.n_in / 16u * 16u;
+        if (valid_row) {
+            for (uint index = local; index < end; index += 16u) {
+                float x = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
+                sum = fma(x, f16_decode(weight_f16(slot, row_base + index)), sum);
+            }
+            if (local < 8u && end + local < pc.n_in) {
+                float x = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + end + local]);
+                sum = fma(x, f16_decode(weight_f16(slot, row_base + end + local)), sum);
+            }
+        }
+        partial[lane] = sum;
+        barrier();
+        if (local != 0u || !valid_row) return;
+        precise float low = ((partial[lane_base] + partial[lane_base + 4u])
+            + (partial[lane_base + 1u] + partial[lane_base + 5u]))
+            + ((partial[lane_base + 2u] + partial[lane_base + 6u])
+            + (partial[lane_base + 3u] + partial[lane_base + 7u]));
+        precise float high = ((partial[lane_base + 8u] + partial[lane_base + 12u])
+            + (partial[lane_base + 9u] + partial[lane_base + 13u]))
+            + ((partial[lane_base + 10u] + partial[lane_base + 14u])
+            + (partial[lane_base + 11u] + partial[lane_base + 15u]));
+        sum = low + high;
     } else if (pc.reduction_mode == 2u) {
         if (local < 16u && valid_row) {
             // Keep each NEON accumulator's stride and reduction order.
             for (uint idx = local; idx < pc.n_in; idx += 16u) {
-                float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx]));
+                float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + idx]);
+                input_value = round_f16_rte(input_value);
                 sum = fma(input_value, f16_decode(weight_f16(slot, row_base + idx)), sum);
             }
         }
@@ -147,7 +189,8 @@ void main() {
     } else {
         if (local != 0u || !valid_row) return;
         for (uint index = 0u; index < pc.n_in; index++) {
-            float input_value = round_f16_rte(uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]));
+            float input_value = uintBitsToFloat(arena.data[pc.input_word + token_row * pc.input_stride + index]);
+            if (pc.reduction_mode != 32u) input_value = round_f16_rte(input_value);
             float weight_value = f16_decode(weight_f16(slot, row_base + index));
             sum += input_value * weight_value;
         }

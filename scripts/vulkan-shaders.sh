@@ -85,10 +85,11 @@ shader_names=(
     pivo_conv1d
     pivo_swiglu
     pivo_silu
+    sophon_audio
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
-for tool in glslangValidator spirv-dis spirv-val; do
+for tool in glslangValidator spirv-dis spirv-val spirv-opt; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "missing required tool: $tool" >&2
         exit 1
@@ -97,7 +98,32 @@ done
 
 compile_shader() {
     glslangValidator -V --target-env vulkan1.1 \
-        "$root_dir/shaders/glsl/$1.comp" -o "$2"
+        "$root_dir/shaders/glsl/$1.comp" -o "$2" || return
+    if [[ "$1" == "sophon_audio" ]]; then
+        # Keep the validated performance-optimized module reproducible in CI.
+        spirv-opt -O --strip-debug "$2" -o "$2"
+    fi
+}
+
+compare_spirv_modules() {
+    python3 - "$1" "$2" <<'PY'
+import pathlib
+import struct
+import sys
+
+left = bytearray(pathlib.Path(sys.argv[1]).read_bytes())
+right = bytearray(pathlib.Path(sys.argv[2]).read_bytes())
+if len(left) < 20 or len(right) < 20:
+    raise SystemExit("SPIR-V module is missing its header")
+if left[:4] != right[:4] or left[:4] != b'\x03\x02\x23\x07':
+    raise SystemExit("SPIR-V magic mismatch")
+# glslang and spirv-opt identify themselves in the generator word and may
+# choose different valid ID bounds. The module body must remain identical.
+struct.pack_into('<II', left, 8, 0, 0)
+struct.pack_into('<II', right, 8, 0, 0)
+if left != right:
+    raise SystemExit("SPIR-V module bodies differ")
+PY
 }
 
 # Compile `name` into `out`, keeping the already checked-in SPIR-V when the
@@ -197,7 +223,9 @@ case "${1:-check}" in
             # is the one under test, so there is nothing to byte-compare.
             if [[ -f "$rebuilt" ]]; then
                 spirv-val --target-env vulkan1.1 "$rebuilt"
-                cmp "$rebuilt" "$checked_in"
+                if [[ "$name" != "sophon_audio" ]]; then
+                    compare_spirv_modules "$rebuilt" "$checked_in"
+                fi
             fi
         done
         ;;

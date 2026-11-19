@@ -1,0 +1,998 @@
+{
+  "date": "2026-11-11",
+  "status": "PASS",
+  "scope": "CPU F32 vision encoder independent numerical parity and real Sophon shared-default-path regression",
+  "export": {
+    "old_gguf": "models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+    "old_sha256": "75a9be7a2637ad7ecac7706fa4ecabf65b95b629b25aba24f5bab5de3d053c26",
+    "new_gguf": "models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+    "new_sha256": "38c73644e80b490e5d2ab1669cb0202d97f570f14f9bd8d70166145f411400a0",
+    "old_bytes": 2381090112,
+    "new_bytes": 2381090144,
+    "tensor_count": 352,
+    "all_tensor_payloads_equal": true,
+    "added_metadata": {
+      "clip.vision.preserve_f32": true
+    },
+    "existing_metadata_unchanged": true,
+    "payload_manifest_sha256": "b9cc619b216ce82493c3e13902f248dc4b5da007fae00ca9efab34bdbb4aa861",
+    "source_config_sha256": "b48dc9247bf75aa54ba2af1109ae9e2e5414db54ce0331dba8169ccd6f4405ba",
+    "preprocessor_sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+    "red_rgb_sha256": "2e56e21861dbcc0094936bfc227eb1b67321673188257bcea489584e7eae71c5",
+    "seconds": 8.712203012779355
+  },
+  "independent_oracle": {
+    "status": "PASS",
+    "first_divergence": null,
+    "gates": {
+      "relative_rmse_max": 0.001,
+      "cosine_min": 0.999999
+    },
+    "vision_config": {
+      "deepstack_visual_indexes": [
+        8,
+        16,
+        24
+      ],
+      "depth": 27,
+      "dtype": "bfloat16",
+      "hidden_act": "gelu_pytorch_tanh",
+      "hidden_size": 1152,
+      "in_channels": 3,
+      "initializer_range": 0.02,
+      "intermediate_size": 4304,
+      "model_type": "qwen3_vl_vision",
+      "num_heads": 16,
+      "num_position_embeddings": 2304,
+      "out_hidden_size": 5120,
+      "patch_size": 16,
+      "rope_parameters": {
+        "rope_theta": 10000.0,
+        "rope_type": "axial"
+      },
+      "spatial_merge_size": 2,
+      "temporal_patch_size": 2
+    },
+    "reference": {
+      "class": "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLVisionModel",
+      "transformers": "4.57.6",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "attention": "eager",
+      "vision_module_sha256": "dd63ed3b124232735b3dca1bfa28f9d6b0d3f7182afcb75dde8f3e724b2b22da",
+      "processor_class": "Qwen2VLImageProcessor",
+      "processor_module_sha256": "7820a0fcca107e75605e08d9b774285ca2b0316f857bc0225c779794705ecf4f",
+      "threads": 4,
+      "interop_threads": 1,
+      "compute": "cpu",
+      "dtype": "f32",
+      "vision_only": true,
+      "parameters": 595266800,
+      "inference_seconds": 45.181734232231975
+    },
+    "inputs": {
+      "gguf": "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+      "gguf_sha256": "38c73644e80b490e5d2ab1669cb0202d97f570f14f9bd8d70166145f411400a0",
+      "source_config_sha256": "b48dc9247bf75aa54ba2af1109ae9e2e5414db54ce0331dba8169ccd6f4405ba",
+      "preprocessor_sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "image_sha256": "becf0cf30d6978325d9ccdea315923e2dbbf7e591c2857b92b5f82e41957bb98",
+      "image_size": [
+        32,
+        32
+      ],
+      "grid_thw": [
+        [
+          1,
+          16,
+          16
+        ]
+      ],
+      "image_rgb_sha256": "2e56e21861dbcc0094936bfc227eb1b67321673188257bcea489584e7eae71c5",
+      "image_min_pixels": 65536,
+      "image_max_pixels": 16777216,
+      "normalized_channels": [
+        1,
+        -1,
+        -1
+      ],
+      "projected_shape": [
+        64,
+        5120
+      ],
+      "deepstack_layers": [
+        8,
+        16,
+        24
+      ],
+      "rust_trace": "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-rust.jsonl",
+      "rust_trace_sha256": "09874785c45643660000f6a22ce334f09e108098950920604c1771caa2aff070",
+      "rust_binary": "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+      "rust_binary_sha256": "3b9bd71da67fe96432401ed47339bb1d87edbd7df48f114c2d091de0d3a1417a",
+      "source_manifest": "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-source-manifest.json",
+      "source_manifest_sha256": "124a0bf3211ec19128c5b8b7493bf0101c6bb38a31ce9cc25d28dd0bb33a292c",
+      "oracle_script_sha256": "cccec6bfeb18aa4ce7e62fe1e5e4866dee535be65002e182919a3d1a09f9e49e"
+    },
+    "results": [
+      {
+        "name": "input",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 9.5367431640625e-07,
+        "rmse": 3.5748572580435714e-08,
+        "relative_rmse": 6.325486986612481e-08,
+        "cosine": 0.999999999999998,
+        "pass": true,
+        "rust_sha256": "44811fa2456aa61e25d418d139953a18f76e77407ea60248dcb3f5d44c1df63d",
+        "reference_sha256": "c8512c5d075763cbf2505f7f5a873e6eb584c2998a06048adc087dcd981d569a"
+      },
+      {
+        "name": "blocks.0",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 6.9141387939453125e-06,
+        "rmse": 2.1759773106076693e-07,
+        "relative_rmse": 3.3348759597354014e-07,
+        "cosine": 0.9999999999999445,
+        "pass": true,
+        "rust_sha256": "fb443d30aaccf8a859c58869bf1170f7ee4d6e5d4156fb04aacc4e87431c5326",
+        "reference_sha256": "8fe56fa2db27b594dfd506115fa4a1469444c43ee2dcf1cb23c9b3596ddd0ea7"
+      },
+      {
+        "name": "blocks.1",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 1.0967254638671875e-05,
+        "rmse": 3.2580351113122054e-07,
+        "relative_rmse": 8.640038631222496e-07,
+        "cosine": 0.9999999999996273,
+        "pass": true,
+        "rust_sha256": "fca3ab604ab0ae35be75370bcd5cccf68500f3ab8e1aecef944426d83a3a61b0",
+        "reference_sha256": "b35d46ed0db71272b545f5c3d9aac5ad31d56e2ff4b52c103be99801c77f2478"
+      },
+      {
+        "name": "blocks.2",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 1.1205673217773438e-05,
+        "rmse": 3.8895498056487596e-07,
+        "relative_rmse": 1.1055651804778422e-06,
+        "cosine": 0.9999999999993883,
+        "pass": true,
+        "rust_sha256": "b562541230be51ac2fe8cce874eaea344ae9a08a5bc5bd6d082ebfad76e88db6",
+        "reference_sha256": "980a18fd44fcf8b4d0962a915a4d38c802581be3fa0440249aa000ef86af02ff"
+      },
+      {
+        "name": "blocks.3",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 1.2159347534179688e-05,
+        "rmse": 4.503248375961953e-07,
+        "relative_rmse": 1.2833888120756016e-06,
+        "cosine": 0.9999999999991768,
+        "pass": true,
+        "rust_sha256": "d4cfb300488aad103dfc409e719822c39432f1d84d72c935324caa8d63427cfb",
+        "reference_sha256": "139078a8da1dc29f8683096f3a95a53b66b407689ef7ef0214165e5bb4acfc16"
+      },
+      {
+        "name": "blocks.4",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 1.9669532775878906e-05,
+        "rmse": 4.999096520892676e-07,
+        "relative_rmse": 1.40012476900625e-06,
+        "cosine": 0.9999999999990227,
+        "pass": true,
+        "rust_sha256": "74e3fd11f6e4b264334be623ccbfc9265d4db28f9c99776327c5eef10e30e29e",
+        "reference_sha256": "6c30ea65b21298a9a683cb1bc69d20e340496e485558703ab26006412b586f18"
+      },
+      {
+        "name": "blocks.5",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 2.9325485229492188e-05,
+        "rmse": 5.720587697609418e-07,
+        "relative_rmse": 1.6373577273564038e-06,
+        "cosine": 0.9999999999986638,
+        "pass": true,
+        "rust_sha256": "b2402478490de7d1112fa68b876a2fbd5dc1545b4ec025c3e5d14ceae9462bd9",
+        "reference_sha256": "4a4e692b62613be919a510a7d7bd5849dfb0403181dfd48160c223262e62d36d"
+      },
+      {
+        "name": "blocks.6",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 4.3392181396484375e-05,
+        "rmse": 6.608788715006797e-07,
+        "relative_rmse": 1.7933035002321019e-06,
+        "cosine": 0.9999999999983943,
+        "pass": true,
+        "rust_sha256": "5d0a150940bf478b8d85144af4d5defcfac0d7f34edee0a8172e0282d3a79702",
+        "reference_sha256": "a7cb0e4770b241ae7f994e83b907d5d1591284f5a3199b534e87344e0d9faafd"
+      },
+      {
+        "name": "blocks.7",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 4.38690185546875e-05,
+        "rmse": 7.121051874420096e-07,
+        "relative_rmse": 1.9149874984894754e-06,
+        "cosine": 0.9999999999981692,
+        "pass": true,
+        "rust_sha256": "141c46f3f6373f56b00c8cd7082eef089d2b51871784a838da6bf0243539cc17",
+        "reference_sha256": "535b3743380218f805c828cef9b5d2a5e62dc96636298d36e255e66f3add5552"
+      },
+      {
+        "name": "blocks.8",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 4.0531158447265625e-05,
+        "rmse": 7.7838966548419e-07,
+        "relative_rmse": 2.1391074022332893e-06,
+        "cosine": 0.9999999999977139,
+        "pass": true,
+        "rust_sha256": "7870ebf43da4adfb97f8ba94ce1fbde0f28222ff46b0d7746b2cf69160518fb0",
+        "reference_sha256": "51a059692f931927af2e1362146169fd4f34f4a9d12940404b88c8c25f853e8a"
+      },
+      {
+        "name": "deepstack.0",
+        "shape": [
+          64,
+          5120
+        ],
+        "max_abs": 1.0251998901367188e-05,
+        "rmse": 1.024371354593762e-06,
+        "relative_rmse": 2.1520054819553174e-06,
+        "cosine": 0.9999999999977068,
+        "pass": true,
+        "rust_sha256": "3cc0688a974f1eff6147ae36f5bf49b1eff10663254b447d6b11ef1e81337cbc",
+        "reference_sha256": "99d6b41e099213102e4a96a6abd99c5e31a4c931063700ee9708ff8cb008e216"
+      },
+      {
+        "name": "blocks.9",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.000213623046875,
+        "rmse": 1.0625806676324942e-06,
+        "relative_rmse": 1.7136651932309705e-06,
+        "cosine": 0.9999999999985396,
+        "pass": true,
+        "rust_sha256": "deeef588f16fadc9f0ae3bc982060787837c59c3ea0db6159d920722858cb513",
+        "reference_sha256": "96eabcf54ec678510f4318bf0140bcfa327a1fc124ccfeee392f7066a481862b"
+      },
+      {
+        "name": "blocks.10",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.000213623046875,
+        "rmse": 1.3419907314997702e-06,
+        "relative_rmse": 2.0941140383015813e-06,
+        "cosine": 0.999999999997817,
+        "pass": true,
+        "rust_sha256": "2797bfd7047e1f0bf09cbf269e92b1d0cf907031d311041c1634fb8b6c9ff875",
+        "reference_sha256": "0f9a0087450b78c52150f96b7b10eb0a8e7b7f96dfcabf4a2d58d77b7062b63e"
+      },
+      {
+        "name": "blocks.11",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.000213623046875,
+        "rmse": 1.5319087494210514e-06,
+        "relative_rmse": 2.2901344278072215e-06,
+        "cosine": 0.9999999999973862,
+        "pass": true,
+        "rust_sha256": "f796fcc41e706ee5340ad3af3f64003ae7e9e8fe8b903c726779fcc0e935da6b",
+        "reference_sha256": "bb0a4939d8e87cd83bf8264b4be40a2e333c26d9b534ac5d66dbf20b10e67915"
+      },
+      {
+        "name": "blocks.12",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.000213623046875,
+        "rmse": 1.972475492321539e-06,
+        "relative_rmse": 2.830891565657707e-06,
+        "cosine": 0.9999999999960029,
+        "pass": true,
+        "rust_sha256": "a471b9df5679d754b13e9836f56aa69db26cb3d4c12f3587f8cdefd1fec6dd81",
+        "reference_sha256": "d2aa80dd0206eeb8366c6a2c0dd5edbabd1985d717d81d02f0db432b49dc334b"
+      },
+      {
+        "name": "blocks.13",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0001983642578125,
+        "rmse": 2.6630370056362527e-06,
+        "relative_rmse": 3.368888906099489e-06,
+        "cosine": 0.9999999999943319,
+        "pass": true,
+        "rust_sha256": "7e9236abaf695fc746e6d9918efd2a810aefb8ae0afd187a5b4f0acbfd9e46ac",
+        "reference_sha256": "d6f8b17fa7daf8db926452e2408e0d0dcf3f313a3ea74039a94fdfb34153463d"
+      },
+      {
+        "name": "blocks.14",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0003108978271484375,
+        "rmse": 3.5460489663309434e-06,
+        "relative_rmse": 3.999749659006939e-06,
+        "cosine": 0.9999999999920101,
+        "pass": true,
+        "rust_sha256": "dcc9be26feb7e18c0d730a14bb2782f6287f84dd5294ee966d56268dba482518",
+        "reference_sha256": "bee79232c1ded6326e0ac81923e7b06c6dd533841f071dd989f6f4f2ca6e778e"
+      },
+      {
+        "name": "blocks.15",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.00049591064453125,
+        "rmse": 4.46614965865973e-06,
+        "relative_rmse": 4.480818894333456e-06,
+        "cosine": 0.9999999999899722,
+        "pass": true,
+        "rust_sha256": "1bc6fb46cbf4805a768e10c3a8d1c0033ca8109c2ca530ad4172f89e88a7121f",
+        "reference_sha256": "8541044f98321f46ee24d5b52cee6eccf2fb01d6b38e45e8f99e88c0e090416a"
+      },
+      {
+        "name": "blocks.16",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0004901885986328125,
+        "rmse": 5.0676061055608925e-06,
+        "relative_rmse": 4.738536559870841e-06,
+        "cosine": 0.9999999999887855,
+        "pass": true,
+        "rust_sha256": "4acccefdeea54f4281a161e1d2e2040ffca9c9a029c99849f439765f2b6e3a8b",
+        "reference_sha256": "4db65e905ad7b33809d7f34c30f9956c9f3ab78671390cccff196538e867d954"
+      },
+      {
+        "name": "deepstack.1",
+        "shape": [
+          64,
+          5120
+        ],
+        "max_abs": 0.00011134147644042969,
+        "rmse": 4.7693963205227055e-06,
+        "relative_rmse": 5.463978415920884e-06,
+        "cosine": 0.9999999999851173,
+        "pass": true,
+        "rust_sha256": "514afc8e90f8c0d30219a214bc182d68f538915db24d8675d0d487b25675df49",
+        "reference_sha256": "a44f859e98ca05995ccc4941cdcdc913b7aaf64940357ad164148456f01d6851"
+      },
+      {
+        "name": "blocks.17",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0006494522094726562,
+        "rmse": 6.255279599867655e-06,
+        "relative_rmse": 5.2163313644776395e-06,
+        "cosine": 0.9999999999864159,
+        "pass": true,
+        "rust_sha256": "892285f7c696f8946c2977ce97d9d2b1faa6573919544cc5fff43c25191e1217",
+        "reference_sha256": "33ded213633ef14f28428d7f87fffee4e3935a0b9b84e4b8547887ed4f5b3016"
+      },
+      {
+        "name": "blocks.18",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0006542205810546875,
+        "rmse": 7.294274792722962e-06,
+        "relative_rmse": 5.5379036832082006e-06,
+        "cosine": 0.9999999999846815,
+        "pass": true,
+        "rust_sha256": "31bcfd6eb409f5e01f064d26f172121f33d5597f43086b1c76543b0f7cf6a30c",
+        "reference_sha256": "f09c584e5178c35de15eebf8c722d76f964e4b7de70d7a4a9610cb111ad3ee30"
+      },
+      {
+        "name": "blocks.19",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0006809234619140625,
+        "rmse": 8.442720236923824e-06,
+        "relative_rmse": 5.366164665670042e-06,
+        "cosine": 0.9999999999856098,
+        "pass": true,
+        "rust_sha256": "78885c6415059b2fe364a8061d8d03cd1f75a85a3b215bcb55e38404d6e94d70",
+        "reference_sha256": "ca6dca37db8640bc2c811d5ce2a1aae8fe3bce57b8c36f08ca7c32c655cd5624"
+      },
+      {
+        "name": "blocks.20",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.000705718994140625,
+        "rmse": 1.0152465805241445e-05,
+        "relative_rmse": 4.589796893373068e-06,
+        "cosine": 0.9999999999894675,
+        "pass": true,
+        "rust_sha256": "204e7fe57258465d043aff18d9bd79efe439ace3f0f69f6d34246bf101c62ed8",
+        "reference_sha256": "546d11405fba9f54d1c52516cc38ed9c767994d42206fa706d3a5bf0fd4c99d6"
+      },
+      {
+        "name": "blocks.21",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0007457733154296875,
+        "rmse": 1.178169041460232e-05,
+        "relative_rmse": 4.619602058886396e-06,
+        "cosine": 0.9999999999893312,
+        "pass": true,
+        "rust_sha256": "4596d07f2e86ff2d06cd83452e57160492a2214c81d97df3239ad45cfd35091b",
+        "reference_sha256": "884c6691c4ae009c34d6ecc07087333cae3cf4adce1d7e86272f73412ed9e5e8"
+      },
+      {
+        "name": "blocks.22",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.0008087158203125,
+        "rmse": 1.2936420038765186e-05,
+        "relative_rmse": 3.573834858131548e-06,
+        "cosine": 0.9999999999936138,
+        "pass": true,
+        "rust_sha256": "2be701910f6117fda2c90c35f4ce98588da341eb32d48904594426ee83bfd1ec",
+        "reference_sha256": "1f64f4c0db4819fd04922b9bf1e80c8ef4dc631098b0f07f4ab96db49c8fee93"
+      },
+      {
+        "name": "blocks.23",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.000896453857421875,
+        "rmse": 1.5047829548166785e-05,
+        "relative_rmse": 4.47380418732918e-06,
+        "cosine": 0.9999999999899951,
+        "pass": true,
+        "rust_sha256": "68ed0170d628f02c8cf61213f20b01019c63ca1ef3826d36ce534571319dac10",
+        "reference_sha256": "2c388f688c7596806c93dcb81ca63b5488367f5e0e63dad2bdab4e62eb837018"
+      },
+      {
+        "name": "blocks.24",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.00142669677734375,
+        "rmse": 1.6974380170747565e-05,
+        "relative_rmse": 4.152515906640091e-06,
+        "cosine": 0.9999999999913772,
+        "pass": true,
+        "rust_sha256": "04d629f97d72478dee1c6c8328e6475ff5783ff4d583a72d5d305d8814f1781a",
+        "reference_sha256": "8ec3162ced3a6a4e8f37d7b4d8e158d2fbe95bfb4945a3aa67e58e9d594db44b"
+      },
+      {
+        "name": "deepstack.2",
+        "shape": [
+          64,
+          5120
+        ],
+        "max_abs": 5.644559860229492e-05,
+        "rmse": 2.598204891097834e-06,
+        "relative_rmse": 8.36000872224736e-06,
+        "cosine": 0.9999999999652296,
+        "pass": true,
+        "rust_sha256": "0029d88af51ae35760c54804c508f5f00585d9bf874f044057cc213e4e3de511",
+        "reference_sha256": "3338bcbdb6fd408a7e0ca8136fcc212380c5fb9edc0c07e455e1815dd227fb8a"
+      },
+      {
+        "name": "blocks.25",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.001495361328125,
+        "rmse": 1.967779045365978e-05,
+        "relative_rmse": 6.923796762329212e-06,
+        "cosine": 0.9999999999760432,
+        "pass": true,
+        "rust_sha256": "fe2f62c5dc99a4a9a125fddf7129398d5999bb2e8e53832ea0a5de1221ad5753",
+        "reference_sha256": "d717267583a23a117b124ab32d6e7e569c6962d1a35522408ac19edc3176854a"
+      },
+      {
+        "name": "blocks.26",
+        "shape": [
+          256,
+          1152
+        ],
+        "max_abs": 0.1630859375,
+        "rmse": 0.001066792756167611,
+        "relative_rmse": 9.57439764287412e-06,
+        "cosine": 0.9999999999542257,
+        "pass": true,
+        "rust_sha256": "8fb1971e3351261f32e8f5d76d54711a52c6c1e6e2d5e9a1ac6838277a20c08d",
+        "reference_sha256": "5e59dedda26f14e8df2eb46c11eff1d9b1ded729819f3db4d6106b5b795191a5"
+      },
+      {
+        "name": "output",
+        "shape": [
+          64,
+          5120
+        ],
+        "max_abs": 0.0004749298095703125,
+        "rmse": 1.0238152721760091e-05,
+        "relative_rmse": 1.269970181647014e-05,
+        "cosine": 0.9999999999195905,
+        "pass": true,
+        "rust_sha256": "f649149c5f05ac29da71861787f799c6b817a3d16a157fc7b025de431a28d7b8",
+        "reference_sha256": "09a217fe0579441083377f0d8550a6fcc9d6b0694f671e93e044081826fbfeaa"
+      }
+    ]
+  },
+  "shared_default_regression": {
+    "status": "BITWISE_EQUAL",
+    "scope": "real Sophon asset using the shared default path; other vision model assets unavailable",
+    "baseline": {
+      "fixture": {
+        "projected": {
+          "len": 327680,
+          "sha256": "50d692e51af4031b54f72aa4c5edc86606a8bb01c12f55c70e0270bc7ce0df6d"
+        },
+        "deepstack": [
+          {
+            "len": 327680,
+            "sha256": "b9f47ec37aae400103bcdbcdcd1bfc791cd80af7b7e009b90abca4cf7b00c85d"
+          },
+          {
+            "len": 327680,
+            "sha256": "ec50b5b4856630f8ddcbc5ffc877c06fdad82fd68efba826c3b6e873c4279e75"
+          },
+          {
+            "len": 327680,
+            "sha256": "eb5ec39f234ce1d2bbd2ec6fea2be6b755072b497dbf3bb2e1f220a1df1c27f3"
+          }
+        ]
+      },
+      "binary": "target/sophon/vision-lossless-33367/vision-lossless-default-baseline-lib-test",
+      "binary_sha256": "5cf378c2eeb1d8c662dac7ed4b6ade1f0f7c5172a096654d1851ee3980d4d37c",
+      "source_manifest": "target/sophon/vision-lossless-33367/vision-lossless-default-baseline-source-manifest.json",
+      "source_manifest_sha256": "23a2ea17b8bcf31b1444609dfc3d89658b4ce6af547e802dd8733daaafb72fb8",
+      "source_count": 618,
+      "metadata_preserve_f32_absent": true,
+      "fixture_rgb_sha256": "2e56e21861dbcc0094936bfc227eb1b67321673188257bcea489584e7eae71c5"
+    },
+    "current_fixture": {
+      "projected": {
+        "len": 327680,
+        "sha256": "50d692e51af4031b54f72aa4c5edc86606a8bb01c12f55c70e0270bc7ce0df6d"
+      },
+      "deepstack": [
+        {
+          "len": 327680,
+          "sha256": "b9f47ec37aae400103bcdbcdcd1bfc791cd80af7b7e009b90abca4cf7b00c85d"
+        },
+        {
+          "len": 327680,
+          "sha256": "ec50b5b4856630f8ddcbc5ffc877c06fdad82fd68efba826c3b6e873c4279e75"
+        },
+        {
+          "len": 327680,
+          "sha256": "eb5ec39f234ce1d2bbd2ec6fea2be6b755072b497dbf3bb2e1f220a1df1c27f3"
+        }
+      ]
+    },
+    "current_binary": {
+      "path": "target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+      "sha256": "3b9bd71da67fe96432401ed47339bb1d87edbd7df48f114c2d091de0d3a1417a"
+    },
+    "current_source_manifest_sha256": "124a0bf3211ec19128c5b8b7493bf0101c6bb38a31ce9cc25d28dd0bb33a292c",
+    "asset": "75a9be7a2637ad7ecac7706fa4ecabf65b95b629b25aba24f5bab5de3d053c26"
+  },
+  "validation": {
+    "red": [
+      {
+        "test": "models::qwen3::vision::tests::f32_metadata_opt_in_keeps_linears_lossless_and_defaults_quantized",
+        "observed": "Bool(true) still produced lossless=false before implementation",
+        "exit_code": 101,
+        "evidence": {
+          "path": "target/sophon/vision-lossless-33367/rust-red.log",
+          "sha256": "ffb83fe16db2566889b93b06d9462bd2562d8b8b58883354357c1adfc876e514"
+        }
+      },
+      {
+        "test": "ConverterTests.test_vision_temporal_split_norm_deepstack_and_pixel_budgets",
+        "observed": "missing F32 opt-in metadata before implementation: None is not True",
+        "exit_code": 1,
+        "evidence": {
+          "path": "target/sophon/vision-lossless-33367/python-red.log",
+          "sha256": "ae210810882d458eac7b0b51e7263d723628e1bc7366d6f306677410e54e3bf4"
+        }
+      }
+    ],
+    "python_suite": {
+      "tests_passed": 20,
+      "failures": 0,
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "unittest",
+        "tools.converter.sophon_realtime.test_convert",
+        "tools.oracle.sophon_realtime.test_vision_oracle"
+      ],
+      "env": {
+        "PYTHONPATH": "/opt/venv/lib/python3.12/site-packages",
+        "OMP_NUM_THREADS": "4",
+        "MKL_NUM_THREADS": "4"
+      },
+      "evidence": {
+        "path": "target/sophon/vision-lossless-33367/python-suite.log",
+        "sha256": "a5cae452b68a740e07e11602b3df4d64ff251f500b345c60f66aae698e4b4bb1"
+      }
+    },
+    "library_regression": {
+      "status": "NO_NEW_FAILURES",
+      "summary": "test result: FAILED. 1684 passed; 23 failed; 234 ignored; 0 measured; 0 filtered out; finished in 74.07s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "baseline": {
+        "log": "target/sophon/final-reviewed-1-33367.log",
+        "log_sha256": "b660de94a1d5094a41fec6dc2c3b3574700253f7e2105aedcaef8c6074cdcdee",
+        "log_bytes": 1617858,
+        "summary": "test result: FAILED. 1683 passed; 23 failed; 234 ignored; 0 measured; 0 filtered out; finished in 74.46s",
+        "counts": {
+          "passed": 1683,
+          "failed": 23,
+          "ignored": 234,
+          "measured": 0,
+          "filtered out": 0
+        },
+        "failures": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+          "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+          "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+          "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+          "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+          "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+          "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+        ],
+        "failure_list_matches_summary_and_test_lines": true,
+        "base_source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+        "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+        "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan,parity-trace",
+          "--lib",
+          "-j2",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit_code": 101
+      },
+      "new_failures": [],
+      "removed_failures": [],
+      "source_manifest_sha256": "124a0bf3211ec19128c5b8b7493bf0101c6bb38a31ce9cc25d28dd0bb33a292c"
+    }
+  },
+  "build": {
+    "source_manifest": "target/sophon/vision-lossless-33367/vision-lossless-source-manifest.json",
+    "source_manifest_sha256": "124a0bf3211ec19128c5b8b7493bf0101c6bb38a31ce9cc25d28dd0bb33a292c",
+    "source_count": 618,
+    "stages": [
+      {
+        "name": "vision-lossless-rust-green",
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan,parity-trace",
+          "--lib",
+          "f32_metadata_opt_in_keeps_linears_lossless_and_defaults_quantized",
+          "-j2",
+          "--",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "exit_code": 0,
+        "seconds": 246.10965449735522,
+        "log": "target/sophon/vision-lossless-33367/vision-lossless-rust-green.log",
+        "log_sha256": "7c6429ebeac2fa2c32877aa2a49187c9a569ef922bbe51609934732149f692df"
+      },
+      {
+        "name": "vision-lossless-default-current",
+        "command": [
+          "target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+          "app::text::vision::qwen3vl_image_tests::real_projected_width_preserves_all_image_and_deepstack_rows",
+          "--exact",
+          "--ignored",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "exit_code": 0,
+        "seconds": 6.070896048098803,
+        "log": "target/sophon/vision-lossless-33367/vision-lossless-default-current.log",
+        "log_sha256": "1c13c25a0e56598a5874c54c4e13363ba80875f2db3844c7b6cb1d6224f2185b"
+      },
+      {
+        "name": "vision-lossless-capture-exact32",
+        "command": [
+          "target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+          "app::text::vision::qwen3vl_image_tests::real_projected_width_preserves_all_image_and_deepstack_rows",
+          "--exact",
+          "--ignored",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "exit_code": 0,
+        "seconds": 20.490662332624197,
+        "log": "target/sophon/vision-lossless-33367/vision-lossless-capture-exact32.log",
+        "log_sha256": "47ec298f339bd8215a1e55e04aec99d48b031c13bd986b5c073c9e26f571c746"
+      },
+      {
+        "name": "vision-lossless-bins",
+        "command": [
+          "cargo",
+          "build",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan,parity-trace",
+          "--bin",
+          "rust-model-inference",
+          "--bin",
+          "rust-model-server",
+          "-j2"
+        ],
+        "exit_code": 0,
+        "seconds": 305.89829020760953,
+        "log": "target/sophon/vision-lossless-33367/vision-lossless-bins.log",
+        "log_sha256": "ecadb51f751784316fe9ad1210c031cc695a8a117d65c8ab31308b2d2f84dc57"
+      },
+      {
+        "name": "vision-lossless-full-lib",
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--features",
+          "vulkan,parity-trace",
+          "--lib",
+          "-j2",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit_code": 101,
+        "seconds": 74.45663082040846,
+        "log": "target/sophon/vision-lossless-33367/vision-lossless-full-lib.log",
+        "log_sha256": "82354dadcfa8332bfe805dd14ac6d7becc288743946717f28b73b68918ab327c"
+      }
+    ],
+    "lib_test": {
+      "path": "target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+      "sha256": "3b9bd71da67fe96432401ed47339bb1d87edbd7df48f114c2d091de0d3a1417a"
+    },
+    "vision_trace": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/vision-lossless-33367/vision-lossless-rust.jsonl",
+      "sha256": "09874785c45643660000f6a22ce334f09e108098950920604c1771caa2aff070",
+      "checkpoints": 32
+    },
+    "binaries": {
+      "rust-model-inference": {
+        "path": "target/sophon/vision-lossless-33367/vision-lossless-rust-model-inference",
+        "sha256": "13d4970a460a76d6e20fba67bce2fde275bd4d3804d29d5ca5909064c39f7680"
+      },
+      "rust-model-server": {
+        "path": "target/sophon/vision-lossless-33367/vision-lossless-rust-model-server",
+        "sha256": "5e782d1bd436c080f88f396a2ff764103712be44bfd70e465a4ec9fa4e1663c9"
+      }
+    }
+  },
+  "source_hashes": {
+    "src/models/qwen3/vision/mod.rs": "a99a13f8b0134043561f32a1f1b696e4a51de46ad50d7762cd63db659ee35227",
+    "src/app/text/vision.rs": "16edfca4c5c3f4928f5612c7e91cf8766deadbb960496bfbdcb2cee0b3b96011",
+    "tools/converter/sophon_realtime/convert.py": "fa155ea887cef5387f22d021d299e97abc1e17fa22b3f893d1e31450c65c7cb4",
+    "tools/converter/sophon_realtime/test_convert.py": "53d84b5f5a52a32dd594d0facf3390ca3d6ced4851499cd78d8d169990a71a71",
+    "tools/oracle/sophon_realtime/vision_oracle.py": "cccec6bfeb18aa4ce7e62fe1e5e4866dee535be65002e182919a3d1a09f9e49e",
+    "tools/oracle/sophon_realtime/test_vision_oracle.py": "e777dcaa306adac4aeca9190e49ec2f494ba3c85a53b855c27561194e5cff9a4"
+  },
+  "reproduction": {
+    "working_directory": "/workspace/rust-model-inference",
+    "rust_capture": {
+      "command": [
+        "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+        "app::text::vision::qwen3vl_image_tests::real_projected_width_preserves_all_image_and_deepstack_rows",
+        "--exact",
+        "--ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "env": {
+        "RMI_SOPHON_VISION": "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+        "RMI_PARITY_TRACE": "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-rust.jsonl",
+        "RMI_PARITY_FILTER": "mage_flow.vision.input,mage_flow.vision.blocks.0,mage_flow.vision.blocks.1,mage_flow.vision.blocks.2,mage_flow.vision.blocks.3,mage_flow.vision.blocks.4,mage_flow.vision.blocks.5,mage_flow.vision.blocks.6,mage_flow.vision.blocks.7,mage_flow.vision.blocks.8,mage_flow.vision.deepstack.0,mage_flow.vision.blocks.9,mage_flow.vision.blocks.10,mage_flow.vision.blocks.11,mage_flow.vision.blocks.12,mage_flow.vision.blocks.13,mage_flow.vision.blocks.14,mage_flow.vision.blocks.15,mage_flow.vision.blocks.16,mage_flow.vision.deepstack.1,mage_flow.vision.blocks.17,mage_flow.vision.blocks.18,mage_flow.vision.blocks.19,mage_flow.vision.blocks.20,mage_flow.vision.blocks.21,mage_flow.vision.blocks.22,mage_flow.vision.blocks.23,mage_flow.vision.blocks.24,mage_flow.vision.deepstack.2,mage_flow.vision.blocks.25,mage_flow.vision.blocks.26,mage_flow.vision.output",
+        "TMPDIR": "/workspace/rust-model-inference/target/sophon/tmp"
+      }
+    },
+    "official_reference": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "tools.oracle.sophon_realtime.vision_oracle",
+        "--model-dir",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag",
+        "--gguf",
+        "/workspace/rust-model-inference/models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf",
+        "--image",
+        "/workspace/rust-model-inference/target/sophon/entrypoints-final-reviewed-q8-cpu-vision-33367/red.png",
+        "--rust-trace",
+        "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-rust.jsonl",
+        "--rust-binary",
+        "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-lib-test",
+        "--source-manifest",
+        "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-source-manifest.json",
+        "--output",
+        "/workspace/rust-model-inference/target/sophon/vision-lossless-33367/vision-lossless-reference"
+      ],
+      "env": {
+        "PYTHONPATH": "/opt/venv/lib/python3.12/site-packages",
+        "OMP_NUM_THREADS": "4",
+        "MKL_NUM_THREADS": "4",
+        "OPENBLAS_NUM_THREADS": "4"
+      }
+    },
+    "fresh_outputs_required": true
+  },
+  "limits": {
+    "input_coverage": "one fixed 32x32 red RGB image, resized to 256x256, 64 projected rows and three DeepStack planes",
+    "other_model_vision_regression": "unverified: no WeVisOne/Qwen3-VL/Mage/Physbrain vision GGUF in the existing models inventory; shared-default regression uses the real historical Sophon mmproj",
+    "model_inventory": {
+      "root": "/workspace/rust-model-inference/models",
+      "gguf_files_scanned": 58,
+      "vision_assets": [
+        "models/Sophon-Realtime-32B-Tag-GGUF/mmproj-F32.gguf",
+        "models/Sophon-Realtime-32B-Tag-GGUF/vision-lossless-mmproj-F32.gguf"
+      ]
+    },
+    "performance_status": "numerical run timings were recorded under concurrent compilation; no isolated performance comparison",
+    "raw_data_location": "remote target/sophon/vision-lossless-33367 only; only JSON evidence was retrieved"
+  },
+  "lossless_entrypoints": {
+    "status": "PASS",
+    "scope": "CPU Q8_0 thinker/F16 KV with explicit lossless F32 vision; CLI/HTTP functional generation and single/grouped JEV, not independent combined-model numerical/task-quality acceptance",
+    "evidence": "entrypoint-results.json: entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367",
+    "remote_evidence": "target/sophon/entrypoints-fallback-reviewed-q8-cpu-vision-lossless-33367/result.json",
+    "cases": {
+      "cli-jev": {
+        "pass": true,
+        "seconds": 88.45980193652213
+      },
+      "cli-grouped": {
+        "pass": true,
+        "seconds": 96.83302139118314
+      },
+      "cli-generation": {
+        "pass": true,
+        "seconds": 57.706063682213426
+      },
+      "http-jev": {
+        "pass": true,
+        "seconds": 86.72226086258888
+      },
+      "http-grouped": {
+        "pass": true,
+        "seconds": 93.60925915464759
+      },
+      "ordinary-chat-batch": {
+        "pass": true,
+        "seconds": 57.736551059409976
+      },
+      "ordinary-chat-stream": {
+        "pass": true,
+        "seconds": 58.23078357055783
+      },
+      "context-400-False": {
+        "pass": true,
+        "seconds": 0.0018797069787979126
+      },
+      "context-400-True": {
+        "pass": true,
+        "seconds": 0.0012547485530376434
+      }
+    },
+    "single_cli_http_probability_difference": 0.0,
+    "grouped_cli_http_probability_difference": 0.0,
+    "cli_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+    "server_sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb",
+    "vision_gguf_sha256": "38c73644e80b490e5d2ab1669cb0202d97f570f14f9bd8d70166145f411400a0",
+    "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+    "source_manifest_sha256": "5701ac901a75e5405839648f81797448647fc45ee3b9828668c19219a8ba20e4"
+  }
+}

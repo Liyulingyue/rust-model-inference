@@ -1,0 +1,1975 @@
+{
+  "scope": "Ordinary Qwen3 F32 text-generation regression and shared Q4_K encoder real-row samples",
+  "date": "2026-11-11",
+  "evidence_host": "existing remote 33367; weights, sample GGUFs, raw logits and fixtures remain remote",
+  "f32_cli_regression": {
+    "status": "PASS",
+    "checks": {
+      "distinct_binary_artifacts": true,
+      "same_model_sha256": true,
+      "same_cli_arguments": true,
+      "same_prompt_ids": true,
+      "same_generated_ids": true,
+      "same_logits_count": true,
+      "all_logits_bitwise_equal": true
+    },
+    "baseline": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/baseline-1/summary.json",
+    "current": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/current-d650-1/summary.json",
+    "baseline_binary_sha256": "d78fd24b4727bea86f773b9dcb1a9f6483821e31bed3fe130236f7dfd862654d",
+    "current_binary_sha256": "d650a15995198b901001ffb4e950e9aa00d34702ee80132f829d4d479c5c410f",
+    "compared_values": 4558080,
+    "generated_token_ids": [
+      785,
+      12884,
+      7952,
+      6303,
+      1576,
+      39020,
+      374,
+      36967
+    ],
+    "source_snapshot": "Protected d650 CLI precedes later unified text/image logits and per-token/Flow-block/HiFT-stage cancellation follow-ups; this snapshot does not validate those changes.",
+    "evidence_root": "target/sophon/f32-regression-review-20261111",
+    "model_origin": "All 310 tensors independently dequantized with official gguf 0.18.0 from real Qwen3-0.6B-Q4_K_M; all 32 metadata keys/types retained, only general.file_type 15->0.",
+    "source_model_sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
+    "f32_model_sha256": "7de72a3ee39fd5c69c66ee9c385987ec953d8125f7cc870495fad4cd996d8ada",
+    "independent_decoder_source_sha256": "46461f4f9db2fccaf9364c06566b281af2520fbcc1e01f223a3973aa122adc5b",
+    "prompt": "Explain why the sky is blue in one sentence.",
+    "compute": "cpu",
+    "kv_cache": "f32",
+    "threads": 4,
+    "temperature": 0,
+    "max_tokens": 8,
+    "prefill_batch_size": 64,
+    "max_context": 256,
+    "logits_count": 30,
+    "max_abs": 0,
+    "limitation": "Single short prompt at the recorded build identities; no broader prompt, other architecture, GPU, HTTP or performance claim."
+  },
+  "q4_k_real_weight_samples": {
+    "status": "PASS",
+    "checks": {
+      "new_row_error_within_gate": true,
+      "aggregate_weighted_error_not_increased": true,
+      "all_norms_bitwise_unchanged": true
+    },
+    "gates_declared_before_run": {
+      "maximum_new_row_relative_rmse": 0.1,
+      "maximum_new_to_old_aggregate_weighted_sse_ratio": 1.0,
+      "norm_type_and_bytes_unchanged": true
+    },
+    "model": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/Qwen3-0.6B-independent-F32.gguf",
+    "model_sha256": "7de72a3ee39fd5c69c66ee9c385987ec953d8125f7cc870495fad4cd996d8ada",
+    "model_origin": "Independent official gguf dequantization of real Qwen3-0.6B-Q4_K_M.gguf; not original HF full-precision weights",
+    "old_quantizer_sha256": "1476a4d9275a99b7b3a46c97a79e61788d0e5fce649383d5fc1acedd492c1b47",
+    "new_quantizer_sha256": "68e475895d55cea5f52efe90f5e831e574ab301f6ea4cccf9a93081ab296ce12",
+    "independent_decoder": "gguf.quants.dequantize",
+    "independent_decoder_sha256": "46461f4f9db2fccaf9364c06566b281af2520fbcc1e01f223a3973aa122adc5b",
+    "shared_dispatch_sha256": "1f8181e20c15a50f849a378ee36f033ac2f234c53b4acef452a44e816248770b",
+    "matrix_count": 197,
+    "row_count": 591,
+    "norm_count": 113,
+    "sampled_values": 863232,
+    "weighted_sse": {
+      "old": 0.03806546215545253,
+      "new": 0.03806238267022851
+    },
+    "new_to_old_weighted_sse_ratio": 0.9999191002801584,
+    "changed_rows": 21,
+    "rows_with_higher_new_weighted_sse": 11,
+    "maximum_new_row_relative_rmse": 0.08818428059334005,
+    "limitations": [
+      "Row samples only; does not establish full conversion, full inference, downstream model accuracy, or bitwise agreement with llama.cpp quantization.",
+      "The F32 source is a real mixed Q4_K/Q6_K model independently dequantized; original quantization loss remains.",
+      "Only the sampled rows and all 1-D norm tensors are serialized in the two sample GGUFs."
+    ],
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367",
+    "evidence_root": "target/sophon/q4-k-sample-review-20261111-run-1",
+    "old_source_revision": "0ea4e3837611325b58f22b7457b039cfeaecf176",
+    "old_mean_row_relative_rmse": 0.014879486984504628,
+    "new_mean_row_relative_rmse": 0.01487571168948873,
+    "largest_weighted_sse_increases": [
+      {
+        "tensor": "blk.18.ffn_gate.weight",
+        "row": 1536,
+        "old": 5.123163709948387e-06,
+        "new": 5.189310845396158e-06,
+        "increase": 6.614713544777092e-08
+      },
+      {
+        "tensor": "blk.15.ffn_down.weight",
+        "row": 1023,
+        "old": 6.3616254999200265e-06,
+        "new": 6.410595438896825e-06,
+        "increase": 4.896993897679827e-08
+      },
+      {
+        "tensor": "blk.11.ffn_up.weight",
+        "row": 0,
+        "old": 1.4297608326640347e-06,
+        "new": 1.4692216537930042e-06,
+        "increase": 3.9460821128969525e-08
+      }
+    ]
+  },
+  "same_feature_library_regression_review_fixed": {
+    "baseline": {
+      "log": "target/sophon/baseline-tmpdir-serial-33367.log",
+      "summary": "test result: FAILED. 1624 passed; 23 failed; 222 ignored; 0 measured; 0 filtered out; finished in 71.35s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "current": {
+      "log": "target/sophon/current-review-fixed-tmpdir-serial-33367.log",
+      "summary": "test result: FAILED. 1658 passed; 23 failed; 225 ignored; 0 measured; 0 filtered out; finished in 72.57s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "current_only": [],
+    "baseline_only": [],
+    "environment": "Same Linux/x86-64, features vulkan,parity-trace; TMPDIR in repository instead of full /tmp; --test-threads=1"
+  },
+  "same_feature_library_regression_final_source": {
+    "baseline": {
+      "log": "target/sophon/baseline-tmpdir-serial-33367.log",
+      "summary": "test result: FAILED. 1624 passed; 23 failed; 222 ignored; 0 measured; 0 filtered out; finished in 71.35s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "current": {
+      "log": "target/sophon/current-final-source-1-33367.log",
+      "summary": "test result: FAILED. 1663 passed; 23 failed; 225 ignored; 0 measured; 0 filtered out; finished in 72.88s",
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ]
+    },
+    "baseline_only": [],
+    "current_only": [],
+    "artifact_identity": {
+      "cli_sha256": "ae5951e730e5cbd3e8ee5855444b80daebb286ac6bf6a25e0e0a73405f160318",
+      "server_sha256": "248a96ef9336e30635583d3136a80f5fc0bf163d26bd5b45b786be579ba4c6e8",
+      "source_manifest": "target/sophon/current-final-source-manifest.json",
+      "source_comparison": "610 actual Rust/Cargo source inputs match local files; AppleDouble metadata excluded"
+    }
+  },
+  "main_integrated_source_identity": {
+    "date": "2026-11-11",
+    "baseline_source_commit": "f553db2a4d88ea846c0c7a9f6438a96bfeb3169a",
+    "current_source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+    "reviewed_pr_head": "39752de37a30fdb389055c752dfddfd81c3c9e57",
+    "pull_request": "https://github.com/Liyulingyue/rust-model-inference/pull/233",
+    "source_manifest": "target/sophon/main-integrated-source-manifest.json",
+    "source_manifest_sha256": "a45de3a50a33ee823232b72d1ee1336d3568e74cc2593680fac2f2a5ed740c96",
+    "source_files_compared": 618,
+    "source_files_mismatched": [],
+    "source_comparison": "All 618 Rust/Cargo manifest entries match the local files by SHA-256. src/, Cargo.toml and Cargo.lock have no changes relative to current_source_commit; the reviewed PR head adds evidence only. AppleDouble metadata is excluded from the source manifest.",
+    "build_evidence": "target/sophon/main-integrated-build-33367.json",
+    "build_evidence_sha256": "5c745da4bc3409b0b3c8061a5be9d51cbe1ec2bb56af356e6831c2d7c3d8cb21",
+    "baseline_build_evidence": "target/sophon/upstream-main-baseline-build-33367.json",
+    "baseline_build_evidence_sha256": "0969fc725ce55b5714c9cb62b966d19f809c22a7c7e2a5d19999db023a460b0f",
+    "baseline_cli_sha256": "9e026996f4ec6dc907726200bfd460a886e875a2e21b3fa867495e508f572caf",
+    "current_cli_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+    "current_server_sha256": "010a3f33f0ef6b02da7c5a2925e4a0aeea5eb590ab514b7e55d614fdd2fa858c",
+    "latest_library_evidence": "same_feature_library_regression_main_integrated",
+    "latest_f32_evidence": "f32_cli_regression_main_integrated",
+    "historical_evidence": "The earlier f32_cli_regression, same_feature_library_regression_review_fixed and same_feature_library_regression_final_source sections are retained as historical snapshots. They do not supersede the main-integrated records for the final source."
+  },
+  "same_feature_library_regression_main_integrated": {
+    "status": "NO_NEW_FAILURES",
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367, read through target/sophon/ssh-remote with a fresh connection and no ControlMaster",
+    "baseline": {
+      "log": "target/sophon/upstream-main-baseline-1-33367.log",
+      "log_sha256": "bac86d865ee526a794bcf8bca54f7ba83ebdae6898828558113b3317b5de3d0a",
+      "log_bytes": 1613403,
+      "summary": "test result: FAILED. 1643 passed; 23 failed; 229 ignored; 0 measured; 0 filtered out; finished in 75.89s",
+      "counts": {
+        "passed": 1643,
+        "failed": 23,
+        "ignored": 229,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true,
+      "source_commit": "f553db2a4d88ea846c0c7a9f6438a96bfeb3169a",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/workspace/rust-model-inference/target/sophon/upstream-main-src/Cargo.toml",
+        "--offline",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib",
+        "-j1",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101
+    },
+    "current": {
+      "log": "target/sophon/main-integrated-1-33367.log",
+      "log_sha256": "dab978c3af572ad658e9ba2306b40332950f5e6f279d9d59a9986a737ee63c2e",
+      "log_bytes": 1617472,
+      "summary": "test result: FAILED. 1682 passed; 23 failed; 232 ignored; 0 measured; 0 filtered out; finished in 74.73s",
+      "counts": {
+        "passed": 1682,
+        "failed": 23,
+        "ignored": 232,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true,
+      "source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+      "source_manifest": "target/sophon/main-integrated-source-manifest.json",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib",
+        "-j2",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101
+    },
+    "baseline_only": [],
+    "current_only": [],
+    "same_failure_names": true,
+    "new_failure_count": 0,
+    "passed_delta": 39,
+    "ignored_delta": 3,
+    "environment": "Same existing Linux/x86-64 host; --offline --locked --profile release-fast --features vulkan,parity-trace --lib -- --test-threads=1. Baseline compilation used -j1 and current compilation used -j2; both test runs were serial.",
+    "limitation": "Both full library suites remain FAILED with the recorded 23 shared failure names. NO_NEW_FAILURES means the complete failure sets match; it does not mean the full suite passed or classify every shared failure cause."
+  },
+  "f32_cli_regression_main_integrated": {
+    "status": "PASS",
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367; only small JSON summaries were transferred, with model and raw logits retained remotely",
+    "checks": {
+      "distinct_binary_artifacts": true,
+      "same_model_sha256": true,
+      "same_cli_arguments": true,
+      "same_prompt_ids": true,
+      "same_generated_ids": true,
+      "same_logits_count": true,
+      "all_logits_bitwise_equal": true
+    },
+    "comparison": "target/sophon/f32-regression-review-20261111/main-integrated-comparison.json",
+    "comparison_sha256": "05e4fd9cd392cc318a9b2106c9a081c77f5c66ddc62f3c814c4b61c2299dc7d6",
+    "baseline": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/upstream-main-1/summary.json",
+    "current": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/main-integrated-1/summary.json",
+    "baseline_summary_sha256": "37a6665a026a624c64af124770f58eb3f9fd6dc39d587055f07cf655cb53c365",
+    "current_summary_sha256": "c92359834db18b3a15b9e2d241076fbbb3da98b21e6c52c0c6a1e8b198ce4ba1",
+    "baseline_source_commit": "f553db2a4d88ea846c0c7a9f6438a96bfeb3169a",
+    "current_source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+    "source_manifest": "target/sophon/main-integrated-source-manifest.json",
+    "baseline_binary_sha256": "9e026996f4ec6dc907726200bfd460a886e875a2e21b3fa867495e508f572caf",
+    "current_binary_sha256": "a2f47bf103e68628943840e9327d76d5151b6ba1710da9aa762b945bf589be90",
+    "model": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/Qwen3-0.6B-independent-F32.gguf",
+    "model_sha256": "7de72a3ee39fd5c69c66ee9c385987ec953d8125f7cc870495fad4cd996d8ada",
+    "model_origin": "All 310 tensors independently dequantized with official gguf 0.18.0 from real Qwen3-0.6B-Q4_K_M; all 32 metadata keys/types retained, only general.file_type 15->0.",
+    "source_model_sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
+    "independent_decoder_source_sha256": "46461f4f9db2fccaf9364c06566b281af2520fbcc1e01f223a3973aa122adc5b",
+    "prompt": "Explain why the sky is blue in one sentence.",
+    "prompt_token_ids": [
+      151644,
+      872,
+      198,
+      840,
+      20772,
+      3170,
+      279,
+      12884,
+      374,
+      6303,
+      304,
+      825,
+      11652,
+      13,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "generated_token_ids": [
+      785,
+      12884,
+      7952,
+      6303,
+      1576,
+      39020,
+      374,
+      36967
+    ],
+    "cli_arguments": [
+      "--model",
+      "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/Qwen3-0.6B-independent-F32.gguf",
+      "--prompt",
+      "Explain why the sky is blue in one sentence.",
+      "--compute",
+      "cpu",
+      "--kv-cache",
+      "f32",
+      "--threads",
+      "4",
+      "--temperature",
+      "0",
+      "--max-tokens",
+      "8",
+      "--no-thinking",
+      "--prefill-batch-size",
+      "64",
+      "--max-context",
+      "256"
+    ],
+    "compute": "cpu",
+    "kv_cache": "f32",
+    "threads": 4,
+    "temperature": 0,
+    "max_tokens": 8,
+    "prefill_batch_size": 64,
+    "max_context": 256,
+    "logits_count": 30,
+    "compared_values": 4558080,
+    "differing_values": 0,
+    "max_abs": 0.0,
+    "maximum_relative_rmse": 0.0,
+    "source_snapshot": "Final main-integrated source, including the unified logits, grouped scoring, cancellation follow-ups, upstream f553db2a merge, shared RealFft reuse and scoped composed-speech seed validation. The current CLI SHA matches the build evidence tied to the 618-file source manifest.",
+    "limitation": "One short ordinary Qwen3 F32 CPU CLI prompt with the recorded settings and independently dequantized real model; no broader prompt, other architecture, GPU, HTTP or performance claim."
+  },
+  "final_reviewed_source_identity": {
+    "date": "2026-11-11",
+    "baseline_source_commit": "f553db2a4d88ea846c0c7a9f6438a96bfeb3169a",
+    "base_source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+    "reviewed_pr_head": "39752de37a30fdb389055c752dfddfd81c3c9e57",
+    "pull_request": "https://github.com/Liyulingyue/rust-model-inference/pull/233",
+    "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+    "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+    "source_files_compared": 618,
+    "source_files_mismatched": [],
+    "source_changes_since_main_integrated": [
+      "src/app/text/vision.rs",
+      "src/vulkan/ops.rs"
+    ],
+    "source_comparison": "All 618 build-time Rust/Cargo manifest entries match the local files by SHA-256. The manifest includes the reviewed projection-width preservation fix in src/app/text/vision.rs and removal of the obsolete Q8_0 row-recorder width gate in src/vulkan/ops.rs, including their regressions. These two files are worktree changes relative to the reviewed PR head; this record identifies their exact contents by the source manifest rather than attributing them to the earlier commit.",
+    "build_evidence": "target/sophon/final-reviewed-build-33367.json",
+    "build_evidence_sha256": "4e4570fef6642caa9a528c2a0ec0a7da0e7e548791b49cdb11db1f475b03c643",
+    "binary_build_command": [
+      "cargo",
+      "build",
+      "--offline",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--bin",
+      "rust-model-inference",
+      "--bin",
+      "rust-model-server",
+      "-j2"
+    ],
+    "binary_build_exit_code": 0,
+    "baseline_cli_sha256": "9e026996f4ec6dc907726200bfd460a886e875a2e21b3fa867495e508f572caf",
+    "current_cli_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+    "current_server_sha256": "a4dec2b3fe79ef2adc0eda9a671ac2706e3cd069704445b5a0f6577633e2928c",
+    "binary_comparison": "Both preserved final-reviewed binaries were independently rehashed on the evidence host and match the build JSON.",
+    "latest_library_evidence": "same_feature_library_regression_final_reviewed",
+    "latest_f32_evidence": "f32_cli_regression_final_reviewed",
+    "targeted_regression_evidence": "targeted_regressions_final_reviewed",
+    "historical_evidence": "All earlier main-integrated and prior regression records are retained as historical snapshots. The final-reviewed source/build/library records include the two later shared fixes."
+  },
+  "same_feature_library_regression_final_reviewed": {
+    "status": "NO_NEW_FAILURES",
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367, read through target/sophon/ssh-remote with a fresh connection and no ControlMaster",
+    "source_identity": "final_reviewed_source_identity",
+    "baseline": {
+      "log": "target/sophon/upstream-main-baseline-1-33367.log",
+      "log_sha256": "bac86d865ee526a794bcf8bca54f7ba83ebdae6898828558113b3317b5de3d0a",
+      "log_bytes": 1613403,
+      "summary": "test result: FAILED. 1643 passed; 23 failed; 229 ignored; 0 measured; 0 filtered out; finished in 75.89s",
+      "counts": {
+        "passed": 1643,
+        "failed": 23,
+        "ignored": 229,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true,
+      "source_commit": "f553db2a4d88ea846c0c7a9f6438a96bfeb3169a",
+      "exit_code": 101
+    },
+    "current": {
+      "log": "target/sophon/final-reviewed-1-33367.log",
+      "log_sha256": "b660de94a1d5094a41fec6dc2c3b3574700253f7e2105aedcaef8c6074cdcdee",
+      "log_bytes": 1617858,
+      "summary": "test result: FAILED. 1683 passed; 23 failed; 234 ignored; 0 measured; 0 filtered out; finished in 74.46s",
+      "counts": {
+        "passed": 1683,
+        "failed": 23,
+        "ignored": 234,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true,
+      "base_source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+      "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+      "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib",
+        "-j2",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101
+    },
+    "baseline_only": [],
+    "current_only": [],
+    "same_failure_names": true,
+    "new_failure_count": 0,
+    "passed_delta": 40,
+    "ignored_delta": 5,
+    "environment": "Same existing Linux/x86-64 host; --offline --locked --profile release-fast --features vulkan,parity-trace --lib -- --test-threads=1. Baseline compilation used -j1 and current compilation used -j2; both test runs were serial.",
+    "limitation": "Both full library suites remain FAILED with the same 23 failure names. NO_NEW_FAILURES describes the complete matching failure sets; it does not mean the full suite passed or classify every shared failure cause."
+  },
+  "targeted_regressions_final_reviewed": {
+    "status": "PASS",
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367",
+    "source_identity": "final_reviewed_source_identity",
+    "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+    "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+    "build_evidence": "target/sophon/final-reviewed-build-33367.json",
+    "q8_wide": {
+      "test": "vulkan::ops::tests::vulkan_q8_wide_dot_and_prepared_match_cpu",
+      "weight_format": "Q8_0",
+      "input_width": 25600,
+      "output_width": 65,
+      "prepared_token_rows": [
+        1,
+        3,
+        33
+      ],
+      "direct_dot_token_rows": 1,
+      "cpu_reference": "production quantize_q8_0_into plus matmul_q8_0_quantized_range",
+      "numerical_gate": {
+        "absolute_tolerance": 0.0002,
+        "relative_tolerance": 2e-05,
+        "bitwise_required": false
+      },
+      "checks": [
+        "prequantized Qwen3Ops dot recorder",
+        "BatchedLinearRuntime activation preparation",
+        "one completed GPU submission per matmul",
+        "finite outputs within the declared CPU-reference numerical gate"
+      ],
+      "runs": [
+        {
+          "log": "target/sophon/final-reviewed-2-33367.log",
+          "log_sha256": "d49b9973c700cbd8fb6d7aa8bd2a4f5b09444bad4aea9dd058b49a284412c47f",
+          "log_bytes": 95133,
+          "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1939 filtered out; finished in 0.07s",
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "measured": 0,
+            "filtered out": 1939
+          },
+          "failures": [],
+          "failure_list_matches_summary_and_test_lines": true,
+          "rust_gpu_tiled": 0,
+          "command": [
+            "env",
+            "RUST_GPU_TILED=0",
+            "cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "release-fast",
+            "--features",
+            "vulkan,parity-trace",
+            "--lib",
+            "vulkan_q8_wide",
+            "-j2",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "process_seconds": 0.26964162662625313,
+          "operator_checks": [
+            "operator=q8_wide_dot max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+            "operator=q8_wide_prepared_rows_1 max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+            "operator=q8_wide_prepared_rows_3 max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+            "operator=q8_wide_prepared_rows_33 max_abs=0.000e0 max_rel=0.000e0 first_bad=None"
+          ]
+        },
+        {
+          "log": "target/sophon/final-reviewed-3-33367.log",
+          "log_sha256": "12b842bc78df96ec4fa63df8d8f27696ee84dcdab7a0c1d8f777f5dd822c2ef1",
+          "log_bytes": 95133,
+          "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1939 filtered out; finished in 0.11s",
+          "counts": {
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "measured": 0,
+            "filtered out": 1939
+          },
+          "failures": [],
+          "failure_list_matches_summary_and_test_lines": true,
+          "rust_gpu_tiled": 1,
+          "command": [
+            "env",
+            "RUST_GPU_TILED=1",
+            "cargo",
+            "test",
+            "--offline",
+            "--locked",
+            "--profile",
+            "release-fast",
+            "--features",
+            "vulkan,parity-trace",
+            "--lib",
+            "vulkan_q8_wide",
+            "-j2",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+            "--nocapture"
+          ],
+          "exit_code": 0,
+          "process_seconds": 0.2955417186021805,
+          "operator_checks": [
+            "operator=q8_wide_dot max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+            "operator=q8_wide_prepared_rows_1 max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+            "operator=q8_wide_prepared_rows_3 max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+            "operator=q8_wide_prepared_rows_33 max_abs=0.000e0 max_rel=0.000e0 first_bad=None"
+          ]
+        }
+      ],
+      "limitation": "The two environment settings ran in separate processes. This bounded operator regression does not establish full-model GPU parity or performance; the separate legacy VulkanContext::matmul_q8_0 width contract was not changed."
+    },
+    "projected_vision_rows": {
+      "log": "target/sophon/final-reviewed-4-33367.log",
+      "log_sha256": "b9937c02b314f9a590b9bc8492108d6a7001b6d23278861432790e73a6a03264",
+      "log_bytes": 94921,
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1939 filtered out; finished in 6.13s",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered out": 1939
+      },
+      "failures": [],
+      "failure_list_matches_summary_and_test_lines": true,
+      "test": "app::text::vision::qwen3vl_image_tests::real_projected_width_preserves_all_image_and_deepstack_rows",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib",
+        "real_projected_width_preserves_all_image_and_deepstack_rows",
+        "-j2",
+        "--",
+        "--ignored",
+        "--test-threads=1",
+        "--nocapture"
+      ],
+      "exit_code": 0,
+      "process_seconds": 6.400129804387689,
+      "compute": "cpu",
+      "fixture": "Pinned remote Sophon mmproj-F32.gguf via RMI_SOPHON_VISION",
+      "input_image_size": [
+        32,
+        32
+      ],
+      "checks": [
+        "projected media length equals smart-resize token count times projection_dim",
+        "configured DeepStack layer count is preserved",
+        "every DeepStack layer has the full projected media length",
+        "projected media values are finite"
+      ],
+      "limitation": "Real-weight shape-preservation regression only; not a broader vision-quality or performance evaluation."
+    }
+  },
+  "f32_cli_regression_final_reviewed": {
+    "status": "PASS",
+    "date": "2026-11-11",
+    "evidence_host": "existing remote 33367; only small JSON summaries were transferred, with model and raw logits retained remotely",
+    "checks": {
+      "distinct_binary_artifacts": true,
+      "same_model_sha256": true,
+      "same_cli_arguments": true,
+      "same_prompt_ids": true,
+      "same_generated_ids": true,
+      "same_logits_count": true,
+      "all_logits_bitwise_equal": true
+    },
+    "comparison": "target/sophon/f32-regression-review-20261111/final-reviewed-comparison.json",
+    "comparison_sha256": "3f5c02438a8489392617720fdc11114535e0dc302c0e2f354c08545939bc753a",
+    "baseline": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/upstream-main-1/summary.json",
+    "current": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/final-reviewed-1/summary.json",
+    "baseline_summary_sha256": "37a6665a026a624c64af124770f58eb3f9fd6dc39d587055f07cf655cb53c365",
+    "current_summary_sha256": "e02b4d17fa6f0c7258a08db1a0b103fb96d698d43868a8c1f55a3a1eb22717d0",
+    "baseline_source_commit": "f553db2a4d88ea846c0c7a9f6438a96bfeb3169a",
+    "source_manifest": "target/sophon/final-reviewed-source-manifest.json",
+    "baseline_binary_sha256": "9e026996f4ec6dc907726200bfd460a886e875a2e21b3fa867495e508f572caf",
+    "current_binary_sha256": "1d6ebd0c893c3095299556556bd6aa9ec583cee036397e6dd878fcc59ffb9c62",
+    "model": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/Qwen3-0.6B-independent-F32.gguf",
+    "model_sha256": "7de72a3ee39fd5c69c66ee9c385987ec953d8125f7cc870495fad4cd996d8ada",
+    "model_origin": "All 310 tensors independently dequantized with official gguf 0.18.0 from real Qwen3-0.6B-Q4_K_M; all 32 metadata keys/types retained, only general.file_type 15->0.",
+    "source_model_sha256": "ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a",
+    "independent_decoder_source_sha256": "46461f4f9db2fccaf9364c06566b281af2520fbcc1e01f223a3973aa122adc5b",
+    "prompt": "Explain why the sky is blue in one sentence.",
+    "prompt_token_ids": [
+      151644,
+      872,
+      198,
+      840,
+      20772,
+      3170,
+      279,
+      12884,
+      374,
+      6303,
+      304,
+      825,
+      11652,
+      13,
+      151645,
+      198,
+      151644,
+      77091,
+      198,
+      151667,
+      271,
+      151668,
+      271
+    ],
+    "generated_token_ids": [
+      785,
+      12884,
+      7952,
+      6303,
+      1576,
+      39020,
+      374,
+      36967
+    ],
+    "cli_arguments": [
+      "--model",
+      "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/Qwen3-0.6B-independent-F32.gguf",
+      "--prompt",
+      "Explain why the sky is blue in one sentence.",
+      "--compute",
+      "cpu",
+      "--kv-cache",
+      "f32",
+      "--threads",
+      "4",
+      "--temperature",
+      "0",
+      "--max-tokens",
+      "8",
+      "--no-thinking",
+      "--prefill-batch-size",
+      "64",
+      "--max-context",
+      "256"
+    ],
+    "compute": "cpu",
+    "kv_cache": "f32",
+    "threads": 4,
+    "temperature": 0,
+    "max_tokens": 8,
+    "prefill_batch_size": 64,
+    "max_context": 256,
+    "logits_count": 30,
+    "compared_values": 4558080,
+    "differing_values": 0,
+    "max_abs": 0,
+    "maximum_relative_rmse": 0,
+    "source_snapshot": "Final reviewed source includes the main-integrated implementation plus the projected vision width/truncation fix and shared Q8_0 row-recorder width-gate fix. The captured current CLI SHA matches the preserved final-reviewed build artifact tied to the 618-file source manifest.",
+    "limitation": "One short ordinary Qwen3 F32 CPU CLI prompt with the recorded settings and independently dequantized real model; no broader prompt, other architecture, GPU, HTTP or performance claim.",
+    "source_manifest_sha256": "cd579b6dbde376557cb401a6254cf47af9ba63718cc9ccb2dace653cbedec934",
+    "source_identity": "final_reviewed_source_identity",
+    "build_evidence": "target/sophon/final-reviewed-build-33367.json",
+    "build_evidence_sha256": "4e4570fef6642caa9a528c2a0ec0a7da0e7e548791b49cdb11db1f475b03c643",
+    "base_source_commit": "a5afdebba452c963e8e7bb3edff4e6141de9e0f3",
+    "baseline_capture_exit_code": 0,
+    "current_capture_exit_code": 0,
+    "comparison_exit_code": 0
+  },
+  "fallback_reviewed_source_identity": {
+    "base_source_commit": "d2179bd0d8586ef6d368ef1f1b1c487a9c4e3448",
+    "source_manifest": "target/sophon/fallback-reviewed-source-manifest.json",
+    "source_manifest_sha256": "5701ac901a75e5405839648f81797448647fc45ee3b9828668c19219a8ba20e4",
+    "source_files_compared": 618,
+    "source_files_mismatched": [],
+    "binaries": {
+      "rust-model-inference": {
+        "path": "target/sophon/fallback-reviewed-rust-model-inference",
+        "sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347"
+      },
+      "rust-model-server": {
+        "path": "target/sophon/fallback-reviewed-rust-model-server",
+        "sha256": "18a8a7d6818b46a6f5a8f6278231fc9e126285d7944e120e07fe762bf59a9abb"
+      }
+    },
+    "build_report": "target/sophon/fallback-reviewed-build-33367.json",
+    "build_report_sha256": "fffb0f2ff59ad5714ea9e7494b90a42f5d87fb83ea3df9886abe189ccc91d8ad",
+    "date": "2026-11-11",
+    "pull_request": "https://github.com/Liyulingyue/rust-model-inference/pull/233",
+    "source_changes_since_final_reviewed": [
+      "src/app/text/vision.rs",
+      "src/models/qwen3/vision/mod.rs",
+      "src/models/qwen3/trunk/prefill.rs"
+    ],
+    "source_comparison": "All 618 Rust/Cargo build-time manifest entries match this checkout by SHA-256. Other reports retain their distinct source manifests and binaries.",
+    "pushed_source_commit": "304d93a10002db99a17d93aad6ab33c25837ee63"
+  },
+  "same_feature_library_regression_fallback_reviewed": {
+    "status": "NO_NEW_FAILURES",
+    "baseline": {
+      "log": "target/sophon/upstream-main-baseline-1-33367.log",
+      "log_sha256": "bac86d865ee526a794bcf8bca54f7ba83ebdae6898828558113b3317b5de3d0a",
+      "log_bytes": 1613403,
+      "summary": "test result: FAILED. 1643 passed; 23 failed; 229 ignored; 0 measured; 0 filtered out; finished in 75.89s",
+      "counts": {
+        "passed": 1643,
+        "failed": 23,
+        "ignored": 229,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "current": {
+      "log": "target/sophon/fallback-reviewed-1-33367.log",
+      "log_sha256": "eb5f12fb18fdcc6514a008d550bd135a760e18a424361440a0d2b556b3316ffd",
+      "log_bytes": 1618017,
+      "summary": "test result: FAILED. 1685 passed; 23 failed; 234 ignored; 0 measured; 0 filtered out; finished in 73.54s",
+      "counts": {
+        "passed": 1685,
+        "failed": 23,
+        "ignored": 234,
+        "measured": 0,
+        "filtered out": 0
+      },
+      "failures": [
+        "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::kernel::q8_0::tests::q8_kernel_thread_partition",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits"
+      ],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "new_failures": [],
+    "removed_failures": [],
+    "date": "2026-11-11",
+    "evidence_host": "authorized existing remote 33367",
+    "source_identity": "fallback_reviewed_source_identity"
+  },
+  "prefill_replay_regression_fallback_reviewed": {
+    "status": "PASS",
+    "test": "models::qwen3::trunk::prefill::tests::cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix",
+    "red": {
+      "log": "target/sophon/prefill-replay-red.log",
+      "log_sha256": "fdb4e0081fc951c504787dc53c500d653bb655fbb2cd66d897fb6bfd4340525a",
+      "log_bytes": 95527,
+      "summary": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1941 filtered out; finished in 0.00s",
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0,
+        "measured": 0,
+        "filtered out": 1941
+      },
+      "failures": [
+        "models::qwen3::trunk::prefill::tests::cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix"
+      ],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "green": {
+      "log": "target/sophon/prefill-replay-green.log",
+      "log_sha256": "36b9fd2f82908f4cb0019d8c981cddab4a72bb4d9e956dacc44c7b6d3620c414",
+      "log_bytes": 94802,
+      "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1941 filtered out; finished in 0.00s",
+      "counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered out": 1941
+      },
+      "failures": [],
+      "failure_list_matches_summary_and_test_lines": true
+    },
+    "scope": "F32-KV CPU fixture simulates partial device progress and nonfinite current-input KV; committed prefixes 0/2, full logits/KV, final length and replay CPU error retaining original GPU cause. This does not establish device numerical parity.",
+    "initial_harness_error": {
+      "log": "target/sophon/prefill-replay-fixture-error.log",
+      "log_sha256": "b62961922e6abe7b616d0085a087694ed37fe157252d7520eb567c2589f29e1d",
+      "reason": "Initial fixture used default F16 session while expecting F32; corrected before the genuine RED comparison."
+    },
+    "source_identity": "fallback_reviewed_source_identity"
+  },
+  "python_tests_fallback_reviewed": {
+    "status": "PASS",
+    "count": 68,
+    "log": "target/sophon/fallback-reviewed-python-tests.log",
+    "log_sha256": "e7e043e194ec2b136e8ed61c6922eb50057b5442bb510cdcf6a1683c91c50c10"
+  },
+  "f32_cli_regression_fallback_reviewed": {
+    "status": "PASS",
+    "checks": {
+      "distinct_binary_artifacts": true,
+      "same_model_sha256": true,
+      "same_cli_arguments": true,
+      "same_prompt_ids": true,
+      "same_generated_ids": true,
+      "same_logits_count": true,
+      "all_logits_bitwise_equal": true
+    },
+    "baseline": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/upstream-main-1/summary.json",
+    "current": "/root/rmi-sophon-artifacts/repo/target/sophon/f32-regression-review-20261111/fallback-reviewed-1/summary.json",
+    "baseline_binary_sha256": "9e026996f4ec6dc907726200bfd460a886e875a2e21b3fa867495e508f572caf",
+    "current_binary_sha256": "eb97c833657ed9efc085d6c9abe6274f1905bd93af563146d28d00ef00408347",
+    "compared_values": 4558080,
+    "generated_token_ids": [
+      785,
+      12884,
+      7952,
+      6303,
+      1576,
+      39020,
+      374,
+      36967
+    ],
+    "logits": [
+      {
+        "occurrence": 0,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 1,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 2,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 3,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 4,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 5,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 6,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 7,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 8,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 9,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 10,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 11,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 12,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 13,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 14,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 15,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 16,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 17,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 18,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 19,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 20,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 21,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 22,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 23,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 24,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 25,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 26,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 27,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 28,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      },
+      {
+        "occurrence": 29,
+        "same_shape": true,
+        "same_occurrence": true,
+        "same_bits": true,
+        "values": 151936,
+        "max_abs": 0.0,
+        "relative_rmse": 0.0,
+        "differing_values": 0
+      }
+    ],
+    "date": "2026-11-11",
+    "evidence_host": "authorized remote 33367; only small JSON transferred; model and raw logits remain remote",
+    "source_identity": "fallback_reviewed_source_identity",
+    "comparison": "target/sophon/f32-regression-review-20261111/fallback-reviewed-comparison.json",
+    "scope": "Ordinary upstream Qwen3 F32 CPU inference; 30 logits records and 4558080 values. Existing CPU numerical behavior remains unchanged; this is not a lossy/device bitwise acceptance requirement."
+  },
+  "ci_fallback_reviewed": {
+    "status": "ENVIRONMENT_FAILURE",
+    "head": "304d93a10002db99a17d93aad6ab33c25837ee63",
+    "workflow": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644",
+    "source_identity": "fallback_reviewed_source_identity",
+    "jobs": [
+      {
+        "name": "x86 dispatch regressions",
+        "conclusion": "failure",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644/job/130633790351",
+        "failed_steps": [
+          "Q8 dispatch without F16C"
+        ],
+        "successful_steps": [
+          "Set up job",
+          "Run actions/checkout@v4",
+          "Run dtolnay/rust-toolchain@stable",
+          "Require native SIMD coverage",
+          "Run cargo test --locked --lib ops::softmax::tests::softmax_approx_avx2_",
+          "Run cargo test --locked --lib ops::math::exp::tests::",
+          "Run cargo test --locked --lib ops::kernel::q8_0::",
+          "Run cargo test --locked --lib raw_hidden_",
+          "Run cargo test --locked --lib models::vela3::",
+          "Run cargo test --locked --lib format::safetensors::tests::",
+          "Run cargo test --locked --test system_one_cli",
+          "Run cargo test --locked --lib models::nemotron_reuse::",
+          "Run cargo test --locked --test nemotron_reuse_cli",
+          "Run python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'",
+          "Run cargo test --locked --lib ggml_dots_honor_scalar_dispatch",
+          "Run RMI_SCALAR=1 cargo test --locked --lib ggml_dots_honor_scalar_dispatch",
+          "Run cargo test --locked --lib hy_mt2_",
+          "Run cargo test --locked --lib hy_",
+          "Run RMI_SCALAR=1 cargo test --locked --lib hy_",
+          "Run cargo test --locked --lib ops::audio::",
+          "Run cargo test --locked --lib unlimited_ocr",
+          "Run cargo test --locked --lib models::diffusion::dreamx::kernels::tests::",
+          "Run cargo test --locked --test unlimited_ocr_cli",
+          "Run cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline",
+          "Post Run actions/checkout@v4",
+          "Complete job"
+        ],
+        "classification": "environment: Ubuntu Azure mirror DNS resolution",
+        "failure_excerpt": [
+          "2026-11-11T16:00:23.3939010Z   Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T16:00:23.3993705Z E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-user_8.2.2%2bds-0ubuntu1.18_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T16:00:23.3994355Z E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/universe/q/qemu/qemu-user-binfmt_8.2.2%2bds-0ubuntu1.18_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'"
+        ],
+        "captured_log_sha256": "58a4cedefc10740af7e0dd59b7f05c34047192edfb5fdb3f1d38fe2ab36653b4"
+      },
+      {
+        "name": "Rustfmt",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644/job/130633790827",
+        "failed_steps": [],
+        "successful_steps": [
+          "Set up job",
+          "Run actions/checkout@v4",
+          "Run dtolnay/rust-toolchain@stable",
+          "Run cargo fmt --check",
+          "Post Run actions/checkout@v4",
+          "Complete job"
+        ]
+      },
+      {
+        "name": "Vulkan compile and shaders",
+        "conclusion": "failure",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43052689644/job/130633791146",
+        "failed_steps": [
+          "Run sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools mesa-vulkan-drivers libvulkan1"
+        ],
+        "successful_steps": [
+          "Set up job",
+          "Run actions/checkout@v4",
+          "Run dtolnay/rust-toolchain@stable",
+          "Post Run actions/checkout@v4",
+          "Complete job"
+        ],
+        "classification": "environment: Ubuntu Azure mirror DNS resolution",
+        "failure_excerpt": [
+          "2026-11-11T15:58:45.7990212Z E: Failed to fetch mirror+file:/etc/apt/apt-mirrors.txt/pool/universe/s/spirv-tools/spirv-tools_2025.1%7erc1-1%7eubuntu0.24.04.2_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T15:58:45.7991836Z E: Failed to fetch mirror+file:/etc/apt/apt-mirrors.txt/pool/universe/g/glslang/glslang-tools_15.1.0-2%7eubuntu0.24.04.2_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'",
+          "2026-11-11T15:58:45.7993340Z E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/main/m/mesa/mesa-vulkan-drivers_25.2.8-0ubuntu0.24.04.4_amd64.deb  Temporary failure resolving 'azure.archive.ubuntu.com'"
+        ],
+        "captured_log_sha256": "62bcad282230e15b68f1b96fe7d269cef14b61c7dc79326a4d54564e6a5b6ce0"
+      }
+    ],
+    "scope": "Rustfmt passes. x86 code checks before QEMU pass; QEMU is not reached after apt DNS failure. Vulkan shader/compile checks are not reached after the same apt DNS failure. Separately recorded remote library, binary builds and genuine GPU operator/Auto checks retain their independent evidence."
+  },
+  "q6_resumed_31344_build": {
+    "status": "PASS_CPU_BUILD_AND_REPLAY_FIXTURE",
+    "host_port": 31344,
+    "source_archive_commit": "304d93a1",
+    "build_report": "target/sophon/q6-resumed-31344-build.json",
+    "build_report_sha256": "0fbdeccc86023f3944d385e093eb6051e26c8d58f6f12986c536c964e33b7206",
+    "cli": {
+      "path": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli",
+      "sha256": "54c1792d4e63791df6f9bbbfdf41475fd9c2114a064a0c35f1b0adc60f494233",
+      "bytes": 41077552
+    },
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "features": [
+      "parity-trace"
+    ],
+    "default_features": false,
+    "vulkan_enabled": false,
+    "profile": "release-fast",
+    "build_configuration": "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
+    "build_source_manifest": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-source-manifest.json",
+    "build_source_manifest_sha256": "4dc5815b9e82efdf6fa228154a4344dd0ec53b80d1042ab93e664594497d988b",
+    "source_entries": 618,
+    "source_matches_fallback_reviewed": true,
+    "source_unchanged_after_build": true,
+    "source_manifest_after_sha256": "4dc5815b9e82efdf6fa228154a4344dd0ec53b80d1042ab93e664594497d988b",
+    "source_reference": "fallback_reviewed_source_identity",
+    "commands": [
+      {
+        "name": "cli-build",
+        "command": [
+          "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+          "build",
+          "--bin",
+          "rust-model-inference",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--no-default-features",
+          "--features",
+          "parity-trace",
+          "-j4"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli-build.log",
+        "exit_code": 0,
+        "elapsed_seconds": 161.38472235575318,
+        "log_sha256": "cfcc13cbea7147e098b52769256fce48d79d522991fa8bb68e8b245a34986af3"
+      },
+      {
+        "name": "cli-help",
+        "command": [
+          "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli",
+          "--help"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli-help.log",
+        "exit_code": 0,
+        "elapsed_seconds": 0.003669820725917816,
+        "log_sha256": "32a3930a7c0e56bf247b31cb1a11ff40a29ce7a3b567465afd095ebd6b268926"
+      },
+      {
+        "name": "cli-ldd",
+        "command": [
+          "ldd",
+          "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cli-ldd.log",
+        "exit_code": 0,
+        "elapsed_seconds": 0.007575679570436478,
+        "log_sha256": "84dee14131738d386427d16eb0f8427dfb73f6b3e4c50205445bc6ec36d36b34"
+      },
+      {
+        "name": "cpu-replay-test",
+        "command": [
+          "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+          "test",
+          "--lib",
+          "cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix",
+          "--offline",
+          "--locked",
+          "--profile",
+          "release-fast",
+          "--no-default-features",
+          "--features",
+          "parity-trace",
+          "-j4",
+          "--",
+          "--nocapture"
+        ],
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/q6-resumed-31344-cpu-replay-test.log",
+        "exit_code": 0,
+        "elapsed_seconds": 132.43279593996704,
+        "log_sha256": "3d3bd60119662e3efdac1b7fe974c0d8e03364e33d89d97a1a6a29eb7fcca88f"
+      }
+    ],
+    "test_result": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered_out": 1687,
+      "fixture": "models::qwen3::trunk::prefill::tests::cpu_prefill_replay_discards_partial_device_kv_and_preserves_committed_prefix"
+    },
+    "finalization": {
+      "initial_driver_exit_code": 1,
+      "initial_error": "Archive helper glob also matched the CLI executable after the build and test commands had passed.",
+      "resolution": "Selected the exact lib-test executable named by the Cargo test log; independently verified CLI SHA, all command exit codes, test count, and source manifests.",
+      "exit_code": 0
+    },
+    "scope": "Replacement-host CPU+parity-trace CLI only. The build and one CPU replay fixture pass; this is not a new full-library, HTTP, Auto, Vulkan or model numerical acceptance result. Historical protected binaries keep their own identities."
+  },
+  "ci_recovery_checkpoint": {
+    "status": "PASS",
+    "head": "3e9b227c2054196da5a5bacd556eca143b8f1658",
+    "workflow": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115",
+    "source_reference": "fallback_reviewed_source_identity",
+    "source_hashes_unchanged": true,
+    "captured_report": "target/sophon/ci-3e9b227c2.json",
+    "captured_report_sha256": "02635ff3d996c7fbc04a7de426a2e7a909e14cd3df58d06dbabaf3b059e5a85f",
+    "jobs": [
+      {
+        "name": "Rustfmt",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115/job/130668395344",
+        "successful_steps": 6,
+        "failed_steps": []
+      },
+      {
+        "name": "Vulkan compile and shaders",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115/job/130668395710",
+        "successful_steps": 20,
+        "failed_steps": []
+      },
+      {
+        "name": "x86 dispatch regressions",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43062461115/job/130668395848",
+        "successful_steps": 27,
+        "failed_steps": []
+      }
+    ],
+    "scope": "All three CI jobs pass on the evidence checkpoint with unchanged Rust/Cargo source. This subsequent run reaches QEMU and Vulkan compile/shader/device-regression steps that the earlier apt DNS failure prevented. CI success is separate from real-model numerical acceptance; failed thinker/GPU gates remain failed."
+  },
+  "grouped_audio_31344_review": {
+    "status": "PASS for targeted tests/build and no new same-feature library failure names; the complete library suite still FAILS",
+    "date": "2026-11-11",
+    "host_port": 31344,
+    "source_identity": {
+      "base_source_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+      "changed_source_files": [
+        "src/app/jev/grouped.rs",
+        "src/app/server/api.rs",
+        "src/app/server/audio_chat.rs"
+      ],
+      "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+      "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+      "source_entries": 618,
+      "build_report": "target/sophon/grouped-audio-31344-build.json",
+      "build_report_sha256": "e23ef850ae139bc434da2d9c1c91a1489a378777e2bfda9de6865210ef8ad0c0",
+      "cli": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+        "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+        "size": 41362856
+      },
+      "server": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+        "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+        "size": 32469400
+      },
+      "scope": "Functional entrypoint comparison only: Q6_K thinker + F32 audio, CPU/F32 KV; not an all-Q6 component setup or numerical Oracle/GPU acceptance. Synthetic 250ms 440Hz tone checks protocol and deterministic probability equality, not transcription/speech quality.",
+      "source_matches_local_checkout_and_remote_after_run": true
+    },
+    "build": {
+      "status": "passed",
+      "started_at": "2026-11-11T17:52:20.688777+00:00",
+      "base_commit": "20384daf3da04d33f502a32c80126c73673aa743",
+      "changed_source_files": [
+        "src/app/jev/grouped.rs",
+        "src/app/server/api.rs",
+        "src/app/server/audio_chat.rs"
+      ],
+      "source_manifest": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-expected-source-manifest.json",
+      "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+      "source_entries": 618,
+      "source_matches_expected": true,
+      "profile": "release-fast",
+      "features": [
+        "parity-trace"
+      ],
+      "default_features": false,
+      "vulkan_enabled": false,
+      "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+      "config": "[build]\nrustflags = [\"-C\", \"target-cpu=native\"]\n",
+      "server_tests": {
+        "summary": "112 passed / 0 failed",
+        "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-server-green-v2.log",
+        "sha256": "0599ea1f805900095933314cdd26e7ad9345be5a57abd804466382dceeb641f7"
+      },
+      "lib_test": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-lib-test",
+        "sha256": "ec785b79ec0591299f2662755c72eef8b4a4e0d66d2c51ae2f7a75f534156d84"
+      },
+      "jobs": [
+        {
+          "label": "lib-suite",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-lib-test",
+            "--test-threads=1"
+          ],
+          "exit_code": 101,
+          "seconds": 70.43588425405324,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-lib-suite.log",
+          "sha256": "05d3947936255018376488c926cbeb2f588afce798cbf3f9b389d4019a6edbd3"
+        },
+        {
+          "label": "apps-build",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/rust-toolchain/bin/cargo",
+            "build",
+            "--offline",
+            "--locked",
+            "--profile",
+            "release-fast",
+            "--no-default-features",
+            "--features",
+            "parity-trace",
+            "--bin",
+            "rust-model-inference",
+            "--bin",
+            "rust-model-server",
+            "-j4"
+          ],
+          "exit_code": 0,
+          "seconds": 164.75394054874778,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-apps-build.log",
+          "sha256": "c3cbde7b50ae379fcc2bfc83f339b3959c420c3f8e7a89bc9ebe01961f47d854"
+        },
+        {
+          "label": "cli-help",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+            "--help"
+          ],
+          "exit_code": 0,
+          "seconds": 0.0025915130972862244,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli-help.log",
+          "sha256": "32a3930a7c0e56bf247b31cb1a11ff40a29ce7a3b567465afd095ebd6b268926"
+        },
+        {
+          "label": "server-help",
+          "command": [
+            "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+            "--help"
+          ],
+          "exit_code": 0,
+          "seconds": 0.0024179555475711823,
+          "log": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server-help.log",
+          "sha256": "719d9605cbd5b0879e20f523d5f311c6f98f071dd68b6835454bc5fca759d6a5"
+        }
+      ],
+      "lib_suite": {
+        "baseline_summary": [
+          "test result: FAILED. 1566 passed; 16 failed; 106 ignored; 0 measured; 0 filtered out; finished in 70.10s"
+        ],
+        "current_summary": [
+          "test result: FAILED. 1568 passed; 16 failed; 106 ignored; 0 measured; 0 filtered out; finished in 70.41s"
+        ],
+        "baseline_failed_names": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+        ],
+        "current_failed_names": [
+          "format::ggufrs::tests::open_does_not_map_sparse_segment_region",
+          "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+          "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+          "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+          "models::clm::tests::matches_reference_golden_vectors",
+          "models::clm::tests::rejects_wrong_embedding_width",
+          "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+          "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+          "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+          "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+          "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+          "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+          "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+          "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+          "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+          "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+        ],
+        "new_failures": [],
+        "removed_failures": [],
+        "same_failed_names": true,
+        "baseline_log_sha256": "015cbcff378b60ae5c4845434e62d173988f5bd2fe7efc28fc211a56f144b02d"
+      },
+      "cli": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-cli",
+        "sha256": "e842da7594b2ff7b80b26173550e8d1504009fd3cd9c9e4ee8d50d51985420b4",
+        "size": 41362856
+      },
+      "server": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-31344-server",
+        "sha256": "88206ac992c9669adcd4b1bd2884666f9b70efe91a0891bb0f830ba0eec97be7",
+        "size": 32469400
+      },
+      "source_unchanged_after_build": true,
+      "completed_at": "2026-11-11T17:56:16.094014+00:00"
+    },
+    "red_green": {
+      "route_red": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-route-red.log",
+        "size": 95117,
+        "sha256": "12a21027ff0a4a0020e9f825de9f69c839dce545a8bba12fc9f16be49fd916eb",
+        "summaries": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1688 filtered out; finished in 0.13s"
+        ]
+      },
+      "route_red_observation": "Real loopback HTTP returned 404 rather than 200 before the new route existed.",
+      "nonfinite_red": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-nonfinite-red.log",
+        "size": 96749,
+        "sha256": "3ed8c66508615e4749fbd88b6196d7e83b2c1503aca4997a868efa4a44c95387",
+        "summaries": [
+          "test result: FAILED. 13 passed; 2 failed; 0 ignored; 0 measured; 1675 filtered out; finished in 2.26s"
+        ]
+      },
+      "nonfinite_red_observation": "Shared parser unit test accepted nonfinite values; actual loopback HTTP returned 200 rather than 400.",
+      "server_green": {
+        "path": "/root/rmi-sophon-artifacts/repo/target/sophon/grouped-audio-server-green-v2.log",
+        "size": 104703,
+        "sha256": "0599ea1f805900095933314cdd26e7ad9345be5a57abd804466382dceeb641f7",
+        "summaries": [
+          "test result: ok. 112 passed; 0 failed; 0 ignored; 0 measured; 1578 filtered out; finished in 3.38s"
+        ],
+        "tail": null
+      },
+      "source_comparison": {
+        "entries": 618,
+        "mismatches": []
+      }
+    },
+    "source_transfer_preflight": {
+      "removed_transfer_metadata_only": [
+        {
+          "path": "src/app/jev/._grouped.rs",
+          "bytes": 163,
+          "sha256": "afd3455c90d031675b9d62f6ca3d04324da13935c0e0151dc6dae3feaa1d03a0",
+          "kind": "Mac AppleDouble archive metadata; not Rust source"
+        },
+        {
+          "path": "src/app/server/._api.rs",
+          "bytes": 163,
+          "sha256": "afd3455c90d031675b9d62f6ca3d04324da13935c0e0151dc6dae3feaa1d03a0",
+          "kind": "Mac AppleDouble archive metadata; not Rust source"
+        },
+        {
+          "path": "src/app/server/._audio_chat.rs",
+          "bytes": 163,
+          "sha256": "afd3455c90d031675b9d62f6ca3d04324da13935c0e0151dc6dae3feaa1d03a0",
+          "kind": "Mac AppleDouble archive metadata; not Rust source"
+        }
+      ],
+      "production_source_modified": false
+    },
+    "remote_audio_download": {
+      "revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
+      "host_port": 31344,
+      "files": [
+        {
+          "path": "thinker/audio/config.json",
+          "size": 1728,
+          "sha256": "134e9c7ddb91e90cc56fd40b4f793cb4deb28bdaa9980d0037b8ad893eb37d04",
+          "verified_sha256": "134e9c7ddb91e90cc56fd40b4f793cb4deb28bdaa9980d0037b8ad893eb37d04"
+        },
+        {
+          "path": "thinker/audio/model.safetensors",
+          "size": 405001088,
+          "sha256": "1fc9fa79d8731b4d9e4762f52935d60286b87a5eb5c2002f548da87abbfd1e04",
+          "verified_sha256": "1fc9fa79d8731b4d9e4762f52935d60286b87a5eb5c2002f548da87abbfd1e04"
+        },
+        {
+          "path": "thinker/audio/preprocessor_config.json",
+          "size": 356,
+          "sha256": "9ec7d9345842ceb81dc580159bbf377b3c8a4e40c8c7ce110a9a2b435f00ad4b",
+          "verified_sha256": "9ec7d9345842ceb81dc580159bbf377b3c8a4e40c8c7ce110a9a2b435f00ad4b"
+        }
+      ],
+      "transport": "Direct streamed ModelScope HTTPS on the remote host; no checkpoint bytes stored on the Mac",
+      "started_epoch": 1794418572.7657583,
+      "status": "PASS",
+      "finished_epoch": 1794418585.167722,
+      "verified_bytes": 405003172
+    },
+    "remote_audio_download_report_sha256": "e1a566e6eda749db79d01efa858fee0cfdada8b10ddcbd153a4b6e1aee3c9a85",
+    "real_entrypoints": {
+      "report": "target/sophon/grouped-audio-entrypoints-31344-v2/result.json",
+      "sha256": "874c600299d104bc110b5af95ae951f9d6cb4bcc46bfcd5f2e3599fdbc473f68",
+      "status": "PASS",
+      "probability_absolute_tolerance": 1e-07,
+      "observed_probability_differences": {
+        "block_choice": 0.0,
+        "multi_select": 0.0,
+        "single": 0.0
+      },
+      "invalid_http_cases": 7,
+      "earlier_harness_error": {
+        "phase": "server startup",
+        "cause": "/health returns plain text ok; initial harness parsed it as JSON",
+        "driver_log": "/workspace/rust-model-inference/target/sophon/run-grouped-audio-entrypoints-31344.log",
+        "driver_log_sha256": "aba775f68946db65ef7135a564a7a63eb1ea6820971dcb0294206200419efadc",
+        "http_scoring_requests_sent": 0,
+        "production_change_required": false
+      }
+    },
+    "limits": [
+      "CPU-only, no-default-features plus parity-trace on replacement host; its 1566/1568 passed and identical 16 failures are a separate configuration from the historical Vulkan/full-feature 1685/23/234 run.",
+      "Only three Rust files changed: route/schema/handler, shared decoding extraction and grouped finite-value validation; no kernels or arithmetic changed.",
+      "The parser fix intentionally rejects previously accepted NaN/inf option scores for every shared grouped caller. Normal finite scores retain their parsing and scoring semantics.",
+      "Synthetic tone verifies protocol/probability consistency only; matching-format precision, task quality, Auto and Vulkan are not established.",
+      "Python production tools are unchanged; the historical 68/68 Python suite was not rerun for these Rust-only changes."
+    ]
+  },
+  "ci_grouped_audio_checkpoint": {
+    "status": "PASS",
+    "head": "ef0a969c7e748d411c25ebde1356db7e42d90e94",
+    "workflow": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523",
+    "captured_report": "target/sophon/ci-ef0a969-report.json",
+    "captured_report_sha256": "2fa615ae347c4969be91d5dfd208928935c26a12411bb0ac9721e663bd2e38e2",
+    "jobs": [
+      {
+        "name": "Vulkan compile and shaders",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523/job/130710367197"
+      },
+      {
+        "name": "x86 dispatch regressions",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523/job/130710367668"
+      },
+      {
+        "name": "Rustfmt",
+        "conclusion": "success",
+        "url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/43074410523/job/130710367856"
+      }
+    ],
+    "source_manifest": "target/sophon/grouped-audio-31344-expected-source-manifest.json",
+    "source_manifest_sha256": "f8f9e99c5c65d1cc9e0f230643c64b9dec8e909148bc7d7d1f8edaada195f3ef",
+    "all_618_source_hashes_match_local_checkout": true,
+    "scope": "CI applies to exact code/evidence head ef0a969. New documentation-only checkpoints preserve its Rust/Cargo input hashes, but their own CI status is separate. It does not establish failed real-model numerical acceptance."
+  }
+}

@@ -124,6 +124,11 @@ impl<'a> Linear<'a> {
         self.weight.n_out
     }
 
+    pub(crate) fn with_f32_activations(mut self) -> Self {
+        self.weight.kernel.use_f32_activation();
+        self
+    }
+
     pub(crate) fn binding(&self) -> LinearBinding<'_, 'a> {
         LinearBinding {
             weight: &self.weight,
@@ -911,8 +916,28 @@ pub fn attention_on_cpu(
     value: &[f32],
     spec: AttentionSpec,
 ) -> Result<Vec<f32>, String> {
+    attention_on_cpu_with_exp(query, key, value, spec, f32::exp)
+}
+
+/// F64 exponential rounded once to F32, for numerically sensitive synthesis.
+pub(crate) fn attention_on_cpu_with_f64_exp(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+) -> Result<Vec<f32>, String> {
+    attention_on_cpu_with_exp(query, key, value, spec, |x| f64::from(x).exp() as f32)
+}
+
+fn attention_on_cpu_with_exp(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    spec: AttentionSpec,
+    exp: fn(f32) -> f32,
+) -> Result<Vec<f32>, String> {
     ATTENTION_ON_CPU.with(|flag| flag.set(true));
-    let result = attention_scalar_with_dot(query, key, value, spec, dot_f32);
+    let result = attention_scalar_with_bias_exp(query, key, value, None, spec, dot_f32, exp);
     ATTENTION_ON_CPU.with(|flag| flag.set(false));
     result
 }
@@ -1011,6 +1036,18 @@ fn attention_scalar_with_bias(
     spec: AttentionSpec,
     dot: fn(&[f32], &[f32], usize) -> f32,
 ) -> Result<Vec<f32>, String> {
+    attention_scalar_with_bias_exp(query, key, value, bias, spec, dot, f32::exp)
+}
+
+fn attention_scalar_with_bias_exp(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    bias: Option<&[f32]>,
+    spec: AttentionSpec,
+    dot: fn(&[f32], &[f32], usize) -> f32,
+    exp: fn(f32) -> f32,
+) -> Result<Vec<f32>, String> {
     spec.validate(query, key, value)?;
     #[cfg(feature = "vulkan")]
     if bias.is_none() && !attention_is_on_cpu() {
@@ -1057,7 +1094,7 @@ fn attention_scalar_with_bias(
             let mut normalizer = 0.0;
             for &score in &scores {
                 if score.is_finite() {
-                    normalizer += (score - maximum).exp();
+                    normalizer += exp(score - maximum);
                 }
             }
             let output_row = &mut output[query_start..query_start + spec.head_dim];
@@ -1065,7 +1102,7 @@ fn attention_scalar_with_bias(
                 if !score.is_finite() {
                     continue;
                 }
-                let probability = (score - maximum).exp() / normalizer;
+                let probability = exp(score - maximum) / normalizer;
                 let value_start = (key_token * spec.key_value_heads + key_head) * spec.head_dim;
                 for dimension in 0..spec.head_dim {
                     output_row[dimension] += probability * value[value_start + dimension];
@@ -2177,6 +2214,33 @@ mod tests {
         let expected =
             attention_scalar_with_bias(&q, &k, &v, Some(&bias), spec, scalar_dot).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn attention_f64_exp_preserves_cancellation_without_changing_default() {
+        let score = f32::from_bits(0xc092_bba5);
+        let exp = f64::from(score).exp() as f32;
+        let values = [1e7, -exp * 1e7, 2.0];
+        let spec = AttentionSpec {
+            query_tokens: 1,
+            key_tokens: 3,
+            query_heads: 1,
+            key_value_heads: 1,
+            head_dim: 1,
+            causal: false,
+            scale: 1.0,
+        };
+        let expected = |exp: f32| {
+            let denominator = (exp + 1.0) + 1.0;
+            (exp / denominator * values[0] + 1.0 / denominator * values[1])
+                + 1.0 / denominator * values[2]
+        };
+        let q = [1.0];
+        let k = [score, 0.0, 0.0];
+        let actual = attention_on_cpu_with_f64_exp(&q, &k, &values, spec).unwrap();
+        assert!((actual[0] - expected(exp)).abs() <= 1e-3);
+        let legacy = attention_on_cpu(&q, &k, &values, spec).unwrap();
+        assert_eq!(legacy, [expected(std::hint::black_box(score).exp())]);
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub mod qwen3;
 pub mod qwen35;
 pub mod qwen_drive;
 pub mod sensenova_loop;
+pub mod sophon_realtime;
 pub mod spark;
 pub mod thx02;
 pub mod timestral;

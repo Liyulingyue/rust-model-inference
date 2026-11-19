@@ -322,6 +322,7 @@ mod tests {
 
     #[test]
     fn q8_kernel_thread_partition() {
+        let _scope = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
         // 4 rows; simulate 2 threads each writing to its own partition
         // of the same full output slice.
         let mut weight = Vec::new();

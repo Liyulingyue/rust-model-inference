@@ -152,6 +152,31 @@ pub struct Qwen3Session<'model> {
 }
 
 impl<'model> Qwen3Session<'model> {
+    /// Offload projections while keeping the host decoder's KV, bias and RoPE semantics.
+    /// Unlike resident decode, this also supports dense trunks with Q/K/V biases.
+    pub(crate) fn new_with_projection_compute(
+        model: &'model Qwen3Model,
+        capacity: usize,
+        kv_format: KvFormat,
+        lifecycle: KvLifecycle,
+        policy: ComputePolicy,
+    ) -> Result<Self, String> {
+        policy.check_build()?;
+        if policy == ComputePolicy::Vulkan && crate::ops::scalar_mode() {
+            return Err("projection offload requires non-scalar execution".into());
+        }
+        let mut session =
+            Self::new_with_compute(model, capacity, kv_format, lifecycle, ComputePolicy::Cpu)?;
+        if policy != ComputePolicy::Cpu {
+            if model.config.moe.is_some() {
+                return Err("projection offload requires a dense decoder".into());
+            }
+            session.enable_projection_offload(policy, 32.min(capacity))?;
+        }
+        session.compute_policy = policy;
+        Ok(session)
+    }
+
     pub fn new(model: &'model Qwen3Model, capacity: usize) -> Result<Self, String> {
         Self::new_with_kv_state(model, capacity, KvFormat::F16, KvLifecycle::Ephemeral)
     }

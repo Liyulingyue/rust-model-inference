@@ -325,8 +325,21 @@ pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
 /// applies; without ffmpeg the pure-Rust WAV decoder handles 16 kHz mono
 /// PCM16 input.
 pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    use std::io::Write;
+    decode_audio_bytes_bounded(bytes, usize::MAX / 4 - 1)
+}
+
+/// Stop the decoder before an encoded upload can expand beyond its caller's sample budget.
+pub fn decode_audio_bytes_bounded(bytes: &[u8], max_samples: usize) -> Result<Vec<f32>, String> {
+    use std::io::{Read, Write};
     use std::process::{Command, Stdio};
+
+    let max_bytes = max_samples
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(1))
+        .ok_or("audio sample budget overflow")?;
+    if max_samples == 0 {
+        return Err("audio has no remaining context budget".into());
+    }
 
     let mut child = match Command::new("ffmpeg")
         .args([
@@ -351,29 +364,48 @@ pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
     {
         Ok(child) => child,
         Err(_) => {
-            return decode_audio_bytes_pure_rust(bytes);
+            return decode_audio_bytes_pure_rust_bounded(bytes, max_samples);
         }
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(error) = stdin.write_all(bytes) {
+    let mut stdin = child.stdin.take().expect("configured ffmpeg stdin");
+    let stdout = child.stdout.take().expect("configured ffmpeg stdout");
+    let stderr = child.stderr.take().expect("configured ffmpeg stderr");
+    // Drain both output pipes while writing: ffmpeg can fill stdout before reading the upload.
+    let (decoded, written, errors, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(bytes));
+        let errors = scope.spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.take(1 << 20).read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let mut output = Vec::new();
+        let read = stdout.take(max_bytes as u64).read_to_end(&mut output);
+        if read.is_err() || output.len() == max_bytes {
             let _ = child.kill();
-            return Err(format!("failed to pipe the upload to ffmpeg: {error}"));
         }
+        let status = child.wait();
+        (status, writer.join(), errors.join(), read.map(|_| output))
+    });
+    let output = output.map_err(|error| format!("failed to read decoded audio: {error}"))?;
+    if output.len() == max_bytes {
+        return Err("decoded audio exceeds context sample budget".into());
     }
-    let decoded = child
-        .wait_with_output()
-        .map_err(|error| format!("ffmpeg failed for the upload: {error}"))?;
-    if !decoded.status.success() {
+    let decoded = decoded.map_err(|error| format!("ffmpeg failed for the upload: {error}"))?;
+    let errors = errors
+        .map_err(|_| "ffmpeg error reader panicked".to_string())?
+        .map_err(|error| format!("failed to read ffmpeg errors: {error}"))?;
+    if !decoded.success() {
         return Err(format!(
             "ffmpeg failed for the upload: {}",
-            String::from_utf8_lossy(&decoded.stderr).trim()
+            String::from_utf8_lossy(&errors).trim()
         ));
     }
-    if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
+    written
+        .map_err(|_| "ffmpeg upload writer panicked".to_string())?
+        .map_err(|error| format!("failed to pipe the upload to ffmpeg: {error}"))?;
+    if output.is_empty() || output.len() % 4 != 0 {
         return Err("ffmpeg returned invalid F32 audio".into());
     }
-    let samples = decoded
-        .stdout
+    let samples = output
         .as_chunks::<4>()
         .0
         .iter()
@@ -387,7 +419,14 @@ pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
 
 /// The pure-Rust half of [`decode_audio_bytes`]: 16 kHz mono PCM16 WAV only.
 fn decode_audio_bytes_pure_rust(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(bytes)
+    decode_audio_bytes_pure_rust_bounded(bytes, usize::MAX)
+}
+
+fn decode_audio_bytes_pure_rust_bounded(
+    bytes: &[u8],
+    max_samples: usize,
+) -> Result<Vec<f32>, String> {
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any_bounded(bytes, max_samples)
         .map_err(|error| format!("Pure-Rust audio decode failed for the upload: {error:?}"))?;
     if decoded.channels != 1 {
         return Err(format!(
@@ -496,11 +535,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn long_audio_upload_drains_ffmpeg_while_writing() {
+        let samples: Vec<i16> = (0..320_000)
+            .map(|index| (index % 1000) as i16 - 500)
+            .collect();
+        let wav = pcm16_wav(&samples, 1);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(decode_audio_bytes(&wav));
+        });
+        let decoded = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("audio upload decoder blocked on its pipes")
+            .unwrap();
+        assert_eq!(decoded.len(), samples.len());
+        assert!(decoded
+            .iter()
+            .zip(samples)
+            .all(|(a, b)| (*a - b as f32 / 32768.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn audio_upload_is_bounded_before_full_pcm_expansion() {
+        let wav = pcm16_wav(&[100; 16000], 1);
+        assert!(decode_audio_bytes_pure_rust_bounded(&wav, 100)
+            .unwrap_err()
+            .contains("budget"));
+        assert_eq!(
+            decode_audio_bytes_pure_rust_bounded(&wav, 16000)
+                .unwrap()
+                .len(),
+            16000
+        );
+        assert!(decode_audio_bytes_bounded(&wav, 100)
+            .unwrap_err()
+            .contains("budget"));
+        assert_eq!(
+            decode_audio_bytes_bounded(&wav, 16000).unwrap().len(),
+            16000
+        );
+        assert!(decode_audio_bytes_bounded(&wav, 0).is_err());
+        assert!(decode_audio_bytes_bounded(&wav, usize::MAX).is_err());
+    }
+
     /// A stereo upload is refused with a message that names the reason.
     #[test]
     fn stereo_uploads_are_refused() {
         let wav = pcm16_wav(&[0; 16], 2);
-        let error = decode_audio_bytes(&wav).expect_err("stereo must be refused");
+        let error =
+            decode_audio_bytes_pure_rust(&wav).expect_err("stereo must be refused without ffmpeg");
         assert!(error.contains("mono"), "{error}");
     }
 

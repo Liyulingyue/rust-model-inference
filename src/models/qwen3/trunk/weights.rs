@@ -13,7 +13,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::bf16_to_f32;
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
 use std::sync::Arc;
 
 pub use super::config::Qwen3Config;
@@ -638,6 +638,44 @@ impl Qwen3Model {
 
     pub fn config(&self) -> &Qwen3Config {
         &self.config
+    }
+
+    /// Keep F32 activations for F16 projections instead of rounding them to
+    /// F16 on the prepared-row path. F32, BF16, and quantized kernels are
+    /// unaffected.
+    pub(crate) fn use_f32_f16_activations(&mut self) {
+        for layer in &mut self.layers {
+            for weight in [
+                &mut layer.wq,
+                &mut layer.wk,
+                &mut layer.wv,
+                &mut layer.wo,
+                &mut layer.w_gate,
+                &mut layer.w_up,
+                &mut layer.w_down,
+            ] {
+                weight.kernel.use_f32_activation();
+            }
+            for weight in layer.moe_gate.iter_mut() {
+                for weight in weight {
+                    weight.kernel.use_f32_activation();
+                }
+            }
+            for weight in layer.moe_up.iter_mut() {
+                for weight in weight {
+                    weight.kernel.use_f32_activation();
+                }
+            }
+            for weight in layer.moe_down.iter_mut() {
+                for weight in weight {
+                    weight.kernel.use_f32_activation();
+                }
+            }
+        }
+        self.output.kernel.use_f32_activation();
+        if let Some(weight) = &mut self.cls_score {
+            weight.kernel.use_f32_activation();
+        }
     }
 
     pub fn tokenizer(&self) -> &BPETokenizer {

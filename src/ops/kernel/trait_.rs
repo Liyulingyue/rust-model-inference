@@ -17,6 +17,15 @@ pub trait Kernel: Send + Sync {
     /// Kernels without a separate reference contract retain their normal path.
     fn use_scalar_reference(&mut self) {}
 
+    /// Opt in to keeping F32 activations for F16 weights on the prepared path.
+    /// Kernels without an F16 contract retain their normal path.
+    fn use_f32_activation(&mut self) {}
+
+    /// Whether prepared F16 projections keep their input in F32.
+    fn keeps_f32_activation(&self) -> bool {
+        false
+    }
+
     /// Prepared BF16 kernels may also round activations before their wide dot.
     fn rounds_bf16_input(&self) -> bool {
         false

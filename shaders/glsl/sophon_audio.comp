@@ -1,0 +1,133 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f32_dot.glsl"
+#include "f32_divide.glsl"
+#include "exp_accurate.glsl"
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) buffer Arena { float data[]; };
+layout(push_constant) uniform Params {
+    uint op,a,b,c,out_offset,count;
+    uint p0,p1,p2,p3,p4,p5,p6,p7,p8,grid;
+} pc;
+shared float dots[64];
+shared float score_value, probability;
+shared precise float maximum, denominator;
+
+float attention_score(uint query, uint head, uint key) {
+    uint lane=gl_LocalInvocationID.x, width=pc.p2*64;
+    uint lanes=max(pc.p8,1u);
+    precise float sum=0.0;
+    if(lane<lanes) {
+        for(uint d=lane;d<64;d+=lanes) {
+            float q=data[pc.a+query*width+head*64+d];
+            float k=data[pc.b+key*width+head*64+d];
+            if(pc.p8!=0) sum=fma(q,k,sum);
+            else sum+=q*k;
+        }
+    }
+    dots[lane]=sum;
+    barrier();
+    if(lane==0) {
+        if(pc.p8!=0) {
+            float values[16];
+            for(uint d=0;d<16;d++) values[d]=dots[d];
+            sum=reduce_f32_dot(values,pc.p8);
+        }
+        score_value=sum*0.125;
+    }
+    barrier();
+    return score_value;
+}
+
+void main() {
+    uint group=gl_WorkGroupID.x+gl_WorkGroupID.y*pc.grid;
+    uint lane=gl_LocalInvocationID.x;
+    if(pc.op!=1 && group>=(pc.count-1)/64+1) return;
+    uint i=group*64+lane;
+    if(pc.op==1) {
+        if(group>=pc.p0*pc.p2) return;
+        uint query=group/pc.p2, head=group%pc.p2, width=pc.p2*64;
+        precise float value=0.0;
+        if(lane==0) { maximum=-1.0/0.0; denominator=0.0; }
+        barrier();
+        // Normalize probabilities before accumulating V: online rescaling loses cancellation residuals.
+        for(uint key=0;key<pc.p1;key++) {
+            float score=attention_score(query,head,key);
+            if(lane==0 && !isnan(score) && !isinf(score)) maximum=max(maximum,score);
+        }
+        for(uint key=0;key<pc.p1;key++) {
+            float score=attention_score(query,head,key);
+            if(lane==0 && !isnan(score) && !isinf(score)) denominator+=exp_accurate(score-maximum);
+        }
+        for(uint key=0;key<pc.p1;key++) {
+            float score=attention_score(query,head,key);
+            if(lane==0) probability=isnan(score)||isinf(score) ? 0.0
+                : divide_finite_normal(exp_accurate(score-maximum),denominator);
+            barrier();
+            value+=data[pc.c+key*width+head*64+lane]*probability;
+        }
+        data[pc.out_offset+query*width+head*64+lane]=value;
+        return;
+    }
+    if(i>=pc.count) return;
+    if(pc.op==0) {
+        uint channel=i/pc.p3, time=i%pc.p3;
+        uint in_group=pc.p0/pc.p7, base=(channel/(pc.p1/pc.p7))*in_group;
+        precise float value=data[pc.c+channel];
+        // Reduce contiguous kernels per channel instead of one long, cancellation-prone sum.
+        for(uint c=0;c<in_group;c++) {
+            precise float partial=pc.p6==1 ? 0.0:value;
+            uint tap=0;
+            if(pc.p6==1 && pc.p8!=0) {
+                float sums[16];
+                for(uint j=0;j<16;j++) sums[j]=0.0;
+                uint end=pc.p4/pc.p8*pc.p8;
+                for(;tap<end;tap+=pc.p8)
+                    for(uint j=0;j<pc.p8;j++)
+                        sums[j]=fma(data[pc.a+(base+c)*pc.p2+time*pc.p5+tap+j],
+                            data[pc.b+(channel*in_group+c)*pc.p4+tap+j],sums[j]);
+                partial=reduce_f32_dot(sums,pc.p8);
+            }
+            for(;tap<pc.p4;tap++)
+                partial+=data[pc.a+(base+c)*pc.p2+time*pc.p5+tap*pc.p6]*data[pc.b+(channel*in_group+c)*pc.p4+tap];
+            value=pc.p6==1 ? value+partial:partial;
+        }
+        data[pc.out_offset+i]=value;
+    } else if(pc.op==2) {
+        uint bins=pc.p0/2+1, bin=(i/pc.p1)%bins, time=i%pc.p1;
+        precise float re=0.0, im=0.0, re_error=0.0, im_error=0.0;
+        for(uint t=0;t<pc.p0;t++) {
+            float sample_value=data[pc.a+time*pc.p2+t]*data[pc.b+t];
+            uint twiddle=(bin*t)%pc.p0;
+            float r=sample_value*data[pc.b+pc.p0+twiddle]-re_error;
+            float next_re=re+r; re_error=(next_re-re)-r; re=next_re;
+            float s=-sample_value*data[pc.b+pc.p0*2+twiddle]-im_error;
+            float next_im=im+s; im_error=(next_im-im)-s; im=next_im;
+        }
+        data[pc.out_offset+i]=pc.p3!=0 ? re*re+im*im : (i<bins*pc.p1 ? re:im);
+    } else if(pc.op==3) {
+        // Each sample_value gathers its overlapping frames; no floating-point atomics.
+        uint sample_value=i+8, first=sample_value>=15 ? (sample_value-15+3)/4 : 0;
+        uint last=min(sample_value/4,pc.p0-1);
+        precise float sum=0.0, envelope=0.0;
+        for(uint frame=first;frame<=last;frame++) {
+            uint n=sample_value-frame*4;
+            precise float value=0.0;
+            for(uint k=0;k<9;k++) {
+                float mag=min(exp(data[pc.a+k*pc.p0+frame]),100.0);
+                float phase=sin(data[pc.a+(k+9)*pc.p0+frame]);
+                uint twiddle=(k*n)%16;
+                float term=mag*(cos(phase)*data[pc.b+16+twiddle]-sin(phase)*data[pc.b+32+twiddle]);
+                value+=term*((k==0||k==8)?1.0:2.0);
+            }
+            float window=data[pc.b+n];
+            sum+=value*(window/16.0); envelope+=window*window;
+        }
+        data[pc.out_offset+i]=sum/envelope;
+    } else if(pc.op==4) {
+        uint mel=i/pc.p0, frame=i%pc.p0;
+        precise float sum=0.0;
+        for(uint bin=0;bin<201;bin++) sum+=data[pc.a+bin*pc.p0+frame]*data[pc.b+mel*201+bin];
+        data[pc.out_offset+i]=log(max(sum,1e-10))/log(10.0);
+    }
+}

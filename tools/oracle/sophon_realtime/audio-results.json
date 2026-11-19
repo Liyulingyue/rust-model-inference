@@ -1,0 +1,979 @@
+{
+  "scope": "CPU audio-component checkpoints; speech comprehension is separate",
+  "date": "2026-11-11",
+  "source_revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
+  "threads": 4,
+  "evidence_root": "target/sophon/audio-boundaries-33367-v1",
+  "cases": {
+    "short-f32": {
+      "samples": 20480,
+      "planned_mel_frames": 128,
+      "rust_exit": 0,
+      "rust_wall_seconds": 2.525122247636318,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 15.953761268407106,
+      "pass_gate": true,
+      "mel_lengths": [
+        128
+      ],
+      "audio_token_lengths": [
+        8
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.366532713642451e-06,
+          "relative_rmse": 7.665968634434948e-06,
+          "cosine": 0.999999999970617,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 0.0014656633138656616,
+          "rmse": 5.182099678547958e-05,
+          "relative_rmse": 9.4236238637513e-05,
+          "cosine": 0.9999999955623289,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 0.00041097402572631836,
+          "rmse": 4.3747168053563205e-05,
+          "relative_rmse": 7.733356484806748e-05,
+          "cosine": 0.9999999970097808,
+          "pass": true
+        }
+      }
+    },
+    "short-bf16": {
+      "samples": 20480,
+      "planned_mel_frames": 128,
+      "rust_exit": 0,
+      "rust_wall_seconds": 2.1422159783542156,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 14.102681091055274,
+      "pass_gate": true,
+      "mel_lengths": [
+        128
+      ],
+      "audio_token_lengths": [
+        8
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.366532713642451e-06,
+          "relative_rmse": 7.665968634434948e-06,
+          "cosine": 0.999999999970617,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 0.0014656633138656616,
+          "rmse": 5.182099678547958e-05,
+          "relative_rmse": 9.4236238637513e-05,
+          "cosine": 0.9999999955623289,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 0.00041097402572631836,
+          "rmse": 4.3747168053563205e-05,
+          "relative_rmse": 7.733356484806748e-05,
+          "cosine": 0.9999999970097808,
+          "pass": true
+        }
+      }
+    },
+    "cnn-before-f32": {
+      "samples": 15359,
+      "planned_mel_frames": 96,
+      "rust_exit": 0,
+      "rust_wall_seconds": 0.815438000485301,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 16.19284849241376,
+      "pass_gate": true,
+      "mel_lengths": [
+        96
+      ],
+      "audio_token_lengths": [
+        6
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.4513932247123445e-06,
+          "relative_rmse": 7.818983094773328e-06,
+          "cosine": 0.9999999999694317,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 0.0007416009902954102,
+          "rmse": 7.101417811604787e-05,
+          "relative_rmse": 0.00012804277285843988,
+          "cosine": 0.9999999918025244,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 0.0005117058753967285,
+          "rmse": 5.700794842992651e-05,
+          "relative_rmse": 0.00010163902745290511,
+          "cosine": 0.9999999948418492,
+          "pass": true
+        }
+      }
+    },
+    "cnn-before-bf16": {
+      "samples": 15359,
+      "planned_mel_frames": 96,
+      "rust_exit": 0,
+      "rust_wall_seconds": 1.8676924481987953,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 14.517067596316338,
+      "pass_gate": true,
+      "mel_lengths": [
+        96
+      ],
+      "audio_token_lengths": [
+        6
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.4513932247123445e-06,
+          "relative_rmse": 7.818983094773328e-06,
+          "cosine": 0.9999999999694317,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 0.0007416009902954102,
+          "rmse": 7.101417811604787e-05,
+          "relative_rmse": 0.00012804277285843988,
+          "cosine": 0.9999999918025244,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 0.0005117058753967285,
+          "rmse": 5.700794842992651e-05,
+          "relative_rmse": 0.00010163902745290511,
+          "cosine": 0.9999999948418492,
+          "pass": true
+        }
+      }
+    },
+    "cnn-after-f32": {
+      "samples": 15361,
+      "planned_mel_frames": 112,
+      "rust_exit": 0,
+      "rust_wall_seconds": 1.6172228548675776,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 16.10212793573737,
+      "pass_gate": true,
+      "mel_lengths": [
+        112
+      ],
+      "audio_token_lengths": [
+        7
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.033601232037108e-06,
+          "relative_rmse": 7.238827068633266e-06,
+          "cosine": 0.9999999999737998,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 5.453824996948242e-05,
+          "rmse": 6.33887840668253e-06,
+          "relative_rmse": 1.1703116954320785e-05,
+          "cosine": 0.9999999999315228,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 2.925097942352295e-05,
+          "rmse": 4.2474876889972125e-06,
+          "relative_rmse": 7.369592583420807e-06,
+          "cosine": 0.9999999999728456,
+          "pass": true
+        }
+      }
+    },
+    "cnn-after-bf16": {
+      "samples": 15361,
+      "planned_mel_frames": 112,
+      "rust_exit": 0,
+      "rust_wall_seconds": 1.6715475916862488,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 16.072473783046007,
+      "pass_gate": true,
+      "mel_lengths": [
+        112
+      ],
+      "audio_token_lengths": [
+        7
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.033601232037108e-06,
+          "relative_rmse": 7.238827068633266e-06,
+          "cosine": 0.9999999999737998,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 5.453824996948242e-05,
+          "rmse": 6.33887840668253e-06,
+          "relative_rmse": 1.1703116954320785e-05,
+          "cosine": 0.9999999999315228,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 2.925097942352295e-05,
+          "rmse": 4.2474876889972125e-06,
+          "relative_rmse": 7.369592583420807e-06,
+          "cosine": 0.9999999999728456,
+          "pass": true
+        }
+      }
+    },
+    "attention-before-f32": {
+      "samples": 127999,
+      "planned_mel_frames": 800,
+      "rust_exit": 0,
+      "rust_wall_seconds": 6.31228587217629,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 24.347144458442926,
+      "pass_gate": true,
+      "mel_lengths": [
+        800
+      ],
+      "audio_token_lengths": [
+        50
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.401992496037578e-06,
+          "relative_rmse": 7.692572976664606e-06,
+          "cosine": 0.9999999999704136,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 7.772445678710938e-05,
+          "rmse": 1.0919259290240427e-05,
+          "relative_rmse": 1.9784091386481403e-05,
+          "cosine": 0.9999999998043121,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 4.407763481140137e-05,
+          "rmse": 6.71253332484382e-06,
+          "relative_rmse": 1.166088247118749e-05,
+          "cosine": 0.9999999999320704,
+          "pass": true
+        }
+      }
+    },
+    "attention-before-bf16": {
+      "samples": 127999,
+      "planned_mel_frames": 800,
+      "rust_exit": 0,
+      "rust_wall_seconds": 7.89869736507535,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 24.852233309298754,
+      "pass_gate": true,
+      "mel_lengths": [
+        800
+      ],
+      "audio_token_lengths": [
+        50
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.401992496037578e-06,
+          "relative_rmse": 7.692572976664606e-06,
+          "cosine": 0.9999999999704136,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 7.772445678710938e-05,
+          "rmse": 1.0919259290240427e-05,
+          "relative_rmse": 1.9784091386481403e-05,
+          "cosine": 0.9999999998043121,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 4.407763481140137e-05,
+          "rmse": 6.71253332484382e-06,
+          "relative_rmse": 1.166088247118749e-05,
+          "cosine": 0.9999999999320704,
+          "pass": true
+        }
+      }
+    },
+    "attention-after-f32": {
+      "samples": 128001,
+      "planned_mel_frames": 816,
+      "rust_exit": 0,
+      "rust_wall_seconds": 7.645503748208284,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 21.512199440971017,
+      "pass_gate": true,
+      "mel_lengths": [
+        816
+      ],
+      "audio_token_lengths": [
+        51
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.351158187923674e-06,
+          "relative_rmse": 7.62105975660366e-06,
+          "cosine": 0.9999999999709609,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 8.101016283035278e-05,
+          "rmse": 1.0963208881462396e-05,
+          "relative_rmse": 1.9895726527544928e-05,
+          "cosine": 0.9999999998020873,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 4.6312808990478516e-05,
+          "rmse": 7.0279873565386865e-06,
+          "relative_rmse": 1.2216543862143087e-05,
+          "cosine": 0.9999999999254461,
+          "pass": true
+        }
+      }
+    },
+    "attention-after-bf16": {
+      "samples": 128001,
+      "planned_mel_frames": 816,
+      "rust_exit": 0,
+      "rust_wall_seconds": 6.8374339155852795,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 23.442387862131,
+      "pass_gate": true,
+      "mel_lengths": [
+        816
+      ],
+      "audio_token_lengths": [
+        51
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.351158187923674e-06,
+          "relative_rmse": 7.62105975660366e-06,
+          "cosine": 0.9999999999709609,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 8.101016283035278e-05,
+          "rmse": 1.0963208881462396e-05,
+          "relative_rmse": 1.9895726527544928e-05,
+          "cosine": 0.9999999998020873,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 4.6312808990478516e-05,
+          "rmse": 7.0279873565386865e-06,
+          "relative_rmse": 1.2216543862143087e-05,
+          "cosine": 0.9999999999254461,
+          "pass": true
+        }
+      }
+    },
+    "processor-before-f32": {
+      "samples": 478719,
+      "planned_mel_frames": 2992,
+      "rust_exit": 0,
+      "rust_wall_seconds": 28.304859340190887,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 67.33940817974508,
+      "pass_gate": true,
+      "mel_lengths": [
+        2992
+      ],
+      "audio_token_lengths": [
+        187
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.400058710699091e-06,
+          "relative_rmse": 7.685075461530721e-06,
+          "cosine": 0.999999999970469,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 0.00015586242079734802,
+          "rmse": 1.103371342491161e-05,
+          "relative_rmse": 2.0026881268406924e-05,
+          "cosine": 0.9999999997994679,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 0.00010335445404052734,
+          "rmse": 6.943624098968029e-06,
+          "relative_rmse": 1.209730561536096e-05,
+          "cosine": 0.9999999999268651,
+          "pass": true
+        }
+      }
+    },
+    "processor-before-bf16": {
+      "samples": 478719,
+      "planned_mel_frames": 2992,
+      "rust_exit": 0,
+      "rust_wall_seconds": 33.34668182767928,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 94.96791139990091,
+      "pass_gate": true,
+      "mel_lengths": [
+        2992
+      ],
+      "audio_token_lengths": [
+        187
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.400058710699091e-06,
+          "relative_rmse": 7.685075461530721e-06,
+          "cosine": 0.999999999970469,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 0.00015586242079734802,
+          "rmse": 1.103371342491161e-05,
+          "relative_rmse": 2.0026881268406924e-05,
+          "cosine": 0.9999999997994679,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 0.00010335445404052734,
+          "rmse": 6.943624098968029e-06,
+          "relative_rmse": 1.209730561536096e-05,
+          "cosine": 0.9999999999268651,
+          "pass": true
+        }
+      }
+    },
+    "processor-after-f32": {
+      "samples": 478721,
+      "planned_mel_frames": 3008,
+      "rust_exit": 0,
+      "rust_wall_seconds": 49.15241699852049,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 104.7960226200521,
+      "pass_gate": true,
+      "mel_lengths": [
+        3000,
+        8
+      ],
+      "audio_token_lengths": [
+        188,
+        1
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.385721403218995e-06,
+          "relative_rmse": 7.665625345865956e-06,
+          "cosine": 0.9999999999706182,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 9.800493717193604e-05,
+          "rmse": 1.0052324856089775e-05,
+          "relative_rmse": 1.825270659228206e-05,
+          "cosine": 0.9999999998334239,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 6.961822509765625e-05,
+          "rmse": 6.372552945283125e-06,
+          "relative_rmse": 1.1114688596485183e-05,
+          "cosine": 0.9999999999382544,
+          "pass": true
+        }
+      }
+    },
+    "processor-after-bf16": {
+      "samples": 478721,
+      "planned_mel_frames": 3008,
+      "rust_exit": 0,
+      "rust_wall_seconds": 43.74993382394314,
+      "oracle_exit": 0,
+      "oracle_wall_seconds": 93.70647453330457,
+      "pass_gate": true,
+      "mel_lengths": [
+        3000,
+        8
+      ],
+      "audio_token_lengths": [
+        188,
+        1
+      ],
+      "comparisons": {
+        "mel": {
+          "max_abs": 0.00014913082122802734,
+          "rmse": 5.385721403218995e-06,
+          "relative_rmse": 7.665625345865956e-06,
+          "cosine": 0.9999999999706182,
+          "pass": true
+        },
+        "encoder": {
+          "max_abs": 9.800493717193604e-05,
+          "rmse": 1.0052324856089775e-05,
+          "relative_rmse": 1.825270659228206e-05,
+          "cosine": 0.9999999998334239,
+          "pass": true
+        },
+        "projected": {
+          "max_abs": 6.961822509765625e-05,
+          "rmse": 6.372552945283125e-06,
+          "relative_rmse": 1.1114688596485183e-05,
+          "cosine": 0.9999999999382544,
+          "pass": true
+        }
+      }
+    }
+  },
+  "activation_diagnostics": {
+    "scope": "runtime input QDQ; failures retained",
+    "source_report": "target/sophon/tasks/audio-runtime-activation-review.json",
+    "same_input_projection": {
+      "operations": 12,
+      "all_pass": true,
+      "max_relative_rmse": 4.92706396466605e-07,
+      "max_abs": 1.9073486328125e-06
+    },
+    "limits": "Passing 12 projection checks does not prove all quantized kernels or the complete encoder. Quantized end-to-end checks fail; gates are unchanged."
+  },
+  "precision_checks": {
+    "f16": {
+      "f32_activation": {
+        "path": "target/sophon/audio-f16-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.4929182529449463,
+            "rmse": 0.015705232075898416,
+            "relative_rmse": 0.02855988947520758,
+            "cosine": 0.999592379224419,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.11955753713846207,
+            "rmse": 0.013252261101225403,
+            "relative_rmse": 0.02342653558603502,
+            "cosine": 0.9997255683431573,
+            "pass": false
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-f16-33367-runtime-activation/result.json",
+        "pass": true,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.01593184471130371,
+            "rmse": 0.0008148005661549536,
+            "relative_rmse": 0.0014811585129177241,
+            "cosine": 0.9999989031355607,
+            "pass": true
+          },
+          "projected": {
+            "max_abs": 0.004657082259654999,
+            "rmse": 0.0006187454995583148,
+            "relative_rmse": 0.0010939445992736267,
+            "cosine": 0.9999994016470367,
+            "pass": true
+          }
+        }
+      }
+    },
+    "bf16": {
+      "f32_activation": {
+        "path": "target/sophon/audio-bf16-33367-comparison/result.json",
+        "pass": true,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.0014656633138656616,
+            "rmse": 5.182099678547958e-05,
+            "relative_rmse": 9.4236238637513e-05,
+            "cosine": 0.9999999955623289,
+            "pass": true
+          },
+          "projected": {
+            "max_abs": 0.00041097402572631836,
+            "rmse": 4.3747168053563205e-05,
+            "relative_rmse": 7.733356484806748e-05,
+            "cosine": 0.9999999970097803,
+            "pass": true
+          }
+        }
+      }
+    },
+    "q8_0": {
+      "f32_activation": {
+        "path": "target/sophon/audio-q8_0-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 1.0437482595443726,
+            "rmse": 0.07853975221237881,
+            "relative_rmse": 0.1430365644402311,
+            "cosine": 0.9897856598105303,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.6366192400455475,
+            "rmse": 0.054296840697195294,
+            "relative_rmse": 0.09666205346544209,
+            "cosine": 0.9953308258653419,
+            "pass": false
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-q8_0-33367-runtime-activation/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 1.367215633392334,
+            "rmse": 0.09694400291703421,
+            "relative_rmse": 0.17636765718979103,
+            "cosine": 0.9844527325792258,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.7223443686962128,
+            "rmse": 0.07259626510693565,
+            "relative_rmse": 0.12869377518255054,
+            "cosine": 0.9916950804076587,
+            "pass": false
+          }
+        }
+      }
+    },
+    "q4_0": {
+      "f32_activation": {
+        "path": "target/sophon/audio-q4_0-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.14730167388916016,
+            "rmse": 0.021674913479615428,
+            "relative_rmse": 0.04003315956398569,
+            "cosine": 0.9991983533103368,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.07624757289886475,
+            "rmse": 0.016223291175257403,
+            "relative_rmse": 0.02934478302987456,
+            "cosine": 0.9995706872314609,
+            "pass": true
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-q4_0-33367-runtime-activation/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 1.1761268377304077,
+            "rmse": 0.050823447053544274,
+            "relative_rmse": 0.09403998959593493,
+            "cosine": 0.9955835068145215,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.4053693562746048,
+            "rmse": 0.04271325741763107,
+            "relative_rmse": 0.07697783247920403,
+            "cosine": 0.997032938512634,
+            "pass": false
+          }
+        }
+      }
+    },
+    "q4_1": {
+      "f32_activation": {
+        "path": "target/sophon/audio-q4_1-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.17054523527622223,
+            "rmse": 0.022807635250244155,
+            "relative_rmse": 0.04115641941545891,
+            "cosine": 0.9991530598441682,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.08471536636352539,
+            "rmse": 0.014875128899306051,
+            "relative_rmse": 0.026701403661647177,
+            "cosine": 0.9996461571764996,
+            "pass": true
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-q4_1-33367-runtime-activation/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.20430633425712585,
+            "rmse": 0.029263630000868148,
+            "relative_rmse": 0.05281744840775687,
+            "cosine": 0.9986054480013608,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.0956275463104248,
+            "rmse": 0.018706418114856377,
+            "relative_rmse": 0.03353028659579331,
+            "cosine": 0.9994382937647968,
+            "pass": false
+          }
+        }
+      }
+    },
+    "q4_k": {
+      "f32_activation": {
+        "path": "target/sophon/audio-q4_k-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 2.4025568068027496,
+            "rmse": 0.1384673226189427,
+            "relative_rmse": 0.25282742336229297,
+            "cosine": 0.9680164591229818,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 1.235613226890564,
+            "rmse": 0.12095435724962032,
+            "relative_rmse": 0.21408154134335658,
+            "cosine": 0.9769639428564231,
+            "pass": false
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-q4_k-33367-runtime-activation/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 1.2769764065742493,
+            "rmse": 0.052676961120612514,
+            "relative_rmse": 0.09627491770579168,
+            "cosine": 0.9953667071231165,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.3934327960014343,
+            "rmse": 0.04576276816438624,
+            "relative_rmse": 0.08179832861635732,
+            "cosine": 0.9966744345605248,
+            "pass": false
+          }
+        }
+      }
+    },
+    "q5_k": {
+      "f32_activation": {
+        "path": "target/sophon/audio-q5_k-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.34426504373550415,
+            "rmse": 0.03629183581545857,
+            "relative_rmse": 0.06592084154003522,
+            "cosine": 0.9978276074378545,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.17045676708221436,
+            "rmse": 0.027166642773632187,
+            "relative_rmse": 0.04839887726153719,
+            "cosine": 0.9988350633617835,
+            "pass": false
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-q5_k-33367-runtime-activation/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 1.233477532863617,
+            "rmse": 0.05654829568504323,
+            "relative_rmse": 0.10271385990311925,
+            "cosine": 0.994725794462265,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.3642524778842926,
+            "rmse": 0.04124807323975119,
+            "relative_rmse": 0.07342004972219826,
+            "cosine": 0.9973106426952482,
+            "pass": false
+          }
+        }
+      }
+    },
+    "q6_k": {
+      "f32_activation": {
+        "path": "target/sophon/audio-q6_k-33367-comparison/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 1.4832258224487305,
+            "rmse": 0.1053940786126785,
+            "relative_rmse": 0.1918044374567701,
+            "cosine": 0.9815984905447351,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.7741576135158539,
+            "rmse": 0.08331571037371466,
+            "relative_rmse": 0.1475432072494481,
+            "cosine": 0.9890863060481032,
+            "pass": false
+          }
+        }
+      },
+      "runtime_activation": {
+        "path": "target/sophon/audio-q6_k-33367-runtime-activation/result.json",
+        "pass": false,
+        "comparisons": {
+          "mel": {
+            "max_abs": 0.00014913082122802734,
+            "rmse": 5.366532713642451e-06,
+            "relative_rmse": 7.665968634434948e-06,
+            "cosine": 0.9999999999706171,
+            "pass": true
+          },
+          "encoder": {
+            "max_abs": 0.21360749751329422,
+            "rmse": 0.026469920098930733,
+            "relative_rmse": 0.04819187646825058,
+            "cosine": 0.9988388008708007,
+            "pass": false
+          },
+          "projected": {
+            "max_abs": 0.10802209377288818,
+            "rmse": 0.02219824939708396,
+            "relative_rmse": 0.039534748153180574,
+            "cosine": 0.9992237642917643,
+            "pass": false
+          }
+        }
+      }
+    }
+  }
+}

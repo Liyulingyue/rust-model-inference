@@ -1,0 +1,410 @@
+{
+  "scope": "CPU F32 committed-mel replay strategy against pinned native bounded HiFT, plus isolated Rust HiFT over the same saved inputs",
+  "date": "2026-11-11",
+  "source_revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
+  "status": "python_and_isolated_rust_hift_pass_synthetic_inputs",
+  "threads": 4,
+  "seed": 0,
+  "evidence_host": "existing remote 33367",
+  "evidence_root": "target/sophon/streaming-committed-review-20261111-run-1",
+  "script": "target/sophon/streaming-committed-review-20261111/compare.py",
+  "script_sha256": "ffb329278e6a68bc05b41856e04b298b5bb987d2b419ccf12818e54db091ee17",
+  "oracle_helper_sha256": "6b2f0cb20303b7b0e5f345daac3c17870a85b8220c9e75f7cf1f944d7021d96a",
+  "torch_version": "2.9.1+gitff65f5b",
+  "numpy_version": "2.1.2",
+  "reference_source_pins": {
+    "cosyvoice3_code2wav.py": "50004c84fb384873daefd65f72386cb1cb86091fac402790fed0ec63fc9aca42",
+    "code2wav_core/hifigan.py": "104f1368dd8503f1da4604cc5b6d1873ab35dcec86851e331073d8922894aa4e"
+  },
+  "snake_source": "checksum-verified cosyvoice_lite/activation.py via existing Oracle",
+  "snake_source_sha256": "1a1b7a6e511d8dfda9d1d083ebf0fb0db42b278ccd167c23e32a193fb5d2560b",
+  "hift_gguf": "models/Sophon-Realtime-32B-Tag-GGUF/hift-F32.gguf",
+  "hift_gguf_sha256": "41a2e52de8fb46e329526b593a1db97c3d184acda7bd53e9e57941f4c2f0bb15",
+  "explicit_inputs": {
+    "initial_phase": "rand_ini=zeros(1,9), native phase_acc=None at first call; native unchanged cache carries phase thereafter",
+    "excitation_noise": "numpy default_rng(0), generated after mel: uniform [0,1) float32 sample-major [57600,9]; reused by native absolute noise_offset",
+    "uv_buffer": "explicit zeros [1,57600,1]"
+  },
+  "committed_mel_rule": "Each recomputed prefix mutates previously committed rows by +0.25; only fresh per-channel suffix rows are appended for both strategies.",
+  "gate_declared_before_run": {
+    "maximum_relative_rmse": 0.01,
+    "minimum_cosine": 0.9999,
+    "maximum_absolute_error": 0.01
+  },
+  "expected_pcm_chunk_frames": [
+    6,
+    20,
+    20,
+    20,
+    20,
+    20,
+    14
+  ],
+  "expected_total_pcm_samples": 57600,
+  "actual_total_pcm_samples": 57600,
+  "python_strategy_pass": true,
+  "steps": [
+    {
+      "step": 0,
+      "tokens": 10,
+      "finalize": false,
+      "committed_frames": 14,
+      "new_mel_frames": 14,
+      "emitted_samples": 2880,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-00-tokens-10-nonfinal/input.json",
+      "comparison": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0,
+        "pass": true
+      }
+    },
+    {
+      "step": 1,
+      "tokens": 20,
+      "finalize": false,
+      "committed_frames": 34,
+      "new_mel_frames": 20,
+      "emitted_samples": 9600,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-01-tokens-20-nonfinal/input.json",
+      "comparison": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0,
+        "pass": true
+      }
+    },
+    {
+      "step": 2,
+      "tokens": 30,
+      "finalize": false,
+      "committed_frames": 54,
+      "new_mel_frames": 20,
+      "emitted_samples": 9600,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-02-tokens-30-nonfinal/input.json",
+      "comparison": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 0.9999999999999999,
+        "pass": true
+      }
+    },
+    {
+      "step": 3,
+      "tokens": 40,
+      "finalize": false,
+      "committed_frames": 74,
+      "new_mel_frames": 20,
+      "emitted_samples": 9600,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-03-tokens-40-nonfinal/input.json",
+      "comparison": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0,
+        "pass": true
+      }
+    },
+    {
+      "step": 4,
+      "tokens": 50,
+      "finalize": false,
+      "committed_frames": 94,
+      "new_mel_frames": 20,
+      "emitted_samples": 9600,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-04-tokens-50-nonfinal/input.json",
+      "comparison": {
+        "max_abs": 3.5762786865234375e-06,
+        "rmse": 2.94815903891189e-07,
+        "relative_rmse": 3.0634172893972615e-05,
+        "cosine": 0.9999999995307939,
+        "pass": true
+      }
+    },
+    {
+      "step": 5,
+      "tokens": 60,
+      "finalize": false,
+      "committed_frames": 114,
+      "new_mel_frames": 20,
+      "emitted_samples": 9600,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-05-tokens-60-nonfinal/input.json",
+      "comparison": {
+        "max_abs": 3.2107054721564054e-05,
+        "rmse": 2.5870801510908713e-06,
+        "relative_rmse": 0.0002770757383192756,
+        "cosine": 0.9999999616575425,
+        "pass": true
+      }
+    },
+    {
+      "step": 6,
+      "tokens": 60,
+      "finalize": true,
+      "committed_frames": 120,
+      "new_mel_frames": 6,
+      "emitted_samples": 6720,
+      "fixture": "target/sophon/streaming-committed-review-20261111-run-1/step-06-tokens-60-final/input.json",
+      "comparison": {
+        "max_abs": 4.973262548446655e-06,
+        "rmse": 5.780232841863571e-07,
+        "relative_rmse": 5.1156091537448746e-05,
+        "cosine": 0.9999999986922635,
+        "pass": true
+      }
+    }
+  ],
+  "stitched_comparison": {
+    "max_abs": 3.2107054721564054e-05,
+    "rmse": 1.081185905021168e-06,
+    "relative_rmse": 0.0001069287530606052,
+    "cosine": 0.9999999942838079,
+    "pass": true
+  },
+  "artifact_sha256": [
+    {
+      "step": "step-00-tokens-10-nonfinal",
+      "sha256": {
+        "input.json": "73286ce6a15f3e80d1d25635ab6c1a35673435616b0a26d75b4b77542d9bbcf2",
+        "recomputed-prefix.f32": "8930a4890a709da0ad7221aec76b86f4069da8536b4c0f3ded2f37fc1e856868",
+        "excitation_noise.f32": "d200c163c0220290eb19f667cddd491ea799db7416b0366b56e0a3f30cc8a9a9",
+        "committed-replay-chunk.f32": "dafebfb8fccf32114587481f05c950bee26e5aa2bee83b12b7148cf971dac751",
+        "pinned-bounded-chunk.f32": "dafebfb8fccf32114587481f05c950bee26e5aa2bee83b12b7148cf971dac751"
+      }
+    },
+    {
+      "step": "step-01-tokens-20-nonfinal",
+      "sha256": {
+        "input.json": "c1ba2462025916b5ba50ef4106b14f95a68a6a2d1ba148213619a785072b21fe",
+        "recomputed-prefix.f32": "b810ec9b486d4b27da54b523215713aa7e0788c055b51e3d3b60338386e61cc2",
+        "excitation_noise.f32": "f36e89252b3a1907985eebf523550fb1c5fb5d087d617d1106624ca3ecba1825",
+        "committed-replay-chunk.f32": "c42471f9a9ccd38f528f8dfa2efe6cc02e6590a9f543d01b2a6fc5f13bce66ed",
+        "pinned-bounded-chunk.f32": "c42471f9a9ccd38f528f8dfa2efe6cc02e6590a9f543d01b2a6fc5f13bce66ed"
+      }
+    },
+    {
+      "step": "step-02-tokens-30-nonfinal",
+      "sha256": {
+        "input.json": "a117b7a5038ab21bbdcdb0ed1ac9acb34fd5c274db5367fa10aff1138880149b",
+        "recomputed-prefix.f32": "6858c5d5e6206b94c646dbeca54495b79131874524a76af5e1fbf29535f31324",
+        "excitation_noise.f32": "3d464de5c7a9b8bfea0a495d969d6b85d310726002ca1c4aa99c6c981051c710",
+        "committed-replay-chunk.f32": "46976d86fa7d2cea144586aa9cf80060b1c9f34c680936e62a159ad075b16568",
+        "pinned-bounded-chunk.f32": "46976d86fa7d2cea144586aa9cf80060b1c9f34c680936e62a159ad075b16568"
+      }
+    },
+    {
+      "step": "step-03-tokens-40-nonfinal",
+      "sha256": {
+        "input.json": "770356df908c4841923f75bb4dbcc525ceb1b35f75e3da923683af79391e7733",
+        "recomputed-prefix.f32": "a31fceca1add8629e0b47d052f7a4ee928d8b02dc9ffed9f56edf56a8aef1938",
+        "excitation_noise.f32": "1658cca10f557f5c4fcfa8355fcc401867c919db3e5e91a4dffe6da8ccbeed85",
+        "committed-replay-chunk.f32": "2eb1799b7dffc9bd4f996155fce23d590d734b71939f62e19220fba8deb8ea04",
+        "pinned-bounded-chunk.f32": "2eb1799b7dffc9bd4f996155fce23d590d734b71939f62e19220fba8deb8ea04"
+      }
+    },
+    {
+      "step": "step-04-tokens-50-nonfinal",
+      "sha256": {
+        "input.json": "0b1a1f57dbed255d306c40174a025c95ad10ac6180e114f9a013109fe4f8f306",
+        "recomputed-prefix.f32": "2dc00036b51a8562a16a632f136b2d3f47dce15fc65cfdadf14b1bf6b1c732a7",
+        "excitation_noise.f32": "1d1c21533390703eff717985ad17c5f9026aa3d719eefe6d31ca653bbdc08724",
+        "committed-replay-chunk.f32": "876a638fb382e8600ef2ec137caff5f1385e74aa2a3b17b416e29557e5ef5eb8",
+        "pinned-bounded-chunk.f32": "22e436189b3242e547cf98d220637185d6de66b73dc9626811501dd270d6e5af"
+      }
+    },
+    {
+      "step": "step-05-tokens-60-nonfinal",
+      "sha256": {
+        "input.json": "048c7b2d80aa3a88065e611c938ce45dda2698501fc3db02f380fd04f4866ced",
+        "recomputed-prefix.f32": "a59a4eaafda6a8c9ffbfd5803daad65e8d2ff8207624e743fd02b1621f175142",
+        "excitation_noise.f32": "cb0920677e0c3c98c399367bce1a0b0bc467274287492de289b54d174cefe7d5",
+        "committed-replay-chunk.f32": "8fb6c85bc149e1b57edca42ad21585de32a400c2fa0e0103e914cba0734a2fa3",
+        "pinned-bounded-chunk.f32": "91a68931349c52d32370a0d6d687c14b22f2ed5e1a954074d70a0d6c4d05d099"
+      }
+    },
+    {
+      "step": "step-06-tokens-60-final",
+      "sha256": {
+        "input.json": "40c1315278a596072262efef066cd4a2811d992350e165ee31b0c5ff20014eac",
+        "recomputed-prefix.f32": "c9afe2f5c1a2829e9165917d8b35e50db896f9a5a6f1cae134fe764d99cc90e8",
+        "excitation_noise.f32": "1e812f8dfb7f8cc83a2875306dc01719a2f18a70456ebf8bba86de3cc639f043",
+        "committed-replay-chunk.f32": "1e0df4c2879b2f3cf42956186786ae60a6ad49f6c189a13f88aee012286321b1",
+        "pinned-bounded-chunk.f32": "838572ce92f90ba138b21e41c3c437138e72aef9e213fcdc402d57fd76580034"
+      }
+    }
+  ],
+  "rust_fixture_comparison": {
+    "pass_gate": true,
+    "threads": 4,
+    "test": "models::sophon_realtime::tests::real_code2wav_checkpoints",
+    "test_binary": "/root/rmi-sophon-artifacts/repo/target/sophon/current-build/release-fast/deps/rust_model_inference-8991fe1a6714960d",
+    "test_binary_sha256": "9aff3d004efa24092137622ea0672b6d95252fcfb29ed21c31de9d30f4aa65a2",
+    "binary_identity_unchanged": true,
+    "flow_gguf_sha256": "affddddc464b0c8762d1e6ca8dbfb1edddf901a02b504f3c8ebbbd9fcf7fe819",
+    "hift_gguf_sha256": "41a2e52de8fb46e329526b593a1db97c3d184acda7bd53e9e57941f4c2f0bb15",
+    "gate_declared_before_run": {
+      "maximum_relative_rmse": 0.01,
+      "minimum_cosine": 0.9999,
+      "maximum_absolute_error": 0.01
+    },
+    "steps": [
+      {
+        "step": 0,
+        "fixture_sha256": "73286ce6a15f3e80d1d25635ab6c1a35673435616b0a26d75b4b77542d9bbcf2",
+        "waveform_sha256": "e12ad35d3df65b8244a1066b979621c21c07169fe8dfc5dee2eb3ddfab08bbcb",
+        "samples": 2880,
+        "emitted_samples": 2880,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 4.192556291193178e-05,
+          "cosine": 0.9999999991255433,
+          "max_abs": 4.223547875881195e-06,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 4.192556291193178e-05,
+          "cosine": 0.9999999991255433,
+          "max_abs": 4.223547875881195e-06,
+          "pass_gate": true
+        }
+      },
+      {
+        "step": 1,
+        "fixture_sha256": "c1ba2462025916b5ba50ef4106b14f95a68a6a2d1ba148213619a785072b21fe",
+        "waveform_sha256": "3ffaeb8c3b95fb0e5e7303cd665f267b0657fba50e94a4194dd3efd6613f7aae",
+        "samples": 12480,
+        "emitted_samples": 9600,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 8.768639685364707e-05,
+          "cosine": 0.9999999961615662,
+          "max_abs": 9.408919140696526e-06,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 0.00010389944175963864,
+          "cosine": 0.9999999946094071,
+          "max_abs": 9.408919140696526e-06,
+          "pass_gate": true
+        }
+      },
+      {
+        "step": 2,
+        "fixture_sha256": "a117b7a5038ab21bbdcdb0ed1ac9acb34fd5c274db5367fa10aff1138880149b",
+        "waveform_sha256": "e084b794c8a734727902999231e6dcaa1c329d89e267c6cbe584b5826107e5b1",
+        "samples": 22080,
+        "emitted_samples": 9600,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 0.0007310666215767636,
+          "cosine": 0.9999997330428748,
+          "max_abs": 0.00014118850231170654,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 0.001218754518186213,
+          "cosine": 0.9999992590693338,
+          "max_abs": 0.00014118850231170654,
+          "pass_gate": true
+        }
+      },
+      {
+        "step": 3,
+        "fixture_sha256": "770356df908c4841923f75bb4dbcc525ceb1b35f75e3da923683af79391e7733",
+        "waveform_sha256": "e0b7052bd7921cb0bfd4497d9c9c82e27d35d06533027f64c0c4b4de122c5370",
+        "samples": 31680,
+        "emitted_samples": 9600,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 0.0012469907736097421,
+          "cosine": 0.9999992225067383,
+          "max_abs": 0.00018543750047683716,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 0.002010157465608526,
+          "cosine": 0.9999979812981532,
+          "max_abs": 0.00018543750047683716,
+          "pass_gate": true
+        }
+      },
+      {
+        "step": 4,
+        "fixture_sha256": "0b1a1f57dbed255d306c40174a025c95ad10ac6180e114f9a013109fe4f8f306",
+        "waveform_sha256": "4f741d40983d907de77be37f13f269b9268e6e8ce09937b6ca27dbbadf740466",
+        "samples": 41280,
+        "emitted_samples": 9600,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 0.0012520937160561587,
+          "cosine": 0.999999216144988,
+          "max_abs": 0.00018543750047683716,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 0.0012752835312640483,
+          "cosine": 0.9999991871821908,
+          "max_abs": 0.0001301513984799385,
+          "pass_gate": true
+        }
+      },
+      {
+        "step": 5,
+        "fixture_sha256": "048c7b2d80aa3a88065e611c938ce45dda2698501fc3db02f380fd04f4866ced",
+        "waveform_sha256": "f0a256db0eb99490966a9149dfd2c5eff3fb1b4b9f3a4b92646b6c312041f4a5",
+        "samples": 50880,
+        "emitted_samples": 9600,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 0.0013011677024994963,
+          "cosine": 0.9999991534946173,
+          "max_abs": 0.00018543750047683716,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 0.0013300202187088988,
+          "cosine": 0.9999991167517691,
+          "max_abs": 9.78708267211914e-05,
+          "pass_gate": true
+        }
+      },
+      {
+        "step": 6,
+        "fixture_sha256": "40c1315278a596072262efef066cd4a2811d992350e165ee31b0c5ff20014eac",
+        "waveform_sha256": "65ae9324fa5010f830f2d99fb12bb7b4186cd623464d5bc651d33849916c6a15",
+        "samples": 57600,
+        "emitted_samples": 6720,
+        "full_prefix_vs_committed_pcm": {
+          "relative_rmse": 0.001413140621617412,
+          "cosine": 0.9999990015193984,
+          "max_abs": 0.00038312841206789017,
+          "pass_gate": true
+        },
+        "suffix_vs_native_bounded": {
+          "relative_rmse": 0.001977350745838806,
+          "cosine": 0.9999980451170883,
+          "max_abs": 0.00038785720244050026,
+          "pass_gate": true
+        }
+      }
+    ],
+    "stitched_comparison": {
+      "relative_rmse": 0.0013925733654177276,
+      "cosine": 0.9999990303701589,
+      "max_abs": 0.00038785720244050026,
+      "pass_gate": true
+    },
+    "total_samples": 57600,
+    "limitation": "Isolated Rust HiFT over synthetic committed mel; full prefix reference reconstructs saved committed PCM chunks. This does not run SpeechEngine history, live Flow, sampling or HTTP.",
+    "evidence_root": "target/sophon/streaming-committed-review-20261111-rust-current-1",
+    "protected_test_binary": "target/sophon/protected-streaming-libtest-9aff",
+    "source_snapshot": "Build includes committed-mel ownership, P2/S2S/audio JEV changes. It precedes later text/image logits unification and per-token/Flow-block/HiFT-stage cancellation checks; these follow-ups are not validated by this artifact.",
+    "maximum_chunk_relative_rmse": 0.002010157465608526,
+    "maximum_full_prefix_relative_rmse": 0.001413140621617412
+  },
+  "limitations": [
+    "Python strategy and isolated Rust HiFT passed; the complete SpeechEngine streaming history and generated Flow conditioning were not exercised end to end.",
+    "Mel prefixes are synthetic and do not come from an actual streaming Flow session.",
+    "The 60-token schedule covers window rollover and final lookahead release, not long-duration streaming.",
+    "No full speech sampling, CLI/HTTP response, speech comprehension, perceptual quality, or GPU validation is established.",
+    "Another model Oracle and an isolated Cargo build ran concurrently, so elapsed time is not a controlled performance measurement.",
+    "real_code2wav_checkpoints also executes a short Flow pass, but its Flow output is not the HiFT conditioning and no Flow numerical comparison is established by this check."
+  ]
+}
