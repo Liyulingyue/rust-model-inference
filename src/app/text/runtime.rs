@@ -88,6 +88,15 @@ pub struct RuntimeOptions {
     /// a single forward pass. Only the `qwen35` trunk target is supported,
     /// and only greedy, text-only requests take the speculative path.
     pub dspark_model: Option<Arc<dyn TensorSource>>,
+    /// The n-gram self-speculative draft (llama.cpp's `ngram-simple`): the
+    /// committed token history proposes drafts and the target verifies
+    /// them. `ngram_draft` is the per-round draft length (`size_m`) and
+    /// `ngram_lookup` the lookup n-gram size (`size_n`, upstream default
+    /// 12); a zero draft length keeps the plain decode. No second model is
+    /// involved.
+    pub ngram_draft: usize,
+    /// The lookup n-gram size for [`Self::ngram_draft`].
+    pub ngram_lookup: usize,
 }
 
 impl RuntimeOptions {
@@ -109,6 +118,8 @@ impl RuntimeOptions {
             mmproj: None,
             mtp_draft: 0,
             dspark_model: None,
+            ngram_draft: 0,
+            ngram_lookup: crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
         }
     }
 
@@ -123,6 +134,20 @@ impl RuntimeOptions {
     /// are set (the CLI's rule).
     pub fn with_dspark_model(mut self, sidecar: Option<Arc<dyn TensorSource>>) -> Self {
         self.dspark_model = sidecar;
+        self
+    }
+
+    /// Turn the decode into a speculative one driven by the committed
+    /// token history (llama.cpp's `ngram-simple`).
+    pub fn with_ngram_draft(mut self, n_drafts: usize) -> Self {
+        self.ngram_draft = n_drafts;
+        self
+    }
+
+    /// Set the lookup n-gram size for [`Self::with_ngram_draft`] (upstream's
+    /// `size_n`, default 12).
+    pub fn with_ngram_lookup(mut self, size_n: usize) -> Self {
+        self.ngram_lookup = size_n;
         self
     }
 
@@ -222,6 +247,45 @@ pub fn build_text_runtime(
                  capture the per-layer hidden states the draft encodes"
                     .into(),
             );
+        }
+    }
+    if options.ngram_draft > 0 {
+        // Same single-dispatch-point rule as the DSpark sidecar: the
+        // verify/rollback machinery lives in the qwen35 trunk session, so
+        // an arch without it must fail here instead of silently dropping
+        // the flag.
+        if arch != "qwen35" {
+            return Err(format!(
+                "--ngram-draft needs the qwen35 trunk target; architecture {arch} has no \
+                 speculative verify path"
+            ));
+        }
+        // The n-gram rounds run the same CPU verify/rollback machinery as
+        // the DSpark path; the device wiring is untested for them.
+        if policy == crate::compute::ComputePolicy::Vulkan {
+            return Err(
+                "--ngram-draft needs the CPU target path: the Vulkan verify/rollback \
+                 wiring is not exercised for n-gram rounds"
+                    .into(),
+            );
+        }
+        // One draft axis at a time: the MTP head and the DSpark sidecar
+        // both take over drafting, so combining them with the n-gram
+        // lookup would leave one flag silently dead.
+        if options.mtp_draft > 0 || options.dspark_model.is_some() {
+            return Err(
+                "--ngram-draft cannot be combined with --mtp-draft or --dspark-model".into(),
+            );
+        }
+        // llama.cpp's ngram-simple never drafts below the lookup size
+        // (`copy_max < size_n` is a no-draft), so a shorter budget would
+        // be a flag that can never fire.
+        if options.ngram_draft < options.ngram_lookup {
+            return Err(format!(
+                "--ngram-draft {} is below the lookup size {}: ngram-simple drafts \
+                 nothing when the draft length is under the lookup size",
+                options.ngram_draft, options.ngram_lookup
+            ));
         }
     }
     let _scope = policy.enter_legacy_scope();
@@ -845,6 +909,11 @@ pub struct HybridTextRuntime {
     /// DFlash / DSpark sidecar source (`--dspark-model`); `None` keeps the
     /// plain / MTP decode.
     dspark: Option<Arc<dyn TensorSource>>,
+    /// The n-gram per-round draft length (`--ngram-draft`); `0` keeps the
+    /// other decodes.
+    ngram_draft: usize,
+    /// The lookup n-gram size for the n-gram draft (`--ngram-lookup`).
+    ngram_lookup: usize,
 }
 
 impl HybridTextRuntime {
@@ -902,6 +971,8 @@ impl HybridTextRuntime {
             max_context: options.max_context,
             mtp_draft: options.mtp_draft,
             dspark: options.dspark_model,
+            ngram_draft: options.ngram_draft,
+            ngram_lookup: options.ngram_lookup,
         })
     }
 }
@@ -1038,11 +1109,26 @@ impl TextRuntime for HybridTextRuntime {
                 return Err("--dspark-model needs greedy decoding (temperature 0)".into());
             }
         }
+        if self.ngram_draft > 0 {
+            // Same request-time guards as the DSpark path: the lookup works
+            // on token ids (an image prompt's rows are projected vision
+            // embeddings), and the verification is batched greedy.
+            if !request.images.is_empty() {
+                return Err(
+                    "--ngram-draft needs a text-only prompt: the vision path expands the \
+                     prompt into projected embedding rows"
+                        .into(),
+                );
+            }
+            if request.sampling.temperature > 0.0 {
+                return Err("--ngram-draft needs greedy decoding (temperature 0)".into());
+            }
+        }
         // The speculative path writes the KV of the drafted tokens before it
         // knows whether the target accepts them, so the cache needs room for
         // one round of drafts on top of the committed tokens.
-        let mtp_overhead = if self.mtp_draft > 0 || dspark_drafts > 0 {
-            self.mtp_draft.max(dspark_drafts) + 1
+        let mtp_overhead = if self.mtp_draft > 0 || dspark_drafts > 0 || self.ngram_draft > 0 {
+            self.mtp_draft.max(dspark_drafts).max(self.ngram_draft) + 1
         } else {
             0
         };
@@ -1079,13 +1165,14 @@ impl TextRuntime for HybridTextRuntime {
         let mut token_ids = Vec::new();
         let mut finish = Finish::Limit;
         // The speculative paths below commit several tokens per round, so
-        // the one-token-at-a-time loop runs zero times when either is on.
+        // the one-token-at-a-time loop runs zero times when one is on.
         let mtp_enabled = self.mtp_draft > 0
             && dspark_drafts == 0
+            && self.ngram_draft == 0
             && request.sampling.temperature <= 0.0
             && request.images.is_empty()
             && prefill_embeddings.is_none();
-        let plain_steps = if mtp_enabled || dspark_drafts > 0 {
+        let plain_steps = if mtp_enabled || dspark_drafts > 0 || self.ngram_draft > 0 {
             0
         } else {
             request.max_new_tokens
@@ -1196,6 +1283,49 @@ impl TextRuntime for HybridTextRuntime {
             )?;
             log::info!(
                 "[dspark] {} rounds, {}/{} drafts accepted ({:.1}%)",
+                generation.rounds,
+                generation.accepted,
+                generation.drafted,
+                100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+            );
+            for id in generation.tokens {
+                if eos_id == Some(id) || im_end_id == Some(id) {
+                    finish = Finish::Eos;
+                    break;
+                }
+                token_ids.push(id);
+                let chunk = decoder.push(id);
+                if !chunk.is_empty() {
+                    text.push_str(&chunk);
+                    if sink.push_text(&chunk) == Flow::Stop {
+                        finish = Finish::Cancelled;
+                        break;
+                    }
+                }
+            }
+        }
+        if self.ngram_draft > 0 {
+            // The n-gram speculative path: the committed token history
+            // proposes drafts (llama.cpp's `ngram-simple`) and the target
+            // verifies them in one forward per round. A round with no
+            // lookup match degenerates into the plain one-token step, so
+            // the output is always the greedy output.
+            let ids: Vec<u32> = prefill_ids
+                .iter()
+                .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+                .collect::<Result<Vec<u32>, String>>()?;
+            let config = crate::core::ngram::NgramSimpleConfig {
+                size_n: self.ngram_lookup,
+                size_m: self.ngram_draft,
+            };
+            let generation = session.ngram_generate(
+                &ids,
+                &prefill_positions,
+                request.max_new_tokens,
+                &config,
+            )?;
+            log::info!(
+                "[ngram] {} rounds, {}/{} drafts accepted ({:.1}%)",
                 generation.rounds,
                 generation.accepted,
                 generation.drafted,
@@ -1544,6 +1674,74 @@ mod tests {
         }
     }
 
+    /// Same entry-coverage rule for the n-gram draft: the flag may never be
+    /// silently dropped by an arch without the verify path, and it is one
+    /// draft axis at a time.
+    #[test]
+    fn ngram_draft_is_rejected_outside_the_qwen35_trunk() {
+        use super::*;
+        for arch in ["llama", "qwen3", "qwen35moe", "edge0", "sensenova_loop"] {
+            let options = RuntimeOptions::from_model(
+                Arc::new(StubSource),
+                Arc::new(crate::core::thread_pool::ComputePool::new(1)),
+                Arc::new(stub_tokenizer()),
+            )
+            .with_ngram_draft(16);
+            let error = match build_text_runtime(arch, options) {
+                Err(error) => error,
+                Ok(_) => panic!("the ngram gate must fire before any model loading ({arch})"),
+            };
+            assert!(
+                error.contains("--ngram-draft") && error.contains(arch),
+                "arch {arch}: {error}"
+            );
+        }
+    }
+
+    /// The n-gram draft refuses the combinations that would leave a flag
+    /// silently dead: stacked with the other draft axes, or a budget below
+    /// the lookup size (llama.cpp's ngram-simple never drafts there).
+    #[test]
+    fn ngram_draft_rejects_stacked_axes_and_sub_lookup_budgets() {
+        use super::*;
+        let base = || {
+            RuntimeOptions::from_model(
+                Arc::new(StubSource),
+                Arc::new(crate::core::thread_pool::ComputePool::new(1)),
+                Arc::new(stub_tokenizer()),
+            )
+        };
+        let stacked_with_mtp = base().with_ngram_draft(16).with_mtp_draft(4);
+        let error = match build_text_runtime("qwen35", stacked_with_mtp) {
+            Err(error) => error,
+            Ok(_) => panic!("the ngram/mtp combination must be rejected"),
+        };
+        assert!(
+            error.contains("--ngram-draft") && error.contains("--mtp-draft"),
+            "{error}"
+        );
+        let stacked_with_dspark = base()
+            .with_ngram_draft(16)
+            .with_dspark_model(Some(Arc::new(StubSource)));
+        let error = match build_text_runtime("qwen35", stacked_with_dspark) {
+            Err(error) => error,
+            Ok(_) => panic!("the ngram/dspark combination must be rejected"),
+        };
+        assert!(
+            error.contains("--ngram-draft") && error.contains("--dspark-model"),
+            "{error}"
+        );
+        let sub_lookup = base().with_ngram_draft(8);
+        let error = match build_text_runtime("qwen35", sub_lookup) {
+            Err(error) => error,
+            Ok(_) => panic!("a budget below the lookup size must be rejected"),
+        };
+        assert!(
+            error.contains("--ngram-draft") && error.contains("lookup"),
+            "{error}"
+        );
+    }
+
     fn tiny_hybrid_runtime(arch: &str, max_context: usize) -> super::HybridTextRuntime {
         use super::*;
         let mut model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
@@ -1561,6 +1759,8 @@ mod tests {
             max_context,
             mtp_draft: 0,
             dspark: None,
+            ngram_draft: 0,
+            ngram_lookup: crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
         }
     }
 

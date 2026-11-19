@@ -1307,6 +1307,8 @@ pub fn run_multimodal(
         None,
         0,
         None,
+        0,
+        crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
         jinja,
     )
 }
@@ -1343,6 +1345,8 @@ pub fn run_multimodal_with_video(
         repetition_penalty,
         0,
         None,
+        0,
+        crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
         jinja,
     )
 }
@@ -1370,6 +1374,8 @@ pub fn run_multimodal_with_video_and_mtp(
     repetition_penalty: f32,
     mtp_draft: usize,
     dspark_model: Option<&Path>,
+    ngram_draft: usize,
+    ngram_lookup: usize,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let owned_source = Arc::clone(&llm_source);
@@ -1390,6 +1396,8 @@ pub fn run_multimodal_with_video_and_mtp(
         Some(owned_source),
         mtp_draft,
         dspark_model,
+        ngram_draft,
+        ngram_lookup,
         jinja,
     )
 }
@@ -1427,6 +1435,8 @@ pub(super) fn run_multimodal_with_video_ref(
     model_source: Option<Arc<dyn TensorSource>>,
     mtp_draft: usize,
     dspark_model: Option<&Path>,
+    ngram_draft: usize,
+    ngram_lookup: usize,
     jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let arch = llm_source
@@ -1930,11 +1940,15 @@ pub(super) fn run_multimodal_with_video_ref(
         }
         None => 0,
     };
+    // The n-gram lookup drafts when a budget is named. It is exclusive with
+    // the other axes (validated at parse time and by the runtime gate), so
+    // reaching here with ngram_draft > 0 means the other two are off.
+    let ngram_drafts = ngram_draft;
     // The speculative path writes the KV of the drafted tokens before it
     // knows whether the target accepts them, so the cache needs room for
     // one round of drafts on top of the committed tokens.
-    let mtp_overhead = if mtp_draft > 0 || dspark_drafts > 0 {
-        mtp_draft.max(dspark_drafts) + 1
+    let mtp_overhead = if mtp_draft > 0 || dspark_drafts > 0 || ngram_drafts > 0 {
+        mtp_draft.max(dspark_drafts).max(ngram_drafts) + 1
     } else {
         0
     };
@@ -1979,6 +1993,21 @@ pub(super) fn run_multimodal_with_video_ref(
             return Err("--dspark-model needs greedy decoding (--temp 0)".into());
         }
     }
+    if ngram_drafts > 0 {
+        // Same rule as the sidecar: the lookup runs on token ids, so a
+        // vision prompt (whose rows are projected embeddings) has no history
+        // to look up, and the verification is batched greedy.
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--ngram-draft needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--ngram-draft needs greedy decoding (--temp 0)".into());
+        }
+    }
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
     let pool = std::sync::Arc::new(ComputePool::new(n_threads));
@@ -2007,7 +2036,7 @@ pub(super) fn run_multimodal_with_video_ref(
 
     // The speculative path below commits several tokens per round, so the
     // one-token-at-a-time loop runs zero times when a draft head is on.
-    let plain_steps = if mtp_draft > 0 || dspark_drafts > 0 {
+    let plain_steps = if mtp_draft > 0 || dspark_drafts > 0 || ngram_drafts > 0 {
         0
     } else {
         max_tokens
@@ -2223,6 +2252,57 @@ pub(super) fn run_multimodal_with_video_ref(
             std::io::Write::flush(&mut std::io::stdout()).ok();
             all_tokens.push(id as i32);
         }
+    } else if ngram_drafts > 0 {
+        // The n-gram speculative path: the committed token history
+        // drafts (llama.cpp's `ngram-simple`) and the target verifies the
+        // proposal in one forward per round. No sidecar, no draft head: a
+        // round with no lookup match degenerates into the plain
+        // one-token step, so the output is always the greedy output.
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        let config = crate::core::ngram::NgramSimpleConfig {
+            size_n: ngram_lookup,
+            size_m: ngram_drafts,
+        };
+        // The prefill and the rounds are timed apart, like the MTP path.
+        let logits = session.step_with_tokens(&ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation = session.ngram_generate_after_prefill(
+            logits,
+            &ids,
+            &prompt_positions,
+            max_tokens,
+            &config,
+        )?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[ngram] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
     }
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::token_ids(
@@ -2309,6 +2389,8 @@ mod tests {
             None,
             0,
             None,
+            0,
+            crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
             &crate::prompt::jinja::Options::default(),
         )
         .unwrap_err();

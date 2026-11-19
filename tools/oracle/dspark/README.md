@@ -46,6 +46,50 @@ sidecar Q8_0:
   over HTTP returns `--dspark-model needs greedy decoding (temperature
   0)` instead of silently degrading.
 
+## The n-gram follow-up (`ngram-simple`, no sidecar)
+
+The next speculative axis ported after the HTTP follow-ups: llama.cpp's
+self-speculative `ngram-simple`, which needs **no second model** — the
+committed token history drafts and the target verifies. Core in
+`src/core/ngram.rs` (a line-by-line port of `common_ngram_simple_draft`
+from the pinned `b96806d`, including its boundaries: position 0 is the
+not-found sentinel, the backwards search skips the occurrence the round
+sits on, `copy_max < size_n` and `cur_len <= n + m + 1` draft nothing),
+rounds driven by `HybridSession::{ngram_speculative_step,
+ngram_generate}` through the same batched-greedy verify + KV/recurrent
+rollback as MTP / DSpark. Entries: CLI `--ngram-draft N` /
+`--ngram-lookup N` and HTTP `--serve --ngram-draft N`
+(`RuntimeOptions::with_ngram_draft / with_ngram_lookup`); the gates
+mirror the DSpark shape (non-`qwen35`, device paths, stacking with
+`--mtp-draft` / `--dspark-model`, a budget below the lookup size,
+`temperature > 0`, image prompts — all explicit errors, no silent
+drops).
+
+Verified on the same Qwen3.5-2B Q8_0 target (no sidecar involved):
+
+- **Session level** (`qwen35_ngram_speculative_decoding_matches_greedy`,
+  env `RMI_QWEN35_MODEL` only): a repeating number-sequence prompt with
+  lookup 4 / draft 4 commits 24 tokens in 5 rounds with **20/20 drafts
+  accepted**, and the speculative tokens equal the plain greedy tokens
+  token for token.
+- **CLI/HTTP sentinel** (`cli_and_http_agree_on_ngram_speculative_decode`,
+  env `RMI_AGREEMENT_MODEL`): CLI `--ngram-draft 4 --ngram-lookup 3`
+  and the runtime built by `--serve --ngram-draft 4 --ngram-lookup 3`
+  produce byte-identical text, and both equal the plain greedy decode.
+- **Live smoke**: on a repeating prompt, both entries log
+  `[ngram] 47 rounds, 1/8 drafts accepted (12.5%)` for a 48-token budget
+  — one round committed two tokens. Acceptance is workload-dependent by
+  construction (n-grams only recur in repetitive text); a
+  counting/one-off prompt drafts nothing, which is upstream behavior.
+- **Oracle side**: `llama-server --spec-type ngram-simple
+  --spec-ngram-simple-size-n 4 --spec-ngram-simple-size-m 8` on the
+  same target and request produces output **byte-identical** to the
+  same server without speculative decoding — upstream's greedy-
+  equivalence contract, the same one this port satisfies. The fresh
+  cross-engine replay is blocked by the same chat-template difference
+  as the DSpark round (see the next section); the port itself is pinned
+  by the line-by-line reading plus the unit tests on every boundary.
+
 ## Why there is no fresh llama-server replay here
 
 The two servers do not share a prompt builder: llama-server's default
@@ -55,7 +99,11 @@ two different prompts. PR #252's token-for-token parity was established
 by feeding the same prompt to both stacks, and that conclusion stands;
 re-deriving it through both HTTP fronts would first need a shared raw
 prompt (this repo's server has no raw `/completion` endpoint), which is
-out of scope for the entry-point wiring.
+out of scope for the entry-point wiring. The same barrier applies to the
+n-gram round (the oracle above routes the same request into
+`reasoning_content` under its template); what the n-gram replay could
+still establish — the oracle's own greedy equivalence — was verified
+instead, as recorded in the previous section.
 
 ## Reproduce
 
@@ -88,6 +136,28 @@ cargo test --profile release-fast --lib -- --ignored dflash:: dspark
 curl -s http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"Say hi to me"}],"max_tokens":24,"temperature":0}'
+
+# n-gram: session-level greedy parity (no sidecar env needed)
+RMI_QWEN35_MODEL=models/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q8_0.gguf \
+cargo test --profile release-fast --lib -- --ignored qwen35_ngram
+
+# n-gram: CLI/HTTP agreement sentinel
+RMI_AGREEMENT_MODEL=models/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q8_0.gguf \
+cargo test --profile release-fast --test cli_http_agreement \
+  -- cli_and_http_agree_on_ngram
+
+# n-gram: CLI smoke (repetitive prompt is where n-grams recur)
+./target/release-fast/rust-model-inference \
+  --model models/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q8_0.gguf \
+  --ngram-draft 8 --ngram-lookup 4 \
+  --prompt "The sun rises in the east. The sun sets in the west. The sun rises in the east. The sun sets in the west. The sun rises in the" \
+  --n-gen 48 --temp 0
+
+# n-gram: oracle side (upstream greedy equivalence)
+/tmp/opencode/llama_cli_build/bin/llama-server \
+  --model models/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q8_0.gguf \
+  --spec-type ngram-simple --spec-ngram-simple-size-n 4 \
+  --spec-ngram-simple-size-m 8 --ctx-size 0 --port 8766
 ```
 
 Acceptance-rate caveat: the rates above are single-prompt smoke numbers
