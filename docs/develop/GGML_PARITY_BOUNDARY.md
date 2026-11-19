@@ -172,7 +172,7 @@ llama.cpp 的 GDN q/k 归一化换过公式：
 - 要在 CPU 上量一量两个公式差多少时再打开：只换这一处，OvisOCR3 的
   `state_predelta-0` 就从 `1.1e-7` 变成 `4.7e-5`（`q_conv_predelta-0` 从
   `7.8e-8` 变成 `1.18e-5`），是这类公式差最干净的观测点；
-- 仓库里已经没有 Oracle 需要它了：OvisOCR3 的运行时 Oracle 已随 TODO-068
+- 仓库里已经没有 Oracle 需要它了：OvisOCR3 的运行时 Oracle 也已
   重新 pin 到 `b96806d`，与它的转换 pin 一致，所以默认路径不再带
   `eps / (2 * sum)` 的**公式版本差**。
 

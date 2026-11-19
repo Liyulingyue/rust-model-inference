@@ -362,6 +362,24 @@ MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
   否则会在共享算子里给别的模型（如 DiT，8.8× 收益）埋下同类问题。
   临时解法是调用侧加作用域守卫（`ComputePool::disable_gpu_matmul_for_scope`），
   不要在共享算子里按模型加分支。
+- **行跨度与行内 span 是两个数（Z-Image Q/K norm + interleaved RoPE 上设备的教训）**：
+  DiT 的 QKV 是逐行交错 `[Q|K|V]`（`QKV_WIDTH`），Qwen3 是分块 `[整块 Q|整块 K]`。
+  照搬分块语义把 `q_heads*head_dim` 当行跨度传入，着色器按 `q_stride=3840` 寻址而真实
+  间距是 `QKV_WIDTH=11520` —— 只有第 0 行落在正确位置，其余行整体错位；行跨度整除
+  缓冲长度时**不会越界报错**，只会静默写坏 K 与 V。行内 Q→K 同属一个 region、仅靠
+  `k_word` 无法区分，K 每行基址还缺 `HIDDEN` 偏移。修复是 record 函数显式传
+  `q_row_stride` / `k_row_stride`，push constant 加 `k_base`；两个 bug 都是自检抓到的，
+  不是渲染对比发现的。守卫 `gpu_interleaved_qk_norm_rope_matches_the_host_chain` 在生产
+  规模下与 host 逐位一致，并断言 **V 与输入逐位相同**（V 未被触碰是 K 基址算错的唯一
+  可观测信号）。
+- **GPU 与 CPU 的「数学等价」写法差 1 ulp 也会破坏位对齐（Q8_0 量化倒数）**：CPU
+  `quantize_q8_0_into` 用 `1.0 / scale`，shader 曾用 `divide(127.0, amax)` —— 数学等价
+  但差 1 ulp，恰好把乘积从 tie（-20.5）挪成非 tie，round-to-even 分叉到 -21。修复：
+  inverse 从已算出的 `scale` 出发 `divide_finite_normal(1.0, scale)`（精确舍入，与 CPU
+  硬件除法一致），代价为零。同一条教训：**新增管线的索引必须追加在 `OPERATOR_SHADERS`
+  数组末尾**——每个位置都是硬编码常量，插在中间会静默改绑别人的 SPIR-V；以及扩散
+  多步会把微小差异放大成完全不同的轨迹，**不能用「与上一版 GPU 比」判断好坏，只能对
+  CPU 参考比**。
 - `RUST_GPU_TEXT=1`：恢复 Z-Image Qwen3 文本编码器的 GPU 投影（默认关，
   见 `docs/usage/z-image.md` 的 gate 说明）。
 - `RUST_GPU_TRACE=1`：打印每次 dispatch 的序号/形状/耗时。
