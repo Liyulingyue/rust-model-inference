@@ -833,26 +833,31 @@ impl TextRuntime for Qwen3TextRuntime {
 
     fn audio_logits(&mut self, ids: &[u32], audio: &[Vec<f32>]) -> Result<Vec<f32>, String> {
         let _scope = self.options.compute.enter_legacy_scope();
-        let decoder = crate::models::sophon_realtime::audio::AudioDecoder::new(
-            self.options.source.as_ref(),
-            &self.model,
-            self.mmproj.as_deref(),
-            self.options.capacity_for(self.model.config().n_ctx),
-            self.options.compute,
-        )?;
         let fingerprint = audio_fingerprint(audio);
-        let encoded = match self.audio_cache.take() {
-            Some((hash, encoded)) if hash == fingerprint => encoded,
-            _ => decoder.encode_audio(audio)?,
+        let cached = match self.audio_cache.take() {
+            Some((hash, encoded)) if hash == fingerprint => Some(encoded),
+            _ => None,
         };
-        let result = decoder.logits_encoded(
-            ids,
-            &encoded,
-            self.options.kv_format,
-            self.options.prefill_batch_size,
-            self.options.compute,
-        );
-        if result.is_ok() {
+        let mut cache_entry = None;
+        let result = {
+            let decoder = self.audio_decoder()?;
+            let encoded = match cached {
+                Some(encoded) => encoded,
+                None => decoder.encode_audio(audio)?,
+            };
+            let result = decoder.logits_encoded(
+                ids,
+                &encoded,
+                self.options.kv_format,
+                self.options.prefill_batch_size,
+                self.options.compute,
+            );
+            if result.is_ok() {
+                cache_entry = Some(encoded);
+            }
+            result
+        };
+        if let Some(encoded) = cache_entry {
             self.audio_cache = Some((fingerprint, encoded));
         }
         result

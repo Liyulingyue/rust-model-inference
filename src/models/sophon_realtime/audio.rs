@@ -376,13 +376,8 @@ impl<'a> AudioDecoder<'a> {
         })
     }
 
-    pub(crate) fn validate(
-        &self,
-        ids: &[u32],
-        audio: &[Vec<f32>],
-        max_new_tokens: usize,
-    ) -> Result<Vec<u32>, String> {
-        let lengths = audio
+    fn audio_lengths(audio: &[Vec<f32>]) -> Result<Vec<usize>, String> {
+        audio
             .iter()
             .map(|samples| {
                 if samples.iter().any(|v| !v.is_finite()) {
@@ -390,7 +385,16 @@ impl<'a> AudioDecoder<'a> {
                 }
                 token_count(samples.len())
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub(crate) fn validate(
+        &self,
+        ids: &[u32],
+        audio: &[Vec<f32>],
+        max_new_tokens: usize,
+    ) -> Result<Vec<u32>, String> {
+        let lengths = Self::audio_lengths(audio)?;
         expand_prompt(
             self.decoder.tokenizer(),
             ids,
@@ -401,14 +405,10 @@ impl<'a> AudioDecoder<'a> {
     }
 
     pub(crate) fn encode_audio(&self, audio: &[Vec<f32>]) -> Result<Vec<AudioEmbeddings>, String> {
+        Self::audio_lengths(audio)?;
         audio
             .iter()
-            .map(|samples| {
-                if samples.iter().any(|v| !v.is_finite()) {
-                    return Err("audio samples must be finite".to_string());
-                }
-                self.encoder.encode(samples, &self.decoder.pool())
-            })
+            .map(|samples| self.encoder.encode(samples, &self.decoder.pool()))
             .collect()
     }
 
@@ -418,12 +418,12 @@ impl<'a> AudioDecoder<'a> {
         audio: &[Vec<f32>],
         max_new_tokens: usize,
     ) -> Result<PreparedAudio, String> {
-        self.validate(ids, audio, max_new_tokens)?;
+        let token_ids = self.validate(ids, audio, max_new_tokens)?;
         let encoded = self.encode_audio(audio)?;
-        self.prepare_encoded(ids, &encoded, max_new_tokens)
+        self.finish(token_ids, &encoded)
     }
 
-    pub(crate) fn prepare_encoded(
+    fn prepare_encoded(
         &self,
         ids: &[u32],
         encoded: &[AudioEmbeddings],
@@ -437,6 +437,14 @@ impl<'a> AudioDecoder<'a> {
             max_new_tokens,
             self.capacity,
         )?;
+        self.finish(token_ids, encoded)
+    }
+
+    fn finish(
+        &self,
+        token_ids: Vec<u32>,
+        encoded: &[AudioEmbeddings],
+    ) -> Result<PreparedAudio, String> {
         let embeddings = inject_embeddings(self.decoder, &token_ids, encoded)?;
         let positions = crate::models::qwen3::trunk::qwen_text_positions(token_ids.len());
         Ok(PreparedAudio {
@@ -444,18 +452,6 @@ impl<'a> AudioDecoder<'a> {
             positions,
             embeddings,
         })
-    }
-
-    pub(crate) fn logits(
-        &self,
-        ids: &[u32],
-        audio: &[Vec<f32>],
-        kv: crate::core::scratchpad::KvFormat,
-        batch: usize,
-        compute: crate::compute::ComputePolicy,
-    ) -> Result<Vec<f32>, String> {
-        let input = self.prepare(ids, audio, 1)?;
-        self.logits_prepared(&input, kv, batch, compute)
     }
 
     pub(crate) fn logits_encoded(
