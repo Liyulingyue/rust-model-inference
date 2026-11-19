@@ -565,9 +565,54 @@ Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-d
 所以这个开关在这里是有意义的。F16 VAE 的 1×1 / 3×3 卷积也可 offload；
 attention、norms 与 VAE 的 BF16/F32 分支保持 CPU 执行。
 
-## 7. 相关源码索引
+## 7. HTTP 入口
+
+服务端有 `POST /v1/images/generations`（与 P-JiT 共用路由）。模型按**权重签名**判定
+（`general.architecture=pig`，或张量名 `x_embedder.weight` + `cap_embedder.0.weight` +
+`final_layer.linear.weight`），所以启动服务不需要额外开关。
+
+```bash
+target/release/rust-model-inference --serve --host 127.0.0.1 --port 8099 \
+  --model models/z-image-gguf-mine/z-image-turbo-q8_0.gguf \
+  --text-encoder models/z-image-gguf-mine/qwen3_4b_f32-q8_0.gguf \
+  --vae models/z-image-gguf-mine/pig_flux_vae_fp32-f16.gguf
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:8099/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A red fox sleeping beneath a pine tree","size":"512x512","steps":8,"seed":42}'
+```
+
+返回 `{"created":…,"data":[{"b64_json":…}]}`，`b64_json` 是 PNG 的 base64。
+
+请求字段与约束：
+
+| 字段 | 说明 |
+|---|---|
+| `prompt` | 必填，1..=32768 字节，不能是空白 |
+| `size` | `WIDTHxHEIGHT`，必须方形；与 `width`/`height` 互斥 |
+| `width` / `height` | 单独给一边时按方形处理；两边不等就报 400 |
+| `steps` | 采样步数，必须为正 |
+| `seed` | 随机种子 |
+| `guidance` | **不支持** —— Z-Image 没有 CFG 分支，带了报 400 |
+| `n` | 只接受 1 |
+| `response_format` | 只接受 `b64_json` |
+
+分辨率必须是 16 的倍数（VAE 的 latent 形状要求），服务端与 CLI 的检查一致。
+
+实测（NVIDIA GB10，release 构建，128×128 / 2 步 / seed 42）：HTTP 返回的 PNG 与
+同一权重的 CLI 输出**逐位相同**（md5 `86caef6e632c995511bf2395fc1933ad`）；
+debug 与 release 构建的结果也逐位相同。
+
+CLI 与 HTTP 走的是同一份模型代码：`DiffusionPipeline::generate_rgb`
+（`src/models/diffusion/z_image/`），HTTP 层只把请求映射成 `ZImageOptions`，不碰计算。
+
+## 8. 相关源码索引
 
 - `src/app/diffusion.rs` — `run_z_image_cli` 主入口
+- `src/app/server/diffusion.rs` — HTTP 后端（请求映射，不含模型计算）
+- `src/app/server/image_generation.rs` — `/v1/images/generations` 路由与请求体
 - `src/app/mod.rs:187-192` — `reject_incomplete_z_image_architecture`（pig 三组件聚合检查）
 - `src/app/cli/options.rs:608-637` — 逐项必填 + `--steps`/`--resolution` 校验
 - `src/ops/float.rs:31-43` — `gpu_matmul_active()`；无 vulkan feature 时恒为 false

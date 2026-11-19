@@ -94,6 +94,33 @@ Q4_K_M DiT/Text、VAE Conv F16 / Linear F32，新进程、未清理 OS 页缓存
 提示词为 `a lovely cat, detailed fur, sitting on a wooden table, soft daylight, photography`，
 产物 `target/ernie-remote-256-final.png` 显示桌面与窗边场景，但没有猫；只能证明生成链路运行成功，质量验证未通过。
 
+## HTTP 入口
+
+服务端已接入 `POST /v1/images/generations`（与 P-JiT 共用路由，模型按权重签名判定：
+发布的导出把 `general.architecture` 误标成 `wan`，所以按张量名
+`layers.0.self_attention.to_q.weight` + `text_proj.weight` 识别）。
+
+```bash
+target/release/rust-model-inference --serve --host 127.0.0.1 --port 8099 \
+  --model models/ERNIE-Image-GGUF/ernie-image-Q8_0.gguf \
+  --text-encoder models/Ministral-3-3B-Instruct-2512-GGUF/Ministral-3-3B-Instruct-2512-Q4_K_M.gguf \
+  --vae models/ERNIE-Image/vae/flux2-vae.gguf
+
+curl -s -X POST http://127.0.0.1:8099/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"a red panda on a rock","size":"128x128","steps":2,"seed":42}'
+```
+
+请求字段：`prompt`（必填）、`size` 或 `width`/`height`（方形）、`steps`、`seed`、
+`guidance`（映射到 CFG scale，必须为正）、`n`（只接受 1）、`response_format`（只接受 `b64_json`）。
+返回 `{"created":…,"data":[{"b64_json":…}]}`。
+
+实测（NVIDIA GB10，release 构建，128×128 / 2 步 / seed 42）：
+Q8_0 DiT 与 Q4_K_M DiT 两档，HTTP 返回的 PNG 与同一权重的 CLI 输出**逐位相同**
+（Q8_0 md5 `9be3e9f9809f98ae96b4458af32d3856`，Q4_K_M md5 `5e2c2ab771690a89dc54f06ee75dbe95`）。
+K-quant 档在服务端同样归到 CPU（打印 `compute scope=ernie_image backend=Cpu`），
+与 CLI 的行为一致 —— 同一份权重不会因为入口不同而给出不同的图。
+
 目前是 CPU 实验支持，`--gpu` 明确报错。Turbo 独立权重、其他量化、SIMD/FMA 数值对齐和 512/1024 图片质量未验证。
 相关单测与真实契约通过；共享 Z-Image 回归为 84 passed / 7 failed / 10 ignored，7 个失败均在 main 基线复现。
 基线另有一个 VAE 卷积失败，被本次清零 padding 修复。完整仓库测试未运行。

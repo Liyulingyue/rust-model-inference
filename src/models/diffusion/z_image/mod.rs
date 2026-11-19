@@ -173,6 +173,26 @@ pub(crate) enum Component {
     Vae,
 }
 
+/// Recognizes a Z-Image DiT GGUF.
+///
+/// The export tags itself `general.architecture = "pig"`, but the tensor
+/// signature is checked as well: the CLI and the HTTP server both have to
+/// tell a Z-Image DiT from the other diffusion models before they can pick
+/// a pipeline, and a file that carries the wrong tag must still be
+/// recognized rather than silently dispatched elsewhere.
+pub(crate) fn matches_signature(source: &dyn TensorSource) -> bool {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(crate::core::tensor::MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch == "pig" {
+        return true;
+    }
+    source.tensor_info("x_embedder.weight").is_some()
+        && source.tensor_info("cap_embedder.0.weight").is_some()
+        && source.tensor_info("final_layer.linear.weight").is_some()
+}
+
 pub(crate) fn validate_component(
     source: &dyn TensorSource,
     component: Component,
@@ -1356,5 +1376,36 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::matches_signature;
+    use crate::models::diffusion::common::testing::NameOnlySource;
+
+    #[test]
+    fn the_pig_tag_is_enough() {
+        let source = NameOnlySource::new(Some("pig"), &[]);
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn the_tensor_signature_recognizes_a_mis_tagged_file() {
+        let source = NameOnlySource::new(
+            Some("wan"),
+            &[
+                "x_embedder.weight",
+                "cap_embedder.0.weight",
+                "final_layer.linear.weight",
+            ],
+        );
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn another_model_is_not_recognized() {
+        let source = NameOnlySource::new(Some("wan"), &["layers.0.self_attention.to_q.weight"]);
+        assert!(!matches_signature(&source));
     }
 }

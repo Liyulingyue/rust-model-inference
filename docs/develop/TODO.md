@@ -6049,3 +6049,44 @@ CPU 与设备的 PSNR 维持 ≥ 40 dB ✓✓。
 `shaders/glsl/attention_scores_tiled.comp` ✓✓、`shaders/glsl/softmax.comp` ✓✓、
 `shaders/glsl/attention_values.comp` ✓✓、
 [TODO-076](#todo-076-z-image-的-f16-dit-档在设备路径上第二步全-nan--根因是设备端没有-cpu-那份-1128-的预缩放)（同一套设备路径的其它缺口 ✓✓）。
+
+### TODO-078: 图像编辑模型的 HTTP 入口未实现 —— LongCat-Image-Edit 与 Qwen-Image-2.1
+
+**状态**：📌 未实现（本轮未接）。
+
+**结论**：本轮把文生图的 HTTP 入口接上了（Z-Image、ERNIE-Image 共用
+`POST /v1/images/generations`，与 CLI 逐位相同），但**图像编辑类**的两个模型
+还没有入口 —— 这是**缺实现**，不是「不适用」。
+
+| 模型 | 缺什么 | 为什么不能套用现成的路由 |
+|---|---|---|
+| LongCat-Image-Edit / Edit-Turbo | 参考图入口 | 请求要带一张待编辑的图加一段指令，`/v1/images/generations` 的「prompt → 一张图」形状装不下 |
+| Qwen-Image-2.1 | 参考图 + 自有编排 | 除了参考图，它还驱动正负 CFG 两路、Euler 调度、Qwen3-VL 视觉塔与 DeepStack，编排不在 `DiffusionPipeline` 里 |
+
+**已就位的基础**：
+
+- 路由本身是通用的（`src/app/server/image_generation.rs`），请求体是
+  `prompt` / `size` / `width` / `height` / `steps` / `seed` / `guidance` /
+  `n` / `response_format`；要接编辑模型，需要加 `image`（base64 或路径）字段。
+- 模型层已经有可复用的切分：`src/models/diffusion/longcat/`（Transformer 与
+  图文条件）与 `src/models/diffusion/qwen_image_2_1/`（DiT / 组件契约）。
+  缺的只是**把它们编排成一次生成**，再映射到请求 —— 这部分属于 models 层
+  （模型管线），HTTP 层仍然只做输入映射。
+
+**下一步**：
+
+1. 定请求形状：编辑类模型用 `/v1/images/edits`（multipart 还是 JSON+base64），
+   还是复用 `/v1/images/generations` 加 `image` 字段。按 OpenAI 的惯例是前者。
+2. 把 LongCat 的完整编辑入口下沉成 models 层的管线（现在是 CLI 编排），
+   再让 CLI 与 HTTP 共用 —— 现在的 CLI 编排住在 `src/app/diffusion.rs`，
+   按分层红线它应该搬进 `src/models/diffusion/longcat/`。
+3. Qwen-Image-2.1 同理：把 `src/app/diffusion.rs` 里的 `run_qwen_image_2_1`
+   编排下沉成 models 层管线。
+
+**验收**：两个模型各有一个 HTTP 请求，返回的 PNG 与同参数的 CLI 输出逐位相同；
+请求缺参考图、参考图非方形、参考图尺寸不符这三种情况各自报 400。
+
+**关联**：`src/app/server/image_generation.rs`、`src/app/server/diffusion.rs`、
+`src/app/diffusion.rs`（`run_longcat_image_edit` / `run_qwen_image_2_1`）、
+`src/models/diffusion/longcat/`、`src/models/diffusion/qwen_image_2_1/`、
+[SUPPORTED_MODELS.md](SUPPORTED_MODELS.md)（两行的 HTTP 状态）。

@@ -125,6 +125,43 @@ impl DiffusionPipeline for ErnieImagePipeline {
     }
 }
 
+/// Recognizes an ERNIE-Image DiT GGUF.
+///
+/// The published export mis-tags `general.architecture` as `wan`, so the
+/// tensor names are the primary signal and the tag is only a fallback for
+/// a future export that fixes it. The CLI and the HTTP server share this
+/// probe so both dispatch on the same evidence.
+pub fn matches_signature(source: &dyn TensorSource) -> bool {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(crate::core::tensor::MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch == "ernie_image" {
+        return true;
+    }
+    source
+        .tensor_info("layers.0.self_attention.to_q.weight")
+        .is_some()
+        && source.tensor_info("text_proj.weight").is_some()
+}
+
+/// Whether the DiT's main stack is stored in the K-quant family.
+///
+/// The device only has an int8 dot-product kernel, and the K-quant block
+/// scaling does not fit it, so a K-quant DiT measures 2.2x slower on the
+/// device than on the CPU (TODO-068). The CLI pins such a model to the CPU
+/// and the HTTP path has to make the same choice.
+pub fn is_k_quant(source: &dyn TensorSource) -> bool {
+    source
+        .tensor_info("layers.0.mlp.gate_proj.weight")
+        .is_some_and(|info| {
+            matches!(
+                info.ggml_type,
+                GGMLType::Q2K | GGMLType::Q3K | GGMLType::Q4K | GGMLType::Q5K | GGMLType::Q6K
+            )
+        })
+}
+
 fn context_token_count(context: &[f32]) -> Result<usize, String> {
     const WIDTH: usize = dit::TEXT_IN_DIM;
     if context.is_empty() || context.len() % WIDTH != 0 {
@@ -823,4 +860,57 @@ fn linear_into_scaled_impl(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::{is_k_quant, matches_signature};
+    use crate::core::tensor::GGMLType;
+    use crate::models::diffusion::common::testing::NameOnlySource;
+
+    /// A source that carries the ERNIE tensor names.
+    fn ernie_source(arch: Option<&str>) -> NameOnlySource {
+        NameOnlySource::new(
+            arch,
+            &[
+                "layers.0.self_attention.to_q.weight",
+                "text_proj.weight",
+                "layers.0.mlp.gate_proj.weight",
+            ],
+        )
+    }
+
+    #[test]
+    fn the_published_mis_tagged_export_is_recognized() {
+        // The export says "wan"; the tensor names are the real signal.
+        let source = ernie_source(Some("wan"));
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn a_fixed_tag_is_recognized_too() {
+        let source = ernie_source(Some("ernie_image"));
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn another_model_is_not_recognized() {
+        let source = NameOnlySource::new(Some("pig"), &["x_embedder.weight"]);
+        assert!(!matches_signature(&source));
+    }
+
+    #[test]
+    fn a_q8_0_stack_is_not_k_quant() {
+        let source = ernie_source(Some("wan"));
+        assert!(!is_k_quant(&source));
+    }
+
+    #[test]
+    fn a_k_quant_stack_is_recognized() {
+        // The probe reads the stored type of the gate projection, so the
+        // fake source has to answer with a K-quant type.
+        let source =
+            ernie_source(Some("wan")).with_type("layers.0.mlp.gate_proj.weight", GGMLType::Q4K);
+        assert!(is_k_quant(&source));
+    }
 }
