@@ -43,6 +43,8 @@
       "blocked_not_run": 8,
       "pending": 0
     },
-    "gpu_concurrency_limit": "No other visible client during the sampled single-projection retry; physical exclusivity and root cause unproven"
+    "gpu_concurrency_limit": "Latest host completed all physical Vulkan cases; host remains shared, so isolated performance is unverified",
+    "latest_full_matrix_report": "replacement-host-2026-11-20-results.json",
+    "latest_full_matrix_summary": {"expected": 54, "completed": 54, "passed": 12, "failed": 42, "pending": 0}
   }
 }

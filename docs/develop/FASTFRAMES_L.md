@@ -13,12 +13,15 @@ Q8 文本仍超出原容差。相同原生输入的 28 个独立投影复算相�
 [新机复测记录](../../tools/oracle/fastframes_l/replacement-host-results.json) 单独保存修复后的
 BF16/F16/Q8_0 CLI/HTTP 验收，不覆盖历史失败；生产计算和阈值未调整。
 
-新机计划的 18 个入口组合中，6 项 CPU 数值/视频比较完成（BF16 两项通过，F16/Q8_0
-四项失败），4 项设备执行失败，另 8 项因 device lost 阻塞未运行。Q8 Auto 虽生成视频，
-实际为 0 次 Vulkan / 2,202 次 CPU 投影；BF16 严格模式 CLI 退出 1、HTTP 500。
-无模型权重的上游共享测试、两次串行复测和底层单投影测试也触发 hard recovery。
-后者运行期间 18 次采样未发现其他可见 GPU 客户端；物理 GPU 独占及故障根因仍不能确认。
-此前 GPU 通过属于旧实例记录，新实例 GPU 尚未验收通过；详见新机复测记录。
+后续独立远端 worktree 在新实例完成了九档 × CPU/Auto/严格 Vulkan × CLI/HTTP 的
+**54 个真实 transport**：12 项通过、42 项保留失败、0 项 pending。F32/BF16 三后端
+两入口均通过；F16 检查点通过但压缩视频超阈值；六档量化在三后端均保留数值和视频
+失败。Auto 每个 case 记录 143 次 Vulkan / 2,059 次 CPU 投影，严格 Vulkan 记录
+2,202 次 Vulkan / 0 次 CPU 投影，说明这台实例的物理 Vulkan 路径实际执行。
+完整汇总见 [2026-11-20 新机复测记录](../../tools/oracle/fastframes_l/replacement-host-2026-11-20-results.json)。
+
+此前另一台替换实例的 device-lost 记录仍保留在旧报告中，不能套用到本次新机；所有
+权重和完整 tensor payload 仍只在远端。
 
 ## 契约
 

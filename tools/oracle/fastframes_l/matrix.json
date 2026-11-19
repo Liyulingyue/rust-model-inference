@@ -255,6 +255,9 @@
     "repair": "Explicit tensor/tensor activation quantization division; production Rust arithmetic and thresholds unchanged",
     "corrected_wrapper_rerun": "replacement-host-results.json",
     "historical_quantized_metrics": "Retained pre-repair evidence; Q8_0 is rerun separately. Q4_0/Q4_1/Q4_K/Q5_K/Q6_K have not been rerun with the corrected wrapper.",
-    "replacement_gpu_status": "Device lost on latest instance, including unchanged shared controls and serial retries; physical exclusivity unproven. Original successful GPU metrics remain historical."
+    "replacement_gpu_status": "Device lost on the previous replacement instance; latest replacement-host full matrix executed physical Vulkan successfully.",
+    "latest_full_matrix_report": "replacement-host-2026-11-20-results.json",
+    "latest_full_matrix_summary": "54 transports completed: 12 passed, 42 failed, 0 pending; F32/BF16 pass all CPU/Auto/strict Vulkan CLI/HTTP; F16 video gates and all six quantized numeric/video gates fail.",
+    "latest_gpu_execution": "Auto 143 Vulkan + 2059 CPU projection records per case; strict Vulkan 2202 Vulkan + 0 CPU records per case."
   }
 }

@@ -1,10 +1,34 @@
-# FastFrames-L validation — 2026-11-19
+# FastFrames-L validation — 2026-11-20
 
-**Experimental / partial acceptance. The original 54-case matrix passed BF16/F32
-on CPU/Auto/Vulkan at 16×16 / 5 frames. Corrected-wrapper CPU reruns pass BF16;
-F16/Q8_0 still fail output gates. Physical Vulkan reruns on the latest instance
-fail with device lost, including shared controls and serial retries. The earlier
-480p case failed decoded-video cosine and published-BF16 drift gates.**
+## Latest replacement-host full matrix
+
+The isolated FastFrames worktree was pinned to commit `e2b08ccc6` before testing.
+All nine GGUF formats were converted on remote storage and all **54 format ×
+CPU/Auto/strict Vulkan × CLI/HTTP transports** completed at 16×16 / 5 frames:
+**12 passed, 42 failed, 0 pending**. The fixed implementation gates and decoded
+video gates were unchanged. The compact report is
+[replacement-host-2026-11-20-results.json](replacement-host-2026-11-20-results.json).
+
+F32 and BF16 pass all six transports each, with decoded-video RMSE 0. F16 passes
+all checkpoints on all three backends but fails decoded-video gates. Q8_0, Q4_0,
+Q4_1, Q4_K, Q5_K and Q6_K fail their numeric and decoded-video gates on CPU,
+Auto and strict Vulkan. Auto records 143 Vulkan and 2,059 CPU projection events;
+strict Vulkan records 2,202 Vulkan events and no CPU projection events for each
+case. The latest host therefore establishes a healthy physical Vulkan execution
+path while retaining every low-precision quality failure.
+
+The pinned ModelScope source files, 20 official oracle files, four tokenizer
+files, nine GGUF manifests and both release-fast binaries were SHA256-checked on
+the remote host. The 12 Python converter/comparator/streaming tests also pass.
+No weights or full tensor payloads were copied to the Mac. The host shares a
+55 GiB cgroup and CPU/GPU with another task, so these runs are acceptance evidence,
+not isolated performance measurements.
+
+**Experimental / partial acceptance. The latest replacement host completed the
+full 54-case matrix: F32/BF16 pass CPU/Auto/Vulkan, F16 passes checkpoints but
+fails decoded-video gates, and all six quantized formats retain numeric/video
+failures. The earlier 480p case failed decoded-video cosine and published-BF16
+drift gates.**
 All 54 original format/backend/transport combinations completed: 12 passed and 42 failed,
 as retained in [matrix.json](matrix.json).
 Observed summaries and exact transport commands are retained in
@@ -56,9 +80,9 @@ passes all checkpoints but fails decoded RMSE **0.014410152859932579** and cosin
 transports reproduce the same metrics. These supersede the original wrapper's
 Q8_0 CPU values for this rerun; the original failed measurements remain retained.
 
-### Latest physical-device blocker and serial retries
+### Previous replacement-host physical-device blocker (historical)
 
-The replacement-host plan is three formats × CPU/Auto/Vulkan × CLI/HTTP,
+The previous replacement-host plan was three formats × CPU/Auto/Vulkan × CLI/HTTP,
 or 18 transports. Six CPU numerical/video comparisons completed: **2 passed,
 4 failed**. Four device transports were attempted and failed execution;
 the other **8 remain unrun because of the same device blocker**. There are no
@@ -87,9 +111,8 @@ observable from this container: **physical exclusivity and the root cause remain
 unproven**. This does not identify driver, hardware, concurrency or shared runtime
 as the cause. No GPU reset, driver change or interruption of other work was used.
 
-The original successful Vulkan runs below are earlier-instance evidence, not
-successful reruns on this instance. Resume the remaining eight device transports
-after a shared control executes on the physical GPU; retain the fixed gates.
+The latest full-matrix report above supersedes this blocker for the current host;
+the old failure evidence remains useful for diagnosing that earlier instance.
 
 ## Original full-matrix real-model evidence
 
@@ -385,12 +408,11 @@ missing shared capabilities; this PR retains the CPU paths and correctness check
 ## Remaining acceptance
 
 All originally scheduled format oracles and native CPU/Auto/strict Vulkan CLI/HTTP cases
-completed: the historical tiny matrix has 12 passed and 42 failed transports. The
-latest corrected-wrapper plan has six complete CPU comparisons, four failed device
-attempts and eight device transports blocked/unrun, as detailed above. Serial
-shared and single-projection controls still lose the device; a healthy shared
-control is required before resuming physical Vulkan acceptance. The nine-frame
-spatial/KV and real HTTP busy/disconnect checks pass. The completed 480p case
+completed: the historical tiny matrix and the latest full matrix each have 12
+passed and 42 failed transports. The previous replacement-host device-loss
+diagnostics are historical; the latest host completed physical Vulkan execution
+for every scheduled backend/format. The nine-frame spatial/KV and real HTTP
+busy/disconnect checks pass. The completed 480p case
 passes all checkpoints but fails compressed-video cosine and published-BF16 drift.
 Retain and resolve the F16 decoded-video, six quantized numeric/video, and 480p
 quality failures before readiness; isolated block/raw-pixel checks do not replace
