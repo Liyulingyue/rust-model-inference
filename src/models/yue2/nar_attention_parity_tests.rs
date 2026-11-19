@@ -53,6 +53,13 @@ fn queries(rows: usize, config: &YuE2Config) -> Vec<f32> {
         .collect()
 }
 
+/// Reorder a row-major `[row][head][dim]` fixture into the head-major
+/// `[head][row][dim]` order the attention kernels read, so the fixtures
+/// exercise the production layout rather than an accidental permutation of it.
+fn head_major(row_major: Vec<f32>, rows: usize, config: &YuE2Config) -> Vec<f32> {
+    super::head_major(&row_major, rows, config.kv_heads, config.head_dim)
+}
+
 /// The pre-optimization value reduction, verbatim: a fresh accumulator per
 /// invocation, separate multiply and add, then one add into the output.
 fn legacy_value_reduce(
@@ -72,6 +79,84 @@ fn legacy_value_reduce(
         out[dimension] = sum;
     }
     out
+}
+
+/// The head-major KV rewrite is a pure permutation, so attention over the
+/// transposed cache must be bit-identical to attention over the same head's
+/// rows gathered out of the old position-major `[position][head][dim]` layout.
+/// This is the guard for the AR cache and the NAR prefix/latent buffers: if the
+/// transposition or the per-head base arithmetic were wrong, the results would
+/// drift even though the reduction order per dimension is unchanged.
+#[test]
+fn head_major_layout_preserves_attention_bits() {
+    let config = config();
+    let head_dim = config.head_dim;
+    let kv_width = config.kv_heads * head_dim;
+    // 513 rows crosses the 512-key block boundary, so both the short and the
+    // streaming-softmax paths are covered.
+    let rows = 513usize;
+    let mut state = 2024u32;
+    let keys: Vec<f32> = (0..rows * kv_width)
+        .map(|_| draw(&mut state, 8192.0))
+        .collect();
+    let values: Vec<f32> = (0..rows * kv_width)
+        .map(|_| draw(&mut state, 16384.0))
+        .collect();
+    let q = queries(1, &config);
+    let scale = (head_dim as f32).sqrt().recip();
+
+    let mut head_keys = vec![0.0f32; keys.len()];
+    let mut head_values = vec![0.0f32; values.len()];
+    super::head_major_into(&keys, rows, config.kv_heads, head_dim, &mut head_keys);
+    super::head_major_into(&values, rows, config.kv_heads, head_dim, &mut head_values);
+
+    for head in [0usize, 1, config.kv_heads - 1] {
+        let mut gathered_k = Vec::with_capacity(rows * head_dim);
+        let mut gathered_v = Vec::with_capacity(rows * head_dim);
+        for row in 0..rows {
+            let start = row * kv_width + head * head_dim;
+            gathered_k.extend_from_slice(&keys[start..start + head_dim]);
+            gathered_v.extend_from_slice(&values[start..start + head_dim]);
+        }
+
+        let query = &q[head * head_dim..(head + 1) * head_dim];
+        let mut expected_scores = vec![0.0f32; rows];
+        let mut expected = vec![0.0f32; head_dim];
+        super::super::ar::attention_head(
+            query,
+            &gathered_k,
+            &gathered_v,
+            head_dim,
+            &mut expected_scores,
+            &mut expected,
+            scale,
+        );
+
+        let base = head * rows * head_dim;
+        let transposed_k = &head_keys[base..base + rows * head_dim];
+        let transposed_v = &head_values[base..base + rows * head_dim];
+        assert_eq!(transposed_k, gathered_k.as_slice(), "head {head} keys");
+        assert_eq!(transposed_v, gathered_v.as_slice(), "head {head} values");
+
+        let mut actual_scores = vec![0.0f32; rows];
+        let mut actual = vec![0.0f32; head_dim];
+        super::super::ar::attention_head(
+            query,
+            transposed_k,
+            transposed_v,
+            head_dim,
+            &mut actual_scores,
+            &mut actual,
+            scale,
+        );
+        for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "head={head} dim={index}: head-major attention {a} vs position-major {b}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -259,19 +344,35 @@ fn hybrid_attention_is_stable_across_pool_widths() {
     let prefix_rows = 600usize;
     let q = queries(nar_rows, &config);
     let mut state = 5150u32;
-    let nar_k: Vec<f32> = (0..nar_rows * kv_width)
-        .map(|_| draw(&mut state, 8192.0))
-        .collect();
-    let nar_v: Vec<f32> = (0..nar_rows * kv_width)
-        .map(|_| draw(&mut state, 16384.0))
-        .collect();
-    let prefix = (
-        (0..prefix_rows * kv_width)
+    let nar_k = head_major(
+        (0..nar_rows * kv_width)
             .map(|_| draw(&mut state, 8192.0))
-            .collect::<Vec<f32>>(),
-        (0..prefix_rows * kv_width)
+            .collect(),
+        nar_rows,
+        &config,
+    );
+    let nar_v = head_major(
+        (0..nar_rows * kv_width)
             .map(|_| draw(&mut state, 16384.0))
-            .collect::<Vec<f32>>(),
+            .collect(),
+        nar_rows,
+        &config,
+    );
+    let prefix = (
+        head_major(
+            (0..prefix_rows * kv_width)
+                .map(|_| draw(&mut state, 8192.0))
+                .collect(),
+            prefix_rows,
+            &config,
+        ),
+        head_major(
+            (0..prefix_rows * kv_width)
+                .map(|_| draw(&mut state, 16384.0))
+                .collect(),
+            prefix_rows,
+            &config,
+        ),
     );
 
     let run = |threads: usize| {
@@ -308,12 +409,20 @@ fn causal_prefix_attention_is_stable_across_pool_widths() {
     let q: Vec<f32> = (0..rows * q_width)
         .map(|_| draw(&mut state, 8192.0))
         .collect();
-    let k: Vec<f32> = (0..rows * kv_width)
-        .map(|_| draw(&mut state, 8192.0))
-        .collect();
-    let v: Vec<f32> = (0..rows * kv_width)
-        .map(|_| draw(&mut state, 16384.0))
-        .collect();
+    let k = head_major(
+        (0..rows * kv_width)
+            .map(|_| draw(&mut state, 8192.0))
+            .collect(),
+        rows,
+        &config,
+    );
+    let v = head_major(
+        (0..rows * kv_width)
+            .map(|_| draw(&mut state, 16384.0))
+            .collect(),
+        rows,
+        &config,
+    );
 
     let run = |threads: usize| {
         let pool = crate::core::thread_pool::ComputePool::new(threads);
@@ -351,19 +460,35 @@ fn optimized_attention_matches_legacy_bitwise() {
     let prefix_rows = 600usize;
     let mut state = 13579u32;
     let q = queries(nar_rows, &config);
-    let nar_k: Vec<f32> = (0..nar_rows * kv_width)
-        .map(|_| draw(&mut state, 8192.0))
-        .collect();
-    let nar_v: Vec<f32> = (0..nar_rows * kv_width)
-        .map(|_| draw(&mut state, 16384.0))
-        .collect();
-    let prefix = (
-        (0..prefix_rows * kv_width)
+    let nar_k = head_major(
+        (0..nar_rows * kv_width)
             .map(|_| draw(&mut state, 8192.0))
-            .collect::<Vec<f32>>(),
-        (0..prefix_rows * kv_width)
+            .collect(),
+        nar_rows,
+        &config,
+    );
+    let nar_v = head_major(
+        (0..nar_rows * kv_width)
             .map(|_| draw(&mut state, 16384.0))
-            .collect::<Vec<f32>>(),
+            .collect(),
+        nar_rows,
+        &config,
+    );
+    let prefix = (
+        head_major(
+            (0..prefix_rows * kv_width)
+                .map(|_| draw(&mut state, 8192.0))
+                .collect(),
+            prefix_rows,
+            &config,
+        ),
+        head_major(
+            (0..prefix_rows * kv_width)
+                .map(|_| draw(&mut state, 16384.0))
+                .collect(),
+            prefix_rows,
+            &config,
+        ),
     );
     let mut optimized = vec![0.0f32; nar_rows * q_width];
     super::hybrid_attention(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut optimized);
@@ -380,12 +505,20 @@ fn optimized_attention_matches_legacy_bitwise() {
     // causal: 700 rows crosses the 512 block boundary and the row<512 branch.
     let rows = 700usize;
     let q: Vec<f32> = queries(rows, &config);
-    let k: Vec<f32> = (0..rows * kv_width)
-        .map(|_| draw(&mut state, 8192.0))
-        .collect();
-    let v: Vec<f32> = (0..rows * kv_width)
-        .map(|_| draw(&mut state, 16384.0))
-        .collect();
+    let k = head_major(
+        (0..rows * kv_width)
+            .map(|_| draw(&mut state, 8192.0))
+            .collect(),
+        rows,
+        &config,
+    );
+    let v = head_major(
+        (0..rows * kv_width)
+            .map(|_| draw(&mut state, 16384.0))
+            .collect(),
+        rows,
+        &config,
+    );
     let mut optimized = vec![0.0f32; rows * q_width];
     super::causal_prefix_attention(&config, &pool, &q, &k, &v, &mut optimized);
     let mut legacy = vec![0.0f32; rows * q_width];
@@ -414,19 +547,35 @@ fn optimized_attention_matches_legacy_at_production_scale() {
     for (prefix_rows, nar_rows) in [(1758usize, 600usize), (1308, 256), (600, 40), (500, 12)] {
         let mut state = 24680u32;
         let q = queries(nar_rows, &config);
-        let nar_k: Vec<f32> = (0..nar_rows * kv_width)
-            .map(|_| draw(&mut state, 8192.0))
-            .collect();
-        let nar_v: Vec<f32> = (0..nar_rows * kv_width)
-            .map(|_| draw(&mut state, 16384.0))
-            .collect();
-        let prefix = (
-            (0..prefix_rows * kv_width)
+        let nar_k = head_major(
+            (0..nar_rows * kv_width)
                 .map(|_| draw(&mut state, 8192.0))
-                .collect::<Vec<f32>>(),
-            (0..prefix_rows * kv_width)
+                .collect(),
+            nar_rows,
+            &config,
+        );
+        let nar_v = head_major(
+            (0..nar_rows * kv_width)
                 .map(|_| draw(&mut state, 16384.0))
-                .collect::<Vec<f32>>(),
+                .collect(),
+            nar_rows,
+            &config,
+        );
+        let prefix = (
+            head_major(
+                (0..prefix_rows * kv_width)
+                    .map(|_| draw(&mut state, 8192.0))
+                    .collect(),
+                prefix_rows,
+                &config,
+            ),
+            head_major(
+                (0..prefix_rows * kv_width)
+                    .map(|_| draw(&mut state, 16384.0))
+                    .collect(),
+                prefix_rows,
+                &config,
+            ),
         );
         let mut optimized = vec![0.0f32; nar_rows * q_width];
         super::hybrid_attention(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut optimized);
@@ -467,19 +616,35 @@ fn production_scale_divergence_is_a_boundary_effect() {
     ] {
         let mut state = 24680u32;
         let q = queries(nar_rows, &config);
-        let nar_k: Vec<f32> = (0..nar_rows * kv_width)
-            .map(|_| draw(&mut state, 8192.0))
-            .collect();
-        let nar_v: Vec<f32> = (0..nar_rows * kv_width)
-            .map(|_| draw(&mut state, 16384.0))
-            .collect();
-        let prefix = (
-            (0..prefix_rows * kv_width)
+        let nar_k = head_major(
+            (0..nar_rows * kv_width)
                 .map(|_| draw(&mut state, 8192.0))
-                .collect::<Vec<f32>>(),
-            (0..prefix_rows * kv_width)
+                .collect(),
+            nar_rows,
+            &config,
+        );
+        let nar_v = head_major(
+            (0..nar_rows * kv_width)
                 .map(|_| draw(&mut state, 16384.0))
-                .collect::<Vec<f32>>(),
+                .collect(),
+            nar_rows,
+            &config,
+        );
+        let prefix = (
+            head_major(
+                (0..prefix_rows * kv_width)
+                    .map(|_| draw(&mut state, 8192.0))
+                    .collect(),
+                prefix_rows,
+                &config,
+            ),
+            head_major(
+                (0..prefix_rows * kv_width)
+                    .map(|_| draw(&mut state, 16384.0))
+                    .collect(),
+                prefix_rows,
+                &config,
+            ),
         );
         let mut optimized = vec![0.0f32; nar_rows * q_width];
         super::hybrid_attention(&config, &pool, &q, &prefix, &nar_k, &nar_v, &mut optimized);
@@ -515,12 +680,20 @@ fn optimized_causal_attention_matches_legacy_bitwise() {
         let q: Vec<f32> = (0..rows * q_width)
             .map(|_| draw(&mut state, 8192.0))
             .collect();
-        let k: Vec<f32> = (0..rows * kv_width)
-            .map(|_| draw(&mut state, 8192.0))
-            .collect();
-        let v: Vec<f32> = (0..rows * kv_width)
-            .map(|_| draw(&mut state, 16384.0))
-            .collect();
+        let k = head_major(
+            (0..rows * kv_width)
+                .map(|_| draw(&mut state, 8192.0))
+                .collect(),
+            rows,
+            &config,
+        );
+        let v = head_major(
+            (0..rows * kv_width)
+                .map(|_| draw(&mut state, 16384.0))
+                .collect(),
+            rows,
+            &config,
+        );
         let mut optimized = vec![0.0f32; rows * q_width];
         super::causal_prefix_attention(&config, &pool, &q, &k, &v, &mut optimized);
         let mut legacy = vec![0.0f32; rows * q_width];

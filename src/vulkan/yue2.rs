@@ -640,10 +640,12 @@ impl<'model> YuE2VulkanSession<'model> {
 /// NAR attends over.
 pub(crate) fn commit_kv_shadow(
     kv_cache: &mut crate::core::scratchpad::KvCache,
+    layout: crate::core::scratchpad::KvLayout,
     position: usize,
     rows: usize,
     capacity: usize,
     kv_stride: usize,
+    head_dim: usize,
     layer_count: usize,
     k_delta: &[f32],
     v_delta: &[f32],
@@ -653,6 +655,8 @@ pub(crate) fn commit_kv_shadow(
         .and_then(|count| count.checked_mul(rows))
         .ok_or_else(|| "YuE2 Vulkan KV delta length overflow".to_string())?;
     if rows == 0
+        || head_dim == 0
+        || kv_stride % head_dim != 0
         || position.checked_add(rows).is_none_or(|end| end > capacity)
         || k_delta.len() != delta_len
         || v_delta.len() != delta_len
@@ -673,13 +677,37 @@ pub(crate) fn commit_kv_shadow(
     if cache.k.len() != cache_len || cache.v.len() != cache_len {
         return Err("invalid YuE2 CPU shadow KV cache length".into());
     }
-    for layer in 0..layer_count {
-        let layer_base = layer * capacity * kv_stride;
-        for row in 0..rows {
-            let src = (layer * rows + row) * kv_stride;
-            let dst = layer_base + (position + row) * kv_stride;
-            cache.k[dst..dst + kv_stride].copy_from_slice(&k_delta[src..src + kv_stride]);
-            cache.v[dst..dst + kv_stride].copy_from_slice(&v_delta[src..src + kv_stride]);
+    // The device returns deltas in position-major `[layer][row][head][dim]`
+    // order. The CPU shadow is head-major, so the head block is copied into its
+    // own `[position][dim]` run instead of one contiguous row.
+    match layout {
+        crate::core::scratchpad::KvLayout::PositionMajor => {
+            for layer in 0..layer_count {
+                let layer_base = layer * capacity * kv_stride;
+                for row in 0..rows {
+                    let src = (layer * rows + row) * kv_stride;
+                    let dst = layer_base + (position + row) * kv_stride;
+                    cache.k[dst..dst + kv_stride].copy_from_slice(&k_delta[src..src + kv_stride]);
+                    cache.v[dst..dst + kv_stride].copy_from_slice(&v_delta[src..src + kv_stride]);
+                }
+            }
+        }
+        crate::core::scratchpad::KvLayout::HeadMajor => {
+            let heads = kv_stride / head_dim;
+            let head_rows = capacity * head_dim;
+            for layer in 0..layer_count {
+                let layer_base = layer * capacity * kv_stride;
+                for row in 0..rows {
+                    let src_row = (layer * rows + row) * kv_stride;
+                    let dst_row = layer_base + (position + row) * head_dim;
+                    for head in 0..heads {
+                        let src = src_row + head * head_dim;
+                        let dst = dst_row + head * head_rows;
+                        cache.k[dst..dst + head_dim].copy_from_slice(&k_delta[src..src + head_dim]);
+                        cache.v[dst..dst + head_dim].copy_from_slice(&v_delta[src..src + head_dim]);
+                    }
+                }
+            }
         }
     }
     Ok(())

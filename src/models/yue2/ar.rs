@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::core::scratchpad::{KvArch, KvCache, KvFormat, KvState};
+use crate::core::scratchpad::{KvArch, KvCache, KvFormat, KvLayout, KvState};
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
@@ -919,10 +919,12 @@ fn prefill_on_gpu(
         .map_err(|error| error.to_string())?;
     crate::vulkan::yue2::commit_kv_shadow(
         &mut kv.cache,
+        kv.layout,
         base,
         token_ids.len(),
         kv.capacity,
         kv_stride,
+        config.head_dim,
         config.layers,
         result.k_delta,
         result.v_delta,
@@ -965,7 +967,10 @@ impl<'model> YuE2ArSession<'model> {
         Ok(Self {
             model,
             timing: ArPhaseTiming::new(),
-            kv: KvState::new(arch, KvFormat::F32, capacity),
+            // Head-major: the AR attention walks one kv head over the whole
+            // sequence, so `[layer][head][position][dim]` makes that read one
+            // contiguous run instead of a 4 KiB-strided walk.
+            kv: KvState::new(arch, KvFormat::F32, capacity).with_layout(KvLayout::HeadMajor),
             x: vec![0.0; config.hidden],
             normed: vec![0.0; config.hidden],
             q: vec![0.0; q_width],
@@ -1179,26 +1184,35 @@ impl<'model> YuE2ArSession<'model> {
                 &self.k,
             );
 
+            // Head-major cache `[layer][head][position][dim]`: a token write is
+            // one contiguous `head_dim` run per kv head, and the attention below
+            // gets each head as a single contiguous `position × dim` block.
+            let head_rows = self.kv.capacity * config.head_dim;
+            let layer_base = layer_index * self.kv.capacity * kv_width;
             let (key_cache, value_cache) = match &mut self.kv.cache {
                 KvCache::F32(cache) => (&mut cache.k, &mut cache.v),
                 KvCache::F16(_) => return Err("YuE2 AR requires an F32 KV cache".into()),
             };
-            let layer_base = layer_index * self.kv.capacity * kv_width;
-            let row_base = layer_base + position * kv_width;
-            key_cache[row_base..row_base + kv_width].copy_from_slice(&self.k);
-            value_cache[row_base..row_base + kv_width].copy_from_slice(&self.v);
+            for head in 0..config.kv_heads {
+                let dst = layer_base + head * head_rows + position * config.head_dim;
+                let src = head * config.head_dim;
+                key_cache[dst..dst + config.head_dim]
+                    .copy_from_slice(&self.k[src..src + config.head_dim]);
+                value_cache[dst..dst + config.head_dim]
+                    .copy_from_slice(&self.v[src..src + config.head_dim]);
+            }
             let attn_started = std::time::Instant::now();
             self.attention.fill(0.0);
+            let cached = (position + 1) * config.head_dim;
             for head in 0..config.q_heads {
                 let kv_head = head / group_size;
+                let head_base = layer_base + kv_head * head_rows;
                 let q_start = head * config.head_dim;
-                let kv_start = kv_head * config.head_dim;
                 attention_head(
                     &self.q[q_start..q_start + config.head_dim],
-                    &key_cache[layer_base..],
-                    &value_cache[layer_base..],
-                    kv_width,
-                    kv_start,
+                    &key_cache[head_base..head_base + cached],
+                    &value_cache[head_base..head_base + cached],
+                    config.head_dim,
                     &mut self.scores[..=position],
                     &mut self.attention[q_start..q_start + config.head_dim],
                     scale,
@@ -1914,6 +1928,11 @@ pub(super) fn dot(left: &[f32], right: &[f32]) -> f32 {
 /// `(out + head) + tail`, while the original single loop produces
 /// `out + (head + tail)`. Those round differently, which is enough to change a
 /// bf16 rounding decision downstream. One accumulator reproduces the original.
+///
+/// Unlike [`value_reduce_block`], `base_first` / `base_second` here are **row**
+/// numbers, not element offsets: the kernel computes
+/// `(base + token) * row_stride + head_offset + dim`. With the head-major cache
+/// `row_stride == head_dim`, so the kv head's first row is `head * len`.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn value_reduce_block2(
@@ -2163,8 +2182,8 @@ pub(super) fn value_reduce_block2_scalar(
 #[inline]
 /// `base` is an **element** offset into `values` (the kernel computes
 /// `base + token * row_stride + head_offset + dim`), not a row index. Passing a
-/// row number silently reads the wrong elements, which is why the NAR call sites
-/// pass `start * kv_width`.
+/// row number silently reads the wrong elements, which is why the call sites
+/// pass `head * rows * head_dim` / `start * head_dim` for the head-major cache.
 pub(super) fn value_reduce_block(
     values: &[f32],
     scores: &[f32],
@@ -2183,7 +2202,7 @@ pub(super) fn value_reduce_block(
             // bounded by `base + n_tokens * row_stride + head_offset + head_width`
             // which the caller guarantees is within `values`.
             unsafe {
-                value_reduce_block_neon(
+                value_reduce_tokens_neon(
                     values,
                     scores,
                     output,
@@ -2230,9 +2249,16 @@ pub(super) fn value_reduce_block(
     );
 }
 
+/// The NEON form of [`value_reduce_tokens_scalar`].
+///
+/// The token loop stays the outer loop, so a cached token's head slice is read
+/// once in one contiguous run instead of once per dimension block. Four
+/// `f32x4` accumulators cover 16 dimensions per pass; each dimension still sums
+/// the tokens in ascending order with a separate multiply and add, so the
+/// result is bit-identical to the dimension-outer form.
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 #[target_feature(enable = "neon")]
-pub(super) unsafe fn value_reduce_block_neon(
+pub(super) unsafe fn value_reduce_tokens_neon(
     values: &[f32],
     scores: &[f32],
     output: &mut [f32],
@@ -2243,20 +2269,33 @@ pub(super) unsafe fn value_reduce_block_neon(
     head_width: usize,
 ) {
     use std::arch::aarch64::*;
+    const LANES: usize = 4;
+    const GROUP: usize = 4;
     let mut dim = 0;
-    while dim + 4 <= head_width {
-        // Fresh accumulator per block, and a separate multiply so the product is
-        // rounded before the add. Both are load-bearing for bit-exactness.
-        let mut acc = vdupq_n_f32(0.0);
+    while dim + GROUP * LANES <= head_width {
+        // Fresh accumulators per group, and a separate multiply so the product
+        // is rounded before the add. Both are load-bearing for bit-exactness.
+        let mut acc0 = vdupq_n_f32(0.0);
+        let mut acc1 = vdupq_n_f32(0.0);
+        let mut acc2 = vdupq_n_f32(0.0);
+        let mut acc3 = vdupq_n_f32(0.0);
         for token in 0..n_tokens {
             let start = base + token * row_stride + head_offset + dim;
             let weight = vdupq_n_f32(scores[token]);
-            let v = vld1q_f32(values.as_ptr().add(start));
-            acc = vaddq_f32(acc, vmulq_f32(weight, v));
+            let first = values.as_ptr().add(start);
+            acc0 = vaddq_f32(acc0, vmulq_f32(weight, vld1q_f32(first)));
+            acc1 = vaddq_f32(acc1, vmulq_f32(weight, vld1q_f32(first.add(LANES))));
+            acc2 = vaddq_f32(acc2, vmulq_f32(weight, vld1q_f32(first.add(2 * LANES))));
+            acc3 = vaddq_f32(acc3, vmulq_f32(weight, vld1q_f32(first.add(3 * LANES))));
         }
-        let out = vld1q_f32(output.as_ptr().add(dim));
-        vst1q_f32(output.as_mut_ptr().add(dim), vaddq_f32(out, acc));
-        dim += 4;
+        let out = output.as_mut_ptr().add(dim);
+        let acc = [acc0, acc1, acc2, acc3];
+        for (index, accumulator) in acc.iter().enumerate() {
+            let target = out.add(index * LANES);
+            let previous = vld1q_f32(target);
+            vst1q_f32(target, vaddq_f32(previous, *accumulator));
+        }
+        dim += GROUP * LANES;
     }
     while dim < head_width {
         let mut sum = 0.0f32;
@@ -2391,39 +2430,43 @@ pub(super) unsafe fn value_reduce_tokens_avx2(
     }
 }
 
+/// One head's attention over a **head-major** KV slice.
+///
+/// `keys` / `values` are the head's own contiguous `[position][dim]` run, so
+/// both the score loop and the value reduction walk it in order. The old
+/// position-major form stepped over the full `kv_heads * head_dim` row stride
+/// and consumed 512 B of every 4 KiB line.
 pub(super) fn attention_head(
     query: &[f32],
-    key_cache: &[f32],
-    value_cache: &[f32],
-    kv_width: usize,
-    kv_start: usize,
+    keys: &[f32],
+    values: &[f32],
+    head_dim: usize,
     scores: &mut [f32],
     output: &mut [f32],
     scale: f32,
 ) {
     for (cached_position, score) in scores.iter_mut().enumerate() {
-        let key_start = cached_position * kv_width + kv_start;
-        *score = dot(query, &key_cache[key_start..key_start + query.len()]) * scale;
+        let start = cached_position * head_dim;
+        *score = dot(query, &keys[start..start + query.len()]) * scale;
     }
     if scores.len() <= 512 {
         let inverse_sum = softmax(scores);
         // The reduction must reproduce the original arithmetic exactly: a fresh
         // zeroed accumulator per call, a separate multiply and add rather than
         // an FMA, and one add into `output` at the end. `value_reduce_block`
-        // therefore keeps the legacy dimension-outer / token-inner order, so
-        // the per-dimension accumulation order is untouched, and vectorizes the
-        // head dimension instead, so one token read covers contiguous dims
-        // rather than a single scalar. This is the same kernel the NAR
-        // attention uses, and it is pinned bit-exact by
+        // therefore keeps the per-dimension token order -- every dimension sums
+        // the tokens in ascending order -- while reading the head-major rows in
+        // order (token-outer). This is the same kernel the NAR attention uses,
+        // and it is pinned bit-exact by
         // `nar::attention_parity_tests::value_reduce_block_is_bitwise_identical_to_the_scalar_form`.
         output.fill(0.0);
         value_reduce_block(
-            value_cache,
+            values,
             scores,
             output,
             0,
-            kv_width,
-            kv_start,
+            head_dim,
+            0,
             scores.len(),
             output.len(),
         );
@@ -2451,14 +2494,13 @@ pub(super) fn attention_head(
         }
         // Same contiguous, bit-exact reduction as the short path above, applied
         // per KV block so the streaming max/rescale arithmetic is untouched.
-        // `base` is an element offset, not a row index.
         value_reduce_block(
-            value_cache,
+            values,
             block,
             output,
-            start * kv_width,
-            kv_width,
-            kv_start,
+            start * head_dim,
+            head_dim,
+            0,
             block.len(),
             output.len(),
         );

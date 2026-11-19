@@ -151,30 +151,6 @@ impl<'model> YuE2NarSession<'model> {
             chunk.ar_tokens.len(),
             prefill_started.elapsed().as_secs_f64(),
         );
-        for (layer, (keys, values)) in prefix_kv.iter().enumerate() {
-            trace(
-                "yue2.nar.prefix_k",
-                Some(layer),
-                None,
-                &[
-                    chunk.ar_tokens.len(),
-                    model.config().kv_heads,
-                    model.config().head_dim,
-                ],
-                keys,
-            );
-            trace(
-                "yue2.nar.prefix_v",
-                Some(layer),
-                None,
-                &[
-                    chunk.ar_tokens.len(),
-                    model.config().kv_heads,
-                    model.config().head_dim,
-                ],
-                values,
-            );
-        }
         Ok(Self {
             model,
             chunk,
@@ -262,6 +238,10 @@ impl<'model> YuE2NarSession<'model> {
         let mut q = vec![0.0; nar_len * q_width];
         let mut k = vec![0.0; nar_len * kv_width];
         let mut v = vec![0.0; nar_len * kv_width];
+        // Head-major copies for the attention read; the projections write
+        // row-major because the per-row q/k norm and RoPE pass is row-shaped.
+        let mut nar_keys = vec![0.0; nar_len * kv_width];
+        let mut nar_values = vec![0.0; nar_len * kv_width];
         let mut attention = vec![0.0; nar_len * q_width];
         let mut projected = vec![0.0; nar_len * hidden];
         let mut gate = vec![0.0; nar_len * config.ffn];
@@ -341,6 +321,14 @@ impl<'model> YuE2NarSession<'model> {
                 &[nar_len, config.kv_heads, config.head_dim],
                 &v,
             );
+            head_major_into(&k, nar_len, config.kv_heads, config.head_dim, &mut nar_keys);
+            head_major_into(
+                &v,
+                nar_len,
+                config.kv_heads,
+                config.head_dim,
+                &mut nar_values,
+            );
             timed!(
                 2,
                 hybrid_attention(
@@ -348,8 +336,8 @@ impl<'model> YuE2NarSession<'model> {
                     &self.model.pool,
                     &q,
                     &self.prefix_kv[layer_index],
-                    &k,
-                    &v,
+                    &nar_keys,
+                    &nar_values,
                     &mut attention,
                 )
             );
@@ -560,6 +548,29 @@ struct LinearScratch {
     rows: RowScratch,
 }
 
+/// Transpose one layer's row-major `[rows][head][dim]` KV into the head-major
+/// `[head][rows][dim]` run order the attention kernels read.
+///
+/// The element count is unchanged -- this is a permutation, not a widening --
+/// so the cache and the per-layer copies keep their original allocation size.
+fn head_major_into(source: &[f32], rows: usize, heads: usize, head_dim: usize, out: &mut [f32]) {
+    debug_assert_eq!(source.len(), rows * heads * head_dim);
+    debug_assert_eq!(out.len(), rows * heads * head_dim);
+    for head in 0..heads {
+        for row in 0..rows {
+            let src = row * heads * head_dim + head * head_dim;
+            let dst = head * rows * head_dim + row * head_dim;
+            out[dst..dst + head_dim].copy_from_slice(&source[src..src + head_dim]);
+        }
+    }
+}
+
+fn head_major(source: &[f32], rows: usize, heads: usize, head_dim: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; source.len()];
+    head_major_into(source, rows, heads, head_dim, &mut out);
+    out
+}
+
 fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
     let config = model.config();
     let rows = tokens.len();
@@ -620,10 +631,31 @@ fn prefix_kv(model: &YuE2Model, tokens: &[u32]) -> Vec<(Vec<f32>, Vec<f32>)> {
                 &mut scratch,
             )
         );
-        cache.push((k.clone(), v.clone()));
+        cache.push((
+            head_major(&k, rows, config.kv_heads, config.head_dim),
+            head_major(&v, rows, config.kv_heads, config.head_dim),
+        ));
+        // The reference oracle dumps the cache as `[row][head][dim]`, so emit
+        // that logical order from the still row-major projections, then read the
+        // transposed copy.
+        trace(
+            "yue2.nar.prefix_k",
+            Some(cache.len() - 1),
+            None,
+            &[rows, config.kv_heads, config.head_dim],
+            &k,
+        );
+        trace(
+            "yue2.nar.prefix_v",
+            Some(cache.len() - 1),
+            None,
+            &[rows, config.kv_heads, config.head_dim],
+            &v,
+        );
+        let (keys, values) = cache.last().expect("pushed the layer's KV just above");
         timed!(
             2,
-            causal_prefix_attention(config, &model.pool, &q, &k, &v, &mut attention)
+            causal_prefix_attention(config, &model.pool, &q, keys, values, &mut attention)
         );
         timed!(
             3,
@@ -717,14 +749,16 @@ fn causal_prefix_attention(
             unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
         for row in row_start..row_end {
             for head in 0..config.q_heads {
-                let kv_offset = (head / group_size) * head_dim;
+                // Head-major cache: this head's whole `[position][dim]` run is
+                // contiguous starting at `head_base`.
+                let head_base = (head / group_size) * rows * head_dim;
                 let q_row = unsafe {
                     std::slice::from_raw_parts(q_ptr.add(row * q_width + head * head_dim), head_dim)
                 };
                 for position in 0..rows {
                     let key = unsafe {
                         std::slice::from_raw_parts(
-                            k_ptr.add(position * kv_width + kv_offset),
+                            k_ptr.add(head_base + position * head_dim),
                             head_dim,
                         )
                     };
@@ -743,7 +777,7 @@ fn causal_prefix_attention(
                 if row < 512 {
                     let inverse_sum = flash_softmax(scores);
                     result.fill(0.0);
-                    value_reduce_block(v, scores, result, 0, kv_width, kv_offset, rows, head_dim);
+                    value_reduce_block(v, scores, result, head_base, head_dim, 0, rows, head_dim);
                     for value in result.iter_mut() {
                         *value = bf16(*value * inverse_sum);
                     }
@@ -770,9 +804,9 @@ fn causal_prefix_attention(
                         v,
                         block,
                         result,
-                        start * kv_width,
-                        kv_width,
-                        kv_offset,
+                        head_base + start * head_dim,
+                        head_dim,
+                        0,
                         block.len(),
                         head_dim,
                     );
@@ -1130,23 +1164,27 @@ fn hybrid_attention_legacy(
     let mut scores = vec![0.0; total_len];
     for row in 0..nar_len {
         for head in 0..config.q_heads {
-            let kv_offset = (head / group_size) * config.head_dim;
+            // Both caches are head-major: each kv head owns a contiguous
+            // `[position][dim]` run in its own allocation.
+            let q_head = head / group_size;
+            let prefix_head = q_head * prefix_len * config.head_dim;
+            let nar_head = q_head * nar_len * config.head_dim;
             let q_start = row * q_width + head * config.head_dim;
             let value_at = |position: usize, dimension: usize| {
                 if position < prefix_len {
-                    prefix.1[position * kv_width + kv_offset + dimension]
+                    prefix.1[prefix_head + position * config.head_dim + dimension]
                 } else {
-                    nar_v[(position - prefix_len) * kv_width + kv_offset + dimension]
+                    nar_v[nar_head + (position - prefix_len) * config.head_dim + dimension]
                 }
             };
             for (position, score) in scores.iter_mut().enumerate() {
                 let key = if position < prefix_len {
-                    &prefix.0[position * kv_width + kv_offset
-                        ..position * kv_width + kv_offset + config.head_dim]
+                    &prefix.0[prefix_head + position * config.head_dim
+                        ..prefix_head + position * config.head_dim + config.head_dim]
                 } else {
                     let position = position - prefix_len;
-                    &nar_k[position * kv_width + kv_offset
-                        ..position * kv_width + kv_offset + config.head_dim]
+                    &nar_k[nar_head + position * config.head_dim
+                        ..nar_head + position * config.head_dim + config.head_dim]
                 };
                 *score = dot(&q[q_start..q_start + config.head_dim], key) * scale;
             }
@@ -1207,16 +1245,18 @@ fn causal_prefix_attention_legacy(
     let q_width = config.q_heads * config.head_dim;
     let kv_width = config.kv_heads * config.head_dim;
     let rows = k.len() / kv_width;
+    let head_dim = config.head_dim;
     let group_size = config.q_heads / config.kv_heads;
     let scale = (config.head_dim as f32).sqrt().recip();
     let mut scores = vec![0.0; rows];
     for row in 0..rows {
         for head in 0..config.q_heads {
-            let kv_offset = (head / group_size) * config.head_dim;
+            // Head-major: this head's positions are one contiguous block.
+            let head_base = (head / group_size) * rows * head_dim;
             let q_start = row * q_width + head * config.head_dim;
             for (position, score) in scores.iter_mut().enumerate() {
-                let key = &k[position * kv_width + kv_offset
-                    ..position * kv_width + kv_offset + config.head_dim];
+                let key = &k[head_base + position * config.head_dim
+                    ..head_base + position * config.head_dim + config.head_dim];
                 *score = if position <= row {
                     dot(&q[q_start..q_start + config.head_dim], key) * scale
                 } else {
@@ -1228,7 +1268,8 @@ fn causal_prefix_attention_legacy(
                 for dimension in 0..config.head_dim {
                     let mut sum = 0.0f32;
                     for position in 0..rows {
-                        sum += scores[position] * v[position * kv_width + kv_offset + dimension];
+                        sum += scores[position]
+                            * v[head_base + position * config.head_dim + dimension];
                     }
                     output[q_start + dimension] = bf16(sum * inverse_sum);
                 }
@@ -1254,8 +1295,8 @@ fn causal_prefix_attention_legacy(
                 for (dimension, value) in result.iter_mut().enumerate() {
                     let mut sum = 0.0f32;
                     for offset in 0..block.len() {
-                        sum +=
-                            block[offset] * v[(start + offset) * kv_width + kv_offset + dimension];
+                        sum += block[offset]
+                            * v[head_base + (start + offset) * config.head_dim + dimension];
                     }
                     *value += sum;
                 }
@@ -1329,14 +1370,18 @@ fn hybrid_attention(
             unsafe { &mut *per_thread_scores[ith.min(per_thread_scores.len() - 1)].get() };
         for row in row_start..row_end {
             for head in 0..config.q_heads {
-                let kv_offset = (head / group_size) * head_dim;
+                // Both caches are head-major: the kv head's positions are one
+                // contiguous run in each allocation.
+                let q_head = head / group_size;
+                let prefix_head = q_head * prefix_len * head_dim;
+                let nar_head = q_head * nar_len * head_dim;
                 let q_row = unsafe {
                     std::slice::from_raw_parts(q_ptr.add(row * q_width + head * head_dim), head_dim)
                 };
                 for position in 0..prefix_len {
                     let key = unsafe {
                         std::slice::from_raw_parts(
-                            prefix_k.as_ptr().add(position * kv_width + kv_offset),
+                            prefix_k.as_ptr().add(prefix_head + position * head_dim),
                             head_dim,
                         )
                     };
@@ -1345,7 +1390,7 @@ fn hybrid_attention(
                 for position in 0..nar_len {
                     let key = unsafe {
                         std::slice::from_raw_parts(
-                            nar_k_ptr.add(position * kv_width + kv_offset),
+                            nar_k_ptr.add(nar_head + position * head_dim),
                             head_dim,
                         )
                     };
@@ -1358,6 +1403,11 @@ fn hybrid_attention(
                         head_dim,
                     )
                 };
+                // `value_reduce_block2` takes row indices, so with the head-major
+                // `row_stride == head_dim` the kv head's first row is
+                // `q_head * len`.
+                let prefix_row = q_head * prefix_len;
+                let nar_row = q_head * nar_len;
                 if scores_len <= 512 {
                     // The short path is not just a blocked path with one block:
                     // `softmax` rounds every exponential to bf16 while
@@ -1366,14 +1416,14 @@ fn hybrid_attention(
                     let inverse_sum = softmax(&mut scores_row[..scores_len]);
                     value_reduce_block2(
                         prefix_v,
-                        0,
+                        prefix_row,
                         nar_v,
-                        0,
+                        nar_row,
                         prefix_len,
                         &scores_row[..scores_len],
                         out,
-                        kv_width,
-                        kv_offset,
+                        head_dim,
+                        0,
                         scores_len,
                         head_dim,
                     );
@@ -1407,14 +1457,14 @@ fn hybrid_attention(
                     let n_nar = (end - start) - n_prefix;
                     value_reduce_block2(
                         prefix_v,
-                        start,
+                        prefix_row + start,
                         nar_v,
-                        start.saturating_sub(prefix_len),
+                        nar_row + start.saturating_sub(prefix_len),
                         n_prefix,
                         block,
                         out,
-                        kv_width,
-                        kv_offset,
+                        head_dim,
+                        0,
                         end - start,
                         head_dim,
                     );

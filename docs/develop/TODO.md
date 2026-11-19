@@ -13,22 +13,27 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [ ] **YuE2 AR 的 KV cache 布局：转置后剩下的那部分访存浪费** —
-      2026-11-16 实测：value reduce 的瓶颈是**访存模式**而不是带宽——KV 布局是
-      `[layer][position][kv_head][dim]`，扫一个 kv head 时步长 4 KiB、每行只用 512 B，
-      而内核是 dim-outer 的（每个 32 B 的 dim block 单独重走一遍 4 KiB 步长）。用真实
-      内核实测三种布局：现状 34.5 ms → 转置 `[kv_head][position][dim]` 14.6 ms（2.36x）
-      → 转置 + token-outer（16 个独立累加器）7.1 ms（**4.84x**）；两种改法都逐位一致
-      （每个 dim 内的 token 顺序不变）。
-      ✅ **先做掉了收益更大的那一半**：不改布局、只把 reduce 的循环顺序换成 token-outer
-      （`13344004`），逐位一致；AR attention 94.0 s → 69.0 s、NAR prefix attention
-      14.1 s → 10.2 s、整链 510.9 s → 457.6 s，音频 md5 不变。换成 token-outer 之后内核
-      已经按行顺序读，**剩下的收益只是布局带来的访存局部性**（页面复用、预取），比
-      4.84x 这个合成基准暗示的小得多。
-      ⏳ 剩下的改动面：AR 的 KV 写入/读取、score 与 reduce 两条路径、`commit_kv_shadow`、
-      NAR 的 `prefix_kv`。**注意 KV cache 是 `core::scratchpad::KvCache` 这份共享结构**
-      （LFM2 等模型也在用），改布局不是 YuE2 内部改动：要么给共享结构加一个「按 head
-      分块」的变体，要么让 YuE2 自己维护一份转置副本。
+- [x] **YuE2 KV cache 转置成 head-major** — ✅ 2026-11-19 完成。
+      背景（2026-11-16）：value reduce 的瓶颈是**访存模式**而不是带宽——旧的
+      `[layer][position][kv_head][dim]` 扫一个 kv head 步长 4 KiB、每行只用 512 B。
+      合成内核基准：现状 34.5 ms → 转置 `[head][position][dim]` 14.6 ms → 转置 +
+      token-outer 7.1 ms（4.84x），两种改法都逐位一致（每个 dim 内的 token 顺序不变）。
+      第一步（token-outer kernel，`13344004`）已经把 AR attention 94.0 s → 69.0 s、
+      NAR prefix 14.1 s → 10.2 s；本次补上布局那一半。
+      实现：给共享的 `core::scratchpad::KvState` 加**布局标记**（`KvLayout`，默认
+      `PositionMajor`），`KvCache` 容器保持布局无关——两种布局是同一
+      `[layer][capacity][kv_heads * head_dim]` 缓冲的置换，总元素数不变，所以
+      LFM2/qwen3 等既有调用方不受影响；YuE2 构造 session 时
+      `.with_layout(KvLayout::HeadMajor)`。
+      改动面：AR 的 KV 写入/读取与 score、reduce 两条路径、`commit_kv_shadow`（设备
+      delta 仍是 position-major，写 CPU 影子时按布局转置）、NAR 的 `prefix_kv`、
+      `hybrid_attention`、`causal_prefix_attention` 及两个 legacy 参考内核（legacy
+      同步改 head-major，保证同一 fixture 上仍能逐位对比）。trace 契约不变：
+      `yue2.nar.prefix_k/v` 仍在转置前用 row-major 数据发出，与 Python oracle 的
+      `[row][head][dim]` element 顺序一致。
+      回归：`nar::attention_parity_tests::head_major_layout_preserves_attention_bits`
+      证明同一 head 转置前后的 attention 逐位相同（513 行，跨 512 block 边界），
+      NAR 的 fixture 也改为真实 head-major 顺序。
       ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
       "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
 - [ ] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（远大于 VAE 那 1 个档位）** —
