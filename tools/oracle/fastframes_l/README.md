@@ -23,6 +23,14 @@ activation QDQ, and Q4_1 retains the separately rounded Q8_1 sum term. These las
 format-specific paths have regression checks; per-format full-model results and
 failed gates are recorded separately in the matrix.
 
+Activation quantization uses explicit tensor/tensor F32 division before integer
+rounding. PyTorch scalar/tensor division can round a reciprocal first and change
+a code at a half-integer boundary; the regression compares QDQ values within a
+quarter quantization step and separately checks Q4_1's sum correction. Historical
+matrix metrics predate this oracle repair. Corrected-wrapper reruns and the
+remaining accumulated Q8 drift are retained in
+[replacement-host-results.json](replacement-host-results.json) and [validation](validation.md).
+
 `--recipe published` retains BF16 casts while substituting an available PyTorch
 SDPA backend for NVIDIA-only cuDNN on AMD. Its drift is separate; this is not an
 exact reproduction of cuDNN arithmetic. The PyTorch dispatcher selects SDPA's

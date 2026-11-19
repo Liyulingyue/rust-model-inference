@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from tools.oracle.fastframes_l.streaming_weights import StreamingWeights
-from tools.oracle.fastframes_l.effective_weights import activation_qdq, install_prepared_activations
+from tools.oracle.fastframes_l.effective_weights import activation_qdq, install_prepared_activations, q4_1_sum_delta
 
 
 class CrossAttention(torch.nn.Module):
@@ -77,6 +77,34 @@ class StreamingTests(unittest.TestCase):
         x = torch.tensor([[1.0003, -.12345, 65500.]])
         torch.testing.assert_close(activation_qdq(x, 1), x.half().float(), rtol=0, atol=0)
         self.assertFalse(torch.equal(x, activation_qdq(x, 1)))
+
+    def test_activation_quantization_divides_before_rounding_codes(self):
+        # This F32 fixture puts lane 7 at a quantization rounding boundary.
+        bits = np.array([
+            3214565680, 3214511692, 3202573431, 1069867796, 1066599942, 3216800644,
+            1066239163, 3212521752, 3215179503, 1059029414, 3196600292, 3214726010,
+            3204629104, 3213627556, 3203566570, 3187558922, 1052246757, 1057982311,
+            3213083065, 1066797166, 3213484410, 3208379646, 1063682517, 1066476422,
+            1066120626, 3213424243, 3215580435, 3209586140, 3198803490, 1051725897,
+            3218479713, 3174319929,
+        ], dtype=np.uint32)
+        values = bits.view(np.float32)
+        maximum = np.abs(values).max()
+        inverse = np.divide(np.float32(127), maximum)
+        codes = np.rint(values * inverse)
+        self.assertEqual(codes[7], -74)
+        scale = np.divide(maximum, np.float32(127))
+        for kind in [2, 3, 8, 12, 13, 14]:
+            with self.subTest(kind=kind):
+                x = np.pad(values, (0, 224)) if kind in [12, 13, 14] else values
+                step = np.float32(1) / inverse if kind in [12, 13, 14] else np.float16(scale).astype(np.float32)
+                expected = torch.from_numpy(codes * step)
+                actual = activation_qdq(torch.from_numpy(x)[None], kind)[0, :32]
+                torch.testing.assert_close(actual, expected, atol=float(step) / 4, rtol=0)
+        total = codes.sum()
+        expected_delta = np.float16(total * scale).astype(np.float32) - total * np.float16(scale).astype(np.float32)
+        torch.testing.assert_close(q4_1_sum_delta(torch.from_numpy(values)[None]),
+                                   torch.tensor([[expected_delta]]), atol=2e-6, rtol=0)
 
     def test_q4_1_minimum_uses_rounded_q8_1_sum(self):
         dit = torch.nn.Module()

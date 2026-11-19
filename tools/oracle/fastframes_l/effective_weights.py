@@ -13,12 +13,13 @@ def activation_qdq(value,kind):
     x=value.float().reshape(*value.shape[:-1],-1,block)
     if block==32:
         maximum=x.abs().amax(dim=-1,keepdim=True)
-        inverse=torch.where(maximum>0,127./maximum,torch.zeros_like(maximum))
-        scale=(maximum/127.).half().float()
+        # Scalar/tensor division rounds a reciprocal first and can change integer codes.
+        inverse=torch.where(maximum>0,torch.div(torch.full_like(maximum,127.),maximum),torch.zeros_like(maximum))
+        scale=torch.div(maximum,torch.full_like(maximum,127.)).half().float()
     else:
         index=x.abs().argmax(dim=-1,keepdim=True)
         maximum=x.gather(-1,index)
-        inverse=torch.where(maximum!=0,-127./maximum,torch.zeros_like(maximum))
+        inverse=torch.where(maximum!=0,torch.div(torch.full_like(maximum,-127.),maximum),torch.zeros_like(maximum))
         scale=torch.where(inverse!=0,1./inverse,torch.zeros_like(inverse))
     return (torch.round(x*inverse).clamp(-128,127)*scale).reshape(value.shape).to(value.dtype)
 
@@ -26,9 +27,9 @@ def activation_qdq(value,kind):
 def q4_1_sum_delta(value):
     x=value.float().reshape(*value.shape[:-1],-1,32)
     maximum=x.abs().amax(dim=-1)
-    inverse=torch.where(maximum>0,127./maximum,torch.zeros_like(maximum))
+    inverse=torch.where(maximum>0,torch.div(torch.full_like(maximum,127.),maximum),torch.zeros_like(maximum))
     total=torch.round(x*inverse.unsqueeze(-1)).clamp(-128,127).sum(dim=-1)
-    scale=maximum/127.
+    scale=torch.div(maximum,torch.full_like(maximum,127.))
     return (total*scale).half().float()-total*scale.half().float()
 
 

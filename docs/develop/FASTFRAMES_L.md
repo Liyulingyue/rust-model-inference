@@ -7,6 +7,12 @@ F32 CPU/Auto/Vulkan 两入口也通过。F16 各后端两入口的检查点通�
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和
 [逐项矩阵](../../tools/oracle/fastframes_l/matrix.json)。
 
+上述 54 项为首次完整矩阵。新机上修复了参考脚本的量化除法舍入，12 项 Python 回归通过；
+Q8 文本仍超出原容差。相同原生输入的 28 个独立投影复算相对误差均低于 `5e-7`，
+首层归一化的微小误差已导致一个激活量化码变化。
+[新机复测记录](../../tools/oracle/fastframes_l/replacement-host-results.json) 单独保存修复后的
+BF16/F16/Q8_0 CLI/HTTP 验收，不覆盖历史失败；生产计算和阈值未调整。
+
 ## 契约
 
 - FastFrames-L：ModelScope `apple/FastFrames-L` @ `651fb104ea405268a4c7400b01c1859718090c5d`。

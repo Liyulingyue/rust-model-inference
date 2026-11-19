@@ -8,6 +8,50 @@ Observed summaries and exact transport commands are retained in
 tests run; model weights and full tensor sidecars remain on remote storage.
 JEV and text-token streaming do not apply to this video-generation contract.
 
+## Replacement-host oracle repair
+
+Testing resumed on a replacement Linux instance after the previous instance was lost.
+All eight pinned ModelScope source/tokenizer files were downloaded directly to
+remote storage and SHA256-verified; restored BF16, F16 and Q8_0 GGUFs reproduce
+the earlier hashes. No weights or full tensor sidecars were copied to the Mac.
+The new environment uses Rust 1.100.0, PyTorch 2.9.1 ROCm and FFmpeg 9.0.2.
+The earlier FFmpeg version was not recorded, so codec-dependent pixel changes
+across hosts cannot establish a production fix. This host again shares its
+16-core quota, 55 GiB cgroup and 48 GiB GPU with other work.
+
+Self-review found an oracle activation-quantization defect: PyTorch's
+`127. / maximum` rounds a reciprocal before multiplying. Against one direct F32
+division, 4 of 3,200,000 integer codes differed on both CPU and GPU. A captured
+32-value fixture quantized lane 7 to -75 instead of -74; all six Q-format
+subtests and Q4_1's sum correction failed before repair. The wrapper now uses
+explicit tensor/tensor division, including the scale division. All **12**
+converter/comparator/streaming tests pass. Production Rust arithmetic, padding,
+encoding parameters and acceptance thresholds are unchanged.
+
+The corrected Q8_0 text-only diagnostic still fails final-output gates:
+relative RMSE **0.02767814** for CPU/10 tokens, **0.02770654** for GPU/512-padding
+and **0.03131954** for GPU/10 tokens. Padding alone therefore does not explain
+the failure. Temporary trace-only native instrumentation was restored after
+capture, and the preserved production binary is used for real transports.
+Replaying 28 individual official linear projections at layers 0, 1, 12 and 23
+with the same captured native inputs gives maximum relative RMSE
+**4.959657988753818e-7**. The first norm differs by only **3.6967634e-8** relative
+RMSE, yet one of 40,960 activation codes changes, producing prepared-input
+relative RMSE **0.0004839344**. This demonstrates quantization sensitivity at
+the first split; it neither proves the whole graph correct nor overrides its
+failed gates. The earlier 54-case matrix and per-format metrics remain historical
+evidence from the pre-repair wrapper; corrected-wrapper reruns and exact
+provenance are recorded separately in [replacement-host-results.json](replacement-host-results.json).
+
+Corrected-wrapper CPU CLI and HTTP reruns have completed for all three restored
+formats. BF16 passes all 411 checkpoints and decoded-video RMSE 0. F16 again
+passes all checkpoints but fails decoded RMSE **0.014410152859932579** and cosine
+**0.9995483949878057**. Q8_0 still first fails at `fastframes.text` (relative RMSE
+**0.027697485017157433**), reaches full-model relative RMSE
+**0.07609434268844385**, and fails decoded RMSE **0.02451650235264669**. Both
+transports reproduce the same metrics. These supersede the original wrapper's
+Q8_0 CPU values for this rerun; the original failed measurements remain retained.
+
 ## Real-model evidence
 
 The same BF16 GGUF was consumed by Rust CPU and independently reconstructed
