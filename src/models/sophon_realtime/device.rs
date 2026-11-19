@@ -1,6 +1,7 @@
 use crate::ops::kernel::Weight;
 use crate::vulkan::ops::{
-    ArenaRegion, BatchedLinearRuntime, GpuMatmulSpec, Qwen3Ops, TokenCommands,
+    ArenaRegion, BatchedLinearRuntime, GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat, Qwen3Ops,
+    TokenCommands,
 };
 use crate::vulkan::VulkanContext;
 
@@ -31,7 +32,11 @@ impl Device {
         {
             return Err("invalid Sophon projection input".into());
         }
-        let spec = GpuMatmulSpec::prepared(weight).map_err(|e| e.to_string())?;
+        let mut spec = GpuMatmulSpec::prepared(weight).map_err(|e| e.to_string())?;
+        if spec.format == GpuWeightFormat::F32 {
+            // HiFT amplifies the F32 tiled reduction's cancellation error.
+            spec.mode = GpuMatmulMode::Dot;
+        }
         let bytes = weight
             .kernel
             .weight_bytes()
@@ -118,6 +123,9 @@ impl Device {
         u32::try_from(end.checked_add(count).ok_or("device span overflow")?)
             .map_err(|_| "device word span overflow")?;
         push[6..6 + parameters.len()].copy_from_slice(parameters);
+        if op <= 1 {
+            push[14] = crate::vulkan::ops::f32_dot_lanes();
+        }
         let output = ArenaRegion {
             offset: end.checked_mul(4).ok_or("device size overflow")?,
             size: count.checked_mul(4).ok_or("device size overflow")?,

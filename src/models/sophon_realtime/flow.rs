@@ -506,7 +506,8 @@ fn chunk_attention(
             output.extend(values);
             continue;
         }
-        output.extend(nn::attention_scalar(
+        // HiFT amplifies the host expf's one-ULP error even with identical Q/K/V.
+        output.extend(nn::attention_on_cpu_with_f64_exp(
             &q[start * DIM..end * DIM],
             &k[..end * DIM],
             &v[..end * DIM],
@@ -1005,6 +1006,25 @@ mod device_tests {
         assert_eq!(expected.0, vec![32.0]);
         let actual = conv.forward(&input, 3, 0, 0, 1, 1, &pool, &gpu).unwrap();
         assert_close(&actual.0, &expected.0);
+
+        let long = Conv {
+            input: 1,
+            output: 1,
+            kernel: 31,
+            groups: 1,
+            weight: vec![1.0; 31],
+            bias: vec![0.0],
+        };
+        let mut long_input = vec![0.0; 31];
+        long_input[..4].copy_from_slice(&[1e8, 1.0, -1e8, 1.0]);
+        long_input[30] = 1.0;
+        let expected_long = long
+            .forward(&long_input, 31, 0, 0, 1, 1, &pool, &Execution::cpu())
+            .unwrap();
+        let actual = long
+            .forward(&long_input, 31, 0, 0, 1, 1, &pool, &gpu)
+            .unwrap();
+        assert_close(&actual.0, &expected_long.0);
 
         let auto = Execution::new(ComputePolicy::Auto).unwrap();
         assert!(auto

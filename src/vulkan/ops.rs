@@ -731,7 +731,7 @@ pub(crate) enum GpuMatmulMode {
     RoundedInputF32,
     /// Round BF16 activations; F32 products use a compensated wide sum.
     RoundedBf16,
-    /// Match dot_f16_f16_bytes / dot_bf16_f32 reduction.
+    /// Keep the CPU dot reduction instead of using transposed float tiling.
     Dot,
     /// F16 storage with F32 activations and accumulation, without input rounding.
     F32Activation,
@@ -767,7 +767,8 @@ impl GpuMatmulSpec {
                 GpuWeightFormat::F16,
                 GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot | GpuMatmulMode::F32Activation,
             )
-            | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16) => Ok(()),
+            | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16)
+            | (GpuWeightFormat::F32, GpuMatmulMode::Dot) => Ok(()),
             _ => Err(VulkanError::UnsupportedShape(
                 "unsupported weight storage/numerical mode combination".into(),
             )),
@@ -7962,6 +7963,16 @@ pub(super) fn q8_dot_mode() -> u32 {
     }
 }
 
+pub(crate) fn f32_dot_lanes() -> u32 {
+    if crate::ops::has_avx2_fma() {
+        8
+    } else if crate::ops::has_neon() {
+        16
+    } else {
+        0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn matmul_rows_push(
     arena_size: usize,
@@ -8056,7 +8067,14 @@ fn matmul_rows_push(
         push[1] = 8;
     }
     if format == GpuWeightFormat::F16 && bindings.weight_mode == GpuMatmulMode::F32Activation {
-        push[1] = 4;
+        push[1] = if n_in.is_multiple_of(8) && crate::ops::has_avx2_fma() && crate::ops::has_f16c()
+        {
+            16
+        } else if crate::ops::has_neon() {
+            4
+        } else {
+            32
+        };
     }
     if format == GpuWeightFormat::BF16 && bindings.weight_mode != GpuMatmulMode::RoundedBf16 {
         push[1] = if crate::ops::has_avx2_fma() && n_in >= 8 {
@@ -8174,10 +8192,11 @@ fn matmul_rows_push(
     } else if format == GpuWeightFormat::F16 {
         // f16_matmul packs output rows into one workgroup so that all 64
         // threads work. Each row uses as many lanes as its CPU reduction:
-        // 32 for the parity tree, 16 for NEON, 8 for AVX2/F16C, 1 for scalar.
+        // F32 activations use 4 NEON or 16 AVX2 lanes; rounded modes keep their tree.
         let rows_per_group = match push[1] {
             1 => 2,
-            2 | 4 => 4,
+            2 | 16 => 4,
+            4 => 16,
             8 => 8,
             _ => 64,
         };
@@ -9985,6 +10004,75 @@ fn check_rms_norm_exact(context: &VulkanContext) -> Result<(), String> {
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     result.and(cleanup).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires a Vulkan device"]
+fn rms_norm_non_power_of_two_preserves_quantization() {
+    const WIDTH: usize = 5120;
+    const ROWS: usize = 3;
+    let mut input: Vec<_> = (0..WIDTH * ROWS)
+        .map(|index| {
+            let bits = 0x3f00_0000 + (index as u32).wrapping_mul(2654435761) % 0x0400_0000;
+            f32::from_bits(bits) * if index % 3 == 0 { -1.0 } else { 1.0 }
+        })
+        .collect();
+    for row in input.chunks_exact_mut(WIDTH) {
+        row[..32].fill(1.0);
+    }
+    let mut weight = vec![1.0; WIDTH];
+    // Put the first block near quantization boundaries to expose early mean rounding.
+    for (index, value) in weight.iter_mut().enumerate().take(32).skip(1) {
+        *value = (index as f32 - 0.5) / 127.0;
+    }
+    let context = VulkanContext::new().unwrap();
+    let layout = ArenaLayout::build_rows(WIDTH, WIDTH, 1, 1, 32, 1, 1, 1, ROWS, 0).unwrap();
+    let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&weight)) }.unwrap();
+    {
+        let mut ops = Qwen3Ops::new(&context, layout, 2).unwrap();
+        let binding = ops.bind_buffers(&[buffer]).unwrap();
+        ops.write_f32(layout.x, &input).unwrap();
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_rms_norm_rows(
+            &commands,
+            binding,
+            layout.x,
+            layout.normed,
+            WIDTH,
+            1e-6,
+            ROWS,
+            WIDTH,
+            WIDTH,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        let actual = ops.read_f32(layout.normed, input.len()).unwrap();
+        let mut expected = vec![0.0; WIDTH];
+        let mut actual_codes = vec![0; WIDTH];
+        let mut expected_codes = vec![0; WIDTH];
+        let mut scales = vec![0.0; WIDTH / 32];
+        for (row, (input, actual)) in input
+            .chunks_exact(WIDTH)
+            .zip(actual.chunks_exact(WIDTH))
+            .enumerate()
+        {
+            crate::ops::rms_norm(input, &weight, &mut expected, 1e-6);
+            check_close("rms_norm_5120", actual, &expected, 1e-6, 1e-6).unwrap();
+            crate::ops::quantize_q8_0_into(actual, WIDTH, &mut actual_codes, &mut scales);
+            crate::ops::quantize_q8_0_into(&expected, WIDTH, &mut expected_codes, &mut scales);
+            let changed = actual_codes
+                .iter()
+                .zip(&expected_codes)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                changed, 0,
+                "row {row}: normalization changed quantization codes"
+            );
+        }
+    }
+    unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
 }
 
 fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {

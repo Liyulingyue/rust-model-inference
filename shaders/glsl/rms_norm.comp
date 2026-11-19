@@ -79,9 +79,19 @@ void main() {
         barrier();
     }
     if (lane == 0u) {
-        precise float mean_square = (partial[0] + partial_correction[0]) / float(pc.count)
-            + pc.eps;
-        inverse_rms = inverse_sqrt_f32(mean_square);
+        // Divide before rounding away the sum's tail: non-power-of-two widths can change Q8 codes.
+        float count = float(pc.count);
+        precise float mean = divide_finite_normal(partial[0], count);
+        float a = uintBitsToFloat(floatBitsToUint(mean) & 0xfffff000u);
+        float b = uintBitsToFloat(floatBitsToUint(count) & 0xfffff000u);
+        precise float a_low = mean - a;
+        precise float b_low = count - b;
+        precise float product = mean * count;
+        precise float error = ((a * b - product) + a * b_low + a_low * b) + a_low * b_low;
+        precise float residual = ((partial[0] - product) - error) + partial_correction[0];
+        precise float correction = divide_finite_normal(residual, count);
+        precise float mean_square = mean + correction;
+        inverse_rms = inverse_sqrt_f32(mean_square + pc.eps);
     }
     barrier();
     for (uint index = lane; index < pc.count; index += 64u) {

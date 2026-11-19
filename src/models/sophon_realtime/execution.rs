@@ -232,6 +232,81 @@ mod tests {
             }
             assert_close(&actual, &expected);
         }
+        for width in [16, 24, 31, 64] {
+            let bytes = crate::ops::f32_to_f16(1.0).to_le_bytes().repeat(width * 8);
+            let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+                &bytes,
+                crate::GGMLType::F16,
+                width,
+                8,
+            ));
+            let linear = Linear::from_weight(weight, Some(vec![1.0; 8]))
+                .unwrap()
+                .with_f32_activations();
+            let mut input = vec![0.0; 33 * width];
+            for row in input.chunks_exact_mut(width) {
+                for (index, value) in [(0, 1e8), (4, 1.0), (8, -1e8), (12, 1.0), (width - 1, 1.0)] {
+                    row[index] = value;
+                }
+            }
+            let expected = Execution::cpu()
+                .linear(&linear, &ComputePool::new(2), &input, 33)
+                .unwrap();
+            let actual = gpu
+                .linear(&linear, &ComputePool::new(2), &input, 33)
+                .unwrap();
+            assert_close(&actual, &expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a hardware Vulkan device"]
+    fn vulkan_f32_projection_preserves_cancellation_for_speech() {
+        let gpu = Execution::new(ComputePolicy::Vulkan).unwrap();
+        let bytes = 1.0f32.to_le_bytes().repeat(64 * 7);
+        let weight = Weight::from_f32_bytes(&bytes, 64, 7).unwrap();
+        let linear = Linear::from_weight(weight, None).unwrap();
+        let mut input = vec![0.0; 33 * 64];
+        for row in input.chunks_exact_mut(64) {
+            row[..4].copy_from_slice(&[16_777_216.0, 1.0, -16_777_216.0, 1.0]);
+            row[63] = 1.0;
+        }
+        let expected = Execution::cpu()
+            .linear(&linear, &ComputePool::new(2), &input, 33)
+            .unwrap();
+        let actual = gpu
+            .linear(&linear, &ComputePool::new(2), &input, 33)
+            .unwrap();
+        assert_close(&actual, &expected);
+    }
+
+    #[test]
+    #[ignore = "requires a hardware Vulkan device"]
+    fn vulkan_attention_normalizes_before_cancelling_values() {
+        let gpu = Execution::new(ComputePolicy::Vulkan).unwrap();
+        let q = vec![0.0; 64];
+        let k = vec![0.0; 5 * 64];
+        let v: Vec<_> = [1e7, 1.0, -1e7, 1.0, 0.0]
+            .into_iter()
+            .flat_map(|value| [value; 64])
+            .collect();
+        let expected = crate::ops::nn::attention_on_cpu(
+            &q,
+            &k,
+            &v,
+            crate::ops::nn::AttentionSpec {
+                query_tokens: 1,
+                key_tokens: 5,
+                query_heads: 1,
+                key_value_heads: 1,
+                head_dim: 64,
+                causal: false,
+                scale: 0.125,
+            },
+        )
+        .unwrap();
+        let actual = gpu.attention(&q, &k, &v, 1).unwrap().unwrap();
+        assert_close(&actual, &expected);
     }
 
     #[test]

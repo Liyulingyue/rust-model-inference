@@ -100,7 +100,7 @@ M3 Max / 64 GiB / MoltenVK，`release-fast`、四线程。当前分支已合入�
 
 F16 Flow 显式保留 F32 激活/累加，修复了先前最后一步 velocity rRMSE `0.001005 > 0.001` 的失败；现有 Oracle 使用对应的 `--activation f32`，没有放宽门槛。其他模型默认 F16 prepared 行为保留。
 
-短组件通过不等于完整语音验收。真实“你好。”、brand_zh、seed 0、greedy 生成 18 个 speech token、17280 样本。F32 CPU/Vulkan 的 token 完全一致。卷积二次自审前，非流式波形 rRMSE `0.2347744`，未通过原 `0.01 / 0.9999 / 0.01` 门槛；按通道归约后降至 `0.1703544`，仍失败。F16 非流式从 `0.31661` 降至 `0.0463668`，仍失败；BF16 降至 `0.0076777`，同输入通过。三档流式 rRMSE 分别为 `0.0062204 / 0.0030469 / 0.0011583`，均通过。Flow mel rRMSE 只有 `2.6214e-5`，在 HiFT 中被放大。同一份真实 mel/激励重放 CPU/Vulkan HiFT，修复前误差 `2.1707e-5`，修复后 `4.3336e-6`；官方 HiFT 分别重放两份输入也产生 `0.2347789` 的差异，各自与 Rust 的同输入比较都通过。这说明输入敏感性，不能把完整链路写成通过。F16/BF16 和所有入口的独立结果见设备报告。
+短组件通过不等于完整语音验收。2026-11-20 的同一真实输入已完成 RMSNorm、F32 投影、长卷积、Flow attention 和 F16 F32-activation 归约修复。F32、F16、BF16 严格 Vulkan 的非流式波形 rRMSE 分别为 `4.6249149e-5`、`4.8784055e-5`、`5.6769100e-3`，均通过 `0.01 / 0.9999 / 0.01` 门槛。CLI、HTTP WAV/PCM 和 SSE 均通过。27 个 F32/F16/BF16 组件组合与 54 个优化后 Vulkan/Auto 回放都有独立记录。块量化失败、resident K-format、full-duplex 和感知质量仍待补齐。
 
 共享修复仅扩展必要接口：Qwen3 session 的显式投影 offload 构造器保留旧构造器默认路径；F16 capability query/设备模式仅用于已有 opt-in；无 shaderFloat64 的设备跳过可选 PiVo FP64 pipeline 初始化，PiVo 调用本身仍明确报错。GPU 初始化恢复后，四项 CPU 专用测试显式选择 CPU，未修改 Yue2/Q8 生产逻辑。完整测试的历史失败、真实旧模型逐位回归和同机组件性能均单独记录。
 
