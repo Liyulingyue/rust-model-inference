@@ -414,6 +414,7 @@ Worker 的 `my_epoch` 必须从 `0` 初始化，**不能**读 `inner.epoch.load(
 本规范只写跨模块的设计契约；以下子系统的设计细节独立成文：
 
 * [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md) — 模型 `trunk/` + sibling 目录结构与依赖方向
+* [`ARCHITECTURE_EVOLUTION.md`](ARCHITECTURE_EVOLUTION.md) — 架构数线性增长的中长期解（layer_template / 组件组装 / feature gate）
 * [`SUPPORTED_MODELS.md`](SUPPORTED_MODELS.md) — 每个具体型号的"已验证格式 + Oracle + 限制"矩阵
 * [`SERVER_BACKEND_SELECTION.md`](SERVER_BACKEND_SELECTION.md) — server 的 `Backend` 选择：哪些靠 flag、哪些靠 GGUF 元数据探测，以及新增后端时怎么判断
 * [`KV_CACHE_DESIGN.md`](KV_CACHE_DESIGN.md) — KV cache 共享条件 + Ephemeral/Timed/Persistent 生命周期
