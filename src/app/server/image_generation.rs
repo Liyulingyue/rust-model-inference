@@ -49,17 +49,17 @@ fn server_defaults(options: &CliOptions) -> Result<PjitOptions, String> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Request {
-    prompt: String,
-    model: Option<String>,
-    size: Option<String>,
-    n: Option<usize>,
-    response_format: Option<String>,
-    width: Option<usize>,
-    height: Option<usize>,
-    steps: Option<usize>,
-    seed: Option<u64>,
-    guidance: Option<f32>,
-    negative_prompt: Option<String>,
+    pub(super) prompt: String,
+    pub(super) model: Option<String>,
+    pub(super) size: Option<String>,
+    pub(super) n: Option<usize>,
+    pub(super) response_format: Option<String>,
+    pub(super) width: Option<usize>,
+    pub(super) height: Option<usize>,
+    pub(super) steps: Option<usize>,
+    pub(super) seed: Option<u64>,
+    pub(super) guidance: Option<f32>,
+    pub(super) negative_prompt: Option<String>,
 }
 type ApiError = (StatusCode, Json<serde_json::Value>);
 fn error(status: StatusCode, message: impl ToString) -> ApiError {
@@ -69,18 +69,64 @@ fn error(status: StatusCode, message: impl ToString) -> ApiError {
     )
 }
 impl Request {
-    fn options(&self, defaults: &PjitOptions) -> Result<PjitOptions, String> {
+    /// The square resolution the request asks for, if any.
+    ///
+    /// The diffusion models generate square images, so a request naming two
+    /// different sides is a bad request rather than something to round.
+    pub(super) fn resolution(&self) -> Result<Option<usize>, String> {
+        let (width, height) = match (&self.size, self.width, self.height) {
+            (Some(size), None, None) => {
+                let (width, height) = size.split_once('x').ok_or("size must be WIDTHxHEIGHT")?;
+                (
+                    width.parse().map_err(|_| "invalid width")?,
+                    height.parse().map_err(|_| "invalid height")?,
+                )
+            }
+            (None, Some(width), Some(height)) => (width, height),
+            (None, Some(width), None) => (width, width),
+            (None, None, Some(height)) => (height, height),
+            (Some(_), _, _) => return Err("size conflicts with width/height".into()),
+            (None, None, None) => return Ok(None),
+        };
+        if width != height {
+            return Err("this model generates square images; width and height must match".into());
+        }
+        if width == 0 {
+            return Err("resolution must be positive".into());
+        }
+        Ok(Some(width))
+    }
+
+    /// The prompt, if it is one the models can encode.
+    ///
+    /// Checked before the generation slot is taken, so an empty prompt
+    /// fails fast instead of queueing behind a running generation.
+    pub(super) fn prompt_text(&self) -> Result<&str, String> {
         if self.prompt.trim().is_empty() || self.prompt.len() > 32768 {
             return Err("prompt must contain 1..=32768 bytes".into());
         }
+        Ok(&self.prompt)
+    }
+
+    /// The shared request shape every image-generation backend accepts.
+    ///
+    /// One image per request, returned as base64: the route has a single
+    /// PNG to give back.
+    pub(super) fn single_image(&self) -> Result<(), String> {
         if self.n.is_some_and(|n| n != 1)
             || self
                 .response_format
                 .as_deref()
                 .is_some_and(|f| f != "b64_json")
         {
-            return Err("P-JiT supports n=1 and response_format=b64_json".into());
+            return Err("image generation supports n=1 and response_format=b64_json".into());
         }
+        Ok(())
+    }
+
+    fn options(&self, defaults: &PjitOptions) -> Result<PjitOptions, String> {
+        self.prompt_text()?;
+        self.single_image()?;
         let mut options = defaults.clone();
         if let Some(size) = &self.size {
             if self.width.is_some() || self.height.is_some() {
@@ -115,13 +161,16 @@ impl Request {
         Ok(options)
     }
 }
+/// What the request resolved to, per backend.
+enum Plan {
+    Pjit(PjitOptions),
+    Diffusion(super::diffusion::DiffusionPlan),
+}
+
 pub(super) async fn generate(
     State(state): State<AppState>,
     Json(request): Json<Request>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let Backend::Pjit(backend) = state.model.as_ref() else {
-        return Err(error(StatusCode::NOT_FOUND, "Image generation unavailable"));
-    };
     if request
         .model
         .as_deref()
@@ -129,9 +178,27 @@ pub(super) async fn generate(
     {
         return Err(error(StatusCode::BAD_REQUEST, "Unknown model"));
     }
-    let options = request
-        .options(&backend.defaults)
-        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    // Resolve the request before taking the slot, so a bad request never
+    // queues behind a running generation.
+    let plan = match state.model.as_ref() {
+        Backend::Pjit(backend) => Plan::Pjit(
+            request
+                .options(&backend.defaults)
+                .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        ),
+        Backend::Diffusion(backend) => Plan::Diffusion(
+            backend
+                .plan(&request)
+                .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
+        ),
+        _ => return Err(error(StatusCode::NOT_FOUND, "Image generation unavailable")),
+    };
+    // The prompt is checked with the rest of the request shape, before the
+    // generation slot is taken.
+    let prompt = request
+        .prompt_text()
+        .map_err(|e| error(StatusCode::BAD_REQUEST, e))?
+        .to_string();
     let permit = state
         .generation_slot
         .clone()
@@ -140,10 +207,15 @@ pub(super) async fn generate(
     let model = state.model.clone();
     let data = compute_task(state.compute, move || {
         let _permit = permit;
-        let Backend::Pjit(backend) = model.as_ref() else {
-            unreachable!()
+        let rgb = match (model.as_ref(), &plan) {
+            (Backend::Pjit(backend), Plan::Pjit(options)) => {
+                backend.pipeline.generate(&prompt, options, None)?
+            }
+            (Backend::Diffusion(backend), Plan::Diffusion(plan)) => {
+                backend.generate(plan, &prompt)?
+            }
+            _ => unreachable!(),
         };
-        let rgb = backend.pipeline.generate(&request.prompt, &options, None)?;
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png)
             .write_image(

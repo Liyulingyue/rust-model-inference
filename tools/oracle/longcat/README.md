@@ -10,6 +10,7 @@
 
 **Transformer 与完整图片入口分别验证**。实验 CLI 读取 Qwen2.5-VL-7B / 3584 维编码器、Tokenizer/processor 和 Flux VAE safetensors。固定 32×32 输入、`edit the image`、seed 42、CFG 1 下，Edit 单步及 Turbo 两步的图文条件、reference latent、初始噪声、去噪 latent 全部与 Oracle 原始 F32 位一致；两版最终 RGB 各 3,072 字节也完全相同。Turbo 使用自己的 GGUF 与 `base_shift=max_shift=1.15` 的 Flux scheduler。
 默认分辨率与默认 Edit 50 步 / Turbo 8 步尚未运行完整逐位检查，因此 CLI 仍标记为 `Experimental`。非方形输入未支持，非标量加速路径不在对齐范围。
+**HTTP 未接入** —— 编辑模型需要参考图入口（`/v1/images/edits` 一类），本轮没有实现；这是「缺实现」，不是「不适用」：`docs/MODEL_LIST.md` 与 `docs/develop/SUPPORTED_MODELS.md` 都按未接入记录。
 已有 Qwen2.5-VL-3B 或 YuE2 VAE 不能替代这些组件。通用 `--image` 入口不会把任意 `flux` 权重当作 LongCat。
 
 ## 模型契约

@@ -42,6 +42,17 @@ pub(crate) struct ErnieImageTextEncoder {
     layers: Vec<TextLayer>,
 }
 
+/// Whether the text encoder may use the device.
+#[cfg(feature = "vulkan")]
+fn text_encoder_on_gpu() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_TEXT")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
 impl ErnieImageTextEncoder {
     pub(crate) fn load(
         source: Arc<dyn TensorSource>,
@@ -100,6 +111,20 @@ impl ErnieImageTextEncoder {
         if ids.is_empty() {
             return Err("Invalid Ministral-3 token sequence".into());
         }
+        // The text encoder stays on the CPU.
+        //
+        // Its weights are K-quant, and the device has no vectorized kernel
+        // for that family: a block-scaled int32 accumulation does not fit
+        // the int8 dot product that Q8_0 uses (TODO-032). Measured on this
+        // machine, the text encoder runs 12x slower on the device than on
+        // the CPU, and it would dominate the whole run.
+        //
+        // The DiT is a different file and can hold Q8_0, which is where the
+        // device is worth using. `RUST_GPU_TEXT=1` opts the text encoder
+        // back in so the difference can be measured.
+        #[cfg(feature = "vulkan")]
+        let _text_encoder_on_cpu = (!text_encoder_on_gpu())
+            .then(crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope);
         let token_count = ids.len();
         let output_len = token_count
             .checked_mul(HIDDEN)
