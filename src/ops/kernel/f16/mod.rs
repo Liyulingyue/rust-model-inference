@@ -33,11 +33,15 @@ pub mod scalar;
 #[derive(Debug, Clone, Copy)]
 pub struct F16Kernel<'a> {
     pub weight: &'a [u8],
+    f32_input: bool,
 }
 
 impl<'a> F16Kernel<'a> {
     pub fn new(weight: &'a [u8]) -> Self {
-        Self { weight }
+        Self {
+            weight,
+            f32_input: false,
+        }
     }
 
     /// Number of input columns (= n_in) for a given weight size.
@@ -45,6 +49,21 @@ impl<'a> F16Kernel<'a> {
     #[inline]
     pub fn element_count(&self) -> usize {
         self.weight.len() / 2
+    }
+
+    fn forward_f32_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if forward_f16_dispatch(self.weight, input, output, n_in, n_out, ith, nth) {
+            return;
+        }
+        scalar::forward_f16_rows(self.weight, input, output, n_in, n_out, ith, nth);
     }
 
     pub fn forward_scaled(
@@ -104,6 +123,10 @@ fn dequant_q8(input_q8: &[u8], input_scales: &[f32], k: usize) -> f32 {
 }
 
 impl<'a> Kernel for F16Kernel<'a> {
+    fn use_f32_activation(&mut self) {
+        self.f32_input = true;
+    }
+
     fn supports_f16_strict(&self) -> bool {
         true
     }
@@ -205,7 +228,9 @@ impl<'a> Kernel for F16Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        if input_f32.len() >= n_in {
+        if self.f32_input && input_f32.len() >= n_in {
+            self.forward_f32_rows(input_f32, output, n_in, n_out, ith, nth);
+        } else if input_f32.len() >= n_in {
             self.forward_scaled_rows(
                 input_f32,
                 output,
@@ -495,6 +520,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn prepared_f16_can_keep_f32_activations() {
+        let weight = f16_bytes(&[f16::ONE; 8]);
+        let input = [1.0003f32; 8];
+        let mut kernel = F16Kernel::new(&weight);
+        let mut rounded = [0.0];
+        kernel.forward_prepared(&input, &[], &[], None, &mut rounded, 8, 1, 0, 1);
+        assert_eq!(rounded[0], 8.0);
+
+        kernel.use_f32_activation();
+        let mut wide = [0.0];
+        kernel.forward_prepared(&input, &[], &[], None, &mut wide, 8, 1, 0, 1);
+        assert!(wide[0] > 8.002, "F32 activation was rounded to F16");
     }
 
     #[test]

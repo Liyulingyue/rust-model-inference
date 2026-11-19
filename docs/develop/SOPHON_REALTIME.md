@@ -87,7 +87,7 @@ Tokenizer、shape、控制 token、版本和 stream ordering 精确检查。F32/
 
 CPU 走仓库线程池与 SIMD/量化算子。Auto 复用现有分发，须按真实 backend/submission 证据判断；回退 CPU 不代表 GPU 通过。现有 Qwen3-VL resident decoder 已实现 interleaved M-RoPE/DeepStack，设备路径要求 F16 KV 和可用权重格式。最新 Q8_0 文本实测有 714 次设备提交，但未过现有 CPU/GPU 数值门槛；不能宣称完整 GPU 支持。音频 block attention/frontend、causal convolution 和 HiFT spectral 的严格设备路径尚缺共享算子，明确拒绝。后续共享层及顺序见 validation；未以没 GPU 硬件掩盖缺 kernel。
 
-Q8_0 thinker 配 F16 KV 的 CPU 文本、图像及单/分组 JEV 已跑通，CLI/HTTP 概率差为 0；图像记录使用历史 F32 存储、内部 Q8 预打包视觉路径，不能冒充纯 F32 数值对齐。量化音频/Flow 存在未过原门槛的结果；F16 talker 有极小 margin 的 greedy 分歧，部分 K talker 在 128-token 边界未 EOS。长 HiFT 的中间检查点仍有失败，尽管最终 waveform 门槛通过。没有广泛听感、任务准确率或真实 full-duplex 质量结论。
+Q8_0 thinker 配 F16 KV 的 CPU 文本、图像及单/分组 JEV 已跑通，CLI/HTTP 概率差为 0；图像记录使用历史 F32 存储、内部 Q8 预打包视觉路径，不能冒充纯 F32 数值对齐。量化音频/Flow 存在未过原门槛的结果；F16 talker 旧 prepared 输入舍入路径有极小 margin 的 step 51 greedy 分歧，现已对 talker opt-in F32 prepared activation，并以 F32-activation Oracle 全 81 步通过（rRMSE `4.45308760e-6`、cosine `0.99999999999235`，step 51 两端均为 640）；部分 K talker 在 128-token 边界未 EOS。长 HiFT 的中间检查点仍有失败，尽管最终 waveform 门槛通过。没有广泛听感、任务准确率或真实 full-duplex 质量结论。
 
 新 lossless F32 vision 已用官方 Transformers 4.57.6 `Qwen3VLVisionModel`、相同导出权重、CPU 四线程独立验证，不加载 thinker。固定 32×32 红图按源配置放大到 256×256，得到 64 行、每行 5120 维；1152 宽、27 层视觉塔的 input、27 个 block、三层 DeepStack（8/16/24）及最终投影共 **32/32 通过**，最差 rRMSE `1.26997018e-5`、最低 cosine `0.9999999999195905`，无首分叉；原门槛仍为 `0.001 / 0.999999`。历史默认资产的投影与三层 DeepStack 位哈希也在改动前后完全一致。证据见 [vision-results.json](../../tools/oracle/sophon_realtime/vision-results.json)；其他模型的真实 vision 资产缺失，未声称其真实回归通过。新 lossless 图像组件已配合 Q8_0 thinker/F16 KV，在最新构建通过 CLI/HTTP 的 9 项检查：图像 chat、单/分组 JEV、batch/SSE 与上下文预检；两项 CLI/HTTP 概率差均为 0。Auto/Vulkan vision 数值路径仍待验证；独立 encoder 数值和组合入口功能分别留证。
 

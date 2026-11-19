@@ -2,8 +2,8 @@
   "status": "experimental; failures retained; not a full speech-quality acceptance",
   "source_revision": "990d6a74bbf15c1765a6f7736fa839f423fd5b59",
   "evidence_root": "target/sophon/precision-components-33367",
-  "scope": "CPU same-GGUF independent decoding plus pinned official reference; short component fixture. Baseline uses F32 activations; runtime applies independent PreparedRows input QDQ. No gate was relaxed.",
-  "oracle_jobs": 29,
+  "scope": "CPU same-GGUF independent decoding plus pinned official reference; short component fixture. Baseline uses F32 activations; runtime applies independent PreparedRows input QDQ. The F16 talker entry added below measures the opt-in F32-activation runtime contract; the earlier F16 rows retain the legacy F16-input-rounding failure. No gate was relaxed.",
+  "oracle_jobs": 30,
   "rust_jobs": {
     "count": 16,
     "all_exit_zero": true,
@@ -73,7 +73,8 @@
         "reference_id": 640,
         "reference_margin": 0.001735687255859375,
         "relative_rmse": 0.0005155649024951421
-      }
+      },
+      "rust_contract": "f16_prepared_input_rounding"
     },
     {
       "component": "talker",
@@ -98,7 +99,37 @@
         "reference_id": 640,
         "reference_margin": 0.0007190704345703125,
         "relative_rmse": 0.0005301313382253865
-      }
+      },
+      "rust_contract": "f16_prepared_input_rounding"
+    },
+    {
+      "component": "talker",
+      "precision": "F16",
+      "activation": "f32",
+      "rust_contract": "f32_prepared_activation",
+      "strict_pass": true,
+      "max_relative_rmse": 4.453087599479348e-06,
+      "result": "target/sophon/talker-f16-f32-activation/oracle/result.json",
+      "steps": 81,
+      "numerical_failures": 0,
+      "greedy_failures": 0,
+      "first_numerical_failure_step": null,
+      "first_greedy_failure_step": null,
+      "gguf_sha256": "3308514979e3b2471e181a3406e073d5fca5fdf4004d69a28653d11972f69f1c",
+      "actual_tensor_types": {
+        "F16": 171,
+        "F32": 121
+      },
+      "minimum_cosine": 0.9999999999923451,
+      "maximum_absolute_error": 9.250640869140625e-05,
+      "minimum_nonforced_greedy_margin": 0.001743316650390625,
+      "reference": {
+        "torch": "2.9.1+cpu",
+        "transformers": "5.23.0",
+        "threads": 8
+      },
+      "rust_trace": "target/sophon/talker-f16-f32-activation/rust-trace.jsonl",
+      "note": "Rust F16 kernels opt in to F32 prepared activations for this decoder; the F32-activation Oracle matches the new runtime contract. Step 51 now agrees (640/640); the first two F16 jobs retain the old 642/640 mismatch."
     },
     {
       "component": "code2wav",

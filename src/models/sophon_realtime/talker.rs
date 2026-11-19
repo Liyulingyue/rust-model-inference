@@ -232,7 +232,7 @@ impl Talker {
             return Err("invalid Sophon talker text tokenizer".into());
         }
         let text_embedding = static_weight(source.as_ref(), "token_embd.weight", WIDTH, TEXT_VOCAB);
-        let decoder = Qwen3Model {
+        let mut decoder = Qwen3Model {
             config: Qwen3Config {
                 architecture: "qwen2".into(),
                 n_embd: WIDTH,
@@ -272,6 +272,7 @@ impl Talker {
             pool,
             source,
         };
+        decoder.use_f32_f16_activations();
         Ok(Self {
             decoder,
             text_embedding,

@@ -4,6 +4,7 @@ Status: **Experimental, partial adaptation**. F32/F16/BF16 thinker, the F32 visi
 
 ModelScope revision: `990d6a74bbf15c1765a6f7736fa839f423fd5b59`.
 Official Sophon reference: `541d83c29ca68dd5235d2e344a2b72d29e6299c2`.
+Talker scheduler/cleaner reference: `adventists-ai/sophon-realtime` `ffe67b0b239b45f359e618cff0747fb66357d4df`; `talker_tag.py` and `proc.py` are checked against the declared SHA256 values, and the tokenizer wrapper is separately SHA256-pinned.
 Official DuplexJev reference: `b851ea57ba48b351bb9381d6c16d6d10619a9d6b`.
 Historical run host: authorized Linux/x86-64 EPYC 9334, AMD gfx1100 / 51,522,830,336 VRAM bytes, SSH port 33367, 2026-11-11 UTC. That host was subsequently retired.
 Q6_K recovery host: replacement EPYC 9334 at SSH port 31344; its new CPU binary and reference provenance are recorded separately. Model assets and generated weights stay remote. On the replacement host, `/workspace/rust-model-inference` links to `/root/rmi-sophon-artifacts/repo` on the larger root filesystem; the separate workspace capacity is insufficient for widened reference weights.
@@ -51,11 +52,13 @@ The previous opening statement claiming no numerical or end-to-end result is sup
 | Talker F32 | all 81 logits rows/controls/greedy decisions; 77 speech tokens and EOS; max rRMSE 2.66328396e-6 | PASS | [talker.md](talker.md) |
 | Short Flow/HiFT F32 | all 15 checkpoints; flow mel rRMSE 9.44775e-6; waveform 1.32167e-5 | PASS | [precision-results.json](precision-results.json) |
 | BF16 talker and short Flow/HiFT | same-file component checks pass; autonomous talker matches F32 | PASS in covered fixture | [precision-results.json](precision-results.json) |
-| F16 talker | numerical rows pass; step 51 greedy mismatch, runtime-QDQ reference margin 0.00071907 | Overall FAIL under unchanged discrete gate | [precision-results.json](precision-results.json) |
+| F16 talker, legacy prepared-input rounding | numerical rows pass; step 51 greedy mismatch, runtime-QDQ reference margin 0.00071907 | Overall FAIL under unchanged discrete gate; retained as historical | [precision-results.json](precision-results.json) |
+| F16 talker, opt-in F32 prepared activations | all 81 rows; max rRMSE 4.45308760e-6, max_abs 0.0000925064, min cosine 0.99999999999235; step 51 and every greedy ID agree | PASS in covered fixture; F16 weights, F32 prepared activations | [precision-results.json](precision-results.json), [talker.md](talker.md) |
 | Quantized Flow/talker | six block Flow formats fail at velocity checkpoint 0; talker results vary | FAIL/Experimental; Q4_K talker strict fixture passes but autonomous output reaches cap without EOS | [precision-results.json](precision-results.json) |
 | Extended F32 nonfinal | 15 checkpoints pass; max rRMSE 1.46377e-4 | PASS | [precision-results.json](precision-results.json) |
 | Extended F32 64-frame fixture | HiFT stage0 rRMSE 0.00110145034 > 0.001; final waveform rRMSE 0.00360077 / max_abs 0.000727881 passes waveform gate | Overall FAIL; final waveform does not hide intermediate failure | [precision-results.json](precision-results.json) |
 | Standalone F32 CLI TTS, brand_zh | 77 speech tokens, EOS, 73,920 samples at 24 kHz; WAV SHA256 9a1e2129d2922916e0c596e9ac5e52d9f9fad7c7e9d89fecf53c185b48a9e80d | Executed; initial nonstream binary before subsequent fixes | [performance.json](performance.json) |
+| Standalone F16 CLI TTS, brand_zh | 77 speech tokens, EOS, 73,920 samples at 24 kHz; WAV SHA256 0a8e98dbc28b26296fbff09dc22d3c5827c54e56f3008e2a675ffcb2f4050e1f | Functional pass with opt-in F32 prepared activations; timing is not capacity evidence | [performance.json](performance.json), [talker.md](talker.md) |
 
 Q8 same-input projection probes pass 12 audio operations (maximum rRMSE 4.9271e-7) and the real talker first-layer Q/K operations. They narrow the diagnosis to accumulated activation/nonlinear/rounding boundaries, but do not establish every kernel or end-to-end quality. The Q8 audio export also fails its original per-tensor conversion budget at layer0.fc2 (rRMSE 0.0105698 > 0.01). Implementation error, export degradation and source FP8-activation semantics remain separate.
 

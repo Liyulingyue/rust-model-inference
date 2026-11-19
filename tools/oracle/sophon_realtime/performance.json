@@ -340,6 +340,22 @@
         "profile": "release-fast"
       },
       "condition": "Sequential release-fast CPU protocol checks with a 250ms synthetic tone. CLI includes loading; resident HTTP does not. These are validation timings, not an equal-work throughput, deployment capacity or speech-quality benchmark."
+    },
+    {
+      "component": "tts CLI F16 talker / F16 flow / F32 HiFT",
+      "format": "F16 talker / F16 flow / F32 HiFT",
+      "policy": "cpu",
+      "threads": 4,
+      "speech_tokens": 77,
+      "samples": 73920,
+      "sample_rate": 24000,
+      "internal_seconds": 108.35,
+      "wall_seconds": 108.62,
+      "max_rss_kb": 1705844,
+      "binary_sha256": "096b552e01362921de5d4e27547f77a7076384ca5978044a3048f464f6f17ddd",
+      "wav_sha256": "0a8e98dbc28b26296fbff09dc22d3c5827c54e56f3008e2a675ffcb2f4050e1f",
+      "evidence": "target/sophon/f16-e2e/result.json",
+      "condition": "Local Linux x86_64 release-fast, four threads; functional synthesis after the opt-in F32-activation talker change. Single shared-desktop run, not capacity or speedup evidence."
     }
   ],
   "gpu": {

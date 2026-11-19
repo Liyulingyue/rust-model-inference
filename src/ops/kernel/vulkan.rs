@@ -1824,6 +1824,10 @@ impl Kernel for VulkanKernel<'_> {
         self.scalar_reference = true;
     }
 
+    fn use_f32_activation(&mut self) {
+        self.inner.use_f32_activation();
+    }
+
     fn supports_f16_strict(&self) -> bool {
         self.inner.supports_f16_strict()
     }
