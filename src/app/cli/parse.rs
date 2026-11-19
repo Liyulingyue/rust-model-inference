@@ -165,6 +165,26 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 options.dspark_model = Some(value.to_string());
                 i += 1;
             }
+            "--ngram-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --ngram-draft")?;
+                options.ngram_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --ngram-draft value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--ngram-lookup" => {
+                let value = args.get(i + 1).ok_or("Missing value for --ngram-lookup")?;
+                let lookup = value
+                    .parse::<usize>()
+                    .map_err(|error| format!("Invalid --ngram-lookup value: {error}"))?;
+                if lookup == 0 {
+                    return Err("Invalid --ngram-lookup value: must be at least 1".into());
+                }
+                options.ngram_lookup = Some(lookup);
+                i += 1;
+            }
             "--steps" => {
                 let value = args.get(i + 1).ok_or("Missing value for --steps")?;
                 options.steps = Some(

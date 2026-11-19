@@ -1726,6 +1726,16 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
             crate::models::mage_vl::validate_components(source.as_ref(), vision.as_ref())?;
         }
     }
+    // The DFlash / DSpark sidecar is an LLM-role GGUF: open it once so the
+    // runtime can borrow it per request. A file that is not a DSpark draft
+    // (or a target without the shared embedding table) fails the runtime
+    // constructor — and therefore this startup — instead of the first
+    // request.
+    let dspark: Option<Arc<dyn TensorSource>> = options
+        .dspark_model
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .map(|path| Arc::from(open_or_exit(std::path::Path::new(path), ComponentRole::Llm)));
     // One dispatch point for every arch (CLI/HTTP unification,
     // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
     // without an adapter — those models load but answer 501 at request time.
@@ -1743,7 +1753,22 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     .with_max_context(options.effective_max_context())
     .with_prefill_batch_size(prefill_batch_size)
     .with_mtp_draft(options.effective_mtp_draft())
+    .with_dspark_model(dspark)
+    .with_ngram_draft(options.effective_ngram_draft())
+    .with_ngram_lookup(options.effective_ngram_lookup())
     .with_mmproj(mmp);
+    // A requested-but-unsatisfiable DSpark sidecar is a startup error, not a
+    // log line: the user asked for speculative decoding, and quietly serving
+    // plain text (or 501s) behind the flag would be the silent-drop hole the
+    // runtime gate exists to prevent.
+    let dspark_requested = options
+        .dspark_model
+        .as_deref()
+        .is_some_and(|path| !path.is_empty());
+    // The n-gram draft has no sidecar to open, but the same rule holds: the
+    // user asked for speculative decoding, so a runtime that cannot provide
+    // it is a startup error, not a plain decode behind the flag.
+    let ngram_requested = options.effective_ngram_draft() > 0;
     let (runtime, context_length) =
         match crate::app::text::build_text_runtime(&arch, runtime_options) {
             Ok(runtime) => {
@@ -1752,7 +1777,9 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
             }
             Err(error)
                 if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
-                    || arch == crate::models::sensenova_loop::ARCH =>
+                    || arch == crate::models::sensenova_loop::ARCH
+                    || dspark_requested
+                    || ngram_requested =>
             {
                 return Err(error)
             }
