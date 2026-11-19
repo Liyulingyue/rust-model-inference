@@ -1057,14 +1057,36 @@ fn project_qkv_rows(
                 rows,
                 model.pool.clone(),
             ) {
-                Ok(mut executor) => {
+                Ok(executor) => {
+                    // The batched q/k/v group must keep the CPU's BF16
+                    // contract: `matmul_rows` rounds every BF16 projection
+                    // result back to BF16 after the dot product, and the
+                    // grouped executor returns the raw F32 sum. Without this
+                    // round the NAR trunk receives ~1e-3 relative differences
+                    // that rewrite the whole waveform.
+                    let mut executor = executor.with_cpu_dot_contract();
                     let ids = [
                         executor.id_for(weights.q.weight()).expect("q binding"),
                         executor.id_for(weights.k.weight()).expect("k binding"),
                         executor.id_for(weights.v.weight()).expect("v binding"),
                     ];
                     let mut outputs: [&mut [f32]; 3] = [&mut *q, &mut *k, &mut *v];
-                    executor.run_group(ids, input, rows, outputs).is_ok()
+                    if executor.run_group(ids, input, rows, outputs).is_ok() {
+                        for (weight, output) in [
+                            (&weights.q, &mut *q),
+                            (&weights.k, &mut *k),
+                            (&weights.v, &mut *v),
+                        ] {
+                            if weight.ggml_type() == crate::GGMLType::BF16 {
+                                for value in output.iter_mut() {
+                                    *value = half::bf16::from_f32(*value).to_f32();
+                                }
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
                 }
                 Err(_) => false,
             }
