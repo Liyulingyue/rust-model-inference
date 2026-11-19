@@ -7,7 +7,7 @@ seed 42 / 20 线程 / Q8_0 GGUF。绝对值会随机器状态漂移，**只有�
 
 相关文档：
 - `docs/usage/z-image.md` —— 用户向的用法、性能表、画质对比
-- `docs/usage/yue2-gpu.md` / `docs/usage/yue2-vae-profiling.md` —— YuE2 侧的同类记录
+- `docs/usage/yue2.md`（§5 Vulkan 历史调查）/ `docs/usage/yue2-vae-profiling.md` —— YuE2 侧的同类记录
 - `docs/develop/ZIMAGE_OPTIMIZATION.md` —— **已过时**（64×64 baseline、SIMD/CPU 视角）
 
 ---
@@ -188,7 +188,7 @@ PyTorch 用 int8 tensor core（mma），而本机 `GL_KHR_cooperative_matrix` gl
 ## 附：与本轮相关但属于其它模型的结论
 
 - **YuE2 GPU**：AR session 已实现（`362d5fa`）但比 CPU 慢 20×，根因是 k-quant
-  shader 只用 64 个 workgroup lane 中的 1 个（`a84635a` / `docs/usage/yue2-gpu.md`）
+  shader 只用 64 个 workgroup lane 中的 1 个（`a84635a` / `docs/usage/yue2.md` §5）
 - **YuE2 VAE**：155 s 里的 5 条优化路径已全部否证（`bc5eae4` /
   `docs/usage/yue2-vae-profiling.md`）
 - **Edge0**：35B MoE + 30/40 层 Mamba/SSM + 620 个 LoRA 张量；稠密:稀疏算力

@@ -355,7 +355,7 @@ impl<'model> YuE2VulkanSession<'model> {
 
         // Gated: the device is far slower than the CPU for this stage, so the
         // per-phase split is here to be re-measured when the k-quant shaders get
-        // their workgroups fixed (see docs/usage/yue2-gpu.md).
+        // their workgroups fixed (see docs/usage/yue2.md, Vulkan history section).
         let profile = std::env::var("YUE2_GPU_PROFILE").is_ok();
         let t_start = std::time::Instant::now();
         let commands = TokenCommands::begin(self.context)?;
