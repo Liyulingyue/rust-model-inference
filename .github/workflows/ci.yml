@@ -86,6 +86,7 @@ jobs:
       - run: cargo check --locked --all-targets
       - run: cargo check --locked --all-targets --features vulkan,parity-trace
       - run: 'cargo test --locked --features vulkan --lib compute::tests::'
+      - run: 'cargo test --locked --features vulkan --lib vulkan::tests::'
       - run: cargo test --locked --features vulkan --lib woof
       - run: cargo test --locked --features vulkan --lib legacy_auto_requires_gpu_opt_in_before_initializing
       - run: cargo test --locked --features vulkan --lib batched_linear_layout_

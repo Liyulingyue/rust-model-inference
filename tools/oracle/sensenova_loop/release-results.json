@@ -8140,6 +8140,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_1-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -8658,6 +8663,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-bf16-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -9176,6 +9186,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f32-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -9694,6 +9709,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_k-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -10212,6 +10232,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_0-vulkan/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -10736,6 +10761,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q5_k-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -11254,6 +11284,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f16-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -11772,6 +11807,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_1-vulkan/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -12296,6 +12336,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_0-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -12814,6 +12859,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-bf16-vulkan/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -13338,6 +13388,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f32-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -13856,6 +13911,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f16-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -14374,6 +14434,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q8_0-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -14892,6 +14957,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_0-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -15373,6 +15443,11 @@
       "cli_http_comparisons": {},
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_k-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -15555,6 +15630,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q6_k-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -16065,6 +16145,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f32-vulkan/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -16556,6 +16641,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-bf16-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -17074,6 +17164,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q8_0-vulkan/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -17598,6 +17693,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q4_1-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -18079,6 +18179,11 @@
       "cli_http_comparisons": {},
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q5_k-auto/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -18228,6 +18333,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f16-vulkan/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -18752,6 +18862,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-q8_0-cpu/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -19270,6 +19385,11 @@
       },
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": true,
+      "provenance": {
+        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+        "ssh_endpoint": "36.150.116.206:31667",
+        "remote_evidence": "target/release-validation/interfaces-f32-auto-custom/results.json"
+      },
       "cli_exit_codes": {
         "text": 0,
         "image": 0,
@@ -26897,24 +27017,1128 @@
   },
   "jev_stdout_recheck": null,
   "qwen_json_stdout_recheck": null,
+  "continuation": {
+    "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+    "ssh_endpoint": "36.150.116.206:33162",
+    "remote_repo": "/workspace/rust-model-inference-sensenova-loop-9b",
+    "collected_at": "2026-11-19T02:21:34.614614+00:00",
+    "matrix-progress": [
+      {
+        "name": "kparallel-exports",
+        "command": [
+          ".venv/bin/python",
+          "target/sensenova-export-kparallel.py"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 3001.593461765995,
+        "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+        "source_head": "873545726b3a729643c7fc8582968730958b271d"
+      }
+    ],
+    "final-four-log-build-finished": {
+      "command": [
+        "/usr/local/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+        "build",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "parity-trace,vulkan",
+        "--bin",
+        "rust-model-inference",
+        "--bin",
+        "rust-model-server"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 342.9860558310029
+    },
+    "source-f32-convert-finished": {
+      "command": [
+        ".venv/bin/python",
+        "-m",
+        "tools.converter.sensenova_loop.convert",
+        "models/SenseNova-Loop-9B",
+        "--outfile",
+        "models/SenseNova-Loop-9B-F32.gguf",
+        "--mmproj-outfile",
+        "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 180.64278416099842
+    },
+    "export-hashes": [
+      {
+        "format": "F32",
+        "bytes": 35838774432,
+        "sha256": "f90fd3400b3e04a4ffba3b0577dcb0df39bbb9709450663080e6df8ed98ed6cd"
+      },
+      {
+        "format": "Q8_0",
+        "bytes": 9558576320,
+        "sha256": "f358fc13a395fbb30553ce1f5a7e29aa2dda442744d949f36f282e8ba98f422f",
+        "elapsed_s": 70.5842755229969
+      },
+      {
+        "format": "Q4_0",
+        "bytes": 5085351104,
+        "sha256": "c86aa59de1fdd0ad8c20eb2bb24ad9fe0a43701608e57296199ba0b25d72c721",
+        "elapsed_s": 110.76271872599318
+      },
+      {
+        "format": "Q4_1",
+        "bytes": 5644504256,
+        "sha256": "603f629d3ca15a874e8226537f4ce40b3031e9421d09495f82549c1059b987b3",
+        "elapsed_s": 106.0770274749957
+      },
+      {
+        "format": "Q4_K",
+        "bytes": 5085351104,
+        "sha256": "ece489d129d4150349599b08f98cbbfd31346a028f7ea0063188458d35823ba1",
+        "elapsed_s": 1342.1408648929937,
+        "process_peak_rss_kib": 235792,
+        "parallel_workers": 6,
+        "independent_block_self_check": "byte identical to serial encoder"
+      },
+      {
+        "format": "Q5_K",
+        "bytes": 6203657408,
+        "sha256": "e5e7c374a271dcd89c7096d0652d74ff45f27a49a9a81cac697f5627f1c31613",
+        "elapsed_s": 1216.582211935005,
+        "process_peak_rss_kib": 235792,
+        "parallel_workers": 6,
+        "independent_block_self_check": "byte identical to serial encoder"
+      },
+      {
+        "format": "Q6_K",
+        "bytes": 7391857856,
+        "sha256": "144f8be287eec370c2afb314d201787af7166d0eb2c0a29528d4e05ba675997d",
+        "elapsed_s": 438.2382417260087,
+        "process_peak_rss_kib": 235792,
+        "parallel_workers": 6,
+        "independent_block_self_check": "byte identical to serial encoder"
+      }
+    ],
+    "projector-hash": {
+      "bytes": 1824061376,
+      "sha256": "dcc42d2b8385dd585a4f1d79344b5f37f820f9654ebaa61e336ca77404301187"
+    },
+    "source-files-verified": {
+      "repo": "SenseNova/SenseNova-Loop-9B",
+      "revision": "3fa2faf34a8ed0dba63d320e2312e2b900a7e8be",
+      "files": [
+        {
+          "Path": "README.md",
+          "Size": 16520,
+          "Sha256": "53e350378579409311af928af04335f1a1873f08923a294c69941edfe9a42cfb"
+        },
+        {
+          "Path": "README_CN.md",
+          "Size": 15961,
+          "Sha256": "3d2265151783a7c6bc92a70da8ef00974c0db6b2b3d74fd1d22eed9b1800661c"
+        },
+        {
+          "Path": "chat_template.jinja",
+          "Size": 7756,
+          "Sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+        },
+        {
+          "Path": "config.json",
+          "Size": 3679,
+          "Sha256": "614dbd44b3a7fba8cd3adf5118b91ee40d51765b874de9dfadf67ea4e16ba68e"
+        },
+        {
+          "Path": "configuration.json",
+          "Size": 64,
+          "Sha256": "625c81a3527ce4f7a739854b431f380a987dc4af5e07e099b568e50e2e3b248c"
+        },
+        {
+          "Path": "generation_config.json",
+          "Size": 198,
+          "Sha256": "f288bb4281580138395c6acc7b3adb62f45c21530bc0708cb2cf9edf093f6a4f"
+        },
+        {
+          "Path": "model-00001.safetensors",
+          "Size": 2034237592,
+          "Sha256": "8e7d17dd41efe79746bcff1e51a892ec6bf8092887cba88827cefc77b19b3fd3"
+        },
+        {
+          "Path": "model-00002.safetensors",
+          "Size": 8328,
+          "Sha256": "8fee2d7786386d45639a612ee11642d047eeaa0606b4225123c7aff396b80673"
+        },
+        {
+          "Path": "model-00003.safetensors",
+          "Size": 2034237568,
+          "Sha256": "85dca81a009c5a814855ad026ada6959d509cd0175b6880cc2c89b6a135a45c7"
+        },
+        {
+          "Path": "model-00004.safetensors",
+          "Size": 1987300784,
+          "Sha256": "e682478f625e6786bf2d428404d259dcbb97d65765e03798a09cbac9a84e0716"
+        },
+        {
+          "Path": "model-00005.safetensors",
+          "Size": 1933340304,
+          "Sha256": "4b6b528980d7ebc8b976bd0092552758fd87f1cb5cfd589d573cb169f1f32f05"
+        },
+        {
+          "Path": "model-00006.safetensors",
+          "Size": 1967994288,
+          "Sha256": "f736a6d35716ffed5f9033d733c21f92f1677902755a15adea44bd3fbe2a50c3"
+        },
+        {
+          "Path": "model-00007.safetensors",
+          "Size": 1933340384,
+          "Sha256": "89b8928cb35915fbbbf8ab50ffd1dad58c72312e29bb839b3337ee7e562e6aac"
+        },
+        {
+          "Path": "model-00008.safetensors",
+          "Size": 1967994328,
+          "Sha256": "42bc4726d6f3028f1a8a074f11fe3de82fc119687d69cc07fbc0885cdeedbdaa"
+        },
+        {
+          "Path": "model-00009.safetensors",
+          "Size": 1933340376,
+          "Sha256": "a1d12fbdc13785f5f9af34d7cb26ccd93b5761429cb4ea7067aead70056ae147"
+        },
+        {
+          "Path": "model-00010.safetensors",
+          "Size": 1915564280,
+          "Sha256": "ab662a9fe6583c4cea66bbdc033fb243ba71a55fe9b5155c5bdcdd854701cf97"
+        },
+        {
+          "Path": "model-00011.safetensors",
+          "Size": 1124976376,
+          "Sha256": "3bd59cddbf2dee7a2d33d14bfa0dcfaa1d2356f37be64a2164789393b752d31d"
+        },
+        {
+          "Path": "model.safetensors.index.json",
+          "Size": 70057,
+          "Sha256": "a478440d3817d761ef6a8088f063131e02197b0d8699262165d4626c5d577510"
+        },
+        {
+          "Path": "modeling_sensenova_loop.py",
+          "Size": 18968,
+          "Sha256": "26e11d3522aa730c0ba031340ce42632bc2834da8cc0b6804006bb207d979a5b"
+        },
+        {
+          "Path": "mtp.safetensors",
+          "Size": 486582880,
+          "Sha256": "3b84d5143ad5c97cbeffb4ffe9d2db9f620e3cbbfa334f987a04a3cb902d08a6"
+        },
+        {
+          "Path": "preprocessor_config.json",
+          "Size": 443,
+          "Sha256": "3a159dfec9978a186a72ba085e0ad6a050f3968d8b364218d7bd13f5c89381f2"
+        },
+        {
+          "Path": "processor_config.json",
+          "Size": 1191,
+          "Sha256": "d89ef49ce9cd37fbf510158e13c1ef063d9286411c1ec9049932dbe0487143b1"
+        },
+        {
+          "Path": "tokenizer.json",
+          "Size": 19989325,
+          "Sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+        },
+        {
+          "Path": "tokenizer_config.json",
+          "Size": 1165,
+          "Sha256": "792fa3f0cb88b111e54ef3134c873531008c4df471d108da17903426e308aa7b"
+        },
+        {
+          "Path": "video_preprocessor_config.json",
+          "Size": 550,
+          "Sha256": "bd96830cce1312679aa1f2ea43ed17da20e8ebbcea2398cfa64e2d275a96fdd7"
+        }
+      ]
+    },
+    "qwen-download-manifest": {
+      "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+      "revision": "master",
+      "files": [
+        {
+          "CommitMessage": "Upload folder using ModelScope SDK (batch 1/1)",
+          "CommittedDate": 1772467516,
+          "CommitterName": "systemd",
+          "InCheck": false,
+          "IsLFS": true,
+          "Mode": "33188",
+          "Name": "Qwen3.5-0.8B-Q8_0.gguf",
+          "Path": "Qwen3.5-0.8B-Q8_0.gguf",
+          "Revision": "88467eb7c8e3b6e7894c794f373050d4dbc6ae8a",
+          "Sha256": "0ad885ffd4bb022fc4f0d33a3308fa108ef8613159d3b3a67e23abca056b7a6c",
+          "Size": 811843840,
+          "Type": "blob"
+        }
+      ]
+    },
+    "recovery-operator-results": [
+      {
+        "name": "f32",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "f32"
+        ],
+        "environment": {},
+        "exit_code": 1,
+        "elapsed_s": 4.475895773997763
+      },
+      {
+        "name": "q8-no-dp4a",
+        "command": [
+          "target/release-fast/examples/vk_ops_check",
+          "--formats",
+          "q8_0"
+        ],
+        "environment": {
+          "RUST_GPU_DP4A": "0"
+        },
+        "exit_code": 1,
+        "elapsed_s": 4.3709949659969425
+      }
+    ],
+    "recovery-baseline-build-finished": {
+      "exit_code": 0,
+      "elapsed_s": 377.645377592009,
+      "base": "44527e5ad2ca979518a0f13c2b70dc2c0b78fddc"
+    },
+    "recovery-baseline-probe": {
+      "command": [
+        "target/release-validation/rust-model-inference.recovery-baseline",
+        "--model",
+        "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--threads",
+        "16",
+        "--max-context",
+        "512",
+        "--kv-cache",
+        "f32",
+        "--jinja",
+        "--jev",
+        "--jev-output",
+        "json",
+        "--jev-context",
+        "The image is blue.",
+        "--jev-question",
+        "What color?",
+        "--jev-option",
+        "blue",
+        "--jev-option",
+        "red"
+      ],
+      "base": "44527e5ad2ca979518a0f13c2b70dc2c0b78fddc",
+      "exit_code": 1,
+      "elapsed_s": 4.929078343993751,
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "free_vram_bytes_before_probe": 39175565312,
+      "stdout": "",
+      "stderr": "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\nJEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Qwen3.5 forward_logits failed: Unsupported shape: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
+      "device_lost": true
+    },
+    "recovery-torch": {
+      "pass": true,
+      "torch": "2.9.1+gitff65f5b",
+      "hip": "7.2.53211-e1a6bc5663",
+      "device": "AMD Radeon Graphics",
+      "operation": "4096-element F32 mul/add and synchronized CPU readback",
+      "elapsed_s": 0.28067851200466976
+    },
+    "qwen-json-stdout-cpu": {
+      "pass": true,
+      "command": [
+        "/workspace/rust-model-inference-sensenova-loop-9b/target/release-validation/rust-model-inference.current-8735457",
+        "--model",
+        "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--threads",
+        "16",
+        "--max-context",
+        "512",
+        "--kv-cache",
+        "f32",
+        "--jinja",
+        "--jev",
+        "--jev-output",
+        "json",
+        "--jev-context",
+        "The image is blue.",
+        "--jev-question",
+        "What color?",
+        "--jev-option",
+        "blue",
+        "--jev-option",
+        "red"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 1.6420554049982456,
+      "stdout_json_parsed_without_filtering": true,
+      "result": {
+        "mode": "choice",
+        "question": "What color?",
+        "labels": [
+          "A",
+          "B"
+        ],
+        "descriptions": [
+          "blue",
+          "red"
+        ],
+        "values": [
+          0.0,
+          0.0
+        ],
+        "probabilities": {
+          "A": 0.7787768244743347,
+          "B": 0.2212231606245041
+        },
+        "choice": "A",
+        "confidence": 0.7787768,
+        "entropy": 0.5284517,
+        "margin": 0.55755365,
+        "prefill_ms": 1067
+      },
+      "backend": "cpu",
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5"
+    },
+    "mapped-range-postfix": {
+      "command": [
+        "target/release-fast/examples/vk_ops_check",
+        "--formats",
+        "f32"
+      ],
+      "environment": {
+        "RMI_VULKAN_VALIDATION": "1",
+        "VK_LAYER_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/share/vulkan/explicit_layer.d",
+        "LD_LIBRARY_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/lib/x86_64-linux-gnu"
+      },
+      "exit_code": 1,
+      "elapsed_s": 5.122022050010855,
+      "validation_error_count": 0,
+      "validation_errors": [],
+      "device_lost": true,
+      "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
+      "raw_log": "target/release-validation/mapped-range-postfix-validation.log"
+    },
+    "mapped-range-final-build-finished": {
+      "exit_code": 0,
+      "elapsed_s": 262.81593142698694,
+      "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2"
+    },
+    "postfix-real-model-probes": {
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
+      "probes": {
+        "qwen-cpu": {
+          "command": [
+            "target/release-fast/rust-model-inference",
+            "--model",
+            "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--threads",
+            "16",
+            "--max-context",
+            "512",
+            "--kv-cache",
+            "f32",
+            "--jinja",
+            "--jev",
+            "--jev-output",
+            "json",
+            "--jev-context",
+            "The image is blue.",
+            "--jev-question",
+            "What color?",
+            "--jev-option",
+            "blue",
+            "--jev-option",
+            "red"
+          ],
+          "exit_code": 0,
+          "elapsed_s": 3.485446327002137,
+          "device_lost": false,
+          "stdout": "{\"mode\":\"choice\",\"question\":\"What color?\",\"labels\":[\"A\",\"B\"],\"descriptions\":[\"blue\",\"red\"],\"values\":[0.0,0.0],\"probabilities\":{\"A\":0.7787768244743347,\"B\":0.2212231606245041},\"choice\":\"A\",\"confidence\":0.7787768,\"entropy\":0.5284517,\"margin\":0.55755365,\"prefill_ms\":2176}\n",
+          "stderr": "JEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\ncompute requested=Cpu scope=hybrid_decoder backend=Cpu rows=64\ncompute requested=Cpu scope=hybrid_decoder backend=Cpu rows=7\n\nJEV total: 2856 ms (1 questions)\n",
+          "json": {
+            "mode": "choice",
+            "question": "What color?",
+            "labels": [
+              "A",
+              "B"
+            ],
+            "descriptions": [
+              "blue",
+              "red"
+            ],
+            "values": [
+              0.0,
+              0.0
+            ],
+            "probabilities": {
+              "A": 0.7787768244743347,
+              "B": 0.2212231606245041
+            },
+            "choice": "A",
+            "confidence": 0.7787768,
+            "entropy": 0.5284517,
+            "margin": 0.55755365,
+            "prefill_ms": 2176
+          },
+          "stdout_json_parsed_without_filtering": true,
+          "probabilities_equal_before_mapping_fix": true
+        },
+        "qwen-vulkan": {
+          "command": [
+            "target/release-fast/rust-model-inference",
+            "--model",
+            "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf",
+            "--compute",
+            "vulkan",
+            "--threads",
+            "16",
+            "--max-context",
+            "512",
+            "--kv-cache",
+            "f32",
+            "--jinja",
+            "--jev",
+            "--jev-output",
+            "json",
+            "--jev-context",
+            "The image is blue.",
+            "--jev-question",
+            "What color?",
+            "--jev-option",
+            "blue",
+            "--jev-option",
+            "red"
+          ],
+          "exit_code": 1,
+          "elapsed_s": 5.34639636000793,
+          "device_lost": true,
+          "stdout": "",
+          "stderr": "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\nJEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Qwen3.5 forward_logits failed: Unsupported shape: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+        },
+        "sensenova-q8-vulkan": {
+          "command": [
+            "target/release-fast/rust-model-inference",
+            "--model",
+            "models/SenseNova-Loop-9B-Q8_0.gguf",
+            "--compute",
+            "vulkan",
+            "--threads",
+            "16",
+            "--max-context",
+            "512",
+            "--kv-cache",
+            "f32",
+            "--jinja",
+            "--prompt",
+            "Hello!",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "1"
+          ],
+          "exit_code": 1,
+          "elapsed_s": 4.943186777003575,
+          "device_lost": true,
+          "stdout": "LLM arch: sensenova_loop\nSenseNova-Loop-9B model loaded: 56 layers, n_embd=4096, n_head=16, n_ff=12288, rope_freq_base=10000000, rope_sections=[11, 11, 10, 0], rope_dim_count=64\nPrompt tokens: 14 (including 0 vision placeholders)\n",
+          "stderr": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[RUST_TOKENS] n=14 ids=[248045, 846, 198, 9419, 0, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]\ncompute pool: 16 threads\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Unsupported shape: Q8_0 activation path: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+        }
+      }
+    },
+    "gpu-assisted-probe": {
+      "command": [
+        "target/release-fast/examples/vk_ops_check",
+        "--formats",
+        "f32"
+      ],
+      "environment": {
+        "RMI_VULKAN_VALIDATION": "1",
+        "VK_LAYER_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/share/vulkan/explicit_layer.d",
+        "LD_LIBRARY_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/lib/x86_64-linux-gnu",
+        "VK_LAYER_ENABLES": "VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_RESERVE_BINDING_SLOT_EXT"
+      },
+      "exit_code": 1,
+      "elapsed_s": 8.178069829999004,
+      "errors": [],
+      "gpu_assisted_messages": [],
+      "device_lost": true,
+      "raw_log": "target/release-validation/gpu-assisted-probe.log"
+    },
+    "recovery-llvm-probe": {
+      "command": [
+        "target/release-fast/examples/vk_ops_check",
+        "--formats",
+        "f32"
+      ],
+      "environment": {
+        "RADV_DEBUG": "llvm"
+      },
+      "exit_code": 1,
+      "elapsed_s": 9.982256429997506,
+      "device_lost": true,
+      "raw_log": "target/release-validation/recovery-llvm-probe.log",
+      "output": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31 (LLVM 20.1.2)) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nVulkan row operator check failed: f32: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+    },
+    "queue-recovery": {
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "source_parent": "873545726b3a729643c7fc8582968730958b271d",
+      "source_sha256": "ce12a5c1c80b6f4aeb9fbbae4d707f12bad128fcdf169df6b98d0c9b401b80d6",
+      "runs": [
+        {
+          "name": "queue-fix-build",
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--offline",
+            "--profile",
+            "release-fast",
+            "--features",
+            "parity-trace,vulkan",
+            "--bin",
+            "rust-model-inference",
+            "--bin",
+            "rust-model-server",
+            "--example",
+            "vk_ops_check",
+            "--example",
+            "sensenova_loop_check"
+          ],
+          "environment_overrides": {},
+          "exit_code": 0,
+          "elapsed_s": 393.1075989410019,
+          "log": "target/release-validation/queue-fix-build.log"
+        },
+        {
+          "name": "queue-fix-ops-f32",
+          "command": [
+            "target/release-fast/examples/vk_ops_check",
+            "--formats",
+            "f32"
+          ],
+          "environment_overrides": {
+            "RMI_VULKAN_VALIDATION": "1",
+            "VK_LAYER_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/share/vulkan/explicit_layer.d",
+            "LD_LIBRARY_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/lib/x86_64-linux-gnu"
+          },
+          "exit_code": 1,
+          "elapsed_s": 4.571688964002533,
+          "log": "target/release-validation/queue-fix-ops-f32.log"
+        }
+      ]
+    },
+    "independent-vulkan-probe": {
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "source_sha256": "4e63af6aaaff6845cee6939c1a20cc3f06fb3a46dcf7f766c931d56f309f7cb4",
+      "build_command": [
+        "/usr/local/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
+        "--edition=2021",
+        "--crate-name",
+        "independent_vulkan",
+        "/workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs",
+        "--extern",
+        "ash=/workspace/rust-model-inference-sensenova-loop-9b/target/release-fast/deps/libash-15a24de955847108.rlib",
+        "-L",
+        "dependency=/workspace/rust-model-inference-sensenova-loop-9b/target/release-fast/deps",
+        "-o",
+        "/workspace/rust-model-inference-sensenova-loop-9b/target/release-validation/independent-vulkan"
+      ],
+      "build_exit_code": 0,
+      "probes": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-sensenova-loop-9b/target/release-validation/independent-vulkan",
+            "compute"
+          ],
+          "environment": {
+            "RMI_DIAGNOSTIC_QUEUE_FAMILY": "0"
+          },
+          "validation_requested": false,
+          "exit_code": 101,
+          "elapsed_s": 4.317763130005915,
+          "stdout": "",
+          "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (48878) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+          "readback_verified": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-sensenova-loop-9b/target/release-validation/independent-vulkan",
+            "compute"
+          ],
+          "environment": {
+            "RMI_DIAGNOSTIC_QUEUE_FAMILY": "0",
+            "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
+            "VK_LAYER_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/share/vulkan/explicit_layer.d",
+            "LD_LIBRARY_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/lib/x86_64-linux-gnu"
+          },
+          "validation_requested": true,
+          "exit_code": 101,
+          "elapsed_s": 4.379825384996366,
+          "stdout": "",
+          "stderr": "VALIDATION WARNING: env var 'VK_INSTANCE_LAYERS' defined and adding layers \"VK_LAYER_KHRONOS_validation\"\nVALIDATION WARNING: env var 'VK_INSTANCE_LAYERS' defined and adding layers \"VK_LAYER_KHRONOS_validation\"\ndevice=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (48896) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+          "readback_verified": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-sensenova-loop-9b/target/release-validation/independent-vulkan",
+            "fill"
+          ],
+          "environment": {
+            "RMI_DIAGNOSTIC_QUEUE_FAMILY": "0",
+            "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
+            "VK_LAYER_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/share/vulkan/explicit_layer.d",
+            "LD_LIBRARY_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/lib/x86_64-linux-gnu"
+          },
+          "validation_requested": true,
+          "exit_code": 101,
+          "elapsed_s": 4.3356179160036845,
+          "stdout": "",
+          "stderr": "VALIDATION WARNING: env var 'VK_INSTANCE_LAYERS' defined and adding layers \"VK_LAYER_KHRONOS_validation\"\nVALIDATION WARNING: env var 'VK_INSTANCE_LAYERS' defined and adding layers \"VK_LAYER_KHRONOS_validation\"\ndevice=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (48900) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+          "readback_verified": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-sensenova-loop-9b/target/release-validation/independent-vulkan",
+            "compute"
+          ],
+          "environment": {
+            "RMI_DIAGNOSTIC_QUEUE_FAMILY": "1",
+            "VK_INSTANCE_LAYERS": "VK_LAYER_KHRONOS_validation",
+            "VK_LAYER_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/share/vulkan/explicit_layer.d",
+            "LD_LIBRARY_PATH": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-validation/usr/lib/x86_64-linux-gnu"
+          },
+          "validation_requested": true,
+          "exit_code": 0,
+          "elapsed_s": 0.10448497500328813,
+          "stdout": "readback=123\n",
+          "stderr": "VALIDATION WARNING: env var 'VK_INSTANCE_LAYERS' defined and adding layers \"VK_LAYER_KHRONOS_validation\"\nVALIDATION WARNING: env var 'VK_INSTANCE_LAYERS' defined and adding layers \"VK_LAYER_KHRONOS_validation\"\ndevice=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n",
+          "readback_verified": true
+        }
+      ]
+    },
+    "independent-vulkan-repeat": [
+      {
+        "family": 1,
+        "exit_code": 101,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58835) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "family": 0,
+        "exit_code": 101,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58838) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "family": 1,
+        "exit_code": 101,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58841) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "family": 1,
+        "exit_code": 101,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58844) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      }
+    ],
+    "independent-vulkan-memory-probe": [
+      {
+        "vram": false,
+        "increment_shader": false,
+        "exit_code": 101,
+        "elapsed_s": 4.317610063008033,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58815) panicked at target/sensenova-independent-vulkan.rs:122:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "vram": false,
+        "increment_shader": true,
+        "exit_code": 101,
+        "elapsed_s": 4.287644762996933,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58818) panicked at target/sensenova-independent-vulkan.rs:122:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 2779096608\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "vram": true,
+        "increment_shader": false,
+        "exit_code": 101,
+        "elapsed_s": 4.288728974992409,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=3 flags=DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58822) panicked at target/sensenova-independent-vulkan.rs:122:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "vram": true,
+        "increment_shader": true,
+        "exit_code": 101,
+        "elapsed_s": 4.287855419999687,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=3 flags=DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58825) panicked at target/sensenova-independent-vulkan.rs:122:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 2779096608\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      }
+    ],
+    "independent-vulkan-driver-control": [
+      {
+        "label": "system-25.2.8",
+        "icd": null,
+        "queue_family": 0,
+        "elapsed_s": 4.319910539998091,
+        "exit_code": 101,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58914) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+      },
+      {
+        "label": "private-24.0.5",
+        "icd": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-driver-control/radeon-control.json",
+        "queue_family": 0,
+        "elapsed_s": 4.3717478689941345,
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nVALIDATION ERROR: GPU hung detected in this process (VK_ERROR_DEVICE_LOST)\nError: ERROR_DEVICE_LOST\n"
+      },
+      {
+        "label": "private-24.0.5-compute",
+        "icd": "/workspace/rust-model-inference-sensenova-loop-9b/target/vulkan-driver-control/radeon-control.json",
+        "queue_family": 1,
+        "elapsed_s": 4.266332145998604,
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nVALIDATION ERROR: GPU hung detected in this process (VK_ERROR_DEVICE_LOST)\nError: ERROR_DEVICE_LOST\n"
+      }
+    ],
+    "independent-vulkan-ioctl": {
+      "command": [
+        "target/vulkan-driver-control/usr/bin/strace",
+        "-f",
+        "-e",
+        "trace=openat,ioctl,poll,ppoll",
+        "-o",
+        "target/release-validation/independent-vulkan-ioctl.log",
+        "target/release-validation/independent-vulkan",
+        "compute"
+      ],
+      "exit_code": 101,
+      "errors": [],
+      "stderr": "device=AMD Radeon Graphics (RADV NAVI31)\nqueues=[QueueFamilyProperties { queue_flags: GRAPHICS | COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: COMPUTE | TRANSFER | SPARSE_BINDING, queue_count: 4, timestamp_valid_bits: 64, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_DECODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: VIDEO_ENCODE_KHR, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }, QueueFamilyProperties { queue_flags: SPARSE_BINDING, queue_count: 1, timestamp_valid_bits: 0, min_image_transfer_granularity: Extent3D { width: 1, height: 1, depth: 1 } }]\nmemory_type=2 flags=HOST_VISIBLE | HOST_COHERENT allocation=16\ninitial=2779096485\nqueue_submit\nwait_for_fences\nfence_status=Ok(true)\ndevice_wait_idle=Ok(())\n\nthread 'main' (58932) panicked at /workspace/rust-model-inference-sensenova-loop-9b/target/sensenova-independent-vulkan.rs:118:9:\nassertion `left == right` failed\n  left: 2779096485\n right: 123\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+    },
+    "driver-control-packages": [
+      {
+        "filename": "mesa-vulkan-drivers_24.0.5-1ubuntu1_amd64.deb",
+        "bytes": 11034284,
+        "sha256": "46cb5118b2d767ce30e9bddba1602265317e097c9668e5cbfa4102c061d3f126"
+      },
+      {
+        "filename": "strace_6.8-0ubuntu2_amd64.deb",
+        "bytes": 584172,
+        "sha256": "d588810ae26b06fee6678dc81e5b54f6efcde8e718e4589adb4d11d254b9820b"
+      }
+    ],
+    "rocm-after-vulkan-controls": {
+      "torch": "2.9.1+gitff65f5b",
+      "hip": "7.2.53211-e1a6bc5663",
+      "device": "AMD Radeon Graphics",
+      "elements": 4096,
+      "pass": true,
+      "max_abs": 0.0,
+      "elapsed_s": 0.2476433309930144,
+      "after_independent_vulkan_failures": true
+    },
+    "gpu-clients-snapshot": {
+      "gpu_busy_percent": "100",
+      "clients": [],
+      "note": "Read-only DRM fdinfo snapshot; no other process was changed."
+    },
+    "restored-source-real-model-probes": {
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
+      "binary_sha256": "4150686b014e021a970478943558dd6884ad2f554fde74a7dbb4375163b6f1e9",
+      "probes": {
+        "qwen-cpu": {
+          "command": [
+            "target/release-fast/rust-model-inference",
+            "--model",
+            "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf",
+            "--compute",
+            "cpu",
+            "--threads",
+            "16",
+            "--max-context",
+            "512",
+            "--kv-cache",
+            "f32",
+            "--jinja",
+            "--jev",
+            "--jev-output",
+            "json",
+            "--jev-context",
+            "The image is blue.",
+            "--jev-question",
+            "What color?",
+            "--jev-option",
+            "blue",
+            "--jev-option",
+            "red"
+          ],
+          "exit_code": 0,
+          "elapsed_s": 0.9108029630006058,
+          "stdout": "{\"mode\":\"choice\",\"question\":\"What color?\",\"labels\":[\"A\",\"B\"],\"descriptions\":[\"blue\",\"red\"],\"values\":[0.0,0.0],\"probabilities\":{\"A\":0.7787768244743347,\"B\":0.2212231606245041},\"choice\":\"A\",\"confidence\":0.7787768,\"entropy\":0.5284517,\"margin\":0.55755365,\"prefill_ms\":465}\n",
+          "stderr": "JEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\n\nJEV total: 659 ms (1 questions)\n",
+          "device_lost": false,
+          "json": {
+            "mode": "choice",
+            "question": "What color?",
+            "labels": [
+              "A",
+              "B"
+            ],
+            "descriptions": [
+              "blue",
+              "red"
+            ],
+            "values": [
+              0.0,
+              0.0
+            ],
+            "probabilities": {
+              "A": 0.7787768244743347,
+              "B": 0.2212231606245041
+            },
+            "choice": "A",
+            "confidence": 0.7787768,
+            "entropy": 0.5284517,
+            "margin": 0.55755365,
+            "prefill_ms": 465
+          },
+          "stdout_json_parsed_without_filtering": true,
+          "probabilities_equal_before_mapping_fix": true
+        },
+        "qwen-vulkan": {
+          "command": [
+            "target/release-fast/rust-model-inference",
+            "--model",
+            "models/Qwen3.5-0.8B-GGUF/Qwen3.5-0.8B-Q8_0.gguf",
+            "--compute",
+            "vulkan",
+            "--threads",
+            "16",
+            "--max-context",
+            "512",
+            "--kv-cache",
+            "f32",
+            "--jinja",
+            "--jev",
+            "--jev-output",
+            "json",
+            "--jev-context",
+            "The image is blue.",
+            "--jev-question",
+            "What color?",
+            "--jev-option",
+            "blue",
+            "--jev-option",
+            "red"
+          ],
+          "exit_code": 1,
+          "elapsed_s": 4.7071511179965455,
+          "stdout": "",
+          "stderr": "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\nJEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Qwen3.5 forward_logits failed: Unsupported shape: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
+          "device_lost": true
+        },
+        "sensenova-q8-vulkan": {
+          "command": [
+            "target/release-fast/rust-model-inference",
+            "--model",
+            "models/SenseNova-Loop-9B-Q8_0.gguf",
+            "--compute",
+            "vulkan",
+            "--threads",
+            "16",
+            "--max-context",
+            "512",
+            "--kv-cache",
+            "f32",
+            "--jinja",
+            "--prompt",
+            "Hello!",
+            "--temperature",
+            "0",
+            "--max-tokens",
+            "1"
+          ],
+          "exit_code": 1,
+          "elapsed_s": 4.722629423005856,
+          "stdout": "LLM arch: sensenova_loop\nSenseNova-Loop-9B model loaded: 56 layers, n_embd=4096, n_head=16, n_ff=12288, rope_freq_base=10000000, rope_sections=[11, 11, 10, 0], rope_dim_count=64\nPrompt tokens: 14 (including 0 vision placeholders)\n",
+          "stderr": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.2s\n[RUST_TOKENS] n=14 ids=[248045, 846, 198, 9419, 0, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]\ncompute pool: 16 threads\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Unsupported shape: Q8_0 activation path: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
+          "device_lost": true
+        }
+      }
+    },
+    "source_sha256": {
+      "src/vulkan.rs": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
+      "src/vulkan/ops.rs": "44cb8804233b6f1b450815d99eca27ac6d4b2702aea9e1e319429173e4eb1c7f",
+      "shaders/manifest.sha256": "953c6ebba8ac4cd314846b94b90974ebb79454698181e22ce53c24d772852fb1"
+    },
+    "binary_sha256": {
+      "rust-model-inference": "4150686b014e021a970478943558dd6884ad2f554fde74a7dbb4375163b6f1e9",
+      "rust-model-server": "bbe166bc11312bd0a124d2b076c0680cedfc98046f68cffc19c82c5ceb6622e5"
+    },
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "environment": {
+      "kernel": "6.8.0-147-generic",
+      "amdgpu_module_version": "7.1.3.31500000",
+      "packages": "libdrm-amdgpu1:amd64\t2.4.125-1ubuntu0.1~24.04.1\nlibdrm2:amd64\t2.4.125-1ubuntu0.1~24.04.1\nlibvulkan1:amd64\t1.3.275.0-1build1\nmesa-vulkan-drivers:amd64\t25.2.8-0ubuntu0.24.04.1\n",
+      "kernel_log_access": "dmesg: read kernel buffer failed: Operation not permitted",
+      "dmesg_restrict": "1"
+    },
+    "memory_events": "low 0\nhigh 0\nmax 4\noom 0\noom_kill 0\noom_group_kill 0\n",
+    "recovery_logs": {
+      "qwen-json-stdout.stderr": "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\nJEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Qwen3.5 forward_logits failed: Unsupported shape: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
+      "qwen-json-stdout.stdout": "",
+      "tiny-ops-recovery.log": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nVulkan row operator check failed: q8_0: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
+      "recovery-ops-f32.log": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nVulkan row operator check failed: f32: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
+      "recovery-ops-q8-no-dp4a.log": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: scalar int8 multiply\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nVulkan row operator check failed: q8_0: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
+    },
+    "validation_layer": {
+      "before_alignment_fix": {
+        "active": true,
+        "errors": [
+          "[GPU-VALIDATION] severity=ERROR type=VALIDATION id=VUID-VkMappedMemoryRange-offset-00687: Validation Error: [ VUID-VkMappedMemoryRange-offset-00687 ] Object 0: handle = 0xaf00000000af, type = VK_OBJECT_TYPE_DEVICE_MEMORY; | MessageID = 0x4f6e1263 | vkFlushMappedMemoryRanges(): pMemoryRanges[0].offset (3216) is not a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (64). The Vulkan spec states: offset must be a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkMappedMemoryRange-offset-00687)",
+          "[GPU-VALIDATION] severity=ERROR type=VALIDATION id=VUID-VkMappedMemoryRange-size-01390: Validation Error: [ VUID-VkMappedMemoryRange-size-01390 ] Object 0: handle = 0xaf00000000af, type = VK_OBJECT_TYPE_DEVICE_MEMORY; | MessageID = 0xdd4e6d8b | vkFlushMappedMemoryRanges(): pMemoryRanges[0].size (132) is not a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (64) and offset + size (3216 + 132 = 3348) not equal to the memory size (3712). The Vulkan spec states: If size is not equal to VK_WHOLE_SIZE, size must either be a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize, or offset plus size must equal the size of memory (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkMappedMemoryRange-size-01390)",
+          "[GPU-VALIDATION] severity=ERROR type=VALIDATION id=VUID-VkMappedMemoryRange-offset-00687: Validation Error: [ VUID-VkMappedMemoryRange-offset-00687 ] Object 0: handle = 0xaf00000000af, type = VK_OBJECT_TYPE_DEVICE_MEMORY; | MessageID = 0x4f6e1263 | vkFlushMappedMemoryRanges(): pMemoryRanges[0].offset (3360) is not a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (64). The Vulkan spec states: offset must be a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkMappedMemoryRange-offset-00687)",
+          "[GPU-VALIDATION] severity=ERROR type=VALIDATION id=VUID-VkMappedMemoryRange-size-01390: Validation Error: [ VUID-VkMappedMemoryRange-size-01390 ] Object 0: handle = 0xaf00000000af, type = VK_OBJECT_TYPE_DEVICE_MEMORY; | MessageID = 0xdd4e6d8b | vkFlushMappedMemoryRanges(): pMemoryRanges[0].size (260) is not a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (64) and offset + size (3360 + 260 = 3620) not equal to the memory size (3712). The Vulkan spec states: If size is not equal to VK_WHOLE_SIZE, size must either be a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize, or offset plus size must equal the size of memory (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkMappedMemoryRange-size-01390)",
+          "[GPU-VALIDATION] severity=ERROR type=VALIDATION id=VUID-VkMappedMemoryRange-offset-00687: Validation Error: [ VUID-VkMappedMemoryRange-offset-00687 ] Object 0: handle = 0xaf00000000af, type = VK_OBJECT_TYPE_DEVICE_MEMORY; | MessageID = 0x4f6e1263 | vkFlushMappedMemoryRanges(): pMemoryRanges[0].offset (3632) is not a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (64). The Vulkan spec states: offset must be a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkMappedMemoryRange-offset-00687)",
+          "[GPU-VALIDATION] severity=ERROR type=VALIDATION id=VUID-VkMappedMemoryRange-size-01390: Validation Error: [ VUID-VkMappedMemoryRange-size-01390 ] Object 0: handle = 0xaf00000000af, type = VK_OBJECT_TYPE_DEVICE_MEMORY; | MessageID = 0xdd4e6d8b | vkFlushMappedMemoryRanges(): pMemoryRanges[0].size (68) is not a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize (64) and offset + size (3632 + 68 = 3700) not equal to the memory size (3712). The Vulkan spec states: If size is not equal to VK_WHOLE_SIZE, size must either be a multiple of VkPhysicalDeviceLimits::nonCoherentAtomSize, or offset plus size must equal the size of memory (https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/vkspec.html#VUID-VkMappedMemoryRange-size-01390)"
+        ],
+        "device_lost": true,
+        "raw_log": "target/release-validation/recovery-validation-layer.log",
+        "raw_log_sha256": "d9938d2baef98fa3ed7120e024af83c852a65dfb9c352f2db27f82733e48c5e6"
+      },
+      "after_alignment_fix": {
+        "active": true,
+        "errors": [],
+        "device_lost": true,
+        "raw_log": "target/release-validation/mapped-range-postfix-validation.log",
+        "raw_log_sha256": "62a3431b8c59af4c5f6cb85653f401577c195bea95c1be0066ec2adae36189ea"
+      },
+      "dedicated_queue_f32": {
+        "active": true,
+        "errors": [],
+        "device_lost": true,
+        "raw_log": "target/release-validation/queue-fix-ops-f32.log",
+        "raw_log_sha256": "3f0fac20a6634fccc3ce6f82bfc97ccf455dedb74514099ab7e8d5390ad975c7"
+      }
+    },
+    "vram_used_bytes": 26759168,
+    "asset_preparation": {
+      "partial_exports_unverified": [],
+      "driver_log": "target/release-validation/export-restore.log",
+      "k_export_log": "target/release-validation/kparallel-exports.log"
+    },
+    "queue_matrix_driver_tail": [],
+    "queue_selection_experiment": {
+      "reverted": true,
+      "reason": "Dedicated queue passed one independent probe, then failed repeats and the repository F32 operator check.",
+      "experimental_source_sha256": "ce12a5c1c80b6f4aeb9fbbae4d707f12bad128fcdf169df6b98d0c9b401b80d6",
+      "final_source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
+      "waiting_drivers_stopped": [
+        50287,
+        55517
+      ]
+    },
+    "completed_interface_groups": []
+  },
+  "host_roles": {
+    "numeric_regression_performance": {
+      "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+      "ssh_endpoint": "36.150.116.206:31667"
+    },
+    "interface_continuation": {
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "ssh_endpoint": "36.150.116.206:33162"
+    }
+  },
+  "evidence_scope": {
+    "numeric_matrix": "Historical 54-run snapshot before the mapped-memory correction.",
+    "original_interfaces": "Historical interface groups carry individual host provenance.",
+    "original_qwen_regression": "Before the mapped-memory correction; no post-correction full-model GPU pass is claimed.",
+    "continuation": "Current-host build, mapped-range validation, real-model attempts and independent Vulkan/ROCm controls are recorded separately."
+  },
+  "mapped_range_fix": {
+    "source": "src/vulkan.rs",
+    "scope": "shared mapped-memory flush/invalidate ranges and mapping the full allocation",
+    "unit_test_command": "cargo test --locked --offline --profile release-fast --features vulkan,parity-trace --lib mapped_ranges_align_subregions_and_clip_to_the_mapped_allocation",
+    "unit_test_host": "Mac aarch64",
+    "unit_test_result": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2035 filtered out; finished in 0.00s",
+    "numeric_evidence_note": "The recorded 54-run numeric matrix and original Qwen regression predate the mapped-memory correction. Current continuation records fresh verification separately. Arithmetic and shaders are unchanged."
+  },
+  "shared_vulkan_unit_tests": {
+    "source": "src/vulkan.rs",
+    "unit_test_host": "Mac aarch64",
+    "unit_test_command": "cargo test --locked --offline --profile release-fast --features vulkan,parity-trace --lib vulkan::tests::",
+    "unit_test_result": "test result: ok. 9 passed; 0 failed; 20 ignored; 0 measured; 2007 filtered out; finished in 0.10s",
+    "ci_workflow": ".github/workflows/ci.yml"
+  },
   "validation_blockers": [
     {
-      "observed_at": "2026-11-18T23:58:41.193903+00:00",
-      "endpoint": "36.150.116.206:31667",
-      "error": "TCP connects but closes before the SSH banner; four repeated SSH/SCP probes fail before authentication",
+      "observed_at": "2026-11-19T02:20:24.223783+00:00",
+      "endpoint": "36.150.116.206:33162",
+      "ssh_reachable": true,
+      "kind": "vulkan_device_lost",
+      "error": "Current and unmodified-baseline Vulkan models fail. Independent constant-write/fill probes also fail under system Mesa 25.2.8 and private Mesa 24.0.5; the latter reports GPU hung/ERROR_DEVICE_LOST. Mapped-range errors are fixed (6 to 0), but model GPU execution remains blocked.",
+      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
       "last_collected_numeric_runs": 54,
       "last_collected_complete_interface_groups": 14,
       "interface_groups_expected": 27,
       "unverified": [
-        "Final four-log stdout/stderr change on the GPU host",
-        "Completion/results of detached remaining interface and repair drivers",
-        "Qwen3.5 GPU CLI JSON recheck after attention self-check diagnostic fix"
+        "Remaining 13 GPU interface groups",
+        "Final four-log GPU CLI JSON recheck",
+        "Post-cache-maintenance-correction full-model GPU regression"
       ],
-      "first_two_quantization_log_fixes_remote_build": "release-fast passed in 9m47s; a Qwen probe then exposed two additional attention diagnostic lines",
-      "qwen_probe_stdout_prefix": [
-        "operator=attention_score_reduction max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
-        "operator=attention_value_reduction exact=true"
-      ]
+      "passed": [
+        "Final CLI/server release-fast build on port 33162",
+        "Mapped range boundary/overflow test on Mac",
+        "Same active validation-layer probe: 6 API errors before fix, 0 after fix",
+        "Qwen CPU JSON parse and exact probabilities before/after cache-maintenance fix",
+        "Bounded ROCm 4096-element mul/add probe",
+        "Final shared Vulkan module tests on Mac: 9 passed, 20 hardware tests ignored",
+        "ROCm 4096-element mul/add/readback still passes after all Vulkan controls"
+      ],
+      "details": "target/sensenova-33162-interfaces.json; continuation in release-results.json",
+      "previous_connection_blocker": {
+        "observed_at": "2026-11-18T23:58:41.193903+00:00",
+        "endpoint": "36.150.116.206:31667",
+        "error": "TCP connects but closes before the SSH banner; four repeated SSH/SCP probes fail before authentication",
+        "last_collected_numeric_runs": 54,
+        "last_collected_complete_interface_groups": 14,
+        "interface_groups_expected": 27,
+        "unverified": [
+          "Final four-log stdout/stderr change on the GPU host",
+          "Completion/results of detached remaining interface and repair drivers",
+          "Qwen3.5 GPU CLI JSON recheck after attention self-check diagnostic fix"
+        ],
+        "first_two_quantization_log_fixes_remote_build": "release-fast passed in 9m47s; a Qwen probe then exposed two additional attention diagnostic lines",
+        "qwen_probe_stdout_prefix": [
+          "operator=attention_score_reduction max_abs=0.000e0 max_rel=0.000e0 first_bad=None",
+          "operator=attention_value_reduction exact=true"
+        ]
+      },
+      "independent_diagnostics": {
+        "below_model_runtime": true,
+        "underlying_kernel_firmware_hardware_cause_confirmed": false,
+        "queue_selection_experiment": "one independent dedicated-queue pass; four repeat failures and operator failure; source change reverted",
+        "memory_controls": "both host-coherent GTT and mapped VRAM failed constant-write/increment probes",
+        "driver_control": "Mesa 24.0.5 and strace extracted only under repository target; process-local ICD selection",
+        "ioctl_control": "DRM submit/sync calls return success; no failed ioctl recorded",
+        "rocm_after_vulkan_controls": "4096-element mul/add/readback passed; max_abs 0",
+        "kernel_log_blocker": "dmesg: Operation not permitted; dmesg_restrict=1"
+      }
     }
   ],
   "embedding_diagnostic": {

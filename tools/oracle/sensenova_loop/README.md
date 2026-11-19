@@ -7,7 +7,8 @@ vision and tokenizer kernels: 32 physical layers execute
 The release's training-only `loop_gate.logits` is validated and omitted because
 the pinned official implementation does not use it. mHC routing stays F32.
 
-**Experimental / partial adaptation.** Release F32 text passes 570 official
+**Experimental / partial adaptation.** On the earlier host, before the mapped-memory
+correction, release F32 text passed 570 official
 state/logit comparisons on each of CPU, Auto and strict Vulkan, with exact
 tokenizer/greedy IDs. F16/BF16 text and image pass 570/172 checks on all three.
 F32 single-image greedy and final logits pass, but some intermediate states
@@ -18,6 +19,18 @@ The remote precision/interface matrix records every combination and failure.
 See [release-validation.md](release-validation.md), the per-combination
 [coverage matrix](release-matrix.csv), and [timings](performance.json).
 [validation.md](validation.md) retains historical Preview evidence.
+
+The port-33162 continuation rebuilt the CLI/server and fixed mapped-memory atom
+alignment found by the Vulkan validation layer. Its tiny F32 probe improves from
+six API errors to zero but still reports `device lost`; unmodified-baseline Qwen
+fails as well. The retained interface snapshot remains 14/27 complete groups.
+Independent integer-write and buffer-fill probes also fail outside this runtime
+under system Mesa 25.2.8 and an isolated Mesa 24.0.5. A dedicated compute queue
+passes once but fails repeat checks; that attempted selection change was reverted.
+ROCm mul/add/readback still passes. Kernel logs are restricted in this container,
+so the underlying kernel/firmware/hardware cause is unresolved.
+The numeric matrix and old-model GPU regression precede this cache-maintenance
+correction; post-correction full-model GPU validation remains incomplete.
 
 The converter exports F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K text
 weights, with F32 norms, recurrent parameters, mHC routers and projector.
@@ -50,8 +63,8 @@ Preview and other models keep their original default coefficient path.
 Run these commands **on the validation host**, from the repository root.
 Do not download weights to the Mac. Allow at least 150 GiB free disk for the
 source, nine text exports, projector and validation artifacts. Check the
-filesystem containing `models`: this host's `/workspace` is a separate 98 GiB
-volume. During validation, this task's `models` was moved to
+filesystem containing `models`: the original numeric host's `/workspace` was a
+separate 98 GiB volume. During validation, this task's `models` was moved to
 `/root/rmi-sensenova-loop-9b-models` and symlinked back; verify its availability
 after reconnecting.
 

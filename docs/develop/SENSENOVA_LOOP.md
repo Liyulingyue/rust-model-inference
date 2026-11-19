@@ -12,7 +12,9 @@ combinations across nine text storage formats, three backends, text/image
 generation and JEV. Implementation, CLI, HTTP and numeric verification are
 separate. The last collected snapshot has
 14/27 complete
-interface groups. **Collection interrupted:** SSH to `36.150.116.206:31667` now closes before the handshake. The interface totals below are the last retrieved snapshot. Detached drivers may still be running, but their final results and the four-log stdout fix have not been collected/rechecked. The 108-row aggregate does not mean the interface matrix is complete.
+interface groups. **GPU continuation blocked:** SSH to `36.150.116.206:33162` works, but real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes fail with `device lost`. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
+
+The continuation host is `j-5fyejyon53kz4ytgmxuf5ne2m5`, SSH port 33162. It completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to port 31667. No throughput comparison combines the two hosts.
 
 F32 text passes all 570 official state/logit gates on each backend,
 with exact tokenizer and greedy IDs. Auto/Vulkan execute device submissions.
@@ -58,6 +60,19 @@ Q4_K/Q6_K scale errors and reference CPU-offload materialization. Qwen3.5 real
 CPU/GPU logits remain bitwise unchanged against the same-host baseline; the full
 library retains the same 25 existing failures. Broader K-quant quality,
 long-context and arbitrary image resizing remain unvalidated.
+
+Continuation on port 33162 also exposed a shared mapped-memory range contract
+defect. Flush/invalidate ranges now cover complete non-coherent atoms within
+the fully mapped allocation. The boundary/overflow test passes; the same
+validation-layer probe improves from six errors to zero but still reports
+`device lost`. The unmodified baseline Qwen GPU CLI fails too, while CPU JSON
+and a bounded ROCm probe pass. Independent integer-write and buffer-fill probes
+also fail under system Mesa 25.2.8 and an isolated Mesa 24.0.5. A dedicated queue
+passes once but fails repeats and the operator check; its selection change was
+reverted. Kernel logs are restricted, so the underlying kernel/driver cause is
+unresolved. Remaining GPU interfaces and post-correction full-model GPU regressions
+remain unverified. Recorded numeric/regression results and process times above
+precede this cache-maintenance correction.
 
 [Validation and review evidence](../../tools/oracle/sensenova_loop/release-validation.md),
 [machine-readable results](../../tools/oracle/sensenova_loop/release-results.json)
