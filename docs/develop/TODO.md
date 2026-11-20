@@ -13,63 +13,6 @@ NEON on aarch64; no AVX-512).
 
 ## High Priority
 
-- [x] **YuE2 KV cache 转置成 head-major** — ✅ 2026-11-19 完成。
-      背景（2026-11-16）：value reduce 的瓶颈是**访存模式**而不是带宽——旧的
-      `[layer][position][kv_head][dim]` 扫一个 kv head 步长 4 KiB、每行只用 512 B。
-      合成内核基准：现状 34.5 ms → 转置 `[head][position][dim]` 14.6 ms → 转置 +
-      token-outer 7.1 ms（4.84x），两种改法都逐位一致（每个 dim 内的 token 顺序不变）。
-      第一步（token-outer kernel，`13344004`）已经把 AR attention 94.0 s → 69.0 s、
-      NAR prefix 14.1 s → 10.2 s；本次补上布局那一半。
-      实现：给共享的 `core::scratchpad::KvState` 加**布局标记**（`KvLayout`，默认
-      `PositionMajor`），`KvCache` 容器保持布局无关——两种布局是同一
-      `[layer][capacity][kv_heads * head_dim]` 缓冲的置换，总元素数不变，所以
-      LFM2/qwen3 等既有调用方不受影响；YuE2 构造 session 时
-      `.with_layout(KvLayout::HeadMajor)`。
-      改动面：AR 的 KV 写入/读取与 score、reduce 两条路径、`commit_kv_shadow`（设备
-      delta 仍是 position-major，写 CPU 影子时按布局转置）、NAR 的 `prefix_kv`、
-      `hybrid_attention`、`causal_prefix_attention` 及两个 legacy 参考内核（legacy
-      同步改 head-major，保证同一 fixture 上仍能逐位对比）。trace 契约不变：
-      `yue2.nar.prefix_k/v` 仍在转置前用 row-major 数据发出，与 Python oracle 的
-      `[row][head][dim]` element 顺序一致。
-      回归：`nar::attention_parity_tests::head_major_layout_preserves_attention_bits`
-      证明同一 head 转置前后的 attention 逐位相同（513 行，跨 512 block 边界），
-      NAR 的 fixture 也改为真实 head-major 顺序。
-      端到端验证（2026-11-19，本机 aarch64 20 核）：ModelScope 拉 `m-a-p/YuE2-3B`
-      + `m-a-p/YuE2-Vae`（sha256 与 `weights_manifest.json` 一致），`--quant bf16`
-      转换后用 `91cf1ce` 与本次改动两个二进制跑同一命令（seed 12300 / steps 1 /
-      max-tokens 256 / 256 latent 帧）：旧二进制 1 次、新二进制 2 次，三次产出的
-      wav md5 全为 `0e15b221b748c49a498f7aa55836ee70`——布局转置与新的 NEON
-      token-outer 内核端到端逐位一致。同一短配置的墙钟为旧 135.9 s、新 107–118 s
-      （单样本，仅作量级参考）。
-      ⚠️ 顺带纠正一个曾写进 PR 的错误结论："AVX2 已到单核带宽上限的 99.4%"——那条
-      "流式天花板"基线本身是串行 FP 加法链，测的是指令吞吐，不是 DRAM 带宽。
-- [x] **YuE2 的 CPU 与 Vulkan 整链输出并不一致（原记录把原因归到 AR prefill，已证伪）**
-      — ✅ 2026-11-19 定位并修复。
-      原记录（2026-11-16）称"设备路径下 AR 的 prefill 走设备（`prefill_on_gpu`），
-      attention 累加顺序不同导致 token 分叉"。这个原因在本分支不成立：
-      `YuE2ArSession` 构造时就是 `gpu: Some(None)`，AR 的整图设备执行器永久禁用，
-      `prefill_on_gpu` 从未被走到；`yue2.abc.generated_ids` 与
-      `yue2.semantic.generated_ids` 在 cpu 与 auto 下逐位相同（640 + 256 个 token）。
-      真正的分叉点在 NAR 的 q/k/v：`project_qkv_rows` 把三个 BF16 投影合并给共享
-      `LinearExecutor`，而设备端的 `matmul_rows_group` 交回的是**未舍入的 F32**；CPU 的
-      `YuE2Weight::matmul_bf16_cpu` 每个元素都要在 bias 之后 `bf16::from_f32` 回舍入。
-      同时 `GpuMatmulSpec::prepared` 对这些权重选的是"先把 activation 舍入到 BF16"的
-      prepared kernel，相对误差约 4e-3，所以只补回舍入仍与 CPU 不同（实测 98.4% 采样
-      不同）。
-      修复（`src/compute/linear.rs` + `src/models/yue2/nar.rs`）：
-      ① `LinearExecutor::with_cpu_dot_contract()` 让 BF16 组投影走
-      `GpuMatmulMode::Dot`，shader 的四路 FMA stream 与 `dot_bf16_f32_4` 的归约
-      逐位相同；② q/k/v 落盘前按 CPU 契约回舍入到 BF16。两者缺一不可。
-      回归：`compute::linear::tests::grouped_bf16_dot_contract_matches_the_cpu_kernel_bit_for_bit`
-      断言设备输出与 `dot_bf16_f32_4` 的 F32 归约逐位相同（`#[ignore]`，需 Vulkan）。
-      端到端（2026-11-19，真实权重，seed 12300 / steps 1 / max-tokens 256，本机
-      aarch64）：`yue2.nar.latents` 的 16384 个 F32
-      在 cpu 与 auto 下**逐位相同**；wav 只有 0.566% 的采样不同，最大 1 个 PCM16 档位
-      （rms 0.075）。parity-trace 显示残余差异从 VAE 的**第一个设备卷积**开始
-      （`yue2.vae.decoder` layer 0 最大 1.7e-6，逐层放大到输出前约 1e-5）——即设备卷积
-      的归约顺序与 torch 钉住的 CPU 路径不同，属于 §3.4 的既有 VAE 门槛，不再是
-      AR/NAR 的分叉。
-      由此确定的验收口径：**AR + NAR 逐位一致；VAE 设备卷积 ≤1 个 PCM16 档位**。
 - [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
       2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
       整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
@@ -79,25 +22,6 @@ NEON on aarch64; no AVX-512).
       把每层的多个投影合成一次提交（共享 linear executor 已有 `run_group`），以及把
       NAR 的 prefix+velocity 两次前向的合成一次提交；设备侧 GEMV 的效率也需要单独看
       （每 workgroup 64 输出通道 × 32 帧的 tiling 对 rows=1 是否合适）。
-- [x] **共享卷积的设备路径无复核门槛，YuE2 VAE 设备化后被它吃掉收益** —
-      ✅ 2026-11-19 收口。
-      `ops::nn::conv3d_with_options` 原来在设备成功后**无条件**用 CPU kernel 复核
-      （`conv3d_matches_cpu`，不符就重试、再不符退回 CPU 重算），而线性路径的复核是
-      `RMI_GPU_CPU_CHECK` 门控的。现在卷积同样门控：新增
-      `ops::nn::conv_cpu_check_enabled()`，在 `RMI_GPU_CPU_CHECK` 置位或严格档
-      `--compute vulkan` 下为真；`--gpu`（Auto）默认信任设备。复核被打开时行为不变
-      （采样 65,536 个元素、容差 `1e-4 * scale`、不符重试、仍不符退回 CPU 重算）。
-      YuE2 VAE 的 `Conv::forward_device` 直连 `try_conv3d` 绕过了共享层，所以它在**同一
-      开关**下用自身的 pinned CPU 路径复核（容差同为 `1e-4 * scale`），不符就回退 CPU。
-      为什么用自身路径而不是共享 kernel：VAE 的 CPU 参考钉在 torch 上，与共享
-      `conv3d` kernel 的求和顺序不同，用共享 kernel 复核会把正确的设备结果判错。
-      `vulkan_yue2_bf16_rounds_after_bias_across_tiles` 现在自己设
-      `RUST_GPU_MIN_OUTPUTS=0`（原来的 ignore 文案要求调用方在 shell 里设），因此不再
-      依赖外部环境变量；代价是它必须单独跑（进程级变量）。
-      验证（2026-11-19，本机 aarch64 + Vulkan）：`vae::device_tests::vae_conv_device_matches_the_cpu_kernel`
-      与 `ar::performance_tests::vulkan_yue2_bf16_rounds_after_bias_across_tiles` 通过；
-      真实权重下 `RMI_GPU_CPU_CHECK=1 --gpu` 与 `--compute vulkan` 各跑一遍，复核未报
-      不一致、也没有重试日志，输出与不带复核的 `--gpu` 逐字节相同。
 - [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
       2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
       vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor
@@ -198,12 +122,6 @@ NEON on aarch64; no AVX-512).
       当前 Q8_0 × Q8_0 matmul 已用 `_mm256_maddubs_epi16` (AVX2)，但 AVX-VNNI 的
       `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
       K2-Horizon / Breeze 等 Q8_0 路径上可省一次 saturate pass。
-- [x] ✅ **Vulkan SiLU 的 f32 次正规数缺陷** (2026-10-12) — `exp_approx` clamp 在 exp
-      溢出点导致 `1/den` 落进次正规数、silu 修正项产出 NaN，Z-Image FFN 43% 激活损坏。
-      **算子从未在生产规模验证过**（自检只覆盖 96 个元素，真实是 3800 万）。
-      clamp 改 `±80` + 新增生产规模门禁。⚠️ **clamp 值不可调回 88.376**，且
-      GPU SiLU 已与 CPU 不再逐位一致（PSNR 33.34 → 31.52 dB）。
-      详见 [TODO-020](#todo-020-vulkan-silu-的-f32-次正规数缺陷---已修复但饱和边界不可回退)。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
@@ -406,68 +324,9 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
          再 top-K choose（第二次 forward pass）
       注意：当前 `verify_label_tokens_single` 只校验 A-Z；扩展后需要校验
       实际使用的 label set（数字或字母）。
-- [x] **MiniCPM-V 4.7 1B（`qwen35` 语言塔）多模态接入** — 已完成，`20c247d`…`1bd1165`。
-      视觉塔逐位对齐：602,112 个 normalized pixel F32 与 pinned oracle
-      `69f201a2` 完全一致；`conv_output_silu` 逐位相同（2158/8192 分量一致，L1 6e-5）；
-      `pos_embed` 约 `1e-6` 相对差异，按 SIMD/FMA 标准接受。切片、CANVAS M-RoPE、
-      tile separator 的 token-free embedding span 已接入；`<image_id>0</image_id>`
-      由 mtmd 层注入。复现命令见 [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpmv/README.md)。
-- [x] **MiniCPM-V 4.7 35B-A3B（`qwen35moe`）语言塔** — 已完成，`032ff5c`…`385d6cf`。
-      SSM 全链路对齐：输入 embedding / conv / `q_conv_predelta` / `k_conv_predelta` /
-      `v_conv_predelta` / `beta_sigmoid` / `gate` 全部逐位一致或 ~1e-7；递推本身与
-      oracle 的 chunked WY 输出在**同一输入、同一初始 state**（用 oracle 自带的
-      `state_predelta` 锚定）下相差 avg 0.0063%。多模态端到端可用，`--jinja` 下
-      512×512 出 overview + 2 slices 共 202 个视觉 token。
-      ⚠️ 途中**两次误判**：先是 oracle eval callback 把多 ubatch 写进同一文件（后写覆盖先写），
-      导致「最佳匹配 L1 923 vs 我方相邻 token 间 L1 中位数 956」——结论**不可证伪**；
-      再是把「我方 token *i*」对「oracle row *i*」，而 llama.cpp 的 prefill ubatch
-      首尾各带 3 个 padding row，3-token prompt 的 ubatch 是
-      `[pad,pad,pad,t1,t2,t3,pad,pad,pad]`。据此曾误报「~14% 差异」，`385d6cf` 已撤回。
-      **教训：oracle dump 必须先解决 ubatch 对齐与 padding，否则任何归因都是错的。**
-      **2026-10-20 追到底**：修掉 `l2_norm` 把 eps 加在根号内（应为分母下限
-      `1/max(sqrt(sum), eps)`，见 `ggml/src/ggml-cpu/ops.cpp:4333`；且 `sqrtf`
-      会先把 f64 累加器收窄到 f32）后，layer 1 的 `conv_output_raw` / `q_conv` /
-      `q_conv_predelta` / `k_conv_predelta` / `state_predelta` / `final_output`
-      **全链逐位精确**，0-2 层 `l_out` 从 1e-5 降到 1e-9 量级。此前
-      `qwen35_l2_norm_matches_pinned_llama_cpp_bits` 没能拦住，是因为它是从它要
-      检查的 Rust 代码生成的（对旧公式 128/128、对 ggml 公式 0/128），已按 kernel 重生成。
-- [x] **35B 的 MoE（routed + shared expert）数值对照** — 已完成，2026-10-20。
-      `src/models/qwen35/trunk/moe.rs` 是**逐算子照抄** oracle 的公式
-      （`LLM_FFN_PAR` 是 gate 模式而非残差；`routed = Σ score_e down_e(silu(gate_e·x)·up_e·x)`；
-      `out = routed + sigmoid(gate_inp_shexp·x) · shared`；256 专家 softmax → top-8 → 归一），
-      张量 shape 也对得上，输出质量正确——但这是**构造性论证 + 行为观察**，
-      不是数值验证。早先「路由选中同一批专家（67,140,206）」的观测**不可信**：
-      用了「首个精确匹配」做 token 映射，重复 token 全部塌到同一下标，且发生在搞懂 padding 之前。
-      ⚠️ **本文原先写「oracle 侧 `ffn_moe_logits` / `ffn_moe_out` / `ffn_shexp_gated`
-      都已能 dump」——这是错的**，属于此前乐观记录的残留。qwen35 的 oracle patch
-      （`tools/oracle/qwen35/qwen35-llama-trace.patch`）白名单里**一个 MoE 节点都没有**，
-      并且 `architecture != "qwen35"` 直接 throw，`qwen35moe` 连加载都做不到。
-      那几个 `ffn_moe_*` dump 属于 **lfm2moe / mellum** 的 patch，是别的模型。
-      即「oracle 从未为本架构产出过这些数字」。
-      Rust 侧的 `RMI_MOE_DUMP` append 式 dumper（6 个文件、无 layer/step、无长度头，
-      40 层 × N token 全部交错，无法归因）已删除，改为
-      `src/models/qwen35/trunk/trace.rs` 的 `(name, layer, step)` 定点 checkpoint，
-      对齐方式定为**两侧各跑单 token**（ubatch padding 只在多 token prefill 出现，
-      单 token 下 `step == 0` 即同一个真 token，无需穿热路径插桩）。
-      oracle 侧也已补齐：`tools/oracle/qwen35/qwen35moe-ffn-dump.patch` 让
-      `llama-eval-callback` 接受 `qwen35moe`，产出 10 个 MoE 节点 + 逐层边界；
-      `tools/oracle/qwen35/build_qwen35_oracle.sh` 从 tarball 构建并做 blob 校验、
-      关掉全部 x86 ISA 变体以保证标量路径。35B Q8_0 权重已下载并校验
-      （`MiniCPM-V-4_7-35B-A3B-Q8_0.gguf`，36,902,368,928 bytes，
-      SHA256 `8543ee5b0f83152066f2fec58b8d9757d56bb7c4233b4fdd26ae364f0107d16b`）。
-      **结果**：`ffn_moe_topk` 在 layer 0 / 3 / 39 逐位一致（id 与顺序都对上），
-      layer 0 的 `ffn_moe_logits` 与 shared expert 全链亦逐位一致。
-      节点清单与对齐规则见
-      [`tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md`](../../tools/oracle/qwen35/qwen35moe-ffn-dump.patch.README.md)。
-      ⚠️ 教训：capture / selection / writing 是**三份独立名单**。「节点不在 manifest 里」
-      在三份都查过之前什么都不能说明；`RMI_CB_TRACE=1` 会打印调度器实际问到的每个名字，
-      一次运行即可分辨「从未提供」与「提供了但被拒」。
 - [ ] **35B 视觉塔未与 oracle 做数值对照** — 1B 的 `pos_embed` 逐位比过，35B 完全没有。
       projector 代码零改动（两个尺寸共用同一 `minicpmv4_7` 实现，仅 `projection_dim`
       1024 → 2048），但 2048 维输出、`attn_post_norm` 全层 checkpoint 都没验证过。
-- [x] **`qwen35moe` 的 Vulkan MoE recorder** — 已实现 Q8_0/F32 专家寻址、GPU 路由、
-      shared expert 与批量 prefill/decode。Sage-A1.5 的硬件数值验收和其他格式边界见
-      [验证记录](../../tools/oracle/sage_a15/README.md)。其他 `qwen35moe` 模型仍需各自验收。
 - [ ] **`qwen35moe` 的 Vulkan 整模数值验收未完成** — 共享路径已接入 GPU expert 投影与
       host 路由/归约。Holo4 在 M3 Max / RADV NAVI31 的 MoE 分层和 batch/reset 检查通过，
       整模 logits 的 0.02 CPU/GPU 门槛仍失败；此 MiniCPM 权重尚未验证 GPU。
@@ -496,13 +355,6 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       另外 `--compute vulkan --jev` 明明整条前向都在设备上（4.2× 于 CPU、概率一致）却打出
       「no complete device path for this mode」。详见
       [TODO-054](#todo-054-dory-的默认提示在-cli--http--模型自带模板之间三分jev-的backendpartial提示对-dory-是假的)。
-- [x] **强制 BOS 的优先级与 llama.cpp 相反** — 已修（原记录「pixtral 缺强制 BOS →
-  Dory 少一个 `<s>`」是**错的**：Dory 的 GGUF 明写 `add_bos_token = false`，参考实现
-  因此也不加 BOS，仓库与参考一致）。真正的问题是 llama.cpp 让 **GGUF 的 key 覆盖**
-  pre 分词器的默认值，仓库却写成「强制值赢过 GGUF」。缺 BOS 的是 **key 缺失**的
-  情况 —— Nemotron-3-Nano 30B（`pre = "pixtral"` 且无 `add_bos_token`）正是这一类。
-  详见 [TODO-052 F2](#f2强制-bos-的优先级与-llamacpp-相反--已修)。
-
 - [ ] **Audio8 fused layer（单 submit/层）未完成** — 当前 GPU 模式每层 8 次 submit
        （2 norm + QKV + attention + O + gate_up + SiLU + down），每次 ~0.25ms 固定开销，
        36 层 × 116 步 ≈ 32K 次提交，submit 开销主导了 GPU 模式 13.5s 的总耗时
