@@ -53,8 +53,6 @@ LINEAR_PROJECTIONS = (
     ".ffn_gate.weight",
     ".ffn_up.weight",
     ".ffn_down.weight",
-    ".mhc_attn.weight",
-    ".mhc_ffn.weight",
 )
 
 
@@ -140,7 +138,7 @@ def validate_config(config):
             raise ValueError(f"unsupported text_config.{key}")
     rope = text["rope_parameters"]
     if (
-        rope.get("rope_type") != "default"
+        rope.get("rope_type") not in ("default", "yarn")
         or rope.get("mrope_interleaved") is not True
         or rope.get("partial_rotary_factor") != text["partial_rotary_factor"]
         or len(rope["mrope_section"]) != 3
@@ -149,6 +147,21 @@ def validate_config(config):
         != text["head_dim"] * text["partial_rotary_factor"]
     ):
         raise ValueError("unsupported text RoPE configuration")
+    if rope["rope_type"] == "yarn":
+        factor = rope.get("factor")
+        original = rope.get("original_max_position_embeddings")
+        if (
+            type(factor) not in (int, float)
+            or not math.isfinite(factor)
+            or factor < 1
+            or type(original) is not int
+            or original <= 0
+            or set(rope) - {
+                "rope_type", "rope_theta", "partial_rotary_factor", "mrope_interleaved",
+                "mrope_section", "factor", "original_max_position_embeddings",
+            }
+        ):
+            raise ValueError("unsupported YaRN scaling parameters")
     if (
         text["linear_key_head_dim"] != text["linear_value_head_dim"]
         or text["linear_num_value_heads"] % text["linear_num_key_heads"]
@@ -270,13 +283,20 @@ def convert(root, output, mmproj, quant="f32"):
             )
             expected[f"model.language_model.layers.{layer}.{kind}.bias"] = (outputs,)
     actual = {name for name in reader.owners if not name.startswith("mtp.")}
+    # The release ships this training gate; the pinned official loader reports
+    # it as unexpected and fixed-count inference never reads it.
+    gate = "model.language_model.loop_gate.logits"
+    if gate in actual:
+        if reader.shape(gate) != (h,) or reader.dtype(gate) != "F32" or not np.isfinite(reader.f32(gate)).all():
+            raise ValueError("invalid unused Loop training gate")
+        actual.remove(gate)
     if actual != set(expected):
         raise ValueError(
             f"tensor inventory mismatch: missing={set(expected) - actual}, unexpected={actual - set(expected)}"
         )
     for name, shape in expected.items():
         dtype = reader.dtype(name)
-        if reader.shape(name) != shape or dtype != "F32":
+        if reader.shape(name) != shape or dtype not in ("F32", "BF16"):
             raise ValueError(
                 f"{name}: invalid shape or precision: {reader.shape(name)}, {dtype}"
             )
@@ -337,7 +357,7 @@ def convert(root, output, mmproj, quant="f32"):
             size = np.prod(shape).item() * 4
 
             def chunks(name=name):
-                yield reader.raw(name)
+                yield reader.raw(name) if reader.dtype(name) == "F32" else reader.f32(name).tobytes()
 
             writer.add_tensor_chunks(target, GGML_F32, gguf_dims(shape), size, chunks)
     writer.write()

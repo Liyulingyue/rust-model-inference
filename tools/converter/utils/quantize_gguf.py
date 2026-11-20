@@ -64,7 +64,7 @@ from tools.converter.utils.gguf import (
     GGML_Q4_1,
     quantize_q4_1,
     GGML_BF16, GGML_F16, GGML_F32, GGML_Q4K, GGML_Q5K, GGML_Q6K, GGML_Q8_0,
-    _read_gguf, GgufWriter, f32_to_bf16, gguf_dims, quantize_q8_0,
+    _read_gguf, _tensor_nbytes, GgufWriter, f32_to_bf16, quantize_q8_0,
 )
 from tools.converter.utils.kquants import quantize_k
 
@@ -74,6 +74,8 @@ from tools.converter.utils.kquants import quantize_k
 #: expects the integer, so a format string here would be a spec violation.
 FILE_TYPES = {"f32": 0, "f16": 1, "bf16": 32, "q8_0": 7, "q4_0": 2, "q4_1": 3,
               "q4_k": 14, "q5_k": 16, "q6_k": 18}
+
+_CHUNK_BYTES = 16 * 1024 * 1024  # Aligned to every supported source/quant block.
 
 #: Elements per block, and the GGUF type each format produces.
 BLOCK_FORMATS = {
@@ -163,11 +165,8 @@ def _quantize_one(
     if target == GGML_BF16:
         return target, f32_to_bf16(values.tobytes())
     if target in (GGML_Q4K, GGML_Q5K, GGML_Q6K):
-        # The k-quant search compares weighted squared errors, so its float
-        # accumulation order is load-bearing: `kquants.py` is a line-by-line
-        # port of `quantize_row_q4_K_ref` / `quantize_row_q5_K_ref` /
-        # `quantize_row_q6_K_ref` for that reason, and reordering it here
-        # would change which scale wins.
+        # Reuse the shared scale search; independent decoding checks accuracy,
+        # while its F64 reductions need not reproduce ggml's F32 payload bits.
         return target, quantize_k(target_format, values)
     raise AssertionError(f"unreachable target {target}")
 
@@ -197,8 +196,7 @@ def quantize_gguf(
         raise FileExistsError(output)
     keep_names = frozenset(keep)
     metadata, tensors = _read_gguf(source)
-    # Build the output in-memory first, then atomically rename it into place
-    # so a failed quantization leaves the directory untouched.
+    # Stream block-aligned chunks so model size does not determine peak RAM.
     temporary = output.with_suffix(output.suffix + ".tmp")
     if temporary.exists():
         raise FileExistsError(temporary)
@@ -219,26 +217,37 @@ def quantize_gguf(
     source_types = {value[0] for value in tensors.values()}
     for index, (name, value) in enumerate(sorted(tensors.items())):
         source_type, dims, length, offset = value
-        raw = _tensor_bytes(source, offset, length)
-        target, payload = _quantize_one(
-            name, raw, source_type, dims, target_format, keep_names
-        )
+        block, target_type = BLOCK_FORMATS[target_format]
+        target = _pick_target(name, source_type, dims, block, target_type, keep_names)
         if target != source_type:
             quantised += 1
         else:
             kept += 1
-        # `_read_gguf` returns GGUF-order dims (reversed vs torch); the writer's
-        # `gguf_dims` helper reverses again, so pass torch-order to round-trip.
-        torch_dims = tuple(reversed(dims))
-        writer.add_tensor(name, target, gguf_dims(torch_dims), payload)
+        def chunks(name=name, source_type=source_type, dims=dims,
+                   length=length, offset=offset):
+            for position in range(0, length, _CHUNK_BYTES):
+                size = min(_CHUNK_BYTES, length - position)
+                raw = _tensor_bytes(source, offset + position, size)
+                if len(raw) != size:
+                    raise ValueError(f"{name}: truncated source tensor")
+                yield _quantize_one(
+                    name, raw, source_type, dims, target_format, keep_names
+                )[1]
+
+        writer.add_tensor_chunks(name, target, dims, _tensor_nbytes(target, dims), chunks)
         if progress_every and (index + 1) % progress_every == 0:
             print(
                 f"  [{index + 1}/{len(tensors)}] {name}: "
                 f"{source_type} -> {target}",
                 file=sys.stderr,
             )
-    writer.write()
-    temporary.rename(output)
+    # Reserve before entering cleanup so a losing writer cannot unlink another partial.
+    temporary.touch(exist_ok=False)
+    try:
+        writer.write()
+        output.hardlink_to(temporary)
+    finally:
+        temporary.unlink(missing_ok=True)
     print(
         f"{output}: {len(tensors)} tensors, "
         f"{quantised} -> {target_format}, "

@@ -6758,6 +6758,7 @@ impl<'a> Qwen3Ops<'a> {
         head_dim: usize,
         eps: f32,
         rows: usize,
+        add_norm_epsilon: bool,
     ) -> Result<(), VulkanError> {
         let expected_key = k_heads
             .checked_mul(head_dim)
@@ -6839,7 +6840,7 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
-        push[14] = 1;
+        push[14] = if add_norm_epsilon { 2 } else { 1 };
         let (x, y) = super::dispatch_grid(k_heads.max(v_heads), &self.context.limits)?;
         unsafe {
             commands.bind(
@@ -10024,61 +10025,75 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
             }
         }
         crate::ops::silu_approx_inplace(values);
-        for offset in [0, DIM] {
-            let head = &mut values[offset..offset + DIM];
-            crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
-        }
     }
     let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&weight)) }
         .map_err(|error| error.to_string())?;
     let run = (|| -> Result<(), VulkanError> {
-        let mut ops = Qwen3Ops::new(context, layout, 2)?;
-        let binding = ops.bind_buffers(&[buffer])?;
-        ops.write_f32(layout.normed, &qkv)?;
-        ops.write_f32(layout.up, &initial)?;
-        let commands = TokenCommands::begin(context)?;
-        ops.record_qwen35_recurrent_conv(
-            &commands,
-            binding,
-            layout.normed,
-            layout.q,
-            layout.k,
-            layout.v,
-            layout.up,
-            0,
-            1,
-            CONV,
-            DIM,
-            DIM,
-            TAPS,
-            1,
-            1,
-            DIM,
-            1e-6,
-            ROWS,
-        )?;
-        commands.submit_and_wait()?;
-        for (region, offset) in [(layout.q, 0), (layout.k, DIM), (layout.v, DIM * 2)] {
-            let actual = ops.read_f32(region, ROWS * DIM)?;
-            for row in 0..ROWS {
-                for column in 0..DIM {
-                    let gpu = actual[row * DIM + column];
-                    let cpu = expected[row * CONV + offset + column];
-                    if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
-                        return Err(VulkanError::UnsupportedShape(format!("conv mismatch offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
+        for add_norm_epsilon in [false, true] {
+            let mut expected = expected.clone();
+            for row in expected.chunks_exact_mut(CONV) {
+                for offset in [0, DIM] {
+                    let head = &mut row[offset..offset + DIM];
+                    if add_norm_epsilon {
+                        let sum = head.iter().map(|&v| f64::from(v * v)).sum::<f64>();
+                        let scale = ((sum as f32) + 1e-6).sqrt().recip();
+                        for value in head {
+                            *value *= scale;
+                        }
+                    } else {
+                        crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
                     }
                 }
             }
+            let mut ops = Qwen3Ops::new(context, layout, 2)?;
+            let binding = ops.bind_buffers(&[buffer])?;
+            ops.write_f32(layout.normed, &qkv)?;
+            ops.write_f32(layout.up, &initial)?;
+            let commands = TokenCommands::begin(context)?;
+            ops.record_qwen35_recurrent_conv(
+                &commands,
+                binding,
+                layout.normed,
+                layout.q,
+                layout.k,
+                layout.v,
+                layout.up,
+                0,
+                1,
+                CONV,
+                DIM,
+                DIM,
+                TAPS,
+                1,
+                1,
+                DIM,
+                1e-6,
+                ROWS,
+                add_norm_epsilon,
+            )?;
+            commands.submit_and_wait()?;
+            for (region, offset) in [(layout.q, 0), (layout.k, DIM), (layout.v, DIM * 2)] {
+                let actual = ops.read_f32(region, ROWS * DIM)?;
+                for row in 0..ROWS {
+                    for column in 0..DIM {
+                        let gpu = actual[row * DIM + column];
+                        let cpu = expected[row * CONV + offset + column];
+                        if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
+                            return Err(VulkanError::UnsupportedShape(format!("conv mismatch add_norm_epsilon={add_norm_epsilon} offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
+                        }
+                    }
+                }
+            }
+            let actual_state = ops.read_f32(layout.up, initial.len())?;
+            assert_eq!(actual_state, state);
         }
-        let actual_state = ops.read_f32(layout.up, initial.len())?;
-        assert_eq!(actual_state, state);
         Ok(())
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     run.and(cleanup).map_err(|error| error.to_string())?;
-    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
+    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true both_norm_formulas=true");
     Ok(())
 }
 
@@ -10284,7 +10299,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
             expected[index].d.to_bits(),
         ));
     }
-    println!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
+    eprintln!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
     Ok(())
 }
 
@@ -10371,7 +10386,7 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
             expected_scales[index].to_bits()
         ));
     }
-    println!(
+    eprintln!(
         "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
         COUNT / 32
     );
@@ -10505,7 +10520,7 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
             expected.to_bits()
         ));
     }
-    println!("operator=attention_value_reduction exact=true");
+    eprintln!("operator=attention_value_reduction exact=true");
     Ok(())
 }
 
@@ -10786,7 +10801,7 @@ fn check_close(
             first_bad = Some((index, gpu, cpu, absolute, relative));
         }
     }
-    println!(
+    eprintln!(
         "operator={name} max_abs={max_absolute:.3e} max_rel={max_relative:.3e} first_bad={:?}",
         first_bad.map(|value| value.0)
     );

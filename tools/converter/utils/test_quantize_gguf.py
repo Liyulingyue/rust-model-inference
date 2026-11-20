@@ -1,3 +1,5 @@
+import importlib
+
 import numpy as np
 import pytest
 
@@ -9,7 +11,7 @@ from tools.converter.utils.gguf import (
     GgufWriter,
     f32_to_bf16,
 )
-from tools.converter.utils.quantize_gguf import quantize_gguf
+from tools.converter.utils.quantize_gguf import BLOCK_FORMATS, quantize_gguf, quantize_tensor
 
 
 def _values(count: int) -> np.ndarray:
@@ -30,6 +32,86 @@ def _read(path):
     from tools.converter.utils.gguf import _read_gguf
 
     return _read_gguf(path)
+
+
+@pytest.mark.parametrize("fmt", sorted(BLOCK_FORMATS))
+def test_streamed_quantization_is_bounded_and_matches_whole_tensor(tmp_path, monkeypatch, fmt):
+    module = importlib.import_module("tools.converter.utils.quantize_gguf")
+    monkeypatch.setattr(module, "_CHUNK_BYTES", 1024, raising=False)
+    read = module._tensor_bytes
+
+    def bounded_read(path, offset, length):
+        assert length <= 1024
+        return read(path, offset, length)
+
+    monkeypatch.setattr(module, "_tensor_bytes", bounded_read)
+    values = _values(256 * 7)
+    source = tmp_path / "source.gguf"
+    _write_source(source, {"projection": (GGML_F32, (256, 7), values.tobytes())})
+    output = tmp_path / f"{fmt}.gguf"
+    quantize_gguf(source, output, target_format=fmt)
+    _, tensors = _read(output)
+    kind, dims, length, offset = tensors["projection"]
+    expected_kind, expected = quantize_tensor(
+        "projection", values.tobytes(), GGML_F32, (256, 7), fmt
+    )
+    assert kind == expected_kind and dims == (256, 7)
+    with output.open("rb") as stream:
+        stream.seek(offset)
+        assert stream.read(length) == expected
+
+
+def test_failed_stream_does_not_publish_or_leave_partial_output(tmp_path, monkeypatch):
+    module = importlib.import_module("tools.converter.utils.quantize_gguf")
+    source = tmp_path / "source.gguf"
+    _write_source(source, {"projection": (GGML_F32, (256, 2), _values(512).tobytes())})
+
+    def failed_read(*_args):
+        raise OSError("interrupted source read")
+
+    monkeypatch.setattr(module, "_tensor_bytes", failed_read)
+    output = tmp_path / "out.gguf"
+    with pytest.raises(OSError, match="interrupted source read"):
+        quantize_gguf(source, output)
+    assert not output.exists()
+    assert not output.with_suffix(".gguf.tmp").exists()
+
+
+def test_publish_preserves_output_created_during_conversion(tmp_path, monkeypatch):
+    module = importlib.import_module("tools.converter.utils.quantize_gguf")
+    source = tmp_path / "source.gguf"
+    _write_source(source, {"projection": (GGML_F32, (256, 2), _values(512).tobytes())})
+    output = tmp_path / "out.gguf"
+    read = module._tensor_bytes
+
+    def concurrent_output(path, offset, length):
+        output.write_bytes(b"another completed export")
+        return read(path, offset, length)
+
+    monkeypatch.setattr(module, "_tensor_bytes", concurrent_output)
+    with pytest.raises(FileExistsError):
+        quantize_gguf(source, output)
+    assert output.read_bytes() == b"another completed export"
+    assert not output.with_suffix(".gguf.tmp").exists()
+
+
+def test_preserves_partial_output_created_after_initial_check(tmp_path, monkeypatch):
+    module = importlib.import_module("tools.converter.utils.quantize_gguf")
+    source = tmp_path / "source.gguf"
+    _write_source(source, {"projection": (GGML_F32, (256, 2), _values(512).tobytes())})
+    output = tmp_path / "out.gguf"
+    temporary = output.with_suffix(".gguf.tmp")
+    add = module.GgufWriter.add_tensor_chunks
+
+    def concurrent_partial(writer, *args):
+        add(writer, *args)
+        temporary.write_bytes(b"another export in progress")
+
+    monkeypatch.setattr(module.GgufWriter, "add_tensor_chunks", concurrent_partial)
+    with pytest.raises(FileExistsError):
+        quantize_gguf(source, output)
+    assert temporary.read_bytes() == b"another export in progress"
+    assert not output.exists()
 
 
 def test_bf16_source_crosses_to_q8_0_and_decodes_back(tmp_path):

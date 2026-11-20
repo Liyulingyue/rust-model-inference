@@ -255,7 +255,7 @@ struct TextBackend {
     arch: String,
     pool: Arc<ComputePool>,
     tokenizer: Arc<BPETokenizer>,
-    /// `--jinja` / `--chat-template-file` for `/v1/chat/completions`.
+    /// `--jinja` / `--chat-template-file` for chat and template-aware JEV scorers.
     /// `Options` is `Send + Sync` (bool + PathBuf), so it can live here.
     chat_template: std::sync::Arc<crate::prompt::jinja::Options>,
     /// The template `chat_template` resolves to, compiled once at load time.

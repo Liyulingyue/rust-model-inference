@@ -188,21 +188,34 @@ fn build_cos_sin_table_and_apply(
         rope_neox_inplace_scalar(x, n_heads, head_dim, &cos_table, &sin_table);
         return;
     }
+    rope_neox_apply_coefficients(x, head_dim, &cos_table, &sin_table);
+}
+
+/// Apply an F32 cosine/sine table using the existing SIMD rotation kernels.
+pub(crate) fn rope_neox_apply_coefficients(
+    x: &mut [f32],
+    head_dim: usize,
+    cos_table: &[f32],
+    sin_table: &[f32],
+) {
+    assert_eq!(cos_table.len(), head_dim / 2);
+    assert_eq!(sin_table.len(), head_dim / 2);
+    let n_heads = x.len() / head_dim;
     #[cfg(target_arch = "x86_64")]
     {
         if super::super::has_avx2_fma() {
-            unsafe { rope_neox_inplace_avx2(x, n_heads, head_dim, &cos_table, &sin_table) };
+            unsafe { rope_neox_inplace_avx2(x, n_heads, head_dim, cos_table, sin_table) };
             return;
         }
     }
     #[cfg(target_arch = "aarch64")]
     {
         if super::super::has_neon() {
-            unsafe { rope_neox_inplace_neon(x, n_heads, head_dim, &cos_table, &sin_table) };
+            unsafe { rope_neox_inplace_neon(x, n_heads, head_dim, cos_table, sin_table) };
             return;
         }
     }
-    rope_neox_inplace_scalar(x, n_heads, head_dim, &cos_table, &sin_table);
+    rope_neox_inplace_scalar(x, n_heads, head_dim, cos_table, sin_table);
 }
 
 #[cfg(target_arch = "x86_64")]

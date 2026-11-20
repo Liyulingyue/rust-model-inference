@@ -66,6 +66,7 @@ fn main() -> Result<(), String> {
                 args.get(5).ok_or("image requires MMPROJ")?,
             ))
             .map_err(|e| e.to_string())?;
+            rust_model_inference::models::sensenova_loop::validate_components(&source, &mmproj)?;
             let pool = Arc::new(ComputePool::new(16));
             let encoder = VisionEncoder::from_source(&mmproj, pool.clone())?;
             let image = image::open(path).map_err(|e| e.to_string())?.to_rgb8();
@@ -174,5 +175,10 @@ fn main() -> Result<(), String> {
         serde_json::to_vec_pretty(&results).unwrap(),
     )
     .map_err(|e| e.to_string())?;
+    #[cfg(feature = "vulkan")]
+    {
+        rust_model_inference::vulkan::dump_submit_trace();
+        rust_model_inference::vulkan::dump_dispatch_trace();
+    }
     Ok(())
 }

@@ -5,6 +5,7 @@ use super::types::{
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -762,8 +763,73 @@ pub fn run_jev_grouped_decision(
         max_context,
     )?;
 
+    print_grouped_results(&results, output_json)?;
+    eprintln!(
+        "\nJEV grouped total: {} ms ({} questions)",
+        t0.elapsed().as_millis(),
+        results.len()
+    );
+    Ok(())
+}
+
+/// Grouped image scoring shares the HTTP payload and multimodal logits path.
+pub fn run_jev_grouped_image_decision(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevGroupedQuestionInput],
+    mode: JevMode,
+    n_threads: usize,
+    prefill_batch_size: usize,
+    output_json: bool,
+    mmproj: Option<&Path>,
+    image: &Path,
+    jinja: crate::prompt::jinja::Options,
+    max_context: usize,
+) -> Result<(), String> {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    if !matches!(arch, "sensenova_loop" | "qwen35" | "qwen35moe") {
+        return Err(format!(
+            "grouped image JEV is not supported for architecture {arch:?}"
+        ));
+    }
+    let mmproj = mmproj.ok_or("grouped image JEV requires --mmproj")?;
+    let prepared = prepare_jev_grouped_questions(questions, mode)?;
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())?;
+    super::single::verify_label_tokens_single(&tokenizer)?;
+    let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
+    let mut results = Vec::with_capacity(prepared.len());
+    for question in &prepared {
+        let payload = build_grouped_payload(context, question)?;
+        let (logits, duration) = crate::app::text::run_qwen35_family_multimodal_logits(
+            source.as_ref(),
+            mmproj,
+            Some(image),
+            None,
+            None,
+            &payload,
+            n_threads,
+            prefill_batch_size,
+            max_context,
+            Some(build_grouped_system()),
+            jinja.as_ref(),
+        )?;
+        results.push(compute_grouped_jev_result(
+            question,
+            &tokenizer,
+            &allocate_group_labels(question),
+            &logits,
+            duration.as_millis(),
+        ));
+    }
+    print_grouped_results(&results, output_json)
+}
+
+fn print_grouped_results(results: &[JevGroupedResult], output_json: bool) -> Result<(), String> {
     if output_json {
-        for r in &results {
+        for r in results {
             let line = serde_json::to_string(r).map_err(|e| format!("json encode: {e}"))?;
             println!("{}", line);
         }
@@ -774,18 +840,12 @@ pub fn run_jev_grouped_decision(
             "\n--- JEV grouped decisions ({} questions) ---",
             results.len()
         );
-        for r in &results {
+        for r in results {
             println!("\nQ: {}", r.question);
             print_grouped_result_text(r);
         }
     }
 
-    let total_ms = t0.elapsed().as_millis();
-    eprintln!(
-        "\nJEV grouped total: {} ms ({} questions)",
-        total_ms,
-        results.len()
-    );
     Ok(())
 }
 
@@ -823,6 +883,44 @@ mod tests {
     use super::grouped_prompt_via_jinja;
     use crate::core::tokenizer::{MockTokenizer, Tokenizer};
     use crate::prompt::jinja::JinjaChatTemplate;
+
+    #[test]
+    fn grouped_image_validates_architecture_and_projector_before_loading() {
+        use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+        use std::sync::Arc;
+        struct Source(MetaValue);
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&MetaValue> {
+                (key == "general.architecture").then_some(&self.0)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&TensorInfo> {
+                None
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                None
+            }
+        }
+        for (arch, expected) in [
+            ("sensenova_loop", "requires --mmproj"),
+            ("llama", "not supported"),
+        ] {
+            let error = super::run_jev_grouped_image_decision(
+                Arc::new(Source(MetaValue::String(arch.into()))),
+                "",
+                &[],
+                crate::app::JevMode::MultiSelect,
+                1,
+                8,
+                true,
+                None,
+                std::path::Path::new("unused.png"),
+                Default::default(),
+                512,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 
     /// Grouped JEV used to store `--jinja` on the scorer and then never read
     /// it, because the prompt is built by this free function rather than by the

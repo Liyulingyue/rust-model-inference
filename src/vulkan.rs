@@ -333,6 +333,35 @@ pub(crate) struct GpuBuffer {
 }
 
 #[cfg(feature = "vulkan")]
+impl GpuBuffer {
+    fn mapped_range(
+        &self,
+        offset: u64,
+        size: u64,
+        atom_size: u64,
+    ) -> Result<vk::MappedMemoryRange, VulkanError> {
+        let end = offset
+            .checked_add(size)
+            .filter(|&end| end <= self.size)
+            .ok_or_else(|| VulkanError::UnsupportedShape("mapped range exceeds buffer".into()))?;
+        if size == 0 || !atom_size.is_power_of_two() || self.size > self.allocation_bytes {
+            return Err(VulkanError::UnsupportedShape("invalid mapped range".into()));
+        }
+        // Vulkan requires atom alignment even for HOST_COHERENT memory.
+        let start = offset / atom_size * atom_size;
+        let end = end
+            .div_ceil(atom_size)
+            .saturating_mul(atom_size)
+            .min(self.allocation_bytes);
+        Ok(vk::MappedMemoryRange::builder()
+            .memory(self.memory)
+            .offset(start)
+            .size(end - start)
+            .build())
+    }
+}
+
+#[cfg(feature = "vulkan")]
 #[derive(Clone)]
 struct DeviceCandidate {
     physical_device: vk::PhysicalDevice,
@@ -997,7 +1026,7 @@ impl VulkanContext {
         let mapped = if map {
             match self
                 .device
-                .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
+                .map_memory(memory, 0, mem_reqs.size, vk::MemoryMapFlags::empty())
             {
                 Ok(mapped) => mapped as *mut u8,
                 Err(_) => {
@@ -1089,11 +1118,7 @@ impl VulkanContext {
         if size == 0 {
             return Ok(());
         }
-        let range = vk::MappedMemoryRange::builder()
-            .memory(buffer.memory)
-            .offset(offset)
-            .size(size)
-            .build();
+        let range = buffer.mapped_range(offset, size, self.limits.non_coherent_atom_size)?;
         self.device
             .flush_mapped_memory_ranges(&[range])
             .map_err(|error| VulkanError::InitFailed(error.to_string()))
@@ -1114,11 +1139,7 @@ impl VulkanContext {
         if size == 0 {
             return Ok(());
         }
-        let range = vk::MappedMemoryRange::builder()
-            .memory(buffer.memory)
-            .offset(offset)
-            .size(size)
-            .build();
+        let range = buffer.mapped_range(offset, size, self.limits.non_coherent_atom_size)?;
         self.device
             .invalidate_mapped_memory_ranges(&[range])
             .map_err(|error| VulkanError::InitFailed(error.to_string()))
@@ -2376,11 +2397,37 @@ impl From<VulkanError> for String {
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::{
-        dispatch_grid, gpu_broken, rank_supported, rejection_reason, DeviceCandidate,
+        dispatch_grid, gpu_broken, rank_supported, rejection_reason, DeviceCandidate, GpuBuffer,
         PipelineVariant, VulkanContext, GPU_BROKEN,
     };
     use ash::vk;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn mapped_ranges_align_subregions_and_clip_to_the_mapped_allocation() {
+        let buffer = GpuBuffer {
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 3700,
+            allocation_bytes: 3712,
+            mapped: std::ptr::null_mut(),
+        };
+        for (offset, size, expected) in [
+            (3216, 132, (3200, 192)),
+            (3360, 260, (3328, 320)),
+            (3632, 68, (3584, 128)),
+            (0, 64, (0, 64)),
+        ] {
+            let range = buffer.mapped_range(offset, size, 64).unwrap();
+            assert_eq!((range.offset, range.size), expected);
+        }
+        let tail = buffer.mapped_range(3696, 4, 256).unwrap();
+        assert_eq!((tail.offset, tail.size), (3584, 128));
+        assert!(buffer.mapped_range(3696, 5, 64).is_err());
+        assert!(buffer.mapped_range(u64::MAX, 2, 64).is_err());
+        assert!(buffer.mapped_range(0, 0, 64).is_err());
+        assert!(buffer.mapped_range(0, 1, 0).is_err());
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]
