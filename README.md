@@ -452,10 +452,10 @@ cargo run --release --bin rust-model-server -- \
 |------|------|------|------|
 | `/health` | GET | any | liveness probe |
 | `/v1/models` | GET | any | 模型列表 |
-| `/v1/chat/completions` | POST | text | OpenAI Chat Completions，支持 SSE 与 function tools |
-| `/v1/responses` | POST | text | OpenAI Responses，支持 SSE、function tools 与 `previous_response_id` |
+| `/v1/chat/completions` | POST | text, image | OpenAI Chat Completions，支持 SSE、function tools 与图片输入（见 [docs/usage/http-images.md](docs/usage/http-images.md)） |
+| `/v1/responses` | POST | text, image | OpenAI Responses，支持 SSE、function tools、`previous_response_id` 与图片输入（见 [docs/usage/http-images.md](docs/usage/http-images.md)） |
 | `/v1/responses/{id}` | GET/DELETE | text | 读取或删除本进程保存的 Response |
-| `/v1/messages` | POST | text | Anthropic Messages，支持 SSE 与 client tools |
+| `/v1/messages` | POST | text, image | Anthropic Messages，支持 SSE、client tools 与图片输入（见 [docs/usage/http-images.md](docs/usage/http-images.md)） |
 | `/v1/messages/count_tokens` | POST | text | Anthropic 输入 token 计数 |
 | `/v1/embeddings` | POST | embedding | OpenAI Embeddings（字符串或字符串数组） |
 | `/v1/audio/transcriptions` | POST | asr | OpenAI Audio Transcriptions（multipart：`file`、`language`、`prompt`） |
