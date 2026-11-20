@@ -9,7 +9,7 @@
 //! ```text
 //! patch_embd -> + position_embd
 //!   ViT blocks [0, insert_layer_id]
-//!   vit_merger window attention (4x4 blocks) + residual
+//!   vit_merger window attention (2x2 blocks) + residual
 //!   vit_merger 2x2 downsample: mean -> concat -> ds_ln -> GELU MLP -> + mean
 //!   ViT blocks [insert_layer_id + 1, n_layer)
 //!   post_ln
@@ -154,10 +154,18 @@ fn softmax(row: &mut [f32]) {
     }
 }
 
-/// Single-head-group attention over `tokens` positions.
+/// Multi-head attention over `tokens` positions.
+///
+/// llama.cpp reshapes q/k/v to `[d_head, n_head, n_token]` and runs
+/// `build_attn`, so every head has its own softmax over the key positions and
+/// its own value mix. Summing the heads into one score before the softmax is a
+/// different operator: it shares one weight vector across all heads.
 ///
 /// `window` selects the vit_merger pattern: when true, position `p` may only
-/// attend to the 15 other positions in its own 4x4 block of the patch grid.
+/// attend to the three other positions in its own 2x2 block of the patch grid.
+/// The oracle reorders into window-major order first, but attention is
+/// permutation-equivariant and the mask follows the same permutation, so the
+/// identity order gives the same result.
 #[allow(clippy::too_many_arguments)]
 fn attention(
     cfg: &MiniCpmV47Config,
@@ -171,57 +179,50 @@ fn attention(
     window: bool,
 ) {
     let (heads, d_head, dim) = (cfg.n_head, cfg.d_head, cfg.n_embd);
-    // ggml builds `softmax(QK^T * kq_scale + mask)`.
-    for token in 0..tokens {
-        let q_row = &q[token * dim..(token + 1) * dim];
-        for other in 0..tokens {
-            let k_row = &k[other * dim..(other + 1) * dim];
-            let mut dot = 0.0f32;
-            for head in 0..heads {
-                let qh = &q_row[head * d_head..(head + 1) * d_head];
-                let kh = &k_row[head * d_head..(head + 1) * d_head];
-                let mut acc = 0.0f32;
-                for i in 0..d_head {
-                    acc += qh[i] * kh[i];
-                }
-                dot += acc;
-            }
-            scores[token * tokens + other] = dot * cfg.kq_scale;
-        }
-    }
-    if window && nx > 0 {
-        // 2x2 blocks of the patch grid — the oracle reorders to window-major
-        // with four tokens per window (`window_idx[k] = (2*wi)*pos_w + 2*wj + {0,1}`),
-        // then masks everything outside the block diagonal.
-        let win = 2usize;
-        let ny = tokens.div_ceil(nx);
-        for token in 0..tokens {
-            let (ty, tx) = (token / nx, token % nx);
-            let (wy, wx) = ((ty / win) * win, (tx / win) * win);
-            for other in 0..tokens {
-                let (oy, ox) = (other / nx, other % nx);
-                let in_block = oy / win == wy / win && ox / win == wx / win;
-                if !in_block {
-                    scores[token * tokens + other] = f32::NEG_INFINITY;
-                }
-            }
-        }
-        let _ = ny;
-    }
-    for token in 0..tokens {
-        softmax(&mut scores[token * tokens..(token + 1) * tokens]);
-    }
     out[..tokens * dim].fill(0.0);
-    for token in 0..tokens {
-        let weights = &scores[token * tokens..(token + 1) * tokens];
-        for other in 0..tokens {
-            let w = weights[other];
-            if w == 0.0 {
-                continue;
+    // One head at a time keeps the score scratch at `tokens * tokens` instead
+    // of `heads * tokens * tokens` (67 MB at 1024 patches).
+    for head in 0..heads {
+        let base = head * d_head;
+        for token in 0..tokens {
+            let q_row = &q[token * dim + base..token * dim + base + d_head];
+            for other in 0..tokens {
+                let k_row = &k[other * dim + base..other * dim + base + d_head];
+                scores[token * tokens + other] =
+                    crate::ops::dot_f32(q_row, k_row, d_head) * cfg.kq_scale;
             }
-            let v_row = &v[other * dim..(other + 1) * dim];
-            for i in 0..dim {
-                out[token * dim + i] += w * v_row[i];
+        }
+        if window && nx > 0 {
+            // 2x2 blocks of the patch grid — the oracle reorders to window-major
+            // with four tokens per window (`window_idx[k] = (2*wi)*pos_w + 2*wj + {0,1}`),
+            // then masks everything outside the block diagonal.
+            let win = 2usize;
+            for token in 0..tokens {
+                let (ty, tx) = (token / nx, token % nx);
+                for other in 0..tokens {
+                    let (oy, ox) = (other / nx, other % nx);
+                    let in_block = oy / win == ty / win && ox / win == tx / win;
+                    if !in_block {
+                        scores[token * tokens + other] = f32::NEG_INFINITY;
+                    }
+                }
+            }
+        }
+        for token in 0..tokens {
+            softmax(&mut scores[token * tokens..(token + 1) * tokens]);
+        }
+        for token in 0..tokens {
+            let weights = &scores[token * tokens..(token + 1) * tokens];
+            let out_row = &mut out[token * dim + base..token * dim + base + d_head];
+            for other in 0..tokens {
+                let w = weights[other];
+                if w == 0.0 {
+                    continue;
+                }
+                let v_row = &v[other * dim + base..other * dim + base + d_head];
+                for i in 0..d_head {
+                    out_row[i] += w * v_row[i];
+                }
             }
         }
     }
