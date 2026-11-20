@@ -104,7 +104,8 @@ jobs:
         run: |
           export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
           test -n "$VK_DRIVER_FILES"
-          cargo test --locked --features vulkan --lib models::idol::gpu::tests:: -- --ignored --test-threads=1
+          cargo test --locked --features vulkan --lib models::idol::gpu::tests::device_attention_agrees_with_the_cpu_kernel_on_the_idol_shapes -- --ignored --test-threads=1
+          cargo test --locked --features vulkan --lib models::idol::gpu::tests::a_stale_device_attention_is_not_used -- --ignored --test-threads=1
       - run: cargo test --locked --features vulkan --lib raw_hidden_
       - run: 'cargo test --locked --features vulkan --lib qwen_image_2_1::gpu::tests::'
       - run: cargo test --locked --features vulkan --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline
