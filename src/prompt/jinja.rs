@@ -124,8 +124,8 @@ impl JinjaChatTemplate {
     /// *undefined* inside the template, which is what the shipped templates
     /// test (`{%- if enable_thinking is defined and enable_thinking is false %}`)
     /// to mean "use the model's training default". Materialising `None` as
-    /// `false` would make every thinking-tuned model render the empty
-    /// `\n\n` block instead.
+    /// `false` would inject the empty think block into every thinking-tuned
+    /// model whose template has such a branch.
     pub fn render(
         &self,
         messages: &[ChatMessage],

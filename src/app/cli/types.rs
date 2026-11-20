@@ -129,9 +129,10 @@ pub struct CliOptions {
     pub top_p: Option<f32>,
     pub threads: usize,
     /// Tri-state: `--thinking` / `--no-thinking`, `None` when neither was
-    /// passed. `None` must reach the chat template as an *undefined*
-    /// variable so the model's own training default applies; collapsing it
-    /// to `false` silently disables reasoning on every thinking-tuned model.
+    /// passed. `None` reaches the chat template as an *undefined* variable,
+    /// so the model's own training default applies there. The hand-written
+    /// builders keep their historical `false` default: the *closed* empty
+    /// think block is what makes a thinking model answer directly.
     pub thinking: Option<bool>,
     pub embedding: bool,
     pub embedding_output: EmbeddingOutput,
