@@ -421,8 +421,8 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--bench" => options.bench = true,
-            "--thinking" => options.thinking = true,
-            "--no-thinking" => options.thinking = false,
+            "--thinking" => options.thinking = Some(true),
+            "--no-thinking" => options.thinking = Some(false),
             "--profile" => options.profile = true,
             "--gpu" => options.gpu = true,
             "--compute" => {

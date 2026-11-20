@@ -99,7 +99,7 @@ impl JevScorer for HunyuanJevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

@@ -128,7 +128,11 @@ pub struct CliOptions {
     pub top_k: Option<usize>,
     pub top_p: Option<f32>,
     pub threads: usize,
-    pub thinking: bool,
+    /// Tri-state: `--thinking` / `--no-thinking`, `None` when neither was
+    /// passed. `None` must reach the chat template as an *undefined*
+    /// variable so the model's own training default applies; collapsing it
+    /// to `false` silently disables reasoning on every thinking-tuned model.
+    pub thinking: Option<bool>,
     pub embedding: bool,
     pub embedding_output: EmbeddingOutput,
     pub dump_logits: bool,

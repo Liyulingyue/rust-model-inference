@@ -277,7 +277,7 @@ pub fn run_inference(
         &template,
         &|key| source.metadata(key).cloned(),
         prompt,
-        thinking,
+        Some(thinking),
     )?
     .ok_or("LFM3 requires its GGUF chat template or --chat-template-file")?;
     let model = Lfm3Model::from_source(source, n_threads)?;

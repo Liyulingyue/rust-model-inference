@@ -44,7 +44,7 @@ pub fn run_chat_runtime(
             },
         }],
         true,
-        true,
+        Some(true),
     )?;
     let arch = crate::app::arch_of(options.source.as_ref());
     let mut request = crate::ops::generation_runtime::GenerationRequest::new(ids, max_tokens);
@@ -102,7 +102,7 @@ pub fn run_qwen3_inference(
                     &template,
                     &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
                     true,
-                    thinking,
+                    Some(thinking),
                 )?
             } else {
                 build_qwen_chat_prompt(
@@ -154,7 +154,7 @@ pub fn run_hunyuan_inference(
         jinja,
         &|k| source.metadata(k).cloned(),
         prompt,
-        false,
+        Some(false),
     )? {
         Some(ids) => ids,
         None => build_hunyuan_chat_prompt(

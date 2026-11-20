@@ -135,7 +135,7 @@ fn plan_prompt(
             template,
             Some(system),
             payload,
-            false,
+            Some(false),
         )?;
         return Ok(PromptPlan::Rendered(ids));
     }

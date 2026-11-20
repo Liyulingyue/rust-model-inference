@@ -447,7 +447,7 @@ pub fn run_inference(
         sos,
         eos,
         prompt,
-        enable_thinking,
+        Some(enable_thinking),
     )? {
         Some(text) => text,
         None => format!(

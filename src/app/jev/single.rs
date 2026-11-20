@@ -549,7 +549,7 @@ pub(crate) fn build_jev_prompt(
             template,
             Some(system),
             &payload,
-            false,
+            Some(false),
         )?;
         return Ok((ids, payload));
     }

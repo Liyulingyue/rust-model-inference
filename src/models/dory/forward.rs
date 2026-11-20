@@ -767,7 +767,7 @@ pub fn run_inference(
             &template,
             &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
             true,
-            thinking,
+            Some(thinking),
         )?
     } else {
         let formatted_prompt = crate::prompt::legacy::format_chat("dory", chat_template, prompt)

@@ -241,7 +241,7 @@ impl Engine {
         let probe = chat.render(
             &[ChatMessage::text("user", "Choose an option.")],
             true,
-            false,
+            Some(false),
             &special,
         )?;
         let prefix = tokenizer
@@ -373,7 +373,7 @@ impl Engine {
         let rendered = self.chat.render(
             &[ChatMessage::text("system", SYSTEM), message],
             true,
-            false,
+            Some(false),
             &self.special,
         )? + &prompt.suffix;
         let pieces = rendered
