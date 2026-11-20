@@ -833,7 +833,13 @@ fn generate(
     if cancelled() {
         return Err("Client disconnected".into());
     }
-    for delta in parser.push(&stop.push(&think.finish()))? {
+    // A reasoning block that never closed is not an answer, but dropping it
+    // silently leaves the client with an empty completion. Keep it and hand
+    // it over as the visible text when the model produced no answer at all;
+    // `finish_reason: length` already tells the client that the turn was
+    // cut short.
+    let (tail, reasoning) = think.finish_with_reasoning();
+    for delta in parser.push(&stop.push(&tail))? {
         if !emit(delta) {
             return Err("Client disconnected".into());
         }
@@ -848,6 +854,15 @@ fn generate(
             return Err("Client disconnected".into());
         }
     }
+    let text: String = parser.text().into();
+    let text = match (&text, &reasoning) {
+        (text, Some(reasoning)) if text.is_empty() => {
+            // Streaming clients get the same text as the non-streaming ones.
+            emit(Delta::Text(reasoning.clone()));
+            reasoning.clone()
+        }
+        (text, _) => text.clone(),
+    };
     let finish = if let Some(sequence) = stop.hit {
         Finish::Sequence(sequence)
     } else if completion_tokens >= request.max_tokens {
@@ -858,7 +873,7 @@ fn generate(
         Finish::Stop
     };
     Ok(Generation {
-        text: parser.text().into(),
+        text,
         calls: parser.calls().to_vec(),
         usage: Usage {
             input: prompt.input_tokens,

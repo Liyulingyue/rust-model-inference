@@ -102,15 +102,24 @@ NEON on aarch64; no AVX-512).
       （`{%- if enable_thinking is defined and enable_thinking is true %}`），手写 builder 的
       默认则是不注入空块；因此同一模型在 `--jinja` 与非 `--jinja` 下默认思考行为不同
       （模板 = 关，builder = 开）。两端在**相同配置**下仍逐 token 一致。
-- [ ] **thinking 模型缺省下的输出形态：长推理时 `content` 被 ThinkFilter 缓冲成空** —
-      2026-11-20 实测（mellum-12b-a2.5b-thinking，HTTP，模板路径，缺省）：模型输出 220 token
-      的推理段却没给出最终答案，`content` 被 `src/app/server/api/think.rs` 的 `ThinkFilter`
-      全部缓冲后变成空字符串，客户端拿到 `content: ""` + `finish_reason: length`。同一 prompt
-      显式 `enable_thinking: false`（注入闭合空块）则 1 token 直答 `Paris`。要定位三件事：
-      ① `ThinkFilter` 是否应该把「推理段 + 其后的答案」拆开，而不是把整段缓冲；
-      ② 缺省是否该给 thinking 模型一个推理预算提示（模板层面）；
-      ③ HTTP 层对「`finish_reason: length` 且 `content` 为空」是否该返回明确错误而不是空串。
-      当前 `ThinkFilter` 只剥 leading think 块（见 `docs/usage/lfm.md` §7.1 的已知限制）。
+- [x] **thinking 模型缺省下的输出形态：长推理时 `content` 被 ThinkFilter 缓冲成空** — ✅ 2026-11-20 完成。
+      当时列的三件事，逐一处置：
+      ① **已修**：`ThinkFilter`（`src/app/server/api/think.rs`）在 `Open` 态不再丢弃推理正文，
+         而是累积到新增的 `reasoning` 缓冲；新增 `finish_with_reasoning()`，`generate()`
+         （`server/api.rs`）在推理块**未闭合**且模型没给出任何答案时，把这段推理作为
+         `content` 交还客户端（流式补发一个 `Delta::Text`，非流式直接进 `Generation.text`），
+         `finish_reason` 仍是 `length`。客户端不再拿到 `content: ""`，能看见「想了一半
+         被截断」的正文。闭合的 think 块照旧剥掉，行为不变。
+      ② **不做**：模板层推理预算提示是模型自家模板的事（Mellum 与 Qwen3.5 模板对
+         「未定义」的解释本来就相反，缺省含义由模板自己解释），服务器不该替模板注入预算。
+      ③ **不做**：`finish_reason: length` + 推理正文已是诚实信号（「被截断」+「想到的内容」）；
+         OpenAI 对截断的回答同样是返回内容 + `length` 而不是 error，包一层错误反而丢信息。
+      实测（Mellum2.1-12B-A2.5B-Thinking，HTTP，`--jinja` 缺省）：改前 `content: ""` +
+      220 completion tokens；改后 `content` 带完整推理正文、`finish_reason: length`；
+      显式 `enable_thinking: false` 路径不变（1 token 直答 `Paris`）。
+      单测：`think.rs` 13 个全绿（新增 `unterminated_block_is_available_as_reasoning`，
+      `a_closed_block_leaves_no_reasoning_behind` 补流式断言），`unterminated_block_is_dropped`
+      保留 —— 「当正文丢弃时仍为空」与「按需交还」两种语义都有覆盖。
 - [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
       `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
       返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/

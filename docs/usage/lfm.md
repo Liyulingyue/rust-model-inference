@@ -215,7 +215,9 @@ the capital of France?"）：
 段（仅是 prompt 层的 hint，不是 jinja 层的开关）。`ThinkFilter`
 （`src/app/server/api/think.rs`）自动剥掉 leading think 块，客户端看到
 的内容仍是纯答案。如果模型 emit 中段的 `` 块（`...answer thinking ...answer`
- 格式），则不会被剥掉 — 这是已知限制（详见 TODO）。
+ 格式），则不会被剥掉 — 这是已知限制（详见 TODO）。推理块一直没闭合就撞上
+`max_tokens` 截断时，未完成的推理正文会作为 `content` 返回（`finish_reason:
+length`），而不是空字符串 —— 客户端能看到模型想到一半的内容。
 
 类型错误（`enable_thinking: "yes"`）返回 400：
 
