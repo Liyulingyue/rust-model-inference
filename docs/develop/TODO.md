@@ -3467,6 +3467,16 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 **这一轮的处置**：GPU 路径改成两级。
 
 - 默认仍然拒绝 `--gpu`，错误消息直接说明原因与开关名；
+
+**2026-11-11 的复测**（本机 GB10，`RMI_GPU_UNSAFE=1` 放行，256×256 / 4 步 /
+CFG 1 / seed 42）：连跑 **6 次，PNG 逐位相同**（6 个 md5 一致），这是 TODO-044
+记下「相同结果」之后的又一次观察。门禁**仍然保留**：TODO-044 自己写明这
+不是数学保证，只是「这段时间内没再看到不一样的」，而本条的根因（设备投影
+偶发整片出错）至今没有定位到具体成因。6/6 不能替代那个定位。
+
+对照：同一台机器上 ERNIE-Image 的设备路径（[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)）
+也是连跑 3 次逐位相同 —— 说明「可复现」这条门禁判据本身是可测的，
+Mage-Flow 缺的仍然是根因，不是证据。
 - `RMI_GPU_UNSAFE=1` 放行 GPU，速度约为 CPU 的两倍（256×256 约 1.5 分钟对 2 分
   53 秒），代价是结果不保证可复现；
 - 采样器每步检查 latent 是否还可用（非有限或整体塌成零就拒绝），被拒绝时
@@ -5658,3 +5668,442 @@ llama-server -m <gguf> -md <gguf> --spec-type draft-mtp --spec-draft-n-max 4 -lv
 `src/models/qwen35/trunk/scratch.rs`、`src/ops/kernel/q8_0/neon.rs`、
 `src/vulkan/qwen35.rs`、`src/compute/state.rs`、
 `docs/develop/SUPPORTED_MODELS.md`。
+
+### TODO-073: ERNIE-Image 的设备路径：K-quant 慢，Q8_0 快 2.8 倍
+
+**状态**：✅ 已解决（2026-11-12）。K-quant 仍是已知缺口。
+
+**结论**：ERNIE-Image 的设备投影**能不能赢，取决于权重量化格式和投影形状两件事**，
+不是取决于模型。
+
+| DiT 权重 | 规格 | CPU denoise | 设备 denoise | 结果 |
+|---|---|---|---|---|
+| Q4_K_M | 256×256 / 8 步 | 251.8 s | 559.5 s | **慢 2.2 倍** |
+| Q8_0 | 256×256 / 8 步 | 219.2 s | **78.4 s** | **快 2.8 倍** |
+
+Q8_0 的结果：与 CPU 的 PNG 差异 PSNR **69.78 dB**（max_abs 1/255），同一 seed
+连跑两次逐位相同。
+
+**两件事各占一半**：
+
+**一、权重量化格式**。设备只有 Q8_0 有向量化 kernel —— `Q8_MATMUL_GROUPED_DP4A`
+与 `Q8_MATMUL_TILED_DP4A` 吃设备 int8 dot-product ✓✓。K-quant 家族只有一个标量
+kernel：它的**块缩放 int32 累加塞不进 int8 dot product** ✓✓（Q8_0 的量化把乘积
+压在 int8 内 ✓✓），要吃 DP4A 得写一个「块缩放 + int32 提升」的 int8 dot
+kernel —— 那是 TODO-032 量过的完整 shader 项目 ✓✓。
+
+⇒ **模型层按权重量化格式选后端** ✓✓：Q8_0 的 DiT 走设备 ✓✓，K-quant 的 DiT 留在
+CPU 范围 ✓✓。
+
+**二、投影形状**（这一半是本条自己踩出来的）。ERNIE 的 DiT 原本**逐 token** 调用
+投影 —— `text_proj`、`final_linear`、qkv、mlp 都是一行一次 ✓✓。一行一次在设备上
+是「每行一次权重上传 + 一次 fence」✗✗，fence 的开销淹没计算 ✗✗：
+
+| 路径 | Q8_0 DiT denoise |
+|---|---|
+| 单行投影允许上设备 | 624.6 s |
+| 单行投影强制 CPU、整批上设备 | **78.4 s** |
+
+⇒ ⇒ **单行投影强制 CPU** ✓✓（`disable_gpu_matmul_for_scope` ✓✓，底下的多线程
+CPU kernel 不变 ✓✓），**整批投影走设备** ✓✓ ✓✓。
+
+**仍然剩下的缺口**：K-quant 的 DiT 在设备上没有优势 ✓✓ ⇒ 要么给 K-quant 写设备
+kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
+
+**踩过的两个坑，记下来**：
+
+- **共享内核自带设备 dispatch，模型层拦不住** ✗✗：`src/ops/kernel/q4_k.rs` 与
+  `q8_0/parallel.rs` 在 `ops::gpu_matmul_active()` 为真时自己就走设备 ✗✗。
+  模型层的门控只覆盖模型自己发起的投影 ✗✗。⇒ **单行路径要显式关掉** ✓✓。
+- **64×64 / 1 步这类小规格测不出设备路径的真实表现** ✗✗：20 个 token 时，
+  权重上传和 252 次 dispatch 的固定成本占主导 ✗✗，设备必然输 ✗✗。⇒ 设备路径的
+  测量要用真实尺寸（256×256 / 8 步 ✓✓）✓✓。
+
+**关联**：`src/models/diffusion/ernie_image/{gpu.rs,dit.rs,mod.rs}`、
+`src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
+`src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
+[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
+
+### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读
+
+**状态**：⚠️ 已知缺口，未排期。2026-11-11 定位。
+
+**现象**：`src/models/qwen3/vision/mod.rs` 的 `decode_linear_weight` **不看张量自己声明的
+格式**，而是看字节长度：
+
+- 每元素 4 字节 → F32
+- 每元素 2 字节 → **F16**
+- `n_out * (n_in / 32) * 34` → Q8_0
+
+⇒ **F16 与 BF16 都是每元素 2 字节** ✓✓ —— **长度分不出两者** ✓✓，而两者解出来的值
+不同：1.0 的 BF16 位模式按 F16 读出来是 **1.875** ✓✓。
+
+**为什么现在没炸**：目前走 qwen3 视觉塔的模型，视觉权重都是 F32
+（Mage-Flow 的 `mmproj-mage-flow-F32.gguf` 全部 314 个张量都是 F32）——F32 是
+4 字节，猜得对 ✓✓。**一旦有一个 BF16 的视觉塔进这个路径，就是静默的错值** ✓✓：
+不报错、不崩，只是每个权重都读错 ✓✓。
+
+**对照**：qwen35 的视觉塔**已经是对的** ✓✓ —— 它的 `load_source_weight` 按
+`ggml_type` 分派（F32 / F16 / BF16 / Q8_0 ✓✓），而不是靠长度猜 ✓✓ ✓✓。
+qwen3 塔是这一族里剩下的那个例外 ✓✓。
+
+**为什么没有直接改**：qwen3 塔的 `VisionLayer` 每个权重字段是 `&[u8]` ✓✓，
+**同一个层里的不同权重可以是不同格式** ✓✓（比如 BF16 的主干 + F32 的 norm ✓✓），
+所以要修就得给每个字段各记一个 dtype ✓✓ —— 那是 `VisionLayer` 的结构变更 ✓✓，
+会牵动所有构造它的调用方（zdt ✓✓、wevisone_vl ✓✓、mage_flow ✓✓）✓✓。
+
+**方向**（未定）：
+
+1. 在 `core::tensor` 加一个按声明格式取矩阵的共享入口
+   （`load_f32_matrix` 已经在 `4c77690f` 里加好了 ✓✓ —— 它就是给这一类用的 ✓✓）✓✓，
+   然后把 qwen3 塔的权重路径换成它 ✓✓ —— 顺带把「按格式取」这件事收进 core ✓✓，
+   符合 §6 的单一事实源原则 ✓✓。
+2. 或者把 qwen3 塔的 `VisionLayer` 权重字段从 `&[u8]` 改成解码后的值 ✓✓，
+   跟刚修完的 bias 一样 ✓✓ —— 代价是所有构造方都要跟 ✓✓。
+
+**验收**：给 qwen3 塔一个 BF16 的视觉塔，权重解码结果与按声明格式解码的结果
+逐位相同 ✓✓。
+
+**关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
+`src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
+`src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
+
+### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
+
+**状态**：⚠️ 部分完成（2026-11-16）。设备路径能跑、能出图、能复现；与 CPU 的数值差异
+和那个偶发的首轮差异待定位。
+
+**发布权重是混合格式**：Q8_0 的 DiT GGUF 一共 265 个张量 = 192 个 Q8_0 + 73 个 BF16。
+
+- **Q8_0**：每个 block 的 `attn.to_q/to_k/to_v/to_out.0`、`img_mlp.gate_up`、
+  `img_mlp.out`。
+- **BF16**：`img_in`、`modulation.1`、`norm_out.linear`、`proj_out`、
+  `time_text_embed.timestep_embedder.linear_1/2`、`txt_in.in_layer`、
+  `txt_in.out_layer`。
+- **全部 65 个一维 norm 向量也是 BF16**：每个 block 的 `attn.norm_q.weight` 与
+  `attn.norm_k.weight`，加上 `txt_in.text_norm.weight`。
+
+⇒ 加载器原来把「二维矩阵」和「一维向量」分成两条路，**两条都硬编码了格式** ✓✓：
+一维向量按 F32 读（长度对不上 ⇒ `Invalid ... weight length` ✓✓），
+`norm_out.linear` 按 F32 读（切片越界 panic ✓✓）。
+
+⇒ 现在**格式由张量自己声明**（`tensor_info().ggml_type` ✓✓），调用点不再假设格式 ✓✓。
+
+**分派器自己写错过一次** ✓✓：把 14 个 `q8_linear` 调用点换成按 dtype 分派的 `linear()`
+时，分派器的默认分支写成了 `self.linear(...)` ⇒ **无限自递归** ✓✓。release 构建把尾递归
+优化成了循环 ⇒ **模型永远出不来**（单核 100% 死转，30 分钟无输出 ✓✓）。
+`rustc` 的 `unconditional_recursion` lint 报了，但淹没在 148 条 warning 里 ✓✓。
+
+**实测**（CFG 4 / seed 42 / 16 线程 ✓✓）：
+
+| 规格 | 路径 | 时间 | 复现性 |
+|---|---|---|---|
+| 128×128 / 2 步 | CPU | 22 s | 4/4 逐位相同 ✓✓ |
+| 128×128 / 2 步 | 设备（`--gpu`） | 15 s | 4/4 逐位相同 ✓✓ |
+| 256×256 / 4 步 | CPU | 106.8 s | 2/2 逐位相同 ✓✓ |
+| 256×256 / 4 步 | 设备（`--gpu`） | 58.3 s | 合并 main 前 **4 次里 3 个结果不同** ✗✗；合并后 4/4 逐位相同 ✓✓ |
+
+⇒ 设备路径**快 1.83 倍**（256×256 / 4 步 ✓✓）✓✓。
+
+**CPU 与设备的 PNG 差异**（PSNR ✓✓）：
+
+| 规格 | CPU vs 设备 | 设备自己 vs 设备自己 |
+|---|---|---|
+| 128×128 / 2 步 | 36.30 dB（max_abs 57 ✓✓） | 逐位相同 ✓✓ |
+| 256×256 / 4 步 | 42.96 dB（max_abs 70 ✓✓） | 逐位相同 ✓✓（合并 main 后 ✓✓） |
+
+⇒ 合并 main 前，设备自己跟自己之间的差异（44.42 dB ✓✓）和它跟 CPU 的差异
+（41.51 / 42.58 dB ✓✓）是同一个量级 ⇒ 那时的抖动**不是**「设备算得不准」，而是**结果
+不确定** ✓✓；合并 main 后这个抖动没有了 ✓✓。
+
+**仍未定位的两件事**：
+
+1. ~~**设备路径在 256×256 下不可复现**~~ ✅ **已解决**（2026-11-17）✓✓。
+
+   原来的现象：4 次跑出 3 个不同的 PNG ✓✓，而 128×128 / 2 步是 4/4 逐位相同 ✓✓、
+   CPU 在 256×256 下也是 2/2 逐位相同 ✓✓ ⇒ 与规模相关，且只在设备上出现 ✓✓。
+
+   **根因是 main 的 Q8_0 内核改动，不是这个模型** ✓✓。合并 main（含 **#244「在批内共享
+   Q8_0 权重读」** ✓✓ 与 **#247「Q8_0 内核用 sdot」** ✓✓）之后，同样的
+   256×256 / 4 步跑 4 次**全部逐位相同** ✓✓，CPU 的结果也没有变 ✓✓（md5 `5cf7aae0`
+   ✓✓）⇒ 之前那 3/4 不同确实是随机的 ✓✓。
+
+   ⇒ 教训：**设备路径的可复现性要在最新的 main 上测** ✓✓ —— Q8_0 内核换实现之后，
+   旧分支上的设备结果就不可比了 ✓✓。
+
+   **当时记下的两条线索**（都留档 ✓✓）：Qwen-Image 用到而 ERNIE 不用的是 **BF16 投影**
+   （`GpuMatmulMode::RoundedBf16` ✓✓）与 **VAE 的设备卷积矩阵** ✓✓；共享的 `ops::nn`
+   路径里有一道 `verify` 防护 ✓✓，注释写明**这个设备曾经返回过前一次调用的数字** ✓✓
+   （陈旧缓冲 / 未同步的上传 ✓✓），而 Qwen-Image 的 `gpu.run` 没有这道防护 ✗✗。
+   ⇒ 上面的根因就落在这两条里（**具体是哪一条没有单独验证** ✓✓）。
+
+2. **偶发的首轮差异** ⚠️ ⚠️：换了二进制之后的**头一两轮**跑出来的 PNG 与之后的不一样
+   （`261e954d` vs `d3b846d3` ✓✓），之后就 4/4 逐位相同 ✓✓；加满 CPU 负载也复现不出来 ✓✓。
+   单线程、2 / 4 / 16 线程的结果都与「稳定值」一致 ⇒ **与线程数无关** ✓✓。
+   **用固定的 `--qwen-context-file` 绕过文本编码器后两次逐位相同** ✓✓ ⇒ 差异来自
+   **Qwen3-VL 的文本编码器** ✓✓，不是 DiT、不是 VAE、不是采样 ✓✓。
+
+   ⇒ Qwen3-VL 的文本编码器在多线程下偶发不可复现 ⇒ 这是**共享代码**的问题
+   （`src/models/qwen3/trunk/` ✓✓），**不是本 PR 引入的**
+   （`git diff origin/main -- src/models/qwen3/trunk/` 为空 ✓✓）。
+
+3. **设备与 CPU 的数值契约不同** ⚠️：设备路径的 Q8_0 投影把激活量化到 int8 ✓✓，
+   BF16 投影用 `RoundedBf16` 模式在设备上做 f32 累加 ✓✓，而 CPU 的 BF16 路径是 f64
+   累加 ✓✓ ⇒ **数值契约不同** ✓✓。哪一条占主导没有量 ✓✓。
+
+**方向**（未定）：
+
+1. 给 Qwen3-VL 的文本编码器补一条「同 seed 连跑逐位相同」的门禁 ✓✓，再定位那个偶发差异
+   （先怀疑线程池的归约顺序与 KV cache 的写入顺序 ✓✓）。
+2. 设备路径的数值对齐按仓库既有做法：设备对齐用 `RMI_SCALAR=1` ✓✓，或者把 CPU 的
+   BF16 累加也降到 f32 ✓✓。
+
+**验收**：Qwen-Image-2.1 基础版在 256×256 / 4 步下，CPU 连跑 3 次逐位相同 ✓✓、
+**设备连跑 3 次逐位相同** ✓✓，且 PSNR 与同规格的 Turbo 水平相当 ✓✓。
+
+**关联**：`src/models/diffusion/qwen_image_2_1/dit.rs`（`linear()` / `vector()` 的 dtype
+分派 ✓✓）、`src/models/diffusion/qwen_image_2_1/mod.rs`（`PrefixedSource` ✓✓、类型集合
+校验 ✓✓）、`src/models/qwen3/trunk/`（文本编码器的复现性，待定位 ✓✓）、
+[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)（同一套「按权重量化
+格式选后端」的结论 ✓✓）。
+
+### TODO-076: Z-Image 的 F16 DiT 档在设备路径上第二步全 NaN —— 根因是设备端没有 CPU 那份 1/128 的预缩放
+
+**状态**：✅ **本轮的缺口已修**（2026-11-18）。F16 档的 DiT 现在能上设备；
+**共享算子还差一份支持**（设备端要能对 FFN 中间量做缩放）。
+
+**现象**（`models/z-image-gguf-mine/z-image-turbo-f16.gguf` ✓✓，128×128 / seed 42 ✓✓）：
+
+| 规格 | CPU | 设备（`--gpu`） |
+|---|---|---|
+| 128×128 / 1 步 | 13.0 s，出图 ✓✓ | 3.9 s，出图，与 CPU 差 **58.29 dB** ✓✓ |
+| 128×128 / 2 步 | 22.0 s，出图 ✓✓ | ✗✗ `Non-finite Z-Image predicted flow: len=4096, nan=4096` |
+| 64×64 / 1 步 | ✓✓ | ✓✓ |
+| 64×64 / 2 步 | ✓✓ | ✗✗ `len=1024, nan=1024` |
+
+⇒ **不是分辨率相关，是步数相关** ✓✓：`RUST_GPU_DIAG=1` 把分界点钉死了 ✓✓ ——
+第 1 步 `sigma=1.000` 正常，第 2 步 `sigma=0.003` 全 NaN ✓✓。
+
+**怎么找到的** ✓✓（探针临时加在 `z_image/dit.rs` 上，测完已删 ✓✓）：
+
+1. 第 1 步 CPU 与设备逐项**同量级** ✓✓：残差流 43.483765 两边一样 ✓✓、
+   qkv 368.420319 对 368.420532 ✓✓、out_proj 112102.141 对 112102.156 ✓✓；
+   **但 velocity 差 0.4%** ✓✓（4.892777 对 4.872861 ✓✓）。
+2. 逐 block 对比 out_proj：**refiner（block 0/1）完全一致（0.00%）** ✓✓，
+   **主栈第一层（block 2）就差 -7.35%** ✓✓ ⇒ 分叉在主栈 ✓✓。
+3. `RUST_GPU_ATTENTION=0`（注意力回到 CPU）时 **qkv 与 out_proj 都一致** ✓✓
+   ⇒ 分叉在**设备的 attention** ✓✓；attention 输出逐 block 对比：refiner 差 0.02% ✓✓，
+   主栈第一层差 **-1.13%** ✓✓。
+4. 第 2 步的逐层序列：**layer 4（主栈第一层）入口 tokens 有限（726.5）** ✓✓，
+   调制有限 ✓✓、attention 输出有限（131.9）✓✓、out_proj 有限（30730）✓✓，
+   **而 `ffn_w2` 是 `max_abs=279398, inf=53760`** ✗✗ ⇒ **inf 产生在 FFN 的下投影** ✓✓。
+
+**根因** ✓✓：CPU 的 FFN 下投影写的是 `linear_into_scaled(.., 1.0 / 128.0)` ✓✓ ——
+激活**先缩小再舍入到 F16** ✓✓，而**舍入是有范围的** ✓✓；
+设备端 `record_ffn` 记 W2 时**没有这份预缩放** ✓✓ ⇒ 激活按原样舍入 ⇒
+第 2 步的 FFN 中间量约 **3.6e6** ✓✓，越过 F16 的 **65504** ✓✓ ⇒ **inf** ✓✓ ⇒
+下一层的 tokens 带着 inf ✓✓ ⇒ 再一步变成 NaN ✓✓ ⇒ flow 全 NaN ✓✓。
+
+⇒ **矩阵乘法是线性的** ✓✓，缩放输入不改变结果、只改变舍入前的量级 ✓✓ ——
+而量级正是要改的东西 ✓✓。
+
+**本轮改了什么** ✓✓：主栈的 **W2 投影不绑设备** ✓✓，落回 CPU 行路径
+（CPU 路径自带那份 1/128 ✓✓）；其余四个投影照常上设备 ✓✓。
+⇒ **F16 档现在 128×128 / 2 步 CPU 22.0 s → 设备 7.4 s（快 3.0×）** ✓✓，
+与 CPU 的 PNG 差 **58.33 dB**（max_abs 2 ✓✓），不再有 NaN ✓✓；
+严格 `--compute vulkan` 档同样出图 ✓✓（`backend=partial mode=vae` ✓✓）。
+⇒ Q8_0 档不受影响 ✓✓（128×128 / 2 步 denoise **1.85~1.87 s** ✓✓，三次一致 ✓✓）。
+
+**还差什么** ✓✓：
+
+1. **共享算子**：设备的浮点 matmul 要能接住「带预缩放的中间量」✓✓ ⇒
+   具体缺口是**设备端没有缩放激活的入口** ✓✓（`record_ffn` 记 W2 时只能原样上传 ✓✓），
+   补上以后 FFN 的下投影也能留在设备上 ✓✓。
+2. **F32 档的加载缺口已修** ✓✓：`z-image-turbo-f32.gguf` 也在 `models/z-image-gguf-mine/` ✓✓，
+   但它原先**加载不了** —— `validate_dit` 把张量的格式**写死**了 ✓✓（bias/norm 一组要 F32 ✓✓、
+   矩阵一组要 F16 ✓✓），于是加载时就报错：`Invalid tensor cap_embedder.1.weight:
+   shape [2560, 3840] type F32; expected [2560, 3840] F16` ✓✓。
+   ⇒ **那是加载器缺口，不是设备缺口** ✓✓，与 Qwen-Image-2.1 那个「格式该由张量自己声明」
+   是同一类问题 ✓✓（[TODO-075](#todo-075-qwen-image-21-的基础版设备路径--现在能跑了但与-cpu-的差异和那个偶发的首轮差异都还没定位) ✓✓）。
+   ⇒ **已修** ✓✓：校验按张量自己声明的格式来 ✓✓（`validate_dit` 的矩阵组接受 F16|F32 ✓✓、
+   `require_matrix` 接受 F16|Q8_0|F32 ✓✓），加载按 dtype 分派 ✓✓
+   （`linear_into` 新增 F32 分支，走 `F32Kernel` + `forward_f32_rows_dispatch` ✓✓，
+   scale 的约定与 F16/Q8_0 两支一致：先缩放输入、输出再除回来 ✓✓；
+   `force_f32_linear_into` 也按 dtype 读，F32 直接按 f32 读而不是从 F16 放宽 ✓✓）。
+   ⇒ **但这个「F32 档」其实是混合格** ✓✓：453 个张量 = **F32 271 + Q8_0 180 + F16 2** ✓✓ ——
+   180 个 Q8_0 是**主栈** 30 层 × 6 个矩阵（qkv/out/w1/w2/w3/adaLN_modulation.0 ✓✓），
+   F32 的是 **refiner**（`context_refiner.*` ✓✓）与两个 embedder（`cap_embedder.1` / `x_embedder` ✓✓），
+   2 个 F16 是 `cap_pad_token` / `x_pad_token` ✓✓
+   ⇒ **没有哪一档的主栈是 F32** ✓✓ ⇒ 「F32 档的主栈上设备」这件事压根不存在 ✓✓
+   （Q8_0 档与 F32 档的主栈是同一份 Q8_0 ✓✓，F32 档只把 refiner 与 embedder 换成了 F32 ✓✓）。
+   ⇒ 实测（128×128 / 2 步 / seed 42 ✓✓）：CPU denoise **13.4~15.4 s** ✓✓，
+   设备（`--gpu`）denoise **5.18~5.37 s** ✓✓，严格 `--compute vulkan` 同样出图 ✓✓
+   （`backend=partial mode=vae` ✓✓）；CPU 与设备的 PNG 差 **33.10 dB** ✓✓，
+   与 Q8_0 档 CPU 的差 **29.17 dB** ✓✓（两份文件只差 refiner/embedder 的精度 ✓✓）。
+   ⇒ **设备端还差 F32 的绑定** ✓✓（`bind_block_weights` 的 `_ => continue` ✓✓）：
+   它的主栈是 Q8_0 所以照常上设备 ✓✓（`RUST_GPU_DIAG=1` 量到 `projections=150` ✓✓），
+   但 refiner 的 F32 矩阵留在 CPU ✓✓；设备其实有 BF16/F32 的转置浮点 matmul ✓✓，
+   要用它需要主机侧把 F32 权重转置后再传 ✓✓（共享算子的布局约定 ✓✓）。
+3. **设备 attention 与 CPU 差 ~1%** ✓✓：这是**与 F16 无关**的差异 ✓✓ ——
+   Q8_0 档的设备路径同样有它（PSNR 49.7 dB ≈ 1% 相对误差 ✓✓），
+   根因在共享的 attention kernel ✓✓，本轮没有动它 ✓✓。
+
+**顺带记一条方法论** ✓✓：**设备路径的耗时波动很大** ✓✓ —— 同一规格、同一二进制，
+Q8_0 档 128×128 / 2 步的 denoise 量到过 **1.86 s / 3.37 s / 8.35 s** ✓✓ 三次 ⇒
+⇒ **性能数字必须多次测量** ✓✓，单次读数不能写进文档 ✓✓
+（本轮所有引用的数字都重测过三次 ✓✓）。
+
+**验收**：Z-Image 的 F16 档在 `--gpu` 下出图且与 CPU 的 PSNR ≥ 40 dB ✓✓（58.33 dB ✓✓）；
+F16 主栈的四个投影在设备上跑完一步且结果有限 ✓✓；FFN 的下投影留在 CPU ✓✓；
+F32 档能加载并出图 ✓✓（CPU 13.4~15.4 s ✓✓ / 设备 5.2~5.4 s ✓✓，
+与 Q8_0 档 CPU 的差 29.17 dB ✓✓ —— 只差 refiner/embedder 的精度 ✓✓）。
+
+**关联**：`src/models/diffusion/z_image/dit.rs`（`bind_block_weights` ✓✓、
+`f16_projections_enabled` ✓✓）、`src/models/diffusion/z_image/dit_gpu.rs`
+（`record_ffn` ✓✓、缺预缩放的地方 ✓✓）、
+[TODO-073](#todo-073-ernie-image-的设备路径k-quant-慢q8_0-快-28-倍)（同一套「按权重量化格式选后端」的结论 ✓✓）。
+
+### TODO-077: Z-Image 的设备路径不可复现 —— 同一 seed 的两次设备运行会出不同的图
+
+**状态**：🔴 **未定位**（2026-11-18 新发现）。已定位到「设备的 attention 链」这一层，
+再往里（哪一段、还是屏障不够）还没定。
+
+**现象**（Q8_0 档 ✓✓，`models/z-image-gguf-mine/z-image-turbo-q8_0.gguf` ✓✓，
+128×128 / 2 步 / seed 42 ✓✓，`--gpu` ✓✓）：
+
+| 连跑次数 | 不同的 PNG | 说明 |
+|---|---|---|
+| 8 次 | **5 个** | 多数输出占 4/8 ✓✓ |
+| 6 次（1 步） | **2 个** | ⇒ 不是跨步的状态 ✓✓ |
+| 8 次（`RUST_GPU_ATTENTION=0`） | **1 个** | ⇒ **分叉在设备的 attention** ✓✓ |
+| 8 次（`RUST_GPU_F16=0`） | **5 个** | ⇒ 与 refiner 走 CPU 行路径无关 ✓✓ |
+| 6 次（`RUST_GPU_TILED=0`） | **4 个** | ⇒ 与 tiled matmul 无关 ✓✓ |
+| 8 次（attention 链三段各自单独提交） | **4 个** | ⇒ **段与段之间的屏障不是问题** ✓✓ |
+| 8 次（`SPLIT_FFN=1`） | **5 个** | ⇒ 不是 FFN 链的提交粒度 ✓✓ |
+| 8 次（`FFN_BATCH_MAX=0`，FFN 不批量） | **5 个** | ⇒ 不是批量 FFN 链 ✓✓ |
+
+⇒ **把 attention 链的三段（`kv_write` → `attention_scores_tiled` → `softmax` →
+`attention_values`）改成各自单独提交并等待，不确定性不变** ✓✓；把 FFN 链拆开也不变 ✓✓
+⇒ **竞态在单个 dispatch 内部** ✓✓ ⇒ 只剩 Z-Image 专有的那几个着色器 ✓✓：
+`attention_scores_tiled.comp` ✓✓ 与 `qk_norm_rope_interleaved.comp` ✓✓
+（ERNIE 走的是标准的 `attention_scores.comp` + 同一份 softmax/values ✓✓，而它是确定的 ✓✓）。
+
+⇒ 差异幅度从**末位舍入**（PSNR 65.6 dB、max_abs 1 ✓✓）到**整张图都不同**
+（PSNR 23.1 dB、max_abs 154 ✓✓）都有 ✓✓ ⇒ 不是固定的某个系数写错 ✓✓，
+更像**读到了竞态下的数据** ✓✓。
+
+**已排除** ✓✓：
+
+1. **CPU 路径是确定的** ✓✓：F32 档 CPU 连跑 4 次逐位相同 ✓✓。
+2. **文本编码器不在设备上** ✓✓：`RUST_GPU_TEXT` 默认关 ✓✓，编码在 CPU ✓✓。
+3. **不是设备路径的通病** ✓✓：ERNIE-Image Q8_0 档的设备路径（256×256 / 2 步）
+   连跑 4 次**逐位相同** ✓✓（它走的是标准的 `record_attention_rows` ✓✓，
+   而 Z-Image 走自己的 `record_diy_attention_full` ✓✓）。
+4. **VAE 不是源头** ✓✓：关掉设备 attention 之后 VAE 照旧在设备上 ✓✓，而那时是确定的 ✓✓。
+
+⇒ **所以分叉在 Z-Image 特有的那条 attention 链上** ✓✓：
+`kv_write` → `attention_scores_tiled` → `softmax` → `attention_values` ✓✓
+（`record_diy_attention_full` ✓✓，全部录进**同一个** command buffer ✓✓，
+中间只有 `compute_barrier` ✓✓）。
+
+**算子级测试：三段都单独跑过，都确定** ✓✓（新增在 `src/vulkan/zimage_probe.rs` ✓✓，
+`RUST_ZIMAGE_VK_PROBE=1` 才跑 ✓✓）：
+
+| 单跑的一段 | 同一输入连跑 8 次 |
+|---|---|
+| `attention_scores_tiled`（含 kv_write ✓✓） | **8/8 逐位相同** ✓✓ |
+| 融合的 Q/K norm + RoPE ✓✓ | **8/8 逐位相同** ✓✓ |
+| 整条 attention 链（kv_write → scores → softmax → values）✓✓ | **8/8 逐位相同** ✓✓ |
+
+⇒ **三个着色器单独跑都没有竞态** ✓✓ ⇒ 竞态在**它们之外** ✓✓。
+
+**逐 block 探针查到了竞态的样子** ✓✓（临时加在 `z_image/dit.rs` 上，测完已删 ✓✓）：
+每次运行打出每个 block 的 attention 输出指纹 ✓✓（求和 + 最大绝对值 + 前 4 个值 ✓✓），
+两次运行对比 ⇒ **分叉从某一个 block 开始** ✓✓（实测分别落在 layer 4 / 5 / 8 / 15 / 31 ✓✓
+⇒ 与时序有关 ✓✓，不是固定的那一层 ✓✓）。
+
+⇒ **而且不是「算错」，是「读早了」** ✓✓：出问题的那个 block，它的 attention 输出
+**前 4 个值和上一个 block 一模一样** ✓✓（例：某次运行的 layer 8 输出
+`head=[3.9762678, -0.04423639, 1.6983759, -1.7022396]` ✓✓，
+与另一次运行的 layer 7 **逐位相同** ✓✓），
+而求和与前一个 block 不同 ✓✓ ⇒ **缓冲区是「新旧混在一起」的** ✓✓
+⇒ **读回拷贝和设备的 values dispatch 撞上了** ✓✓
+（有时整块都是旧的 ✓✓，有时只有一部分是旧的 ✓✓ ⇒ 拷贝发生在 dispatch 写到一半的时候 ✓✓）。
+
+⇒ **这与「屏障」无关** ✓✓：三个着色器内部、段与段之间、链与链之间都各有屏障 ✓✓，
+而单独跑都确定 ✓✓ ⇒ **要么某次提交里根本没有那个 dispatch** ✓✓，
+要么**读回的拷贝没有排在那个 dispatch 之后** ✓✓。
+（提交机制本身看起来是对的：`submit_commands` 会 `end_command_buffer` → `reset_fences` →
+`queue_submit` → `wait_for_fences` ✓✓，命令缓冲与 fence 都在互斥锁下 ✓✓。）
+
+**下一步** ✓✓：
+
+1. **在提交层查**：给 `submit_commands` 加一条断言 —— 提交前检查命令缓冲里
+   确实记录了该有的 dispatch ✓✓（`recorded_dispatches` 计数已经有 ✓✓，
+   但它是全局的 ✓✓，要按提交分组才有用 ✓✓）；同时在 `record_diy_attention` 之后
+   立刻读回 `attention_out` 的前几个值 ✓✓，与提交后的值比对 ✓✓ ——
+   若提交后立刻读是对的、而几微秒后 `run_block_gpu` 再读却变了 ✓✓，
+   那就是**读回路径**的问题 ✓✓（`read_f32_into` 的 staging 拷贝 ✓✓），
+   否则就是**提交丢 dispatch** ✓✓。
+2. 若提交确实带了那个 dispatch ✓✓，查 `read_f32_into` 的 staging 拷贝路径 ✓✓：
+   它把 arena 拷到 staging 再由主机读 ✓✓，拷贝本身也在同一个队列上 ✓✓，
+   理论上排在 compute 之后 ✓✓ —— 但**读到的「新旧混合」说明它没有** ✓✓。
+3. 修好之前，**文档里不能再写「同一 seed 两次设备运行逐位相同」** ✓✓ ——
+   那句话是**样本太少**得出的 ✓✓（同一份二进制连跑 3 次恰好相同 ✓✓），
+   已更正 ✓✓（`docs/MODEL_LIST.md` ✓✓、`docs/develop/SUPPORTED_MODELS.md` ✓✓）。
+
+**验收**：Z-Image 的设备路径在同一规格下连跑 8 次**逐位相同** ✓✓；
+CPU 与设备的 PSNR 维持 ≥ 40 dB ✓✓。
+
+**关联**：`src/models/diffusion/z_image/dit_gpu.rs`（`record_diy_attention` ✓✓）、
+`src/vulkan/ops.rs`（`record_diy_attention_full` ✓✓、`record_diy_attention_scores` ✓✓、
+`record_softmax_rows` ✓✓、`record_attention_values_rows` ✓✓、`compute_barrier` ✓✓、
+`read_f32_into` ✓✓）、`src/vulkan.rs`（`submit_commands` ✓✓、`compute_barrier` ✓✓）、
+`src/vulkan/zimage_probe.rs`（本轮新增的三个算子级探针 ✓✓：
+`tiled_attention_scores_are_reproducible` ✓✓、
+`fused_qk_norm_rope_is_reproducible` ✓✓、
+`diy_attention_chain_is_reproducible` ✓✓）、
+`shaders/glsl/attention_scores_tiled.comp` ✓✓、`shaders/glsl/softmax.comp` ✓✓、
+`shaders/glsl/attention_values.comp` ✓✓、
+[TODO-076](#todo-076-z-image-的-f16-dit-档在设备路径上第二步全-nan--根因是设备端没有-cpu-那份-1128-的预缩放)（同一套设备路径的其它缺口 ✓✓）。
+
+### TODO-078: 图像编辑模型的 HTTP 入口未实现 —— LongCat-Image-Edit 与 Qwen-Image-2.1
+
+**状态**：📌 未实现（本轮未接）。
+
+**结论**：本轮把文生图的 HTTP 入口接上了（Z-Image、ERNIE-Image 共用
+`POST /v1/images/generations`，与 CLI 逐位相同），但**图像编辑类**的两个模型
+还没有入口 —— 这是**缺实现**，不是「不适用」。
+
+| 模型 | 缺什么 | 为什么不能套用现成的路由 |
+|---|---|---|
+| LongCat-Image-Edit / Edit-Turbo | 参考图入口 | 请求要带一张待编辑的图加一段指令，`/v1/images/generations` 的「prompt → 一张图」形状装不下 |
+| Qwen-Image-2.1 | 参考图 + 自有编排 | 除了参考图，它还驱动正负 CFG 两路、Euler 调度、Qwen3-VL 视觉塔与 DeepStack，编排不在 `DiffusionPipeline` 里 |
+
+**已就位的基础**：
+
+- 路由本身是通用的（`src/app/server/image_generation.rs`），请求体是
+  `prompt` / `size` / `width` / `height` / `steps` / `seed` / `guidance` /
+  `n` / `response_format`；要接编辑模型，需要加 `image`（base64 或路径）字段。
+- 模型层已经有可复用的切分：`src/models/diffusion/longcat/`（Transformer 与
+  图文条件）与 `src/models/diffusion/qwen_image_2_1/`（DiT / 组件契约）。
+  缺的只是**把它们编排成一次生成**，再映射到请求 —— 这部分属于 models 层
+  （模型管线），HTTP 层仍然只做输入映射。
+
+**下一步**：
+
+1. 定请求形状：编辑类模型用 `/v1/images/edits`（multipart 还是 JSON+base64），
+   还是复用 `/v1/images/generations` 加 `image` 字段。按 OpenAI 的惯例是前者。
+2. 把 LongCat 的完整编辑入口下沉成 models 层的管线（现在是 CLI 编排），
+   再让 CLI 与 HTTP 共用 —— 现在的 CLI 编排住在 `src/app/diffusion.rs`，
+   按分层红线它应该搬进 `src/models/diffusion/longcat/`。
+3. Qwen-Image-2.1 同理：把 `src/app/diffusion.rs` 里的 `run_qwen_image_2_1`
+   编排下沉成 models 层管线。
+
+**验收**：两个模型各有一个 HTTP 请求，返回的 PNG 与同参数的 CLI 输出逐位相同；
+请求缺参考图、参考图非方形、参考图尺寸不符这三种情况各自报 400。
+
+**关联**：`src/app/server/image_generation.rs`、`src/app/server/diffusion.rs`、
+`src/app/diffusion.rs`（`run_longcat_image_edit` / `run_qwen_image_2_1`）、
+`src/models/diffusion/longcat/`、`src/models/diffusion/qwen_image_2_1/`、
+[SUPPORTED_MODELS.md](SUPPORTED_MODELS.md)（两行的 HTTP 状态）。

@@ -361,13 +361,13 @@ pub struct VisionEncoder<'a> {
     pub patch_embd_weight_1: Option<&'a [u8]>,
     pub position_embd: Option<&'a [u8]>,
     pub post_ln_weight: Option<&'a [u8]>,
-    pub post_ln_bias: Option<&'a [u8]>,
-    pub patch_bias: Option<&'a [u8]>,
+    pub post_ln_bias: Option<Vec<f32>>,
+    pub patch_bias: Option<Vec<f32>>,
     pub layers: Vec<VisionLayer<'a>>,
     pub mm_0_weight: &'a [u8],
-    pub mm_0_bias: Option<&'a [u8]>,
+    pub mm_0_bias: Option<Vec<f32>>,
     pub mm_2_weight: &'a [u8],
-    pub mm_2_bias: Option<&'a [u8]>,
+    pub mm_2_bias: Option<Vec<f32>>,
     pub precomputed: Option<VisionPrecomputed>,
     preserve_f32: bool,
     /// The device-side ViT attention, built on first use. `None` until then
@@ -443,27 +443,27 @@ struct DeepstackPrecomputed {
 
 pub struct VisionLayer<'a> {
     pub ln1_weight: &'a [u8],
-    pub ln1_bias: Option<&'a [u8]>,
+    pub ln1_bias: Option<Vec<f32>>,
     pub ln2_weight: &'a [u8],
-    pub ln2_bias: Option<&'a [u8]>,
+    pub ln2_bias: Option<Vec<f32>>,
     pub qkv_weight: &'a [u8],
-    pub qkv_bias: Option<&'a [u8]>,
+    pub qkv_bias: Option<Vec<f32>>,
     pub out_weight: &'a [u8],
-    pub out_bias: Option<&'a [u8]>,
+    pub out_bias: Option<Vec<f32>>,
     pub ffn_up_weight: &'a [u8],
-    pub ffn_up_bias: Option<&'a [u8]>,
+    pub ffn_up_bias: Option<Vec<f32>>,
     pub ffn_down_weight: &'a [u8],
-    pub ffn_down_bias: Option<&'a [u8]>,
+    pub ffn_down_bias: Option<Vec<f32>>,
     pub deepstack: Option<DeepstackWeights<'a>>,
 }
 
 pub struct DeepstackWeights<'a> {
     pub norm_weight: &'a [u8],
-    pub norm_bias: &'a [u8],
+    pub norm_bias: Vec<f32>,
     pub fc1_weight: &'a [u8],
-    pub fc1_bias: &'a [u8],
+    pub fc1_bias: Vec<f32>,
     pub fc2_weight: &'a [u8],
-    pub fc2_bias: &'a [u8],
+    pub fc2_bias: Vec<f32>,
 }
 
 fn decode_f16_slice_to_f32(data: &[u8]) -> Vec<f32> {
@@ -556,39 +556,49 @@ impl<'a> VisionEncoder<'a> {
         let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
         let position_embd = source.tensor_slice("v.position_embd.weight");
         let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = optional_f32_tensor_bytes(source, "v.post_ln.bias")?;
-        let patch_bias = optional_f32_tensor_bytes(source, "v.patch_embd.bias")?;
+        let post_ln_bias = crate::core::tensor::optional_f32_values(source, "v.post_ln.bias")?;
+        let patch_bias = crate::core::tensor::optional_f32_values(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
             let ln1_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln1.bias", i))?;
+            let ln1_bias =
+                crate::core::tensor::optional_f32_values(source, &format!("v.blk.{}.ln1.bias", i))?;
             let ln2_weight = source
                 .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln2.bias", i))?;
+            let ln2_bias =
+                crate::core::tensor::optional_f32_values(source, &format!("v.blk.{}.ln2.bias", i))?;
             let qkv_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_qkv.weight", i))?;
-            let qkv_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
+            let qkv_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.attn_qkv.bias", i),
+            )?;
             let out_weight = source
                 .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_out.bias", i))?;
+            let out_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.attn_out.bias", i),
+            )?;
             let ffn_up_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_up.bias", i))?;
+            let ffn_up_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_up.bias", i),
+            )?;
             let ffn_down_weight = source
                 .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
                 .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_down.bias", i))?;
+            let ffn_down_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_down.bias", i),
+            )?;
             let deepstack = if config.has_deepstack_layers.get(i).copied().unwrap_or(false) {
                 let tensor = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
@@ -598,7 +608,7 @@ impl<'a> VisionEncoder<'a> {
                 };
                 let bias = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
-                    optional_f32_tensor_bytes(source, &name)?
+                    crate::core::tensor::optional_f32_values(source, &name)?
                         .ok_or_else(|| format!("Missing {name}"))
                 };
                 Some(DeepstackWeights {
@@ -633,11 +643,11 @@ impl<'a> VisionEncoder<'a> {
         let mm_0_weight = source
             .tensor_slice("mm.0.weight")
             .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = optional_f32_tensor_bytes(source, "mm.0.bias")?;
+        let mm_0_bias = crate::core::tensor::optional_f32_values(source, "mm.0.bias")?;
         let mm_2_weight = source
             .tensor_slice("mm.2.weight")
             .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = optional_f32_tensor_bytes(source, "mm.2.bias")?;
+        let mm_2_bias = crate::core::tensor::optional_f32_values(source, "mm.2.bias")?;
 
         Ok(Self {
             config,
@@ -732,21 +742,21 @@ impl<'a> VisionEncoder<'a> {
         for layer in &self.layers {
             let qkv_f32 = decode_linear_weight(layer.qkv_weight, qkv_n_in, qkv_n_out);
             qkv_weights.push(weight(&qkv_f32, qkv_n_in, qkv_n_out));
-            qkv_biases.push(layer.qkv_bias.map(decode_f32_slice));
+            qkv_biases.push(layer.qkv_bias.clone());
             let out_f32 = decode_linear_weight(layer.out_weight, out_n_in, out_n_out);
             out_weights.push(weight(&out_f32, out_n_in, out_n_out));
-            out_biases.push(layer.out_bias.map(decode_f32_slice));
+            out_biases.push(layer.out_bias.clone());
             let ffn_up_f32 = decode_linear_weight(layer.ffn_up_weight, ffn_up_n_in, ffn_up_n_out);
             ffn_up_weights.push(weight(&ffn_up_f32, ffn_up_n_in, ffn_up_n_out));
-            ffn_up_biases.push(layer.ffn_up_bias.map(decode_f32_slice));
+            ffn_up_biases.push(layer.ffn_up_bias.clone());
             let ffn_down_f32 =
                 decode_linear_weight(layer.ffn_down_weight, ffn_down_n_in, ffn_down_n_out);
             ffn_down_weights.push(weight(&ffn_down_f32, ffn_down_n_in, ffn_down_n_out));
-            ffn_down_biases.push(layer.ffn_down_bias.map(decode_f32_slice));
+            ffn_down_biases.push(layer.ffn_down_bias.clone());
             ln1_weights.push(decode_f32_slice(layer.ln1_weight));
-            ln1_biases.push(layer.ln1_bias.map(decode_f32_slice));
+            ln1_biases.push(layer.ln1_bias.clone());
             ln2_weights.push(decode_f32_slice(layer.ln2_weight));
-            ln2_biases.push(layer.ln2_bias.map(decode_f32_slice));
+            ln2_biases.push(layer.ln2_bias.clone());
             deepstack.push(layer.deepstack.as_ref().map(|weights| {
                 let fc1 = decode_linear_weight(weights.fc1_weight, mm_merged_embd, mm_merged_embd);
                 let fc2 = decode_linear_weight(
@@ -756,11 +766,11 @@ impl<'a> VisionEncoder<'a> {
                 );
                 DeepstackPrecomputed {
                     norm_weight: decode_f32_slice(weights.norm_weight),
-                    norm_bias: decode_f32_slice(weights.norm_bias),
+                    norm_bias: weights.norm_bias.clone(),
                     fc1_weight: weight(&fc1, mm_merged_embd, mm_merged_embd),
-                    fc1_bias: decode_f32_slice(weights.fc1_bias),
+                    fc1_bias: weights.fc1_bias.clone(),
                     fc2_weight: weight(&fc2, mm_merged_embd, self.config.projection_dim),
-                    fc2_bias: decode_f32_slice(weights.fc2_bias),
+                    fc2_bias: weights.fc2_bias.clone(),
                 }
             }));
         }
@@ -785,12 +795,12 @@ impl<'a> VisionEncoder<'a> {
             ln2_weights,
             ln2_biases,
             post_ln_weight: self.post_ln_weight.map_or_else(Vec::new, decode_f32_slice),
-            post_ln_bias: self.post_ln_bias.map(decode_f32_slice),
-            patch_bias: self.patch_bias.map(decode_f32_slice),
+            post_ln_bias: self.post_ln_bias.clone(),
+            patch_bias: self.patch_bias.clone(),
             mm_0_weight: weight(&mm0_f32, mm_merged_embd, mm_merged_embd),
-            mm_0_bias: self.mm_0_bias.map(decode_f32_slice),
+            mm_0_bias: self.mm_0_bias.clone(),
             mm_2_weight: weight(&mm2_f32, mm_merged_embd, self.config.projection_dim),
-            mm_2_bias: self.mm_2_bias.map(decode_f32_slice),
+            mm_2_bias: self.mm_2_bias.clone(),
             deepstack,
         });
     }
@@ -904,8 +914,8 @@ impl<'a> VisionEncoder<'a> {
                     }
                 }
             }
-        } else if let Some(patch_bias_data) = self.patch_bias {
-            let bias = decode_f32_slice(patch_bias_data);
+        } else if let Some(patch_bias_data) = self.patch_bias.as_ref() {
+            let bias = patch_bias_data;
             for token in 0..n_tokens {
                 let offset = token * n_embd;
                 for embd in 0..n_embd {
@@ -986,10 +996,10 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
         } else if let (Some(weight_data), Some(bias_data)) =
-            (self.post_ln_weight, self.post_ln_bias)
+            (self.post_ln_weight, self.post_ln_bias.as_ref())
         {
             let weight = decode_f32_slice(weight_data);
-            let bias = decode_f32_slice(bias_data);
+            let bias = bias_data;
             for token in 0..n_tokens {
                 let offset = token * n_embd;
                 layer_norm_with_bias(
@@ -1355,9 +1365,9 @@ impl<'a> VisionEncoder<'a> {
         } else {
             let layer = &self.layers[il];
 
-            if let Some(bias_data) = layer.ln1_bias {
+            if let Some(ref bias_data) = layer.ln1_bias {
                 let w = decode_f32_slice(layer.ln1_weight);
-                let b = decode_f32_slice(bias_data);
+                let b = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     layer_norm_with_bias(
@@ -1389,8 +1399,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.qkv_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.qkv_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     for j in 0..n_embd * 3 {
                         scratch.qkv_buf[t * n_embd * 3 + j] += bias[j];
@@ -1589,8 +1599,8 @@ impl<'a> VisionEncoder<'a> {
                     n_embd,
                 );
             }
-            if let Some(bias_data) = layer.out_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.out_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
@@ -1650,9 +1660,9 @@ impl<'a> VisionEncoder<'a> {
             }
         } else {
             let layer = &self.layers[il];
-            if let Some(bias_data) = layer.ln2_bias {
+            if let Some(ref bias_data) = layer.ln2_bias {
                 let w = decode_f32_slice(layer.ln2_weight);
-                let b = decode_f32_slice(bias_data);
+                let b = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     layer_norm_with_bias(
@@ -1684,8 +1694,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.ffn_up_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_up_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * cfg.n_ff;
                     vec_add_into(&bias, &mut scratch.ffn_buf[off..off + cfg.n_ff]);
@@ -1734,8 +1744,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.ffn_down_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_down_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
@@ -1822,8 +1832,8 @@ impl<'a> VisionEncoder<'a> {
                     merged_embd,
                 );
             }
-            if let Some(bias_data) = self.mm_0_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = self.mm_0_bias.as_ref() {
+                let bias = bias_data;
                 for t in 0..n_projected {
                     for j in 0..bias.len().min(merged_embd) {
                         mm0_out[t * merged_embd + j] += bias[j];
@@ -1869,8 +1879,8 @@ impl<'a> VisionEncoder<'a> {
                     proj_dim,
                 );
             }
-            if let Some(bias_data) = self.mm_2_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = self.mm_2_bias.as_ref() {
+                let bias = bias_data;
                 for t in 0..n_projected {
                     for j in 0..proj_dim {
                         out[t * proj_dim + j] += bias[j];

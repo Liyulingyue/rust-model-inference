@@ -54,3 +54,66 @@ pub(crate) fn resize_zeroed(dst: &mut Vec<f32>, len: usize, name: &str) -> Resul
     dst.resize(len, 0.0);
     Ok(())
 }
+
+/// Test-only helpers shared by the diffusion model probes.
+#[cfg(test)]
+pub(crate) mod testing {
+    use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+    use std::collections::HashMap;
+
+    /// A source that answers metadata and tensor names but holds no payload.
+    ///
+    /// The signature probes only look at the header, so a test can describe
+    /// a model's shape without building a GGUF.
+    pub(crate) struct NameOnlySource {
+        arch: Option<MetaValue>,
+        info: HashMap<String, TensorInfo>,
+    }
+
+    impl NameOnlySource {
+        /// Change the stored type of a tensor the source already carries.
+        pub(crate) fn with_type(mut self, name: &str, ggml_type: GGMLType) -> Self {
+            if let Some(info) = self.info.get_mut(name) {
+                info.ggml_type = ggml_type;
+            }
+            self
+        }
+
+        /// A source with the given architecture tag and tensor names.
+        pub(crate) fn new(arch: Option<&str>, tensors: &[&str]) -> Self {
+            let mut info = HashMap::new();
+            for name in tensors {
+                info.insert(
+                    (*name).to_string(),
+                    TensorInfo {
+                        name: (*name).to_string(),
+                        dims: vec![2, 2],
+                        ggml_type: GGMLType::F16,
+                        offset: 0,
+                    },
+                );
+            }
+            Self {
+                arch: arch.map(|value| MetaValue::String(value.to_string())),
+                info,
+            }
+        }
+    }
+
+    impl TensorSource for NameOnlySource {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            if key == "general.architecture" {
+                return self.arch.as_ref();
+            }
+            None
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.info.get(name)
+        }
+
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+}

@@ -1828,26 +1828,7 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
 }
 
 fn backend_label(b: &Backend) -> &'static str {
-    match b {
-        Backend::Text(_) | Backend::WeVisOne(_) => "text",
-        Backend::UnlimitedOcr(_) => "unlimited-ocr",
-        Backend::Embedding(_) => "embedding",
-        Backend::Asr(_) => "asr",
-        Backend::HySimulMt(_) => "hy-simulmt",
-        Backend::Audio8(_) => "audio8",
-        Backend::AudioEnhancement(_) => "audio-enhancement",
-        Backend::Tts(_) | Backend::Pivo(_) | Backend::UnderdogWoof(_) => "tts",
-        Backend::ArkTts(_) => "arktts",
-        Backend::Auk(_) => "auk",
-        Backend::Pjit(_) => "pjit",
-        Backend::Rerank(_) => "rerank",
-        Backend::Clm(_) => "clm",
-        Backend::Gliner2(_) => "gliner2",
-        Backend::Gliner2Boundary(_) => "gliner2-boundary",
-        Backend::Timestral(_) => "timestral",
-        Backend::Idol(_) => "idol",
-        Backend::Decision(_) => "decision",
-    }
+    b.label()
 }
 
 fn jev_threads(state: &AppState) -> usize {
