@@ -293,11 +293,11 @@ pub fn build_text_runtime(
         Box::new(LlamaTextRuntime::new(options)?)
     } else if matches!(
         arch,
-        "qwen3" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe" | "mage_vl"
+        "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "qwen2vl" | "qwen3vlmoe" | "mage_vl"
     ) {
-        // qwen2vl / qwen3vlmoe share the Qwen3 model + session + Qwen3Input
-        // surface (the CLI's `run_qwen3_family_multimodal` covers them too);
-        // only the projector family differs, which the image path handles.
+        // qwen3moe shares the Qwen3 model + session + Qwen3Input surface with
+        // qwen3, minus the vision path. qwen2vl / qwen3vlmoe add their own
+        // projector family, which the image path handles.
         Box::new(Qwen3TextRuntime::new(options)?)
     } else if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
         Box::new(HybridTextRuntime::new(options)?)

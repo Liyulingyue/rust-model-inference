@@ -31,7 +31,8 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
-        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" | "mage_vl" => Ok(false),
+        "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "lfm2moe" | "qwen2vl"
+        | "qwen3vlmoe" | "mage_vl" => Ok(false),
         // Mellum 2.1 ships ChatML (`<|im_start|>role\n … <|im_end|>\n`) with
         // the same `# Tools` preamble as Qwen3, so it rides the Qwen3
         // renderer.

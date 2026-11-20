@@ -428,7 +428,15 @@ fn load_export_source(role: ComponentRole, path: &Path) -> Result<ExportSource, 
                 .ok_or_else(|| source_error(&source, "missing or invalid general.architecture"))?;
             if !matches!(
                 architecture,
-                "qwen2" | "qwen2vl" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "llama"
+                "qwen2"
+                    | "qwen2vl"
+                    | "qwen3"
+                    | "qwen3moe"
+                    | "minimind2moe"
+                    | "qwen3vl"
+                    | "qwen3vlmoe"
+                    | "qwen35"
+                    | "llama"
             ) {
                 return Err(source_error(
                     &source,

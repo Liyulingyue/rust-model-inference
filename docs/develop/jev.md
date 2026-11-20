@@ -152,7 +152,7 @@ prefill ──► logits [batch, seq_len, vocab]
 
 | 架构 | 状态 | 实现方式 |
 |---|---|---|
-| Qwen3 / Qwen3-VL（含 Qwen3-0.6B-Instruct / IQ4_NL / IQ4_XS / Q2_K…） | ✅ | `Qwen3Session::forward_logits` |
+| Qwen3 / Qwen3-VL / Qwen3-MoE / MiniMind2-MoE（含 Qwen3-0.6B-Instruct / IQ4_NL / IQ4_XS / Q2_K…） | ✅ | `Qwen3Session::forward_logits`；`qwen3moe` / `minimind2moe` 复用同一文本路径 |
 | Qwen3.5 / Qwen3.5-2B 等 dense + hybrid | ✅ | `Qwen35Session::forward_logits` |
 | Llama trunk（llama / k2-horizon / granite / nanbeige / qwen2_2） | ✅ | `llama::run_forward_logits_llama`（copy-paste prefill） |
 | Gemma4 | ✅ | `Gemma4Session::forward_logits`（thin wrapper over `forward_rows`） |
@@ -180,7 +180,7 @@ JEV 按 `general.architecture` 自动选 chat template：
 
 | Arch | Chat template |
 |---|---|
-| qwen3 / qwen3vl | `<\|im_start\|>system\n...\n<\|im_end\|>\n<\|im_start\|>user\n...\n<\|im_end\|>\n<\|im_start\|>assistant\n` |
+| qwen3 / qwen3moe / minimind2moe / qwen3vl | `<\|im_start\|>system\n...\n<\|im_end\|>\n<\|im_start\|>user\n...\n<\|im_end\|>\n<\|im_start\|>assistant\n` |
 | qwen35 | 同 qwen3，但 positions 用 mrope `[t, t, t, 0]` |
 | llama / qwen2_2 / minicpm | `system\n{...}\nuser\n{...}\nassistant\n` |
 | k2-horizon | `<\|start_of_role\|>system<\|end_of_role\|>...<\|end_of_text\|>\n...<\|start_of_role\|>assistant<\|end_of_role\|>` |

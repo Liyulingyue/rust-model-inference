@@ -419,6 +419,8 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "mage_vl"
             | "qwen2vl"
             | "qwen3"
+            | "qwen3moe"
+            | "minimind2moe"
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
@@ -828,7 +830,7 @@ pub struct Qwen3ArchKnobs {
     /// `None` means any configuration derived from `model_config_from_source`
     /// is accepted (e.g. Qwen3 base).
     pub allowed_dimensions: Option<Qwen3AllowedDimensions>,
-    /// Optional routed FFN configuration for the Qwen3-VL MoE variant.
+    /// Optional routed FFN configuration for MoE variants sharing this trunk.
     pub moe: Option<Qwen3MoeConfig>,
 }
 
@@ -942,6 +944,8 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
             | "mage_vl"
             | "qwen2vl"
             | "qwen3"
+            | "qwen3moe"
+            | "minimind2moe"
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
@@ -956,7 +960,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let has_qk_norm = matches!(
         arch.as_str(),
-        "qwen3" | "mage_vl" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
+        "qwen3" | "qwen3moe" | "mage_vl" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
     );
     let has_qkv_bias = arch == "qwen2vl";
 
@@ -984,7 +988,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
         None
     };
 
-    let moe = if arch == "qwen3vlmoe" {
+    let moe = if matches!(arch.as_str(), "qwen3moe" | "minimind2moe" | "qwen3vlmoe") {
         let get = |name: &str| -> Result<usize, String> {
             let key = format!("{arch}.{name}");
             source
@@ -1730,6 +1734,156 @@ mod tests {
             (2048, 48, 32, 4)
         );
         assert_eq!(qwen3_arch_knobs(&qwen3moe).unwrap().arch, "qwen3vlmoe");
+    }
+
+    #[test]
+    fn qwen3moe_text_arch_reads_its_own_metadata_prefix() {
+        let source = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("qwen3moe".into()),
+                ),
+                ("qwen3moe.embedding_length".into(), MetaValue::Uint32(768)),
+                ("qwen3moe.block_count".into(), MetaValue::Uint32(8)),
+                ("qwen3moe.attention.head_count".into(), MetaValue::Uint32(8)),
+                (
+                    "qwen3moe.attention.head_count_kv".into(),
+                    MetaValue::Uint32(4),
+                ),
+                (
+                    "qwen3moe.attention.key_length".into(),
+                    MetaValue::Uint32(96),
+                ),
+                (
+                    "qwen3moe.feed_forward_length".into(),
+                    MetaValue::Uint32(2432),
+                ),
+                ("qwen3moe.context_length".into(), MetaValue::Uint32(32768)),
+                (
+                    "qwen3moe.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "qwen3moe.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+                ("qwen3moe.expert_count".into(), MetaValue::Uint32(4)),
+                ("qwen3moe.expert_used_count".into(), MetaValue::Uint32(1)),
+                (
+                    "qwen3moe.expert_feed_forward_length".into(),
+                    MetaValue::Uint32(2432),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        let config = model_config_from_source(&source).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (768, 8, 8, 4)
+        );
+        let knobs = qwen3_arch_knobs(&source).unwrap();
+        assert_eq!(knobs.arch, "qwen3moe");
+        assert!(knobs.has_qk_norm);
+        assert_eq!(
+            knobs.moe,
+            Some(Qwen3MoeConfig {
+                expert_count: 4,
+                expert_used_count: 1,
+                expert_ffn: 2432,
+                shared_expert_ffn: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn minimind2moe_reads_ungated_shared_expert_metadata() {
+        let source = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("minimind2moe".into()),
+                ),
+                (
+                    "minimind2moe.embedding_length".into(),
+                    MetaValue::Uint32(640),
+                ),
+                ("minimind2moe.block_count".into(), MetaValue::Uint32(8)),
+                (
+                    "minimind2moe.attention.head_count".into(),
+                    MetaValue::Uint32(8),
+                ),
+                (
+                    "minimind2moe.attention.head_count_kv".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "minimind2moe.attention.key_length".into(),
+                    MetaValue::Uint32(80),
+                ),
+                (
+                    "minimind2moe.attention.value_length".into(),
+                    MetaValue::Uint32(80),
+                ),
+                (
+                    "minimind2moe.feed_forward_length".into(),
+                    MetaValue::Uint32(1728),
+                ),
+                (
+                    "minimind2moe.context_length".into(),
+                    MetaValue::Uint32(32768),
+                ),
+                (
+                    "minimind2moe.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "minimind2moe.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-5),
+                ),
+                ("minimind2moe.expert_count".into(), MetaValue::Uint32(4)),
+                (
+                    "minimind2moe.expert_used_count".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "minimind2moe.expert_feed_forward_length".into(),
+                    MetaValue::Uint32(1728),
+                ),
+                (
+                    "minimind2moe.expert_shared_feed_forward_length".into(),
+                    MetaValue::Uint32(1728),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        let config = model_config_from_source(&source).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (640, 8, 8, 2)
+        );
+        let knobs = qwen3_arch_knobs(&source).unwrap();
+        assert_eq!(knobs.arch, "minimind2moe");
+        assert!(!knobs.has_qk_norm);
+        assert_eq!(
+            knobs.moe,
+            Some(Qwen3MoeConfig {
+                expert_count: 4,
+                expert_used_count: 2,
+                expert_ffn: 1728,
+                shared_expert_ffn: 1728,
+            })
+        );
     }
 
     #[test]

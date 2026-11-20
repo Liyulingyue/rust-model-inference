@@ -232,7 +232,7 @@ fn build_jev_token_ids_for_arch(
         return Ok(ids);
     }
     match arch {
-        "qwen3" | "qwen3vl" | "hunyuan-dense" => {
+        "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "hunyuan-dense" => {
             let mut token_ids = Vec::new();
             append_qwen_message_tokens(
                 &mut token_ids,
@@ -613,16 +613,18 @@ pub fn run_jev_grouped_decision_data(
     eprintln!("JEV grouped: arch = {:?}, mode = {:?}", arch, mode);
 
     let results = match &*arch {
-        "qwen3" | "qwen3vl" | "mage_vl" => qwen3::run_jev_grouped_qwen3(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            false,
-            jinja.clone(),
-            max_context,
-        )?,
+        "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "mage_vl" => {
+            qwen3::run_jev_grouped_qwen3(
+                source.clone(),
+                context,
+                &prepared,
+                n_threads_arg,
+                prefill_batch_size,
+                false,
+                jinja.clone(),
+                max_context,
+            )?
+        }
         "qwen35" | "qwen35moe" | "sensenova_loop" => qwen35::run_jev_grouped_qwen35(
             source.clone(),
             context,
