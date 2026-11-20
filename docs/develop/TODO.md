@@ -22,26 +22,35 @@ NEON on aarch64; no AVX-512).
       把每层的多个投影合成一次提交（共享 linear executor 已有 `run_group`），以及把
       NAR 的 prefix+velocity 两次前向的合成一次提交；设备侧 GEMV 的效率也需要单独看
       （每 workgroup 64 输出通道 × 32 帧的 tiling 对 rows=1 是否合适）。
-- [ ] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** —
+- [x] **MiniCPM-V 4.7 视觉塔的 attention/norm/slicing 上不了设备（投影已经能上）** — ✅ 2026-11-20 完成。
       2026-11-10 起 `minicpmv4_7` 的投影（patch embedding、27 层 ViT 的 q/k/v/o 与 FFN、
-      vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor
-      （实测 172 次提交 / 2.17 GB 权重上传，vision embedding 与 CPU 差约 3e-5；CPU 路径仍是
-      原来逐位对齐 llama.cpp oracle 的 `dot_f32` 循环，未改）。剩下三块的情况：
-      ① **ViT 块的 attention 技术上可以上**：`AttentionSpec` 支持 `causal: false`，
-      `models/qwen3/vision` 已有先例，而本视觉塔的 `[token, head*d_head]` 布局正好是设备要的
-      `[token, head, dim]`，连重排都省了；**但 `ops::kernel::vulkan::try_attention` 每次都会用
-      CPU kernel 复核结果**（`attention_matches_cpu`，为 TODO-044「设备返回上一次调用的数字」
-      而加，无开关），不符就重试、再不符退回 CPU 重算 → **CPU 时间一点省不下来，反而更慢**。
-      要真提速必须先有"可信设备路径"：让严格档（`--compute vulkan`）跳过复核，或改成首次/抽样
-      校验，并把 TODO-044 的风险写成显式声明。
-      ② **vit_merger 的窗口 attention 上不去**：它是 2x2 块 mask 的，`AttentionSpec` 没有 mask
-      字段，设备路径表达不了 → 需要 mask-aware kernel。
-      ③ **norm 没有独立设备 kernel**，且是逐行小操作（1024×1152）夹在投影中间，搬上去只增加
-      往返；要做只能融合进投影的 epilogue。
-      ④ **slicing 不是计算**：是像素搬运/切片（CPU 侧数据准备），没有内核可移。
-      另外，投影的输出目前都回读到 host（`run_group` 写进调用方缓冲），attention 要用就得重新
-      上传（每层 q/k/v 各 4.7 MB × 27 层 ≈ 380 MB 往返）—— 要省掉这段就是 THX-02/Mage-VL
-      都撞到的 L2（设备常驻中间结果 + 持久权重）。
+      vit_merger、mm projector）在 `--compute auto|vulkan` 下走共享 linear executor。本次把
+      27 层 ViT attention 与 vit_merger 的窗口 attention 也接到设备上，norm / slicing 按实测
+      明确留在 CPU：
+      ① **ViT attention 上设备**：`vision.rs` 的 `DeviceAttention` 直接驱动
+      `crate::vulkan::ops::AttentionRuntime`（`causal: false`），绕开
+      `ops::kernel::vulkan::try_attention` 的无条件 CPU 复核，按 `tokens * width` 扩容缓存、
+      小网格复用同一 arena。本地 `RMI_GPU_ATTENTION_OFF` 可关。实测 32x32 tile 上 28 次
+      attention（27 层 + merger）全部落在设备。
+      ② **vit_merger 的窗口 attention**：给它一个真正的 mask。`attention_online(.comp|.glsl)`
+      的 push constant 末尾加了 `window` / `grid` 两个词（其余调用方传 0 不受影响），
+      `window=2, grid=patches_per_row` 时 query 只能看到同一 2x2 网格块里的 key，等价于
+      llama.cpp 在 `vit_merger_window_idx` 重排后用的块对角 mask；`AttentionSpec` 的 33 处
+      构造不用改。
+      ③ **norm 留在 CPU**：54 次 LayerNorm（27 层 × 2）在 1024 token 上共 72.7 ms，占
+      整塔 6.5 s 的 1.1%；它是逐行 element-wise，搬上去只能增加往返，要做应改成投影 epilogue。
+      ④ **slicing 不是计算**：`slicing.rs` 只产出像素搬运/切片索引，没有内核可移。
+      **同时修正了 CPU attention 的语义**：原实现把 16 个 head 的点积先加成一个 score、只做
+      一次 softmax、所有 head 共用同一组权重；llama.cpp 的 `clip_graph_minicpmv4_6::build`
+      是 `reshape_3d(Q, d_head, n_head, n_pos)` 后走 `build_attn`，每个 head 独立 softmax。
+      按 pinned oracle 的 `tools/mtmd/models/minicpmv.cpp`（blob `0e0fc038…`，与 pin 一致）改成
+      per-head，并把内层换成 `dot_f32`：1024 token、27 层的 attention 由 15.6 s 降到 5.7 s。
+      实测（aarch64 + NVIDIA GPU，8x8 与 32x32 合成 tile，`mmproj-model-f16`）：
+      32x32 整塔 CPU 6.46 s → 设备 2.65 s（2.4x），设备 vs CPU 最大绝对差 4.9e-5、相对 L2
+      9.5e-6；8x8 小 tile 因每层往返占主导反而变慢（0.40 s → 1.53 s）。
+      **边界**：投影输出仍回读 host（attention 每层重新上传 q/k/v），
+      省掉这段要设备常驻中间结果 + 持久权重（THX-02 / Mage-VL 撞过的同一堵墙）；
+      视觉塔 `pos_embed` 之后仍未与 oracle 逐位对照，本次只对齐了"算什么"。
 - [ ] **转换器的接受格式集由共享 `BLOCK_FORMATS` 推导，会静默接受模型加载器不支持的格式** —
       `tools/converter/mage_vl/convert_mage_vl.py` 写 `TEXT_TYPES = ("f32", *BLOCK_FORMATS)`，
       `tools/converter/thx02/convert_thx02.py` 写 `FORMATS = {..., **BLOCK_FORMATS, ...}`。共享层每

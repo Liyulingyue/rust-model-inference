@@ -52,6 +52,122 @@ pub struct MiniCpmV47Scratch {
     ff: Vec<f32>,
     merged: Vec<f32>,
     mean: Vec<f32>,
+    /// The device-side attention, built on first use and kept across tiles so
+    /// the arena is not reallocated per block. `None` when the policy is CPU,
+    /// after a device failure, or when the runtime cannot hold this geometry.
+    device: Option<DeviceAttention>,
+}
+
+/// The device-side attention for the ViT blocks and the vit_merger window.
+///
+/// The tower keeps `[token, head * d_head]`, which is already the
+/// `[token, head, dim]` layout the runtime indexes, so no repacking is needed.
+/// The runtime is sized for the largest tile seen and reused for the smaller
+/// merged grid.
+#[cfg(feature = "vulkan")]
+struct DeviceAttention {
+    runtime: crate::vulkan::ops::AttentionRuntime,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl DeviceAttention {
+    fn new(tokens: usize, heads: usize, head_dim: usize) -> Option<Self> {
+        let context = crate::ops::get_vulkan_context()?;
+        let plane = tokens * heads * head_dim;
+        let runtime = crate::vulkan::ops::AttentionRuntime::new(context, (plane, plane)).ok()?;
+        Some(Self {
+            runtime,
+            tokens,
+            heads,
+            head_dim,
+        })
+    }
+}
+
+/// Placeholder so the scratch layout and the call sites need no
+/// `cfg(feature = "vulkan")` of their own; the helper always declines.
+#[cfg(not(feature = "vulkan"))]
+struct DeviceAttention;
+
+/// Run the tower's attention on the device when the policy allows it.
+///
+/// Returns `false` when the caller must run [`attention`] instead: a CPU
+/// policy, `RMI_GPU_ATTENTION_OFF`, an unsupported geometry, or a device
+/// error. A failed runtime is dropped so the next block rebuilds it rather
+/// than retrying a broken arena.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn device_attention(
+    cfg: &MiniCpmV47Config,
+    slot: &mut Option<DeviceAttention>,
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    out: &mut [f32],
+    tokens: usize,
+    nx: usize,
+    window: bool,
+) -> bool {
+    if std::env::var_os("RMI_GPU_ATTENTION_OFF").is_some() {
+        return false;
+    }
+    let (heads, head_dim) = (cfg.n_head, cfg.d_head);
+    if tokens == 0 || heads == 0 || head_dim == 0 || q.len() != tokens * heads * head_dim {
+        return false;
+    }
+    // `get_vulkan_context` also enforces the policy, so a CPU scope rebuilds
+    // nothing: `DeviceAttention::new` returns `None` and the CPU path runs.
+    let stale = slot.as_ref().is_none_or(|device| {
+        device.tokens < tokens || device.heads != heads || device.head_dim != head_dim
+    });
+    if stale {
+        *slot = DeviceAttention::new(tokens, heads, head_dim);
+    }
+    let Some(device) = slot.as_mut() else {
+        return false;
+    };
+    let spec = crate::ops::nn::AttentionSpec {
+        query_tokens: tokens,
+        key_tokens: tokens,
+        query_heads: heads,
+        key_value_heads: heads,
+        head_dim,
+        causal: false,
+        scale: cfg.kq_scale,
+    };
+    // The vit_merger's mask is 2x2 tokens of the patch grid, and the oracle
+    // builds it over `n_pos = nx * ny` rows, so `grid` is the patch row width.
+    let window = if window { 2 } else { 0 };
+    let grid = if window == 0 { 1 } else { nx as u32 };
+    match device
+        .runtime
+        .forward_windowed(q, k, v, out, spec, window, grid)
+    {
+        Ok(()) => true,
+        Err(_) => {
+            *slot = None;
+            false
+        }
+    }
+}
+
+#[cfg(not(feature = "vulkan"))]
+#[allow(clippy::too_many_arguments)]
+fn device_attention(
+    _cfg: &MiniCpmV47Config,
+    _slot: &mut Option<DeviceAttention>,
+    _q: &[f32],
+    _k: &[f32],
+    _v: &[f32],
+    _out: &mut [f32],
+    _tokens: usize,
+    _nx: usize,
+    _window: bool,
+) -> bool {
+    false
 }
 
 impl MiniCpmV47Scratch {
@@ -76,7 +192,9 @@ impl MiniCpmV47Scratch {
 /// pinned bit-for-bit to the llama.cpp oracle, so it must not be re-routed
 /// through the shared matmul, whose summation order differs in the last bits.
 /// A device policy submits the same projection to the shared linear executor
-/// instead; attention, norms and slicing stay on the CPU.
+/// instead; the attention goes with it when the policy allows (see
+/// [`device_attention`]), while the norms and the pixel slicing stay on the
+/// CPU.
 fn project(
     linear: &Projection,
     executor: &mut Option<LinearExecutor<'_, 'static>>,
@@ -262,7 +380,9 @@ fn vit_block(
     project(&layer.q, executor, pool, normed, q, tokens)?;
     project(&layer.k, executor, pool, normed, k, tokens)?;
     project(&layer.v, executor, pool, normed, v, tokens)?;
-    attention(cfg, scores, q, k, v, attn, tokens, nx, false);
+    if !device_attention(cfg, &mut scratch.device, q, k, v, attn, tokens, nx, false) {
+        attention(cfg, scores, q, k, v, attn, tokens, nx, false);
+    }
     let mut proj = vec![0.0f32; tokens * dim];
     project(&layer.o, executor, pool, attn, &mut proj, tokens)?;
     // residual is added onto `input`, not the normed copy
@@ -322,8 +442,10 @@ pub fn encode_tile(
     scratch.fit(tokens, dim, cfg.n_ff);
 
     // The projections are the tower's bulk of the work; a device policy hands
-    // them to the shared linear executor while attention, norms and slicing
-    // stay on the CPU.
+    // them to the shared linear executor, and the ViT attention follows through
+    // `device_attention` (the merger window included). The layer norms and the
+    // pixel slicing stay on the CPU: they are per-row element-wise work with no
+    // useful device kernel.
     let policy = ComputePolicy::legacy();
     let mut executor = if policy == ComputePolicy::Cpu {
         None
@@ -473,7 +595,9 @@ pub fn encode_tile(
             v,
             tokens,
         )?;
-        attention(cfg, scores, q, k, v, attn, tokens, nx, true);
+        if !device_attention(cfg, &mut scratch.device, q, k, v, attn, tokens, nx, true) {
+            attention(cfg, scores, q, k, v, attn, tokens, nx, true);
+        }
     }
     let mut proj = vec![0.0f32; tokens * dim];
     project(
@@ -729,6 +853,144 @@ mod device_tests {
         assert!(
             max_abs < 1e-5,
             "device projection differs from the CPU kernel: max_abs={max_abs}"
+        );
+    }
+
+    fn attention_config() -> MiniCpmV47Config {
+        MiniCpmV47Config {
+            image_size: 448,
+            patch_size: 14,
+            n_embd: 32,
+            n_ff: 64,
+            n_layer: 1,
+            n_head: 4,
+            n_embd_text: 16,
+            eps: 1e-6,
+            n_merge: 4,
+            max_slice_nums: 9,
+            insert_layer_id: 0,
+            image_mean: [0.5; 3],
+            image_std: [0.5; 3],
+            d_head: 8,
+            kq_scale: 1.0 / 8.0f32.sqrt(),
+        }
+    }
+
+    fn pseudo_random(n: usize, seed: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (((i * 37 + seed * 11) % 101) as f32 / 101.0) * 2.0 - 1.0)
+            .collect()
+    }
+
+    /// Both attention paths have to agree on the same geometry, including the
+    /// vit_merger's 2x2 window mask (which the shader gets as push constants).
+    #[test]
+    #[ignore = "requires hardware Vulkan; run alone with --test-threads=1"]
+    fn device_attention_matches_the_cpu_kernel() {
+        crate::ops::enable_gpu();
+        let cfg = attention_config();
+        let (tokens, nx, dim) = (16usize, 4usize, 32usize);
+        let q = pseudo_random(tokens * dim, 1);
+        let k = pseudo_random(tokens * dim, 2);
+        let v = pseudo_random(tokens * dim, 3);
+        let mut slot = None;
+        for window in [false, true] {
+            let mut device = vec![0.0f32; tokens * dim];
+            assert!(
+                device_attention(&cfg, &mut slot, &q, &k, &v, &mut device, tokens, nx, window),
+                "the device attention declined a supported geometry"
+            );
+            let mut scores = vec![0.0f32; tokens * tokens];
+            let mut cpu = vec![0.0f32; tokens * dim];
+            attention(&cfg, &mut scores, &q, &k, &v, &mut cpu, tokens, nx, window);
+            let max_abs = cpu
+                .iter()
+                .zip(&device)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let l2 = |values: &[f32]| values.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let relative = l2(&cpu
+                .iter()
+                .zip(&device)
+                .map(|(a, b)| a - b)
+                .collect::<Vec<_>>())
+                / l2(&cpu).max(f32::MIN_POSITIVE);
+            assert!(
+                max_abs < 1e-4 && relative < 1e-5,
+                "window={window}: device attention differs from the CPU kernel \
+                 (max_abs={max_abs}, relative_l2={relative})"
+            );
+        }
+    }
+
+    /// The whole tower with the device attention, against the CPU policy. The
+    /// tolerance is the band the projections already sit in, so a semantic
+    /// mismatch (per-head vs head-summed scores) would not hide inside it.
+    #[test]
+    #[ignore = "requires RMI_MINICPMV_MMPROJ and hardware Vulkan"]
+    fn device_tower_matches_the_cpu_tower() {
+        let Some(path) = std::env::var("RMI_MINICPMV_MMPROJ").ok() else {
+            eprintln!("skipping: set RMI_MINICPMV_MMPROJ");
+            return;
+        };
+        let loader = match crate::core::loader::GGUFLoader::from_file(&path) {
+            Ok(loader) => loader,
+            Err(error) => {
+                eprintln!("skipping: {error}");
+                return;
+            }
+        };
+        let source: Arc<dyn crate::core::tensor::TensorSource> = Arc::new(loader);
+        let weights = MiniCpmV47Weights::load(source.as_ref()).expect("load the vision tower");
+        let cfg = &weights.config;
+        let (nx, ny) = std::env::var("RMI_MINICPMV_TEST_TILE")
+            .ok()
+            .and_then(|value| {
+                let (w, h) = value.split_once('x')?;
+                Some((w.parse::<usize>().ok()?, h.parse::<usize>().ok()?))
+            })
+            .unwrap_or((8, 8));
+        let pixels = pseudo_random(nx * cfg.patch_size * ny * cfg.patch_size * 3, 7);
+        let pool = Arc::new(ComputePool::new(8));
+
+        let (cpu, cpu_elapsed) = {
+            let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
+            let mut scratch = MiniCpmV47Scratch::default();
+            let start = std::time::Instant::now();
+            let out = encode_tile(&weights, &mut scratch, &pool, &pixels, nx, ny).unwrap();
+            (out, start.elapsed())
+        };
+
+        crate::ops::enable_gpu();
+        let mut scratch = MiniCpmV47Scratch::default();
+        let start = std::time::Instant::now();
+        let device = encode_tile(&weights, &mut scratch, &pool, &pixels, nx, ny).unwrap();
+        let device_elapsed = start.elapsed();
+        assert!(
+            scratch.device.is_some(),
+            "the device attention was never built (policy or device unavailable)"
+        );
+
+        let max_abs = cpu
+            .iter()
+            .zip(&device)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let l2 = |values: &[f32]| values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let relative = l2(&cpu
+            .iter()
+            .zip(&device)
+            .map(|(a, b)| a - b)
+            .collect::<Vec<_>>())
+            / l2(&cpu).max(f32::MIN_POSITIVE);
+        eprintln!(
+            "tower {}x{}: cpu={cpu_elapsed:?} device={device_elapsed:?} \
+             max_abs={max_abs} relative_l2={relative}",
+            nx, ny
+        );
+        assert!(
+            max_abs < 1e-3 && relative < 1e-4,
+            "device tower differs from the CPU tower: max_abs={max_abs}, relative_l2={relative}"
         );
     }
 }

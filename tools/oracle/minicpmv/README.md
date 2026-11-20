@@ -164,19 +164,40 @@ one sequential accumulator. That would need a local reimplementation inside
 * Only `Q8_0` + `mmproj-model-f16` are covered.
 * `MARKER_SLOT` (the KV slot the `<|image_pad|>` marker occupies, which sets the
   canvas origin `pos_0 - 1`) is still an assumption.
-* Everything after `pos_embed` is untested: the split means the 27 ViT blocks,
-  the `vit_merger` and the final projector have never been compared at all.
+* Everything after `pos_embed` is untested numerically: the split means the 27
+  ViT blocks, the `vit_merger` and the final projector have never been compared
+  at all. The attention *semantics* were aligned to the pinned builder source
+  instead (see below), which is not a substitute for the dump.
 
-## GPU projection offload (2026-11-10)
+## GPU offload (projections 2026-11-10, attention 2026-11-20)
 
-`--compute auto|vulkan` now submits the vision tower's projections to the shared
+`--compute auto|vulkan` submits the vision tower's projections to the shared
 linear executor: the patch embedding, each ViT layer's q/k/v/o and FFN pair, the
-`vit_merger` attention and downsample MLP, and the `mm` projector. The
-attention, layer norms, slicing and canvas positions stay on the CPU, and the
-CPU path is unchanged — it is still the original `dot_f32` loop, so the oracle
-comparison above is untouched.
+`vit_merger` attention and downsample MLP, and the `mm` projector. Since
+2026-11-20 the 27 ViT attention calls and the `vit_merger`'s windowed attention
+run on the device as well: `vision.rs` drives
+`crate::vulkan::ops::AttentionRuntime` directly (`causal: false`) rather than
+going through `ops::kernel::vulkan::try_attention`, whose unconditional CPU
+cross-check would immediately hand the result back. The windowed variant rides
+the same shader — `attention_online` now reads two trailing push constants
+(`window`, `grid`), and `window=2, grid=patches_per_row` reproduces the 2x2
+block-diagonal mask without touching the 33 `AttentionSpec` constructors.
+`RMI_GPU_ATTENTION_OFF=1` disables the offload. Layer norms, slicing and canvas
+positions stay on the CPU: 54 layer norms over 1024 tokens cost 72.7 ms of a
+6.5 s tower (1.1%), and slicing is index arithmetic rather than math.
 
-Measured on this host (Linux x86_64, NVIDIA L20, `release-fast --features
+The same change corrects the CPU attention semantics. The old kernel summed the
+16 heads' dot products into one score, ran a single softmax and applied one
+shared weight vector. llama.cpp's `clip_graph_minicpmv4_6::build` reshapes `Q` to
+`[d_head, n_head, n_pos]` and calls `build_attn`, so every head gets its own
+softmax and its own weights. The kernel now does the same
+(`tools/mtmd/models/minicpmv.cpp`, blob
+`0e0fc0381148d1e62ce35fdc55107e89211730a8`, identical to the `69f201a` pin) and
+uses `dot_f32` for the inner product. The CPU path is therefore not bit-identical
+to the 2026-11-10 implementation; the pixel and `pos_embed` comparisons above are
+unaffected because both precede the attention.
+
+Projection-only measurement (Linux x86_64, NVIDIA L20, `release-fast --features
 vulkan`, 8 threads, F16 KV, `--jinja`), ModelScope `OpenBMB/MiniCPM-V-4.7-1B-gguf`
 Q4_0 text tower + `mmproj-model-f16.gguf`, 448x448 image:
 
@@ -189,9 +210,26 @@ The CPU column is bit-identical to the pre-offload implementation (verified by
 re-running the same request with the change stashed). The device path differs by
 about 3e-5 on these embeddings, the same band as the tower's other float paths.
 
-Not measured: the 35B-A3B tower (shares the projector implementation), other
-image sizes and slice counts, and the end-to-end text, which the device path
-changes the same way it changes the qwen35 text path.
+With the attention on the device (`device_tower_matches_the_cpu_tower` in
+`src/models/minicpmv/vision.rs`, aarch64 + NVIDIA GPU, `release-fast --features
+vulkan`, `mmproj-model-f16.gguf`, synthetic pixel tiles):
+
+| tile | CPU tower | device tower | max abs | relative L2 |
+|---|---|---|---|---|
+| 32x32 patches | 6.464 s | 2.646 s (2.4x) | 4.93e-5 | 9.49e-6 |
+| 8x8 patches | 0.404 s | 1.53 s | 7.0e-6 | 4.6e-6 |
+
+A 32x32 tile makes 28 attention calls — 27 ViT layers (7 of them at 64 tokens,
+the rest at 16 after the merger's downsample) plus the merger's windowed call —
+and all of them land on the device. Small tiles get slower because the
+per-layer host round trip dominates; the offload is a win once the tile is
+large enough to pay for it. `device_attention_matches_the_cpu_kernel` pins the
+shader against the CPU kernel for both the full and the 2x2-window mask on a
+synthetic 16-token geometry.
+
+Not measured: the 35B-A3B tower (shares the ViT implementation), other image
+sizes and slice counts, and the end-to-end text, which the device path changes
+the same way it changes the qwen35 text path.
 
 ## The 35B-A3B text tower (2026-11-12)
 
