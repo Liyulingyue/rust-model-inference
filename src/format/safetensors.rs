@@ -72,7 +72,7 @@ impl SafetensorSource {
                     .rev()
                     .map(|v| v.as_u64().ok_or_else(|| format!("Invalid {name} shape")))
                     .collect::<Result<_, _>>()?;
-                // TensorInfo uses one-element vectors for scalar readouts.
+                // TensorInfo uses a one-element vector for safetensors rank-zero scalars.
                 if dims.is_empty() {
                     dims.push(1);
                 }
@@ -153,8 +153,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scalar_storage_has_one_element_and_rejects_invalid_length() {
+        let path = std::env::temp_dir().join(format!("rmi-scalar-length-{}", std::process::id()));
+        for (end, valid) in [(4, true), (0, false), (8, false)] {
+            let header =
+                format!(r#"{{"scalar":{{"dtype":"F32","shape":[],"data_offsets":[0,{end}]}}}}"#);
+            let mut data = (header.len() as u64).to_le_bytes().to_vec();
+            data.extend_from_slice(header.as_bytes());
+            data.extend_from_slice(&[0; 8]);
+            std::fs::write(&path, data).unwrap();
+            let result = SafetensorSource::open(&[&path]);
+            assert_eq!(result.is_ok(), valid);
+            if let Ok(source) = result {
+                assert_eq!(source.tensor_info("scalar").unwrap().dims, [1]);
+                assert_eq!(source.tensor_slice("scalar").unwrap().len(), 4);
+            }
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn scalar_readout_is_one_element_and_keeps_range_validation() {
-        let path = std::env::temp_dir().join(format!("rmi-scalar-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("rmi-scalar-readout-{}", std::process::id()));
         let header = br#"{"log_tau":{"dtype":"F32","shape":[],"data_offsets":[0,4]}}"#;
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
         bytes.extend_from_slice(header);

@@ -4,6 +4,16 @@ use super::options::{
 use super::types::{normalize_tts_language, CliOptions};
 
 pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
+    // The Idol image-to-3D mode is selected by the model itself, so it has
+    // to be checked before the mode dispatch below: a request that carries
+    // `--image-to-3d` next to another task's flags must be refused, not
+    // silently answered by the other mode.
+    if crate::app::geometry::selected(options) {
+        return crate::app::geometry::validate_options(options);
+    }
+    if options.geometry_mode.is_some() || options.num_gaussians.is_some() {
+        return Err("--geometry-mode and --num-gaussians require --image-to-3d".into());
+    }
     if crate::app::tts::is_underdog_woof_model(&options.model) {
         if !options.tts {
             return Err(

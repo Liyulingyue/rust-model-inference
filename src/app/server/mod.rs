@@ -5,6 +5,7 @@ mod auk;
 mod decision;
 mod diffusion;
 mod forecast;
+mod geometry;
 mod image_generation;
 mod prediction;
 mod rerank;
@@ -42,7 +43,7 @@ use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEn
 use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
 use crate::models::qwen3::Qwen3Model;
 
-const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations] [--model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> selects the image-generation backend (P-JiT, Z-Image, ERNIE-Image): POST /v1/images/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations] [--model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> selects the image-generation backend (P-JiT, Z-Image, ERNIE-Image): POST /v1/images/generations] [--components <models root> with --model <Idol directory> selects the image-to-3D backend: POST /v1/3d/generations with {\"image\":\"object.png\",\"options\":{...}} returns a binary Gaussian PLY and an x-camera header]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
 
 // =============================================================================
 // Backend types
@@ -93,6 +94,7 @@ enum Backend {
     /// text routes and adds the image prediction route.
     WeVisOne(WeVisOneBackend),
     UnlimitedOcr(UnlimitedOcrBackend),
+    Idol(IdolBackend),
     Embedding(EmbeddingBackend),
     Asr(AsrBackend),
     HySimulMt(HySimulMtBackend),
@@ -138,6 +140,7 @@ impl Backend {
             Self::Gliner2(_) => "gliner2",
             Self::Gliner2Boundary(_) => "gliner2-boundary",
             Self::Timestral(_) => "timestral",
+            Self::Idol(_) => "idol",
             Self::Decision(_) => "decision",
         }
     }
@@ -162,6 +165,10 @@ struct WeVisOneBackend {
     decoder: Option<Arc<dyn TensorSource>>,
     /// Generation options for the prediction route.
     options: crate::models::wevisone_vl::PredictionOptions,
+}
+
+struct IdolBackend {
+    model: Arc<crate::models::idol::Model>,
 }
 
 struct UnlimitedOcrBackend {
@@ -1169,6 +1176,11 @@ fn build_backend(
     options: &CliOptions,
     auk_source: Option<Arc<dyn TensorSource>>,
 ) -> Result<Arc<Backend>, String> {
+    if crate::app::geometry::selected(options) {
+        return Ok(Arc::new(Backend::Idol(IdolBackend {
+            model: Arc::new(crate::app::geometry::load(options)?),
+        })));
+    }
     if options.enhance {
         return Ok(Arc::new(Backend::AudioEnhancement(Arc::new(
             crate::models::nemotron_reuse::Model::load(&options.model, options.compute_policy())?,
@@ -2140,6 +2152,7 @@ pub fn run_server() {
             std::process::exit(2);
         }
     };
+    // The standalone server binary enters here without a literal --serve flag.
     options.serve = true;
     if let Err(error) = reject_unsupported_server_modes(&options) {
         eprintln!("{error}");
@@ -2148,10 +2161,6 @@ pub fn run_server() {
     // `--tts` validation requires non-empty `--prompt` and `--out`, but the
     // server receives both over HTTP. Inject placeholders so validation
     // passes; the real values come from `/v1/audio/speech` requests.
-    let mut options = options;
-    if options.enhance {
-        options.serve = true;
-    }
     if options.tts {
         if options.prompt.as_deref().is_none_or(str::is_empty) {
             options.prompt = Some("placeholder".to_string());
@@ -2320,6 +2329,10 @@ pub fn run_server() {
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
+        Backend::Idol(_) => router.route(
+            "/v1/3d/generations",
+            post(geometry::generate).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
         Backend::Decision(_) => router.merge(decision::routes()),
     };
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan

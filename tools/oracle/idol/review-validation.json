@@ -1,0 +1,233 @@
+{
+  "validated_at_date": "2026-11-03",
+  "scope": "Review follow-up: CI failures and intermittent target-host Vulkan shutdown SIGSEGV.",
+  "ci": {
+    "fix_commit": "c55a5028c9d8ccae7d4e91d6f745eed9525eef0e",
+    "run_url": "https://github.com/Liyulingyue/rust-model-inference/actions/runs/41576553373",
+    "checks": {
+      "Rustfmt": "success",
+      "x86 dispatch regressions": "success",
+      "Vulkan compile and shaders": "success"
+    },
+    "changes": [
+      "Format the eight files reported by rustfmt.",
+      "Refresh exactly eight stale shader manifest hashes; no GLSL or SPIR-V binary changes."
+    ],
+    "shader_validation": {
+      "command": "bash scripts/vulkan-shaders.sh check",
+      "exit_code": 0,
+      "seconds": 4.254016932012746,
+      "glslang": "Glslang Version: 11:15.1.0",
+      "spirv_tools": "SPIRV-Tools v2025.1 unknown hash, 2026-05-13T06:03:38+00:00",
+      "shader_binaries_changed": false,
+      "scope": "Full manifest, validation, workgroup and byte-for-byte rebuild checks using the same package versions as CI."
+    }
+  },
+  "shutdown": {
+    "environment": {
+      "os": "Ubuntu 22.04.5",
+      "cpu": "Xeon Gold 6138",
+      "gpu": "NVIDIA GeForce RTX 5090",
+      "driver": "570.153.02"
+    },
+    "workaround": "LD_PRELOAD=/lib/x86_64-linux-gnu/libnvidia-eglcore.so.570.153.02",
+    "kind": "Process-local target-environment workaround, not a driver root-cause fix.",
+    "system_driver_or_configuration_changed": false,
+    "fault_mapping": {
+      "exit_code": -11,
+      "fault": "FAULT signal=11 address=0x7fe06c97c4c0 rip=7fe06c97c4c0",
+      "matched_libraries": [
+        {
+          "library": "libnvidia-eglcore.so.570.153.02",
+          "base": "0x7fe06bf6e000",
+          "size": "0x20791e8",
+          "offset": "0xa0e4c0"
+        }
+      ],
+      "log": "artifacts/idol/review-shutdown/fault-map-2.log"
+    },
+    "comparisons": [
+      {
+        "preload": "none",
+        "runs": 10,
+        "exit_zero": 9,
+        "sigsegv": 1,
+        "assertion_summaries_passed": 10
+      },
+      {
+        "preload": "GLX library only",
+        "runs": 15,
+        "exit_zero": 12,
+        "sigsegv": 3
+      },
+      {
+        "preload": "EGL core",
+        "runs": 15,
+        "exit_zero": 15,
+        "sigsegv": 0
+      }
+    ],
+    "repeated_exit_test": "vulkan::ops::tests::staged_static_upload_preserves_bytes_and_zeroes_padding",
+    "shared_tests": [
+      {
+        "filter": "vulkan::ops::tests::batched_linear",
+        "exit_code": 101,
+        "seconds": 1.638643492013216,
+        "summary": [
+          "test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 1667 filtered out; finished in 1.38s"
+        ]
+      },
+      {
+        "filter": "vulkan::ops::tests::compute_device_metrics_count_upload_reuse_and_copies",
+        "exit_code": 0,
+        "seconds": 0.4993171039968729,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.37s"
+        ]
+      },
+      {
+        "filter": "vulkan::ops::tests::vulkan_q8_matches_cpu_reduction_bits",
+        "exit_code": 0,
+        "seconds": 0.589782158844173,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.47s"
+        ]
+      },
+      {
+        "filter": "vulkan::tests::warmup_releases_temporary_cached_weights",
+        "exit_code": 0,
+        "seconds": 0.5026216320693493,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.47s"
+        ]
+      },
+      {
+        "filter": "vulkan::tests::batched_linear_device_context_drop_retains_uncertain_resources",
+        "exit_code": 0,
+        "seconds": 0.5315680541098118,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.51s"
+        ]
+      },
+      {
+        "filter": "vulkan::ops::tests::staged_arena_failed_transfer_recovers_before_reusing_staging",
+        "exit_code": 0,
+        "seconds": 0.5142307737842202,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.48s"
+        ]
+      },
+      {
+        "filter": "vulkan::ops::tests::staged_static_upload_preserves_bytes_and_zeroes_padding",
+        "exit_code": 0,
+        "seconds": 0.7541445968672633,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1674 filtered out; finished in 0.63s"
+        ]
+      }
+    ],
+    "shared_test_limit": "The existing Q4_K row/batch mismatch remains (7 passed, 1 failed, exit 101); other six shared filters exit 0. No SIGSEGV in these seven processes. Q5_K/Q6_K assertions after the Q4_K failure remain blocked.",
+    "server_artifact_directory": "artifacts/idol/review-shutdown",
+    "numerical_gates_changed": false,
+    "limits": [
+      "Specific library path/version tested only on this host.",
+      "No proof of reliable shutdown without the process-local prefix.",
+      "Full native 50-step quality, full-resolution official numerical parity and production throughput remain unverified."
+    ],
+    "validation_started_at": "2026-11-03T04:07:02.666609+00:00",
+    "repeat_validation": {
+      "runs": 50,
+      "exit_zero": 50,
+      "sigsegv": 0
+    },
+    "idol_tests": {
+      "exit_code": 0,
+      "seconds": 84.63527848292142,
+      "summary": [
+        "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 1644 filtered out; finished in 83.88s"
+      ]
+    },
+    "cli": {
+      "status": "validated",
+      "exit_code": 0,
+      "elapsed_seconds": 1465.6372330347076,
+      "time_to_ply_seconds": 1462.9166792593896,
+      "profile": "release",
+      "threads": 16,
+      "steps": 5,
+      "cfg": 3,
+      "seed": 42,
+      "mode": "synthetic",
+      "image_size": 1024,
+      "latent_tokens": 8192,
+      "compute": "vulkan",
+      "command": [
+        "target/native/release/rust-model-inference",
+        "--image-to-3d",
+        "--model",
+        "models/idol",
+        "--components",
+        "models",
+        "--image",
+        "artifacts/idol/avocado-input.png",
+        "--out",
+        "artifacts/idol/review-shutdown/avocado-eglcore-5.ply",
+        "--steps",
+        "5",
+        "--cfg",
+        "3",
+        "--num-gaussians",
+        "262144",
+        "--geometry-mode",
+        "synthetic",
+        "--seed",
+        "42",
+        "--compute",
+        "vulkan",
+        "--threads",
+        "16"
+      ],
+      "binary_sha256": "cbba44ae507d44d4167c9d435bc3d4ce289afc79e1ac96eecde514c6000f3f3d",
+      "input_sha256": "773a01e6d0fefa64e3a601d62bb1ef118d874f603b0aa87403613733cbc07b27",
+      "process_environment": {
+        "LD_LIBRARY_PATH": "$PWD/target/tools/vulkan/jammy/usr/lib/x86_64-linux-gnu",
+        "VK_ICD_FILENAMES": "/etc/vulkan/icd.d/nvidia_icd.json",
+        "LD_PRELOAD": "/lib/x86_64-linux-gnu/libnvidia-eglcore.so.570.153.02",
+        "RUST_GPU_MIN_OUTPUTS": "0",
+        "RAYON_NUM_THREADS": "16"
+      },
+      "stage_cumulative_seconds": {
+        "preprocess": 0.074,
+        "conditioning": 178.157,
+        "sampling": 1364.193,
+        "decode": 1451.091
+      },
+      "sample_completion_seconds": [
+        436.42172907851636,
+        669.6024536611512,
+        903.6133029619232,
+        1140.3161687226966,
+        1375.928238737397
+      ],
+      "output": {
+        "all_finite": true,
+        "gaussians": 262144,
+        "properties": 17,
+        "bytes": 17826208,
+        "sha256": "2d8fb4bf34960b66f217f2647a6f55d0692e8d4f665f3e485f023af3c2d2cf9e",
+        "camera": {
+          "yaw": 0.37496700998994204,
+          "pitch": 0.13235408928243342,
+          "radius": 1000.0,
+          "fov": 0.07002071375042525
+        },
+        "identical_to_original_sha256": true
+      },
+      "producer_process_exists_after_exit": false,
+      "log": "artifacts/idol/review-shutdown/eglcore-cli-5.log",
+      "source_note": "Same target-host release binary as the original preview; the CI follow-up only formats Rust and updates shader manifest hashes, without changing the inference path or shader source/binary.",
+      "benchmark_note": "Single shared-host validation run; shared tests overlapped briefly. No dedicated throughput or performance-improvement claim.",
+      "sha256_comparison_note": "Observed identity to the original output, not a required bitwise gate for lossy floating-point implementations."
+    }
+  }
+}

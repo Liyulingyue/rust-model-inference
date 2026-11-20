@@ -3,6 +3,7 @@ pub mod audio;
 pub mod cli;
 pub mod decision;
 pub(crate) mod diffusion;
+pub mod geometry;
 pub(crate) mod jev;
 pub(crate) mod media;
 pub(crate) mod omni;

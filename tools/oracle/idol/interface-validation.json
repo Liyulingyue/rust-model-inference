@@ -1,0 +1,61 @@
+{
+  "cpu_cli": {
+    "command": [
+      "target/release-fast/rust-model-inference",
+      "--image-to-3d",
+      "--model",
+      "models/idol",
+      "--components",
+      "models",
+      "--image",
+      "models/idol/assets/gallery/avocado.webp",
+      "--out",
+      "artifacts/idol/smoke/avocado-cpu.ply",
+      "--steps",
+      "1",
+      "--cfg",
+      "0",
+      "--num-gaussians",
+      "32768",
+      "--threads",
+      "32",
+      "--compute",
+      "cpu"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1683.424561118998,
+    "max_rss_kib": 13325924
+  },
+  "auto_http": {
+    "health": 200,
+    "invalid-options": 400,
+    "unknown-options": 400,
+    "missing-image": 400,
+    "text-jev": 404,
+    "image-jev": 404,
+    "chat": 404,
+    "busy": 429,
+    "success": {
+      "status": 200,
+      "elapsed_seconds": 1776.2676294330158,
+      "bytes": 2228639,
+      "sha256": "c918405e233c67d37d1bbccf1553bdf4f1d909e9a19798932e31d451d5331a62",
+      "camera": {
+        "yaw": 1.1760140715646166,
+        "pitch": 0.4023259195906049,
+        "radius": 1000.0,
+        "fov": 0.11278947281299957
+      }
+    },
+    "total_elapsed_seconds": 1801.0271218379785
+  },
+  "comparison": {
+    "byte_identical": true,
+    "camera_identical": true,
+    "gaussians": 32768,
+    "properties": 17,
+    "bytes": 2228639,
+    "sha256": "c918405e233c67d37d1bbccf1553bdf4f1d909e9a19798932e31d451d5331a62"
+  },
+  "note": "CPU and Auto use the same native CPU backend. This is an observed interface comparison, not a bitwise floating-point oracle requirement."
+}

@@ -1,0 +1,128 @@
+{
+  "oracle_commit": "4702a7f00850e34b6e83a2170cc123c3e9570744",
+  "seed": 20261103,
+  "torch": "2.9.1+gitff65f5b",
+  "oracle_trace_sha256": "ca5d47555e1eb868e9787565faa9da29385e32c8f24e5068a9129a0950cb69b9",
+  "native_trace_sha256": "6e36cfea641dc46fa8cc16e342e1f67092fa815ccea0bc92d2659d3c48a27d04",
+  "gates_sha256": "01287e798a9466cc487148750cd4693671cea1ad77efa0d9bec0e73194e0c8e1",
+  "original_failure": [
+    {
+      "name": "idol.denoiser.joint.23.out",
+      "max_abs": 3.5,
+      "absolute_limit": 2.775,
+      "relative_rmse": 0.005559775012243964,
+      "cosine": 0.9999845455398024
+    }
+  ],
+  "oracle_reconstruction_exact": true,
+  "selected_blocks": [
+    {
+      "name": "noise.0.out",
+      "local_max_abs": 0.25,
+      "local_relative_rmse": 0.00011712032433319115,
+      "accumulated_max_abs": 0.25,
+      "accumulated_relative_rmse": 0.00014204466399138778
+    },
+    {
+      "name": "noise.1.out",
+      "local_max_abs": 0.0625,
+      "local_relative_rmse": 7.769771167788845e-05,
+      "accumulated_max_abs": 0.25,
+      "accumulated_relative_rmse": 0.0002720215103009725
+    },
+    {
+      "name": "context.0.out",
+      "local_max_abs": 0.0078125,
+      "local_relative_rmse": 0.00033761635143278397,
+      "accumulated_max_abs": 0.0078125,
+      "accumulated_relative_rmse": 0.0004586178140551057
+    },
+    {
+      "name": "context.1.out",
+      "local_max_abs": 0.03125,
+      "local_relative_rmse": 0.00022029095783176656,
+      "accumulated_max_abs": 0.03125,
+      "accumulated_relative_rmse": 0.0005690422982810844
+    },
+    {
+      "name": "joint.0.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.00010293100324275687,
+      "accumulated_max_abs": 0.25,
+      "accumulated_relative_rmse": 0.00039460229394142467
+    },
+    {
+      "name": "joint.1.out",
+      "local_max_abs": 0.25,
+      "local_relative_rmse": 0.0001579362479094307,
+      "accumulated_max_abs": 0.25,
+      "accumulated_relative_rmse": 0.0004792583038700438
+    },
+    {
+      "name": "joint.12.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.00016230910261822492,
+      "accumulated_max_abs": 0.5,
+      "accumulated_relative_rmse": 0.0018159242225515742
+    },
+    {
+      "name": "joint.15.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.0001452114671189921,
+      "accumulated_max_abs": 0.625,
+      "accumulated_relative_rmse": 0.0024683586937803335
+    },
+    {
+      "name": "joint.19.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.00016321421274411135,
+      "accumulated_max_abs": 0.884765625,
+      "accumulated_relative_rmse": 0.004226456732975503
+    },
+    {
+      "name": "joint.20.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.00017000941734565783,
+      "accumulated_max_abs": 1.6875,
+      "accumulated_relative_rmse": 0.0043050306516806145
+    },
+    {
+      "name": "joint.21.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.00018276224651434837,
+      "accumulated_max_abs": 0.984375,
+      "accumulated_relative_rmse": 0.004902520006577159
+    },
+    {
+      "name": "joint.22.out",
+      "local_max_abs": 0.125,
+      "local_relative_rmse": 0.0001853580112578822,
+      "accumulated_max_abs": 1.3125,
+      "accumulated_relative_rmse": 0.005351375538086733
+    },
+    {
+      "name": "joint.23.out",
+      "local_max_abs": 0.0625,
+      "local_relative_rmse": 0.00010976578010518942,
+      "accumulated_max_abs": 3.5,
+      "accumulated_relative_rmse": 0.005559775012243964
+    }
+  ],
+  "final_joint_worst": {
+    "index": 38734,
+    "local_error": 0.0,
+    "propagated_error": 3.5
+  },
+  "calibration": {
+    "prefix": "idol.denoiser.joint.",
+    "atol": 0.25,
+    "rtol": 0.015,
+    "relative_rmse": 0.015,
+    "cosine": 0.9995,
+    "final_velocity_gates_unchanged": true
+  },
+  "after_calibration": {
+    "checkpoints": 144,
+    "failed": 0
+  }
+}
