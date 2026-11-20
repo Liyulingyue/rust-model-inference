@@ -473,7 +473,7 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       整模 logits 的 0.02 CPU/GPU 门槛仍失败；此 MiniCPM 权重尚未验证 GPU。
       见 [Holo4 验证](../../tools/oracle/holo4/README.md)。
 - [ ] **decode 每个投影一次 pool dispatch，784 次里 26 次的开销大于活** — Mellum 12B Q8_0
-      在 GB10 上 44 ms/token 里约 21 ms（48%）是 dispatch 固定开销（每次 ~26 µs：唤醒 7 个
+      在 aarch64 上 44 ms/token 里约 21 ms（48%）是 dispatch 固定开销（每次 ~26 µs：唤醒 7 个
       worker + 同步 + 尾部效应），而每个投影每 worker 的活只有 12–98 µs。线程曲线印证：
       1→8 线程只有 3.17× 加速，16/20 线程直接倒退。把一层里能并行的投影合并进一次
       dispatch（每层 4 次而不是 28 次）→ 44 → 26.5 ms/token（1.66×）。不需要新的 pool
@@ -552,7 +552,7 @@ LFM2 / LFM2.5 / Spark / Nemotron-H / Hunyuan / LFM2-MoE），每个 scorer 实�
       `crate::ops::dot_f32` 逐元素算，结构上没有设备路径；CLI 报 `backend=partial mode=mmproj`，
       HTTP 直接拒绝（`--compute vulkan` + `--mmproj` → "full Vulkan runtime supports text
       input only"）。
-      实测（aarch64 + NVIDIA GB10，Q4_K_M 文本 + BF16 mmproj）：**视觉投影**（单独计时）
+      实测（aarch64，Q4_K_M 文本 + BF16 mmproj）：**视觉投影**（单独计时）
       CPU 36.93s → 设备 27.62s；文本 40 步 decode CPU 13.5 t/s、Vulkan 6.6 t/s。
       ⚠ 旧记录里"图像 1 token 的 prefill CPU 7.94s / Vulkan 23.03s（视觉塔独占大头）"是
       **误归因**：CLI 报的 `prefill=` 只含文本 prefill，**不含视觉编码**，视觉塔的耗时当时
@@ -1780,7 +1780,7 @@ SILU_ONLY=1 ./target/release/examples/vk_ops_check   # 只跑这一项
 
 一次 command buffer 录 w1 → w3 → SiLU → w2，取代原来「3 次 submit + 2 次 readback +
 host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 49.7 s
-（512×512，8 步，seed 42，NVIDIA GB10）。
+（512×512，8 步，seed 42，aarch64 Vulkan 主机）。
 
 **与 TODO-020 是同一件事的两端**：旧 clamp + 合批必然 `-inf`，两者必须一起看。
 
@@ -2273,7 +2273,7 @@ if info.dims.len() != 2 || info.dims[0] != h as u64 || info.dims[1] < n_tokens a
 dims 数量、宽度、以及**行数是否覆盖 `n_tokens`** 三者都查了 —— 这正是
 「不查就会静默越界」的地方。
 
-### TODO-031: Qwen3 resident Vulkan decode 在 GB10 上打不过 CPU，且默认根本不启用
+### TODO-031: Qwen3 resident Vulkan decode 在 aarch64 上打不过 CPU，且默认根本不启用
 
 排查「Qwen3 为什么没有 GPU 加速」时挖出三层问题，从表面到根因。
 
@@ -2284,7 +2284,7 @@ Qwen3 唯一的 GPU 路径是常驻 Vulkan 解码器 `Qwen3VulkanSession`
 （`src/app/text/runtime.rs:50` 的 `defaults::KV_FORMAT = KvFormat::F32`），
 于是 `src/models/qwen3/trunk/session.rs` 里 `compute_policy.context()` 那段
 直接落到 `None` 分支，**不报错、不提示**，全程 CPU 跑完，日志里还照样打印
-`[GPU] Vulkan device: NVIDIA GB10`。
+`[GPU] Vulkan device: NVIDIA <GPU>`。
 
 ```rust
 } else if compute_policy == ComputePolicy::Vulkan {
@@ -2299,7 +2299,7 @@ Qwen3 唯一的 GPU 路径是常驻 Vulkan 解码器 `Qwen3VulkanSession`
 
 #### 2. 即使显式 `--kv-cache f16`，GPU 也赢不了
 
-在 GB10（NVIDIA GB10，int8 dot product: supported）上实测，
+在 aarch64 Vulkan 主机（int8 dot product: supported）上实测，
 同一台机器、同一 prompt（220 词）、`--threads 8`、等待 load<3、
 多次重复取中位数：
 
@@ -2446,7 +2446,7 @@ Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
 
 ### TODO-034: Z-Image GPU 路径罕见地不可复现（同 seed 约 1/20 次输出不同）
 
-在 GB10 上交替跑同 seed 的 Z-Image 256×256 八步，**大约每 20 次有一次输出不同**。
+在 aarch64 上交替跑同 seed 的 Z-Image 256×256 八步，**大约每 20 次有一次输出不同**。
 幅度很小：mean|Δ| 1.2/255、PSNR 41.5 dB（不是坏图，是舍入级差异），
 其余各次逐字节一致。main 与 unified 分支都出现过，unified 修复前后都出现，
 所以**不是本次 push constant 特化引入的**。
@@ -2514,7 +2514,7 @@ abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
 
 ### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
 
-Qwen3-0.6B Q8_0，20 核 GB10，greedy，64 token：
+Qwen3-0.6B Q8_0，20 核 aarch64，greedy，64 token：
 
 | `--threads` | prefill t/s | generation t/s |
 |---|---|---|
@@ -2568,7 +2568,7 @@ Z-Image 的 **CPU** 路径 denoise 从 139.7 s 降到 126.4 s（−9.5%），GPU
 
 ### TODO-038: CPU/GPU 自动分发应该按实测选后端，而不是按模型大小
 
-在 GB10 上把 Qwen3 的 Q8_0 从 0.6B 扫到 8B（同 prompt、greedy、16 线程，
+在 aarch64 上把 Qwen3 的 Q8_0 从 0.6B 扫到 8B（同 prompt、greedy、16 线程，
 线程池修复后的构建）：
 
 | 模型 | 每 token 权重 | CPU gen t/s | GPU gen t/s | CPU prefill t/s | GPU prefill t/s |
@@ -2623,7 +2623,7 @@ bf16，greedy，64 token），和本仓库的两条路径同台对照：
 kernel 也够快），所以「GPU 输给 CPU」**不是实现问题**。
 
 真正的原因是带宽比：GPU 有效读取 70 GB/s，CPU 84 GB/s，而 GPU 这 70 GB/s 是在
-**另一个租户占着 85% 设备**的情况下拿到的（nvidia-smi 采样 79–92%）。GB10 的
+**另一个租户占着 85% 设备**的情况下拿到的（nvidia-smi 采样 79–92%）。aarch64 的
 DRAM 峰值在 273 GB/s 量级，设备空闲时 GPU 路径在 8B 上应该能到 20 t/s 以上，
 也就是**会赢过 CPU 的 11.1 t/s**。
 
@@ -2637,7 +2637,7 @@ CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个�
 不是 bug 的证据；要判对错得用同权重的 llama.cpp 参照（TODO-036 的 4B contract
 失败同理）。
 
-### TODO-040: Astronex GPU 路径在同 seed 下不可复现（GB10，2026-10-21）
+### TODO-040: Astronex GPU 路径在同 seed 下不可复现（aarch64，2026-10-21）
 
 同一个二进制、同一个 prompt、同一个 `--seed 42`，两次 GPU 跑出来的
 256x144 视频逐帧 PSNR 只有 18.4–19.2 dB；把采样后的 latent 导出来
@@ -2660,7 +2660,7 @@ CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个�
 输入写都在其后）。把屏障挪到 dispatch 之前能降低发生率但不能根除，
 所以 host→device 可见性不是唯一原因。
 
-下一步：在**独占设备**上重测（这台 GB10 有另一个租户占着 65 GB 和 79–92% 利用率），
+下一步：在**独占设备**上重测（这台 aarch64 机器有另一个租户占着 65 GB 和 79–92% 利用率），
 确认是驱动/内存压力导致的偶发，还是我们自己的同步缺口。
 
 ### TODO-041: Astronex 视频输出依赖系统 `ffmpeg`
@@ -2905,7 +2905,7 @@ SIGTRAP（落在 `libnvidia-gpucomp.so` 的着色器编译器），关掉 GPU-AV
 
 - 默认仍然拒绝 `--gpu`，错误消息直接说明原因与开关名；
 
-**2026-11-11 的复测**（本机 GB10，`RMI_GPU_UNSAFE=1` 放行，256×256 / 4 步 /
+**2026-11-11 的复测**（本机 aarch64，`RMI_GPU_UNSAFE=1` 放行，256×256 / 4 步 /
 CFG 1 / seed 42）：连跑 **6 次，PNG 逐位相同**（6 个 md5 一致），这是 TODO-044
 记下「相同结果」之后的又一次观察。门禁**仍然保留**：TODO-044 自己写明这
 不是数学保证，只是「这段时间内没再看到不一样的」，而本条的根因（设备投影
@@ -3266,7 +3266,7 @@ error[E0432]: unresolved import `rust_model_inference::ops::get_vulkan_context` 
 `Cargo.toml` 的 `[[example]]`/`[[test]]`、`.github/workflows/ci.yml`。
 ### TODO-051: Mellum 的 GPU 路径能跑但打不过 CPU——decode 是单行投影，设备带宽只有 NEON 的一半
 
-Mellum 12B-A2.5B（Q8_0，12.9 GB）在 GB10 上接 Vulkan device 路径，
+Mellum 12B-A2.5B（Q8_0，12.9 GB）在 aarch64 上接 Vulkan device 路径，
 **功能上没问题**：`RMI_PARITY_TRACE` 双后端对拍 15466 个检查点**逐位一致**
 （sum/min/max/head 全同），JEV 单问也一致（A 0.2219 / B 0.7781）。
 但 `--compute auto` 比 `--compute cpu` **慢 40%**。
@@ -3427,7 +3427,7 @@ CPU 5672–5742 ms、设备转置 5134–5951 ms，**打平**。原因：
 
 #### 现象与账单
 
-Mellum 12B Q8_0（8 线程）在 GB10 上 decode 44 ms/token（22.7 tok/s）。拆开：
+Mellum 12B Q8_0（8 线程）在 aarch64 上 decode 44 ms/token（22.7 tok/s）。拆开：
 
 - 纯计算下界 **23 ms/token**（每 token 读 2.35 GB 权重，CPU 多线程有效带宽 ~102 GB/s；
   单投影实测 115 GB/s）
@@ -3514,12 +3514,12 @@ barrier 与常驻 worker 不兼容而不可用），收益 1.66× → 1.8×，�
 
 | 机器 | CPU 有效带宽 | 纯计算/token | 现在 | 合并后 | 加速 |
 |---|---|---|---|---|---|
-| GB10（18 核共享内存） | ~102 GB/s | 23 ms | 44 ms | 26.5 ms | 1.66× |
+| aarch64（18 核共享内存） | ~102 GB/s | 23 ms | 44 ms | 26.5 ms | 1.66× |
 | Intel Ultra 5（LPDDR5X-8533） | ~110 GB/s | 21 ms | 42 ms | 24.5 ms | 1.7× |
 | i7-12700（DDR4-3200 双通道） | ~45 GB/s | 52 ms | 72 ms | 55 ms | 1.3× |
 | 老 i7 / 单通道 DDR4 | ~25 GB/s | 94 ms | 114 ms | 97 ms | 1.18× |
 
-（这些带宽是量级估计，不是实测；TODO-038/039 记的那台机器就是共享内存的 GB10。）
+（这些带宽是量级估计，不是实测；TODO-038/039 记的那台机器就是共享内存的 aarch64。）
 
 #### 顺带
 
@@ -3628,7 +3628,7 @@ Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示构�
 
 | 路径 | prefill | 概率 |
 |---|---|---|
-| Vulkan（GB10） | 5886 ms | A 0.9309 / B 0.0166 / C 0.0505 |
+| Vulkan（aarch64） | 5886 ms | A 0.9309 / B 0.0166 / C 0.0505 |
 | CPU | 24646 ms | A 0.9309 / B 0.0166 / C 0.0505 |
 
 4.2× 的差距 + 完全一致的概率说明整条前向走了设备。服务端
@@ -3643,7 +3643,7 @@ Dory 的 oracle 对拍是**喂 token id** 的，验的是前向不是提示构�
 
 **现象一：包络越界。** `tools/oracle/pr169` 的 Occamy 默认路径界限是 relative L2 ≤ 0.1，
 记录那次（Apple Silicon）逐步为 0.0848/0.0775/0.0390/0.0426/0.0497/0.0707/0.0617/0.0580
-—— 自身最大值 0.0848 已经贴边。2026-11-05 在 aarch64（GB10）用同一份权重复验，逐步为
+—— 自身最大值 0.0848 已经贴边。2026-11-05 在 aarch64 上用同一份权重复验，逐步为
 0.0873/0.0491/0.0243/0.0240/0.0336/0.0684/**0.1198**/0.0805 → **step 6 越界**。
 
 不是实现问题：argmax 与 llama.cpp **每一步都一致**（8/8 greedy 逐 token 相同，且与
@@ -3713,7 +3713,7 @@ PhysBrain 的入口矩阵都没有覆盖"交互 + mmproj"这一格，所以没�
 
 ### TODO-057: qwen35moe（Occamy-1.0）的设备 decode 比 CPU 慢 4 倍 —— 每 token 320 次专家投影太碎
 
-**实测**（aarch64 + NVIDIA GB10，Q8_0，8 线程，`--temperature 0`）：
+**实测**（aarch64，Q8_0，8 线程，`--temperature 0`）：
 
 | 场景 | | CPU | Vulkan | 设备/CPU |
 | --- | --- | --- | --- | --- |
@@ -3787,7 +3787,7 @@ PhysBrain1.5-2B、Qwen-Drive、LongCat 图像、Omni、BGE-VL-Screenshot，≥12
 
 ### TODO-059: EmbeddingGemma-2 的文本塔 forward 不走线程池 —— 媒体 embedding 比文本慢 50 倍
 
-**实测**（aarch64 + GB10，8 线程可用，`--embedding`，同一个 1.29 GB GGUF）：
+**实测**（aarch64，8 线程可用，`--embedding`，同一个 1.29 GB GGUF）：
 
 | 路径 | token 数 | 耗时 | user/real |
 | --- | --- | --- | --- |
@@ -3972,7 +3972,7 @@ TODO-056 的 F16 契约缺口一致 ✓。
    in_proj 宽度是 `2*d_inner + 2*n_group*d_state + dt_rank`（也是加法）。
    写成乘法会让 session 创建直接失败。
 
-**性能（GB10，8 线程，`Hello` + 32 token）**：设备路径 prefill 97 t/s、生成 21.4 t/s、
+**性能（aarch64，8 线程，`Hello` + 32 token）**：设备路径 prefill 97 t/s、生成 21.4 t/s、
 端到端 **17.8 tok/s**；纯 CPU prefill 31 t/s、生成 26 t/s、端到端 14.7 tok/s。
 阶段 1 的端到端是 5.7 tok/s，所以阶段 2 是 **3.1×**。
 
@@ -3990,7 +3990,7 @@ TODO-056 的 F16 契约缺口一致 ✓。
 
   也就是说单 token 的瓶颈**不是** int8 乘加算力，而是权重读取（约 3.6 GB/token：
   SSM 的 in/out 投影 1.66 GB、FFN 1.34 GB、attention 0.15 GB、输出投影 0.41 GB）。
-  按 21.4 t/s 折算只有约 80 GB/s，离 GB10 的峰值还远，**但换 kernel 并不能
+  按 21.4 t/s 折算只有约 80 GB/s，离 aarch64 的峰值还远，**但换 kernel 并不能
   提高它**。要继续优化得先弄清是访存模式（每个 lane 读一行权重，64 条并发
   流）还是别的什么，这是共用 kernel 的问题，影响面覆盖所有模型，本次没有做。
 
@@ -4021,7 +4021,7 @@ TODO-056 的 F16 契约缺口一致 ✓。
 `q8_matmul_grouped.comp` 给每个 lane 一行权重，一个 warp 于是读 32 个
 「相隔一整行」的扇区，而且每个 4 字节的 payload 读取都跨过 34 字节的 block
 边界，要从两个字里拼出来。`src/vulkan/q8_layout.rs` 里记过实测：
-这个 kernel 在 GB10 上只有 **55-59 GB/s**，而设备读同样的字节能到
+这个 kernel 在 aarch64 上只有 **55-59 GB/s**，而设备读同样的字节能到
 **138-171 GB/s** —— kernel 输给了自己的访存模式，不是输给内存系统。
 
 **做法**：仓库里早就有 transposed layout（把 64 行 tile 的 block 归到一起，
@@ -4037,7 +4037,7 @@ payload 连续且 4 字节对齐），但**它从来没跑起来过**：
   `blocks_per_row * 34` 字节 —— **访存模式是一样的**，所以给 tiled kernel
   也补了转置版本（`scripts/transposed-tiled-shader.py` 生成，保证两者同步）。
 
-**结果（GB10，8 线程）**：
+**结果（aarch64，8 线程）**：
 
 | 场景 | native layout | transposed layout |
 |---|---|---|
@@ -4102,7 +4102,7 @@ Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
 `attach_gpu` 都没有，只有按投影的 `ComputePolicy` 卸载，所以 JEV 在它们
 身上最多是「部分卸载」，不是完整设备路径。
 
-**实测**（Nemotron-3 Nano 30B-A3B，Q4_K_M，GB10，8 线程）：CLI `--jev`
+**实测**（Nemotron-3 Nano 30B-A3B，Q4_K_M，aarch64，8 线程）：CLI `--jev`
 两个问题（同一 context）12.3 s；HTTP `/v1/jev/score` 两个问题 42.6 s
 （含冷启动）。两者都是纯 CPU 结果 —— 与 CPU 运行逐位相同，因为根本没有
 上设备。
@@ -4150,7 +4150,7 @@ CPU」放开到可带 `--gpu`，就必须手改 `parse.rs` 的系统模式白名
 那行 `| "--gpu"` 看起来像特例，实际是「共享 flag 列表」的第四份副本。
 下次 `--enhance`（RE-USE）也支持 compute 时，已经改过一次了。
 
-**实测**（GB10，`review/vela3-gpu`）：`--system-one-request --gpu` 走
+**实测**（aarch64，`review/vela3-gpu`）：`--system-one-request --gpu` 走
 `parse_cli_options` → `validate_cli_options` 均通过，`compute_policy()`
 为 `Auto`；`--gpu` 与 `--compute` 同用仍被拒。
 
@@ -4431,7 +4431,7 @@ memory（`shared uint s_input[4096]`，512 个 block）。#166 起 Q8_0 的 kern
 都按 64 个 block 分块暂存，shared memory 不再是约束，但 host 侧两处守卫没删。
 所以不需要改 shader，删掉守卫即可。
 
-**结果**（#238，本机 GB10）：设备 Q8_0 kernel 对 CPU 归约（宽度 17408）逐位
+**结果**（#238，本机 aarch64）：设备 Q8_0 kernel 对 CPU 归约（宽度 17408）逐位
 一致；16 步 greedy 的 15 个 token（含 EOS）CPU 与设备逐个相同；logits
 （248320 维）逐位一致（relative L2 = 0）。详见
 [UNIFIED_COMPUTE_VALIDATION.md](UNIFIED_COMPUTE_VALIDATION.md) 的

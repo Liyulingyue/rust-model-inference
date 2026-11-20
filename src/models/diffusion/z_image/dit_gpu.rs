@@ -597,7 +597,7 @@ impl DitGpuSession {
     /// all in a single command buffer.
     ///
     /// A single matrix read repeatedly measures an L2-resident kernel, and on
-    /// GB10 that reported 110,000 GOP/s where the render with 150 distinct
+    /// aarch64 box that reported 110,000 GOP/s where the render with 150 distinct
     /// matrices per step reported 108. Streaming distinct matrices is what the
     /// render actually does, so it is the number worth comparing.
     pub(crate) fn bench_projection_streaming(

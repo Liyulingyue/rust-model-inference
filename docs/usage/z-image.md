@@ -38,9 +38,9 @@ Z-Image model requires --text-encoder, --vae, --prompt, and --out
 
 `--prompt` / `--out` 同样必填。
 
-### 实测耗时（NVIDIA GB10，20 核，512×512，8 步）
+### 实测耗时（aarch64 Vulkan 主机，20 核，512×512，8 步）
 
-> 以下为上游 `main`（`d7d88d4b`）记录的实机结果；本分支合并后的 GB10 整图尚未复验。
+> 以下为上游 `main`（`d7d88d4b`）记录的实机结果；本分支合并后的 aarch64 整图尚未复验。
 > 本分支另有 F32 累加与 Q8 kernel 改动，不能将这些历史数字当作当前分支的验收结果。
 
 prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--threads 8`，
@@ -209,7 +209,7 @@ barrier 互相可见——而 barrier 已证明加对了。
 
 `batched_ffn_chain_matches_incremental_submission`
 （`dit_gpu.rs`，随 `9e9015b` 加入）在真实 FFN 形状上跑完整四 dispatch 链
-（w1 → w3 → silu → w2），合批一次提交与逐个提交对比：GB10 上 983040 个元素
+（w1 → w3 → silu → w2），合批一次提交与逐个提交对比：aarch64 上 983040 个元素
 **全部有限且逐元素一致**。所以「驱动丢弃长 command buffer 尾部」这个假设在
 FFN 上被证伪——FFN 只有 4 个 dispatch，比 Qwen3.5 触发该问题的 ~230 少三个数量级。
 
@@ -431,7 +431,7 @@ VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上�
 
 GPU 一列的判定依据与已知缺口：
 
-- **已跑通**：NVIDIA GB10（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
+- **已跑通**：aarch64 Vulkan 主机（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
   **70.6 s**（同会话 CPU 574.6 s，8.1×）；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`
   （全部 34 层进入 `run_block_gpu`），每步 170 次 projection。
 - **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **32.21 dB**，
@@ -440,7 +440,7 @@ GPU 一列的判定依据与已知缺口：
 - **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
   （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
 - **RADV 记录**：512×512 八步出图 402.758633 s；128×128 两步 CPU/GPU
-  为 359.780291 / 26.349318 s，PSNR 39.3589 dB。权重与执行范围见链接，和 GB10 记录分开看待。
+  为 359.780291 / 26.349318 s，PSNR 39.3589 dB。权重与执行范围见链接，和 aarch64 记录分开看待。
 - **验证边界**：`tests/z_image_reference.rs` 是纯 CPU 且 `#[ignore]`。
   GPU 成图来自实机运行；像素不逐位一致，512×512 CPU 成品对比和整条浮点管线 parity 尚未完成。
 - **已知缺口**：
@@ -601,7 +601,7 @@ curl -s -X POST http://127.0.0.1:8099/v1/images/generations \
 
 分辨率必须是 16 的倍数（VAE 的 latent 形状要求），服务端与 CLI 的检查一致。
 
-实测（NVIDIA GB10，release 构建，128×128 / 2 步 / seed 42）：HTTP 返回的 PNG 与
+实测（aarch64 Vulkan 主机，release 构建，128×128 / 2 步 / seed 42）：HTTP 返回的 PNG 与
 同一权重的 CLI 输出**逐位相同**（md5 `86caef6e632c995511bf2395fc1933ad`）；
 debug 与 release 构建的结果也逐位相同。
 

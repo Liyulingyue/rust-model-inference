@@ -4225,7 +4225,7 @@ mod tests {
     ///
     /// `q8_matmul_grouped_dp4a` gives one workgroup per (token, output column) pair,
     /// so every weight byte is loaded, multiplied and discarded for exactly one
-    /// token. Inside the render on GB10 that measured 108 GOP/s at this shape,
+    /// token. Inside the render on the aarch64 box that measured 108 GOP/s at this shape,
     /// against PyTorch's ~5900 GOP/s. `q8_matmul_tiled_dp4a` keeps a weight load
     /// alive across eight tokens, which is the only reason a GEMM beats a GEMV.
     ///

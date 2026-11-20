@@ -356,7 +356,7 @@ matter.
 
 ### What the device can actually do
 
-`cargo run --release --features vulkan --example gpu_ceiling` on this GB10:
+`cargo run --release --features vulkan --example gpu_ceiling` on this aarch64 box:
 
 ```
   calls    total   us/call    GOP/s

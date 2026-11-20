@@ -4,7 +4,7 @@
 //
 // The row kernel gives one thread a whole output row: it walks the block's
 // 256 elements serially, so a 2048-wide projection starts 32 workgroups and
-// every SM runs two warps. Measured 1.6 GB/s of weight traffic on GB10
+// every SM runs two warps. Measured 1.6 GB/s of weight traffic on the aarch64 box
 // against 242 GB/s of memory bandwidth.
 //
 // Here eight lanes share one output row and split the block's elements by

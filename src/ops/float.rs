@@ -114,7 +114,7 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
 
 /// Start the device initialization in the background.
 ///
-/// Bringing the Vulkan device up costs about 300 ms on the GB10 box -- the
+/// Bringing the Vulkan device up costs about 300 ms on the aarch64 box -- the
 /// driver loads its compiler and enumerates the device -- and a session
 /// that opens a 12 GB checkpoint has that time to spare. The context is
 /// shared, so whoever needs it first waits for the same initialization.

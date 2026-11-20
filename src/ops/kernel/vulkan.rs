@@ -45,7 +45,7 @@ struct LinearState {
 /// Smallest number of output elements worth a GPU submission.
 ///
 /// Every `BatchedLinearRuntime::matmul_rows` call ends in its own
-/// `submit_and_wait`, and that fence costs ~2.5 ms on the GB10 + driver
+/// `submit_and_wait`, and that fence costs ~2.5 ms on the aarch64 box + driver
 /// combination this project targets. A matmul only wins if it does enough
 /// work to pay that back.
 ///

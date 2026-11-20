@@ -650,7 +650,7 @@ NHWC layout 的输入 `input[ic*spatial + y*side + x]` 在不同 ic 间步进 sp
 3. **小改动验证**：先做最小版本（10-20 行）跑性能，再决定是否投入大改动
 4. **记录每次实验**：即使反优化也要记录（避免后续重蹈覆辙）
 5. **NHWC layout cache 行为难预测**：依赖 profile，不靠推理
-## unified-compute 分支在 GB10 上慢 10–20%：push constant 留在了最内层循环
+## unified-compute 分支在 aarch64 上慢 10–20%：push constant 留在了最内层循环
 
 在同一台机器上交替跑 `main` 与 `test-unified3`（gouzil/codex/unified-compute-dispatch），
 两者 dispatch 数、fence 数、submit 数、`ioctl` 数完全相同（300 dispatch/步、

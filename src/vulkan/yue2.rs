@@ -27,7 +27,7 @@ use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::core::tensor::GGMLType;
 use crate::models::yue2::{YuE2Config, YuE2Model};
 
-/// Ceiling on the device arena. Measured on this GB10: host-coherent buffers
+/// Ceiling on the device arena. Measured on the aarch64 box: host-coherent buffers
 /// up to 2 GB allocate fine and the free heap is 91.3 GiB, so this is a
 /// conservative guard rather than a measured ceiling -- it exists so a
 /// pathological capacity falls back to the CPU instead of failing the run.
