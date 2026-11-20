@@ -199,7 +199,7 @@ cargo run --release --bin server -- \
 | `lfm2moe`（LFM2.5-8B-A1B 等） | `true`（训练时是 thinking 模型） | prompt 尾部追加 `\n\n`，让模型尝试跳过 thinking |
 | `lfm2`（LFM2 / LFM2.5 文本） | `true` | 同上 |
 | `llama` / `nanbeige` / `granite` / `glm4` / `phi3` | `false`（HTTP 路径原本就走 `thinking=false`） | k2-horizon / MiniCPM5 才会显式生效；其它 arch 的 prompt 模板忽略此字段 |
-| `qwen3` / `qwen35` / `qwen3vl` | `false` | 通过 `append_qwen_assistant_prefix(false)` 触发 non-thinking tail |
+| `qwen3` / `qwen35` / `qwen3vl` / `mellum` | 手写 builder 路径下 `false`（注入**闭合**的空 think 块）；服务开了 `--jinja` 时由模型自带模板的 `enable_thinking` 分支决定（Mellum = 继续思考，Qwen3.5 = 关闭思考） | 通过 `append_qwen_assistant_prefix(false)` 触发 non-thinking tail |
 
 LFM2 / LFM2.5 实测（`LFM2.5-8B-A1B-Q8_0`，`max_tokens=150`，问 "What is
 the capital of France?"）：
@@ -223,8 +223,9 @@ the capital of France?"）：
 {"error":{"message":"enable_thinking must be a boolean", ...}}
 ```
 
-CLI 上对应的 `--thinking` / `--no-thinking` 标志**尚未实现**；想关闭
-thinking 请走 HTTP。
+CLI 上的 `--thinking` / `--no-thinking` 与本字段等价：都不传 = `None`
+（沿用模型自己的默认），`--no-thinking` = `enable_thinking: false`，
+`--thinking` = `enable_thinking: true`。
 
 ## 8. 已确认的限制 / 边界
 

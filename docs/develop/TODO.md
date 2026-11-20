@@ -62,34 +62,55 @@ NEON on aarch64; no AVX-512).
       建议：转换器的接受集改成**显式列出该模型支持的格式**（加载器白名单的镜像），或在共享层
       提供「模型 ↔ 支持格式」的单一来源让两侧都读；至少在给共享 `BLOCK_FORMATS` 加格式时，
       同时检查所有 `*BLOCK_FORMATS` 的使用点。
-- [ ] **HTTP `enable_thinking` 默认值与文档契约矛盾（thinking 模型默认被关掉）** —
-      `src/app/server/api/protocol.rs:52-58` 的字段注释写的是「`None` 表示用模型训练默认值，
-      thinking-tuned 变体通常为开启」，但 `src/app/server/api/tools.rs:130` 与 `:148` 的 jinja
-      渲染分支都写成 `enable_thinking.unwrap_or(false)`。于是**客户端不传该字段**时，所有
-      jinja 渲染的 thinking 模型都会被注入一个空的 `<think>\n\n</think>\n\n` 块；同一文件
-      `:179` 的 lfm2 分支用的是 `unwrap_or(true)`，自相矛盾。
-      引入于 `e20d2c1`（"add miniJinja"），影响 qwen3-thinking / k2-horizon /
-      MiniCPM5-thinking / lfm25 / mellum 等所有 thinking 变体，**不是某一个模型的 bug**。
-      实测（mellum-12b-a2.5b-thinking，greedy，`max_tokens=220`）：默认 `None` 时模型在空 think
-      块后开始输出元评论并陷入重复，`content` 被 `think.rs` 的 `ThinkFilter` 全部缓冲后为空；
-      显式传 `"enable_thinking": true` 同一 prompt 立刻正常返回 `2, 3, 5`（159 tokens，与 CLI
-      逐 token 一致）。
-      修复方向：不要在调用点硬编码 `unwrap_or`，改为按 arch 查「训练默认」，或让 `None` 保持
-      `enable_thinking` **未定义**状态传给模板——GGUF 模板自身写的是
-      `{%- if enable_thinking is defined and enable_thinking is false %}`，未定义即不注入空块，
-      与 `unwrap_or(true)` 等价。**改动会翻转现有 thinking 模型的 HTTP 默认输出**，需先确认
-      是否有依赖当前行为的调用方。
-- [ ] **qwen35 CLI `--thinking` 被静默忽略，HTTP `enable_thinking` 生效——两入口 thinking 输出不一致** —
-      2026-11-18 补 DSpark HTTP 入口时发现（哨兵 `cli_and_http_agreement` 解锁了
-      qwen35 的 greedy sweep）：`--model Qwen3.5-2B` 下 CLI `--thinking` 与
-      `--no-thinking` 的 prompt token ids **完全相同**（`[RUST_TOKENS]` 两次
-      一致——qwen35 的 legacy prompt builder 没有 thinking 槽位），而 HTTP
-      `build_prompt` 的路径对 `enable_thinking: true` 产出带 think 块的 prompt。
-      即 CLI 的 thinking flag 对 qwen35 家族是**静默丢弃**，同一请求两入口给出
-      不同输出（实测 thinking 模式下 CLI 直接答、HTTP 返回 think 块）。哨兵
-      目前对 qwen35 排除 thinking sweep（`tests/cli_http_agreement.rs` 带注释
-      指回本条）。修复方向：qwen35 的 CLI prompt builder 补 thinking 槽位与
-      HTTP 对齐，或文档化「thinking 仅在 HTTP 入口可用」。
+- [x] **HTTP `enable_thinking` 默认值与文档契约矛盾（thinking 模型默认被关掉）** — ✅ 2026-11-20 完成。
+      根因：`enable_thinking` 被当成二值，`None` 在调用点被压成 `false`。而在 **jinja 路径**
+      上 `false` 会被模板翻译成「注入空 think 块」，于是缺省请求把 thinking 模型推离了它
+      自己的默认形态；`src/app/server/api/protocol.rs` 的字段注释却写着「`None` 表示用
+      模型训练默认值」。
+      修复（`enable_thinking` 全链路改成三态 `Option<bool>`）：
+      * `src/prompt/jinja.rs`：`render` 只在 `Some(v)` 时把 `enable_thinking` /
+        `preserve_thinking` 写进模板上下文；`None` 时这两个 key **不存在**（不是 `false`），
+        模板的 `{%- if enable_thinking is defined and enable_thinking is false %}` 因此走
+        「未定义」分支，不注入空块 —— 缺省 = 模型自己的训练默认，由每个模板自行解释。
+      * `src/app/server/api/tools.rs`：jinja 分支直接透传 `None`，不再 `unwrap_or(false)`。
+      * CLI 的 `--thinking` / `--no-thinking` 同样改成三态（不传 = `None`）。
+      * 手写 builder 路径（模型没带模板时）**保持原样**（`None` → `false` → 注入**闭合**的
+        空 think 块）：实测这个形态下 thinking 模型直接作答，而「不注入」会让它长篇推理，
+        所以不能一起翻。
+      行为变化（仅限开 `--jinja` 的服务）：缺省不再注入空 think 块，改由模板决定；想恢复
+      直答请显式传 `"enable_thinking": false`。
+      实测（mellum-12b-a2.5b-thinking，HTTP，`max_tokens=220`，问首都）：
+      * 手写路径（未开 `--jinja`）：缺省 = 显式 false = 27 prompt token → 直答 `Paris`
+        （1 completion token），与改动前一致，无回归。
+      * 模板路径（开 `--jinja`）：缺省 → 21 prompt token（不注入）→ 模型输出 220 token 推理
+        段且没给出最终答案，`content` 被 `ThinkFilter` 缓冲为空；显式 false → 27 prompt
+        token → 直答 `Paris`。**「缺省」是思考还是直答取决于模板与模型**：Mellum 的模板把
+        「未定义」当作「继续思考」，Qwen3.5 的模板则把「未定义」当作「关闭思考」。
+      新增单测：`prompt::jinja`（undefined 保持 undefined / 走模板默认）、
+      `app::server::api::tools`（缺省 == 显式 true，且 != 显式 false）。
+- [x] **qwen35 CLI `--thinking` 被静默忽略，HTTP `enable_thinking` 生效——两入口 thinking 输出不一致** — ✅ 2026-11-20 完成。
+      根因：CLI 的 qwen35 前端**完全手写** ChatML（`append_qwen_assistant_prefix`），
+      `--thinking` 根本没有入口，prompt ids 两种模式完全相同；HTTP 走模型自带模板，
+      `enable_thinking` 落在模板的分支上。
+      修复：CLI 的 qwen35 前端改用与 HTTP **同一套规则**选渲染器（Jinja2 开着 → 渲染模型
+      自带模板，否则手写 builder），thinking 三态原样透传；图像路径同样走模板渲染 +
+      `expand_vision_placeholders` 展开占位符。于是 `--thinking` 会真正改变 prompt 尾部。
+      验证：`tests/cli_http_agreement.rs` 的 thinking sweep 之前对 qwen35 是关掉的（注释指回
+      本条），现在解禁并通过——CLI 与 HTTP 在 `thinking=false` / `true` 两档输出逐字符相同
+      （`RMI_AGREEMENT_MODEL=models/Qwen3.5-2B-GGUF/Qwen3.5-2B-Q8_0.gguf`）。
+      已知边界：Qwen3.5 自带模板把「未定义」当「关闭思考」
+      （`{%- if enable_thinking is defined and enable_thinking is true %}`），手写 builder 的
+      默认则是不注入空块；因此同一模型在 `--jinja` 与非 `--jinja` 下默认思考行为不同
+      （模板 = 关，builder = 开）。两端在**相同配置**下仍逐 token 一致。
+- [ ] **thinking 模型缺省下的输出形态：长推理时 `content` 被 ThinkFilter 缓冲成空** —
+      2026-11-20 实测（mellum-12b-a2.5b-thinking，HTTP，模板路径，缺省）：模型输出 220 token
+      的推理段却没给出最终答案，`content` 被 `src/app/server/api/think.rs` 的 `ThinkFilter`
+      全部缓冲后变成空字符串，客户端拿到 `content: ""` + `finish_reason: length`。同一 prompt
+      显式 `enable_thinking: false`（注入闭合空块）则 1 token 直答 `Paris`。要定位三件事：
+      ① `ThinkFilter` 是否应该把「推理段 + 其后的答案」拆开，而不是把整段缓冲；
+      ② 缺省是否该给 thinking 模型一个推理预算提示（模板层面）；
+      ③ HTTP 层对「`finish_reason: length` 且 `content` 为空」是否该返回明确错误而不是空串。
+      当前 `ThinkFilter` 只剥 leading think 块（见 `docs/usage/lfm.md` §7.1 的已知限制）。
 - [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
       `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
       返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/
