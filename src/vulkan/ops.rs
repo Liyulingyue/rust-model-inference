@@ -3479,6 +3479,23 @@ impl AttentionRuntime {
         output: &mut [f32],
         spec: crate::ops::nn::AttentionSpec,
     ) -> Result<(), VulkanError> {
+        self.forward_windowed(q, k, v, output, spec, 0, 0)
+    }
+
+    /// Full attention when `window == 0`. Otherwise query `p` only sees keys in
+    /// the same `window x window` block of a `grid`-wide patch grid, which is
+    /// the block-diagonal mask the vit_merger applies after its window-major
+    /// reorder (`window = 2`, `grid = patches per row`).
+    pub(crate) fn forward_windowed(
+        &mut self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output: &mut [f32],
+        spec: crate::ops::nn::AttentionSpec,
+        window: u32,
+        grid: u32,
+    ) -> Result<(), VulkanError> {
         if spec.query_tokens == 0
             || spec.key_tokens == 0
             || spec.head_dim == 0
@@ -3499,6 +3516,7 @@ impl AttentionRuntime {
             || v.len() != k.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
+            || (window != 0 && (grid == 0 || grid < window))
         {
             return Err(VulkanError::UnsupportedShape(
                 "invalid online attention geometry".into(),
@@ -3517,6 +3535,9 @@ impl AttentionRuntime {
             as_u32(spec.head_dim, "attention dimension")?,
             spec.scale.to_bits(),
             u32::from(spec.causal),
+            window,
+            // The shader divides by the grid only when `window != 0`.
+            if window == 0 { 1 } else { grid },
         ];
         let dispatch = row_dispatch(
             spec.query_tokens
