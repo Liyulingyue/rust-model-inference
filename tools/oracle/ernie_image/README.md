@@ -115,7 +115,7 @@ curl -s -X POST http://127.0.0.1:8099/v1/images/generations \
 `guidance`（映射到 CFG scale，必须为正）、`n`（只接受 1）、`response_format`（只接受 `b64_json`）。
 返回 `{"created":…,"data":[{"b64_json":…}]}`。
 
-实测（NVIDIA GB10，release 构建，128×128 / 2 步 / seed 42）：
+实测（aarch64 Vulkan 主机，release 构建，128×128 / 2 步 / seed 42）：
 Q8_0 DiT 与 Q4_K_M DiT 两档，HTTP 返回的 PNG 与同一权重的 CLI 输出**逐位相同**
 （Q8_0 md5 `9be3e9f9809f98ae96b4458af32d3856`，Q4_K_M md5 `5e2c2ab771690a89dc54f06ee75dbe95`）。
 K-quant 档在服务端同样归到 CPU（打印 `compute scope=ernie_image backend=Cpu`），

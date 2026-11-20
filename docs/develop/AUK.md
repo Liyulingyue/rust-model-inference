@@ -3,7 +3,7 @@
 > 本页只汇总状态、限制和实现沿革。逐检查点的数值证据、性能表和复现命令在
 > [oracle 记录](../../tools/oracle/auk/README.md)；模型清单见 [MODEL_LIST.md](../MODEL_LIST.md)。
 >
-> 更新于 2026-11-04。
+> 更新于 2026-11-19。
 
 ## 入口
 
@@ -178,8 +178,11 @@ curl -s -F prompt="The next train leaves in ten minutes." \
   不同；CPU 路径稳定）：定位过程与证据见
   [TODO](TODO.md) 的 AuK 条目。
 - **未接入 JEV**：AuK 是生成模型，不是打分模型，JEV 路由对它没有意义。
-- **Qwen2.5-Omni audio tower 未移植**（`thinker.audio_tower.*`）：CFMEdit 端到端需要
-  外部提供 audio embeddings（例如用 Python 跑 Qwen audio tower 导出）。
+- **Qwen2.5-Omni audio tower 已移植**（`src/models/qwen3/omni_audio/`，~870 LoC：
+  conv1/conv2 + 32 层 transformer encoder + ln_post + proj 1280→2048，Whisper mel 提取
+  复用 qwen3/asr helpers）。CFMEdit 端到端已落地：`AukPipeline::load_with_audio_tower`
+  / `generate_audio_with_reference_wav`，`<|AUDIO|>`（id 151646）的 embedding 替换走
+  `Qwen3Model::text_encode_with_audio`。
 - **`pitch_shift` 同时改音高和时长**：走线性重采样，+2 半音 = 缩短到 1/1.122。
   「音高变、时长不变」需要 phase vocoder，是 follow-up。
 - **与 audio.cpp 的 oracle diff 仍待校准**：现在的数值基准是官方 PyTorch。

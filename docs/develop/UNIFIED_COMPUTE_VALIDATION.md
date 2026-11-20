@@ -20,7 +20,7 @@ Qwen3.8-27B 的 MLP down 投影是 17408 宽，`--compute vulkan` 因此在第�
 matmul 就报 `invalid Vulkan matmul input width/stride`，整个模型上不了设备。
 上限去掉后，宽度只需要是整块（32 个元素）即可。
 
-**实测**（2026-11-12，本机 Linux aarch64 + NVIDIA GB10，
+**实测**（2026-11-12，本机 Linux aarch64，
 `release-fast --features "parity-trace,vulkan"`，8 线程，F32 KV，
 `models/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf`，prompt `你好`，16 步 greedy）：
 
@@ -81,7 +81,7 @@ prefill 在设备上明显更快（13 token 约 4.8 倍，372 token 约 12 倍�
 
 `qwen35moe` 的设备路径此前只在 Holo4 上验证过，MiniCPM-V 35B-A3B 的权重
 从没在设备上跑过。Q4_K_M 档（`MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf`，21,166,255,008 B），
-本机 GB10，`--jinja`，prompt `What is 2+2?`，8 步 greedy：
+本机 aarch64，`--jinja`，prompt `What is 2+2?`，8 步 greedy：
 
 | 项目 | 结果 |
 |---|---|
@@ -218,7 +218,7 @@ SPIR-V 校验和 manifest/二进制字节比较通过；Rustfmt 和 diff check �
 CPU 计算没有修改，因此不把它视作已修复。基线测试二进制包含一个未执行的临时 ignored
 probe；最终源码去掉该 probe 并新增两个 ignored 回归，解释 ignored 数量差异。
 
-本轮尚未复验 NVIDIA GB10、其他 GPU/驱动、x86 GPU 实机和 Z-Image 原始 GGUF
+本轮尚未复验 aarch64 Vulkan 主机、其他 GPU/驱动、x86 GPU 实机和 Z-Image 原始 GGUF
 整图。这些 golden 与合成 FFN 证据只覆盖相应契约，不替代这些运行。
 
 最终 32 项继承失败名称：
@@ -400,11 +400,11 @@ cargo test --locked --profile release-fast --features vulkan --lib vulkan_q8 \
   -- --ignored --nocapture --test-threads=1
 ```
 
-NVIDIA GB10 SIGTRAP、整个 PR 相对 main 的性能、Z-Image 原始 GGUF 整图仍未验证。
+aarch64 Vulkan 主机 SIGTRAP、整个 PR 相对 main 的性能、Z-Image 原始 GGUF 整图仍未验证。
 
-## GB10 崩溃报告与本机复现（Q8 性能优化前，2026-10-12）
+## aarch64 崩溃报告与本机复现（Q8 性能优化前，2026-10-12）
 
-用户报告 NVIDIA GB10 / ARM64 Linux / 驱动 580.173.02 在 `c59986de` 的 Qwen3
+用户报告 aarch64 Vulkan 主机 / ARM64 Linux / 驱动 580.173.02 在 `c59986de` 的 Qwen3
 Auto、强制 Vulkan、`vk_model_check qwen3` 和 Z-Image GPU 入口退出 133（SIGTRAP），
 gdb 栈位于 `libnvidia-gpucomp.so.580.173.02`；CPU 正常、`vk_ops_check` 通过。
 截图中最后可用提交为 `da5ed52`。该机器已关闭，当前没有 SSH 或原始日志，
@@ -451,7 +451,7 @@ fixture 与下一节相同。CLI 使用 `--max-tokens 32 --temp 0 --threads 8 --
 另从 `git archive da5ed52` 导出独立源码，通过该目录的 `--manifest-path` 编译
 `release-fast` checker。本机没有崩溃，但其 Q8 prefill 首个 logit 为
 GPU `3.361459` / CPU `3.2769063`，检查失败；这是设备和 profile 有限的历史对照，
-不构成 GB10 修复或性能 A/B 证据。
+不构成 aarch64 修复或性能 A/B 证据。
 
 ### 量化与对齐修复后的本机结果（Q8 性能优化前）
 
@@ -491,7 +491,7 @@ prompt 的独立 release CLI 进程墙钟为 CPU 0.677 s / Auto Vulkan 58.693 s�
 优化前扩展的 `release-fast --prompt-repeats 129` 实际是 517-token prompt，model checker
 在 240 秒限时内未完成，最后日志仍在记录驻留 Vulkan 的 64-row 提交；它没有产生
 SIGTRAP，但没有通过完整正确性检查。不能把 133-token 的通过推广到所有上下文长度。
-GB10 驱动崩溃仍未完成实机复验，且本地缺少用户 Z-Image 命令所需的三份 GGUF，
+aarch64 驱动崩溃仍未完成实机复验，且本地缺少用户 Z-Image 命令所需的三份 GGUF，
 所以 Z-Image 整图未复验。
 
 ## 历史自动分发状态（2026-10-11）
@@ -899,7 +899,7 @@ PNG SHA-256：`ab9754ddfed1355eb37fecc75b779d01dd34578227680801bdd200722cc89735`
 
 日志、完整 trace、失败名称对照、release provenance/result 和 PNG 保留在上述本轮
 忽略目录的 `zimage-*` 文件。本次证明数值回归已修复；未据此开放 Auto workload，
-未做像素 oracle/PSNR、GB10/x86/其他驱动复测或跨设备性能准入。
+未做像素 oracle/PSNR、aarch64/x86/其他驱动复测或跨设备性能准入。
 
 ## main 合并验收（2026-10-09）
 
@@ -1141,7 +1141,7 @@ GPU 在这两组小 prompt/decode 工作负载分别约为 CPU 的 **5.87 倍 / 
 没有其他架构与驱动的运行结果。本节补上 arm64 Linux 主机，并首次用**真实权重**
 而非合成 fixture 检验统一分发契约。
 
-主机：aarch64，20 核；设备为 NVIDIA GB10（驱动 580.173.02，Vulkan 经
+主机：aarch64，20 核；设备为 aarch64 Vulkan 设备（驱动 580.173.02，Vulkan 经
 `nvidia_icd.json`）；`release` 构建，`--features vulkan`。
 
 | 文件 | SHA-256 |

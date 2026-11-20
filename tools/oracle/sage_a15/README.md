@@ -29,7 +29,7 @@ have not been rerun for this synchronization.
 ## Full Oracle replay after the GDN change (2026-11-12)
 
 The replay that the section above was missing has been run, on Linux aarch64
-(NVIDIA GB10), with the artifacts from the ModelScope link above
+(aarch64 Vulkan box), with the artifacts from the ModelScope link above
 (`Sage-A1.5-Q8_0.gguf`, 37,802,150,112 bytes, SHA-256
 `f7247f6faef3f6c616b953595e1fc7c3fbf257d02d9915af5fdf15e808ea8ee4`; the
 harness re-checks size and hash before it starts). The Oracle is the pinned

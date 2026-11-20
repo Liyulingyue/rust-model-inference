@@ -195,7 +195,7 @@ CLI：`--auk-sway <coef>`（默认 `-1.0`）、`--auk-flash`（锁定 Flash 配�
 
 ## 性能
 
-GB10（20 核）+ NVIDIA GB10，24 kHz，prompt「The next train leaves in ten
+aarch64 Vulkan 主机（20 核），24 kHz，prompt「The next train leaves in ten
 minutes.」，seed 42，`--threads 20`：
 
 | 模型 | 路径 | 优化前 | 优化后 | 加速 |

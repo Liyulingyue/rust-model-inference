@@ -33,7 +33,7 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 | 路径 | 新接入的 Vulkan 部分 | 保留在 CPU 的部分 |
 |---|---|---|
 | Z-Image | 已有 DiT 路径之外，VAE 的 F16 1×1 / 3×3 卷积，包括 shortcut 与 upsample 后卷积 | VAE 归一化、激活、空间 attention、最近邻上采样 |
-| YuE2 | AR/NAR 投影，BF16 投影加 bias 后仍舍入为 BF16；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、音频 VAE；NAR F16 的 Q8 activation 合约暂留 CPU |
+| YuE2 | AR/NAR 投影；分组 q/k/v 用 CPU 的 BF16 dot 归约并在 bias 后回舍入为 BF16；VAE 普通卷积；`--yue2 --gpu` 可进入加载入口 | attention、状态更新、VAE 转置卷积；NAR F16 的 Q8 activation 合约暂留 CPU |
 | Edge0 | MLX affine 4/8-bit（group=64，BF16 scale/bias）投影与 MoE 专家投影；普通 GGUF 矩阵复用已有 shader | LoRA 的低秩修正、recurrent/attention 状态与 MoE 路由合并 |
 | LFM2 / LFM2.5 / LFM2MoE | Q/K/V、输出、FFN、专家、shortconv 输入/输出投影及 LM head | shortconv 状态与卷积、attention、归一化、激活、采样 |
 | Embedding | 通过共享 `Weight` / `PreparedRows` 的 BERT、EmbeddingGemma、Qwen 文本编码投影 | embedding lookup、归一化、pooling，以及未接入该入口的多模态编码器 |
@@ -43,13 +43,17 @@ macOS 会自动查找系统 Loader，以及 Homebrew 的 `/opt/homebrew/lib/libv
 这些是投影级 offload，Edge0 的整图 Vulkan 资格仍为 false。共享投影按格式和 host 输入/输出预算
 分块，各投影持有自己的上传缓存和 arena；Z-Image VAE 的 F16 卷积独立共享 CHW arena。
 全图融合仍需测量。真实 RADV 模型、算子、成品和计时记录见
-[2026-10-07 实机验证](VULKAN_RADV_VALIDATION_2026-10-07.md)；其他设备和未列出的格式仍需验证。
+[2026-10-07 实机验证](VULKAN_RADV_VALIDATIONS.md)；其他设备和未列出的格式仍需验证。
 
 YuE2 正常会话使用投影 offload。旧整图 AR 执行器存在 BF16 数值合约和长前缀执行问题，
 已停用；隔离生命周期测试不能证明整图可用。
 BF16 dot 投影现已打包独立输出行，四帧共享权重读取，并保留原 FMA/归约顺序。
 RADV 的 256 帧 NAR 重复调用从 33.60 降到 12.42 秒；AR 耗时基本不变，
-详见 [YuE2 优化记录](VULKAN_YUE2_OPTIMIZATION_2026-10-08.md)。
+详见 [YuE2 优化记录](VULKAN_RADV_VALIDATIONS.md)。
+2026-11-19 用真实权重确认：AR + NAR 在 CPU 与 `--gpu` 下逐位一致
+（`yue2.nar.latents` 16384 个 F32 无差异），整链只余 VAE 设备卷积的 ≤1 个 PCM16
+档位（0.566% 采样）。分组 q/k/v 必须同时启用 `with_cpu_dot_contract()` 与 BF16
+回舍入，缺任一项都会让 98% 以上采样分叉；详见 [YuE2 用法 §3.3](../usage/yue2.md)。
 Z-Image VAE 的 F16 卷积复用 register-tiled F16 shader，每组覆盖 32 个像素、64 个输出通道。
 GPU 直接读取 CHW 的 1×1 / 3×3 输入并零填边界，融合 bias 后按 CHW 写回，省去 CPU im2col
 和输出转置。整个 VAE 共享可增长的 arena 与最多 64 份不可变权重缓存；常规设备每层只提交一次。
@@ -65,7 +69,7 @@ RGB 最大字节误差 2、MAE 0.045631、PSNR 61.536 dB，与分块 GPU 的已�
 BF16/F32 VAE 分支、归一化、激活、空间 attention 和上采样保留原有计算。
 AuK 的 F16 点积模式要求 CPU AVX2/F16C/FMA，其他 CPU 后端保持原计算；没有 F16→Q8_0
 重编码。DiT 上传缓存随每次 denoise 的 scratch 释放，重复生成需要重新上传 DiT 权重。
-实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_AUK_RADV_VALIDATION_2026-10-08.md)。
+实机结果与现有音频模型质量边界见 [AuK 验证记录](VULKAN_RADV_VALIDATIONS.md)。
 
 投影在调用线程上同步完成，之后才执行 SiLU、bias 或 residual。GPU 失败或拒绝 shape 时，
 CPU 重算该投影的全部输出；不混用已经成功的前几个 tile。`RMI_SCALAR=1`、
@@ -94,7 +98,8 @@ cargo test --profile release-fast --locked --features vulkan --lib \
 以同一 GGUF、prompt/lyrics、seed、batch、context、精度与线程数分别跑 CPU / `--gpu`，
 记录设备和驱动、权重 SHA-256、实际 GPU dispatch、逐层数值、greedy token / embedding 排序、
 歌曲和图像质量。用 `RUST_GPU_DISPATCH_TRACE=1` 核对使用的 shader，冷启动上传与预热计时分开记录。
-YuE2 的 BF16 舍入阈值和 NAR 累积误差必须单独验收。
+YuE2 的验收口径：AR + NAR 逐位一致（BF16 回舍入 + 分组投影的 CPU dot 契约），
+VAE 设备卷积 ≤1 个 PCM16 档位。
 
 实机修复了 MLX padding 校验、Q8 分组求和顺序和 YuE2 BF16 投影归约。
 三个修改的 shader 通过 validator 与重编译字节比对，完整 manifest hash 校验通过。
@@ -171,6 +176,20 @@ Qwen3.5-0.8B Q8_0 + Qwen3.5-0.8B-mmproj-F16 + 448×448 图像，CPU 与 Vulkan �
 - **恢复**：只有设备/队列不安全才触发共享熔断；局部格式、配置、分配或 session 错误
   不等于设备损坏。idle 未确认的资源不能释放。legacy matvec 保留原看门狗；
   新会话按 Cpu/Auto/Vulkan 分别执行 CPU、事务回退、显式报错。
+
+### 设计取舍（2026-09-04 立项时的决策；原 `VULKAN_INFERENCE_DESIGN.md` 已删除，内容吸收至此）
+
+Vulkan 路径按「增量式 Vulkan 专用执行器」落地：设备 buffer、pipeline、命令录制和
+GPU KV 状态归 Vulkan session 所有，CPU 模型始终是回退路径与正确性 oracle。当时
+否决过的两个替代方案，结论至今仍然成立：
+
+- 只扩展逐 matmul 的 offload 路径——消不掉提交、fence 和 CPU 往返的主导开销；
+- 在跑通一条完整 Vulkan 路径之前先引入通用 graph / backend 抽象——会在没有验证
+  抽象的情况下改动所有模型。
+
+非目标（同样沿用）：不做 CUDA / 原生 Metal / ROCm / wgpu / 通用 backend 抽象
+（wgpu 是独立的实验 feature）；不改模型文件；不宣称「所有模型都有 GPU 支持」，
+支持范围按架构 × 张量格式矩阵逐格报告。
 
 ## 跨厂商统一验收流程
 
@@ -348,6 +367,24 @@ MoltenVK 路径是正确性后端，不宣称比 4-thread CPU 更快。
   否则会在共享算子里给别的模型（如 DiT，8.8× 收益）埋下同类问题。
   临时解法是调用侧加作用域守卫（`ComputePool::disable_gpu_matmul_for_scope`），
   不要在共享算子里按模型加分支。
+- **行跨度与行内 span 是两个数（Z-Image Q/K norm + interleaved RoPE 上设备的教训）**：
+  DiT 的 QKV 是逐行交错 `[Q|K|V]`（`QKV_WIDTH`），Qwen3 是分块 `[整块 Q|整块 K]`。
+  照搬分块语义把 `q_heads*head_dim` 当行跨度传入，着色器按 `q_stride=3840` 寻址而真实
+  间距是 `QKV_WIDTH=11520` —— 只有第 0 行落在正确位置，其余行整体错位；行跨度整除
+  缓冲长度时**不会越界报错**，只会静默写坏 K 与 V。行内 Q→K 同属一个 region、仅靠
+  `k_word` 无法区分，K 每行基址还缺 `HIDDEN` 偏移。修复是 record 函数显式传
+  `q_row_stride` / `k_row_stride`，push constant 加 `k_base`；两个 bug 都是自检抓到的，
+  不是渲染对比发现的。守卫 `gpu_interleaved_qk_norm_rope_matches_the_host_chain` 在生产
+  规模下与 host 逐位一致，并断言 **V 与输入逐位相同**（V 未被触碰是 K 基址算错的唯一
+  可观测信号）。
+- **GPU 与 CPU 的「数学等价」写法差 1 ulp 也会破坏位对齐（Q8_0 量化倒数）**：CPU
+  `quantize_q8_0_into` 用 `1.0 / scale`，shader 曾用 `divide(127.0, amax)` —— 数学等价
+  但差 1 ulp，恰好把乘积从 tie（-20.5）挪成非 tie，round-to-even 分叉到 -21。修复：
+  inverse 从已算出的 `scale` 出发 `divide_finite_normal(1.0, scale)`（精确舍入，与 CPU
+  硬件除法一致），代价为零。同一条教训：**新增管线的索引必须追加在 `OPERATOR_SHADERS`
+  数组末尾**——每个位置都是硬编码常量，插在中间会静默改绑别人的 SPIR-V；以及扩散
+  多步会把微小差异放大成完全不同的轨迹，**不能用「与上一版 GPU 比」判断好坏，只能对
+  CPU 参考比**。
 - `RUST_GPU_TEXT=1`：恢复 Z-Image Qwen3 文本编码器的 GPU 投影（默认关，
   见 `docs/usage/z-image.md` 的 gate 说明）。
 - `RUST_GPU_TRACE=1`：打印每次 dispatch 的序号/形状/耗时。

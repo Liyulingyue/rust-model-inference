@@ -250,7 +250,7 @@
       "jev_text": "choice A (red) 0.6482",
       "jev_image_blue": "choice A (blue) 0.9954",
       "vulkan_vs_cpu_40_step_greedy": "identical",
-      "vulkan_vs_cpu_generation_time": "1.84s GPU vs 1.14s CPU for 40 tokens (aarch64 GB10 + RTX; the recording host compared an Apple Silicon CPU with a separate GPU box and measured about 10x)"
+      "vulkan_vs_cpu_generation_time": "1.84s GPU vs 1.14s CPU for 40 tokens (aarch64 box + RTX; the recording host compared an Apple Silicon CPU with a separate GPU box and measured about 10x)"
     }
   }
 }

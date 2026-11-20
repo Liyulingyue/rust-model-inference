@@ -9,7 +9,7 @@
 // reduction modes give a row sixteen lanes (mode 2), eight (mode 8) or one
 // (mode 0), and every other thread exited immediately. That also meant one
 // warp load instruction fetched a single 32-byte sector, measured 35 GB/s
-// against 242 GB/s of memory bandwidth on GB10.
+// against 242 GB/s of memory bandwidth on the aarch64 box.
 //
 // Grouping rows makes every thread useful and every load instruction fetch
 // four sectors from four rows, without touching the per-row arithmetic:

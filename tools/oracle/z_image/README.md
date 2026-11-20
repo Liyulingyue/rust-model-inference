@@ -33,7 +33,7 @@ curl -s -X POST http://127.0.0.1:8099/v1/images/generations \
 `n` 只接受 1，`response_format` 只接受 `b64_json`。返回
 `{"created":…,"data":[{"b64_json":…}]}`，`b64_json` 是 PNG 的 base64。
 
-实测（NVIDIA GB10，release 构建，128×128 / 2 步 / seed 42）：
+实测（aarch64 Vulkan 主机，release 构建，128×128 / 2 步 / seed 42）：
 HTTP 返回的 PNG 与同一权重的 CLI 输出**逐位相同**（md5 `86caef6e632c995511bf2395fc1933ad`）；
 debug 与 release 构建的结果也逐位相同。
 

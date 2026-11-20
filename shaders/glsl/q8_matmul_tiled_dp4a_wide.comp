@@ -8,7 +8,7 @@ int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // token loop and keep the same register allocation as the original kernel.
 // The accumulate is an unconditional FMA: `reduction_mode` is a push
 // constant, so a runtime test here sits in the innermost loop and costs
-// about 40% of this kernel on GB10. `q8_matmul_tiled_dp4a_wide_add` is the
+// about 40% of this kernel on the aarch64 box. `q8_matmul_tiled_dp4a_wide_add` is the
 // unfused twin for scalar hosts; the host picks by `q8_dot_mode()`.
 //
 // Register-tiled Q8_0 grouped matmul, one weight per (output column, k-block)
@@ -17,7 +17,7 @@ int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // The kernel this replaces gives one workgroup per (token, output column) pair
 // and splits k across the 64 lanes, so every weight byte is loaded, multiplied
 // and discarded for a single token: weight reuse is 1, and the measured result
-// was 108 GOP/s on GB10 against roughly 5900 GOP/s for the same shape in
+// was 108 GOP/s on the aarch64 box against roughly 5900 GOP/s for the same shape in
 // PyTorch. Here a lane owns an output column for the whole k walk and keeps one
 // accumulator per token in the tile, so each weight load feeds TOKENS dots and
 // the cross-lane tree reduction disappears entirely.

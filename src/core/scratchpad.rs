@@ -88,6 +88,29 @@ pub enum KvCache {
     F32(KvCacheF32),
 }
 
+/// KV 缓存的元素排列顺序。
+///
+/// 两种布局的总元素数相同，只是同一层内的下标排列不同：
+///
+/// - `PositionMajor`：`[layer][position][head][dim]`，一个位置的整行连续。
+///   每步 decode 写一行只需一次连续拷贝，是默认布局；但跨位置扫一个 head
+///   时步长是 `kv_heads * head_dim`（YuE2 为 4 KiB），每行只用 `head_dim`
+///   个元素。
+/// - `HeadMajor`：`[layer][head][position][dim]`，一个 head 的所有位置连续。
+///   写入一个 token 变成 `kv_heads` 段 `head_dim` 的连续拷贝，而 attention
+///   扫一个 head 时完全顺序访问（页复用与硬件预取都能生效）。
+///
+/// 存储本身（[`KvCache`]）只是字节容器，不带布局语义；布局由 [`KvState`]
+/// 携带，读写双方必须与构造时选择的一致。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KvLayout {
+    /// `[layer][position][head][dim]`
+    #[default]
+    PositionMajor,
+    /// `[layer][head][position][dim]`
+    HeadMajor,
+}
+
 impl ExecutionScratchpad {
     /// Builds the shared per-step scratchpad.
     ///
@@ -310,6 +333,9 @@ pub enum KvLifecycle {
 pub struct KvState {
     pub arch: std::sync::Arc<KvArch>,
     pub format: KvFormat,
+    /// 缓冲区的元素排列顺序。默认 `PositionMajor`（历史行为）；需要按 head
+    /// 顺序扫描的模型（YuE2）构造后调用 [`KvState::with_layout`] 切换。
+    pub layout: KvLayout,
     pub lifecycle: KvLifecycle,
     pub cache: KvCache,
     pub capacity: usize,
@@ -318,7 +344,7 @@ pub struct KvState {
 }
 
 impl KvState {
-    /// 创建新的 KV 状态（默认 `Ephemeral` 生命周期）。
+    /// 创建新的 KV 状态（默认 `Ephemeral` 生命周期，`PositionMajor` 布局）。
     pub fn new(arch: std::sync::Arc<KvArch>, format: KvFormat, capacity: usize) -> Self {
         let stride = arch.n_head_kv * arch.n_embd_head_k.max(arch.n_embd_head_v);
         let cache = match format {
@@ -328,12 +354,19 @@ impl KvState {
         Self {
             arch,
             format,
+            layout: KvLayout::PositionMajor,
             lifecycle: KvLifecycle::Ephemeral,
             cache,
             capacity,
             seq_len: 0,
             last_access: std::time::Instant::now(),
         }
+    }
+
+    /// 切换元素排列顺序。只改变索引解释，不重新分配（两种布局的总大小相同）。
+    pub fn with_layout(mut self, layout: KvLayout) -> Self {
+        self.layout = layout;
+        self
     }
 
     pub fn with_lifecycle(mut self, lifecycle: KvLifecycle) -> Self {
@@ -387,7 +420,7 @@ impl KvState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionScratchpad, KvArch, KvFormat, KvLifecycle, KvState};
+    use super::{ExecutionScratchpad, KvArch, KvCache, KvFormat, KvLayout, KvLifecycle, KvState};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -472,5 +505,31 @@ mod tests {
         let f16_bytes = arch.bytes_per_token(KvFormat::F16);
         let f32_bytes = arch.bytes_per_token(KvFormat::F32);
         assert_eq!(f32_bytes, f16_bytes * 2);
+    }
+
+    #[test]
+    fn kv_state_defaults_to_position_major_and_layout_is_metadata_only() {
+        let arch = make_arch();
+        let position_major = KvState::new(arch.clone(), KvFormat::F32, 16);
+        assert_eq!(position_major.layout, KvLayout::PositionMajor);
+        let total = match &position_major.cache {
+            KvCache::F32(cache) => cache.k.len(),
+            KvCache::F16(_) => unreachable!(),
+        };
+
+        // Switching the layout must not reallocate or change the element count:
+        // both layouts are permutations of the same `[layer][capacity][stride]`
+        // buffer.
+        let head_major = position_major.with_layout(KvLayout::HeadMajor);
+        assert_eq!(head_major.layout, KvLayout::HeadMajor);
+        assert_eq!(
+            match &head_major.cache {
+                KvCache::F32(cache) => cache.k.len(),
+                KvCache::F16(_) => unreachable!(),
+            },
+            total
+        );
+        assert_eq!(head_major.arch, arch);
+        assert_eq!(head_major.capacity, 16);
     }
 }

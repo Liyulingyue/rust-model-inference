@@ -27,7 +27,7 @@ clone_dir=$work_dir/llama.cpp
 # Runtime and conversion share one pin now: the runtime Oracle used to sit on
 # 11fe0215, whose GDN q/k normalization is the pre-ggml_l2_norm formula, so the
 # shared Rust implementation looked "wrong" against it. Re-pinning here removes
-# that exception (TODO-068). The eval-callback source still comes from the
+# that exception. The eval-callback source still comes from the
 # conversion pin so the trace harness stays the one the patches were written for.
 git -C "$clone_dir" show "$converter_pin:examples/eval-callback/eval-callback.cpp" \
     > "$clone_dir/examples/eval-callback/eval-callback.cpp"

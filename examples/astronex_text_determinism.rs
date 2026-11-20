@@ -9,7 +9,7 @@
 //! Requires the converted components GGUF:
 //! `models/Astronex-World/mmproj-Astronex-World.gguf`.
 //!
-//! On the GB10 box the short-prompt encodings differ between two calls while
+//! On the aarch64 box the short-prompt encodings differ between two calls while
 //! the long ones usually match; a single-threaded `ComputePool` removes the
 //! difference, and `RUST_GPU_MIN_OUTPUTS` moves the whole encoder to the CPU
 //! path, which is reproducible. See `docs/develop/ASTRONEX_WORLD.md`.
@@ -30,7 +30,7 @@ fn main() {
     let loader = GGUFLoader::from_file("models/Astronex-World/mmproj-Astronex-World.gguf")
         .expect("mmproj 载入失败");
     let source: Arc<dyn rust_model_inference::TensorSource> = Arc::new(loader);
-    // A single worker makes the encoder reproducible on the GB10 box, so the
+    // A single worker makes the encoder reproducible on the aarch64 box, so the
     // default here keeps the production thread count to expose the race.
     let pool = Arc::new(ComputePool::new(16));
     let encoder = DreamXTextEncoder::load_astronex(source, pool).expect("文本编码器载入失败");
