@@ -226,3 +226,11 @@ Idol Vulkan projections now sample the existing CPU `dot_f32` path after every s
 The two software-device Idol attention tests that create their own Vulkan context are now ignored in the ordinary library suite. CI runs the complete ignored Idol device group serially with `--test-threads=1`, so the tests do not race other models' Vulkan contexts. On this Mac, the explicit ignored run remains blocked by the existing MoltenVK `ShaderCompileFailed("Initialization of an object has failed")` environment failure. The ordinary full Vulkan library run completed 1806 passed / 35 failed / 263 ignored, with failures in the existing platform and third-party GPU baseline set and no Idol test failure.
 
 The model list, supported-model table, validation summary and GGUF coverage matrix now agree on the completed original/q8_0 CPU probes, the 143/144 AMD GPU gate, and the successful original-GGUF Vulkan CLI smoke. Open quantized GPU/HTTP rows remain marked as unrun.
+
+## Fresh AMD validation — 2026-11-21
+
+The same current head was rerun on `root@36.150.116.206:35186`, an AMD gfx1100 / RADV NAVI31 host with about 48 GiB VRAM. Weights were downloaded and converted on the remote host. The Mac received no model files or generated PLY.
+
+The original GGUF SHA256 remained `4134dabd42e7f906559bc2d42b380eaa55663eeeb3e42556eca4a371533aa5e4`. Native CPU Oracle passed 144/144 checkpoints in 18.54 s. The q8_0 GGUF SHA256 remained `eb72ed5dc4fbbcb4a5d5063ec9b78320bc56ccd2644cb839ec195ccc0ede6598`, and its CPU Oracle passed 144/144 in 13.60 s.
+
+Auto and strict Vulkan each submitted 1,273 device jobs and reproduced the same single `idol.denoiser.joint.23.out` tolerance failure with relative RMSE `0.00668105`. The new projection verification did not add a failure or silently fall back. A real strict-Vulkan CLI run with one step, CFG 0, seed 42 and 32,768 Gaussians exited 0 in 294.143 s. It submitted 32,913 device jobs and wrote a 2,228,639-byte finite PLY with SHA256 `b493c80536e9265dc71c7085b908b4bfa7a17dccdbfac45c8d9d8ff80e79944b`. The standalone GGUF server loaded successfully and `/health` returned `200 ok`. Detailed numbers are in [gguf-performance-20261121.json](gguf-performance-20261121.json).
