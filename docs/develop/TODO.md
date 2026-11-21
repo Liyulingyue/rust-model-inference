@@ -103,7 +103,7 @@ NEON on aarch64; no AVX-512).
       （Vulkan IQ shader 一旦上线，`PreparedRows::matmul_group` 的 `uses_q8_k()` 权重
       会开始走 GPU，需与本次逐位对拍过的 AVX2 路径做同机对照）。验证设备：本机若无
       Vulkan 设备则按 `amd-cloud-gpu-test` skill（用户点名才用）。
-- [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
+- [x] **Q4_0 AVX2 kernel 重写：逐 lane FMA 累加 + 4 行分块**（2.07×，结构对齐 llama.cpp AVX2）— 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
       预期 1.5-2× 加速。
@@ -548,61 +548,49 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 
 ## Detailed TODOs (merged from legacy docs/TODO.md)
 
-### TODO-001: Q4_0 AVX2 kernel 不使用 FMA，性能受限
+### TODO-001: Q4_0 AVX2 kernel 重写（已完成，2026-11-21）
 
-#### 现状
+#### 原状
 
-`src/ops/kernel/q4_0/avx2.rs` 的 Q4_0 matmul kernel 故意**不使用 FMA**：
+`src/ops/kernel/q4_0/avx2.rs` 的 Q4_0 matmul kernel：每 block 先把整个 i32 点积
+`hsum_epi32` 成标量，再把**一个标量**塞进 8-lane f32 累加器的 lane 7 做
+`_mm256_fmadd_ps`——8 个 FMA lane 只用了 1 个，外加每 block 一次水平归约；
+无行分块（TODO 原文写的"不使用 FMA"已过时，代码其实早已引入 fmadd）。
 
-```rust
-//! 8. Multiply by d * scale in f32 with explicit `_mm256_mul_ps` + `_mm256_add_ps`
-//!    (no `_mm256_fmadd_ps`) to match scalar's mul+add rounding exactly.
-//!
-//! **Precision contract**: bit-exact with the scalar implementation.
-```
+#### 处理
 
-行累加采用 `acc += dc * d * scale` 三次 f32 运算（mul → mul → add），
-而不是 `fmadd(d, d*scale, acc)` 一次融合运算。
+按 `q8_0/avx2.rs` 的结构重写：
 
-#### 影响
+1. **逐 lane 累加**：每 block 的 i32 点积保持 8-lane 竖向（每 lane 恰好 4 个乘积，
+   精确），`dot_lane = nib_lane - 8 * y_lane`（y_lane 每 block 算一次、4 行共享），
+   直接 `_mm256_fmadd_ps(ds, cvtepi32(dot_lane), acc)`；hsum 只在每行结束时做一次。
+2. **4 行分块**：Q8 输入 block 每块载入一次、4 个权重行共享（与 Q8_0 kernel 同款）。
 
-- **性能**：相比 Q4_K / Q8_0 kernel（已用 FMA）慢约 1.5-2×。
-  E4B Q4_0 文件实测 5.8 t/s decode，E2B Q4_K_M 10 t/s（同 embd 比例下 kernel 速度是主要差异）。
-- **正确性**：与 scalar reference **bit-exact**（`assert_avx2_eq_scalar` 测试在 `q4_0/avx2.rs:241`）。
-  所有 Q4_0 模型通过 parity 测试。
+#### 验证与语义
 
-#### 何时触发
+- 该累加结构与 llama.cpp 自家 AVX2 `ggml_vec_dot_q4_0_q8_0` **同构**
+  （llama.cpp 同样是逐 lane fmadd + 末尾 hsum；两种"每 lane 精确 i32"写法——
+  减 8 后符号展开 vs nib−8·y 校正——整数上逐 lane 相等），因此默认路径与
+  llama.cpp AVX2 语义对齐；旧 kernel 是既不匹配 scalar 也不匹配 llama.cpp AVX2
+  的自定义混合体，已删除。
+- parity：per-block 整数点积两边都精确，仅 f32 累加顺序不同 → 与 scalar 的
+  对比从"≤4 ULP"放宽为仓库 Q4_K / Q8_0 kernel 同款 **rel < 1e-3**（实测随机
+  4×512 最大 7 ULP / 相对 4.5e-7；测试保留 ULP 打印）。
+- E2E：Qwen3-0.6B-Q4_0 greedy 输出正常（"The capital of France is **Paris**."）。
+- 注意：`tests/inference_parity.rs::q4_0_matches_pinned_scalar_oracle_bit_for_bit`
+  （env 门控）把默认路径与 llama.cpp oracle 逐位对拍——若 oracle 是 AVX2 构建，
+  本次改动后应保持逐位一致（新结构即 llama.cpp 结构）；若 oracle 是标量/FMA-disabled
+  构建，逐位一致原本就不成立（旧 kernel 带 fmadd），需按其 oracle 模式重验。
 
-加载任何 Q4_0 权重时——目前主要是 Gemma 4 E4B Q4_0 导出文件。
+#### 性能
 
-#### 选项
-
-1. **加 FMA + 放松精度契约**（推荐 follow-up）：把 `acc += dc * d * scale` 改成
-   `acc = _mm256_fmadd_ps(prod_d_scale, ...)`。需要新增"near bit-exact"测试模式
-   （参考 llama.cpp 的 GGML_FMA_DISABLED 编译开关做法）。
-   - 预期：1.5-2× 加速
-   - 风险：所有 Q4_0 模型需要重新跑 Oracle 验证（logits 可能漂移 ±1 ULP，最终 token 偶发分叉）
-   - 工作量：半天
-2. **重导出模型到 Q4_K / Q8_0**（推荐立即做）：
-   - `q4_k/avx2.rs` 已用 FMA 写好 + parity 通过
-   - `q8_0/avx2.rs` 已用 FMA 写好 + parity 通过
-   - 用 llama.cpp 的 `convert.py` 把 E4B 转成 Q4_K_M 或 Q8_0
-   - 文件大 ~30%，但推理快 2-3×
-   - 工作量：1 小时
-3. **写 FMA + 8-wide row unroll 版本** — 保留旧 kernel，新增 `matmul_q4_0_vs_q8_0_avx2_fma`，编译时 feature flag 切换。
-   - 预期：2-3× 加速
-   - 工作量：1 天
-
-#### 推荐
-
-短期：选选项 2（重导出 E4B），立即得 2-3× 加速，零代码风险。
-中期：选选项 1（加 FMA kernel），其他 Q4_0 模型（Qwen3-0.6B-Q4_0 等）也受益。
+kernel 级（release，Qwen3-0.6B attn_q 1024 值/次）：旧 kernel 771 µs → 新
+**372 µs（2.07×）**，对 scalar 7.32×。
 
 #### 关联文件
 
-- `src/ops/kernel/q4_0/avx2.rs` — kernel 实现 + parity 测试
-- `src/ops/kernel/q4_0/scalar.rs` — scalar reference
-- `src/ops/kernel/q4_0/mod.rs` — kernel 分发
+- `src/ops/kernel/q4_0/avx2.rs` — 重写后的 kernel + parity 测试
+- `src/ops/kernel/q4_0/scalar.rs` — scalar reference（未动）
 
 ---
 
