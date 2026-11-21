@@ -461,6 +461,7 @@ cargo run --release --bin rust-model-server -- \
 | `/v1/audio/transcriptions` | POST | asr | OpenAI Audio Transcriptions（multipart：`file`、`language`、`prompt`） |
 | `/v1/audio/transcriptions_json` | POST | asr | 同上，但用 JSON 体，`input` 字段为 base64 WAV |
 | `/v1/audio/speech` | POST | tts | OpenAI Audio Speech：`input` 是文本，`voice` 接受 `file://path` 或 `data:audio/wav;base64,...` 形式的参考音频 |
+| `/v1/videos/generations` | POST | video | 文生视频（FastFrames-L）：`prompt` + 几何参数，返回 `video/mp4`；同一进程一次只跑一个生成任务（忙时 429）。见 [docs/develop/FASTFRAMES_L.md](docs/develop/FASTFRAMES_L.md) |
 
 ### 示例
 
