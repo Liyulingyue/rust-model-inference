@@ -404,4 +404,3 @@ mod tests {
         assert_avx2_eq_scalar("model-blk0-attnq", &weight, &q8, &scales);
     }
 }
-
