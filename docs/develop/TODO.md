@@ -31,46 +31,6 @@ NEON on aarch64; no AVX-512).
       `cli_and_http_agree_on_image_input` 这一档（CLI `--mmproj --image` 与 HTTP 带图
       请求逐 token 对齐）。拿到模型后补一条实测结论，并确认 HTTP 的
       `enable_thinking` / 工具调用在带图时也保持一致。
-- [x] **Q2_K / Q3_K SIMD 加速** — 2026-11-21 完成（分支 `feat/q2k-q3k-avx2-simd`）。按 pinned llama.cpp
-      `ggml_vec_dot_q2_K_q8_K` / `ggml_vec_dot_q3_K_q8_K` AVX2 结构重写 `avx2_k.rs` 两个 kernel：
-      全 SIMD 2-bit 解包（`srli_epi16` + mask）+ `maddubs`（u8×i8→i16 对和）+ scale 经
-      `get_scale_shuffle_q3k` 同款 shuffle 内嵌 `madd`，每 super-block 一个 i32 累加器。
-      旧实现的瓶颈是 Q2_K 标量解包循环与两者每 16 元素一次的窄水平归约。
-      Kernel 级（512 行 × 4096 列 microbench，`examples/bench_kquant_dot.rs`）：Q2_K **7.5×**、
-      Q3_K **2.75×** vs scalar。端到端 Qwen3-0.6B（5 批中位）：Q2_K prefill 59→111 t/s、gen 42→65 t/s；
-      Q3_K_M prefill 74→103 t/s、gen 50→59 t/s。parity：随机 64 super-block scalar↔AVX2 相对差
-      ≤ 2.1e-6（f32 舍入级），新增 `q2k/q3k_avx2_matches_scalar_random_superblocks` 测试。
-- [x] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复 + 生产路径 SIMD**（选项 1、2 均已做）—
-      选项 1（2026-11-21）：`src/ops/kernel/iq4_xs.rs` 的 `iq_kernel_impl!` macro 与 IQ4_XS /
-      IQ2_XS 手写 impl 的 `forward_prequantized` 已从 stub（写 0）改为完整 dequant-to-f32 +
-      dot 路径（与 IQ4_NL / Q4_K 同款）。生产仍走 `uses_q8_k()` → `forward_prepared`（Q8K
-      路径），此路径只为接口完整性。8 个类型各一个 2-row 测试，与 `dequantize_row_*`
-      参考逐位一致。
-      选项 2（2026-11-21，原判断"暂无法做精度验证"已过时）：生产的 Q8K 热路径
-      `vec_dot_iq*_q8k` 里 IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S
-      七个类型当时全是 scalar——pinned llama.cpp `b96806d9` 的 x86 arch 里**已有**这七个
-      的 AVX2 kernel，全部按其结构移植到 `src/ops/quant/avx2_k.rs` 并接通 dispatch。
-      验证：① llama.cpp 逐位 oracle（`oracle_vecdot_harness` 链接 pinned 构建的
-      libggml-cpu；注意必须先 `ggml_cpu_init()` 填 FP16 查找表）对随机 64 super-block
-      输入，7 个类型 AVX2 输出与 llama.cpp **逐位一致**（`RMI_LLAMA_ORACLE=<harness>
-      cargo test --lib iq_avx2_matches_llama_cpp_oracle_bitwise -- --ignored`）；
-      ② scalar↔AVX2 parity（随机 super-block + 7 个本地 IQ 模型整行，rel < 1e-3）；
-      ③ kernel 级基准（release，attn_q 1024 值/次）：iq2_xxs 2.60x、iq2_xs 7.21x、
-      iq2_s 2.73x、iq3_xxs 6.01x、iq3_s 3.36x、iq1_m 3.42x、iq1_s 3.96x；
-      ④ E2E：IQ2_S / IQ3_S greedy 生成正确（"The capital of France is Paris"）。
-      **顺带修了 scalar `vec_dot_iq2_xs_q8k_scalar` 只处理半行的 bug**（16/32 个 u16，
-      对照 llama.cpp generic 修正；此前无模型可验，从未被发现）。
-      **模型资产**：`models/Qwen3-0.6B-GGUF/` 补齐 IQ2_XS / IQ2_S / IQ3_S——ModelScope
-      （unsloth / bartowski 镜像）均无这三个文件，用 pinned llama-quantize 自 BF16 +
-      unsloth imatrix 本地生成；SHA256：IQ2_XS `0587d6121f5401f8018f43309235590b0444e4
-      af73a8bceca96722ddfdf1f109`、IQ2_S `ce788484aff33ee76e846bc1a52d015d30f05e27637
-      d3fd30249a3ee4eb35925`、IQ3_S `fac96f9f3fe11987acd69c83294461f0176a259b1d78506
-      ffa60bc290d9ea012`。已知边界：≤2.3 bpw 的 UD-IQ2_XXS / UD-IQ1_S / UD-IQ1_M /
-      本地 IQ2_XS 在 0.6B 模型上 greedy 输出退化为乱码——**llama.cpp 同权重同 prompt
-      同样乱码**（llama-cli b96806d9 实测：IQ2_XS "ention =="、UD-IQ2_XXS "-- exam.
-      informat--"，而 IQ2_S / IQ3_S 正常），且 kernel 层已逐位对拍一致 → 是量化质量
-      本身（2.0-2.3 bpw @ 0.6B 参数量），不是 kernel 问题；≥2.5 bpw 的 IQ2_S / IQ3_S
-      正常（"The capital of France is Paris"）。
 - [ ] **AVX-VNNI int8 dot 加速**（前提已修正：真正的目标是 **AVX-VNNI-INT8 的
       `_mm256_dpbssd_epi32`**，待做）— 详见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速)。
       原条目的两处前提错误已查证并实测（2026-11-21，Meteor Lake dev box）：
@@ -108,19 +68,37 @@ NEON on aarch64; no AVX-512).
       `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
       可移植）；另评估 Q4_0 NEON kernel（`q4_0/neon.rs`，逐 block 标量点积 +
       逐行累加、无行分块）是否按 TODO-001 的 x86 重写思路同步改造。
-- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — 仓库 Vulkan 侧目前只有 Q8_0 / Q4_K /
-      （BF16 等）matmul，IQ 类型完全走 CPU（`src/vulkan/` 无任何 IQ shader）。
-      pinned llama.cpp 有现成参考：`ggml/src/ggml-vulkan/vulkan-shaders/` 下七个类型的
-      `mul_mat_vec_iq*.comp` + `dequant_iq*.comp`（iq1_m / iq1_s / iq2_s / iq2_xs /
-      iq2_xxs / iq3_s / iq3_xxs）。移植时注意 llama.cpp 的 shader 是
-      mul-mat-vec（per-token 解码侧）形态，与仓库现有 `matmul_q4k.rs` 的 prefill 形态
-      不同，需决定先补 decode 侧还是两侧都要；数值验收照仓库惯例对 CPU 路径比
-      （Vulkan IQ shader 一旦上线，`PreparedRows::matmul_group` 的 `uses_q8_k()` 权重
-      会开始走 GPU，需与本次逐位对拍过的 AVX2 路径做同机对照）。验证设备：本机若无
-      Vulkan 设备则按 `amd-cloud-gpu-test` skill（用户点名才用）。
-- [x] **Q4_0 AVX2 kernel 重写：逐 lane FMA 累加 + 4 行分块**（2.07×，结构对齐 llama.cpp AVX2）— 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
-- [x] **token 维寄存器分块：消除 per-token 权重重读**（x86 AVX2 已做，1.56-1.69×；
-      aarch64 侧待 NEON kernel 移植时一并做）— 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
+- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — **IQ4_XS 已完成**（2026-11-21，Intel iGPU
+      实测），剩余 6 个 2/3-bit 网格类型按同一模板跟进。
+      **IQ4_XS 已做**：`shaders/glsl/iq4_xs_matmul.comp`（按仓库 `q4_k_matmul.comp` 的
+      "每 lane 一个输出行 + shared memory 装 Q8_K 输入块"模式，累加顺序逐子块复刻
+      CPU AVX2 kernel 的 `acc += dl * dot`——乘加分离 + `precise`,无 fma 收缩）+
+      `matmul_iq4_xs.rs` 入口 + `GpuWeightFormat::IQ4_XS` 全套注册 + kernel GPU hook。
+      验证：`iq4_xs_gpu_matches_cpu_avx2_bitwise_on_real_weights`——Qwen3-0.6B-IQ4_XS
+      的 blk.0.attn_q（2048 行）GPU 输出与 CPU AVX2 kernel **逐位一致**；E2E
+      `--compute auto` greedy 正常。实现中抓到的坑：① IQ4_XS 的 nibble→value 映射是
+      **lo-first-then-hi**（子块字节 [16ib,16ib+16) 的低 nibble = 值 0..15,高 nibble =
+      值 16..31),不是逐字节交错——AVX2 的 lo/hi 分离配对正源于此；② `OPERATOR_SHADERS`
+      与 `OPERATOR_SHADER_NAMES` 都是按 pipeline id 索引的定长数组,新管线必须
+      追加到**两个数组的末尾**并同步补 `operator_indices_match_shader_modules` 测试表
+      （插中间会把后面所有管线挤偏一位——q8_0 检查当场红）。
+      **已完成 5/7**（2026-11-22）：iq2_xxs / iq2_xs / iq3_xxs / iq3_s / iq4_xs 全部
+      **位级一致**（`iq_gpu_matches_cpu_avx2_bitwise_on_real_weights`，Intel iGPU 实测
+      2048 行零差异）。调试中修复的两个关键 bug：
+      ① `0.125f * (A) + (B)` 运算符优先级——`*` 只覆盖了 A，后半 B 没乘系数；
+      ② iq3_xxs / iq3_s 的 lane-value 映射——每个 lane 处理了 8 个值（g1+g2 两组
+      网格条目），但 CPU AVX2 的 madd 配对是每 lane 4 个值（单网格条目）。
+      **剩余 3 类型的模型文件问题**：iq2_s / iq1_s / iq1_m 的本地模型张量尺寸与预期
+      不匹配（iq2_s: 606208 ≠ 671744；iq1_s/m: 540672 ≠ 409600/458752——UD 模型的
+      attention 层可能用了不同的量化格式），需要确认 GGUF 内张量的实际 type 后
+      才能验证 shader。同模板,
+      但 shader 需嵌入网格表（iq1s_grid 2048×8B = 16KB 最大,IQ2/IQ3 的 2-4KB）,
+      以 GLSL const 数组或 storage buffer 方式进 shader;2-bit 的符号奇偶重建
+      （iq2_xs 的 `full_sign_bits` 路径）在 shader 里按 CPU AVX2 kernel 同款实现。
+      验证设备：本机 Intel iGPU（MTL,已验证可用,int8 dot + shader f16 supported）
+      即可闭环,无需 `amd-cloud-gpu-test`。已知边界：IQ4_XS 模型的**整模型 GPU 常驻
+      解码**还需文件内其它格式（如 Q6_K token_embd）也有 GPU kernel——Qwen3-0.6B-IQ4_XS
+      的 `--compute auto --kv-cache f16` 目前按设计落回 CPU（单投影 GPU 路径已通）。
 - [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
@@ -576,51 +554,6 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 
 ## Detailed TODOs (merged from legacy docs/TODO.md)
 
-### TODO-001: Q4_0 AVX2 kernel 重写（已完成，2026-11-21）
-
-#### 原状
-
-`src/ops/kernel/q4_0/avx2.rs` 的 Q4_0 matmul kernel：每 block 先把整个 i32 点积
-`hsum_epi32` 成标量，再把**一个标量**塞进 8-lane f32 累加器的 lane 7 做
-`_mm256_fmadd_ps`——8 个 FMA lane 只用了 1 个，外加每 block 一次水平归约；
-无行分块（TODO 原文写的"不使用 FMA"已过时，代码其实早已引入 fmadd）。
-
-#### 处理
-
-按 `q8_0/avx2.rs` 的结构重写：
-
-1. **逐 lane 累加**：每 block 的 i32 点积保持 8-lane 竖向（每 lane 恰好 4 个乘积，
-   精确），`dot_lane = nib_lane - 8 * y_lane`（y_lane 每 block 算一次、4 行共享），
-   直接 `_mm256_fmadd_ps(ds, cvtepi32(dot_lane), acc)`；hsum 只在每行结束时做一次。
-2. **4 行分块**：Q8 输入 block 每块载入一次、4 个权重行共享（与 Q8_0 kernel 同款）。
-
-#### 验证与语义
-
-- 该累加结构与 llama.cpp 自家 AVX2 `ggml_vec_dot_q4_0_q8_0` **同构**
-  （llama.cpp 同样是逐 lane fmadd + 末尾 hsum；两种"每 lane 精确 i32"写法——
-  减 8 后符号展开 vs nib−8·y 校正——整数上逐 lane 相等），因此默认路径与
-  llama.cpp AVX2 语义对齐；旧 kernel 是既不匹配 scalar 也不匹配 llama.cpp AVX2
-  的自定义混合体，已删除。
-- parity：per-block 整数点积两边都精确，仅 f32 累加顺序不同 → 与 scalar 的
-  对比从"≤4 ULP"放宽为仓库 Q4_K / Q8_0 kernel 同款 **rel < 1e-3**（实测随机
-  4×512 最大 7 ULP / 相对 4.5e-7；测试保留 ULP 打印）。
-- E2E：Qwen3-0.6B-Q4_0 greedy 输出正常（"The capital of France is **Paris**."）。
-- 注意：`tests/inference_parity.rs::q4_0_matches_pinned_scalar_oracle_bit_for_bit`
-  （env 门控）把默认路径与 llama.cpp oracle 逐位对拍——若 oracle 是 AVX2 构建，
-  本次改动后应保持逐位一致（新结构即 llama.cpp 结构）；若 oracle 是标量/FMA-disabled
-  构建，逐位一致原本就不成立（旧 kernel 带 fmadd），需按其 oracle 模式重验。
-
-#### 性能
-
-kernel 级（release，Qwen3-0.6B attn_q 1024 值/次）：旧 kernel 771 µs → 新
-**372 µs（2.07×）**，对 scalar 7.32×。
-
-#### 关联文件
-
-- `src/ops/kernel/q4_0/avx2.rs` — 重写后的 kernel + parity 测试
-- `src/ops/kernel/q4_0/scalar.rs` — scalar reference（未动）
-
----
 
 ### TODO-002: SIMD GeGLU `tanh_approx` 未启用
 
@@ -1239,53 +1172,6 @@ for token in 0..n_tokens {
 - AuK 那边已记了同类问题（"Per-token matmul batching（`linear_into` 一调一次 token，
   瓶颈）"），两条应共用同一个 kernel 侧分块实现。
 
-#### 已落地（2026-11-21，x86 AVX2）
-
-- **kernel 侧**：`simd_avx2.rs` 新增 `avx2_matmul_packed_tiled!`——与
-  `avx2_matmul_packed!` 同一款逐 (row, token) 点积体（**位级一致**，仅循环嵌套
-  改为 `(row-tile 32 × token-tile 32)` 二维分块，权重 panel 与输入 panel 常驻
-  L2），BF16 / F32 各实例化一份 tiled 版本。**F16 不用 AVX2 tiled**：F16Kernel
-  的 `forward_prepared` 走 `forward_scaled_rows`（激活先转 f16 再 F16×F16 dot），
-  AVX2 tiled 版会跳过激活舍入改变数值（`f16_linear_modes_preserve_existing_
-  rounding` 契约测试当场拦截）——F16 的 tiled 用忠实复刻该语义的标量嵌套循环
-  （`dot_f16_f16_bytes` 自带 SIMD dispatch，可移植），activation f16 转换每
-  token 只做一次。
-- **trait 侧**：`Kernel::supports_token_tiled_batching(n_in)`（能力查询）+
-  `Kernel::forward_batched_rows(input, output, n_in, n_out, n_tokens, row_start,
-  row_end) -> bool`（opt-in 执行，行分区）。BF16（`!bf16_input` 路径）/ F16 /
-  F32 三个 kernel 实现；其余 kernel 返回 false 保持旧路径。
-- **dispatch 侧**：`PreparedRows::matmul_group` 的通用循环前加 tiled 快路径
-  （`rows >= 2` 且组内全部 `!gpu_done` 权重 opt-in）——注意该分支在
-  `pool.compute` 闭包**内部**执行，直接用外层 `(ith, nth)` 行分区，**不能再调
-  `pool.compute`**（首次实现犯过：递归占用线程池自死锁，测试挂 60s+ 定位）。
-  单线程入口 `BF16/F16/F32Kernel::forward_batched` 也在 `n_tokens >= 2` 时改走
-  tiled——breeze / dots / embeddinggemma2 / zdt / qwen35 vision 等直接调用方
-  零改动受益。
-- **验证**：`tiled_batched_matches_per_token_loop_bits`——BF16/F16/F32，
-  33 token × 70 行 × n_in 200（跨 32×32 tile 边界 + 4 元素尾），tiled 输出与
-  逐 token 循环**逐位一致**；既有
-  `prepared_rows_match_sequential_matmul_bits_and_reuse_storage`（含 F16/BF16/F32
-  权重）自动改走 tiled 路径并保持位级断言通过。
-- **基准**（release-fast，BF16 3584×3584 单线程）：128 token 1.56×
-  （666→425 ms）、512 token **1.69×**（2.06→1.22 s）。输入矩阵从 L3 重读成为
-  新的次要瓶颈（每行 tile 重读全部 token），再往上要靠更大的 NR×NT 面板调优；
-  aarch64（20 核，权重流量占比更高）预期收益更大。
-- **遗留**：BF16 / F32 的 NEON tiled（见清单一节独立条目）；`longcat::dit::Layer::forward`
-  仍是逐 token 调 `forward`（f16/bf16 kernel 内部已 tiled，调用方无需改）；
-  `qwen3::trunk::text_encode_forward` 的 `project_tokens` 走
-  `LinearExecutor::run_group` → `matmul_group`，自动获得 tiled 路径。
-
-#### 关联文件
-
-- `src/ops/kernel/bf16/mod.rs`（`forward_batched`）
-- `src/ops/kernel/f16/mod.rs`（`forward_batched`）
-- `src/ops/kernel/q8_0/dispatch.rs`（已有的 NRC4 输出行分块，可作参照）
-- `src/models/qwen3/trunk/forward.rs`（`project_tokens`、`RowsWrap`、`TokenProjection`）
-- `src/models/diffusion/longcat/dit.rs`（`Layer::forward` 逐 token 结构）
-- `src/models/qwen35/vision/mod.rs`（`matmul_weight_batch` / `..._pooled`）
-- `src/core/thread_pool.rs`（`compute` / `row_range`）
-
----
 
 ## Archived / completed work
 
