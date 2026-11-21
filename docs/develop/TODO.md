@@ -120,33 +120,37 @@ NEON on aarch64; no AVX-512).
       单测：`think.rs` 13 个全绿（新增 `unterminated_block_is_available_as_reasoning`，
       `a_closed_block_leaves_no_reasoning_behind` 补流式断言），`unterminated_block_is_dropped`
       保留 —— 「当正文丢弃时仍为空」与「按需交还」两种语义都有覆盖。
-- [ ] **HTTP 多模态图片输入（OpenAI 兼容）** — `/v1/chat/completions` 现在**完全不支持图片**：
-      `protocol.rs::text_content` 只接受 string / `type:"text"` block，带 `image_url` 的请求实测
-      返回 400 `unsupported content block`。CLI 侧 `--mmproj --image` 能力完备（`app/text/
-      multimodal.rs` + `inject_vision_embeddings`），HTTP 侧 `--mmproj` 只为 `/v1/jev/image*`
-      决策打分端点加载，**没有通用带图对话端点**。
-      对齐目标（已查证 `references/llama.cpp/tools/server/server-common.cpp:1060` 的 `handle_media`）
-      接受四种形式：`http(s)://`（真下载，10MB 上限 + 10s 超时）、`file://`（llama.cpp 要求
-      `--media-path` 白名单）、`data:image/...;base64,...`、裸 base64。OpenAI 官方 API 同样
-      支持 URL 与 base64 两种，故 URL 不是可选装饰而是兼容性的一部分。
-      建议实现（暂缓，等维护者启动）：
-      1. `protocol.rs` 接三种 block：Chat `{"type":"image_url","image_url":{"url":...}}`、
-         Responses `{"type":"input_image","image_url":"..."}`、Anthropic
-         `{"type":"image","source":{"type":"base64","media_type":...,"data":...}}`（**裸 base64，
-         字段名不同，别漏**）。
-      2. base64 → `image::DynamicImage`：复用 TTS 的 data-URI 解析与 base64 报错模式
-         （`server/mod.rs:447,522-540`）+ `media.rs:261` 的 `image::load_from_memory`（吃的就是
-         `&[u8]`）。
-      3. **`api.rs:164` 的 chat 路由 `DefaultBodyLimit` 是 4MB**，一张 3MB PNG base64 后必 413；
-         需抬到 32~64MB（ASR 端点已是 64MB，`server/mod.rs:987`）。
-      4. `RuntimeOptions` 加 `images` 字段，`Qwen3TextRuntime` / `Qwen35TextRuntime` 建 vision
-         encoder 并在首步注入 embedding（复用 CLI 已验证路径）；`build_text_runtime` 已是为此
-         留好的扩展点，server 结构无需再改。
-      5. 哨兵扩一档：带图 prompt 的 CLI vs HTTP 对比。
-      安全决策（建议）：远程 URL 需要新增 HTTP client 依赖（仓库现无 reqwest），且给推理服务开
-       SSRF 面（内网探测 / 超时消耗）。建议加 `--allow-remote-images`，**默认关闭**（只允许
-      data URI / 裸 base64 / 本地 `file://`），开启时带 10MB + 10s + 重定向上限护栏。
-      `file://` 是否限制目录需明示：本服务与本机同用户（模型文件即本地路径），但应文档化该姿态。
+- [x] **HTTP 多模态图片输入（OpenAI 兼容）** — ✅ 2026-11-20 实现已就位。
+      **本条的现状描述已过时**：它写的是「`/v1/chat/completions` 完全不支持图片」，
+      实测**已经支持**了，逐条对下来当时列的五步建议都已经落地：
+      1. 协议层：`protocol.rs::content_parts` 接三种 block（Chat `image_url`、
+         Responses `input_image`、Anthropic `image.source.base64`），`image_input.rs`
+         解 data URI / 裸 base64 / 本地 `file://` / 远程 `http(s)`。
+      2. base64 → `image::DynamicImage`：`image_input.rs::decode_image_source` 复用
+         `app::media::decode_image_bytes`，非图片内容在解析期就 400。
+      3. body limit 已是 32 MB（`server/api.rs:173`），不是 4 MB。
+      4. `RuntimeOptions.mmproj` → `text/runtime.rs::validate_request` +
+         `prepare_image_prefill` 已把投影 embedding 注入 prefill。
+      5. 哨兵 `cli_and_http_agree_on_image_input` 已在 `tests/cli_http_agreement.rs`。
+      安全决策也已落地：`--allow-remote-images` 默认关闭，开启时带 10 MB + 10 s +
+      ≤3 次重定向 + 拒绝内网/回环地址的护栏（`image_input.rs`）。
+      本次补的是**文档**：新增 `docs/usage/http-images.md`（三种协议格式、四种来源
+      形式、安全默认、限制、示例），README 的端点表把三个端点的模态从 `text` 改成
+      `text, image`。
+      实测（Qwen3.5-2B，故意**不带** `--mmproj`）：三种协议都 400
+      `image input requires a vision projector; start the server with --mmproj <path>`；
+      非图片 payload 400 `unsupported image format … expected PNG or JPEG`；远程 URL
+      400 `remote image URLs are disabled; start the server with --allow-remote-images …`
+      —— 解析 → 解码 → runtime 校验整条链路通。
+- [ ] **HTTP 带图对话的端到端验证（需要可配对的文本塔 + mmproj）** —
+      2026-11-20：上面那条的实现齐了，但**真模型带图对话**还没在本机跑通——本地只有
+      MiniCPM-V 4.7 的 mmproj（1B 文本塔缺失）和 Qwen3.5-2B 的文本塔（mmproj 缺失），
+      没有可配对的图文组合。跑通方式：准备 `RMI_AGREEMENT_MODEL`（Qwen3.5 / Qwen3-VL /
+      Qwen2-VL 的文本塔）+ `RMI_AGREEMENT_MMPROJ`（配套投影器），然后
+      `cargo test --profile release-fast --test cli_http_agreement`，看
+      `cli_and_http_agree_on_image_input` 这一档（CLI `--mmproj --image` 与 HTTP 带图
+      请求逐 token 对齐）。拿到模型后补一条实测结论，并确认 HTTP 的
+      `enable_thinking` / 工具调用在带图时也保持一致。
 - [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
       预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
 - [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
