@@ -73,6 +73,13 @@ const Q4_0_MATMUL_TILED_SHADER: &[u8] =
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
 const IQ4_XS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq4_xs_matmul.spv");
+const IQ2_XXS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_xxs_matmul.spv");
+const IQ2_XS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_xs_matmul.spv");
+const IQ2_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_s_matmul.spv");
+const IQ3_XXS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq3_xxs_matmul.spv");
+const IQ3_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq3_s_matmul.spv");
+const IQ1_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq1_s_matmul.spv");
+const IQ1_M_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq1_m_matmul.spv");
 const Q4_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q4_k_matmul_cooperative.spv");
 /// Q5_0 grouped matmul. The 30B-A3B's attention, SSM and expert
@@ -277,6 +284,13 @@ const PIVO_CONV1D: usize = 71;
 const PIVO_SWIGLU: usize = 72;
 const PIVO_SILU: usize = 73;
 const IQ4_XS_MATMUL: usize = 75;
+const IQ2_XXS_MATMUL: usize = 76;
+const IQ2_XS_MATMUL: usize = 77;
+const IQ2_S_MATMUL: usize = 78;
+const IQ3_XXS_MATMUL: usize = 79;
+const IQ3_S_MATMUL: usize = 80;
+const IQ1_S_MATMUL: usize = 81;
+const IQ1_M_MATMUL: usize = 82;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -432,6 +446,13 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "pivo_silu",
     "q4_0_matmul_tiled_dp4a",
     "iq4_xs_matmul",
+    "iq2_xxs_matmul",
+    "iq2_xs_matmul",
+    "iq2_s_matmul",
+    "iq3_xxs_matmul",
+    "iq3_s_matmul",
+    "iq1_s_matmul",
+    "iq1_m_matmul",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -557,7 +578,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 76] = [
+const OPERATOR_SHADERS: [&[u8]; 83] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -634,12 +655,26 @@ const OPERATOR_SHADERS: [&[u8]; 76] = [
     PIVO_SILU_SHADER,
     Q4_0_MATMUL_TILED_SHADER,
     IQ4_XS_MATMUL_SHADER,
+    IQ2_XXS_MATMUL_SHADER,
+    IQ2_XS_MATMUL_SHADER,
+    IQ2_S_MATMUL_SHADER,
+    IQ3_XXS_MATMUL_SHADER,
+    IQ3_S_MATMUL_SHADER,
+    IQ1_S_MATMUL_SHADER,
+    IQ1_M_MATMUL_SHADER,
 ];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub(crate) enum GpuWeightFormat {
     Q8_0,
     IQ4_XS,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ2_S,
+    IQ3_XXS,
+    IQ3_S,
+    IQ1_S,
+    IQ1_M,
     Q4_0,
     Q4_1,
     Q5_0,
@@ -794,6 +829,13 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q5K => Ok(Self::Q5_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
             crate::core::tensor::GGMLType::IQ4_XS => Ok(Self::IQ4_XS),
+            crate::core::tensor::GGMLType::IQ2_XXS => Ok(Self::IQ2_XXS),
+            crate::core::tensor::GGMLType::IQ2_XS => Ok(Self::IQ2_XS),
+            crate::core::tensor::GGMLType::IQ2_S => Ok(Self::IQ2_S),
+            crate::core::tensor::GGMLType::IQ3_XXS => Ok(Self::IQ3_XXS),
+            crate::core::tensor::GGMLType::IQ3_S => Ok(Self::IQ3_S),
+            crate::core::tensor::GGMLType::IQ1_S => Ok(Self::IQ1_S),
+            crate::core::tensor::GGMLType::IQ1_M => Ok(Self::IQ1_M),
             crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
             crate::core::tensor::GGMLType::BF16 => Ok(Self::BF16),
             crate::core::tensor::GGMLType::F32 => Ok(Self::F32),
@@ -803,7 +845,7 @@ impl GpuWeightFormat {
         }
     }
 
-    fn layout(self) -> (usize, usize, usize) {
+    pub(crate) fn layout(self) -> (usize, usize, usize) {
         match self {
             Self::Q8_0 => (32, 34, Q8_MATMUL_GROUPED),
             Self::Q4_0 => (32, 18, Q4_0_MATMUL),
@@ -814,6 +856,13 @@ impl GpuWeightFormat {
             Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
             Self::IQ4_XS => (256, 136, IQ4_XS_MATMUL),
+            Self::IQ2_XXS => (256, 66, IQ2_XXS_MATMUL),
+            Self::IQ2_XS => (256, 74, IQ2_XS_MATMUL),
+            Self::IQ2_S => (256, 82, IQ2_S_MATMUL),
+            Self::IQ3_XXS => (256, 98, IQ3_XXS_MATMUL),
+            Self::IQ3_S => (256, 110, IQ3_S_MATMUL),
+            Self::IQ1_S => (256, 50, IQ1_S_MATMUL),
+            Self::IQ1_M => (256, 56, IQ1_M_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
             Self::BF16 => (1, 2, BF16_MATMUL),
             Self::F32 => (1, 4, F32_MATMUL),
@@ -855,7 +904,14 @@ pub(crate) fn required_activation_contracts(
             GpuWeightFormat::Q4_K
             | GpuWeightFormat::Q5_K
             | GpuWeightFormat::Q6_K
-            | GpuWeightFormat::IQ4_XS => {
+            | GpuWeightFormat::IQ4_XS
+            | GpuWeightFormat::IQ2_XXS
+            | GpuWeightFormat::IQ2_XS
+            | GpuWeightFormat::IQ2_S
+            | GpuWeightFormat::IQ3_XXS
+            | GpuWeightFormat::IQ3_S
+            | GpuWeightFormat::IQ1_S
+            | GpuWeightFormat::IQ1_M => {
                 contracts.q8_k = true;
             }
             GpuWeightFormat::F16
@@ -4650,7 +4706,14 @@ impl<'a> Qwen3Ops<'a> {
             GpuWeightFormat::Q4_K
             | GpuWeightFormat::Q5_K
             | GpuWeightFormat::Q6_K
-            | GpuWeightFormat::IQ4_XS => {
+            | GpuWeightFormat::IQ4_XS
+            | GpuWeightFormat::IQ2_XXS
+            | GpuWeightFormat::IQ2_XS
+            | GpuWeightFormat::IQ2_S
+            | GpuWeightFormat::IQ3_XXS
+            | GpuWeightFormat::IQ3_S
+            | GpuWeightFormat::IQ1_S
+            | GpuWeightFormat::IQ1_M => {
                 let push = quantize_rows_push(
                     self.arena.size as usize,
                     input,
@@ -9253,6 +9316,13 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
         GpuWeightFormat::IQ4_XS => 1024,
+        GpuWeightFormat::IQ2_XXS => 1024,
+        GpuWeightFormat::IQ2_XS => 1024,
+        GpuWeightFormat::IQ2_S => 1024,
+        GpuWeightFormat::IQ3_XXS => 1024,
+        GpuWeightFormat::IQ3_S => 1024,
+        GpuWeightFormat::IQ1_S => 1024,
+        GpuWeightFormat::IQ1_M => 1024,
         GpuWeightFormat::F16 => 1024,
         GpuWeightFormat::BF16 => 1024,
         GpuWeightFormat::F32 => 1024,
@@ -9630,6 +9700,28 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         *value = low | (high << 4);
                     }
                 }
+                GpuWeightFormat::IQ2_XXS
+                | GpuWeightFormat::IQ2_XS
+                | GpuWeightFormat::IQ2_S
+                | GpuWeightFormat::IQ3_XXS
+                | GpuWeightFormat::IQ3_S
+                | GpuWeightFormat::IQ1_S
+                | GpuWeightFormat::IQ1_M => {
+                    // d = 0 on the first block (zero-row convention); the rest
+                    // is patterned bytes — every grid/sign/scale bit pattern
+                    // decodes, so the GPU/CPU comparison covers the format.
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 2..offset + bytes].iter_mut().enumerate() {
+                        *value = ((index * 37 + row * 17 + block * 11 + 3) & 255) as u8;
+                    }
+                }
                 GpuWeightFormat::Q5_K => {
                     data[offset..offset + 2].copy_from_slice(
                         &crate::ops::f32_to_f16(if row == 0 && block == 0 {
@@ -9844,6 +9936,97 @@ fn cpu_weight_matvec(
                     &weight[row * row_bytes..(row + 1) * row_bytes],
                     &q8k,
                 );
+            }
+        }
+        GpuWeightFormat::IQ2_XXS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_XXS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_xxs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ2_XS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_XS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_xs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ2_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ3_XXS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ3_XXS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq3_xxs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ3_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ3_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq3_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ1_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ1_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq1_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ1_M => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ1_M_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq1_m_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
             }
         }
         GpuWeightFormat::Q5_K => {
@@ -11108,6 +11291,20 @@ mod tests {
             (PIVO_SWIGLU, "pivo_swiglu", PIVO_SWIGLU_SHADER),
             (PIVO_SILU, "pivo_silu", PIVO_SILU_SHADER),
             (IQ4_XS_MATMUL, "iq4_xs_matmul", IQ4_XS_MATMUL_SHADER),
+            (IQ2_XXS_MATMUL, "iq2_xxs_matmul", IQ2_XXS_MATMUL_SHADER),
+            (IQ2_XS_MATMUL, "iq2_xs_matmul", IQ2_XS_MATMUL_SHADER),
+            (IQ2_S_MATMUL, "iq2_s_matmul", IQ2_S_MATMUL_SHADER),
+            (IQ3_XXS_MATMUL, "iq3_xxs_matmul", IQ3_XXS_MATMUL_SHADER),
+            (IQ3_S_MATMUL, "iq3_s_matmul", IQ3_S_MATMUL_SHADER),
+            (IQ1_S_MATMUL, "iq1_s_matmul", IQ1_S_MATMUL_SHADER),
+            (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
+            (IQ2_XXS_MATMUL, "iq2_xxs_matmul", IQ2_XXS_MATMUL_SHADER),
+            (IQ2_XS_MATMUL, "iq2_xs_matmul", IQ2_XS_MATMUL_SHADER),
+            (IQ2_S_MATMUL, "iq2_s_matmul", IQ2_S_MATMUL_SHADER),
+            (IQ3_XXS_MATMUL, "iq3_xxs_matmul", IQ3_XXS_MATMUL_SHADER),
+            (IQ3_S_MATMUL, "iq3_s_matmul", IQ3_S_MATMUL_SHADER),
+            (IQ1_S_MATMUL, "iq1_s_matmul", IQ1_S_MATMUL_SHADER),
+            (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);

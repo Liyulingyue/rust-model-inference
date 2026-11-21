@@ -15,6 +15,7 @@
 pub(crate) mod dense;
 #[cfg(feature = "vulkan")]
 pub(crate) mod dory;
+pub(crate) mod matmul_iq;
 pub(crate) mod matmul_iq4_xs;
 #[cfg(feature = "vulkan")]
 pub(crate) mod matmul_q4k;

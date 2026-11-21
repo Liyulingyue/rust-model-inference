@@ -228,7 +228,7 @@ impl<'a> Kernel for IQ4XSKernel<'a> {
 }
 
 macro_rules! iq_kernel_impl {
-    ($name:ident, $block_bytes:expr, $vec_dot:ident, $dequant_row:ident) => {
+    ($name:ident, $block_bytes:expr, $vec_dot:ident, $dequant_row:ident, $gpu_format:ident) => {
         impl<'a> Kernel for $name<'a> {
             fn forward_prequantized(
                 &self,
@@ -317,18 +317,44 @@ iq_kernel_impl!(
     IQ2XXSKernel,
     66,
     vec_dot_iq2_xxs_q8k,
-    dequantize_row_iq2_xxs
+    dequantize_row_iq2_xxs,
+    IQ2_XXS
 );
-iq_kernel_impl!(IQ2SKernel, 82, vec_dot_iq2_s_q8k, dequantize_row_iq2_s);
+iq_kernel_impl!(
+    IQ2SKernel,
+    82,
+    vec_dot_iq2_s_q8k,
+    dequantize_row_iq2_s,
+    IQ2_S
+);
 iq_kernel_impl!(
     IQ3XXSKernel,
     98,
     vec_dot_iq3_xxs_q8k,
-    dequantize_row_iq3_xxs
+    dequantize_row_iq3_xxs,
+    IQ3_XXS
 );
-iq_kernel_impl!(IQ3SKernel, 110, vec_dot_iq3_s_q8k, dequantize_row_iq3_s);
-iq_kernel_impl!(IQ1MKernel, 56, vec_dot_iq1_m_q8k, dequantize_row_iq1_m);
-iq_kernel_impl!(IQ1SKernel, 50, vec_dot_iq1_s_q8k, dequantize_row_iq1_s);
+iq_kernel_impl!(
+    IQ3SKernel,
+    110,
+    vec_dot_iq3_s_q8k,
+    dequantize_row_iq3_s,
+    IQ3_S
+);
+iq_kernel_impl!(
+    IQ1MKernel,
+    56,
+    vec_dot_iq1_m_q8k,
+    dequantize_row_iq1_m,
+    IQ1_M
+);
+iq_kernel_impl!(
+    IQ1SKernel,
+    50,
+    vec_dot_iq1_s_q8k,
+    dequantize_row_iq1_s,
+    IQ1_S
+);
 
 pub struct IQ2XSKernel<'a> {
     pub weight: &'a [u8],
@@ -400,6 +426,33 @@ impl<'a> Kernel for IQ2XSKernel<'a> {
         ith: usize,
         nth: usize,
     ) {
+        #[cfg(feature = "vulkan")]
+        {
+            use std::sync::atomic::Ordering;
+            static GPU_DISABLED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !GPU_DISABLED.load(Ordering::Relaxed) && crate::ops::gpu_matmul_active() && ith == 0
+            {
+                if let Some(ctx) = crate::ops::get_vulkan_context() {
+                    match crate::vulkan::matmul_iq::matmul_iq(
+                        ctx,
+                        crate::vulkan::ops::GpuWeightFormat::IQ2_XS,
+                        self.weight,
+                        &input_f32[..n_in],
+                        1,
+                        n_in,
+                        n_out,
+                        output,
+                    ) {
+                        Ok(()) => return,
+                        Err(crate::vulkan::VulkanError::UnsupportedShape(_)) => {
+                            GPU_DISABLED.store(true, Ordering::Relaxed);
+                        }
+                        Err(_) => return,
+                    }
+                }
+            }
+        }
         let per_thread = n_out.div_ceil(nth);
         let start = ith * per_thread;
         let end = (start + per_thread).min(n_out);

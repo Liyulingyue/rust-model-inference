@@ -86,6 +86,7 @@ extern "C" fn shutdown_vulkan() {
     let cleanup = || {
         crate::ops::kernel::vulkan::release_shared_runtimes()?;
         crate::vulkan::matmul_q4k::release_shared_runtime()?;
+        crate::vulkan::matmul_iq::release_shared_runtime()?;
         if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
             context.shutdown()?;
         }
