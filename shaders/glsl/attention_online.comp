@@ -7,6 +7,10 @@ layout(push_constant) uniform PC {
     uint q_word; uint k_word; uint v_word; uint output_word;
     uint queries; uint keys; uint q_heads; uint kv_heads; uint dim;
     float scale; uint causal;
+    // `window == 0` is full attention. Otherwise a query only sees keys whose
+    // `window x window` block of the `grid`-wide patch grid matches its own,
+    // which is the vit_merger's block-diagonal mask.
+    uint window; uint grid;
 } pc;
 const uint QUERIES = 16u;
 shared float query_stage[QUERIES][128];
@@ -55,8 +59,14 @@ void main() {
         for (uint q = 0u; q < QUERIES / 4u; q++) for (uint d = 0u; d < 4u; d++) {
             uint query = lane / 8u * (QUERIES / 4u) + q;
             uint key = lane % 8u * 4u + d;
-            bool visible = key < live && query_base + query < pc.queries
-                && (pc.causal == 0u || start + key <= query_base + query + pc.keys - pc.queries);
+            uint query_row = query_base + query;
+            uint key_row = start + key;
+            bool in_window = pc.window == 0u
+                || ((query_row / pc.grid) / pc.window == (key_row / pc.grid) / pc.window
+                    && ((query_row % pc.grid) / pc.window == (key_row % pc.grid) / pc.window));
+            bool visible = key < live && query_row < pc.queries
+                && (pc.causal == 0u || key_row <= query_row + pc.keys - pc.queries)
+                && in_window;
             scores[query][key] = visible ? score[q][d] * pc.scale : -3.402823466e38;
         }
         barrier();

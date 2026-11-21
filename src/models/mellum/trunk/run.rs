@@ -72,7 +72,7 @@ pub fn run_inference(
         &special.bos,
         &special.eos,
         prompt,
-        thinking,
+        Some(thinking),
     )?;
     let prompt_text = jinja_text.unwrap_or_else(|| build_mellum_prompt(None, prompt, thinking));
     let ids = tokenizer.encode(

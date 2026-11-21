@@ -90,7 +90,7 @@ impl JevScorer for MellumJevScorer {
                 template,
                 Some(&system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

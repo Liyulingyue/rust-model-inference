@@ -92,7 +92,7 @@ void main() {
 
     uint row_bytes = pc.blocks_per_row * 22u;
     // The expert index is folded into a temporary and added unconditionally:
-    // adding a constant inside the branch trips the GB10 shader compiler.
+    // adding a constant inside the branch trips the aarch64 box shader compiler.
     uint expert_index = 0u;
     if (pc.expert_count != 0u) {
         uint expert = arena.data[pc.expert_ids_word + token_row * pc.expert_used + pc.expert_slot];

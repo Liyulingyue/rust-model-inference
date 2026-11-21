@@ -1,9 +1,14 @@
 # 文本推理运行时统一：HTTP 与 CLI 共用一条生成路径
 
-> **状态**：设计已锁定，待实施。四个决策由维护者确认（见 §5）。
-> **动机**：HTTP 层当前不是 CLI 的薄封装，而是一套平行的 arch dispatcher——
-> CLI 文本入口 `app::text::run_inference` 从未被 HTTP 复用，导致每个 arch 在
-> HTTP 侧都要单独写分支 + 手写 decode 循环，且大量 arch 加载后只能返回 501。
+> **状态（2026-11-19 复核）**：**已实施**。`app::text::build_text_runtime`
+> （`src/app/text/runtime.rs:213`）是 CLI 与 HTTP 的单一 arch 分发点
+> （`src/app/server/mod.rs:1773` 直接调用），`TextInner` 多变体 dispatcher 已删除。
+> §5 的四个锁定决策与 §7 的验证矩阵作为实施记录保留；本文剩余价值是
+> 决策理由与 `tests/cli_http_agreement.rs` 哨兵的背景说明。
+> **动机**（当时的痛点）：HTTP 层不是 CLI 的薄封装，而是一套平行的 arch
+> dispatcher——CLI 文本入口 `app::text::run_inference` 从未被 HTTP 复用，
+> 每个 arch 在 HTTP 侧都要单独写分支 + 手写 decode 循环，且大量 arch 加载后
+> 只能返回 501。§1 的现状证据描述的是**实施前**的仓库形态，仅存档用途。
 
 ## 1. 现状证据
 

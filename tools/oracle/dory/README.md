@@ -339,14 +339,14 @@ RMI_DORY_Q5_MODEL="$RMI_DORY_Q5_MODEL" \
 Latest coverage and limits are recorded in the completion validation below.
 Historical operator failures above have not been relaxed or counted as passing.
 
-## Second GPU device: NVIDIA GB10 (2026-11-05)
+## Second GPU device: aarch64 Vulkan box (2026-11-05)
 
 Every device result above was recorded on **AMD RADV NAVI31**. The resident graph
 was re-run on a second vendor's device to check that the parts of the contract
 that are vendor-specific actually are, and that the parts that are not do not
 regress.
 
-Host: NVIDIA GB10 (integrated, `PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU`),
+Host: aarch64 Vulkan box (integrated, `PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU`),
 driver 580.173.02, Vulkan API 1.4.312. Device limits that matter here:
 `shaderFloat64 = true`, `shaderInt64 = true`,
 `maxStorageBufferRange = 4294967295` (4 GiB). The `shaderFloat64` requirement is
@@ -379,7 +379,7 @@ Observed on 2026-11-05:
 | `dory_q5_reference_trace` | ok — `generated_ids=[1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325]` |
 
 Five tests, 179.87 s wall clock, no failures. The device reported itself as
-`NVIDIA GB10 (int8 dot product: supported, shader f16: supported)` and the
+`NVIDIA <GPU> (int8 dot product: supported, shader f16: supported)` and the
 Q8_0 matmul selected the packed int8 dot product, so the device path is the
 same one the RADV host exercised, not a fallback.
 

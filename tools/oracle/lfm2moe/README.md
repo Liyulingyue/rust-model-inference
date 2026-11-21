@@ -136,6 +136,51 @@ the live `step + 1` entries per head and (for the scores) multiplied by
 * `generated_ids = [440, 5141, 355, 229]` — identical
 * every compared checkpoint bit-identical
 
+## Bugs this harness found in the shared shortconv code
+
+Both are fixed; the guards live in `tests/lfm2moe_reference.rs`.
+
+* **The decode-time conv state window was one step stale.** This is the real
+  story behind the "residual 1-ULP greedy flips" once recorded for this family
+  (the earlier reading — a near-tie top-2 flipping on a 1-ULP logit gap — was
+  wrong). With full bit parity, the first diverging checkpoint sat exactly on
+  layer 0's `conv_conv` (the first decode step) while its `conv_in_proj` input
+  was bit-exact: the input was right, the *state window* was not.
+  `forward_shortconv` only slid the state when `!is_prefill`, and no caller
+  rebuilds the state *after* the last prefill token (rebuild happens before
+  each prefill token), so the first decode step read
+  `[bx_{t-2}, bx_{t-1}]` instead of `[bx_{t-1}, bx_t]`. The fix slides the
+  state on every step — the slide during prefill is overwritten by the next
+  rebuild, so it is harmless. Side effect worth remembering: decode went
+  4.7 → 18.0 t/s (3.8×) on the 24B, because decode had been doing real work
+  with a stale window. This affects the first generated token of every
+  lfm2 / lfm2moe / lfm25 model.
+* **`l_cache == 3` sign of zero.** The unrolled branch accumulated as
+  `a0*w0 + a1*w1 + a2*w2` (the first product folded into the initial value)
+  while the generic branch and ggml accumulate from `0.0` term by term.
+  Numerically equal, but when all three products are ±0.0 the two forms differ
+  in the sign bit (`0.0 + (-0.0) == +0.0`). It takes a real GGUF to observe:
+  the 24B's 9,926 checkpoints never trip it, LFM2.5-8B-A1B hits it on 104 of
+  2048 channels at layer 0 alone. After the fix, both checkpoints are
+  zero-mismatch with no 24B regression.
+
+## Extended coverage (2026-10-16)
+
+* `LFM2.5-8B-A1B` (`lfm2moe`), Q4_0 and Q4_K_M: 7,840 checkpoints each, zero
+  mismatches (Q4_K_M also exercises the trunk's Q8_K / Q4_K matmul path).
+* 15 dense LFM2 / LFM2.5 GGUFs (QAD-Q4_0 / Q4_K_M / Q5_K_M / Q6_K / Q8_0 /
+  F16 / BF16 across 230M, 1.2B-Instruct and 2.6B) replay the same pinned
+  oracle with `-n 24 --temp 0 -c 512` and `RMI_SCALAR=1`: greedy token ids all
+  match, token for token.
+* `LFM2.5-2.6B-Q4_K_M` additionally ran a layer-by-layer bit comparison:
+  35 steps, 75,240 checkpoints, zero mismatches, including every full
+  128,000-entry `result_output`. Guards: `tests/lfm2_dense_trunk_agreement.rs`
+  (two trunks agree bit for bit + greedy replay) and
+  `src/models/lfm2/trunk/trace.rs` (24 checkpoints named after the oracle).
+* The `lfm25` trunk itself is now a thin alias over the `lfm2` trunk rather
+  than a second implementation; see `src/models/lfm25/mod.rs` for why the
+  `general.basename`-based routing between the two was removed.
+
 ## Limits
 
 * Scalar only. The Rust side needs `RMI_SCALAR=1`; the repo's AVX2/NEON

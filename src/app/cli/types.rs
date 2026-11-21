@@ -76,6 +76,13 @@ pub struct CliOptions {
     /// A DFlash / DSpark sidecar GGUF: when set, the decode becomes a
     /// speculative one with the sidecar drafting (`--dspark-model`).
     pub dspark_model: Option<String>,
+    /// The n-gram self-speculative draft (llama.cpp's `ngram-simple`): the
+    /// committed token history drafts (`--ngram-draft N`, the per-round
+    /// draft length; `None` or zero keeps the plain decode).
+    pub ngram_draft: Option<usize>,
+    /// The lookup n-gram size for `--ngram-draft` (`--ngram-lookup N`;
+    /// `None` rides the upstream default of 12).
+    pub ngram_lookup: Option<usize>,
     pub repetition_penalty: Option<f32>,
     pub steps: Option<usize>,
     /// Astronex output latent-frame count. `--frames` remains reserved for
@@ -121,7 +128,12 @@ pub struct CliOptions {
     pub top_k: Option<usize>,
     pub top_p: Option<f32>,
     pub threads: usize,
-    pub thinking: bool,
+    /// Tri-state: `--thinking` / `--no-thinking`, `None` when neither was
+    /// passed. `None` reaches the chat template as an *undefined* variable,
+    /// so the model's own training default applies there. The hand-written
+    /// builders keep their historical `false` default: the *closed* empty
+    /// think block is what makes a thinking model answer directly.
+    pub thinking: Option<bool>,
     pub embedding: bool,
     pub embedding_output: EmbeddingOutput,
     pub dump_logits: bool,
@@ -317,6 +329,20 @@ impl CliOptions {
     /// used at all.
     pub fn effective_mtp_draft(&self) -> usize {
         self.mtp_draft.unwrap_or(0)
+    }
+
+    /// How many tokens the n-gram lookup may draft per round (`size_m`).
+    ///
+    /// Zero means the decode stays plain / MTP / DSpark.
+    pub fn effective_ngram_draft(&self) -> usize {
+        self.ngram_draft.unwrap_or(0)
+    }
+
+    /// The lookup n-gram size (`size_n`), upstream's default of 12 when the
+    /// flag is absent.
+    pub fn effective_ngram_lookup(&self) -> usize {
+        self.ngram_lookup
+            .unwrap_or(crate::core::ngram::NGRAM_SIMPLE_SIZE_N)
     }
 
     /// Default max-context cap. Most chat workloads fit in 8K; this

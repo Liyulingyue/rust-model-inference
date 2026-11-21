@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Benchmark Mellum 2.1 PyTorch native inference on GB10.
+"""Benchmark Mellum 2.1 PyTorch native inference on the aarch64 box.
 
 Reference point for the native Rust implementation
 (`src/models/mellum/`), which runs the same Q8_0 GGUF.
 
-The GB10 has unified memory, so a CUDA run needs the bf16 weights resident
+The aarch64 box has unified memory, so a CUDA run needs the bf16 weights resident
 in GPU memory *plus* the CPU staging copy that `from_pretrained` uses while
 sharding -- roughly 2x the model size in peak RSS. When another process
 already holds most of the unified memory (e.g. a local inference server),

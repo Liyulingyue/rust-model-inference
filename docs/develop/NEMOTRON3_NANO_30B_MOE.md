@@ -447,7 +447,7 @@ kernel 的 F32 累加结构**不同，被下游的 Q4_K 出投影的 Q8_K 激活
 （`expert_count / expert_ids_word / expert_used / expert_slot`）。
 
 **显存**：专家权重约 24.2 GB（23 层 × 128 专家 × (Q5_0 2688×1856 + Q8_0
-1856×2688)），单层最大张量 428 MB（up）/ 620 MB（down），都在 GB10 的
+1856×2688)），单层最大张量 428 MB（up）/ 620 MB（down），都在 aarch64 的
 `maxMemoryAllocationSize`（约 4 GiB）之下；整模 24.5 GB 的权重与 host 侧的
 mmap 是同一份数据的两份拷贝，统一内存放得下。
 
@@ -468,7 +468,7 @@ Q8_0 档的设备路径是逐位的（§B7.4）。30B 比 4B 更敏感：
   `max_rel = 3.791e-3`（Q8_0 的 kernel 则是**逐位一致**，`max_abs = 0`）。
 - Mamba-2 的递归把这个差异沿 52 层放大，router 还可能在近似平局上翻转。
 
-实测（GB10，1 / 2 / 3 token 的 prefill，logits 相对 L2 / 缩放最大绝对误差）：
+实测（aarch64，1 / 2 / 3 token 的 prefill，logits 相对 L2 / 缩放最大绝对误差）：
 
 | 配置 | 1 token | 2 token | 3 token |
 |---|---|---|---|
@@ -503,7 +503,7 @@ Q8_0 档的设备路径是逐位的（§B7.4）。30B 比 4B 更敏感：
 > 经递归放大后 logits 的相对 L2 从 **4.28%** 变成 **5.84%**
 > （`nemotron_moe_route.comp` 因此开了 `GL_ARB_gpu_shader_fp64`）。
 
-#### B7.3 性能（GB10，8 线程，55 token 提示 + 16 token 生成）
+#### B7.3 性能（aarch64，8 线程，55 token 提示 + 16 token 生成）
 
 | | prefill | 生成 | 端到端 |
 |---|---|---|---|
@@ -524,7 +524,7 @@ prefill 快 **4.9×**（权重读一次、多行复用），逐 token 生成与 
 `exact_bits = true`），路由 shader 用的也是 ggml-exact 的 `exp_reference`
 + `divide_finite_normal`。
 
-实测（GB10，8 线程）：
+实测（aarch64，8 线程）：
 
 | 检查 | 结果 |
 |---|---|

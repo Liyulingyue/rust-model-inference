@@ -101,7 +101,7 @@ vision bound. This isolates encoder arithmetic from lossy image resize.
 
 ## Measured CPU results
 
-Linux aarch64 (NVIDIA GB10), `release-fast --features parity-trace`,
+Linux aarch64 (aarch64 Vulkan 主机), `release-fast --features parity-trace`,
 `RMI_SCALAR=1`, one thread, with the runtime Oracle on the conversion pin
 `b96806d`:
 

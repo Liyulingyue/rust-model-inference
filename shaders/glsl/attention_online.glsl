@@ -6,6 +6,10 @@ layout(push_constant) uniform PC {
     uint q_word; uint k_word; uint v_word; uint output_word;
     uint queries; uint keys; uint q_heads; uint kv_heads; uint dim;
     float scale; uint causal;
+    // `window == 0` is full attention. Otherwise a query only sees keys whose
+    // `window x window` block of the `grid`-wide patch grid matches its own,
+    // which is the vit_merger's block-diagonal mask.
+    uint window; uint grid;
 } pc;
 shared float queries[8][128];
 // The extra column prevents every key lane from hitting the same shared bank.
@@ -34,8 +38,13 @@ void main() {
     barrier();
     for (uint start = 0u; start < pc.keys; start += 32u) {
         uint live = min(32u, pc.keys - start);
+        uint key_row = start + lane;
+        bool in_window = pc.window == 0u
+            || ((query / pc.grid) / pc.window == (key_row / pc.grid) / pc.window
+                && ((query % pc.grid) / pc.window == (key_row % pc.grid) / pc.window));
         bool visible = lane < live && query < pc.queries
-            && (pc.causal == 0u || start + lane <= query + pc.keys - pc.queries);
+            && (pc.causal == 0u || key_row <= query + pc.keys - pc.queries)
+            && in_window;
         float score = 0.0;
         for (uint chunk = 0u; chunk < pc.dim; chunk += 128u) {
             if (pc.dim > 128u) {

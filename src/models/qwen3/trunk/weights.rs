@@ -258,9 +258,6 @@ pub fn load_layers_static(
         )?;
         let (w_gate, w_up, w_down, moe_router, moe_gate, moe_up, moe_down) = if let Some(moe) = moe
         {
-            if moe.shared_expert_ffn != 0 {
-                return Err("Qwen3VL-MoE shared experts are not supported".into());
-            }
             let gate_slices = expert_slices(
                 source,
                 &format!("blk.{l}.ffn_gate_exps.weight"),
@@ -329,34 +326,62 @@ pub fn load_layers_static(
                 &format!("blk.{l}.ffn_gate_inp.weight"),
                 &[n_embd as u64, moe.expert_count as u64],
             )?;
+            let (w_gate, w_up, w_down) = if moe.shared_expert_ffn != 0 {
+                (
+                    static_weight(
+                        source,
+                        &format!("blk.{l}.ffn_gate_shexp.weight"),
+                        n_embd,
+                        moe.shared_expert_ffn,
+                    ),
+                    static_weight(
+                        source,
+                        &format!("blk.{l}.ffn_up_shexp.weight"),
+                        n_embd,
+                        moe.shared_expert_ffn,
+                    ),
+                    static_weight(
+                        source,
+                        &format!("blk.{l}.ffn_down_shexp.weight"),
+                        moe.shared_expert_ffn,
+                        n_embd,
+                    ),
+                )
+            } else {
+                (
+                    weight_from_bytes(
+                        gate_slices[0],
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_gate_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        moe.expert_ffn,
+                    ),
+                    weight_from_bytes(
+                        up_slices[0],
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_up_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        moe.expert_ffn,
+                    ),
+                    weight_from_bytes(
+                        down_slices[0],
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_down_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        moe.expert_ffn,
+                        n_embd,
+                    ),
+                )
+            };
             (
-                weight_from_bytes(
-                    gate_slices[0],
-                    source
-                        .tensor_info(&format!("blk.{l}.ffn_gate_exps.weight"))
-                        .unwrap()
-                        .ggml_type,
-                    n_embd,
-                    moe.expert_ffn,
-                ),
-                weight_from_bytes(
-                    up_slices[0],
-                    source
-                        .tensor_info(&format!("blk.{l}.ffn_up_exps.weight"))
-                        .unwrap()
-                        .ggml_type,
-                    n_embd,
-                    moe.expert_ffn,
-                ),
-                weight_from_bytes(
-                    down_slices[0],
-                    source
-                        .tensor_info(&format!("blk.{l}.ffn_down_exps.weight"))
-                        .unwrap()
-                        .ggml_type,
-                    moe.expert_ffn,
-                    n_embd,
-                ),
+                w_gate,
+                w_up,
+                w_down,
                 Some(router),
                 Some(gate),
                 Some(up),

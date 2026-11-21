@@ -232,7 +232,7 @@ impl<'a> Model<'a> {
         let probe = chat.render(
             &[ChatMessage::text("user", "Choose an option.")],
             true,
-            false,
+            Some(false),
             &special,
         )?;
         let prefix = tok
@@ -301,7 +301,7 @@ impl<'a> Model<'a> {
         self.chat.render(
             &[ChatMessage::text("system", SYSTEM), message],
             true,
-            false,
+            Some(false),
             &self.special,
         )
     }
@@ -484,7 +484,7 @@ impl<'a> Model<'a> {
             let rendered = self.chat.render(
                 &[ChatMessage::text("user", &prompt)],
                 true,
-                false,
+                Some(false),
                 &self.special,
             )?;
             let ids = self.encode(&rendered)?;

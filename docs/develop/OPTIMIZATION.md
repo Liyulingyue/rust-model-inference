@@ -100,7 +100,7 @@ SILU_ONLY=1 ./target/release/examples/vk_ops_check
 ### 1.3 已知未完全修复
 
 - **Q6_K AVX2** 仍有 1-2 ULP drift（commit `acb0a2b` 调查根因）：scalar `sumf += sums[l]` 是线性累加，AVX2 `hsum_ps` 是树形 reduction；f32 加法不满足结合律。尝试过多种缓解（FMA→mul+add 拆解、scalar 改 `mul_add`），均无改善——属于 IEEE 754 不可避免现象。生产验证：Q6_K / Q4_K_M / Q8_0 均输出 "The capital of France is **Paris**"（scalar 与 AVX2 一致）。
-  - 2026-09-18 复现：`Q6_KKernel::forward_prepared` → `vec_dot_q6k_q8k_avx2` 与 `vec_dot_q6k_q8k_scalar` 在 `tests/quantized_inference.rs::q6_k_prepared_path_matches_existing_scalar_dot_bits` 差 1 ULP。**当前无生产影响**：Q6_K fused path 未接入任何模型，实际 Qwen3-0.6B-Q6_K 文本推理走 `forward_prequantized` → `matmul_q6_k_scalar_range` 全 scalar 路径（实测 55.3 t/s，产出 "Paris"）。`embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致。详见 [`TODO.md`](TODO.md) high-priority 第一条（已划 ✅）。
+  - 2026-09-18 复现：`Q6_KKernel::forward_prepared` → `vec_dot_q6k_q8k_avx2` 与 `vec_dot_q6k_q8k_scalar` 在 `tests/quantized_inference.rs::q6_k_prepared_path_matches_existing_scalar_dot_bits` 差 1 ULP。**当前无生产影响**：Q6_K fused path 未接入任何模型，实际 Qwen3-0.6B-Q6_K 文本推理走 `forward_prequantized` → `matmul_q6_k_scalar_range` 全 scalar 路径（实测 55.3 t/s，产出 "Paris"）。`embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致。详见 [`TODO.md`](TODO.md) 的「AVX2 kernel 与 ggml 参考实现不逐位一致」条目。
 - **Q8_0 AVX2 "diff=255"** 是测试 bug（scalar 函数调用时 `(n_in, n_out, 0)` 把 `n_out` 错位传到 `row_start`，导致 scalar 没跑任何行返回 0）。修复后实测 `max_diff=0.000366 rel=1.6e-7`，AVX2 算法 bit-exact 正确。
 
 ---
@@ -369,7 +369,8 @@ PR / commit：
 
 **Q5_K 当前状态**：只完成合成 kernel parity，未纳入端到端模型支持矩阵。
 
-详见 [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md)。
+详见 [`VULKAN.md`](VULKAN.md)（含设计取舍与历史硬件矩阵；2026-09 的
+`VULKAN_INFERENCE_{DESIGN,PLAN}.md` 已被其吸收并删除）。
 
 ### 7.2 wgpu（`--features wgpu`，实验性）
 
@@ -434,7 +435,7 @@ PR / commit：
 - [`SUPPORTED_MODELS.md`](SUPPORTED_MODELS.md) — 每个具体型号的"已验证格式 + Oracle + 限制"
 - [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md) — trunk + sibling 目录约定与依赖方向
 - [`KV_CACHE_DESIGN.md`](KV_CACHE_DESIGN.md) — KV cache 共享条件 + 三种生命周期
-- [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md) — Vulkan 后端
+- [`VULKAN.md`](VULKAN.md) — Vulkan 后端（含设计取舍；旧 DESIGN/PLAN 两文档已吸收删除）
 - [`PARALLEL_MATMUL_SAFETY.md`](PARALLEL_MATMUL_SAFETY.md) — Issue 4（`compute_unchecked` 形式别名违规）
 - [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md) — "标量为底 + 后端注册表"
 - [`LFM25_OPTIMIZATION.md`](LFM25_OPTIMIZATION.md) / [`LFM25_MOE_OPTIMIZATION.md`](LFM25_MOE_OPTIMIZATION.md) / [`ZIMAGE_OPTIMIZATION.md`](ZIMAGE_OPTIMIZATION.md) — 子模型/子方向专项

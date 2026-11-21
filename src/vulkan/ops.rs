@@ -27,7 +27,7 @@ const Q8_MATMUL_GROUPED_TILED_WIDE_SHADER: &[u8] =
 /// Unfused twin of the wide kernel, for hosts whose CPU reduction does not
 /// contract. Both are the same code with the accumulate folded to a single
 /// operation, because testing `reduction_mode` costs about 40% of the kernel
-/// on GB10 and the mode is known on the host.
+/// on the aarch64 box and the mode is known on the host.
 const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_add.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
@@ -652,7 +652,7 @@ pub(crate) enum GpuWeightFormat {
 /// Whether the Q8_0 device matmul uses the transposed weight layout.
 ///
 /// The transposed layout reads the weight the way a GEMV wants to read it:
-/// 2.7x the bandwidth of ggml's own layout on the GB10 box (163 GB/s
+/// 2.7x the bandwidth of ggml's own layout on the aarch64 box (163 GB/s
 /// against 60 GB/s) for the same result, bit for bit. Rewriting the
 /// weight costs about 26 ms per 240 MB, once, when the weight is
 /// uploaded.
@@ -701,7 +701,7 @@ impl GpuWeightFormat {
     ///
     /// The transposed Q8_0 layout turns the weight reads into one
     /// contiguous run per warp, which is 2.5-2.7x the bandwidth of the
-    /// native layout on the GB10 box. It applies to both Q8_0 matmul
+    /// native layout on the aarch64 box. It applies to both Q8_0 matmul
     /// kernels: the one-row kernel gives every lane one output row, and
     /// the tiled kernel gives every lane one output column, so both read
     /// rows that are `blocks_per_row * 34` bytes apart in the native
@@ -3479,6 +3479,23 @@ impl AttentionRuntime {
         output: &mut [f32],
         spec: crate::ops::nn::AttentionSpec,
     ) -> Result<(), VulkanError> {
+        self.forward_windowed(q, k, v, output, spec, 0, 0)
+    }
+
+    /// Full attention when `window == 0`. Otherwise query `p` only sees keys in
+    /// the same `window x window` block of a `grid`-wide patch grid, which is
+    /// the block-diagonal mask the vit_merger applies after its window-major
+    /// reorder (`window = 2`, `grid = patches per row`).
+    pub(crate) fn forward_windowed(
+        &mut self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output: &mut [f32],
+        spec: crate::ops::nn::AttentionSpec,
+        window: u32,
+        grid: u32,
+    ) -> Result<(), VulkanError> {
         if spec.query_tokens == 0
             || spec.key_tokens == 0
             || spec.head_dim == 0
@@ -3499,6 +3516,7 @@ impl AttentionRuntime {
             || v.len() != k.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
+            || (window != 0 && (grid == 0 || grid < window))
         {
             return Err(VulkanError::UnsupportedShape(
                 "invalid online attention geometry".into(),
@@ -3517,6 +3535,9 @@ impl AttentionRuntime {
             as_u32(spec.head_dim, "attention dimension")?,
             spec.scale.to_bits(),
             u32::from(spec.causal),
+            window,
+            // The shader divides by the grid only when `window != 0`.
+            if window == 0 { 1 } else { grid },
         ];
         let dispatch = row_dispatch(
             spec.query_tokens
@@ -4910,7 +4931,7 @@ impl<'a> Qwen3Ops<'a> {
         // shader derives the token tile from the workgroup id, so a mismatch
         // here would read and write the wrong rows rather than fail.
         //
-        // Measured on GB10 at Z-Image's W2 shape, streaming eight distinct
+        // Measured on the aarch64 box at Z-Image's W2 shape, streaming eight distinct
         // weight matrices: 8 -> 64.4 ms, 16 -> 32.0 ms, 32 -> 20.6 ms,
         // 64 -> 48.9 ms. Sixty-four accumulators per lane is past what the
         // register file holds, so 32 is where the curve turns.
@@ -12019,7 +12040,7 @@ mod tests {
                     // The two wide kernels fold the host's accumulation
                     // contract into the shader instead of testing
                     // `reduction_mode` in the token loop (a runtime branch
-                    // there costs about 40% of the kernel on GB10), so
+                    // there costs about 40% of the kernel on the aarch64 box), so
                     // `_WIDE` only honours the fused contract and `_WIDE_ADD`
                     // only the unfused one.
                     if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE && mode != 1 {

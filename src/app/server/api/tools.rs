@@ -31,7 +31,8 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
     match arch {
         // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
         // their projector differs, which the runtime's image path handles.
-        "qwen3" | "qwen3vl" | "lfm2moe" | "qwen2vl" | "qwen3vlmoe" | "mage_vl" => Ok(false),
+        "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "lfm2moe" | "qwen2vl"
+        | "qwen3vlmoe" | "mage_vl" => Ok(false),
         // Mellum 2.1 ships ChatML (`<|im_start|>role\n … <|im_end|>\n`) with
         // the same `# Tools` preamble as Qwen3, so it rides the Qwen3
         // renderer.
@@ -253,7 +254,7 @@ pub fn build_prompt(
             compiled_jinja,
             &messages,
             true,
-            enable_thinking.unwrap_or(false),
+            enable_thinking,
         )?;
         // Return the cached result before resolving anything. `Option::or`
         // takes its argument by value, so folding the fallback into it ran
@@ -271,7 +272,7 @@ pub fn build_prompt(
             &|k| source.metadata(k).cloned(),
             &messages,
             true,
-            enable_thinking.unwrap_or(false),
+            enable_thinking,
         )? {
             return Ok((ids, Vec::new()));
         }
@@ -296,7 +297,10 @@ pub fn build_prompt(
             .find(|m| m.role == "user")
             .map(|m| m.text.as_str())
             .unwrap_or("");
-        let enable_thinking = enable_thinking.unwrap_or(false);
+        // The Spark template reads the tri-state itself; the hand-written
+        // fallback below has no "undefined" branch, so it keeps the
+        // historical direct-answer default.
+        let thinking = enable_thinking.unwrap_or(false);
         let sos = "<｜start▁of▁sentence｜>";
         let eos = "<｜end▁of▁sentence｜>";
         let rendered = crate::prompt::jinja::single_turn_text(
@@ -308,11 +312,7 @@ pub fn build_prompt(
             enable_thinking,
         )?
         .unwrap_or_else(|| {
-            let bot_suffix = if enable_thinking {
-                "<think>"
-            } else {
-                "</think>"
-            };
+            let bot_suffix = if thinking { "<think>" } else { "</think>" };
             format!(
                 "{sos}<|System|>\nyou are a helpful assistant.{eos}\
                  {sos}<|User|>{user_text}{eos}\
@@ -1122,6 +1122,118 @@ mod tests {
         }]
     }
 
+    /// A minimal BPE tokenizer: one token per character, plus the two think
+    /// markers so a prompt can be inspected for them.
+    fn thinking_tokenizer() -> crate::BPETokenizer {
+        let tokens = vec!["u", "s", "e", "r", "Ċ", "H", "i", "<think>", "</think>"];
+        let types = vec![1u32, 1, 1, 1, 1, 1, 1, 3, 4];
+        let metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".into(),
+                MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.pre".into(),
+                MetaValue::String("qwen2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".into(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    tokens
+                        .into_iter()
+                        .map(|value| MetaValue::String(value.into()))
+                        .collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".into(),
+                MetaValue::Array(
+                    MetaValueType::Uint32,
+                    types.into_iter().map(MetaValue::Uint32).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.merges".into(),
+                MetaValue::Array(MetaValueType::String, vec![]),
+            ),
+        ]);
+        crate::BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned()).unwrap()
+    }
+
+    struct MetadataOnly(HashMap<String, MetaValue>);
+
+    impl crate::core::tensor::TensorSource for MetadataOnly {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.0.get(key)
+        }
+        fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            panic!("the prompt builder must not touch tensors")
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            panic!("the prompt builder must not touch tensors")
+        }
+    }
+
+    /// The shipped thinking models branch on
+    /// `enable_thinking is defined and enable_thinking is false`: an
+    /// *undefined* value keeps the reasoning block, an explicit `false`
+    /// injects the empty one.
+    fn thinking_template() -> crate::prompt::jinja::JinjaChatTemplate {
+        crate::prompt::jinja::JinjaChatTemplate::compile(
+            "{% for m in messages %}{{ m.role }}\n{{ m.content }}\n{% endfor %}\
+             {% if add_generation_prompt %}assistant\n{% endif %}\
+             {%- if enable_thinking is defined and enable_thinking is false %}\
+            <think>\n\n</think>\n\n{% endif %}",
+            "test",
+        )
+        .unwrap()
+    }
+
+    fn prompt_ids(enable_thinking: Option<bool>) -> Vec<u32> {
+        let tokenizer = thinking_tokenizer();
+        let source = MetadataOnly(HashMap::new());
+        let messages = vec![Message {
+            role: "user".into(),
+            text: "hi".into(),
+            calls: Vec::new(),
+            call_id: None,
+            images: Vec::new(),
+        }];
+        let (ids, _) = build_prompt(
+            &source,
+            &tokenizer,
+            "qwen3",
+            &messages,
+            &[],
+            &ToolChoice::Auto,
+            enable_thinking,
+            &crate::prompt::jinja::Options::default(),
+            Some(&thinking_template()),
+        )
+        .unwrap();
+        ids
+    }
+
+    #[test]
+    fn a_missing_enable_thinking_keeps_the_models_own_default() {
+        // The contract the request field documents: "None means the model's
+        // training default". Handing the template an explicit `false` used
+        // to inject the empty think block into every thinking-tuned model,
+        // which is what turned a normal answer into a meta-comment loop.
+        let missing = prompt_ids(None);
+        let enabled = prompt_ids(Some(true));
+        let disabled = prompt_ids(Some(false));
+        assert_eq!(
+            missing, enabled,
+            "an absent enable_thinking must render like the thinking default"
+        );
+        assert_ne!(
+            missing, disabled,
+            "an explicit false must still be able to turn the reasoning block off"
+        );
+    }
+
     #[test]
     fn lfm3_plain_text_stream_is_accepted() {
         let mut parser = OutputParser::new("lfm3", &[], &ToolChoice::Auto);
@@ -1463,7 +1575,7 @@ mod tests {
                 content: json!([{"type":"image"},{"type":"text","text":single[0].text}]),
             }],
             true,
-            false,
+            Some(false),
         )
         .unwrap();
         assert_eq!(render(&single).unwrap().0, cli_ids);

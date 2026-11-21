@@ -13,7 +13,7 @@ use rust_model_inference::TensorSource;
 
 const USAGE: &str = "Usage: rust-model-inference --model <path.gguf-or-ggufrs> [--prompt ...] [--threads N] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--max-context N (default 8192)] [--repetition-penalty α (default 1.0 = disabled)] [--serve [--host 0.0.0.0] [--port 8080]]\n\nMTP draft head: --mtp-draft N turns the Qwen3.5 decode into a speculative one: the checkpoint's own MTP head (block 64) proposes N tokens per round and the target verifies them in one forward pass. Greedy only (--temp 0) and text-only prompts; the draft head runs on the CPU, so on a 27B Q8_0 checkpoint the speculative decode is not faster than the plain one (the forward is compute bound). See docs/develop/TODO.md (TODO-072).
 
-Chat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1 / Turbo: add --qwen-image-turbo for the Turbo checkpoint (fixed 8-step schedule, CFG 1); --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\nAstronex-World: --astronex --model <Astronex-World-BF16.gguf> --mmproj <mmproj-Astronex-World.gguf> --prompt TEXT --out video.mp4 [--width N --height N --video-frames N --fps N --steps 8 --cfg-scale N --seed N] [--image first-frame.png] | T2V or first-frame I2V; causal 8-frame blocks, 20-frame KV window, 8-step Flow-UniPC; add --gpu with the Vulkan build\n\nUnlimited-OCR-2: --model <official-safetensors-directory-or-native.gguf> --image first.png [--reference next.png ...] [--prompt TEXT] [--max-tokens N] [--max-context N] [--out result.txt --overwrite] | 1024px base, greedy OCR; --compute auto / --gpu hybrid offload; --compute vulkan requires a usable device and moves the linear projections only; CLI/HTTP OCR; see tools/oracle/unlimited_ocr/README.md\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding]\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
+Chat template: --jinja renders the GGUF's own `tokenizer.chat_template` (a Jinja2 program) with minijinja instead of the built-in per-architecture builder; --chat-template-file <path.jinja> overrides it and implies --jinja. --chat-template <name> still selects a built-in preset (chatml/llama3/gemma/lfm2/glm4/exaone/phi/none). Both are off by default, so token ids are unchanged unless you ask. tests/jinja_chat_template_ab.rs compares the two paths on real GGUFs: Qwen3 is asserted to match token for token, and LFM2.5 records a known divergence where the template is the correct one.\n\nLongCat Image Edit: --kind edit|turbo --model <transformer.gguf> --components <dir> --input <image.png> --instruction TEXT --out edited.png [--side 1024] [--steps N] [--guidance F32] [--seed N]; <dir> holds text_encoder/, vae/ and tokenizer/ safetensors, shared by both kinds; the two kinds use different Flux schedules so the step/guidance defaults differ (Edit 50/4.5, Turbo 8/1.0)\n\nQwen-Image-2.1 / Turbo: add --qwen-image-turbo for the Turbo checkpoint (fixed 8-step schedule, CFG 1); --model <qwen-image-2.1-Q8_0.gguf> --text-encoder <Qwen3-VL-8B.gguf> --vae <Qwen-Image-2.1/vae/diffusion_pytorch_model.safetensors> --prompt TEXT --out image.png [--width N --height N --steps N --cfg N --seed N] [--image reference.png --mmproj vision.gguf --reference another.png]\nAstronex-World: --astronex --model <Astronex-World-BF16.gguf> --mmproj <mmproj-Astronex-World.gguf> --prompt TEXT --out video.mp4 [--width N --height N --video-frames N --fps N --steps 8 --cfg-scale N --seed N] [--image first-frame.png] | T2V or first-frame I2V; causal 8-frame blocks, 20-frame KV window, 8-step Flow-UniPC; add --gpu with the Vulkan build\n\nUnlimited-OCR-2: --model <official-safetensors-directory-or-native.gguf> --image first.png [--reference next.png ...] [--prompt TEXT] [--max-tokens N] [--max-context N] [--out result.txt --overwrite] | 1024px base, greedy OCR; --compute auto / --gpu hybrid offload; --compute vulkan requires a usable device and moves the linear projections only; CLI/HTTP OCR; see tools/oracle/unlimited_ocr/README.md\n\nMage-Flow: --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> --prompt TEXT --out image.png [--resolution N | --width N --height N] [--steps N --cfg N --seed N --noise fixed.f32] [--image reference.png --mmproj vision.gguf --reference another.png]\n\nRerank mode: --rerank --rerank-query <TEXT> [--rerank-doc <TEXT> ...] | [--rerank-documents <FILE>] [--rerank-instruction <TEXT>] [--rerank-max-tokens N] | cross-encoder scoring; backend picked by GGUF arch (jina-bert-v2 + cls.weight/cls.bias → bert forward, qwen3 + cls.output.weight + pooling_type=4 → qwen3 trunk + 2-class head); one sigmoid'd score per document in [0, 1]\n\nJEV mode: --jev --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | single-forward-pass decision scoring over candidate labels A/B/C/…\n\nJEV grouped: --jev --jev-multi [--jev-option <pos> --jev-option <neg> ...] (pairs) or --jev-block <label> --jev-option <a> [--jev-option <b> ...] (blocks)\n\nServer mode: --serve [--host 0.0.0.0] [--port 8080] --model <path> [--mmproj ...] [--tts] [--embedding] | Image generation (P-JiT, Z-Image, ERNIE-Image): --serve --model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> serves POST /v1/images/generations; the model is recognized by its weights, and the prompt comes with the request\n\nCLM mode: --jev --clm-head <clm-heads.gguf> --jev-context <text> --jev-question <text> --jev-option <a> [--jev-option <b> ...] | cosine scoring via CLM projection heads on the chosen encoder (state = context, blank line, question; candidates verbatim\n\nGLiNER2 mode: --jev --gliner2-decide --model <gliner2-decide.gguf> --jev-context <text> [--gliner2-schema <json> | --jev-question <name> --jev-option <a> [--jev-option <b> ...]] | one DeBERTa-v3 pass scores every label of every task; --gliner2-schema takes a classify_text-shaped mapping: {intent: [a, b], aspects: {labels: [x], multi_label: true, cls_threshold: 0.4}}
 
 PiVo-1.4M: --tts --model pivo-F32.gguf --prompt TEXT --out speech.wav [--voice Pi|Vo] [--speed 0.5..2] [--pronunciations JSON] | English, 16 kHz mono; bundled vocoder, no --mmproj; CPU/Auto; HTTP /v1/audio/speech; see tools/oracle/pivo/README.md
 
@@ -577,24 +577,41 @@ fn main() {
         let arch_probe: Arc<dyn TensorSource> = early_source
             .clone()
             .unwrap_or_else(|| Arc::from(open_or_exit(&options.model, ComponentRole::Llm)));
-        let arch_name = arch_probe
-            .metadata("general.architecture")
-            .and_then(MetaValue::to_string_val)
-            .unwrap_or_default();
-        let is_ernie_image = arch_name == "ernie_image"
-            || (arch_probe
-                .tensor_info("layers.0.self_attention.to_q.weight")
-                .is_some()
-                && arch_probe.tensor_info("text_proj.weight").is_some());
+        // The published ERNIE export mis-tags `general.architecture` as
+        // "wan", so the probe in the model layer looks at the tensor names.
+        let is_ernie_image =
+            rust_model_inference::models::diffusion::ernie_image::matches_signature(
+                arch_probe.as_ref(),
+            );
         if is_ernie_image {
-            let _cpu = rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope();
+            // The backend follows the weight format.
+            //
+            // The device only has an int8 dot-product kernel for Q8_0. The
+            // K-quant family has one scalar kernel and no vectorized
+            // variant, because its block-scaled int32 accumulation does not
+            // fit the int8 dot product that Q8_0 uses (TODO-032), and a
+            // Q4_K_M model measures 17.6x slower on the device than on the
+            // CPU there. ERNIE's own Q4_K_M DiT measures 2.2x slower
+            // (TODO-068), so it stays on the CPU.
+            //
+            // A Q8_0 DiT is the other case: every projection then takes the
+            // int8 path, which is where the device is at least as fast as
+            // the CPU. That is a different model file, not a different
+            // mode, so the choice is made from the weights themselves.
+            let k_quant = rust_model_inference::models::diffusion::ernie_image::is_k_quant(
+                arch_probe.as_ref(),
+            );
+            let _cpu = k_quant
+                .then(|| rust_model_inference::compute::ComputePolicy::Cpu.enter_legacy_scope());
             let turbo = options
                 .model
                 .to_string_lossy()
                 .to_lowercase()
                 .contains("turbo");
-            if options.compute_policy() != rust_model_inference::compute::ComputePolicy::Cpu {
-                eprintln!("compute scope=ernie_image backend=Cpu reason=unmigrated_model");
+            if k_quant {
+                eprintln!(
+                    "compute scope=ernie_image backend=Cpu reason=kquant_weights_slower_on_device"
+                );
             }
             let text: Arc<dyn TensorSource> = Arc::from(open_or_exit(
                 options
@@ -1244,6 +1261,35 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
+        // The speculative-decode flags exist only on the qwen35 trunk path;
+        // an arch that never receives them would silently drop the flag, so
+        // they are gated here with the same rule the runtime applies. The
+        // MTP head is a checkpoint property (the hybrid archs' session
+        // errors when it is missing); the DSpark sidecar and the n-gram
+        // lookup need the qwen35 trunk's verify/rollback machinery.
+        if options.effective_mtp_draft() > 0
+            && !matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop")
+        {
+            app::run_or_exit(Err(format!(
+                "--mtp-draft needs the hybrid trunk; architecture {arch} has no \
+                 speculative decode path"
+            )));
+            return;
+        }
+        if options.dspark_model.is_some() && arch != "qwen35" {
+            app::run_or_exit(Err(format!(
+                "--dspark-model needs the qwen35 trunk target; architecture {arch} has no \
+                 DSpark verify path"
+            )));
+            return;
+        }
+        if options.effective_ngram_draft() > 0 && arch != "qwen35" {
+            app::run_or_exit(Err(format!(
+                "--ngram-draft needs the qwen35 trunk target; architecture {arch} has no \
+                 speculative verify path"
+            )));
+            return;
+        }
         if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             // `--mtp-draft` turns the decode into a speculative one: the
             // MTP draft head proposes tokens and the target verifies them.
@@ -1261,8 +1307,11 @@ fn main() {
                 prefill_batch_size,
                 options.effective_max_context(),
                 options.effective_repetition_penalty(),
+                options.thinking,
                 options.effective_mtp_draft(),
                 options.dspark_model.as_deref().map(std::path::Path::new),
+                options.effective_ngram_draft(),
+                options.effective_ngram_lookup(),
                 &jinja_options,
             ));
         } else if options.embedding {
@@ -1299,7 +1348,7 @@ fn main() {
                 max_tokens,
                 temperature,
                 options.threads,
-                options.thinking,
+                options.thinking.unwrap_or(false),
                 prefill_batch_size,
             ));
         } else if options.bench || options.profile || options.kv_format == app::KvFormat::F32 {
@@ -1309,7 +1358,7 @@ fn main() {
                 max_tokens,
                 temperature,
                 options.threads,
-                options.thinking,
+                options.thinking.unwrap_or(false),
                 options.bench,
                 options.profile,
                 options.kv_format,
@@ -1326,7 +1375,7 @@ fn main() {
                 max_tokens,
                 temperature,
                 options.threads,
-                options.thinking,
+                options.thinking.unwrap_or(false),
                 options.bench,
                 options.profile,
                 options.kv_format,
@@ -1359,6 +1408,20 @@ fn main() {
         // tokenizer and prompt token ids line up with the rest of the
         // qwen35 family; the qwen35 multimodal stack handles the
         // image-less case (it just skips the vision stage).
+        // The speculative-decode flags have no interactive implementation;
+        // gate them here instead of letting the interactive loop drop them
+        // silently (the arch rules are the prompt mode's / the runtime's).
+        if options.effective_mtp_draft() > 0
+            || options.dspark_model.is_some()
+            || options.effective_ngram_draft() > 0
+        {
+            app::run_or_exit(Err(
+                "speculative decoding (--mtp-draft / --dspark-model / --ngram-draft) is \
+                 not available in interactive mode; use --prompt or --serve"
+                    .into(),
+            ));
+            return;
+        }
         if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             app::run_or_exit(app::run_interactive_qwen35(
                 Arc::clone(&source),

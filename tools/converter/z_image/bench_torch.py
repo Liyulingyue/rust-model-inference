@@ -1,7 +1,7 @@
-"""What does Z-Image-Turbo actually do on this GB10?
+"""What does Z-Image-Turbo actually do on the aarch64 box?
 
 The Rust CPU path takes 140 s per denoise step at 512x512 and 20.5 minutes for
-an 8-step render. The GB10 in this box is a Blackwell part with a few hundred
+an 8-step render. The GPU in this aarch64 box is a Blackwell part with a few hundred
 TFLOPS of bf16 tensor core throughput, so almost any of the explanations offered
 for that number -- bandwidth, dispatch overhead, the row-at-a-time loop shape --
 are worth checking against the one measurement that settles it: run the model the

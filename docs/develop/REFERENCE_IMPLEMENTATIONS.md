@@ -29,7 +29,7 @@
 | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | 文本、Embedding、Jina Embeddings v5 Omni、Qwen3.5/Qwen3.8、Gemma 4、Qwen3-TTS、Qwen-Drive、Nemotron-3 Nano 4B 和性能基准 | 生成 token、checkpoint、logits、Embedding、音频及性能对照 | 按用途固定，见 §「llama.cpp 固定版本」 | `tools/oracle/shared/`、`tools/oracle/gemma4/`、`tools/oracle/qwen3_tts/`、`tools/oracle/qwen_drive/` 和对应 `tests/*_reference.rs` | `Pinned Oracle` |
 | [hqu-little-boy/asr.cpp](https://github.com/hqu-little-boy/asr.cpp) | Qwen3-ASR | C++/GGML 行为参考 | 未固定 | 当前没有 checkout、builder 或外部 Oracle 测试；现有回归见 [`src/format/ggufrs.rs`](../../src/format/ggufrs.rs) | `Reference only` |
 | [leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) | Z-Image Turbo | 文生图 checkpoint 与最终图像 Oracle | `97d2990807fe6d558e395f8764198d7c7e7b411c` | [`tools/oracle/z_image/build_stable_diffusion_oracle.sh`](../../tools/oracle/z_image/build_stable_diffusion_oracle.sh)、[`tools/oracle/z_image/stable-diffusion-z-image-trace.patch`](../../tools/oracle/z_image/stable-diffusion-z-image-trace.patch)、[`tests/z_image_reference.rs`](../../tests/z_image_reference.rs) | `Pinned Oracle` |
-| [XHToken/llama.cpp](https://github.com/XHToken/llama.cpp) | Spark-X2.5 | Spark2.5 模型实现参考（仓库历史沿用名 `XFllama.cpp`，对应上游即 XHToken fork） | 未固定 | [`src/models/spark/trunk/config.rs`](../../src/models/spark/trunk/config.rs)、[`docs/TODO.md`](../TODO.md)；尚无可执行 Oracle | `Pending pin` |
+| [XHToken/llama.cpp](https://github.com/XHToken/llama.cpp) | Spark-X2.5 | Spark2.5 模型实现参考（仓库历史沿用名 `XFllama.cpp`，对应上游即 XHToken fork） | 未固定 | [`src/models/spark/trunk/config.rs`](../../src/models/spark/trunk/config.rs)、[`docs/develop/TODO.md`](TODO.md)（Archived 区适配记录）；尚无可执行 Oracle | `Pending pin` |
 | [studio-dots-ai/dots.tts](https://github.com/studio-dots-ai/dots.tts) | dots.tts-base、dots.tts.edit | 官方 Python 推理链路与逐 checkpoint/PCM Oracle；LLM 部分由 `arch=qwen2` GGUF 驱动，mmproj 由 `arch=dotstts` 驱动 | `32407a55228630475c48ecdb2c4e2c0f9c09e030` | [`tools/oracle/dots/build_dots_tts_oracle.sh`](../../tools/oracle/dots/build_dots_tts_oracle.sh)、[`tools/oracle/dots/run_dots_tts_oracle.py`](../../tools/oracle/dots/run_dots_tts_oracle.py)、[`tools/oracle/dots/dots-tts-oracle-trace.patch`](../../tools/oracle/dots/dots-tts-oracle-trace.patch)、[`tests/dots_tts_reference.rs`](../../tests/dots_tts_reference.rs) | `Pinned Oracle` |
 | [AMAP-ML/DreamX-Creator](https://github.com/AMAP-ML/DreamX-Creator) / [ModelScope weights](https://modelscope.cn/models/GD-ML/DreamX-Creator) | DreamX-Creator base audio-video pipeline、2K refiner | 导出映射、Creator/UMT5/VAE/DAC/SR-DiT/upsampler/LightVAE 行为参考及 CUDA trace 入口 | `215d4cd7fbed7e161ab508ae1f85a8fee0536f62` | [`tools/oracle/dreamx/dreamx_oracle_trace.py`](../../tools/oracle/dreamx/dreamx_oracle_trace.py)、[`tests/dreamx_reference.rs`](../../tests/dreamx_reference.rs) | `Pinned reference; Oracle unrun` |
 | Qwen-Drive-1.0-4B 原始权重（仓库闭源，按 `tools/oracle/qwen_drive/README.md` 表里的 SHA256 + size 锁定；VLM 部分仍是 `arch=qwen2vl/qwen3vl`，planner 是独立 head） | Qwen-Drive-1.0-4B VLM + planner-SFT + planner-RL + perception | VLM（mtmd qwen2vl/qwen3vl mtmd-debug）+ 规划器（PyTorch oracle） | `b96806d96061049a5b574269b049bf6241d63d46`（VLM 同 Qwen3.5） | [`tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh`](../../tools/oracle/qwen_drive/build_qwen_drive_vlm_oracle.sh)、[`tools/oracle/qwen_drive/qwen_drive_vlm_trace.patch`](../../tools/oracle/qwen_drive/qwen_drive_vlm_trace.patch)、[`tools/oracle/qwen_drive/qwen_drive_oracle.py`](../../tools/oracle/qwen_drive/qwen_drive_oracle.py)、[`tools/oracle/qwen_drive/README.md`](../../tools/oracle/qwen_drive/README.md)、[`tests/qwen_drive_vlm_reference.rs`](../../tests/qwen_drive_vlm_reference.rs)、[`tests/qwen_drive_planner_reference.rs`](../../tests/qwen_drive_planner_reference.rs) | `Pinned Oracle` |
@@ -66,6 +66,31 @@
 构建脚本接收外部 checkout 路径，并在运行前校验提交；除通用 scalar 脚本外，脚本会复制到临时目录后再打 trace patch，避免修改输入 checkout。
 
 `references/` 只是可选的本地便利目录，不是完整依赖清单，也不应据此判断某个 Oracle 是否存在。当前仓库不会自动下载这些上游；需要执行回归时，应按上表准备对应仓库和固定提交。
+
+**`GGML_NATIVE=OFF` 不是标量 oracle**（曾长期写进 TODO 的坑，2026-10 实测定量）：它只去掉
+`-march=native`，**不改 ggml 自身的默认值**——该 pin 下 `GGML_CPU_ALL_VARIANTS` 仍为 ON
+（为每个 kernel 额外编译一份 AVX2 / AVX512 / FMA 副本并运行时分发），`GGML_AVX2` /
+`GGML_FMA` / `GGML_F16C` / `GGML_AVX512*` 也仍为 ON，于是得到一个「看起来能跑」的 SIMD
+oracle。逐位对齐必须显式关掉这组 ISA 开关。实测（同一 commit、同一模型、同一 prompt，
+仅差这组开关，`LFM2.5-230M-Q4_K_M` 单线程）：3 468 个 checkpoint 中 3 445 个逐位不同
+（99.3%）；`result_output` 每步 65 536 个 logits 中 65 535 个不同，max|delta| 0.218（约
+1.2%）；**token ids 相同**（11 prompt + 6 greedy 全一致）——即**逐位结论失效，token 级
+结论通常存活**，但近平局处会翻转。共享脚本
+[`tools/oracle/shared/build_llama_oracle.sh`](../../tools/oracle/shared/build_llama_oracle.sh)
+已补齐 `GGML_AVX/AVX2/FMA/F16C/AVX512*/AVX_VNNI/AMX=OFF` 与 `GGML_CPU_ALL_VARIANTS=OFF`。
+复验时须知：
+
+- `tests/inference_parity.rs` 的 `q4_0` / `q4_k_m`
+  `…_matches_pinned_scalar_oracle_bit_for_bit`（均 `#[ignore]`，`f32::from_bits` 原始位
+  比较）若其 `RMI_LLAMA_ORACLE` 二进制是在补开关之前构建的，结论需重跑；MiniCPM5
+  `dump_tokens_oracle` 与 Falcon-H1 的「遵循共享脚本标志」构建同理。
+- 同类脚本仍有 10 个只带 `GGML_NATIVE=OFF`：`mellum` / `qwen35` / `qwen_drive` /
+  `gemma4`（两个）/ `ernie_image` / `nanbeige` / `longcat` / `jina_bert_v2` /
+  `qwen_image_2_1`。部分结论在 ARM 上取得（CMAKE_C_FLAGS 已带 `-U__ARM_NEON`，x86 的
+  陷阱不适用）；其余应逐个 arch 确认其结论是否依赖浮点位级一致性，再决定是否重建 oracle。
+- 复现方法：用只带 `GGML_NATIVE=OFF` 的标志构建一份 oracle，与全标量那份对同一模型跑
+  同一 prompt，再用 [`tools/oracle/lfm2moe/check_scalar.py`](../../tools/oracle/lfm2moe/check_scalar.py)
+  对比两份 manifest。
 
 ## DreamX-Creator trace
 

@@ -14,12 +14,31 @@
 - 图像：需要配套的 F16 mmproj；视觉塔始终在 CPU 上跑。
 - MTP 投机解码：CLI `--mtp-draft N`（每轮起草 N 个 token；仅 greedy、仅纯文本
   prompt——图像路径的 prompt 行是投影后的 embedding，拿不到 token id）。
-- DSpark 投机解码（Qwen3.5-2B 实测）：CLI `--dspark-model <sidecar.gguf>`
-  （可选 `--mtp-draft N` 指定每轮草稿数，默认 8；与 MTP 同样仅 greedy、仅纯文本
-  prompt、目标走 CPU 路径）。sidecar 是独立的 `dflash` 架构 GGUF（如
+- DSpark 投机解码（Qwen3.5-2B 实测）：CLI `--dspark-model <sidecar.gguf>` 与
+  HTTP `--serve --dspark-model <sidecar.gguf>` 双入口（同一
+  `RuntimeOptions::with_dspark_model` 分发；可选 `--mtp-draft N` 指定每轮草稿
+  数，默认 8；与 MTP 同样仅 greedy、仅纯文本 prompt、目标走 CPU 路径——非
+  `qwen35` target、设备路径在启动时报错，temp>0 或带图请求在请求时报错，flag
+  不会静默降级）。sidecar 是独立的 `dflash` 架构 GGUF（如
   `Qwen3.5-2B-DSpark`），起草 token 与 pinned llama.cpp `b96806d` 的
-  `--spec-type draft-dspark` 逐 token 一致；实现与验证记录见
-  [SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md)。
+  `--spec-type draft-dspark` 逐 token 一致；CLI 与 HTTP 输出逐字节一致且与
+  plain greedy 相同（哨兵 `cli_and_http_agree_on_dspark_speculative_decode`
+  断言）。实现与验证记录见
+  [SPECULATIVE_DECODING.md](SPECULATIVE_DECODING.md) 与
+  [tools/oracle/dspark/README.md](../../tools/oracle/dspark/README.md)。
+- n-gram 投机解码（无需任何第二份权重）：CLI `--ngram-draft N`（每轮草稿长，
+  上游 `size_m`）/ `--ngram-lookup N`（查找 n-gram 长 `size_n`，缺省 12，需
+  满足 draft ≥ lookup——上游在该区间永不起草）与 HTTP `--serve
+  --ngram-draft N` 双入口（`RuntimeOptions::with_ngram_draft /
+  with_ngram_lookup`；门控与 DSpark 同构：非 `qwen35`、设备路径、与
+  `--mtp-draft`/`--dspark-model` 叠加、temp>0、带图请求均显式报错）。
+  已提交 token 历史查找上一次出现的 n-gram 并取其后 m 个 token 作草稿
+  （`src/core/ngram.rs`，上游 `ngram-simple` 的逐行移植），目标用与 MTP /
+  DSpark 相同的批量 greedy 验证 + KV/recurrent 回滚——无匹配的轮退化为
+  plain 单 token 步，输出恒等于 greedy。接受率本质上是负载相关的（重复文本
+  才会命中）：Qwen3.5-2B 上重复 prompt + `--ngram-draft 8 --ngram-lookup 4`
+  实测 48 token / 47 轮 / 1 草稿接受；CLI 与 HTTP 一致且与 plain greedy
+  相同（哨兵 `cli_and_http_agree_on_ngram_speculative_decode`）。
 
 ## CPU：与 pinned llama.cpp 的对拍
 

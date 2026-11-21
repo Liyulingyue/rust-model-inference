@@ -74,7 +74,7 @@ pub fn run_inference(
         &special.bos,
         &special.eos,
         prompt,
-        thinking,
+        Some(thinking),
     )?;
     let prompt_text = match jinja_text {
         Some(text) => text,

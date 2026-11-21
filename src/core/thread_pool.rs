@@ -86,7 +86,7 @@ impl Drop for GpuMatmulScope {
 /// hot spin keeps every participant runnable: a pool with as many
 /// participants as the machine has cores then starves the thread that is
 /// actually doing the work, and on a shared box it starves the other tenants
-/// too. Measured on a 20-core GB10 with `--threads 20`, hot spinning cost
+/// too. Measured on a 20-core aarch64 box with `--threads 20`, hot spinning cost
 /// 29x: 2.4 tok/s against 69 tok/s at 19 threads.
 const WAIT_SPINS: usize = 256;
 
