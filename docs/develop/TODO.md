@@ -169,9 +169,23 @@ NEON on aarch64; no AVX-512).
       **对照**：不带 `parity-trace` feature 的构建同权重同卡**完整跑通**（SenseNova Loop 9B
       Q4_0 在 L20 上输出 greedy tokens），独立 `vk_ops_check` 全过 → GPU 路径本身可用，
       此前「GPU 路径挂死」的结论是这条死锁造成的假象。
-      **修法选项**：① trace 前先释放 `commands`（或改 `flush()` 语义让它交还 guard）；
-      ② 读回改走不持锁的路径；③ `parity_trace::enabled()` 改用 `var()` + 非空判断，
-      避免空串误开。
+      **修法选项**（2026-11-21 复核，代码逐行核实过死锁链；暂缓实施，理由见下）：
+      ② 为推荐项，但**形态很关键**——读回应做成 **`TokenCommands` 自身的方法**
+      （如 `commands.read_region(region, output)`：把 `record_buffer_copy` 记进当前
+      命令缓冲，复用既有 `flush()` 的 submit+wait+重开语义——guard 全程持有，读回
+      本质只是多一个 chunk 边界），而**不是**平行的自由函数
+      `read_f32_into_with(&mut TokenCommands)`：后者造成"同一操作两套入口"，未来任何
+      chunk 录制中途的读回功能都得自行判断持锁状态选入口，选错即同一死锁——
+      对扩展有损伤。①（`flush()` 交还 guard）不推荐：guard 跨 chunk 保留是防其它
+      会话插队提交的**有意设计**，交还会引入提交竞争。③ 顺手一行：
+      `parity_trace::enabled()` 的 `var_os().is_some()` 改为 `var()` + 非空判断。
+      **暂缓理由**：本条是编译期 feature 的诊断工具，生产路径完全不经过；修复需要
+      端到端验证（复现挂起 → 打补丁 → 跑通），而真实目标场景（sensenova Loop 9B
+      parity 对拍）不在本机——只验一半就接线违反"没实测过不接线"纪律。**最佳时机
+      是做 GPU parity 工作的会话**（顺带解锁下一条 sensenova 不一致 TODO 的定位）。
+      本机复现可行性已确认：Intel iGPU ICD（`intel_icd.json`）+ `/dev/dri` 渲染节点
+      在位，可用 Qwen3.5-0.8B + `--features vulkan,parity-trace` +
+      `RMI_PARITY_TRACE=1` 复现。
       **影响面**：所有 `qwen35` / sensenova GPU 会话的 parity 比对 —— 即**当前无法用 parity trace
       定位 GPU 与 CPU 的数值差异**（见下条）。
 - [ ] **sensenova GPU 与 CPU 的 greedy 输出不一致** — 2026-11-09，SenseNova Loop 9B Q4_0
