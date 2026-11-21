@@ -108,16 +108,28 @@ NEON on aarch64; no AVX-512).
       `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
       可移植）；另评估 Q4_0 NEON kernel（`q4_0/neon.rs`，逐 block 标量点积 +
       逐行累加、无行分块）是否按 TODO-001 的 x86 重写思路同步改造。
-- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — 仓库 Vulkan 侧目前只有 Q8_0 / Q4_K /
-      （BF16 等）matmul，IQ 类型完全走 CPU（`src/vulkan/` 无任何 IQ shader）。
-      pinned llama.cpp 有现成参考：`ggml/src/ggml-vulkan/vulkan-shaders/` 下七个类型的
-      `mul_mat_vec_iq*.comp` + `dequant_iq*.comp`（iq1_m / iq1_s / iq2_s / iq2_xs /
-      iq2_xxs / iq3_s / iq3_xxs）。移植时注意 llama.cpp 的 shader 是
-      mul-mat-vec（per-token 解码侧）形态，与仓库现有 `matmul_q4k.rs` 的 prefill 形态
-      不同，需决定先补 decode 侧还是两侧都要；数值验收照仓库惯例对 CPU 路径比
-      （Vulkan IQ shader 一旦上线，`PreparedRows::matmul_group` 的 `uses_q8_k()` 权重
-      会开始走 GPU，需与本次逐位对拍过的 AVX2 路径做同机对照）。验证设备：本机若无
-      Vulkan 设备则按 `amd-cloud-gpu-test` skill（用户点名才用）。
+- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — **IQ4_XS 已完成**（2026-11-21，Intel iGPU
+      实测），剩余 6 个 2/3-bit 网格类型按同一模板跟进。
+      **IQ4_XS 已做**：`shaders/glsl/iq4_xs_matmul.comp`（按仓库 `q4_k_matmul.comp` 的
+      "每 lane 一个输出行 + shared memory 装 Q8_K 输入块"模式，累加顺序逐子块复刻
+      CPU AVX2 kernel 的 `acc += dl * dot`——乘加分离 + `precise`,无 fma 收缩）+
+      `matmul_iq4_xs.rs` 入口 + `GpuWeightFormat::IQ4_XS` 全套注册 + kernel GPU hook。
+      验证：`iq4_xs_gpu_matches_cpu_avx2_bitwise_on_real_weights`——Qwen3-0.6B-IQ4_XS
+      的 blk.0.attn_q（2048 行）GPU 输出与 CPU AVX2 kernel **逐位一致**；E2E
+      `--compute auto` greedy 正常。实现中抓到的坑：① IQ4_XS 的 nibble→value 映射是
+      **lo-first-then-hi**（子块字节 [16ib,16ib+16) 的低 nibble = 值 0..15,高 nibble =
+      值 16..31),不是逐字节交错——AVX2 的 lo/hi 分离配对正源于此；② `OPERATOR_SHADERS`
+      与 `OPERATOR_SHADER_NAMES` 都是按 pipeline id 索引的定长数组,新管线必须
+      追加到**两个数组的末尾**并同步补 `operator_indices_match_shader_modules` 测试表
+      （插中间会把后面所有管线挤偏一位——q8_0 检查当场红）。
+      **剩余**：iq2_xxs / iq2_xs / iq2_s / iq3_xxs / iq3_s / iq1_s / iq1_m——同模板,
+      但 shader 需嵌入网格表（iq1s_grid 2048×8B = 16KB 最大,IQ2/IQ3 的 2-4KB）,
+      以 GLSL const 数组或 storage buffer 方式进 shader;2-bit 的符号奇偶重建
+      （iq2_xs 的 `full_sign_bits` 路径）在 shader 里按 CPU AVX2 kernel 同款实现。
+      验证设备：本机 Intel iGPU（MTL,已验证可用,int8 dot + shader f16 supported）
+      即可闭环,无需 `amd-cloud-gpu-test`。已知边界：IQ4_XS 模型的**整模型 GPU 常驻
+      解码**还需文件内其它格式（如 Q6_K token_embd）也有 GPU kernel——Qwen3-0.6B-IQ4_XS
+      的 `--compute auto --kv-cache f16` 目前按设计落回 CPU（单投影 GPU 路径已通）。
 - [x] **Q4_0 AVX2 kernel 重写：逐 lane FMA 累加 + 4 行分块**（2.07×，结构对齐 llama.cpp AVX2）— 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [x] **token 维寄存器分块：消除 per-token 权重重读**（x86 AVX2 已做，1.56-1.69×；
       aarch64 侧待 NEON kernel 移植时一并做）— 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
