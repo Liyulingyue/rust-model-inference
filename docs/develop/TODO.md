@@ -93,6 +93,21 @@ NEON on aarch64; no AVX-512).
       `iq_avx2_matches_llama_cpp_oracle_bitwise` 的 ARM 版 oracle harness）；仓库当前
       无 aarch64 CI 作业（见下方"aarch64 CI"条目），接入前先补交叉编译或 CI 门禁，
       不盲接 dispatch。
+- [ ] **BF16 / F32 的 NEON token-tiled batched（TODO-019 的 aarch64 侧）** —
+      token 分块的 x86 AVX2 版已落地（见 TODO-019），但 aarch64 上
+      `supports_token_tiled_batching` 对 BF16 / F32 返回 false——TODO-019 的痛点
+      机（20 核 aarch64，文本编码 11% 峰值）恰恰拿不到这个收益，仍是逐 token
+      重流整个权重矩阵。F16 不缺：其 tiled 实现是可移植的标量嵌套循环
+      （`dot_f16_f16_bytes` 自带 NEON dispatch），在 aarch64 上已生效。
+      **待做**：为 `bf16/avx2.rs`（BF16）与 `f32/avx2.rs`（F32）写 NEON tiled
+      kernel（2D (row-tile × token-tile) blocking，x86 宏
+      `avx2_matmul_packed_tiled!` 可作结构模板；BF16 unpack 用 NEON 的
+      u16→f32 高半移位，F32 用 `vld1q_f32`），把
+      `supports_token_tiled_batching` / `forward_batched_rows` 的 aarch64 分支
+      接上。**前置**：与所有 NEON kernel 相同——必须在 aarch64 机器上开发并跑
+      `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
+      可移植）；另评估 Q4_0 NEON kernel（`q4_0/neon.rs`，逐 block 标量点积 +
+      逐行累加、无行分块）是否按 TODO-001 的 x86 重写思路同步改造。
 - [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — 仓库 Vulkan 侧目前只有 Q8_0 / Q4_K /
       （BF16 等）matmul，IQ 类型完全走 CPU（`src/vulkan/` 无任何 IQ shader）。
       pinned llama.cpp 有现成参考：`ggml/src/ggml-vulkan/vulkan-shaders/` 下七个类型的
@@ -104,9 +119,8 @@ NEON on aarch64; no AVX-512).
       会开始走 GPU，需与本次逐位对拍过的 AVX2 路径做同机对照）。验证设备：本机若无
       Vulkan 设备则按 `amd-cloud-gpu-test` skill（用户点名才用）。
 - [x] **Q4_0 AVX2 kernel 重写：逐 lane FMA 累加 + 4 行分块**（2.07×，结构对齐 llama.cpp AVX2）— 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
-- [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
-      文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
-      预期 1.5-2× 加速。
+- [x] **token 维寄存器分块：消除 per-token 权重重读**（x86 AVX2 已做，1.56-1.69×；
+      aarch64 侧待 NEON kernel 移植时一并做）— 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
 - [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
@@ -1132,6 +1146,11 @@ ComputePool，不是把 LLM 迁去 rayron"。迁移面：
 
 ### TODO-019: token 维寄存器分块，消除 per-token 权重重读
 
+**状态（2026-11-21）**：**选项 1 已落地（x86 AVX2）**。F16 的 tiled 为可移植
+标量实现（`dot_f16_f16_bytes` 自带 NEON dispatch），aarch64 上已生效；BF16 / F32
+的 NEON tiled 是独立待办（见清单一节"BF16 / F32 的 NEON token-tiled batched"
+条目——与 IQ NEON kernel 移植是两件不同的 kernel 工作）。
+
 **目标**：让一次权重载入服务多个 token，把权重流量除以分块宽度 NR。图像编辑的文本
 编码与去噪合计占端到端 ~95% 的时间，而算力利用率只有峰值的 ~11%——不是算不动，是
 权重搬不过来。
@@ -1205,6 +1224,42 @@ for token in 0..n_tokens {
   建议先做这条——它不依赖线程池迁移。
 - AuK 那边已记了同类问题（"Per-token matmul batching（`linear_into` 一调一次 token，
   瓶颈）"），两条应共用同一个 kernel 侧分块实现。
+
+#### 已落地（2026-11-21，x86 AVX2）
+
+- **kernel 侧**：`simd_avx2.rs` 新增 `avx2_matmul_packed_tiled!`——与
+  `avx2_matmul_packed!` 同一款逐 (row, token) 点积体（**位级一致**，仅循环嵌套
+  改为 `(row-tile 32 × token-tile 32)` 二维分块，权重 panel 与输入 panel 常驻
+  L2），BF16 / F32 各实例化一份 tiled 版本。**F16 不用 AVX2 tiled**：F16Kernel
+  的 `forward_prepared` 走 `forward_scaled_rows`（激活先转 f16 再 F16×F16 dot），
+  AVX2 tiled 版会跳过激活舍入改变数值（`f16_linear_modes_preserve_existing_
+  rounding` 契约测试当场拦截）——F16 的 tiled 用忠实复刻该语义的标量嵌套循环
+  （`dot_f16_f16_bytes` 自带 SIMD dispatch，可移植），activation f16 转换每
+  token 只做一次。
+- **trait 侧**：`Kernel::supports_token_tiled_batching(n_in)`（能力查询）+
+  `Kernel::forward_batched_rows(input, output, n_in, n_out, n_tokens, row_start,
+  row_end) -> bool`（opt-in 执行，行分区）。BF16（`!bf16_input` 路径）/ F16 /
+  F32 三个 kernel 实现；其余 kernel 返回 false 保持旧路径。
+- **dispatch 侧**：`PreparedRows::matmul_group` 的通用循环前加 tiled 快路径
+  （`rows >= 2` 且组内全部 `!gpu_done` 权重 opt-in）——注意该分支在
+  `pool.compute` 闭包**内部**执行，直接用外层 `(ith, nth)` 行分区，**不能再调
+  `pool.compute`**（首次实现犯过：递归占用线程池自死锁，测试挂 60s+ 定位）。
+  单线程入口 `BF16/F16/F32Kernel::forward_batched` 也在 `n_tokens >= 2` 时改走
+  tiled——breeze / dots / embeddinggemma2 / zdt / qwen35 vision 等直接调用方
+  零改动受益。
+- **验证**：`tiled_batched_matches_per_token_loop_bits`——BF16/F16/F32，
+  33 token × 70 行 × n_in 200（跨 32×32 tile 边界 + 4 元素尾），tiled 输出与
+  逐 token 循环**逐位一致**；既有
+  `prepared_rows_match_sequential_matmul_bits_and_reuse_storage`（含 F16/BF16/F32
+  权重）自动改走 tiled 路径并保持位级断言通过。
+- **基准**（release-fast，BF16 3584×3584 单线程）：128 token 1.56×
+  （666→425 ms）、512 token **1.69×**（2.06→1.22 s）。输入矩阵从 L3 重读成为
+  新的次要瓶颈（每行 tile 重读全部 token），再往上要靠更大的 NR×NT 面板调优；
+  aarch64（20 核，权重流量占比更高）预期收益更大。
+- **遗留**：BF16 / F32 的 NEON tiled（见清单一节独立条目）；`longcat::dit::Layer::forward`
+  仍是逐 token 调 `forward`（f16/bf16 kernel 内部已 tiled，调用方无需改）；
+  `qwen3::trunk::text_encode_forward` 的 `project_tokens` 走
+  `LinearExecutor::run_group` → `matmul_group`，自动获得 tiled 路径。
 
 #### 关联文件
 

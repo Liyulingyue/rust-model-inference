@@ -5,7 +5,7 @@
 //! weight bytes are reinterpreted as `&[f32]` so no dequant step is
 //! required.  See module docs for the shared skeleton.
 
-use crate::avx2_matmul_packed;
+use crate::{avx2_matmul_packed, avx2_matmul_packed_tiled};
 
 #[target_feature(enable = "avx2", enable = "fma")]
 unsafe fn unpack_f32_8(w: *const u8, row_byte: usize, col: usize) -> std::arch::x86_64::__m256 {
@@ -97,3 +97,11 @@ mod tests {
         assert_avx2_eq_scalar("tail 3x40", &weight, &input, n_in, n_out);
     }
 }
+
+avx2_matmul_packed_tiled!(
+    matmul_f32_vs_f32_avx2_tiled,
+    4,
+    unpack_f32_8,
+    unpack_f32_4,
+    scalar_unpack_f32
+);

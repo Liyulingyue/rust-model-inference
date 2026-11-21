@@ -86,10 +86,34 @@ pub unsafe fn matmul_q4_0_vs_q8_0_avx2(
             let ds3 = f16_to_f32(std::ptr::read_unaligned(p3 as *const u16)) * bd;
 
             // Per-lane exact block dot for each row: nib_lane - 8 * y_lane.
-            let dot0 = q4_0_row_block_dot(_mm_loadu_si128(p0.add(2) as *const __m128i), qy, y8, m0f128, ones);
-            let dot1 = q4_0_row_block_dot(_mm_loadu_si128(p1.add(2) as *const __m128i), qy, y8, m0f128, ones);
-            let dot2 = q4_0_row_block_dot(_mm_loadu_si128(p2.add(2) as *const __m128i), qy, y8, m0f128, ones);
-            let dot3 = q4_0_row_block_dot(_mm_loadu_si128(p3.add(2) as *const __m128i), qy, y8, m0f128, ones);
+            let dot0 = q4_0_row_block_dot(
+                _mm_loadu_si128(p0.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+            let dot1 = q4_0_row_block_dot(
+                _mm_loadu_si128(p1.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+            let dot2 = q4_0_row_block_dot(
+                _mm_loadu_si128(p2.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+            let dot3 = q4_0_row_block_dot(
+                _mm_loadu_si128(p3.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
 
             cv0 = _mm256_fmadd_ps(_mm256_set1_ps(ds0), _mm256_cvtepi32_ps(dot0), cv0);
             cv1 = _mm256_fmadd_ps(_mm256_set1_ps(ds1), _mm256_cvtepi32_ps(dot1), cv1);
@@ -381,53 +405,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod q4_perf_probe {
-    // TEMPORARY perf probe: current kernel vs scalar on the real Q4_0 tensor.
-    #[test]
-    #[ignore = "manual perf probe"]
-    fn q4_0_perf_probe() {
-        if !crate::ops::has_avx2_fma() {
-            return;
-        }
-        let path = "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_0.gguf";
-        let loader = match crate::core::loader::GGUFLoader::from_file(path) {
-            Ok(l) => l,
-            Err(_) => return,
-        };
-        let tensor = loader
-            .tensors()
-            .iter()
-            .find(|t| t.name == "blk.0.attn_q.weight")
-            .expect("attn_q not found");
-        let bytes = loader.tensor_slice(&tensor.name).unwrap().to_vec();
-        let n_in = tensor.dims[0] as usize;
-        let blocks = n_in / 32;
-        let q8: Vec<u8> = (0..n_in).map(|i| ((i as i32 % 31) - 15) as i8 as u8).collect();
-        let scales: Vec<f32> = (0..blocks).map(|b| 0.01 + (b as f32) * 0.001).collect();
-        let iters = 2000;
-        let mut acc = 0.0f32;
-        let mut out = vec![0.0f32; 4];
-        let t0 = std::time::Instant::now();
-        for _ in 0..iters {
-            unsafe {
-                super::matmul_q4_0_vs_q8_0_avx2(&bytes, &q8, &scales, &mut out, n_in, 0, 4);
-            }
-        }
-        let t_avx2 = t0.elapsed();
-        let t0 = std::time::Instant::now();
-        for _ in 0..iters {
-            crate::ops::kernel::q4_0::matmul_q4_0_scalar_range(
-                &bytes, &q8, &scales, &mut out, n_in, 4, 0, 1,
-            );
-        }
-        let t_scalar = t0.elapsed();
-        std::hint::black_box(acc);
-        println!(
-            "q4_0 attn_q 4 rows/dot: avx2(current) {:?}  scalar {:?}  ratio {:.2}x",
-            t_avx2,
-            t_scalar,
-            t_scalar.as_secs_f64() / t_avx2.as_secs_f64()
-        );
-    }
-}
