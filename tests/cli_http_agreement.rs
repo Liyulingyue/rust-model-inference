@@ -94,17 +94,15 @@ fn cli_text(
     path: &std::path::Path,
     max_tokens: usize,
     temperature: f32,
-    thinking: bool,
+    thinking: Option<bool>,
     dspark: Option<&std::path::Path>,
     ngram: Option<(usize, usize)>,
 ) -> Option<String> {
     // The CLI's `--thinking` flag and the server's `enable_thinking` field
-    // must be set explicitly: the two fronts default differently
-    // (CLI `options.thinking` is `false` unless `--thinking` is passed;
-    // `build_prompt`'s `enable_thinking = None` resolves to `true` for
-    // thinking-tuned archs like lfm2moe/lfm2). Relying on the defaults
-    // here would compare different prompt tails and report a spurious
-    // disagreement.
+    // are both tri-state: `None` means "whatever the model's own default
+    // is", so the two fronts have to agree on it as well. The cases below
+    // therefore pass `None` to both when they compare the default path,
+    // and an explicit mode to both when they compare a mode.
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
     command
         .arg("--model")
@@ -124,11 +122,13 @@ fn cli_text(
         command.arg("--ngram-draft").arg(draft.to_string());
         command.arg("--ngram-lookup").arg(lookup.to_string());
     }
-    command.arg(if thinking {
-        "--thinking"
-    } else {
-        "--no-thinking"
-    });
+    if let Some(thinking) = thinking {
+        command.arg(if thinking {
+            "--thinking"
+        } else {
+            "--no-thinking"
+        });
+    }
     let output = command.output().ok()?;
     if !output.status.success() {
         eprintln!("CLI failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -293,20 +293,15 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     // disagreed on the *default* — the CLI passed `thinking=false` while
     // `build_prompt` had no such field at all).
     //
-    // The qwen35 CLI front silently ignores `--thinking` — the prompt ids
-    // are identical with and without the flag, while `build_prompt`'s jinja
-    // path honors `enable_thinking` — so sweeping it there would compare two
-    // different prompts. That divergence is tracked in TODO.md ("qwen35 CLI
-    // --thinking is silently ignored"); until it is fixed, thinking is
-    // excluded from the qwen35 sweep instead of failing here.
-    let thinking_modes: &[bool] = if arch == "qwen35" {
-        &[false]
-    } else {
-        &[false, true]
-    };
+    // The qwen35 CLI front used to ignore `--thinking` altogether: it built
+    // the prompt by hand, so the flag never reached the template while the
+    // HTTP front honoured `enable_thinking`. Both fronts now render the
+    // checkpoint's own chat template, so the sweep covers qwen35 as well.
+    let thinking_modes: &[bool] = &[false, true];
     for &thinking in thinking_modes {
         for temperature in [0.0f32] {
-            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, thinking, None, None) else {
+            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, Some(thinking), None, None)
+            else {
                 panic!("CLI failed: arch={arch} thinking={thinking} temperature={temperature}");
             };
             let http = http_text(loader, temperature, &[], PROMPT, Some(thinking), None, None);
@@ -366,7 +361,7 @@ fn cli_and_http_agree_on_dspark_speculative_decode() {
     let sidecar_loader: &'static GGUFLoader = Box::leak(Box::new(
         GGUFLoader::from_file(&sidecar).expect("RMI_AGREEMENT_DSPARK must point at a GGUF"),
     ));
-    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, false, Some(&sidecar), None) else {
+    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, None, Some(&sidecar), None) else {
         panic!("CLI failed with --dspark-model: arch={arch}");
     };
     let http = http_text(loader, 0.0, &[], PROMPT, None, Some(sidecar_loader), None);
@@ -410,7 +405,7 @@ fn cli_and_http_agree_on_ngram_speculative_decode() {
         return;
     }
     let ngram = (4usize, 3usize);
-    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, false, None, Some(ngram)) else {
+    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, None, None, Some(ngram)) else {
         panic!("CLI failed with --ngram-draft: arch={arch}");
     };
     let http = http_text(loader, 0.0, &[], PROMPT, None, None, Some(ngram));
@@ -500,10 +495,10 @@ fn cli_and_http_agree_on_image_input() {
         panic!("CLI printed no recognisable output line; stdout was:\n{stdout}");
     };
 
-    // Vision paths: `None` keeps the legacy behaviour — every arch with a
-    // vision-compatible `build_prompt` treats the missing toggle the same
-    // way on both fronts (the CLI's `--thinking` does not reach the
-    // multimodal path, and the vision builders ignore the flag entirely).
+    // Vision paths: `None` on both fronts, so the comparison covers the
+    // default path. The CLI's `--thinking` reaches the multimodal prompt
+    // builder now, so the two fronts pick the same renderer and the same
+    // reasoning mode.
     let http = http_text(
         loader,
         0.0,

@@ -48,7 +48,7 @@ impl Lfm3JevScorer {
             &self.template,
             Some(system),
             payload,
-            false,
+            Some(false),
         )
     }
 }

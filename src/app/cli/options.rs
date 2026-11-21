@@ -286,7 +286,7 @@ pub fn yue2_cli_options(options: &CliOptions) -> Result<Option<YuE2CliOptions>, 
         Some("--resolution")
     } else if options.cfg_scale.is_some() {
         Some("--cfg-scale")
-    } else if options.thinking {
+    } else if options.thinking.unwrap_or(false) {
         Some("--thinking")
     } else {
         None
@@ -556,7 +556,7 @@ pub fn dreamx_cli_options(options: &CliOptions) -> Result<Option<DreamXCliOption
         Some("--profile")
     } else if options.compute_policy() != crate::compute::ComputePolicy::Cpu {
         Some("--gpu/--compute")
-    } else if options.thinking {
+    } else if options.thinking.unwrap_or(false) {
         Some("--thinking")
     } else if options.language.is_some() {
         Some("--language")
@@ -686,7 +686,7 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
         Some("--bench")
     } else if options.profile {
         Some("--profile")
-    } else if options.thinking {
+    } else if options.thinking.unwrap_or(false) {
         Some("--thinking")
     } else if options.language.is_some() {
         Some("--language")

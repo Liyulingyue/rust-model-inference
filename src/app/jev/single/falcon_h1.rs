@@ -108,7 +108,7 @@ impl JevScorer for FalconH1JevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

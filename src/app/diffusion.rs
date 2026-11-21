@@ -469,7 +469,7 @@ pub fn run_mage_flow_cli(
         (options.dump_logits, "--dump-logits"),
         (options.bench, "--bench"),
         (options.profile, "--profile"),
-        (options.thinking, "--thinking"),
+        (options.thinking.unwrap_or(false), "--thinking"),
         (options.language.is_some(), "--language"),
         (options.lyrics.is_some(), "--lyrics"),
         (options.max_tokens.is_some(), "--max-tokens"),

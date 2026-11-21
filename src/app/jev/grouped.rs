@@ -216,7 +216,7 @@ fn grouped_prompt_via_jinja(
         template,
         Some(system),
         payload,
-        false,
+        Some(false),
     )
     .map(Some)
 }

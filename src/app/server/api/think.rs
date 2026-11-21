@@ -23,6 +23,13 @@
 pub struct ThinkFilter {
     pending: String,
     state: State,
+    /// The reasoning seen so far inside the open block.
+    ///
+    /// It is only *used* when the block never closes (the model ran out of
+    /// budget mid-thought): the caller can then hand it to the client
+    /// instead of returning an empty completion. A block that closes is
+    /// dropped, as before.
+    reasoning: String,
 }
 
 /// Current mode of the filter. `Open` is the leading-only think-block path;
@@ -49,6 +56,7 @@ impl ThinkFilter {
         Self {
             pending: String::new(),
             state: State::Unknown,
+            reasoning: String::new(),
         }
     }
 
@@ -137,14 +145,21 @@ impl ThinkFilter {
     /// `Open` -> emit text after ``, switch to `Passthrough`.
     fn advance_open(&mut self) -> String {
         if let Some(offset) = self.pending.find(THINK_CLOSE) {
+            // The block closes: its reasoning is dropped, as before.
             let output = self.pending[offset + THINK_CLOSE.len()..].to_string();
             self.pending.clear();
+            self.reasoning.clear();
             self.state = State::Passthrough;
             return output;
         }
-        // Keep only a possible suffix of the closer; drop reasoning text.
+        // Keep only a possible suffix of the closer; the reasoning text goes
+        // to `self.reasoning`, which is only surfaced when the block never
+        // closes.
         let keep = closer_prefix_keep(&self.pending);
-        self.pending = self.pending.split_off(self.pending.len() - keep);
+        let body = std::mem::take(&mut self.pending);
+        let split = body.len() - keep;
+        self.reasoning.push_str(&body[..split]);
+        self.pending = body[split..].to_string();
         String::new()
     }
 
@@ -178,16 +193,33 @@ impl ThinkFilter {
     /// Flush at end of generation. Returns anything still worth emitting;
     /// an unterminated reasoning block is discarded.
     pub fn finish(&mut self) -> String {
-        // An `Open` block that never closes: discard (model went straight
-        // to thinking with no answer). An `OrphanClose` that never met its
-        // opener: passthrough whatever was buffered.
+        self.finish_with_reasoning().0
+    }
+
+    /// Flush at end of generation, keeping the reasoning that never closed.
+    ///
+    /// A reasoning block that ran to the end of the token budget (`<think>`
+    /// with no matching `</think>`) is not an answer, so it must not be
+    /// handed to the client *as* one — but dropping it silently leaves the
+    /// client with an empty completion and no idea what the model was
+    /// doing. The caller decides how to surface it (the HTTP layer hands
+    /// it over as the visible text when there is no answer at all).
+    ///
+    /// The returned string is the passthrough text (empty when a reasoning
+    /// block was open); the second element is the unfinished reasoning, if
+    /// there was any.
+    pub fn finish_with_reasoning(&mut self) -> (String, Option<String>) {
         match self.state {
             State::Open => {
                 self.state = State::Passthrough;
-                self.pending.clear();
-                String::new()
+                let reasoning = std::mem::take(&mut self.reasoning);
+                let reasoning = reasoning.trim();
+                (
+                    String::new(),
+                    (!reasoning.is_empty()).then(|| reasoning.to_string()),
+                )
             }
-            _ => std::mem::take(&mut self.pending),
+            _ => (std::mem::take(&mut self.pending), None),
         }
     }
 }
@@ -268,6 +300,42 @@ mod tests {
             out.is_empty(),
             "unterminated reasoning must not leak: {out:?}"
         );
+    }
+
+    /// The same unterminated block, but asked for as reasoning instead of
+    /// as text: the caller can then hand it to the client instead of
+    /// returning an empty completion.
+    #[test]
+    fn unterminated_block_is_available_as_reasoning() {
+        let open = THINK_OPEN;
+        let mut filter = ThinkFilter::new();
+        for chunk in [open, " thinking forever", " still thinking"] {
+            filter.push(chunk);
+        }
+        let (text, reasoning) = filter.finish_with_reasoning();
+        assert!(text.is_empty(), "the reasoning is not an answer: {text:?}");
+        assert_eq!(
+            reasoning.as_deref(),
+            Some("thinking forever still thinking"),
+            "the unfinished reasoning must survive for the caller to surface"
+        );
+    }
+
+    /// A finished answer has no reasoning to hand back.
+    #[test]
+    fn a_closed_block_leaves_no_reasoning_behind() {
+        let open = THINK_OPEN;
+        let close = THINK_CLOSE;
+        let mut filter = ThinkFilter::new();
+        let mut out = String::new();
+        for chunk in [open, " secret", close, "Paris"] {
+            out.push_str(&filter.push(chunk));
+        }
+        let (text, reasoning) = filter.finish_with_reasoning();
+        // The answer already left through `push`; nothing is buffered now.
+        assert_eq!(text, "");
+        assert_eq!(reasoning, None);
+        assert_eq!(out, "Paris");
     }
 
     #[test]

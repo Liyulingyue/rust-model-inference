@@ -85,7 +85,7 @@ impl JevScorer for NemotronHJevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

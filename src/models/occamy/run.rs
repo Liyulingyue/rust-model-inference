@@ -61,7 +61,7 @@ pub fn run_inference(
             jinja,
             &|key| source.metadata(key).cloned(),
             prompt,
-            false,
+            Some(false),
         )? {
             Some(tokens) => tokens,
             None => crate::prompt::build_qwen_chat_prompt(

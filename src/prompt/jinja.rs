@@ -14,7 +14,11 @@
 //! - `messages` — list of `{role, content}` objects
 //! - `add_generation_prompt` — bool; whether to open the assistant turn
 //! - `enable_thinking` / `preserve_thinking` — bool, read by Qwen3 and
-//!   LFM2.5 respectively. We pass both; unused ones are inert.
+//!   LFM2.5 respectively. We pass both; unused ones are inert. Both are
+//!   *tri-state*: `None` leaves the key undefined inside the template,
+//!   which is what the shipped templates test for
+//!   (`{%- if enable_thinking is defined and enable_thinking is false %}`
+//!   means "only an explicit `false` changes the prompt").
 //! - `bos_token` / `eos_token` — the literal control strings, so a
 //!   template that emits `{{ bos_token }}` produces a token the encoder
 //!   can resolve back to the BOS id.
@@ -116,30 +120,37 @@ impl JinjaChatTemplate {
     /// transcript for parity comparison, and `true` for live generation —
     /// getting it backwards silently changes every token after the last
     /// user turn.
+    /// `enable_thinking` is tri-state on purpose. `None` leaves the key
+    /// *undefined* inside the template, which is what the shipped templates
+    /// test (`{%- if enable_thinking is defined and enable_thinking is false %}`)
+    /// to mean "use the model's training default". Materialising `None` as
+    /// `false` would inject the empty think block into every thinking-tuned
+    /// model whose template has such a branch.
     pub fn render(
         &self,
         messages: &[ChatMessage],
         add_generation_prompt: bool,
-        enable_thinking: bool,
+        enable_thinking: Option<bool>,
         special: &SpecialTokens,
     ) -> Result<String, String> {
         let messages: Vec<Value> = messages
             .iter()
             .map(|m| json!({ "role": m.role, "content": m.content }))
             .collect();
-        let ctx = json!({
-            "messages": messages,
-            "add_generation_prompt": add_generation_prompt,
-            "enable_thinking": enable_thinking,
-            "preserve_thinking": enable_thinking,
-            "bos_token": special.bos,
-            "eos_token": special.eos,
-            // Always empty: `{% if tools %}` must be falsy. Tool calling
-            // is not wired up, and pretending otherwise would render a
-            // tools preamble the model has no way to satisfy.
-            "tools": [],
-        });
-        self.render_in(&self.env, &ctx)
+        let mut ctx = serde_json::Map::new();
+        ctx.insert("messages".into(), json!(messages));
+        ctx.insert("add_generation_prompt".into(), json!(add_generation_prompt));
+        if let Some(thinking) = enable_thinking {
+            ctx.insert("enable_thinking".into(), json!(thinking));
+            ctx.insert("preserve_thinking".into(), json!(thinking));
+        }
+        ctx.insert("bos_token".into(), json!(special.bos));
+        ctx.insert("eos_token".into(), json!(special.eos));
+        // Always empty: `{% if tools %}` must be falsy. Tool calling
+        // is not wired up, and pretending otherwise would render a
+        // tools preamble the model has no way to satisfy.
+        ctx.insert("tools".into(), json!([]));
+        self.render_in(&self.env, &Value::Object(ctx))
     }
 
     /// Render a model's full message/tool schema without flattening its content.
@@ -285,7 +296,7 @@ pub fn render_tokens(
     template: &JinjaChatTemplate,
     messages: &[ChatMessage],
     add_generation_prompt: bool,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Vec<u32>, String> {
     let special = special_tokens_from_tokenizer(tokenizer);
     let text = template.render(messages, add_generation_prompt, enable_thinking, &special)?;
@@ -391,7 +402,7 @@ pub fn conversation_tokens_with(
     template: Option<&JinjaChatTemplate>,
     messages: &[ChatMessage],
     add_generation_prompt: bool,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Option<Vec<u32>>, String> {
     let Some(template) = template else {
         return Ok(None);
@@ -416,7 +427,7 @@ pub fn single_turn_tokens(
     opts: &Options,
     metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
     user: &str,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Option<Vec<u32>>, String> {
     let Some(template) = opts.resolve(metadata)? else {
         return Ok(None);
@@ -439,7 +450,7 @@ pub fn single_turn_text(
     bos: &str,
     eos: &str,
     user: &str,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Option<String>, String> {
     let Some(template) = opts.resolve(metadata)? else {
         return Ok(None);
@@ -467,7 +478,7 @@ pub fn conversation_tokens(
     metadata: &dyn Fn(&str) -> Option<crate::core::tensor::MetaValue>,
     messages: &[ChatMessage],
     add_generation_prompt: bool,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Option<Vec<u32>>, String> {
     let template = opts.resolve(metadata)?;
     // Routed through `render_tokens` so the tokenizer's BOS contract applies
@@ -589,7 +600,7 @@ pub fn media_conversation_tokens(
     media: &[MediaPart],
     user_text: &str,
     system_text: Option<&str>,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Option<Vec<u32>>, String> {
     let media_counts: Vec<usize> = media.iter().map(|m| m.token_count).collect();
     let Some(mut ids) = text_conversation_tokens(
@@ -630,7 +641,7 @@ pub fn text_conversation_tokens(
     system_text: Option<&str>,
     user_text: &str,
     media: &[MediaPart],
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Option<Vec<u32>>, String> {
     let Some(template) = template else {
         return Ok(None);
@@ -671,7 +682,7 @@ pub fn render_text_conversation(
     template: &JinjaChatTemplate,
     system_text: Option<&str>,
     user_text: &str,
-    enable_thinking: bool,
+    enable_thinking: Option<bool>,
 ) -> Result<Vec<u32>, String> {
     let mut messages: Vec<ChatMessage> = Vec::new();
     if let Some(system) = system_text.filter(|s| !s.trim().is_empty()) {
@@ -709,7 +720,7 @@ mod tests {
         t.render(
             &[ChatMessage::text("user", "hi")],
             agp,
-            thinking,
+            Some(thinking),
             &SpecialTokens::default(),
         )
         .unwrap()
@@ -766,6 +777,60 @@ mod tests {
         let src = "{% if enable_thinking %}T{% else %}N{% endif %}";
         assert_eq!(render(src, true, true), "T");
         assert_eq!(render(src, true, false), "N");
+    }
+
+    #[test]
+    fn undefined_enable_thinking_stays_undefined() {
+        // The shipped templates disagree on what "not set" means: the
+        // Qwen3-style ones test `enable_thinking is defined and
+        // enable_thinking is false` (so an undefined value keeps the
+        // reasoning block), while the Qwen3.5 one tests `... is true`
+        // (so an undefined value closes it). The contract is the same
+        // either way: `None` must leave the key *out* of the context
+        // instead of materialising it as `false`.
+        let src = "{% if enable_thinking is defined %}DEFINED{% else %}UNDEFINED{% endif %}";
+        let t = JinjaChatTemplate::compile(src, "test").unwrap();
+        let msgs = [ChatMessage::text("user", "hi")];
+        assert_eq!(
+            t.render(&msgs, true, None, &SpecialTokens::default())
+                .unwrap(),
+            "UNDEFINED"
+        );
+        assert_eq!(
+            t.render(&msgs, true, Some(false), &SpecialTokens::default())
+                .unwrap(),
+            "DEFINED"
+        );
+        assert_eq!(
+            t.render(&msgs, true, Some(true), &SpecialTokens::default())
+                .unwrap(),
+            "DEFINED"
+        );
+    }
+
+    #[test]
+    fn undefined_enable_thinking_keeps_the_template_default() {
+        // The llama.cpp idiom the shipped thinking models use: only an
+        // explicit `false` injects the empty think block.
+        let src = "{%- if enable_thinking is defined and enable_thinking is false %}\
+                   EMPTY{% else %}OPEN{% endif %}";
+        let t = JinjaChatTemplate::compile(src, "test").unwrap();
+        let msgs = [ChatMessage::text("user", "hi")];
+        assert_eq!(
+            t.render(&msgs, true, None, &SpecialTokens::default())
+                .unwrap(),
+            "OPEN"
+        );
+        assert_eq!(
+            t.render(&msgs, true, Some(false), &SpecialTokens::default())
+                .unwrap(),
+            "EMPTY"
+        );
+        assert_eq!(
+            t.render(&msgs, true, Some(true), &SpecialTokens::default())
+                .unwrap(),
+            "OPEN"
+        );
     }
 
     #[test]
@@ -916,7 +981,7 @@ mod tests {
                     ]),
                 }],
                 true,
-                false,
+                Some(false),
                 &SpecialTokens::default(),
             )
             .unwrap();
@@ -965,8 +1030,14 @@ mod tests {
         let emitting = JinjaChatTemplate::compile("<s>{{ messages[0].content }}", "t").unwrap();
         let plain = JinjaChatTemplate::compile("{{ messages[0].content }}", "t").unwrap();
         let count_bos = |tok: &MockTokenizer, tpl: &JinjaChatTemplate| {
-            let ids =
-                render_tokens(tok, tpl, &[ChatMessage::text("user", "hi")], true, false).unwrap();
+            let ids = render_tokens(
+                tok,
+                tpl,
+                &[ChatMessage::text("user", "hi")],
+                true,
+                Some(false),
+            )
+            .unwrap();
             ids.iter().filter(|&&t| t == 1).count()
         };
 
@@ -1034,7 +1105,7 @@ mod tests {
             t.render(
                 &[ChatMessage::text("user", "hello")],
                 true,
-                false,
+                Some(false),
                 &SpecialTokens::default()
             )
             .unwrap(),
@@ -1061,7 +1132,7 @@ mod tests {
             t.render(
                 &[ChatMessage::text("user", "x")],
                 true,
-                false,
+                Some(false),
                 &SpecialTokens::default()
             )
             .unwrap(),
@@ -1125,7 +1196,7 @@ mod tests {
             ]),
         }];
         let out = t
-            .render(&msgs, true, false, &SpecialTokens::default())
+            .render(&msgs, true, Some(false), &SpecialTokens::default())
             .unwrap();
         assert_eq!(out, "<|vision_start|><|image_pad|><|vision_end|>hi");
     }
@@ -1225,7 +1296,7 @@ mod tests {
                 .render(
                     &[ChatMessage::text("user", "Capital of France?")],
                     true,
-                    thinking,
+                    Some(thinking),
                     &special,
                 )
                 .expect("render");

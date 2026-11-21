@@ -92,7 +92,7 @@ impl JevScorer for Gemma4JevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }
