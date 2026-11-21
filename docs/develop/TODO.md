@@ -40,15 +40,37 @@ NEON on aarch64; no AVX-512).
       Q3_K **2.75×** vs scalar。端到端 Qwen3-0.6B（5 批中位）：Q2_K prefill 59→111 t/s、gen 42→65 t/s；
       Q3_K_M prefill 74→103 t/s、gen 50→59 t/s。parity：随机 64 super-block scalar↔AVX2 相对差
       ≤ 2.1e-6（f32 舍入级），新增 `q2k/q3k_avx2_matches_scalar_random_superblocks` 测试。
-- [x] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复**（已做，选项 1）—
-      `src/ops/kernel/iq4_xs.rs` 的 `iq_kernel_impl!` macro 与 IQ4_XS / IQ2_XS 手写 impl 的
-      `forward_prequantized` 已从 stub（写 0）改为完整 dequant-to-f32 + dot 路径（与
-      IQ4_NL / Q4_K 同款：Q8_0 activation 按 per-32 scale 反量化，权重行 `$dequant_row`
-      反量化后求点积）。生产仍走 `uses_q8_k()` → `forward_prepared`（Q8K 路径），此路径
-      只为接口完整性。新增 8 个类型（IQ2_XXS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S /
-      IQ2_XS / IQ4_XS）各一个 2-row 测试：全 1 activation 下点积 = 行和，与
-      `dequantize_row_*` 参考逐位一致。选项 2（SIMD kernel）仍需 IQ2_XS / IQ3_S 的 GGUF
-      测试模型 + llama.cpp Oracle 才能做精度验证，未做。
+- [x] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复 + 生产路径 SIMD**（选项 1、2 均已做）—
+      选项 1（2026-11-21）：`src/ops/kernel/iq4_xs.rs` 的 `iq_kernel_impl!` macro 与 IQ4_XS /
+      IQ2_XS 手写 impl 的 `forward_prequantized` 已从 stub（写 0）改为完整 dequant-to-f32 +
+      dot 路径（与 IQ4_NL / Q4_K 同款）。生产仍走 `uses_q8_k()` → `forward_prepared`（Q8K
+      路径），此路径只为接口完整性。8 个类型各一个 2-row 测试，与 `dequantize_row_*`
+      参考逐位一致。
+      选项 2（2026-11-21，原判断"暂无法做精度验证"已过时）：生产的 Q8K 热路径
+      `vec_dot_iq*_q8k` 里 IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S
+      七个类型当时全是 scalar——pinned llama.cpp `b96806d9` 的 x86 arch 里**已有**这七个
+      的 AVX2 kernel，全部按其结构移植到 `src/ops/quant/avx2_k.rs` 并接通 dispatch。
+      验证：① llama.cpp 逐位 oracle（`oracle_vecdot_harness` 链接 pinned 构建的
+      libggml-cpu；注意必须先 `ggml_cpu_init()` 填 FP16 查找表）对随机 64 super-block
+      输入，7 个类型 AVX2 输出与 llama.cpp **逐位一致**（`RMI_LLAMA_ORACLE=<harness>
+      cargo test --lib iq_avx2_matches_llama_cpp_oracle_bitwise -- --ignored`）；
+      ② scalar↔AVX2 parity（随机 super-block + 7 个本地 IQ 模型整行，rel < 1e-3）；
+      ③ kernel 级基准（release，attn_q 1024 值/次）：iq2_xxs 2.60x、iq2_xs 7.21x、
+      iq2_s 2.73x、iq3_xxs 6.01x、iq3_s 3.36x、iq1_m 3.42x、iq1_s 3.96x；
+      ④ E2E：IQ2_S / IQ3_S greedy 生成正确（"The capital of France is Paris"）。
+      **顺带修了 scalar `vec_dot_iq2_xs_q8k_scalar` 只处理半行的 bug**（16/32 个 u16，
+      对照 llama.cpp generic 修正；此前无模型可验，从未被发现）。
+      **模型资产**：`models/Qwen3-0.6B-GGUF/` 补齐 IQ2_XS / IQ2_S / IQ3_S——ModelScope
+      （unsloth / bartowski 镜像）均无这三个文件，用 pinned llama-quantize 自 BF16 +
+      unsloth imatrix 本地生成；SHA256：IQ2_XS `0587d6121f5401f8018f43309235590b0444e4
+      af73a8bceca96722ddfdf1f109`、IQ2_S `ce788484aff33ee76e846bc1a52d015d30f05e27637
+      d3fd30249a3ee4eb35925`、IQ3_S `fac96f9f3fe11987acd69c83294461f0176a259b1d78506
+      ffa60bc290d9ea012`。已知边界：≤2.3 bpw 的 UD-IQ2_XXS / UD-IQ1_S / UD-IQ1_M /
+      本地 IQ2_XS 在 0.6B 模型上 greedy 输出退化为乱码——**llama.cpp 同权重同 prompt
+      同样乱码**（llama-cli b96806d9 实测：IQ2_XS "ention =="、UD-IQ2_XXS "-- exam.
+      informat--"，而 IQ2_S / IQ3_S 正常），且 kernel 层已逐位对拍一致 → 是量化质量
+      本身（2.0-2.3 bpw @ 0.6B 参数量），不是 kernel 问题；≥2.5 bpw 的 IQ2_S / IQ3_S
+      正常（"The capital of France is Paris"）。
 - [ ] **AVX-VNNI int8 dot 加速**（前提已修正：真正的目标是 **AVX-VNNI-INT8 的
       `_mm256_dpbssd_epi32`**，待做）— 详见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速)。
       原条目的两处前提错误已查证并实测（2026-11-21，Meteor Lake dev box）：
@@ -62,6 +84,25 @@ NEON on aarch64; no AVX-512).
       无 AVX-512，它是那里唯一可用的单指令 int8 dot）、Granite Rapids / Zen 5（那里更优的
       是 zmm 版 `_mm512_dpbssd_epi32`）。前置：需要一台 `avxvnniint8` 机器实跑 parity
       测试（复用 `avxvnni.rs` 的 3 测试模板），本机无法验证，不能盲接 dispatch。
+- [ ] **IQ2/IQ3/IQ1 × Q8_K 的 NEON kernel（aarch64）** — 2026-11-21 的 AVX2 移植只覆盖
+      x86；aarch64 上这七个类型仍走 scalar（`neon_k.rs` 目前只有 iq4_nl 的 NEON）。
+      pinned llama.cpp `b96806d9` 的 `ggml-cpu/arch/arm/quants.c` 有全部七个的 NEON
+      kernel（iq2_xxs / iq2_xs / iq2_s / iq3_xxs / iq3_s / iq1_s / iq1_m，gate 在
+      `__ARM_FEATURE_DOTPROD`），按 AVX2 同款流程移植：结构对齐 + oracle 对拍。
+      **前置**：本机是 x86，NEON kernel 必须在 aarch64 机器上开发验证（含
+      `iq_avx2_matches_llama_cpp_oracle_bitwise` 的 ARM 版 oracle harness）；仓库当前
+      无 aarch64 CI 作业（见下方"aarch64 CI"条目），接入前先补交叉编译或 CI 门禁，
+      不盲接 dispatch。
+- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — 仓库 Vulkan 侧目前只有 Q8_0 / Q4_K /
+      （BF16 等）matmul，IQ 类型完全走 CPU（`src/vulkan/` 无任何 IQ shader）。
+      pinned llama.cpp 有现成参考：`ggml/src/ggml-vulkan/vulkan-shaders/` 下七个类型的
+      `mul_mat_vec_iq*.comp` + `dequant_iq*.comp`（iq1_m / iq1_s / iq2_s / iq2_xs /
+      iq2_xxs / iq3_s / iq3_xxs）。移植时注意 llama.cpp 的 shader 是
+      mul-mat-vec（per-token 解码侧）形态，与仓库现有 `matmul_q4k.rs` 的 prefill 形态
+      不同，需决定先补 decode 侧还是两侧都要；数值验收照仓库惯例对 CPU 路径比
+      （Vulkan IQ shader 一旦上线，`PreparedRows::matmul_group` 的 `uses_q8_k()` 权重
+      会开始走 GPU，需与本次逐位对拍过的 AVX2 路径做同机对照）。验证设备：本机若无
+      Vulkan 设备则按 `amd-cloud-gpu-test` skill（用户点名才用）。
 - [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
 - [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
       文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
