@@ -451,9 +451,8 @@ mod tests {
             fn $name() {
                 let n_in = 256;
                 let n_out = 2;
-                let dequant = |bytes: &[u8], out: &mut [f32]| {
-                    crate::ops::quant::$dequant(bytes, out)
-                };
+                let dequant =
+                    |bytes: &[u8], out: &mut [f32]| crate::ops::quant::$dequant(bytes, out);
                 let mut weight = Vec::new();
                 for seed in [$seed, $seed.wrapping_add(0x9E37_79B9)] {
                     weight.extend(finite_random_super_block($block_bytes, seed, &dequant));

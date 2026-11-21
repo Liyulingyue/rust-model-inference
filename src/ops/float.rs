@@ -65,6 +65,8 @@ static HAS_AVX2_FMA: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
 static HAS_F16C: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
+static HAS_AVXVNNI: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "vulkan")]
@@ -246,8 +248,10 @@ fn init_cpu_features() {
     }
     let avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
     let f16c = is_x86_feature_detected!("f16c");
+    let avxvnni = is_x86_feature_detected!("avxvnni");
     HAS_AVX2_FMA.store(avx2_fma, Ordering::Relaxed);
     HAS_F16C.store(f16c, Ordering::Relaxed);
+    HAS_AVXVNNI.store(avxvnni, Ordering::Relaxed);
     INIT_DONE.store(true, Ordering::Relaxed);
 }
 
@@ -281,6 +285,28 @@ pub fn has_f16c() -> bool {
 #[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
 pub const fn has_f16c() -> bool {
+    false
+}
+
+/// AVX-VNNI (`vpdpbusd`, CPUID `avx_vnni`): one-instruction int8 dot.
+/// Used by the `q8_0::avxvnni` reference kernel and its tests; the
+/// production Q8_0 dispatch deliberately stays on AVX2 (see TODO-AVX-VNNI
+/// in docs/develop/TODO.md).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn has_avxvnni() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVXVNNI.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avxvnni() -> bool {
     false
 }
 
