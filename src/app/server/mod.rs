@@ -2289,8 +2289,12 @@ pub fn run_server() {
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
         Backend::Video(_) => router.route(
+            // 256 KiB covers the documented 65,536-byte prompt limit even in
+            // its worst JSON encoding (a prompt of all 4-byte characters
+            // escapes to ~12 bytes per character, ~196 KiB); 128 KiB would
+            // have rejected such prompts with 413 before validation ran.
             "/v1/videos/generations",
-            post(video_generation::generate).layer(DefaultBodyLimit::max(128 * 1024)),
+            post(video_generation::generate).layer(DefaultBodyLimit::max(256 * 1024)),
         ),
         Backend::Pjit(_) | Backend::Diffusion(_) => {
             router.route("/v1/images/generations", post(image_generation::generate))
