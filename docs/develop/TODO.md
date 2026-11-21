@@ -31,8 +31,15 @@ NEON on aarch64; no AVX-512).
       `cli_and_http_agree_on_image_input` 这一档（CLI `--mmproj --image` 与 HTTP 带图
       请求逐 token 对齐）。拿到模型后补一条实测结论，并确认 HTTP 的
       `enable_thinking` / 工具调用在带图时也保持一致。
-- [ ] **Q2_K / Q3_K SIMD 加速** — 当前 scalar 5-9 t/s。仿 `vec_dot_q4k_q8k_avx2` 写 `_avx2` AVX2 kernel。
-      预期 5-10× 加速，目标 30-50 t/s。详见 `docs/OPTIMIZATION.md` § "Quant Kernel 补全"。
+- [x] **Q2_K / Q3_K SIMD 加速** — 2026-11-21 完成（分支 `feat/q2k-q3k-avx2-simd`）。按 pinned llama.cpp
+      `ggml_vec_dot_q2_K_q8_K` / `ggml_vec_dot_q3_K_q8_K` AVX2 结构重写 `avx2_k.rs` 两个 kernel：
+      全 SIMD 2-bit 解包（`srli_epi16` + mask）+ `maddubs`（u8×i8→i16 对和）+ scale 经
+      `get_scale_shuffle_q3k` 同款 shuffle 内嵌 `madd`，每 super-block 一个 i32 累加器。
+      旧实现的瓶颈是 Q2_K 标量解包循环与两者每 16 元素一次的窄水平归约。
+      Kernel 级（512 行 × 4096 列 microbench，`examples/bench_kquant_dot.rs`）：Q2_K **7.5×**、
+      Q3_K **2.75×** vs scalar。端到端 Qwen3-0.6B（5 批中位）：Q2_K prefill 59→111 t/s、gen 42→65 t/s；
+      Q3_K_M prefill 74→103 t/s、gen 50→59 t/s。parity：随机 64 super-block scalar↔AVX2 相对差
+      ≤ 2.1e-6（f32 舍入级），新增 `q2k/q3k_avx2_matches_scalar_random_superblocks` 测试。
 - [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
       的 `iq_kernel_impl!` macro 给 IQ2_XXS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S 生成了
       Kernel trait impl，`forward_prepared` 正确调 `vec_dot_*_q8k` scalar（生产走 Q8K 路径无 panic）；

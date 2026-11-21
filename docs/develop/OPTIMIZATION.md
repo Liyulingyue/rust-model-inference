@@ -163,9 +163,9 @@ SILU_ONLY=1 ./target/release/examples/vk_ops_check
 | **Q5_K_S** | 416 | 36.9 | ✅ | Q5K × Q8K scalar（原 placeholder） |
 | **Q4_K_S** | 366 | 41.1 | ✅ | Q4K × Q8K scalar（原 0 output） |
 | **BF16** | 1143 | **27.5** | ✅ | BF16 × F32 AVX2+FMA（`src/ops/kernel/bf16/avx2.rs`，含 `avx2_q8.rs`） |
-| Q3_K_M | 331 | 9.2 | ✅ | Q3K × Q8K scalar（`q3_k.rs`，format bug 修复） |
-| Q3_K_S | 308 | 6.0 | ✅ | Q3K × Q8K scalar（format bug 修复；Lyon noise） |
-| Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K AVX2（`avx2_k.rs`，3 个 bug 修复：qs_base / scale_b / hsum256_ps） |
+| Q3_K_M | 331 | **58.7** | ✅ | Q3K × Q8K AVX2 重写（`avx2_k.rs`，llama.cpp 结构：maddubs + scale-shuffle + i32 累积；2026-11-21） |
+| Q3_K_S | 308 | **45.4** | ✅ | Q3K × Q8K AVX2 重写（同上；"Lyonne" 为该格式历史输出） |
+| Q2_K | 283 | **64.7** | ✅ | Q2K × Q8K AVX2 重写（同上；2026-11-21，旧实现与 scalar 持平已修） |
 | IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2（共享 `src/ops/quant/avx2_k.rs`，bit-exact，commit `b8d6b7c`） |
 | **IQ4_NL** | 381 | **16.1** | ✅ | **IQ4_NL × Q8K AVX2 + NEON**（`vec_dot_iq4_nl_q8k_avx2` + `vec_dot_iq4_nl_q8k_neon` 共享 `avx2_k.rs` / 新增 `neon_k.rs`，≤ 1 ULP drift，2026-09-18） |
 | IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar（f64 block acc；"The capital of France is Paris."） |
@@ -181,8 +181,15 @@ SILU_ONLY=1 ./target/release/examples/vk_ops_check
 - IQ4_XS：was panic → AVX2 4.8 t/s（修复 + 打开 dispatch）
 - **IQ4_NL**：scalar 8.6 t/s → AVX2 **16.1 t/s**（1.87×，`vec_dot_iq4_nl_q8k_avx2` 在 `src/ops/quant/avx2_k.rs`；同步新增 `vec_dot_iq4_nl_q8k_neon` 在 `src/ops/quant/neon_k.rs` 走 aarch64 路径；测试 `iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp`；端到端 Qwen3-0.6B-IQ4_NL.gguf 5 批中位 16.1 t/s gen，产出 "Paris"）
 - IQ3_XXS (UD)：was panic → scalar 4.3 t/s（修复 + f64 acc → 给出 "The capital of France is Paris."）
-- Q2_K：was 乱码（scalar 4.9 t/s）→ AVX2 4.9 t/s（启用 dispatch，3 bugs 修复）
-- Q3_K / Q3_K_M / Q3_K_S：scalar 5-9 t/s → AVX2 4.7-7.3 t/s（重写：修 `scale_shuffles` + `hsum256ps` 双 shuffle imm；scalar 改用 `_mm_extract` + `_mm_add_epi16`；Q3_K_M 现在输出 "The capital of France is **Paris**" 与 IQ4_XS 完全一致）
+- Q2_K：was 乱码（scalar 4.9 t/s）→ AVX2 4.9 t/s（启用 dispatch，3 bugs 修复）→ **AVX2 重写 64.7 t/s**
+- Q3_K / Q3_K_M / Q3_K_S：scalar 5-9 t/s → AVX2 4.7-7.3 t/s（重写：修 `scale_shuffles` + `hsum256ps` 双 shuffle imm；scalar 改用 `_mm_extract` + `_mm_add_epi16`）→ **AVX2 重写 Q3_K_M 58.7 t/s / Q3_K_S 45.4 t/s**
+- **Q2_K / Q3_K AVX2 重写（2026-11-21）**：按 pinned llama.cpp `ggml_vec_dot_q2_K_q8_K` /
+  `ggml_vec_dot_q3_K_q8_K` AVX2 分支重写 `avx2_k.rs`：全 SIMD 2-bit 解包 + `maddubs` +
+  scale shuffle 内嵌 `madd` + 每 super-block 单 i32 累加器（消除旧实现 Q2_K 的标量解包循环
+  与两者的每 16 元素窄水平归约）。kernel 级（`examples/bench_kquant_dot.rs`，512 行 × 4096 列）
+  Q2_K **7.5×**、Q3_K **2.75×** vs scalar；端到端 5 批中位 Q2_K prefill 59→111 / gen 42→65 t/s，
+  Q3_K_M prefill 74→103 / gen 50→59 t/s；输出与历史一致（Q2_K/Q2_K_L/Q3_K_M "Paris"、Q3_K_S "Lyonne"）。
+  parity：随机 64 super-block scalar↔AVX2 相对差 ≤ 2.1e-6，新增 random-superblocks 测试。
 
 **Kernel 路径索引**：
 
@@ -209,7 +216,8 @@ src/ops/quant/
 ### 4.1 已知未实现
 
 - **IQ2_XXS / IQ2_XS / IQ3_XXS / IQ1_S / IQ3_S / IQ2_S / IQ1_M kernel**：仅在 `GGMLType` enum 注册（`src/core/tensor.rs:32-45`），其中 IQ3_XXS / IQ2_XXS / IQ1_M / IQ1_S 已有 scalar kernel（精度受损），其余仍 panic。
-- **Q2_K / Q3_K 全 SIMD 覆盖**：当前仅 K-quant 路径共享 `avx2_k.rs`；scalar Q2_K 4.9 t/s 与 AVX2 持平，原因是 K-quant block 结构复杂、SIMD 利用率受限。
+- **Q2_K / Q3_K 全 SIMD 覆盖**：✅ 2026-11-21 完成。`avx2_k.rs` 的 Q2_K / Q3_K kernel 已按 llama.cpp
+  结构重写（全 SIMD 解包 + maddubs + 单 i32 累加器），不再有标量循环与窄水平归约；NEON 路径仍为 scalar。
 
 ---
 
@@ -392,7 +400,7 @@ PR / commit：
 | **Vulkan Q5_K 端到端** | ❌ 仅合成 parity | `src/ops/quant/avx2_k.rs` AVX2 实现已就绪；Vulkan shader 未对齐 |
 | **Logits 输出投影优化**（V·151936，~23% decode 时间） | ❌ 未实现 | memory-bound；候选：分块、fuse to 采样 |
 | **FFN 整体融合**（gate+up+silu+quant+down） | ⚠️ 部分（`fuse_vstack`） | 进一步融合需要 persistent workers（§2.3 已废弃） |
-| **Q2_K / Q3_K 全 SIMD 加速**（4.9 t/s → 30+ t/s） | ❌ AVX2 实现已存在但与 scalar 持平 | K-quant block 结构复杂；需重写 algorithm |
+| **Q2_K / Q3_K 全 SIMD 加速**（4.9 t/s → 30+ t/s） | ✅ 2026-11-21 完成：AVX2 按 llama.cpp 结构重写，Q2_K gen 65 t/s、Q3_K_M 59 t/s（kernel 级 7.5× / 2.75× vs scalar） | 剩余：aarch64 NEON 路径仍 scalar |
 | **chunked prefill 推广到所有 trunk** | ⚠️ Qwen3 / Qwen3.5 / Gemma4 已支持（`#68`） | llama / lfm2 / lfm25 / lfm2moe / spark / breeze / nemotron_h 未适配 |
 | **dotprod/i8mm 内核**（ARM64） | ❌ 仅 NEON baseline | 需要 ASM 手写或 `std::arch::aarch64::*` 内建 |
 | **权重重排**（whisper.cpp-style repack） | ❌ 未实现 | 对 Q4_K / Q6_K 大权重 matmul 提升明显 |

@@ -3319,6 +3319,85 @@ mod avx2_kq_parity {
         let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(block, &q8k) };
         assert!((s - avx2).abs() < 1.0, "scalar={}, avx2={}", s, avx2);
     }
+
+    /// xorshift64* PRNG: deterministic, no external dependency; full-width
+    /// bytes so parity covers every bit pattern, not just hand-picked ones.
+    fn prng_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn q2k_avx2_matches_scalar_random_superblocks() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        // d/dmin kept around 1e-2 so the f32 dot stays in a range where the
+        // scalar (8 addends) and AVX2 (single FMA) reduction orders agree
+        // far inside the 1e-3 relative bound.
+        let weight = prng_bytes(0x2026_1121_0002_2E0_u64 ^ 0x5eed, nb * BLOCK_Q2K_SIZE);
+        let mut blocks = weight;
+        for b in 0..nb {
+            let off = b * BLOCK_Q2K_SIZE;
+            let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * ((b % 7) as f32)).to_le_bytes();
+            blocks[off + 80] = d_bits[0];
+            blocks[off + 81] = d_bits[1];
+            blocks[off + 82] = d_bits[0];
+            blocks[off + 83] = d_bits[1];
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let scalar = vec_dot_q2k_q8k_scalar(&blocks, &q8k);
+        let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(&blocks, &q8k) };
+        let diff = (scalar - avx2).abs();
+        let rel = diff / scalar.abs().max(1.0);
+        eprintln!(
+            "q2k random {} blocks: scalar={} avx2={} abs_diff={} rel={}",
+            nb, scalar, avx2, diff, rel
+        );
+        assert!(rel < 1e-3, "q2k random parity: rel={rel} diff={diff}");
+    }
+
+    #[test]
+    fn q3k_avx2_matches_scalar_random_superblocks() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        let weight = prng_bytes(0x2026_1121_0003_3E0_u64 ^ 0x5eed, nb * BLOCK_Q3K_SIZE);
+        let mut blocks = weight;
+        for b in 0..nb {
+            let off = b * BLOCK_Q3K_SIZE;
+            let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * ((b % 5) as f32)).to_le_bytes();
+            blocks[off + 108] = d_bits[0];
+            blocks[off + 109] = d_bits[1];
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 41 + 7) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let scalar = vec_dot_q3k_q8k_scalar(&blocks, &q8k);
+        let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(&blocks, &q8k) };
+        let diff = (scalar - avx2).abs();
+        let rel = diff / scalar.abs().max(1.0);
+        eprintln!(
+            "q3k random {} blocks: scalar={} avx2={} abs_diff={} rel={}",
+            nb, scalar, avx2, diff, rel
+        );
+        assert!(rel < 1e-3, "q3k random parity: rel={rel} diff={diff}");
+    }
 }
 
 #[cfg(test)]
