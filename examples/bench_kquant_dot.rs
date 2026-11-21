@@ -103,14 +103,12 @@ fn main() {
 
     println!("--- Q2_K × Q8_K ---");
     let s_ns = bench("scalar", || {
-        wq2
-            .chunks_exact(N_IN / 256 * 84)
+        wq2.chunks_exact(N_IN / 256 * 84)
             .map(|row| vec_dot_q2k_q8k_scalar(row, &q8k))
             .sum::<f32>()
     });
     let a_ns = bench("dispatched (AVX2)", || {
-        wq2
-            .chunks_exact(N_IN / 256 * 84)
+        wq2.chunks_exact(N_IN / 256 * 84)
             .map(|row| vec_dot_q2k_q8k(row, &q8k))
             .sum::<f32>()
     });
@@ -118,14 +116,12 @@ fn main() {
 
     println!("--- Q3_K × Q8_K ---");
     let s_ns = bench("scalar", || {
-        wq3
-            .chunks_exact(N_IN / 256 * 110)
+        wq3.chunks_exact(N_IN / 256 * 110)
             .map(|row| vec_dot_q3k_q8k_scalar(row, &q8k))
             .sum::<f32>()
     });
     let a_ns = bench("dispatched (AVX2)", || {
-        wq3
-            .chunks_exact(N_IN / 256 * 110)
+        wq3.chunks_exact(N_IN / 256 * 110)
             .map(|row| vec_dot_q3k_q8k(row, &q8k))
             .sum::<f32>()
     });

@@ -40,22 +40,87 @@ NEON on aarch64; no AVX-512).
       Q3_K **2.75×** vs scalar。端到端 Qwen3-0.6B（5 批中位）：Q2_K prefill 59→111 t/s、gen 42→65 t/s；
       Q3_K_M prefill 74→103 t/s、gen 50→59 t/s。parity：随机 64 super-block scalar↔AVX2 相对差
       ≤ 2.1e-6（f32 舍入级），新增 `q2k/q3k_avx2_matches_scalar_random_superblocks` 测试。
-- [ ] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复** — 现状：`src/ops/kernel/iq4_xs.rs`
-      的 `iq_kernel_impl!` macro 给 IQ2_XXS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S 生成了
-      Kernel trait impl，`forward_prepared` 正确调 `vec_dot_*_q8k` scalar（生产走 Q8K 路径无 panic）；
-      但 `forward_prequantized` 是 stub（写 0）。`uses_q8_k()` 包含所有 IQ 类型 → 生产永远走
-      `forward_prepared` → stub 永不触发，但接口完整性差。
-      选项 1：把 macro 里的 stub 改成完整 dequant-to-f32 + dot 路径（与 IQ4_NL / Q4_K 同款），低成本。
-      选项 2：直接写 SIMD kernel（需要 IQ2_XS / IQ3_S 的 GGUF 测试模型 + llama.cpp Oracle；当前
-      `models/qwen3-0.6b-gguf/` 没有这些格式，按 `adapting-new-models` skill 暂无法做精度验证）。
-- [ ] **AVX-VNNI int8 dot 加速** — 见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速) 详细说明。
-      当前 Q8_0 × Q8_0 matmul 已用 `_mm256_maddubs_epi16` (AVX2)，但 AVX-VNNI 的
-      `_mm256_dpbssd_epi32`（带 saturate 的三操作数 int8 dot）在
-      K2-Horizon / Breeze 等 Q8_0 路径上可省一次 saturate pass。
-- [ ] **Q4_0 kernel 加 FMA + tiling** — 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
-- [ ] **token 维寄存器分块：消除 per-token 权重重读** — 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
-      文本编码只跑到约 11% 的 NEON 峰值，瓶颈是每个 token 都从 DRAM 重读整个权重矩阵。
-      预期 1.5-2× 加速。
+- [x] **IQ2_XS / IQ3_S / IQ2_S scalar forward_prequantized stub 修复 + 生产路径 SIMD**（选项 1、2 均已做）—
+      选项 1（2026-11-21）：`src/ops/kernel/iq4_xs.rs` 的 `iq_kernel_impl!` macro 与 IQ4_XS /
+      IQ2_XS 手写 impl 的 `forward_prequantized` 已从 stub（写 0）改为完整 dequant-to-f32 +
+      dot 路径（与 IQ4_NL / Q4_K 同款）。生产仍走 `uses_q8_k()` → `forward_prepared`（Q8K
+      路径），此路径只为接口完整性。8 个类型各一个 2-row 测试，与 `dequantize_row_*`
+      参考逐位一致。
+      选项 2（2026-11-21，原判断"暂无法做精度验证"已过时）：生产的 Q8K 热路径
+      `vec_dot_iq*_q8k` 里 IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / IQ3_S / IQ1_M / IQ1_S
+      七个类型当时全是 scalar——pinned llama.cpp `b96806d9` 的 x86 arch 里**已有**这七个
+      的 AVX2 kernel，全部按其结构移植到 `src/ops/quant/avx2_k.rs` 并接通 dispatch。
+      验证：① llama.cpp 逐位 oracle（`oracle_vecdot_harness` 链接 pinned 构建的
+      libggml-cpu；注意必须先 `ggml_cpu_init()` 填 FP16 查找表）对随机 64 super-block
+      输入，7 个类型 AVX2 输出与 llama.cpp **逐位一致**（`RMI_LLAMA_ORACLE=<harness>
+      cargo test --lib iq_avx2_matches_llama_cpp_oracle_bitwise -- --ignored`）；
+      ② scalar↔AVX2 parity（随机 super-block + 7 个本地 IQ 模型整行，rel < 1e-3）；
+      ③ kernel 级基准（release，attn_q 1024 值/次）：iq2_xxs 2.60x、iq2_xs 7.21x、
+      iq2_s 2.73x、iq3_xxs 6.01x、iq3_s 3.36x、iq1_m 3.42x、iq1_s 3.96x；
+      ④ E2E：IQ2_S / IQ3_S greedy 生成正确（"The capital of France is Paris"）。
+      **顺带修了 scalar `vec_dot_iq2_xs_q8k_scalar` 只处理半行的 bug**（16/32 个 u16，
+      对照 llama.cpp generic 修正；此前无模型可验，从未被发现）。
+      **模型资产**：`models/Qwen3-0.6B-GGUF/` 补齐 IQ2_XS / IQ2_S / IQ3_S——ModelScope
+      （unsloth / bartowski 镜像）均无这三个文件，用 pinned llama-quantize 自 BF16 +
+      unsloth imatrix 本地生成；SHA256：IQ2_XS `0587d6121f5401f8018f43309235590b0444e4
+      af73a8bceca96722ddfdf1f109`、IQ2_S `ce788484aff33ee76e846bc1a52d015d30f05e27637
+      d3fd30249a3ee4eb35925`、IQ3_S `fac96f9f3fe11987acd69c83294461f0176a259b1d78506
+      ffa60bc290d9ea012`。已知边界：≤2.3 bpw 的 UD-IQ2_XXS / UD-IQ1_S / UD-IQ1_M /
+      本地 IQ2_XS 在 0.6B 模型上 greedy 输出退化为乱码——**llama.cpp 同权重同 prompt
+      同样乱码**（llama-cli b96806d9 实测：IQ2_XS "ention =="、UD-IQ2_XXS "-- exam.
+      informat--"，而 IQ2_S / IQ3_S 正常），且 kernel 层已逐位对拍一致 → 是量化质量
+      本身（2.0-2.3 bpw @ 0.6B 参数量），不是 kernel 问题；≥2.5 bpw 的 IQ2_S / IQ3_S
+      正常（"The capital of France is Paris"）。
+- [ ] **AVX-VNNI int8 dot 加速**（前提已修正：真正的目标是 **AVX-VNNI-INT8 的
+      `_mm256_dpbssd_epi32`**，待做）— 详见 [TODO-AVX-VNNI](#todo-avx-vnni-int8-dot-加速)。
+      原条目的两处前提错误已查证并实测（2026-11-21，Meteor Lake dev box）：
+      ① `_mm256_dpbssd_epi32` 不是 AVX-VNNI，是 **AVX-VNNI-INT8**（CPUID `avxvnniint8`），
+      本机只有 plain AVX-VNNI，按原计划实现直接 SIGILL（gdb 定位到 `vpdpbssd`）；
+      ② plain AVX-VNNI 只有 `vpdpbusd`（unsigned×signed），去不掉 sign fixup，实测比
+      AVX2 kernel 慢 2.2-2.4× → **`vpdpbusd` 这一层不做**（参考实现保留在
+      `src/ops/kernel/q8_0/avxvnni.rs` 作测量记录 + bit-exact 测试基线，dispatch 未接线）。
+      **待做**：`avxvnniint8` 路径（`vpdpbssd`，signed×signed 直接点积，去 2 条 sign fixup、
+      horizontal add 缩 1 条、无 -128 边角）。目标机型：Arrow Lake / Lunar Lake（消费端、
+      无 AVX-512，它是那里唯一可用的单指令 int8 dot）、Granite Rapids / Zen 5（那里更优的
+      是 zmm 版 `_mm512_dpbssd_epi32`）。前置：需要一台 `avxvnniint8` 机器实跑 parity
+      测试（复用 `avxvnni.rs` 的 3 测试模板），本机无法验证，不能盲接 dispatch。
+- [ ] **IQ2/IQ3/IQ1 × Q8_K 的 NEON kernel（aarch64）** — 2026-11-21 的 AVX2 移植只覆盖
+      x86；aarch64 上这七个类型仍走 scalar（`neon_k.rs` 目前只有 iq4_nl 的 NEON）。
+      pinned llama.cpp `b96806d9` 的 `ggml-cpu/arch/arm/quants.c` 有全部七个的 NEON
+      kernel（iq2_xxs / iq2_xs / iq2_s / iq3_xxs / iq3_s / iq1_s / iq1_m，gate 在
+      `__ARM_FEATURE_DOTPROD`），按 AVX2 同款流程移植：结构对齐 + oracle 对拍。
+      **前置**：本机是 x86，NEON kernel 必须在 aarch64 机器上开发验证（含
+      `iq_avx2_matches_llama_cpp_oracle_bitwise` 的 ARM 版 oracle harness）；仓库当前
+      无 aarch64 CI 作业（见下方"aarch64 CI"条目），接入前先补交叉编译或 CI 门禁，
+      不盲接 dispatch。
+- [ ] **BF16 / F32 的 NEON token-tiled batched（TODO-019 的 aarch64 侧）** —
+      token 分块的 x86 AVX2 版已落地（见 TODO-019），但 aarch64 上
+      `supports_token_tiled_batching` 对 BF16 / F32 返回 false——TODO-019 的痛点
+      机（20 核 aarch64，文本编码 11% 峰值）恰恰拿不到这个收益，仍是逐 token
+      重流整个权重矩阵。F16 不缺：其 tiled 实现是可移植的标量嵌套循环
+      （`dot_f16_f16_bytes` 自带 NEON dispatch），在 aarch64 上已生效。
+      **待做**：为 `bf16/avx2.rs`（BF16）与 `f32/avx2.rs`（F32）写 NEON tiled
+      kernel（2D (row-tile × token-tile) blocking，x86 宏
+      `avx2_matmul_packed_tiled!` 可作结构模板；BF16 unpack 用 NEON 的
+      u16→f32 高半移位，F32 用 `vld1q_f32`），把
+      `supports_token_tiled_batching` / `forward_batched_rows` 的 aarch64 分支
+      接上。**前置**：与所有 NEON kernel 相同——必须在 aarch64 机器上开发并跑
+      `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
+      可移植）；另评估 Q4_0 NEON kernel（`q4_0/neon.rs`，逐 block 标量点积 +
+      逐行累加、无行分块）是否按 TODO-001 的 x86 重写思路同步改造。
+- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — 仓库 Vulkan 侧目前只有 Q8_0 / Q4_K /
+      （BF16 等）matmul，IQ 类型完全走 CPU（`src/vulkan/` 无任何 IQ shader）。
+      pinned llama.cpp 有现成参考：`ggml/src/ggml-vulkan/vulkan-shaders/` 下七个类型的
+      `mul_mat_vec_iq*.comp` + `dequant_iq*.comp`（iq1_m / iq1_s / iq2_s / iq2_xs /
+      iq2_xxs / iq3_s / iq3_xxs）。移植时注意 llama.cpp 的 shader 是
+      mul-mat-vec（per-token 解码侧）形态，与仓库现有 `matmul_q4k.rs` 的 prefill 形态
+      不同，需决定先补 decode 侧还是两侧都要；数值验收照仓库惯例对 CPU 路径比
+      （Vulkan IQ shader 一旦上线，`PreparedRows::matmul_group` 的 `uses_q8_k()` 权重
+      会开始走 GPU，需与本次逐位对拍过的 AVX2 路径做同机对照）。验证设备：本机若无
+      Vulkan 设备则按 `amd-cloud-gpu-test` skill（用户点名才用）。
+- [x] **Q4_0 AVX2 kernel 重写：逐 lane FMA 累加 + 4 行分块**（2.07×，结构对齐 llama.cpp AVX2）— 见 [TODO-001](#todo-001-q4_0-avx2-kernel-不使用-fma性能受限)。
+- [x] **token 维寄存器分块：消除 per-token 权重重读**（x86 AVX2 已做，1.56-1.69×；
+      aarch64 侧待 NEON kernel 移植时一并做）— 详见 [TODO-019](#todo-019-token-维寄存器分块消除-per-token-权重重读)。
 - [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
@@ -104,9 +169,23 @@ NEON on aarch64; no AVX-512).
       **对照**：不带 `parity-trace` feature 的构建同权重同卡**完整跑通**（SenseNova Loop 9B
       Q4_0 在 L20 上输出 greedy tokens），独立 `vk_ops_check` 全过 → GPU 路径本身可用，
       此前「GPU 路径挂死」的结论是这条死锁造成的假象。
-      **修法选项**：① trace 前先释放 `commands`（或改 `flush()` 语义让它交还 guard）；
-      ② 读回改走不持锁的路径；③ `parity_trace::enabled()` 改用 `var()` + 非空判断，
-      避免空串误开。
+      **修法选项**（2026-11-21 复核，代码逐行核实过死锁链；暂缓实施，理由见下）：
+      ② 为推荐项，但**形态很关键**——读回应做成 **`TokenCommands` 自身的方法**
+      （如 `commands.read_region(region, output)`：把 `record_buffer_copy` 记进当前
+      命令缓冲，复用既有 `flush()` 的 submit+wait+重开语义——guard 全程持有，读回
+      本质只是多一个 chunk 边界），而**不是**平行的自由函数
+      `read_f32_into_with(&mut TokenCommands)`：后者造成"同一操作两套入口"，未来任何
+      chunk 录制中途的读回功能都得自行判断持锁状态选入口，选错即同一死锁——
+      对扩展有损伤。①（`flush()` 交还 guard）不推荐：guard 跨 chunk 保留是防其它
+      会话插队提交的**有意设计**，交还会引入提交竞争。③ 顺手一行：
+      `parity_trace::enabled()` 的 `var_os().is_some()` 改为 `var()` + 非空判断。
+      **暂缓理由**：本条是编译期 feature 的诊断工具，生产路径完全不经过；修复需要
+      端到端验证（复现挂起 → 打补丁 → 跑通），而真实目标场景（sensenova Loop 9B
+      parity 对拍）不在本机——只验一半就接线违反"没实测过不接线"纪律。**最佳时机
+      是做 GPU parity 工作的会话**（顺带解锁下一条 sensenova 不一致 TODO 的定位）。
+      本机复现可行性已确认：Intel iGPU ICD（`intel_icd.json`）+ `/dev/dri` 渲染节点
+      在位，可用 Qwen3.5-0.8B + `--features vulkan,parity-trace` +
+      `RMI_PARITY_TRACE=1` 复现。
       **影响面**：所有 `qwen35` / sensenova GPU 会话的 parity 比对 —— 即**当前无法用 parity trace
       定位 GPU 与 CPU 的数值差异**（见下条）。
 - [ ] **sensenova GPU 与 CPU 的 greedy 输出不一致** — 2026-11-09，SenseNova Loop 9B Q4_0
@@ -497,61 +576,49 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 
 ## Detailed TODOs (merged from legacy docs/TODO.md)
 
-### TODO-001: Q4_0 AVX2 kernel 不使用 FMA，性能受限
+### TODO-001: Q4_0 AVX2 kernel 重写（已完成，2026-11-21）
 
-#### 现状
+#### 原状
 
-`src/ops/kernel/q4_0/avx2.rs` 的 Q4_0 matmul kernel 故意**不使用 FMA**：
+`src/ops/kernel/q4_0/avx2.rs` 的 Q4_0 matmul kernel：每 block 先把整个 i32 点积
+`hsum_epi32` 成标量，再把**一个标量**塞进 8-lane f32 累加器的 lane 7 做
+`_mm256_fmadd_ps`——8 个 FMA lane 只用了 1 个，外加每 block 一次水平归约；
+无行分块（TODO 原文写的"不使用 FMA"已过时，代码其实早已引入 fmadd）。
 
-```rust
-//! 8. Multiply by d * scale in f32 with explicit `_mm256_mul_ps` + `_mm256_add_ps`
-//!    (no `_mm256_fmadd_ps`) to match scalar's mul+add rounding exactly.
-//!
-//! **Precision contract**: bit-exact with the scalar implementation.
-```
+#### 处理
 
-行累加采用 `acc += dc * d * scale` 三次 f32 运算（mul → mul → add），
-而不是 `fmadd(d, d*scale, acc)` 一次融合运算。
+按 `q8_0/avx2.rs` 的结构重写：
 
-#### 影响
+1. **逐 lane 累加**：每 block 的 i32 点积保持 8-lane 竖向（每 lane 恰好 4 个乘积，
+   精确），`dot_lane = nib_lane - 8 * y_lane`（y_lane 每 block 算一次、4 行共享），
+   直接 `_mm256_fmadd_ps(ds, cvtepi32(dot_lane), acc)`；hsum 只在每行结束时做一次。
+2. **4 行分块**：Q8 输入 block 每块载入一次、4 个权重行共享（与 Q8_0 kernel 同款）。
 
-- **性能**：相比 Q4_K / Q8_0 kernel（已用 FMA）慢约 1.5-2×。
-  E4B Q4_0 文件实测 5.8 t/s decode，E2B Q4_K_M 10 t/s（同 embd 比例下 kernel 速度是主要差异）。
-- **正确性**：与 scalar reference **bit-exact**（`assert_avx2_eq_scalar` 测试在 `q4_0/avx2.rs:241`）。
-  所有 Q4_0 模型通过 parity 测试。
+#### 验证与语义
 
-#### 何时触发
+- 该累加结构与 llama.cpp 自家 AVX2 `ggml_vec_dot_q4_0_q8_0` **同构**
+  （llama.cpp 同样是逐 lane fmadd + 末尾 hsum；两种"每 lane 精确 i32"写法——
+  减 8 后符号展开 vs nib−8·y 校正——整数上逐 lane 相等），因此默认路径与
+  llama.cpp AVX2 语义对齐；旧 kernel 是既不匹配 scalar 也不匹配 llama.cpp AVX2
+  的自定义混合体，已删除。
+- parity：per-block 整数点积两边都精确，仅 f32 累加顺序不同 → 与 scalar 的
+  对比从"≤4 ULP"放宽为仓库 Q4_K / Q8_0 kernel 同款 **rel < 1e-3**（实测随机
+  4×512 最大 7 ULP / 相对 4.5e-7；测试保留 ULP 打印）。
+- E2E：Qwen3-0.6B-Q4_0 greedy 输出正常（"The capital of France is **Paris**."）。
+- 注意：`tests/inference_parity.rs::q4_0_matches_pinned_scalar_oracle_bit_for_bit`
+  （env 门控）把默认路径与 llama.cpp oracle 逐位对拍——若 oracle 是 AVX2 构建，
+  本次改动后应保持逐位一致（新结构即 llama.cpp 结构）；若 oracle 是标量/FMA-disabled
+  构建，逐位一致原本就不成立（旧 kernel 带 fmadd），需按其 oracle 模式重验。
 
-加载任何 Q4_0 权重时——目前主要是 Gemma 4 E4B Q4_0 导出文件。
+#### 性能
 
-#### 选项
-
-1. **加 FMA + 放松精度契约**（推荐 follow-up）：把 `acc += dc * d * scale` 改成
-   `acc = _mm256_fmadd_ps(prod_d_scale, ...)`。需要新增"near bit-exact"测试模式
-   （参考 llama.cpp 的 GGML_FMA_DISABLED 编译开关做法）。
-   - 预期：1.5-2× 加速
-   - 风险：所有 Q4_0 模型需要重新跑 Oracle 验证（logits 可能漂移 ±1 ULP，最终 token 偶发分叉）
-   - 工作量：半天
-2. **重导出模型到 Q4_K / Q8_0**（推荐立即做）：
-   - `q4_k/avx2.rs` 已用 FMA 写好 + parity 通过
-   - `q8_0/avx2.rs` 已用 FMA 写好 + parity 通过
-   - 用 llama.cpp 的 `convert.py` 把 E4B 转成 Q4_K_M 或 Q8_0
-   - 文件大 ~30%，但推理快 2-3×
-   - 工作量：1 小时
-3. **写 FMA + 8-wide row unroll 版本** — 保留旧 kernel，新增 `matmul_q4_0_vs_q8_0_avx2_fma`，编译时 feature flag 切换。
-   - 预期：2-3× 加速
-   - 工作量：1 天
-
-#### 推荐
-
-短期：选选项 2（重导出 E4B），立即得 2-3× 加速，零代码风险。
-中期：选选项 1（加 FMA kernel），其他 Q4_0 模型（Qwen3-0.6B-Q4_0 等）也受益。
+kernel 级（release，Qwen3-0.6B attn_q 1024 值/次）：旧 kernel 771 µs → 新
+**372 µs（2.07×）**，对 scalar 7.32×。
 
 #### 关联文件
 
-- `src/ops/kernel/q4_0/avx2.rs` — kernel 实现 + parity 测试
-- `src/ops/kernel/q4_0/scalar.rs` — scalar reference
-- `src/ops/kernel/q4_0/mod.rs` — kernel 分发
+- `src/ops/kernel/q4_0/avx2.rs` — 重写后的 kernel + parity 测试
+- `src/ops/kernel/q4_0/scalar.rs` — scalar reference（未动）
 
 ---
 
@@ -1093,6 +1160,11 @@ ComputePool，不是把 LLM 迁去 rayron"。迁移面：
 
 ### TODO-019: token 维寄存器分块，消除 per-token 权重重读
 
+**状态（2026-11-21）**：**选项 1 已落地（x86 AVX2）**。F16 的 tiled 为可移植
+标量实现（`dot_f16_f16_bytes` 自带 NEON dispatch），aarch64 上已生效；BF16 / F32
+的 NEON tiled 是独立待办（见清单一节"BF16 / F32 的 NEON token-tiled batched"
+条目——与 IQ NEON kernel 移植是两件不同的 kernel 工作）。
+
 **目标**：让一次权重载入服务多个 token，把权重流量除以分块宽度 NR。图像编辑的文本
 编码与去噪合计占端到端 ~95% 的时间，而算力利用率只有峰值的 ~11%——不是算不动，是
 权重搬不过来。
@@ -1166,6 +1238,42 @@ for token in 0..n_tokens {
   建议先做这条——它不依赖线程池迁移。
 - AuK 那边已记了同类问题（"Per-token matmul batching（`linear_into` 一调一次 token，
   瓶颈）"），两条应共用同一个 kernel 侧分块实现。
+
+#### 已落地（2026-11-21，x86 AVX2）
+
+- **kernel 侧**：`simd_avx2.rs` 新增 `avx2_matmul_packed_tiled!`——与
+  `avx2_matmul_packed!` 同一款逐 (row, token) 点积体（**位级一致**，仅循环嵌套
+  改为 `(row-tile 32 × token-tile 32)` 二维分块，权重 panel 与输入 panel 常驻
+  L2），BF16 / F32 各实例化一份 tiled 版本。**F16 不用 AVX2 tiled**：F16Kernel
+  的 `forward_prepared` 走 `forward_scaled_rows`（激活先转 f16 再 F16×F16 dot），
+  AVX2 tiled 版会跳过激活舍入改变数值（`f16_linear_modes_preserve_existing_
+  rounding` 契约测试当场拦截）——F16 的 tiled 用忠实复刻该语义的标量嵌套循环
+  （`dot_f16_f16_bytes` 自带 SIMD dispatch，可移植），activation f16 转换每
+  token 只做一次。
+- **trait 侧**：`Kernel::supports_token_tiled_batching(n_in)`（能力查询）+
+  `Kernel::forward_batched_rows(input, output, n_in, n_out, n_tokens, row_start,
+  row_end) -> bool`（opt-in 执行，行分区）。BF16（`!bf16_input` 路径）/ F16 /
+  F32 三个 kernel 实现；其余 kernel 返回 false 保持旧路径。
+- **dispatch 侧**：`PreparedRows::matmul_group` 的通用循环前加 tiled 快路径
+  （`rows >= 2` 且组内全部 `!gpu_done` 权重 opt-in）——注意该分支在
+  `pool.compute` 闭包**内部**执行，直接用外层 `(ith, nth)` 行分区，**不能再调
+  `pool.compute`**（首次实现犯过：递归占用线程池自死锁，测试挂 60s+ 定位）。
+  单线程入口 `BF16/F16/F32Kernel::forward_batched` 也在 `n_tokens >= 2` 时改走
+  tiled——breeze / dots / embeddinggemma2 / zdt / qwen35 vision 等直接调用方
+  零改动受益。
+- **验证**：`tiled_batched_matches_per_token_loop_bits`——BF16/F16/F32，
+  33 token × 70 行 × n_in 200（跨 32×32 tile 边界 + 4 元素尾），tiled 输出与
+  逐 token 循环**逐位一致**；既有
+  `prepared_rows_match_sequential_matmul_bits_and_reuse_storage`（含 F16/BF16/F32
+  权重）自动改走 tiled 路径并保持位级断言通过。
+- **基准**（release-fast，BF16 3584×3584 单线程）：128 token 1.56×
+  （666→425 ms）、512 token **1.69×**（2.06→1.22 s）。输入矩阵从 L3 重读成为
+  新的次要瓶颈（每行 tile 重读全部 token），再往上要靠更大的 NR×NT 面板调优；
+  aarch64（20 核，权重流量占比更高）预期收益更大。
+- **遗留**：BF16 / F32 的 NEON tiled（见清单一节独立条目）；`longcat::dit::Layer::forward`
+  仍是逐 token 调 `forward`（f16/bf16 kernel 内部已 tiled，调用方无需改）；
+  `qwen3::trunk::text_encode_forward` 的 `project_tokens` 走
+  `LinearExecutor::run_group` → `matmul_group`，自动获得 tiled 路径。
 
 #### 关联文件
 
@@ -1292,19 +1400,19 @@ This project targets the following SIMD instruction sets:
 |---|---|---|---|
 | **x86_64** (Intel Core Ultra 5 125H, AMD Zen 4, etc.) | SSE2 / SSE4.2 / AVX / **AVX2** / **FMA** / **F16C** / **BMI2** | `is_x86_feature_detected!` | `src/ops/simd_avx2.rs`, `src/ops/kernel/*/avx2*.rs` |
 | x86_64 (Skylake-X, Ice Lake, Sapphire Rapids, Zen 5) | + **AVX-512F** / **AVX-512BW** / **AVX-512VNNI** | runtime gate | (not yet wired) |
-| x86_64 (Intel Alder Lake+, Zen 5) | + **AVX-VNNI** (`vpdpbusd`/`vpdpwssd`) | CPUID `avx_vnni` | (see TODO-AVX-VNNI below) |
+| x86_64 (Intel Alder Lake+, Zen 5) | + **AVX-VNNI** (`vpdpbusd`/`vpdpwssd`) | CPUID `avx_vnni` | `src/ops/kernel/q8_0/avxvnni.rs`（仅参考实现，实测更慢，dispatch 未接线——见 TODO-AVX-VNNI） |
+| x86_64 (Arrow Lake, Lunar Lake, Granite Rapids, Zen 5) | + **AVX-VNNI-INT8** (`vpdpbssd`) | CPUID `avxvnniint8` | (not yet wired — see TODO-AVX-VNNI below) |
 | **aarch64** | NEON / NEON-F16 / NEON-F32 | `is_aarch64_feature_detected!` | `src/ops/kernel/*/neon*.rs` |
 | aarch64 (Apple M1+) | + NEON-DOT / SME | runtime | (not yet wired) |
 
 ### AVX-VNNI / AVX-512 background
 
-**AVX-VNNI** (`vpdpbusd`/`vpdpwssd`, also written as `vpdpbusd_yx_yx` or `_mm256_dpbssd_epi32`)
-is an Intel/AMD x86 extension that performs **saturating int8 dot-product with a
-single FMA-like instruction**. First shipped on Intel Tiger Lake (2020) and AMD Zen 5;
-the current dev box (Core Ultra 5 125H, Meteor Lake) supports it via the `avx_vnni`
-CPUID bit. It computes `acc += (a - 128) * b` over 16 int8 lanes with saturating accumulation
-to int32 — exactly the operation our Q8_0 × Q8_0 matmul does via three separate
-AVX2 instructions (`_mm256_maddubs_epi16` → unpack → `_mm256_madd_epi16` → CVTPS).
+**AVX-VNNI**（CPUID `avx_vnni`，Intel Tiger Lake 2020 / AMD Zen 5 起支持；dev box
+Core Ultra 5 125H, Meteor Lake 有此位）提供 **`vpdpbusd`（unsigned×signed int8 dot，
+`_mm256_dpbusd_epi32`）** 与 `vpdpwssd`（i16×i16）。每条指令把 32 个 int8 乘积按
+8 个 int32 lane 水平累加。**注意**：`_mm256_dpbssd_epi32`（signed×signed）、
+`_mm256_dpbuud_epi32` 等属于 **AVX-VNNI-INT8**（CPUID `avxvnniint8`，Granite Rapids /
+Zen 5），是另一个更少见的 CPUID 位——在只有 AVX-VNNI 的机器上执行直接 SIGILL。
 
 **AVX-512 VNNI** (`vpdpbusd` with 64-lane / 32-int32 ops on zmm registers) is the server-class
 extension of the same idea: 2× the throughput per instruction and the only way to reach
@@ -1313,31 +1421,51 @@ our dev CPU does not.
 
 ### TODO-AVX-VNNI: int8 dot 加速
 
-**目标**：在已有 `q8_0/avx2.rs` 的 3-instruction int8 dot (`_mm256_maddubs_epi16` →
-unpack → `_mm256_madd_epi16` → CVTPS) 基础上加一条 AVX-VNNI 路径
-(`_mm256_dpbsud_epi32` / `_mm256_dpbssd_epi32`)，把 saturating int8 dot
-缩成 1 条指令。预期 1.3-1.5× Q8_0 matmul 加速。
+> 状态：**开放项**。原条目前提已修正——`_mm256_dpbssd_epi32` 属 AVX-VNNI-INT8（非
+> AVX-VNNI），plain AVX-VNNI（`vpdpbusd`）本机实测更慢已否证；真正的目标是
+> `avxvnniint8` 的 `vpdpbssd`（见下方"待做"）。
 
-**实现计划**：
-1. 加 `#[target_feature(enable = "avx2", enable = "avxvnni")]` 的 kernel
-   `matmul_q8_0_vs_q8_0_avxvnni(weight, q8, scales, output, n_in, n_out, start, end)`，
-   内部用 `_mm256_dpbsud_epi32` (unsigned×signed saturating dot)。
-2. 在 `q8_0/dispatch.rs::matmul_q8_0_quantized_range` 加 `is_x86_feature_detected!("avxvnni")` 分支。
-3. 加 parity 测试 `q8_0_avxvnni_matches_scalar_q8_dots`，相对 scalar 1 ULP 内。
-4. 在 `src/ops/kernel/mod.rs::Kernel` dispatch 表里 KV 缓存值的 int8 dot 也走 AVX-VNNI。
+**原始目标**：在 `q8_0/avx2.rs` 的 int8 dot（`_mm256_maddubs_epi16` → `_mm256_madd_epi16`）
+基础上用 AVX-VNNI 缩成 1 条指令，预期 1.3-1.5×。
 
-**风险**：
-- `_mm256_dpbssd_epi32` saturate 到 int32 → 16 lanes per dot。K2-Horizon-4B / Breeze 等
-  Q8_0 权重 dot 输出通常在 ±10⁴ 量级，不会触发 saturate，所以等价于无 saturate 的 int32 dot。
-- AVX-VNNI 在 Meteor Lake 上只有 256-bit 寄存器（不是 512-bit）。所以加速上限是"少 2 条 unpack 指令"，
-  不是 2× lane 宽。
-- 加 `target_feature("avxvnni")` 意味着老的 CPU 不能跑这条路径（fallback 到 AVX2）。
+**调查结论（2026-11-21，Core Ultra 5 125H / Meteor Lake 实测）**：
 
-**验收**：
-- Q8_0 Q4_0 matmul parity 测试通过（1 ULP 内）
-- Qwen3-0.6B-Q8_0 decode ≥ 36 t/s（vs 当前 ~28 t/s），用 `--max-context 8192` 默认 cap
-- K2-Horizon-4B-Q8_0 decode ≥ 8 t/s（vs BF16 当前 4 t/s），关键前置：**必须** `--max-context 8192`
-      否则默认走 524288 → 77 GB OOM（`--max-context` 的说明见 [`docs/usage/hunyuan.md`](../usage/hunyuan.md)）
+1. **原条目指令名写错了**。`_mm256_dpbssd_epi32`（signed×signed int8 dot）属于
+   **AVX-VNNI-INT8**（CPUID `avxvnniint8`，Granite Rapids / Zen 5），不是 AVX-VNNI；
+   在 dev box 上按原计划实现直接 `SIGILL`（gdb 定位到 `vpdpbssd %ymm`）。
+   AVX-VNNI（CPUID `avx_vnni`）只有 `vpdpbusd`（unsigned×signed）/ `vpdpwssd`（i16×i16）。
+2. **AVX-VNNI 无法去掉 sign fixup**。Q8_0 权重和 activation 都是有符号 int8，`vpdpbusd`
+   要求第一操作数无符号，`_mm256_sign_epi8` ×2 必须保留；能省的只有
+   `maddubs → madd` 两条里的 1 条，还要多 1 条 `vpxor` 清零三操作数累加器。
+3. **实测更慢**。release 单线程、Qwen3-0.6B `blk.0.attn_q`（1024×2048）交替测量 5 轮：
+   AVX2 kernel 5.4-5.8 ms / 100 次 vs AVX-VNNI kernel 12.5-13.2 ms / 100 次
+   （**0.42-0.47×**）。Meteor Lake 上 `vpdpbusd ymm` 的 uop 成本高于流水良好的
+   `vpmaddubsw` + `vpmaddwd` 组合。
+
+**落地产物**：`src/ops/kernel/q8_0/avxvnni.rs`（`vpdpbusd` 版 kernel + 3 个测试：uniform、
+±127 极端值、Qwen3-0.6B 真实权重）。kernel 与 AVX2 路径**逐位一致**（两者每 block 的
+int32 点积都精确、无 lane 可饱和），测试守住了这个断言。**dispatch 保持 AVX2 默认**；
+该文件仅作测量记录，任何机型启用前必须重测 A/B。
+
+**顺手修的契约边界**：`_mm256_sign_epi8(-128, …)` 在 int8 里无法取负（|-128| 仍是 -128），
+权重或 activation 含 -128 时 sign fixup 会算错。仓库 Q8_0 量化器
+（`quantize_q8_0_into_scalar_range`）clamp 到 ±127，真实权重文件同样是 ±127，生产不会
+触发；`avx2.rs` / `avxvnni.rs` real-model 测试的输入生成已改到契约内（原来 `(i as i8)`
+会造出 -128，且此前因模型路径 `../models/...` 在本机从未真正跑过）。
+
+**待做（开放项，非否决）**：`avxvnniint8` 路径（`_mm256_dpbssd_epi32`，signed×signed
+直接点积）——去掉 2 条 sign fixup、horizontal add 缩 1 条、无 -128 边角，结构上就是
+原条目想要的收益。按机型分两档：
+
+| 机型 | CPUID | 应做的 kernel |
+|---|---|---|
+| **Arrow Lake / Lunar Lake**（消费端，无 AVX-512） | `avxvnniint8` | ymm `_mm256_dpbssd_epi32` —— 那里**唯一可用的单指令 int8 dot**，原条目的预期收益在这档成立 |
+| Granite Rapids / Zen 5 | `avxvnniint8` + AVX-512 | zmm `_mm512_dpbssd_epi32`（2× lane 宽），优于 ymm 版；即上方 SIMD 表中 AVX-512VNNI 未接线行的延伸 |
+
+前置条件：本机（Meteor Lake）无法验证 `avxvnniint8`，需要一台目标机型实跑 parity
+测试（复用 `avxvnni.rs` 的 3 测试模板：uniform / ±127 极端值 / 真实权重）通过后才能接
+dispatch——`vpdpbssd` 在有该 CPUID 的机器上语义更简单（无 sign fixup），但**没实测过的
+kernel 不接线**的纪律不变。
 
 ### TODO-LLAMA-PER-TOKEN-SIMD化
 

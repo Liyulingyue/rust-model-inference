@@ -283,6 +283,12 @@ impl<'a> Kernel for BF16Kernel<'a> {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
+        // Token-tiled path when available: identical per-(row, token) values,
+        // weight rows reused from L1/L2 instead of re-streamed per token.
+        if n_tokens >= 2 && self.supports_token_tiled_batching(n_in) {
+            self.forward_batched_rows(input, output, n_in, n_out, n_tokens, 0, n_out);
+            return;
+        }
         for token in 0..n_tokens {
             self.forward(
                 &input[token * n_in..(token + 1) * n_in],
@@ -291,6 +297,50 @@ impl<'a> Kernel for BF16Kernel<'a> {
                 n_out,
             );
         }
+    }
+
+    fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
+        !self.bf16_input
+            && n_in % 8 == 0
+            && cfg!(target_arch = "x86_64")
+            && crate::ops::has_avx2_fma()
+    }
+
+    /// Token-tiled batching for the standard f32-input AVX2 path. The
+    /// bf16-input rounding contract (`use_scalar_reference`) keeps the
+    /// per-token path.
+    fn forward_batched_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        n_tokens: usize,
+        row_start: usize,
+        row_end: usize,
+    ) -> bool {
+        if self.bf16_input {
+            return false;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2::matmul_bf16_vs_f32_avx2_tiled(
+                        self.weight,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {

@@ -1610,3 +1610,77 @@ fn rope_norm_rotates_adjacent_pairs_with_ggml_recurrence() {
         [0x3e97_713b, 0x403e_3d4f, 0xbee2_971d, 0x3e6d_9079],
     );
 }
+
+#[test]
+fn tiled_batched_matches_per_token_loop_bits() {
+    // The token-tiled fast path (rows >= 2, bf16/f16/f32 kernels) must be
+    // bit-identical to the per-token loop: same per-(row, token) dot, same
+    // reduction order, only the loop nesting changes. Shapes cross both the
+    // 32-row and 32-token tile boundaries and n_in lands on a 4-element tail
+    // (multiple of 8, not of 16).
+    for kind in [GGMLType::BF16, GGMLType::F16, GGMLType::F32] {
+        let n_in = 200usize;
+        let n_out = 70usize;
+        let rows = 33usize;
+        let elements = n_in * n_out;
+        let weight_bytes: Vec<u8> = match kind {
+            GGMLType::BF16 => (0..elements)
+                .flat_map(|i| {
+                    half::bf16::from_f32(((i % 41) as f32 - 20.0) / 16.0)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect(),
+            GGMLType::F16 => (0..elements)
+                .flat_map(|i| f32_to_f16(((i % 37) as f32 - 18.0) / 16.0).to_le_bytes())
+                .collect(),
+            _ => (0..elements)
+                .flat_map(|i| ((i % 43) as f32 - 21.0).to_le_bytes())
+                .collect(),
+        };
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            leaked_weight_bytes(weight_bytes),
+            kind,
+            n_in,
+            n_out,
+        ));
+
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| (((i * 31 + 7) % 97) as f32 - 48.0) / 32.0)
+            .collect();
+
+        // Reference: the per-token loop (the old forward_batched nesting).
+        let mut expected = vec![0.0f32; rows * n_out];
+        for (t, (input_row, output_row)) in input
+            .chunks_exact(n_in)
+            .zip(expected.chunks_exact_mut(n_out))
+            .enumerate()
+        {
+            let _ = t;
+            weight.kernel.forward(input_row, output_row, n_in, n_out);
+        }
+
+        let mut actual = vec![0.0f32; rows * n_out];
+        let mut prepared = PreparedRows::new(rows, n_in);
+        prepared
+            .prepare(
+                &input,
+                rows,
+                n_in,
+                weight.needs_q8_0_activation(),
+                weight.uses_q8_k(),
+            )
+            .unwrap();
+        prepared
+            .matmul(&weight, &input, &mut actual, &ComputePool::new(3))
+            .unwrap();
+
+        for (index, (a, b)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "kind={kind:?} element {index}: tiled {a} vs per-token {b}"
+            );
+        }
+    }
+}

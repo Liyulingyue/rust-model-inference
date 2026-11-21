@@ -277,6 +277,55 @@ impl PreparedRows {
                 }
                 return;
             }
+            // Token-tiled batching: kernels that opt in process their whole
+            // row range for ALL activation rows in one call, keeping the
+            // weight panel and the input panel resident in L2 instead of
+            // re-streaming the weight matrix once per token. The per-(row,
+            // token) values are bit-identical to the per-token loop below —
+            // only the loop order changes. Single-token calls (decode) keep
+            // the generic loop.
+            let tiled_batched = !batched_q4
+                && !batched_q8
+                && self.rows >= 2
+                && projections
+                    .iter()
+                    .filter(|(_, _, done)| !done)
+                    .all(|(weight, _, _)| weight.kernel.supports_token_tiled_batching(self.n_in));
+            if tiled_batched {
+                // Already inside the pool.compute worker closure: (ith, nth)
+                // is this worker's row partition. Calling pool.compute here
+                // again would deadlock against the pool we are occupying.
+                for (weight, output_ptr, gpu_done) in projections {
+                    if gpu_done {
+                        continue;
+                    }
+                    let per_thread = (weight.n_out + nth - 1) / nth;
+                    let row_start = ith * per_thread;
+                    let row_end = (row_start + per_thread).min(weight.n_out);
+                    if row_start >= row_end {
+                        continue;
+                    }
+                    // SAFETY: output lengths were checked above (the
+                    // buffer holds `rows * n_out` values) and each worker
+                    // owns a disjoint row range of every token row — the
+                    // audited alias pattern of
+                    // docs/develop/PARALLEL_MATMUL_SAFETY.md §4.
+                    let out = unsafe {
+                        std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out)
+                    };
+                    let tiled = weight.kernel.forward_batched_rows(
+                        input,
+                        out,
+                        self.n_in,
+                        weight.n_out,
+                        self.rows,
+                        row_start,
+                        row_end,
+                    );
+                    debug_assert!(tiled, "tiled_batched group members must opt in");
+                }
+                return;
+            }
             let mut output_ptrs = projections.map(|(_, output_ptr, _)| output_ptr);
             for row in 0..self.rows {
                 let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
