@@ -4675,49 +4675,65 @@ kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 `src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
 [TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
 
-### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读
+### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读 — ✅ 已完成（2026-11-22）
 
-**状态**：⚠️ 已知缺口，未排期。2026-11-11 定位。
+**做完了**：qwen3 视觉塔的每一个张量现在都按 GGUF 头里声明的格式读，不再有任何一处
+靠字节长度猜。
 
-**现象**：`src/models/qwen3/vision/mod.rs` 的 `decode_linear_weight` **不看张量自己声明的
-格式**，而是看字节长度：
+**当时的缺陷比条目记的更宽**：条目只点了 `decode_linear_weight`（按字节长度猜），
+实际同一族里还有两处同源的硬编码：
 
-- 每元素 4 字节 → F32
-- 每元素 2 字节 → **F16**
-- `n_out * (n_in / 32) * 34` → Q8_0
+| 位置 | 当时的假设 | 后果 |
+| --- | --- | --- |
+| `decode_linear_weight`（2-D 矩阵） | 4 字节→F32，2 字节→**F16**，34 字节/32→Q8_0 | BF16 被当 F16 读（1.0 → 1.875） |
+| `decode_f32_slice`（1-D 向量：ln1/ln2/deepstack norm/post_ln/position_embd） | **恒为 F32** | F16/BF16 的 norm 向量按 4 字节一组读 → 数值全错 |
+| `matmul_f16_f32_single`（未 precompute 的那条路） | **恒为 Q8_0 块布局**（函数名有误导） | 任何非 Q8_0 的塔被当 Q8_0 解 → 数值全错 |
 
-⇒ **F16 与 BF16 都是每元素 2 字节** ✓✓ —— **长度分不出两者** ✓✓，而两者解出来的值
-不同：1.0 的 BF16 位模式按 F16 读出来是 **1.875** ✓✓。
+三处都是「格式不由张量声明」，所以一起修。
 
-**为什么现在没炸**：目前走 qwen3 视觉塔的模型，视觉权重都是 F32
-（Mage-Flow 的 `mmproj-mage-flow-F32.gguf` 全部 314 个张量都是 F32）——F32 是
-4 字节，猜得对 ✓✓。**一旦有一个 BF16 的视觉塔进这个路径，就是静默的错值** ✓✓：
-不报错、不崩，只是每个权重都读错 ✓✓。
+**改法**：
 
-**对照**：qwen35 的视觉塔**已经是对的** ✓✓ —— 它的 `load_source_weight` 按
-`ggml_type` 分派（F32 / F16 / BF16 / Q8_0 ✓✓），而不是靠长度猜 ✓✓ ✓✓。
-qwen3 塔是这一族里剩下的那个例外 ✓✓。
+1. `src/core/tensor.rs` 新增 `decode_f32_matrix(ggml_type, bytes, n_in, n_out)` —— 按
+   声明格式解码已借到的字节（F32 / F16 / BF16 / Q8_0）；`load_f32_matrix` 改为转调它，
+   core 里只有一份解码实现。（`load_f32_matrix` 是 `4c77690f` 为这一类加的，但**至今
+   没有调用方**；视觉塔拿到的是字节不是张量名，需要的是这个 bytes 级入口。）
+2. `src/models/qwen3/vision/mod.rs` 新增 `VisionMatrix<'a>`：**借到的字节 + 头部声明的
+   `ggml_type`**。`VisionLayer` / `DeepstackWeights` / `VisionEncoder` 的 2-D 权重字段
+   全部换成它，`decode_linear_weight`（按长度猜的那个）删除。
+3. 1-D 向量改走 `core::tensor::optional_f32_values` —— 它本来就按声明格式解
+   （F32 / BF16 / F16）。顺带副作用：**非 precompute 路径每层每帧都在重新解码
+   ln1/ln2 的老代码没有了**（现在加载期解一次）。
+4. 未 precompute 的那条路按声明格式分派：Q8_0 走原来的块路径，F32 / F16 / BF16 走
+   共享的 SIMD dot（`dot_f32` / `dot_f16_f32` / `dot_bf16_f32`），零拷贝借用映射来的
+   字节，不复制。
+5. 头部声明了不支持的格式（如 Q4_0）→ **加载期报错** `Unsupported vision matrix
+   {name}: {type:?}`，不再等到运行时读出一堆错值。
 
-**为什么没有直接改**：qwen3 塔的 `VisionLayer` 每个权重字段是 `&[u8]` ✓✓，
-**同一个层里的不同权重可以是不同格式** ✓✓（比如 BF16 的主干 + F32 的 norm ✓✓），
-所以要修就得给每个字段各记一个 dtype ✓✓ —— 那是 `VisionLayer` 的结构变更 ✓✓，
-会牵动所有构造它的调用方（zdt ✓✓、wevisone_vl ✓✓、mage_flow ✓✓）✓✓。
+**对现有模型零行为变化**：F32 / F16 / Q8_0 矩阵的解码与从前**逐位相同**（同一套字节
+布局：`dequant_q80_weight` 与被删掉的 `dequant_q8_0_tensor` 是同一个算法），F32 的
+1-D 向量也逐位相同。变的只有「头部声明 BF16 / F16 时读对了」和「1-D 向量按声明格式
+读」。
 
-**方向**（未定）：
+**顺带查清的一件事**：未 precompute 的那条路（`matmul_f16_f32_single`）对 qwen3 塔
+**已经没有活调用方** —— qwen3 塔的三个使用方（`models/diffusion/mage_flow/text.rs`、
+`models/wevisone_vl/mod.rs`、`app/diffusion.rs` 的 qwen3vl 分支）都调了
+`precompute` / `precompute_lossless` / `precompute_ggml_f16`；而 vela3-d3、qwen_drive、
+thx02、longcat 用的都是 **qwen35** 塔（那条塔本来就 dtype-aware）。所以这条 Q8_0
+专用路径是一颗哑雷：谁把它复活配上 F16 塔，就是静默的错值。现在它按声明格式分派，
+哑雷拆了。
 
-1. 在 `core::tensor` 加一个按声明格式取矩阵的共享入口
-   （`load_f32_matrix` 已经在 `4c77690f` 里加好了 ✓✓ —— 它就是给这一类用的 ✓✓）✓✓，
-   然后把 qwen3 塔的权重路径换成它 ✓✓ —— 顺带把「按格式取」这件事收进 core ✓✓，
-   符合 §6 的单一事实源原则 ✓✓。
-2. 或者把 qwen3 塔的 `VisionLayer` 权重字段从 `&[u8]` 改成解码后的值 ✓✓，
-   跟刚修完的 bias 一样 ✓✓ —— 代价是所有构造方都要跟 ✓✓。
+**验收**：`a_bf16_vision_tower_decodes_to_the_values_the_header_declares` —— 造一个
+**混合格式**的合成塔（矩阵 BF16、norm F32），加载 + `precompute_lossless`，把解出来的
+权重与 `decode_f32_matrix(BF16, …)` 逐位对比，并断言首元素是 `1.0` 而不是 F16 读法
+的 `1.875`。另有 4 条 core 测试（`decode_f32_matrix` 的格式/长度/不支持分支、
+`optional_f32_values` 的 BF16 分支）+ 4 条视觉塔测试。
 
-**验收**：给 qwen3 塔一个 BF16 的视觉塔，权重解码结果与按声明格式解码的结果
-逐位相同 ✓✓。
+**未覆盖**：本机没有 qwen3 塔的 mmproj（本地模型是 qwen35 塔 / 纯文本 / 扩散），
+端到端只有合成塔这一条证据；等有真实 BF16 的 qwen3vl mmproj 时应再跑一次实机。
 
-**关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
+**关联**：`src/models/qwen3/vision/mod.rs`（`VisionMatrix`）、
 `src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
-`src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
+`src/core/tensor.rs`（`decode_f32_matrix` ✓✓、`load_f32_matrix` ✓✓）。
 
 ### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
 

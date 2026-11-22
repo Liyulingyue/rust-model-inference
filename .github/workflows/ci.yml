@@ -37,6 +37,8 @@ jobs:
       - run: cargo test --locked --lib raw_hidden_
       - run: 'cargo test --locked --lib models::vela3::'
       - run: 'cargo test --locked --lib models::qwen3::tests::'
+      - run: 'cargo test --locked --lib models::qwen3::vision::tests::'
+      - run: 'cargo test --locked --lib core::tensor::tests::'
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
       - run: 'cargo test --locked --lib models::nemotron_reuse::'
