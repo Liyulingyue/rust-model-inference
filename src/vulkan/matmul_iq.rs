@@ -236,13 +236,9 @@ mod gpu_cpu_parity {
             let (tensor_name, n_in, n_out) = loader
                 .tensors()
                 .iter()
-                .find(|t| {
-                    t.ggml_type == want_type && t.dims.len() == 2 && t.dims[0] % 256 == 0
-                })
+                .find(|t| t.ggml_type == want_type && t.dims.len() == 2 && t.dims[0] % 256 == 0)
                 .map(|t| (t.name.clone(), t.dims[0] as usize, t.dims[1] as usize))
-                .unwrap_or_else(|| {
-                    panic!("{path}: no {want_type:?} tensor — wrong model file?")
-                });
+                .unwrap_or_else(|| panic!("{path}: no {want_type:?} tensor — wrong model file?"));
             let (block_elements, block_bytes, _) = format.layout();
             let weight = loader.tensor_slice(&tensor_name).unwrap();
             let expected_len = n_out * (n_in / block_elements) * block_bytes;
