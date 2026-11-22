@@ -111,7 +111,7 @@ pub fn run_qwen3_inference(
                         role: "user",
                         content: prompt,
                     }],
-                    thinking || source.metadata("wevisone_vl.source_revision").is_some(),
+                    thinking || crate::models::qwen3::is_wevisone(source.as_ref()),
                 )?
             }
         }

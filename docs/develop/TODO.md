@@ -2896,45 +2896,62 @@ token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏
 `docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
 `docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
 
-### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖
+### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖 — ✅ 已完成（2026-11-22）
 
-**现状**：WeVisOne-VL-4B 的适配在 6 个位置各自判断「这是不是 WeVisOne」，写法完全一样：
+**做完了**：判定收敛到 1 处（`src/models/qwen3/mod.rs`），静默覆盖改成显式告警 +
+文档说明，并加了一条扫描式守卫测试防止它重新散开。
 
-```rust
-source.metadata("wevisone_vl.source_revision").is_some()
-```
+#### 问题一（判定重复）——已收敛到 1 处
 
-| 位置 | 用途 |
-| --- | --- |
-| `src/app/server/api/tools.rs:505` | 强制 thinking（HTTP prompt 构造） |
-| `src/app/text/qwen3.rs:65` | 强制 thinking（CLI 文本路径） |
-| `src/models/qwen3/trunk/forward.rs:758` | 强制 thinking（generate 路径） |
-| `src/app/jev/single/qwen3.rs:171` | 强制 jinja 渲染 |
-| `src/app/server/mod.rs:1464` | 决定是否构造 `wevisone_options` |
-| `src/models/qwen3/vision/mod.rs:612` | 视觉预计算保留 F32 |
+先修一个前提：条目写的「6 处」是旧分支的数字，main 上实际是 **12 处**同样的
+写法 `source.metadata("wevisone_vl.source_revision").is_some()`。除了原先记的 6 处，
+main 还多出：`src/main.rs`（qwen3vl decoder 模式豁免）、`src/app/server/prediction.rs`
+（WeVisOne 组件校验）、`src/models/qwen3/trunk/prefill.rs`（Auto 投影下沉）、
+`src/models/qwen3/trunk/session.rs`（F32 KV 的 `[GPU]` 提示）、
+`src/models/wevisone_vl/mod.rs`（读 revision 的**值**而不是判定）、以及
+`src/app/server/api/tools.rs` 里的测试替身。**散得比记的多，是这条条目最该
+记下来的事实**——漏改一处就是静默的行为分叉。
 
-**强制 thinking 这件事本身是对的**：WeVisOne 自带的 `chat_template.jinja` 里**完全没有
-thinking 机制**（没有 `enable_thinking` 变量、没有 `<think>` 标记，助手轮就是字面
-`assistant\n`），官方实现走 `AutoProcessor.apply_chat_template`，所以官方 prompt
-永远不含空 think 块。不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+现在的形态：
 
-**问题一（判定重复）**：同一判定散 6 处，已经吃过一次亏——thinking 阈值在
-forward.rs / qwen3.rs / jev 三处各写一遍。将来加 WeVisOne 变体（或改名 revision
-标记）时漏改一处就是静默的行为分叉。**修复方向**：抽一个
-`qwen3::is_wevisone(source) -> bool`（或把它做成 `Qwen3Config` 的一个字段），
-6 处收敛到 1 处，并补一条单测锁住「哪些路径必须按 WeVisOne 处理」。
+- `src/models/qwen3/mod.rs` 定义 `WEVISONE_SOURCE_REVISION_KEY` 与
+  `is_wevisone(source)`；**key 字面量在全仓只出现在这一个文件里**。
+- 12 处调用点全部改为调用 `is_wevisone`（`wevisone_vl/mod.rs` 需要 revision 的
+  值，改用 `WEVISONE_SOURCE_REVISION_KEY` 常量）。
+- 放在 `models::qwen3` 而不是 `models::wevisone_vl`：`wevisone_vl` 本来就依赖
+  `qwen3`，反过来会让基座家族依赖变体家族。
 
-**问题二（对外可见的静默覆盖）**：`src/app/server/api/protocol.rs:52-58` 的
-`enable_thinking` 是**客户端字段**（顶层 `"enable_thinking": false` 或嵌套
-`chat_template_kwargs`）。`tools.rs:505` 的
+守卫测试 `models::qwen3::tests::wevisone_marker_is_read_in_one_place` 扫 `src/`
+下所有 `.rs`，除 `models/qwen3/mod.rs` 外任何文件再写出这个 key 字面量就红。
+这是「哪些路径必须按 WeVisOne 处理」唯一能真正锁住的形态——单测一个
+`is_wevisone` 的布尔值锁不住「调用点有没有漏改」。
+
+**行为零变化**：强制 thinking 这件事本身是对的（WeVisOne 自带的
+`chat_template.jinja` 里完全没有 thinking 机制，没有 `enable_thinking` 变量、
+没有 `<think>` 标记，助手轮就是字面 `assistant\n`；官方实现走
+`AutoProcessor.apply_chat_template`，所以官方 prompt 永远不含空 think 块）。
+不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+
+#### 问题二（对外可见的静默覆盖）——已改成显式告警 + 文档说明
+
+`src/app/server/api/protocol.rs` 的 `enable_thinking` 是**客户端字段**（顶层
+`"enable_thinking": false` 或嵌套 `chat_template_kwargs`）。原来的
 `enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
-覆盖成 true**。功能上无害（WeVisOne 本来就不 think，客户端拿到的仍是「无思考」
-输出），但 API 语义上是「显式请求被静默忽略」。
-**修复方向**：要么在强制时打一条 warning，要么在 `protocol.rs` 的字段注释里写明
-「WeVisOne 忽略该开关，模型没有 think 模式」。后者零风险，前者更友好。
-注意本条与已有的
-[enable_thinking 默认值条目](#high-priority) 是**不同**的问题：那条讲的是
-`unwrap_or(false)` 这个默认值本身，那条讲的是 WeVisOne 的强制覆盖。
+覆盖成 true**。功能上无害（WeVisOne 本来就不 think），但 API 语义上是「显式请求
+被静默忽略」。
+
+两个修法都做了（条目说「二选一」，这里取的是叠加而非替代）：
+
+- `src/app/server/api/tools.rs` 在覆盖发生时打一条
+  `log::warn!("enable_thinking=false is ignored for WeVisOne: its chat template
+  has no thinking mode")`——沿用仓库既有的「字段被忽略」告警样式
+  （`protocol.rs` 里同类 `log::warn!`）。
+- `protocol.rs` 的字段注释写明 WeVisOne 是例外：模板没有 thinking 机制，该字段
+  对它无效，答案一律不带推理块。
+
+**验证**：`cargo test --profile release-fast --lib` 基线 1619 passed / 39 failed，
+本分支 1621 passed / 39 failed —— 失败集合逐条相同（均为预存失败：本机 Windows
+临时目录权限 + oracle 依赖类），新增的 2 个通过项就是本条新增的两条测试。
 
 **关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
 
@@ -4658,49 +4675,65 @@ kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 `src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
 [TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
 
-### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读
+### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读 — ✅ 已完成（2026-11-22）
 
-**状态**：⚠️ 已知缺口，未排期。2026-11-11 定位。
+**做完了**：qwen3 视觉塔的每一个张量现在都按 GGUF 头里声明的格式读，不再有任何一处
+靠字节长度猜。
 
-**现象**：`src/models/qwen3/vision/mod.rs` 的 `decode_linear_weight` **不看张量自己声明的
-格式**，而是看字节长度：
+**当时的缺陷比条目记的更宽**：条目只点了 `decode_linear_weight`（按字节长度猜），
+实际同一族里还有两处同源的硬编码：
 
-- 每元素 4 字节 → F32
-- 每元素 2 字节 → **F16**
-- `n_out * (n_in / 32) * 34` → Q8_0
+| 位置 | 当时的假设 | 后果 |
+| --- | --- | --- |
+| `decode_linear_weight`（2-D 矩阵） | 4 字节→F32，2 字节→**F16**，34 字节/32→Q8_0 | BF16 被当 F16 读（1.0 → 1.875） |
+| `decode_f32_slice`（1-D 向量：ln1/ln2/deepstack norm/post_ln/position_embd） | **恒为 F32** | F16/BF16 的 norm 向量按 4 字节一组读 → 数值全错 |
+| `matmul_f16_f32_single`（未 precompute 的那条路） | **恒为 Q8_0 块布局**（函数名有误导） | 任何非 Q8_0 的塔被当 Q8_0 解 → 数值全错 |
 
-⇒ **F16 与 BF16 都是每元素 2 字节** ✓✓ —— **长度分不出两者** ✓✓，而两者解出来的值
-不同：1.0 的 BF16 位模式按 F16 读出来是 **1.875** ✓✓。
+三处都是「格式不由张量声明」，所以一起修。
 
-**为什么现在没炸**：目前走 qwen3 视觉塔的模型，视觉权重都是 F32
-（Mage-Flow 的 `mmproj-mage-flow-F32.gguf` 全部 314 个张量都是 F32）——F32 是
-4 字节，猜得对 ✓✓。**一旦有一个 BF16 的视觉塔进这个路径，就是静默的错值** ✓✓：
-不报错、不崩，只是每个权重都读错 ✓✓。
+**改法**：
 
-**对照**：qwen35 的视觉塔**已经是对的** ✓✓ —— 它的 `load_source_weight` 按
-`ggml_type` 分派（F32 / F16 / BF16 / Q8_0 ✓✓），而不是靠长度猜 ✓✓ ✓✓。
-qwen3 塔是这一族里剩下的那个例外 ✓✓。
+1. `src/core/tensor.rs` 新增 `decode_f32_matrix(ggml_type, bytes, n_in, n_out)` —— 按
+   声明格式解码已借到的字节（F32 / F16 / BF16 / Q8_0）；`load_f32_matrix` 改为转调它，
+   core 里只有一份解码实现。（`load_f32_matrix` 是 `4c77690f` 为这一类加的，但**至今
+   没有调用方**；视觉塔拿到的是字节不是张量名，需要的是这个 bytes 级入口。）
+2. `src/models/qwen3/vision/mod.rs` 新增 `VisionMatrix<'a>`：**借到的字节 + 头部声明的
+   `ggml_type`**。`VisionLayer` / `DeepstackWeights` / `VisionEncoder` 的 2-D 权重字段
+   全部换成它，`decode_linear_weight`（按长度猜的那个）删除。
+3. 1-D 向量改走 `core::tensor::optional_f32_values` —— 它本来就按声明格式解
+   （F32 / BF16 / F16）。顺带副作用：**非 precompute 路径每层每帧都在重新解码
+   ln1/ln2 的老代码没有了**（现在加载期解一次）。
+4. 未 precompute 的那条路按声明格式分派：Q8_0 走原来的块路径，F32 / F16 / BF16 走
+   共享的 SIMD dot（`dot_f32` / `dot_f16_f32` / `dot_bf16_f32`），零拷贝借用映射来的
+   字节，不复制。
+5. 头部声明了不支持的格式（如 Q4_0）→ **加载期报错** `Unsupported vision matrix
+   {name}: {type:?}`，不再等到运行时读出一堆错值。
 
-**为什么没有直接改**：qwen3 塔的 `VisionLayer` 每个权重字段是 `&[u8]` ✓✓，
-**同一个层里的不同权重可以是不同格式** ✓✓（比如 BF16 的主干 + F32 的 norm ✓✓），
-所以要修就得给每个字段各记一个 dtype ✓✓ —— 那是 `VisionLayer` 的结构变更 ✓✓，
-会牵动所有构造它的调用方（zdt ✓✓、wevisone_vl ✓✓、mage_flow ✓✓）✓✓。
+**对现有模型零行为变化**：F32 / F16 / Q8_0 矩阵的解码与从前**逐位相同**（同一套字节
+布局：`dequant_q80_weight` 与被删掉的 `dequant_q8_0_tensor` 是同一个算法），F32 的
+1-D 向量也逐位相同。变的只有「头部声明 BF16 / F16 时读对了」和「1-D 向量按声明格式
+读」。
 
-**方向**（未定）：
+**顺带查清的一件事**：未 precompute 的那条路（`matmul_f16_f32_single`）对 qwen3 塔
+**已经没有活调用方** —— qwen3 塔的三个使用方（`models/diffusion/mage_flow/text.rs`、
+`models/wevisone_vl/mod.rs`、`app/diffusion.rs` 的 qwen3vl 分支）都调了
+`precompute` / `precompute_lossless` / `precompute_ggml_f16`；而 vela3-d3、qwen_drive、
+thx02、longcat 用的都是 **qwen35** 塔（那条塔本来就 dtype-aware）。所以这条 Q8_0
+专用路径是一颗哑雷：谁把它复活配上 F16 塔，就是静默的错值。现在它按声明格式分派，
+哑雷拆了。
 
-1. 在 `core::tensor` 加一个按声明格式取矩阵的共享入口
-   （`load_f32_matrix` 已经在 `4c77690f` 里加好了 ✓✓ —— 它就是给这一类用的 ✓✓）✓✓，
-   然后把 qwen3 塔的权重路径换成它 ✓✓ —— 顺带把「按格式取」这件事收进 core ✓✓，
-   符合 §6 的单一事实源原则 ✓✓。
-2. 或者把 qwen3 塔的 `VisionLayer` 权重字段从 `&[u8]` 改成解码后的值 ✓✓，
-   跟刚修完的 bias 一样 ✓✓ —— 代价是所有构造方都要跟 ✓✓。
+**验收**：`a_bf16_vision_tower_decodes_to_the_values_the_header_declares` —— 造一个
+**混合格式**的合成塔（矩阵 BF16、norm F32），加载 + `precompute_lossless`，把解出来的
+权重与 `decode_f32_matrix(BF16, …)` 逐位对比，并断言首元素是 `1.0` 而不是 F16 读法
+的 `1.875`。另有 4 条 core 测试（`decode_f32_matrix` 的格式/长度/不支持分支、
+`optional_f32_values` 的 BF16 分支）+ 4 条视觉塔测试。
 
-**验收**：给 qwen3 塔一个 BF16 的视觉塔，权重解码结果与按声明格式解码的结果
-逐位相同 ✓✓。
+**未覆盖**：本机没有 qwen3 塔的 mmproj（本地模型是 qwen35 塔 / 纯文本 / 扩散），
+端到端只有合成塔这一条证据；等有真实 BF16 的 qwen3vl mmproj 时应再跑一次实机。
 
-**关联**：`src/models/qwen3/vision/mod.rs`（`decode_linear_weight`）、
+**关联**：`src/models/qwen3/vision/mod.rs`（`VisionMatrix`）、
 `src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
-`src/core/tensor.rs`（`load_f32_matrix` ✓✓）。
+`src/core/tensor.rs`（`decode_f32_matrix` ✓✓、`load_f32_matrix` ✓✓）。
 
 ### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
 
