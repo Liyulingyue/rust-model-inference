@@ -526,7 +526,7 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
       方向：把「模式 → 允许的 flag 集」集中成一份声明，或反过来给 flag 标注归属
       模式；两者都是**纯重构**，不改行为。`parse.rs` 是所有模型的入口，要**独立成
       PR**，别混进模型适配。
-      详见 [TODO-064](#todo-064-模式互斥白名单手写枚举每加一个共享-flag-都要改多处)。
+      详见 [TODO-064](#todo-064-模式互斥白名单手写枚举每加一个共享-flag-都要改多处---已完成2026-11-22)。
 - [ ] **Vela3 的 F32 权重路径每次投影都整份拷贝** — `models/vela3/tensor.rs` 的
       `linear()` 用 `QuantizedTensor::from_bytes` 交权重：F16/BF16 借用 mmap 字节切片，
       **F32 会把整份权重 `collect()` 成 `Vec<f32>`**（`ops/kernel/quantized_tensor.rs`）。
@@ -3963,51 +3963,62 @@ Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
 `run_forward_logits_*`、`src/models/nemotron_h/trunk/runtime.rs`、
 `docs/develop/jev.md`、TODO-053（30B 适配）。
 
-### TODO-064: 模式互斥白名单手写枚举，每加一个共享 flag 都要改多处
+### TODO-064: 模式互斥白名单手写枚举，每加一个共享 flag 都要改多处 — ✅ 已完成（2026-11-22）
 
-**状态**：⚠️ 已知缺口，未排期。
+**做完了**：白名单收进**一张表**，`parse.rs` 里三段内联 `match` 全部删掉；而且
+不止三处 —— 决策模式自己的检查里还有**第四份**共享 flag 副本，一起收了。
 
-**现象**：`src/app/cli/parse.rs` 的主解析循环统一处理所有 flag
-（`--gpu` 在第 389 行就是 `"--gpu" => options.gpu = true`），但每个
-「模式」在解析之后另有一段**手写白名单**，用来声明该模式允许哪些
-flag、并对带值参数补一次取值校验：
+**当时的四处**：
 
-- `options.enhance` → `--enhance | --compute | --gpu | --overwrite | --serve`
-- `options.system_one_request` → `--adapter | --system-one-request | --compute | --gpu`
-- `options.decision_request` → 自带一段匹配
+| 位置 | 形式 |
+| --- | --- |
+| `app/cli/parse.rs` 的 enhance 段 | `--model/--audio/--out`（路径）、`--threads`（数字）、`--enhance/--compute/--gpu/--overwrite/--serve` |
+| `app/cli/parse.rs` 的 system-one 段 | `--model`、`--threads`、`--adapter/--system-one-request/--compute/--gpu` |
+| `app/cli/parse.rs` 的 decision 段 | **没有白名单**（任何 flag 都收），只对 `--model/--threads/--max-context` 校验取值 |
+| `app/decision.rs` 的 `validate_options` | `--model/--threads/--compute/--gpu/--max-context/--decision-thinker` —— **共享 flag 的第四份副本** |
 
-白名单里出现一个 flag，就等于「这个模式接受它」；其余任何 flag 都会得到
-「`<模式>` cannot be combined with `<flag>`」。
+⇒ 一个共享 flag（`--gpu`、`--compute`…）要在**每一处**各写一遍；新增一个模式就是
+新增一份副本，漏一处就是「这个模式莫名其妙拒绝了一个 flag」。
 
-**为什么它是缺口**：白名单是**手写枚举**，每有一个新模式接受共享 flag，
-就要在三处白名单里各加一次。Vela3 混合 Vulkan 投影
-（`codex/vela3-gpu`，`828c8e8a`）把 `--system-one-request` 从「只允许
-CPU」放开到可带 `--gpu`，就必须手改 `parse.rs` 的系统模式白名单 ——
-那行 `| "--gpu"` 看起来像特例，实际是「共享 flag 列表」的第四份副本。
-下次 `--enhance`（RE-USE）也支持 compute 时，已经改过一次了。
+**改法**（选了条目里的**方向 2：按 flag 声明归属**，因为它才真的消掉多份副本）：
 
-**实测**（aarch64，`review/vela3-gpu`）：`--system-one-request --gpu` 走
-`parse_cli_options` → `validate_cli_options` 均通过，`compute_policy()`
-为 `Auto`；`--gpu` 与 `--compute` 同用仍被拒。
+- `app/cli/parse.rs` 新增 `Mode`（`Enhance` / `Decision` / `SystemOne`）、
+  `Value`（`None` / `Path` / `Number`）、`FlagRule`（flag + 取值 + 接受它的模式），
+  以及一张表 `FLAG_RULES`：**每个 flag 只写一次**，共享 flag 写一次就够，
+  「哪个模式收它」写在同一条目里。
+- 三段内联 `match` 换成一次 `apply_mode_flags(mode, args, &parsed_flags)`：查表 →
+  按 `Value` 校验取值 → 不在表里且该模式有白名单就报
+  「`<模式>` cannot be combined with `<flag>`」。
+- **第四份副本也收了**：`app/decision.rs` 的 `validate_options` 改用同一张表
+  （`flag_is_allowed_for(flag, Mode::Decision)`），只留下它自己的两条条件
+  （native decisions 在 `--serve` / `--jev` 下额外收自己的 flag）。
+- **纯重构**：接受 / 拒绝的集合逐项不变，错误文案也不变。
 
-**方向**（未定）：
+**回归**（条目方向 3 要求的矩阵）：
 
-1. 把「模式 → 允许的 flag 集」集中成一份声明（例如每个模式一个
-   `const ALLOWED: &[&str]`），解析后统一查表，取代三处内联白名单。
-   这是**纯重构**，不改任何 flag 的接受或拒绝行为。
-2. 或者反过来：给 flag 声明它属于哪些模式（`--gpu` 属于 text / enhance /
-   decision / system-one / …），模式检查按声明求交集。后者更不容易
-   漏，但要求给每个共享 flag 标注归属，改动面更大。
-3. 两种方案都要带一条「重构前后行为逐项相同」的回归：把现有
-   `src/app/cli/tests.rs` 与 `tests/system_one_cli.rs` 里的模式冲突用例
-   扩充成「每个模式 × 每个共享 flag」的矩阵。
+- `the_flag_table_matches_the_flags_each_mode_accepted` —— 把**旧白名单原样抄进
+  测试**（enhance 9 个、system-one 6 个、decision 7 个），逐个 flag × 逐个模式
+  比对表与旧行为。测试写的是**行为**，不是表自己，所以表和旧行为是被对照的两方，
+  不是表自证。
+- `the_flag_table_lists_each_flag_once` —— 表里不许有重复条目。
+- `every_mode_takes_the_shared_flags` —— 三个模式 × 三个共享 flag 的矩阵
+  （`--threads 2` / `--compute cpu` / `--gpu`）端到端过 `parse_cli_options`。
+- `a_mode_rejects_the_flags_of_another_mode` —— 跨模式的 flag 被拒。
+
+**顺带记一笔**：决策模式在 `parse.rs` 里**没有白名单**（任何 flag 都收），它的
+白名单其实在 `decision::validate_options` 里 —— 也就是说「模式收哪些 flag」这件事
+在代码里是**分裂**的。表把两边统一到一处之后，这种分裂不会再长出来。
+
+**验证**：`cargo test --profile release-fast --lib` 失败集合与改动前逐条相同（本机
+预存失败 39 条：Windows 临时目录权限 + oracle 依赖类），新增 4 条测试全过；
+`tests/system_one_cli` 全过；`tests/decision_cli` 的 5 条失败在改动前后**完全
+相同**（本机 Windows locale 的报错文案差异，已用 `git stash` 对拍确认）。
 
 **影响面**：`src/app/cli/parse.rs` 是**所有模型**的入口（Qwen3、GLM-4、
-llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，因此应当
-**独立成 PR**，不要混进模型适配的 PR。
+llama、Vela3、Idol 等全走它）—— 本条**独立成 PR**，没有混进模型适配的 PR。
 
-**关联**：`src/app/cli/parse.rs`、`src/app/cli/types.rs`、
-`src/app/cli/validate.rs`、`tests/system_one_cli.rs`。
+**关联**：`src/app/cli/parse.rs`（`FLAG_RULES`）、`src/app/cli/mod.rs`、
+`src/app/decision.rs`、`src/app/cli/tests.rs`、`tests/system_one_cli.rs`。
 
 ### TODO-065: Vela3 的 F32 权重路径每次投影都整份拷贝
 
