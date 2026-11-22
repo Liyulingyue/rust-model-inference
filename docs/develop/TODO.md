@@ -106,6 +106,22 @@ NEON on aarch64; no AVX-512).
       即可闭环,无需 `amd-cloud-gpu-test`。已知边界：IQ4_XS 模型的**整模型 GPU 常驻
       解码**还需文件内其它格式（如 Q6_K token_embd）也有 GPU kernel——Qwen3-0.6B-IQ4_XS
       的 `--compute auto --kv-cache f16` 目前按设计落回 CPU（单投影 GPU 路径已通）。
+- [ ] **Q2_K / Q3_K 的 GPU matmul shader（IQ 模型整模型常驻的最后一缺口）** —
+      IQ 单投影验证已 7/7 闭环（上一条），但 UD 混合量化文件里挡住"整模型
+      GPU 常驻解码"的是混布的 k-quant 张量。以 UD-IQ1_S 为例（GGUF 头部实测）：
+      `blk.8-25.attn_v.weight` 是 **Q2_K ×18**，`token_embd.weight` 是 Q5_K（已有
+      `q5_k_matmul.comp`）；UD-IQ3_XXS / UD-Q3_K_XL 同理含 Q3_K 张量。Q4_K / Q5_K /
+      Q6_K 的 shader 都在，**唯独 Q2_K / Q3_K 没写**，这两个格式的投影按设计逐 op
+      落回 CPU，整模型常驻建不起来。
+      **待做**：按 `q4_k_matmul.comp` 模板补 `q2_k_matmul.comp` / `q3_k_matmul.comp`
+      （块布局见 `tensor.rs`：Q2K = 84B/256（d+dmin+scales[16]+qs[64]），
+      Q3K = 110B/256（d+hmask[32]+qs[64]+scales[12]），对齐本仓 CPU kernel 的
+      8-lane 结构），
+      `GpuWeightFormat` 注册 + kernel hook + `matmul_iq` 同款 per-format runtime。
+      验证：`q2_k` / `q3_k` 权重的 GPU vs CPU 位级对拍（照抄
+      `iq_gpu_matches_cpu_avx2_bitwise_on_real_weights` 的按 `ggml_type` 选张量模板，
+      UD-IQ1_S 的 blk.8.attn_v 即真 Q2_K 张量）+ UD-IQ1_S `--compute auto` 全链路。
+      无新硬件需求，本机 iGPU 可闭环。
 - [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
