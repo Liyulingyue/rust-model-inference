@@ -12,7 +12,6 @@
 //! inside this module's loading path.
 
 use super::config::Qwen35Config;
-use super::util::f16_at;
 use crate::core::tensor::GGMLType;
 use crate::core::tensor::TensorSource;
 use crate::models::edge0::weights::load_affine;
@@ -274,6 +273,19 @@ pub type Qwen35Model<'a> = HybridTrunk<'a>;
 // can refer to a common TensorSource without redundant imports.
 pub(crate) type Source<'a> = &'a dyn TensorSource;
 
+/// The formats a qwen35 matrix tensor ships in.
+const MATRIX_FORMATS: &[GGMLType] = &[
+    GGMLType::F32,
+    GGMLType::F16,
+    GGMLType::BF16,
+    GGMLType::Q8_0,
+    GGMLType::Q4_0,
+    GGMLType::Q4_1,
+    GGMLType::Q4K,
+    GGMLType::Q5K,
+    GGMLType::Q6K,
+];
+
 /// Load a quantized weight (F32/F16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K) into a
 /// `Weight` borrowing the GGUF bytes. Returns `None` if the tensor is
 /// missing or the dtype is not supported (with a stderr warning).
@@ -283,49 +295,35 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
 ) -> Option<Weight<'a>> {
     let ti = source.tensor_info(name)?;
     let data = source.tensor_slice(name)?;
-    let n_cols = ti.dims[0] as usize;
-    let n_rows = if ti.dims.len() >= 2 {
-        ti.dims[1] as usize
-    } else {
-        1
-    };
 
-    match ti.ggml_type {
-        GGMLType::F32 => Weight::from_f32_bytes(data, n_cols, n_rows),
-        GGMLType::I32 => match load_affine(source, name, None) {
+    if ti.ggml_type == GGMLType::I32 {
+        // The affine tensors are not matrices: they carry their own layout.
+        return match load_affine(source, name, None) {
             Ok(weight) => Some(weight),
             Err(error) => {
                 eprintln!("WARNING: {error}");
                 None
             }
-        },
-        GGMLType::F16
-        | GGMLType::BF16
-        | GGMLType::Q8_0
-        | GGMLType::Q4_0
-        | GGMLType::Q4_1
-        | GGMLType::Q4K
-        | GGMLType::Q5K
-        | GGMLType::Q6K => {
-            let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-                data,
-                ti.ggml_type,
-                n_cols,
-                n_rows,
-            ));
-            weight.n_in = n_cols;
-            weight.n_out = n_rows;
+        };
+    }
+
+    // The matrix shape comes from the tensor: the first dimension is the
+    // row length, and the number of rows is the product of the rest.
+    let n_in = ti.dims.first().copied().unwrap_or(0) as usize;
+    let n_out = ti.dims[1..].iter().product::<u64>() as usize;
+
+    match crate::core::tensor::load_weight_any(source, name, n_in, n_out, Some(MATRIX_FORMATS)) {
+        Ok(mut weight) => {
             if ti.ggml_type == GGMLType::BF16 {
+                // The qwen35 family follows llama.cpp's BF16 activation and
+                // accumulation contract, which the default kernel is not.
                 weight.kernel =
                     Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(data));
             }
             Some(weight)
         }
-        _ => {
-            eprintln!(
-                "WARNING: unsupported quant type {:?} for tensor {}",
-                ti.ggml_type, name
-            );
+        Err(error) => {
+            eprintln!("WARNING: {error}");
             None
         }
     }
@@ -475,54 +473,23 @@ fn load_moe_weights<'a, S: TensorSource + ?Sized>(
     })
 }
 
+/// Load a norm or bias tensor into owned F32 values, using the format the
+/// tensor declares.
+///
+/// The formats are the ones a norm or a bias can ship in. A tensor whose
+/// payload does not match its declared format is reported rather than
+/// padded with zeros: a short vector is a broken file, and the padding used
+/// to hide it.
 pub(crate) fn load_weight_f32<S: TensorSource + ?Sized>(
     source: &S,
     name: &str,
 ) -> Option<Vec<f32>> {
-    let ti = source.tensor_info(name)?;
-    let data = source.tensor_slice(name)?;
-    let n_el = ti.n_elements();
-    match ti.ggml_type {
-        GGMLType::F32 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                let off = i * 4;
-                if off + 4 <= data.len() {
-                    out.push(f32::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                        data[off + 2],
-                        data[off + 3],
-                    ]));
-                } else {
-                    out.push(0.0);
-                }
-            }
-            Some(out)
+    match crate::core::tensor::optional_f32_values(source, name) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("WARNING: {error}");
+            None
         }
-        GGMLType::F16 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                out.push(f16_at(data, i));
-            }
-            Some(out)
-        }
-        GGMLType::BF16 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                let off = i * 2;
-                if off + 2 <= data.len() {
-                    out.push(crate::ops::bf16_to_f32(u16::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                    ])));
-                } else {
-                    out.push(0.0);
-                }
-            }
-            Some(out)
-        }
-        _ => None,
     }
 }
 

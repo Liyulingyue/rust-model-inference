@@ -610,11 +610,12 @@ AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体�
 
 ---
 
-### TODO-003: 统一 5 个 `load_weight` / `load_weight_any` 到单一 `core::load_weight_any`
+### TODO-003: 统一 5 个 `load_weight` / `load_weight_any` 到单一 `core::load_weight_any` — ✅ 已完成（2026-11-22）
 
-#### 现状
+**做完了**：五个 loader 全部改为调用 `core::tensor::load_weight_any`，各模型的
+**公开签名不变**（调用方一处没动）。
 
-仓库目前每个模型自维护一份 GGML weight loader，签名 / 白名单 / dims 拆解 / 错误返回都不一致：
+#### 当时的五份实现
 
 | 实现 | 签名 | 接受类型 | dims 校验 | 错误返回 |
 |---|---|---|---|---|
@@ -624,45 +625,71 @@ AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体�
 | `gemma4/trunk/weights.rs::load_weight` | `(source, name, dims, ggml_type)` | 单一类型 | 严格 dims+type | `Result<_, String>` |
 | `gemma4/trunk/weights.rs::load_weight_any` | `(source, name, dims, &[GGMLType])` | 白名单 | 严格 dims+白名单 | `Result<_, String>` |
 
-`qwen3` 干脆没有 `load_weight` —— 直接展开 `Weight::from_quantized(QuantizedTensor::from_bytes(...))`，
-天然支持 `QuantizedTensor::from_bytes` 接受的全部 20+ 类型。
+`qwen3` 干脆没有 `load_weight` —— 直接展开
+`Weight::from_quantized(QuantizedTensor::from_bytes(...))`，天然支持全部 20+ 类型。
 
-**核心公共部分**（≈ 5 行）：
+#### 现在的形态
 
-```rust
-let info = source.tensor_info(name)?;
-let bytes = source.tensor_slice(name)?;
-let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-    bytes, info.ggml_type, n_in, n_out,
-));
-```
+`core::tensor::load_weight_any(source, name, n_in, n_out, allowed)` —— 一个入口负责
+**格式来自头部**、**白名单**、**字节长度校验**、**F32 零拷贝**、**矩阵形状写回**；
+`allowed = None` 表示「`QuantizedTensor` 能装的都收」。五个 loader 变成薄包装：
+形状怎么拆、dims 怎么校、各自的特殊情况，都留在模型侧。
 
-#### 影响
+**签名和条目里提议的不一样，是有原因的**：条目设想的是
+`(source, name, dims: &[u64], allowed)`，即由 core 统一拆 dims。实际做不到 ——
+仓库里**两套 dims 约定都是对的**：
 
-- **未来加 IQ2/IQ4/Q6_K/Q5_K 等新量化类型**——每个 `load_weight` 都要扩白名单。
-- **dims 拆解不一致**：`dims.last()` vs `dims[0]/dims[1]` vs `dims[..-1]` 累乘
-- **白名单粒度不一**：写死 vs 参数化 vs 无
-- **错误返回风格不一**：`Result<_, String>` vs `Option<Weight>`
+- **GGUF 自己的**：第一个维度是行长度（块量化的块轴就在这里），其余维度的乘积是行数。
+  qwen35 / gemma4 用这套。
+- **dots 声码器的**：**除了最后一个维度，其余全是输入宽度**。它的卷积权重按
+  `[kernel, in_ch, out_ch]` 存（`[5, 128, 1536]` → 一个 640×1536 的矩阵），按 GGUF
+  那套拆会得到 n_in=5、n_out=128×1536 ✗。
 
-#### 选项
+强行统一成一套，就是把 dots 的卷积权重悄悄reshape错。所以**形状由调用方给出**
+（`n_in` / `n_out` 两个数），core 只管「把这份字节变成一个 Weight」。真正被统一的
+是那份**到处复制的核心**：格式判定、字节长度算术、F32 的零拷贝路径、以及
+「F32 变体不携带矩阵形状」导致的那次 `n_in`/`n_out` 补写。
 
-1. **最小**：扩 `dots::load_weight` 接受 Q4_0/Q4_1。维持命名遗留。
-2. **中度**：breeze 摆脱 dots 命名，改直接展开 `Weight::from_quantized(...)`（学 qwen3）。
-3. **完整**：5 个 `load_weight` 全部迁到 `crate::core::tensor::load_weight_any`：
-   - 签名：`(source, name, dims: &[u64], allowed: Option<&[GGMLType]>) -> Result<Weight, String>`
-   - `dims` 校验可选；`allowed=None` 表示 `QuantizedTensor::from_bytes` 接受全部类型
-   - 所有模型调用方改 import；`qwen35::load_weight_f32` 与 `core::load_f32_tensor` 合并去重
-   - 工作量：~200 行；彻底统一
+#### 顺带修好的三件事
 
-#### 推荐
+1. **F32 权重不再整份拷贝**。原来的 F32 路径走
+   `QuantizedTensor::from_bytes` → `collect()` 成一份 `Vec<f32>`（而且丢掉矩阵形状，
+   所以每个 loader 都要补写 `n_in`/`n_out`）。统一入口对 F32 走
+   `Weight::from_f32_bytes`，**借字节、不拷贝、形状还在**。这与 roadmap 里
+   「F32 内核改成永远借字节」那条同向。
+2. **qwen35 的 norm / bias 读取不再把短向量补零**。原来的 `load_weight_f32` 在数据
+   不足时**默默补 0.0**（一个坏文件被当成好文件）。现在走
+   `core::tensor::optional_f32_values`：长度不符就是一条 WARNING。
+3. **`qwen35::trunk::util` 里的 `f16_at` / `f16_bits_to_f32` 变成死代码**（只有旧的
+   `load_weight_f32` 用），随本次改动删除。
 
-**方案 3**。`load_weight` 不是 dots 私有的，它是项目 GGML weight loader 的事实标准入口——
-`qwen3` 已经证明**不抽象也活得很好**，所以抽象必须带来明显收益。
+#### 保留在模型侧的东西（各自有理由）
 
-#### 关联文件
+- **qwen35 的 BF16 激活契约**：qwen35 要 llama.cpp 的 BF16 输入与累加契约
+  （`BF16Kernel::with_bf16_input`），默认 kernel 不是 —— 统一入口不碰它，qwen35
+  在拿到 Weight 之后自己换 kernel。
+- **qwen35 的 I32 分支**：仿射张量不是矩阵，走 `load_affine` 自己的布局。
+- **gemma4 的 `'static` 生命周期**：它的 model 持有 source 的 Arc，所以权重是
+  `'static` 的；统一入口返回借用生命周期的 Weight，gemma4 在包装层做原来那个
+  transmute（ SAFETY 注释照旧）。
+- **各模型的 dims 校验严格度**：dots 允许 Q8_0 的行被摊平（`[.., n_in, n_out]`），
+  gemma4 要求 dims 完全一致，qwen35 不校 —— 这些差异是模型自己的契约。
 
-- `src/models/dots/weights.rs:5-67`、`qwen35/trunk/weights.rs:80-124`、`gemma4/trunk/weights.rs:226-309`
-- `src/core/tensor.rs:288-330` — `load_f32_tensor`
+#### 验证
+
+- 新增 5 条 core 单测：`load_weight_any` 按声明格式解码（BF16 不会被当 F16）、
+  **F32 权重确实借的是原始字节**（指针相等）、白名单外的格式被拒、字节长度不符被拒、
+  块对齐的行被拒。
+- **真实模型**：`OvisOCR3.Q8_0.gguf`（qwen35 家族，Q8_0）与
+  `OvisOCR3-BF16.gguf`（BF16）各跑一次贪心生成，**输出与改动前逐字相同**
+  （"The ocean is a vast and mysterious place that holds the secrets of the
+  world."）—— 覆盖了 qwen35 loader 的 Q8_0 与 BF16 两条路径。
+- `cargo test --profile release-fast --lib` 失败集合与改动前逐条相同（本机预存失败
+  39 条），新增 5 条测试全过。
+
+**关联**：`src/core/tensor.rs`（`load_weight_any`）、
+`src/models/dots/weights.rs`、`src/models/qwen35/trunk/weights.rs`、
+`src/models/gemma4/trunk/weights.rs`、`src/models/qwen35/trunk/util.rs`。
 
 ---
 
