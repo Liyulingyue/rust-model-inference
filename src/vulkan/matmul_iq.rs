@@ -158,9 +158,15 @@ mod gpu_cpu_parity {
     use super::*;
     use crate::core::loader::GGUFLoader;
 
-    /// Every IQ type: the GPU matmul over the real model's first attention
-    /// projection must be bit-identical to the CPU AVX2 kernel (which is
-    /// itself bitwise-verified against llama.cpp).
+    /// Every IQ type: the GPU matmul over a real model tensor must be
+    /// bit-identical to the CPU AVX2 kernel (which is itself bitwise-verified
+    /// against llama.cpp).
+    ///
+    /// The tensor is selected by `ggml_type`, not by name: UD (Unsloth
+    /// Dynamic) mixed quants deliberately keep the attention layers at a
+    /// higher-precision format (e.g. UD-IQ1_S ships `blk.0.attn_q.weight`
+    /// as IQ2_XXS and only the FFN tensors as IQ1_S), so name-based picks
+    /// silently grabbed the wrong layout and tripped the size check.
     #[test]
     fn iq_gpu_matches_cpu_avx2_bitwise_on_real_weights() {
         let context = match VulkanContext::new() {
@@ -171,58 +177,55 @@ mod gpu_cpu_parity {
             eprintln!("[skip] software ICD detected");
             return;
         }
-        let cases: [(&str, &str, GpuWeightFormat, &str, usize); 7] = [
+        use crate::core::tensor::GGMLType;
+        let cases: [(&str, &str, GpuWeightFormat, GGMLType); 7] = [
             (
                 "iq2_xxs",
                 "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ2_XXS.gguf",
                 GpuWeightFormat::IQ2_XXS,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ2_XXS_SIZE,
+                GGMLType::IQ2_XXS,
             ),
             (
                 "iq2_xs",
                 "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ2_XS.gguf",
                 GpuWeightFormat::IQ2_XS,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ2_XS_SIZE,
+                GGMLType::IQ2_XS,
             ),
+            // The bartowski IQ2_S file contains no IQ2_S tensors at all
+            // (137×IQ2_XS + 59×IQ3_S); the UD-IQ1_S file ships genuine
+            // IQ2_S FFN-down tensors, so it validates the format instead.
             (
                 "iq2_s",
-                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ2_S.gguf",
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_S.gguf",
                 GpuWeightFormat::IQ2_S,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ2_S_SIZE,
+                GGMLType::IQ2_S,
             ),
             (
                 "iq3_xxs",
                 "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ3_XXS.gguf",
                 GpuWeightFormat::IQ3_XXS,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ3_XXS_SIZE,
+                GGMLType::IQ3_XXS,
             ),
             (
                 "iq3_s",
                 "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ3_S.gguf",
                 GpuWeightFormat::IQ3_S,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ3_S_SIZE,
+                GGMLType::IQ3_S,
             ),
             (
                 "iq1_s",
                 "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_S.gguf",
                 GpuWeightFormat::IQ1_S,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ1_S_SIZE,
+                GGMLType::IQ1_S,
             ),
             (
                 "iq1_m",
                 "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_M.gguf",
                 GpuWeightFormat::IQ1_M,
-                "blk.0.attn_q.weight",
-                crate::ops::quant::BLOCK_IQ1_M_SIZE,
+                GGMLType::IQ1_M,
             ),
         ];
-        for (label, path, format, tensor_name, block_bytes) in cases {
+        for (label, path, format, want_type) in cases {
             let loader = match GGUFLoader::from_file(path) {
                 Ok(l) => l,
                 Err(_) => {
@@ -230,18 +233,22 @@ mod gpu_cpu_parity {
                     continue;
                 }
             };
-            let tensor = loader
+            let (tensor_name, n_in, n_out) = loader
                 .tensors()
                 .iter()
-                .find(|t| t.name == tensor_name)
-                .unwrap_or_else(|| panic!("{path}: {tensor_name} not found"));
-            let weight = loader.tensor_slice(&tensor.name).unwrap();
-            let n_in = tensor.dims[0] as usize;
-            let n_out = tensor.dims[1] as usize;
-            let expected_len = n_out * (n_in / 256) * block_bytes;
+                .find(|t| {
+                    t.ggml_type == want_type && t.dims.len() == 2 && t.dims[0] % 256 == 0
+                })
+                .map(|t| (t.name.clone(), t.dims[0] as usize, t.dims[1] as usize))
+                .unwrap_or_else(|| {
+                    panic!("{path}: no {want_type:?} tensor — wrong model file?")
+                });
+            let (block_elements, block_bytes, _) = format.layout();
+            let weight = loader.tensor_slice(&tensor_name).unwrap();
+            let expected_len = n_out * (n_in / block_elements) * block_bytes;
             if weight.len() != expected_len {
                 eprintln!(
-                    "[skip] {label}: tensor size { } != expected { }",
+                    "[skip] {label}: tensor size {} != expected {}",
                     weight.len(),
                     expected_len
                 );

@@ -68,8 +68,9 @@ NEON on aarch64; no AVX-512).
       `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
       可移植）；另评估 Q4_0 NEON kernel（`q4_0/neon.rs`，逐 block 标量点积 +
       逐行累加、无行分块）是否按 TODO-001 的 x86 重写思路同步改造。
-- [ ] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — **IQ4_XS 已完成**（2026-11-21，Intel iGPU
-      实测），剩余 6 个 2/3-bit 网格类型按同一模板跟进。
+- [x] **IQ2/IQ3/IQ1 的 GPU（Vulkan）路径** — **7/7 全部完成**（IQ4_XS 2026-11-21；
+      iq2_xxs/iq2_xs/iq2_s/iq3_xxs/iq3_s/iq1_s/iq1_m 2026-11-22，Intel iGPU 实测
+      全部与 CPU AVX2 **位级一致**），完整记录见下。
       **IQ4_XS 已做**：`shaders/glsl/iq4_xs_matmul.comp`（按仓库 `q4_k_matmul.comp` 的
       "每 lane 一个输出行 + shared memory 装 Q8_K 输入块"模式，累加顺序逐子块复刻
       CPU AVX2 kernel 的 `acc += dl * dot`——乘加分离 + `precise`,无 fma 收缩）+
@@ -88,12 +89,18 @@ NEON on aarch64; no AVX-512).
       ① `0.125f * (A) + (B)` 运算符优先级——`*` 只覆盖了 A，后半 B 没乘系数；
       ② iq3_xxs / iq3_s 的 lane-value 映射——每个 lane 处理了 8 个值（g1+g2 两组
       网格条目），但 CPU AVX2 的 madd 配对是每 lane 4 个值（单网格条目）。
-      **剩余 3 类型的模型文件问题**：iq2_s / iq1_s / iq1_m 的本地模型张量尺寸与预期
-      不匹配（iq2_s: 606208 ≠ 671744；iq1_s/m: 540672 ≠ 409600/458752——UD 模型的
-      attention 层可能用了不同的量化格式），需要确认 GGUF 内张量的实际 type 后
-      才能验证 shader。同模板,
-      但 shader 需嵌入网格表（iq1s_grid 2048×8B = 16KB 最大,IQ2/IQ3 的 2-4KB）,
-      以 GLSL const 数组或 storage buffer 方式进 shader;2-bit 的符号奇偶重建
+      **剩余 3 类型已闭环（2026-11-22）**：此前 iq2_s / iq1_s / iq1_m 的"张量尺寸不匹配"
+      并非模型文件损坏，也非本仓库格式标记错误（枚举编号与块大小均与 pinned llama.cpp
+      的 static_assert 逐项一致：66/74/82/98/110/136/50/56）。根因是**测试按 tensor 名
+      选张量**：UD（Unsloth Dynamic）混合量化故意把部分 attention 层留在高精度格式——
+      UD-IQ1_S/IQ1_M 的 blk.0.attn_q 实际是 IQ2_XXS（66B/块），IQ2_S 文件的 attn_q 实际
+      是 IQ2_XS（74B/块）；bartowski 标准 IQ2_S 文件甚至**不含任何 IQ2_S 张量**
+      （137×IQ2_XS + 59×IQ3_S）。修复：测试改为按 `ggml_type` 选张量（首个 2D、
+      n_in%256==0 的目标格式张量），iq2_s 用 UD-IQ1_S 的 blk.3.ffn_down（真 IQ2_S），
+      iq1_s 用 UD-IQ1_S 的 blk.0.ffn_gate，iq1_m 用 UD-IQ1_M 的 blk.8.attn_q
+      （blk.8-25 的 attn/ffn 才是真 IQ1_M，GGML_TYPE_IQ1_M=29 是新枚举编号）。
+      shader 实现已嵌入网格表（iq1s_grid 2048×8B = 16KB 最大,IQ2/IQ3 的 2-4KB）,
+      以 GLSL const 数组方式进 shader;2-bit 的符号奇偶重建
       （iq2_xs 的 `full_sign_bits` 路径）在 shader 里按 CPU AVX2 kernel 同款实现。
       验证设备：本机 Intel iGPU（MTL,已验证可用,int8 dot + shader f16 supported）
       即可闭环,无需 `amd-cloud-gpu-test`。已知边界：IQ4_XS 模型的**整模型 GPU 常驻

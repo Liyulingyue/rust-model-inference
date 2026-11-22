@@ -121,21 +121,30 @@ def emit(kind, tables):
     return "\n".join(parts)
 
 
-def _final(factor="1.0"):
+def _tree(a="acc_lane"):
     # hsum_float_8's add tree as a pure expression:
     # t0=x[4]+x[0], t1=x[5]+x[1], t2=x[6]+x[2], t3=x[7]+x[3]
     # u0=t0+t2, u1=t1+t3, result=u0+u1
-    a = "acc_lane"
-    expr = f"(({a}[4] + {a}[0]) + ({a}[6] + {a}[2])) + (({a}[5] + {a}[1]) + ({a}[7] + {a}[3]))"
+    return f"(({a}[4] + {a}[0]) + ({a}[6] + {a}[2])) + (({a}[5] + {a}[1]) + ({a}[7] + {a}[3]))"
+
+
+def _final(factor="1.0", extra_term=""):
+    expr = _tree("acc_lane")
     if factor == "1.0":
-        return expr
-    return factor + " * (" + expr + ")"
+        pass
+    elif factor == "1.0f":
+        expr = factor + " * (" + expr + ")"
+    else:
+        expr = factor + " * (" + expr + ")"
+    if extra_term:
+        expr = "(" + expr + ") + " + extra_term
+    return expr
 
 
 BODIES = {}
 
-def _def(name, bb, tables, body, final, extra_acc=""):
-    BODIES[name] = dict(bb=bb, tables=tables, body=body, final=_final(final), extra_acc=extra_acc)
+def _def(name, bb, tables, body, final, extra_acc="", extra_term=""):
+    BODIES[name] = dict(bb=bb, tables=tables, body=body, final=_final(final, extra_term), extra_acc=extra_acc)
 
 # iq2_xxs
 _def("iq2_xxs", 66, ["IQ2XXS_GRID", "KSIGNS"], """\
@@ -269,36 +278,49 @@ _def("iq3_s", 110, ["IQ3S_GRID"], """\
 """ + LANE_ACC, "1.0f")
 
 # iq1_s
+# CPU lane structure (vec_dot_iq1_s_q8k_avx2): 8 i32 lanes, lane k = the
+# 4-value slice 4k..4k+3 of every group scaled by that group's ls; the delta
+# term (per-group sign * ls * q8-sum) is a separate SCALAR i32 accumulated
+# into a scalar f32 with plain mul+add (no fma), and the epilogue is
+# hsum(acc_lane) + 0.125 * acc_delta.
 _def("iq1_s", 50, ["IQ1S_GRID"], """\
             precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
             precise float d = f16_decode(wshort(slot, rb) & 0xffffu) * q8_scale;
             int lane[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
             int total_delta = 0;
-            for (uint ib = 0u; ib < 8u; ++ib) {
-                uint qh_val = wshort(slot, rb + 34u + 2u * ib);
+            for (uint g = 0u; g < 8u; ++g) {
+                uint qh_val = wshort(slot, rb + 34u + 2u * g);
                 uint ls = 2u * ((qh_val >> 12u) & 7u) + 1u;
                 int delta = (qh_val & 0x8000u) == 0x8000u ? -1 : 1;
-                int dot = 0;
-                int bsum_pair = 0;
-                for (uint l = 0u; l < 4u; ++l) {
-                    uint gidx = wbyte(slot, rb + 2u + 4u * ib + l) | (((qh_val >> (3u * l)) & 7u) << 8u);
-                    int dot2 = 0;
-                    for (uint j = 0u; j < 8u; ++j) {
+                int gsum = 0;
+                for (uint k = 0u; k < 8u; ++k) {
+                    uint l = k / 2u;
+                    uint gidx = wbyte(slot, rb + 2u + 4u * g + l) | (((qh_val >> (3u * l)) & 7u) << 8u);
+                    int dot = 0;
+                    for (uint m = 0u; m < 4u; ++m) {
+                        uint j = 4u * (k % 2u) + m;
                         uint b = j < 4u ? (IQ1S_GRID_LO[gidx] >> (8u * j)) & 0xffu
                                         : (IQ1S_GRID_HI[gidx] >> (8u * (j - 4u))) & 0xffu;
-                        int qv = input_q8[32u * ib + 8u * l + j];
+                        int qv = input_q8[32u * g + 4u * k + m];
                         dot += i8v(b) * qv;
-                        bsum_pair += qv;
+                        gsum += qv;
                     }
+                    lane[k] += dot * int(ls);
                 }
-                lane[ib] += dot * int(ls);
-                total_delta += int(ls) * delta * bsum_pair;
+                total_delta += gsum * delta * int(ls);
             }
 """ + LANE_ACC + """
-            acc_delta += d * float(total_delta);""", "1.0f",
-    extra_acc="    precise float acc_delta = 0.0;")
+            acc_delta += d * float(total_delta);""", "1.0",
+    extra_acc="    precise float acc_delta = 0.0;",
+    extra_term="0.125f * acc_delta")
 
 # iq1_m
+# CPU lane structure (vec_dot_iq1_m_q8k_avx2): two 8-lane i32 accumulators.
+# scales16[t] = 2*((sc_u16[t%4] >> shifts[t/4]) & 7) + 1 with shifts={0,6,3,9};
+# group g's first half (k<4) uses scales16[(g/2) + 4*(g%2)], its second half
+# (k>=4) that +8 — matching the shuffle_idx1/idx2 walk. accum2 holds the same
+# 4-value slices of the ±q8 sums (sign per 8-value chunk from the qh bits).
+# Epilogue: hsum(accum1) + 0.125 * hsum(accum2), both fma-accumulated per block.
 _def("iq1_m", 56, ["IQ1S_GRID"], """\
             uint sc0 = wshort(slot, rb + 48u);
             uint sc1 = wshort(slot, rb + 50u);
@@ -308,47 +330,47 @@ _def("iq1_m", 56, ["IQ1S_GRID"], """\
             precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
             precise float d = f16_decode(scale_u16 & 0xffffu) * q8_scale;
             int lane[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
-            int total_delta = 0;
-            for (uint ib = 0u; ib < 8u; ++ib) {
-                uint sc_pair = wshort(slot, rb + 48u + 2u * (ib / 2u));
-                uint shift = 6u * (ib % 2u);
-                uint ls1 = 2u * ((sc_pair >> shift) & 7u) + 1u;
-                uint ls2 = 2u * ((sc_pair >> (shift + 3u)) & 7u) + 1u;
-                uint qh0 = wbyte(slot, rb + 32u + 2u * ib);
-                uint qh1 = wbyte(slot, rb + 32u + 2u * ib + 1u);
+            int lane2[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
+            for (uint g = 0u; g < 8u; ++g) {
+                uint tf = g / 2u + (g % 2u) * 4u;
+                uint sf = tf % 4u == 0u ? sc0 : (tf % 4u == 1u ? sc1 : (tf % 4u == 2u ? sc2 : sc3));
+                uint shf = tf / 4u == 0u ? 0u : (tf / 4u == 1u ? 6u : (tf / 4u == 2u ? 3u : 9u));
+                uint ls1 = 2u * ((sf >> shf) & 7u) + 1u;
+                uint tl = tf + 8u;
+                uint sl = tl % 4u == 0u ? sc0 : (tl % 4u == 1u ? sc1 : (tl % 4u == 2u ? sc2 : sc3));
+                uint shl = tl / 4u == 0u ? 0u : (tl / 4u == 1u ? 6u : (tl / 4u == 2u ? 3u : 9u));
+                uint ls2 = 2u * ((sl >> shl) & 7u) + 1u;
+                uint qh0 = wbyte(slot, rb + 32u + 2u * g);
+                uint qh1 = wbyte(slot, rb + 32u + 2u * g + 1u);
                 int dv0 = (qh0 & 0x08u) == 0x08u ? -1 : 1;
                 int dv1 = (qh0 & 0x80u) == 0x80u ? -1 : 1;
                 int dv2 = (qh1 & 0x08u) == 0x08u ? -1 : 1;
                 int dv3 = (qh1 & 0x80u) == 0x80u ? -1 : 1;
-                int gdot[4]; int qsum[4];
-                for (uint l = 0u; l < 4u; ++l) {
-                    uint qhb = (l < 2u) ? qh0 : qh1;
-                    uint sh = (l % 2u == 0u) ? 8u : 4u;
-                    uint gidx = wbyte(slot, rb + 4u * ib + l) | ((wbyte(slot, rb + 32u + 2u * ib + l / 2u) << sh) & 0x700u);
-                    int gd = 0; int qs8 = 0;
-                    for (uint j = 0u; j < 8u; ++j) {
+                for (uint k = 0u; k < 8u; ++k) {
+                    uint l = k / 2u;
+                    uint gidx = wbyte(slot, rb + 4u * g + l) | ((wbyte(slot, rb + 32u + 2u * g + l / 2u) << ((l % 2u == 0u) ? 8u : 4u)) & 0x700u);
+                    int dot = 0;
+                    int qsum = 0;
+                    for (uint m = 0u; m < 4u; ++m) {
+                        uint j = 4u * (k % 2u) + m;
                         uint b = j < 4u ? (IQ1S_GRID_LO[gidx] >> (8u * j)) & 0xffu
                                         : (IQ1S_GRID_HI[gidx] >> (8u * (j - 4u))) & 0xffu;
-                        int qv = input_q8[32u * ib + 8u * l + j];
-                        gd += i8v(b) * qv;
-                        qs8 += qv;
+                        int qv = input_q8[32u * g + 4u * k + m];
+                        dot += i8v(b) * qv;
+                        qsum += qv;
                     }
-                    gdot[l] = gd; qsum[l] = qs8;
+                    uint scale = (k < 4u) ? ls1 : ls2;
+                    int sgn = (k / 2u == 0u) ? dv0 : ((k / 2u == 1u) ? dv1 : ((k / 2u == 2u) ? dv2 : dv3));
+                    lane[k] += dot * int(scale);
+                    lane2[k] += (qsum * sgn) * int(scale);
                 }
-                int delta_r0 = int(1u - 2u * ((qh0 >> 3u) & 1u));
-                int delta_r1 = int(1u - 2u * ((qh0 >> 7u) & 1u));
-                int delta_r2 = int(1u - 2u * ((qh1 >> 3u) & 1u));
-                int delta_r3 = int(1u - 2u * ((qh1 >> 7u) & 1u));
-                lane[2u * (ib % 2u)] += (gdot[0] + gdot[1]) * int(ls1)
-                    + (qsum[0] * delta_r0 + qsum[1] * delta_r1) * int(ls1);
-                lane[2u * (ib % 2u) + 1u] += (gdot[2] + gdot[3]) * int(ls2)
-                    + (qsum[2] * delta_r2 + qsum[3] * delta_r3) * int(ls2);
-                total_delta += (qsum[0] * delta_r0 + qsum[1] * delta_r1) * int(ls1)
-                             + (qsum[2] * delta_r2 + qsum[3] * delta_r3) * int(ls2);
             }
 """ + LANE_ACC + """
-            acc_delta = fma(d, float(total_delta), acc_delta);""", "1.0f",
-    extra_acc="    precise float acc_delta = 0.0;")
+            for (uint k = 0u; k < 8u; ++k) {
+                acc2_lane[k] = fma(d, float(lane2[k]), acc2_lane[k]);
+            }""", "1.0",
+    extra_acc="    precise float acc2_lane[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);",
+    extra_term="0.125f * (" + _tree("acc2_lane") + ")")
 
 
 def main():

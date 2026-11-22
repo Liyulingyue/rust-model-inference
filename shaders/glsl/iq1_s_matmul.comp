@@ -39,25 +39,26 @@ void main() {
             precise float d = f16_decode(wshort(slot, rb) & 0xffffu) * q8_scale;
             int lane[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
             int total_delta = 0;
-            for (uint ib = 0u; ib < 8u; ++ib) {
-                uint qh_val = wshort(slot, rb + 34u + 2u * ib);
+            for (uint g = 0u; g < 8u; ++g) {
+                uint qh_val = wshort(slot, rb + 34u + 2u * g);
                 uint ls = 2u * ((qh_val >> 12u) & 7u) + 1u;
                 int delta = (qh_val & 0x8000u) == 0x8000u ? -1 : 1;
-                int dot = 0;
-                int bsum_pair = 0;
-                for (uint l = 0u; l < 4u; ++l) {
-                    uint gidx = wbyte(slot, rb + 2u + 4u * ib + l) | (((qh_val >> (3u * l)) & 7u) << 8u);
-                    int dot2 = 0;
-                    for (uint j = 0u; j < 8u; ++j) {
+                int gsum = 0;
+                for (uint k = 0u; k < 8u; ++k) {
+                    uint l = k / 2u;
+                    uint gidx = wbyte(slot, rb + 2u + 4u * g + l) | (((qh_val >> (3u * l)) & 7u) << 8u);
+                    int dot = 0;
+                    for (uint m = 0u; m < 4u; ++m) {
+                        uint j = 4u * (k % 2u) + m;
                         uint b = j < 4u ? (IQ1S_GRID_LO[gidx] >> (8u * j)) & 0xffu
                                         : (IQ1S_GRID_HI[gidx] >> (8u * (j - 4u))) & 0xffu;
-                        int qv = input_q8[32u * ib + 8u * l + j];
+                        int qv = input_q8[32u * g + 4u * k + m];
                         dot += i8v(b) * qv;
-                        bsum_pair += qv;
+                        gsum += qv;
                     }
+                    lane[k] += dot * int(ls);
                 }
-                lane[ib] += dot * int(ls);
-                total_delta += int(ls) * delta * bsum_pair;
+                total_delta += gsum * delta * int(ls);
             }
             for (uint k = 0u; k < 8u; ++k) {
                 acc_lane[k] = fma(d, float(lane[k]), acc_lane[k]);
@@ -70,5 +71,5 @@ void main() {
     if (!valid_row) return;
     uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
     uint out_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
-    arena.data[output_word + token_row * out_stride + row] = floatBitsToUint(1.0f * (((acc_lane[4] + acc_lane[0]) + (acc_lane[6] + acc_lane[2])) + ((acc_lane[5] + acc_lane[1]) + (acc_lane[7] + acc_lane[3]))));
+    arena.data[output_word + token_row * out_stride + row] = floatBitsToUint((((acc_lane[4] + acc_lane[0]) + (acc_lane[6] + acc_lane[2])) + ((acc_lane[5] + acc_lane[1]) + (acc_lane[7] + acc_lane[3]))) + 0.125f * acc_delta);
 }
