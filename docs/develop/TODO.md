@@ -2482,13 +2482,41 @@ CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个�
 下一步：在**独占设备**上重测（这台 aarch64 机器有另一个租户占着 65 GB 和 79–92% 利用率），
 确认是驱动/内存压力导致的偶发，还是我们自己的同步缺口。
 
-### TODO-041: Astronex 视频输出依赖系统 `ffmpeg`
+### TODO-041: Astronex 视频输出依赖系统 `ffmpeg` — ✅ 已完成（2026-11-22）
 
-`src/models/diffusion/dreamx/media.rs` 直接 spawn `ffmpeg`，没有它
-`--astronex` 跑完采样和 VAE 解码后在写视频时失败（`Start ffmpeg for DreamX
-video: No such file or directory`）。这台机器没有系统 ffmpeg，验证时用的是
-`imageio-ffmpeg` 装进仓库 venv 的静态构建（7.0.2，含 libx264）。
-要么在 USAGE 里写明这个运行期依赖，要么在 `--out` 不支持时给出更早、更明确的报错。
+**做完了**：两件都做了 —— 更早、更明确的报错，和 USAGE / 文档里的运行期依赖说明。
+
+**当时的失败点**：`src/models/diffusion/dreamx/media.rs` 直接 spawn `ffmpeg`，
+没有它的时候 `--astronex` 要**跑完采样和 VAE 解码**才在写视频时失败
+（`Start ffmpeg for DreamX video: No such file or directory`）——用户等的是整条
+管线的时间，换来一句看不出该怎么办的报错。
+
+**改法**：
+
+1. `media.rs` 新增 `require_ffmpeg()`：跑一次 `ffmpeg -version`，成功就放行。
+   失败时报的是**运行期依赖**而不是模型问题：
+   `ffmpeg is required to write the video but could not be started: … It is a
+   runtime dependency of the video path, not a model component: install it (for
+   example `winget install Gyan.FFmpeg`, `apt install ffmpeg`, or `brew install
+   ffmpeg`) and make sure it is on PATH.`
+2. **调用点提前到昂贵工作之前**：
+   - `--astronex`：`app::diffusion::run_astronex_cli` 里，参数校验之后、
+     `AstronexPipeline::load` 与采样 / VAE 解码之前。
+   - DreamX 视频路径：`app::diffusion::run_dreamx_cli` 里，模型加载与 denoise
+     之前；**dry run 不需要 ffmpeg**（它不写文件），所以用 `if !options.dry_run`
+     跳过。
+   ⇒ 现在缺 ffmpeg 是**开局就报错**，不是跑完再报错。
+3. 两处 spawn 的错误信息也补上了依赖说明（原来只有 `Start ffmpeg for DreamX
+   video: {error}`）。
+4. 文档：CLI 的 USAGE 里 Astronex 那行加上「writing the video needs ffmpeg on
+   PATH」；`docs/develop/ASTRONEX_WORLD.md` 新增一节 **Runtime dependencies**，
+   写清 ffmpeg 是运行期依赖（不是模型组件）、检查发生在采样之前、DreamX 路径同理。
+
+**验证**：`a_missing_external_program_is_reported_as_a_runtime_dependency` 用一个
+不存在的程序名验证报错形状（说清是运行期依赖、怎么装、PATH 这件事）。本机 PATH 上
+有 ffmpeg，所以「有 ffmpeg 时放行」这一侧由实跑覆盖。**未覆盖**：没有本地
+astronex / DreamX 权重，所以「检查确实发生在采样之前」的顺序是读代码确认的，没有
+端到端跑过一条没有 ffmpeg 的完整管线。
 
 ### TODO-042: Astronex 权重契约的 pinned commit 不公开
 

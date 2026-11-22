@@ -33,6 +33,16 @@ target/release-fast/rust-model-inference --gpu --astronex \
   --steps 8 --cfg-scale 3 --seed 42 --threads 1
 ```
 
+## Runtime dependencies
+
+The video is written by shelling out to **ffmpeg**, so `ffmpeg` has to be on
+`PATH` (`ffmpeg -version` must work). It is a runtime dependency of the video
+path, not a model component: nothing about the weights changes without it.
+The CLI checks for it **before** the sampling and the VAE decode, so a machine
+without ffmpeg fails at the start of the run instead of after the whole
+pipeline. The same applies to the DreamX video path
+(`src/models/diffusion/dreamx/media.rs`).
+
 Apple GPU execution reuses ash/Vulkan through MoltenVK. Projection uses BF16
 weights with F32 activations/accumulation; online attention has bounded shared
 workspace and no materialized N-squared matrix. The VAE's F32 3D convolutions
