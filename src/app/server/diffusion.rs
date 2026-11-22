@@ -180,7 +180,7 @@ impl DiffusionKind {
 /// The compute policy this model runs under.
 ///
 /// A K-quant ERNIE DiT measures 2.2x slower on the device than on the CPU
-/// (TODO-068), so the CLI pins such a model to the CPU and the HTTP path
+/// (TODO-073), so the CLI pins such a model to the CPU and the HTTP path
 /// has to make the same choice: the same weights must not answer
 /// differently depending on the entry point.
 pub(super) fn policy_for(
@@ -268,7 +268,7 @@ impl DiffusionBackend {
     /// The compute policy this backend actually runs under.
     ///
     /// A K-quant ERNIE DiT measures 2.2x slower on the device than on the
-    /// CPU (TODO-068), so the CLI pins such a model to the CPU; the HTTP
+    /// CPU (TODO-073), so the CLI pins such a model to the CPU; the HTTP
     /// path has to make the same choice, otherwise the same weights would
     /// answer differently depending on the entry point.
     pub(super) fn compute_policy(&self, requested: ComputePolicy) -> ComputePolicy {

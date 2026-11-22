@@ -149,7 +149,7 @@ pub fn matches_signature(source: &dyn TensorSource) -> bool {
 ///
 /// The device only has an int8 dot-product kernel, and the K-quant block
 /// scaling does not fit it, so a K-quant DiT measures 2.2x slower on the
-/// device than on the CPU (TODO-068). The CLI pins such a model to the CPU
+/// device than on the CPU (TODO-073). The CLI pins such a model to the CPU
 /// and the HTTP path has to make the same choice.
 pub fn is_k_quant(source: &dyn TensorSource) -> bool {
     source

@@ -581,7 +581,7 @@ fn main() {
             // fit the int8 dot product that Q8_0 uses (TODO-032), and a
             // Q4_K_M model measures 17.6x slower on the device than on the
             // CPU there. ERNIE's own Q4_K_M DiT measures 2.2x slower
-            // (TODO-068), so it stays on the CPU.
+            // (TODO-073), so it stays on the CPU.
             //
             // A Q8_0 DiT is the other case: every projection then takes the
             // int8 path, which is where the device is at least as fast as

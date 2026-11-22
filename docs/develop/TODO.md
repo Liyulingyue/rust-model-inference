@@ -716,13 +716,24 @@ hidden-attn / mlp 主矩阵走 Q4_0 或 Q4_K。长期再评估 Q4_K / Q6_K 全�
 
 ---
 
-### TODO-005: F32 x86_64 matmul 缺 SIMD kernel — ✅ 已完成
+### TODO-005: F32 / F16 / BF16 的 SIMD 收敛计划
 
-`src/ops/kernel/f32/avx2.rs` 实现完成，F32 / F16 NEON kernel 完成，AVX2 matmul macro 共享代码。
-BF16 / F16 / F32 三档精度 matmul 共享 `avx2_matmul_packed!` 宏。
+**状态**：x86_64 部分 ✅ 已完成；下面三条仍开放（代码里有 7 处指向这里）。
 
-实测：Breeze `--quant f32` scalar 234s → AVX2 54s (4.3×)，`--quant f16` 47s → 31s (1.5×)。
-F32 与 BF16 md5 bit-exact (a7c5e3f5...)，三档精度 md5 都已记录 baseline。
+**已完成**（2026-10）：`src/ops/kernel/f32/avx2.rs` 实现完成，F32 / F16 的 NEON
+kernel 完成，AVX2 matmul macro 共享代码；BF16 / F16 / F32 三档精度的 matmul 共享
+`avx2_matmul_packed!` 宏。实测：Breeze `--quant f32` scalar 234s → AVX2 54s（4.3×），
+`--quant f16` 47s → 31s（1.5×）；F32 与 BF16 md5 bit-exact（a7c5e3f5...），三档精度
+md5 都已记录 baseline。
+
+**仍开放的三条**：
+
+1. **三档精度共用一个 kernel**。BF16 / F16 / F32 各自的 matmul 仍是一份宏实例化，
+   计划收敛到单个 `matmul_f32_vs_f32_simd` 核心（`ops/kernel/simd_avx2.rs`、
+   `f16/mod.rs`、`f32/mod.rs`）。
+2. **aarch64 的标量参考校验**。F16 / F32 的 NEON kernel 没有在 aarch64 上与
+   `super::scalar` 对拍过 —— 仓库没有 aarch64 CI runner；见 **TODO-028**。
+3. **rope 的 aarch64 NEON 变体**。`ops/rope/neox.rs` 的 aarch64 分支仍回落到标量。
 
 ---
 
