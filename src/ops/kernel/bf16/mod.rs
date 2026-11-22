@@ -300,10 +300,18 @@ impl<'a> Kernel for BF16Kernel<'a> {
     }
 
     fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
-        !self.bf16_input
-            && n_in % 8 == 0
-            && cfg!(target_arch = "x86_64")
-            && crate::ops::has_avx2_fma()
+        if self.bf16_input {
+            return false;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+            return true;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if crate::ops::has_neon() {
+            return true;
+        }
+        false
     }
 
     /// Token-tiled batching for the standard f32-input AVX2 path. The
@@ -339,6 +347,20 @@ impl<'a> Kernel for BF16Kernel<'a> {
                 }
                 return true;
             }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if crate::ops::has_neon() {
+            unsafe {
+                neon::matmul_bf16_vs_f32_neon_batched(
+                    self.weight,
+                    input,
+                    output,
+                    n_in,
+                    n_out,
+                    n_tokens,
+                );
+            }
+            return true;
         }
         false
     }
@@ -405,5 +427,35 @@ mod tests {
         kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 3, 1, 0, 1);
         assert!(output[0].is_finite());
         assert!(output[0] > 0.0);
+    }
+
+    #[test]
+    fn bf16_kernel_batched_matches_single_rows() {
+        let n_tokens = 4;
+        let n_in = 13;
+        let n_out = 3;
+        let weight = bf16_bytes(
+            &(0..n_in * n_out)
+                .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
+                .collect::<Vec<_>>(),
+        );
+        let input: Vec<f32> = (0..n_tokens * n_in)
+            .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+            .collect();
+        let kernel = BF16Kernel::new(&weight);
+        let mut actual = vec![0.0f32; n_tokens * n_out];
+        let mut expected = vec![0.0f32; n_tokens * n_out];
+
+        kernel.forward_batched(&input, &mut actual, n_in, n_out);
+        for token in 0..n_tokens {
+            kernel.forward(
+                &input[token * n_in..(token + 1) * n_in],
+                &mut expected[token * n_out..(token + 1) * n_out],
+                n_in,
+                n_out,
+            );
+        }
+
+        assert_eq!(actual, expected);
     }
 }
