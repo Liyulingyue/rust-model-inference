@@ -56,6 +56,13 @@ fn mmproj_path() -> Option<std::path::PathBuf> {
     std::env::var_os("RMI_AGREEMENT_MMPROJ").map(std::path::PathBuf::from)
 }
 
+/// `RMI_AGREEMENT_DSPARK` — the DFlash / DSpark sidecar GGUF for the
+/// speculative-decode comparison. The verified pairing is a Qwen3.5-2B
+/// target (`qwen35`) with its DSpark sidecar.
+fn dspark_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("RMI_AGREEMENT_DSPARK").map(std::path::PathBuf::from)
+}
+
 fn mmp() -> Option<std::sync::Arc<dyn rust_model_inference::core::tensor::TensorSource>> {
     let path = mmproj_path()?;
     let loader = GGUFLoader::from_file(&path).expect("RMI_AGREEMENT_MMPROJ must point at a GGUF");
@@ -87,15 +94,15 @@ fn cli_text(
     path: &std::path::Path,
     max_tokens: usize,
     temperature: f32,
-    thinking: bool,
+    thinking: Option<bool>,
+    dspark: Option<&std::path::Path>,
+    ngram: Option<(usize, usize)>,
 ) -> Option<String> {
     // The CLI's `--thinking` flag and the server's `enable_thinking` field
-    // must be set explicitly: the two fronts default differently
-    // (CLI `options.thinking` is `false` unless `--thinking` is passed;
-    // `build_prompt`'s `enable_thinking = None` resolves to `true` for
-    // thinking-tuned archs like lfm2moe/lfm2). Relying on the defaults
-    // here would compare different prompt tails and report a spurious
-    // disagreement.
+    // are both tri-state: `None` means "whatever the model's own default
+    // is", so the two fronts have to agree on it as well. The cases below
+    // therefore pass `None` to both when they compare the default path,
+    // and an explicit mode to both when they compare a mode.
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rust-model-inference"));
     command
         .arg("--model")
@@ -108,24 +115,44 @@ fn cli_text(
         .arg(temperature.to_string())
         .arg("--max-context")
         .arg(CONTEXT.to_string());
-    command.arg(if thinking {
-        "--thinking"
-    } else {
-        "--no-thinking"
-    });
+    if let Some(sidecar) = dspark {
+        command.arg("--dspark-model").arg(sidecar);
+    }
+    if let Some((draft, lookup)) = ngram {
+        command.arg("--ngram-draft").arg(draft.to_string());
+        command.arg("--ngram-lookup").arg(lookup.to_string());
+    }
+    if let Some(thinking) = thinking {
+        command.arg(if thinking {
+            "--thinking"
+        } else {
+            "--no-thinking"
+        });
+    }
     let output = command.output().ok()?;
     if !output.status.success() {
         eprintln!("CLI failed: {}", String::from_utf8_lossy(&output.stderr));
         return None;
     }
-    // The CLI prints `Output: <chunk>` and keeps appending on the SAME line as
-    // tokens stream, then a newline and `[N output tokens in Xms]`. Everything
-    // between `Output: ` and that summary line is the generated text.
+    // Two CLI output conventions: the llama/qwen3 front prints
+    // `Output: <chunk>` on one line and ends with a `[N output tokens]`
+    // summary; the qwen35 multimodal front streams the text between the
+    // `--- Generation ---` and `--- End ---` banners. The sentinel must read
+    // both, or the "covered" matrix would panic on parse for every qwen35
+    // model (which is how the greedy case stayed uncovered at 2B).
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let start = stdout.find("Output: ")? + "Output: ".len();
-    let rest = &stdout[start..];
-    let rest = rest.strip_suffix('\n').unwrap_or(rest);
-    let end = rest.find("\n[").unwrap_or(rest.len());
+    if let Some(start) = stdout.find("Output: ") {
+        let rest = &stdout[start + "Output: ".len()..];
+        let rest = rest.strip_suffix('\n').unwrap_or(rest);
+        let end = rest.find("\n[").unwrap_or(rest.len());
+        return Some(rest[..end].to_string());
+    }
+    let banner = "--- Generation ---";
+    let start = stdout.find(banner)? + banner.len();
+    let rest = stdout[start..]
+        .strip_prefix('\n')
+        .unwrap_or(&stdout[start..]);
+    let end = rest.find("\n--- End ---").unwrap_or(rest.len());
     Some(rest[..end].to_string())
 }
 
@@ -136,6 +163,8 @@ fn http_text(
     images: &[Vec<u8>],
     prompt: &str,
     thinking: Option<bool>,
+    dspark: Option<&'static GGUFLoader>,
+    ngram: Option<(usize, usize)>,
 ) -> String {
     let arch = loader
         .metadata("general.architecture")
@@ -158,6 +187,15 @@ fn http_text(
     let options =
         RuntimeOptions::from_model(Arc::new(LeakedLoader(loader)), pool, tokenizer.clone())
             .with_max_context(CONTEXT)
+            .with_dspark_model(
+                dspark.map(|sidecar| Arc::new(LeakedLoader(sidecar)) as Arc<dyn TensorSource>),
+            )
+            .with_ngram_draft(ngram.map(|(draft, _)| draft).unwrap_or(0))
+            .with_ngram_lookup(
+                ngram
+                    .map(|(_, lookup)| lookup)
+                    .unwrap_or(rust_model_inference::core::ngram::NGRAM_SIMPLE_SIZE_N),
+            )
             .with_mmproj(mmp());
     let mut runtime = build_text_runtime(&arch, options)
         .unwrap_or_else(|e| panic!("no runtime for arch {arch}: {e}"));
@@ -254,12 +292,19 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
     // leave the other tail unprotected (and, pre-PR-#120, the two fronts
     // disagreed on the *default* — the CLI passed `thinking=false` while
     // `build_prompt` had no such field at all).
-    for thinking in [false, true] {
+    //
+    // The qwen35 CLI front used to ignore `--thinking` altogether: it built
+    // the prompt by hand, so the flag never reached the template while the
+    // HTTP front honoured `enable_thinking`. Both fronts now render the
+    // checkpoint's own chat template, so the sweep covers qwen35 as well.
+    let thinking_modes: &[bool] = &[false, true];
+    for &thinking in thinking_modes {
         for temperature in [0.0f32] {
-            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, thinking) else {
+            let Some(cli) = cli_text(&path, MAX_TOKENS, temperature, Some(thinking), None, None)
+            else {
                 panic!("CLI failed: arch={arch} thinking={thinking} temperature={temperature}");
             };
-            let http = http_text(loader, temperature, &[], PROMPT, Some(thinking));
+            let http = http_text(loader, temperature, &[], PROMPT, Some(thinking), None, None);
             if cli != http {
                 // Where the texts first differ. A split at char 0 means a
                 // forward-path divergence (wrong tokens from step one); a split
@@ -284,6 +329,95 @@ fn cli_and_http_agree_on_greedy_and_temperature() {
             );
         }
     }
+}
+
+#[test]
+fn cli_and_http_agree_on_dspark_speculative_decode() {
+    // The entry-coverage check for the speculative sidecar: the CLI's
+    // `--dspark-model` and the runtime the server builds must produce the
+    // same tokens for the same prompt, and both must match the plain greedy
+    // decode — the sidecar may change how many forward passes the tokens
+    // take, never which tokens come out.
+    let Some(path) = model_path() else {
+        eprintln!("skipping: set RMI_AGREEMENT_MODEL to a GGUF to run this check");
+        return;
+    };
+    let Some(sidecar) = dspark_path() else {
+        eprintln!("skipping: set RMI_AGREEMENT_DSPARK to a sidecar GGUF to run this check");
+        return;
+    };
+    let loader: &'static GGUFLoader = Box::leak(Box::new(
+        GGUFLoader::from_file(&path).expect("RMI_AGREEMENT_MODEL must point at a GGUF"),
+    ));
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if arch != "qwen35" {
+        eprintln!("skipping: dspark agreement needs the qwen35 target, got {arch}");
+        return;
+    }
+    let sidecar_loader: &'static GGUFLoader = Box::leak(Box::new(
+        GGUFLoader::from_file(&sidecar).expect("RMI_AGREEMENT_DSPARK must point at a GGUF"),
+    ));
+    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, None, Some(&sidecar), None) else {
+        panic!("CLI failed with --dspark-model: arch={arch}");
+    };
+    let http = http_text(loader, 0.0, &[], PROMPT, None, Some(sidecar_loader), None);
+    assert_eq!(
+        cli, http,
+        "CLI and HTTP disagree under --dspark-model\nCLI : {cli:?}\nHTTP: {http:?}"
+    );
+    let plain = http_text(loader, 0.0, &[], PROMPT, None, None, None);
+    assert_eq!(
+        http, plain,
+        "dspark speculative decode changed the greedy tokens\nplain: {plain:?}"
+    );
+}
+
+#[test]
+fn cli_and_http_agree_on_ngram_speculative_decode() {
+    // The entry-coverage check for the n-gram self-speculative draft: the
+    // CLI's `--ngram-draft` and the runtime the server builds must produce
+    // the same tokens, and both must match the plain greedy decode — the
+    // lookup may change how many forward passes the tokens take, never
+    // which tokens come out.
+    //
+    // The sizes are deliberately small (draft 4, lookup 3, against the
+    // upstream defaults of 48/12): the sentinel prompt is short, and the
+    // length guard needs cur_len > n + m + 1 tokens of history before the
+    // lookup can draft at all.
+    let Some(path) = model_path() else {
+        eprintln!("skipping: set RMI_AGREEMENT_MODEL to a GGUF to run this check");
+        return;
+    };
+    let loader: &'static GGUFLoader = Box::leak(Box::new(
+        GGUFLoader::from_file(&path).expect("RMI_AGREEMENT_MODEL must point at a GGUF"),
+    ));
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if arch != "qwen35" {
+        eprintln!("skipping: ngram agreement needs the qwen35 target, got {arch}");
+        return;
+    }
+    let ngram = (4usize, 3usize);
+    let Some(cli) = cli_text(&path, MAX_TOKENS, 0.0, None, None, Some(ngram)) else {
+        panic!("CLI failed with --ngram-draft: arch={arch}");
+    };
+    let http = http_text(loader, 0.0, &[], PROMPT, None, None, Some(ngram));
+    assert_eq!(
+        cli, http,
+        "CLI and HTTP disagree under --ngram-draft\nCLI : {cli:?}\nHTTP: {http:?}"
+    );
+    let plain = http_text(loader, 0.0, &[], PROMPT, None, None, None);
+    assert_eq!(
+        http, plain,
+        "ngram speculative decode changed the greedy tokens\nplain: {plain:?}"
+    );
 }
 
 #[test]
@@ -361,11 +495,19 @@ fn cli_and_http_agree_on_image_input() {
         panic!("CLI printed no recognisable output line; stdout was:\n{stdout}");
     };
 
-    // Vision paths: `None` keeps the legacy behaviour — every arch with a
-    // vision-compatible `build_prompt` treats the missing toggle the same
-    // way on both fronts (the CLI's `--thinking` does not reach the
-    // multimodal path, and the vision builders ignore the flag entirely).
-    let http = http_text(loader, 0.0, &[agreement_image()], IMAGE_PROMPT, None);
+    // Vision paths: `None` on both fronts, so the comparison covers the
+    // default path. The CLI's `--thinking` reaches the multimodal prompt
+    // builder now, so the two fronts pick the same renderer and the same
+    // reasoning mode.
+    let http = http_text(
+        loader,
+        0.0,
+        &[agreement_image()],
+        IMAGE_PROMPT,
+        None,
+        None,
+        None,
+    );
     assert_eq!(
         cli, http,
         "CLI and HTTP disagree on image input\nCLI : {cli:?}\nHTTP: {http:?}"

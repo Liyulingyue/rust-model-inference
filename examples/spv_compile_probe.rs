@@ -1,7 +1,7 @@
 #![cfg(feature = "vulkan")]
 //! Compile one SPIR-V file into a compute pipeline and report the result.
 //!
-//! The GB10 driver (580.173.02) traps inside `libnvidia-gpucomp.so` while
+//! The aarch64 box driver (580.173.02) traps inside `libnvidia-gpucomp.so` while
 //! compiling `q8_matmul_grouped.spv`, which takes the whole process down. A
 //! probe that only touches `vkCreateComputePipelines` lets a variant be tested
 //! in a second instead of rebuilding the crate for every shader edit.

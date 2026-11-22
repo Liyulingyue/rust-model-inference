@@ -599,8 +599,7 @@ numbers live (see [`tools/oracle/minicpmv/README.md`](../../tools/oracle/minicpm
   `/v1/jev/image` and `/v1/jev/image_grouped` share). It was registered on the
   generation path only, so the 35B could chat with an image but not be scored
   on one; since the MoE tower is a `Qwen35Model` with `moe` set, the existing
-  `qwen35` scorers are reused as-is. See
-  [`TODO.md`](TODO.md#入口面覆盖2026-10-19-审计).
+  `qwen35` scorers are reused as-is.
 * `src/vulkan/qwen35/moe.rs` binds resident expert banks with per-expert
   descriptor ranges and records routed/shared projections. Softmax/top-k and
   ordered weighted reduction remain on the host; strict Vulkan supports text,

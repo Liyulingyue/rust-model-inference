@@ -69,7 +69,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.max_tokens.is_some()
             || options.top_k.is_some()
             || options.top_p.is_some()
-            || options.thinking
+            || options.thinking.unwrap_or(false)
             || options.dump_logits
             || options.bench
             || options.jinja
@@ -187,7 +187,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.bench
             || options.profile
             || options.dump_logits
-            || options.thinking
+            || options.thinking.unwrap_or(false)
             || options.jinja
             || options.chat_template.is_some()
             || options.chat_template_file.is_some()
@@ -229,7 +229,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.top_p.is_some()
             || options.bench
             || options.dump_logits
-            || options.thinking
+            || options.thinking.unwrap_or(false)
             || options.jinja
             || options.chat_template.is_some()
             || options.chat_template_file.is_some()
@@ -290,7 +290,16 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
         || options.noise.is_some()
         || !options.references.is_empty()
     {
-        return Err("--width/--height/--cfg/--noise/--reference require a Mage-Flow model".into());
+        // Qwen-Image-2.1 takes the same size and guidance flags, so the
+        // model decides whether they belong to it. Mage-Flow and
+        // Qwen-Image-2.1 are the two models with a size, a step count and
+        // a guidance scale, and they spell the size and the guidance the
+        // same way.
+        if !is_qwen_image_2_1_model(&options.model) {
+            return Err(
+                "--width/--height/--cfg/--noise/--reference require a Mage-Flow model".into(),
+            );
+        }
     }
     if options.qwen_latent_width.is_some_and(|value| value == 0)
         || options.qwen_latent_height.is_some_and(|value| value == 0)
@@ -605,6 +614,26 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
     if options.max_tokens == Some(0) {
         return Err("--audio requires --max-tokens greater than 0".into());
     }
+    // One speculative draft axis at a time: the runtime implements the MTP
+    // head, the DSpark sidecar, and the n-gram lookup as exclusive decode
+    // paths, so stacked flags would leave one silently dead. A n-gram
+    // budget below the lookup size is rejected the same way — llama.cpp's
+    // ngram-simple never drafts there.
+    if options.effective_ngram_draft() > 0 {
+        if options.effective_mtp_draft() > 0 || options.dspark_model.is_some() {
+            return Err(
+                "--ngram-draft cannot be combined with --mtp-draft or --dspark-model".into(),
+            );
+        }
+        if options.effective_ngram_draft() < options.effective_ngram_lookup() {
+            return Err(format!(
+                "--ngram-draft {} is below the lookup size {}: ngram-simple drafts \
+                 nothing when the draft length is under the lookup size",
+                options.effective_ngram_draft(),
+                options.effective_ngram_lookup()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -632,6 +661,19 @@ pub fn transcription_options(
         prompt: options.prompt.clone(),
         max_new_tokens: resolve_cli_generation_options(options).0,
     }
+}
+
+/// Whether the model file is a Qwen-Image-2.1 DiT.
+///
+/// The size and guidance flags are shared with Mage-Flow, so the validator
+/// has to look at the model to decide whether they are allowed. The model
+/// is memory mapped, so this costs a header read.
+fn is_qwen_image_2_1_model(model: &std::path::Path) -> bool {
+    use crate::format::ggufrs::ComponentRole;
+    let Ok(source) = crate::format::ggufrs::open_model_source(model, ComponentRole::Llm) else {
+        return false;
+    };
+    crate::models::diffusion::qwen_image_2_1::matches_signature(source.as_ref())
 }
 
 #[cfg(test)]

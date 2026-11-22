@@ -135,3 +135,13 @@ operations remain on CPU. An unavailable hardware device is an error.
 
 See [the Turbo validation report](../../../docs/develop/QWEN_IMAGE_2_1_TURBO.md)
 for executed cases, artifact hashes, results and limitations.
+
+## HTTP
+
+**未接入** —— 该模型自带 latent / context 编排（正负 CFG 两路、Euler 调度、参考图与
+视觉塔），请求形状与 `/v1/images/generations` 的「一段 prompt → 一张图」不同，本轮没有
+实现对应入口。这是「缺实现」，不是「不适用」：`docs/MODEL_LIST.md` 与
+`docs/develop/SUPPORTED_MODELS.md` 都按未接入记录。
+
+服务端当前的图像生成路由由 `src/app/server/diffusion.rs` 提供，只覆盖实现了
+`DiffusionPipeline` 的两个文生图模型（Z-Image、ERNIE-Image）；P-JiT 共用同一条路由。

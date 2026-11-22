@@ -220,7 +220,7 @@ numerical alignment, robot-action execution or performance benchmark is claimed.
 ## Occamy-1.0 re-verification on the aarch64 box (2026-11-05)
 
 The `Occamy-1.0` branch (from `main`) was re-verified with the real weights on
-an aarch64 host (NVIDIA GB10 box, 8 inference threads, `release-fast`). Both
+an aarch64 host (aarch64 box, 8 inference threads, `release-fast`). Both
 files match the hashes in `verification.json`: `occamy-1.0-Q8_0.gguf`
 (`9bd6ecea…`, 36,903,139,456 bytes) and `mmproj-occamy-1.0-F16.gguf`
 (`8f827a1e…`, 899,282,944 bytes).
@@ -297,7 +297,7 @@ Speed, same prompt, same machine:
 | | load | prefill (19 tokens) | decode |
 | --- | --- | --- | --- |
 | upstream PyTorch, CPU, BF16 | 46.3 s | 11.59 s | 0.90 tok/s |
-| upstream PyTorch, GB10, BF16 | 388.4 s | 2.75 s | 4.71 tok/s |
+| upstream PyTorch, aarch64 box, BF16 | 388.4 s | 2.75 s | 4.71 tok/s |
 | this engine, CPU, Q8_0, 8 threads | ~40 s (mmap) | 1.09 s | **15.2 tok/s** |
 | this engine, Vulkan, Q8_0 | ~40 s (mmap) | **0.63 s** | 3.8 tok/s |
 

@@ -80,7 +80,7 @@ pub fn run_inference(
         jinja,
         &|k| source.metadata(k).cloned(),
         prompt,
-        thinking,
+        Some(thinking),
     )? {
         Some(ids) => ids,
         None => build_lfm2_chat_prompt_with_thinking(

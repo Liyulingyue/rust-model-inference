@@ -284,7 +284,7 @@ fn force_f32_linear_into(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if info.ggml_type != GGMLType::F16 {
+    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::F32) {
         return Err(format!("Invalid {name} type for force-F32 linear"));
     }
     let bytes = source
@@ -294,14 +294,32 @@ fn force_f32_linear_into(
         return Err(format!("Invalid {name} byte length"));
     }
     scratch.force_f32_row.resize(n_in, 0.0);
-    let row_bytes = n_in
-        .checked_mul(2)
-        .ok_or_else(|| format!("Invalid {name} row byte size"))?;
-    for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
-        for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
-            *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+    match info.ggml_type {
+        GGMLType::F16 => {
+            let row_bytes = n_in
+                .checked_mul(2)
+                .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+            for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+                for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
+                    *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+                }
+                *output = dot_f32(&scratch.force_f32_row, input, n_in);
+            }
         }
-        *output = dot_f32(&scratch.force_f32_row, input, n_in);
+        GGMLType::F32 => {
+            // The F32 file stores the weights as f32 already, so the row is
+            // read as it is rather than widened from F16.
+            let row_bytes = n_in
+                .checked_mul(4)
+                .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+            for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+                for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(4)) {
+                    *value = f32::from_le_bytes(chunk.try_into().unwrap());
+                }
+                *output = dot_f32(&scratch.force_f32_row, input, n_in);
+            }
+        }
+        _ => unreachable!(),
     }
     Ok(())
 }
@@ -2295,12 +2313,17 @@ fn gpu_attention_enabled() -> bool {
     })
 }
 
-/// `RUST_GPU_F16_REF=0` puts the refiner stacks back on the CPU row path.
+/// `RUST_GPU_F16=0` keeps every F16 projection on the CPU row path.
+///
+/// The name used to be `RUST_GPU_F16_REF` and it used to switch the refiner
+/// stacks only. It now switches all of them, because the main stack can
+/// take them: the FFN down projection is the exception and stays on the CPU
+/// whatever this says.
 #[cfg(feature = "vulkan")]
-fn f16_refiner_enabled() -> bool {
+fn f16_projections_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("RUST_GPU_F16_REF")
+        std::env::var("RUST_GPU_F16")
             .map(|value| value != "0")
             .unwrap_or(true)
     })
@@ -2323,7 +2346,7 @@ fn f16_refiner_resident_only() -> bool {
 /// Upload and bind this block's projections, once per render.
 ///
 /// The main stack is Q8_0 and binds all five. The two refiner stacks are F16 in
-/// the GGUF and bind nothing unless `RUST_GPU_F16_REF` is set, so by default
+/// the GGUF and bind nothing unless the F16 projections are enabled, so by default
 /// every refiner projection falls through to the per-row CPU path below.
 #[cfg(feature = "vulkan")]
 fn bind_block_weights(
@@ -2337,7 +2360,7 @@ fn bind_block_weights(
     let mut bound = std::collections::HashSet::new();
     // The F16 weights get uploaded either way when this is set; only the
     // decision to dispatch on them changes, which is the whole point.
-    let resident_only = f16_refiner_resident_only() && f16_refiner_enabled();
+    let resident_only = f16_refiner_resident_only() && f16_projections_enabled();
     for (projection, name) in [
         (Projection::Qkv, &block.qkv),
         (Projection::Out, &block.out),
@@ -2357,15 +2380,55 @@ fn bind_block_weights(
         // move it to the device at the cost of its precision.
         let format = match info.ggml_type {
             GGMLType::Q8_0 => crate::vulkan::ops::GpuWeightFormat::Q8_0,
-            // Off by default. The F16 tiled kernel is 7x faster than the CPU
-            // row path on the refiner's shapes (3.74 s -> 0.52 s of a step) and
-            // agrees with it to 2.17/255, but with the refiner on the device the
-            // main stack's FFN slot measured 6.68 s against 3.81 s before, and
-            // 8.00 s with the refiner back on the CPU -- so the step total did
-            // not move and the regression is not explained. The slot is not
-            // stable enough across instrumentation changes to attribute it, so
-            // this stays opt-in until it is.
-            GGMLType::F16 if f16_refiner_enabled() => crate::vulkan::ops::GpuWeightFormat::F16,
+            // The F16 device matmul is the refiner's contract, and the refiner
+            // stacks are the only place it was measured: they have no AdaLN
+            // weights and no time input. The main stack differs -- its
+            // activations carry the AdaLN modulation and the time embedding --
+            // and dispatching it with the same kernel does not survive a
+            // second step. Measured on the F16 DiT (128x128): the first step
+            // (sigma 1.000) matched the CPU render to 58.3 dB, and the second
+            // step (sigma 0.003) came back with every flow value NaN, 1024 of
+            // 1024. The CPU render of the same spec is finite, so the F16
+            // weights are not at fault; the device path is.
+            //
+            // So the F16 weights bind for the refiner stacks only, and a model
+            // whose main stack is F16 keeps that stack on the CPU row path,
+            // which is the same policy the K-quant DiT gets (TODO-032). The
+            // F16 main stack on the device is a gap in the shared float matmul,
+            // tracked as TODO-076.
+            //
+            // The F16 tiled kernel is also off by default. It is 7x faster than
+            // the CPU row path on the refiner's shapes (3.74 s -> 0.52 s of a
+            // step) and agrees with it to 2.17/255, but with the refiner on the
+            // device the main stack's FFN slot measured 6.68 s against 3.81 s
+            // before, and 8.00 s with the refiner back on the CPU -- so the step
+            // total did not move and the regression is not explained. The slot
+            // is not stable enough across instrumentation changes to attribute
+            // it, so this stays opt-in until it is.
+            GGMLType::F16 if f16_projections_enabled() => {
+                // The FFN down projection is the one projection the device
+                // path cannot take in F16. The CPU path writes it with
+                // `linear_into_scaled(.., 1.0 / 128.0)`, which scales the
+                // activations down before they are rounded to F16 -- and
+                // rounding is what has a range. The device path has no such
+                // pre-scale, so the F16 intermediate is rounded as it stands:
+                // at the second step of a render it is around 3.6e6, which is
+                // past the 65504 an F16 holds, and the projection came back
+                // with 53760 infinities in it. Those infinities are the
+                // NaNs: the next block's tokens came back with them, and the
+                // flow with them.
+                //
+                // The matmul is linear, so scaling the input changes nothing
+                // but the rounding -- which is exactly what has to change. The
+                // device path has no way to scale the FFN intermediate (it
+                // never leaves the device), so the projection stays on the
+                // CPU row path for the main stack, where the pre-scale is
+                // already part of the contract.
+                if matches!(projection, Projection::W2) && layer >= 2 * REFINER_LAYERS {
+                    continue;
+                }
+                crate::vulkan::ops::GpuWeightFormat::F16
+            }
             _ => continue,
         };
         let Some(bytes) = source.tensor_slice(name) else {
@@ -2446,7 +2509,8 @@ fn run_block_gpu(
         for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
             *value += *bias;
         }
-        Some(split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?)
+        let split = split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?;
+        Some(split)
     } else {
         if time.is_some() {
             return Err("Unexpected Z-Image AdaLN input".into());
@@ -4161,7 +4225,7 @@ mod tests {
     ///
     /// `q8_matmul_grouped_dp4a` gives one workgroup per (token, output column) pair,
     /// so every weight byte is loaded, multiplied and discarded for exactly one
-    /// token. Inside the render on GB10 that measured 108 GOP/s at this shape,
+    /// token. Inside the render on the aarch64 box that measured 108 GOP/s at this shape,
     /// against PyTorch's ~5900 GOP/s. `q8_matmul_tiled_dp4a` keeps a weight load
     /// alive across eight tokens, which is the only reason a GEMM beats a GEMV.
     ///

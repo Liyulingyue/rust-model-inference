@@ -562,6 +562,10 @@ unvalidated. Reproduction commands are in [README.md](README.md).
 
 ## Q4_0 image review follow-up (2026-11-22)
 
+This section records the device-only fix at `a4a5ed71ad581f9a5ac123dc9af15e6b694117e6`.
+The subsequent main-branch integration and CPU correction are recorded separately
+below; these counts and the unchanged-CPU result do not describe that later snapshot.
+
 This investigates [PR #256's Q4_0 image report](https://github.com/Liyulingyue/rust-model-inference/pull/256#issuecomment-7071771104).
 The baseline is `2c1ce45009e35487b6bcf50cf83cd59276424692`; the fix changes only
 Q4_0 device accumulation on AVX2/FMA hosts. [Machine-readable evidence](q4-image-review.json)
@@ -673,3 +677,79 @@ throughput benchmark was performed in this follow-up. The shared change affects
 all Q4_0 device projections on AVX2/FMA hosts; synthetic operator coverage and
 Qwen unit tests do not replace those model-level checks. Keep the PR **Draft /
 Experimental / partial adaptation**; Q4_0 numerical acceptance remains open.
+
+## Main integration and CPU Q4_0 correction (2026-11-22)
+
+The PR's merge conflicts prevented GitHub CI from starting. Main
+`7858cb7d7` is now integrated for validation. The conflict resolutions retain
+SenseNova's image-placeholder validation and cached-template priority, pass
+main's `Option<bool>` thinking value through both template paths, and retain
+both sides' shader paths with hashes recomputed from the resolved files.
+
+Main independently changed Q4_0 AVX2 to eight floating-point lane accumulators.
+Inspection found that its integer nibble dot groups consecutive four elements,
+but its zero-point correction grouped two elements from each 16-element half.
+Those unmatched integer terms only cancel after floating-point scaling and
+reduction. A real EPYC regression with decoded **all-zero weights** returns
+`0.0078125` before correction instead of zero. Both the four-row tile and trailing
+row now compute the correction with `maddubs(byte_ones, q8)` followed by `madd`,
+matching the dot's consecutive four-element groups. Pair sums lie in
+`[-256, 254]`, so the signed-16-bit intermediate cannot saturate.
+
+The regression selects rows `[1, 6)` to exercise a four-row tile, a trailing row
+and a nonzero starting row; it fails before the fix and passes with absolute
+error below `1e-6` afterwards. It also runs in the x86 CI Q4_0 kernel group.
+This corrects integer lane grouping; it does not require bitwise floating-point
+agreement between CPU and GPU. The GPU cancellation test retains the independent
+exact result and its original `1e-4` gate. Its old CPU exact-result precondition
+was removed because main's eight-lane reduction is a different algorithm; no
+GPU tolerance was widened and no same-CPU-reduction claim remains.
+
+Fresh default-library comparison on this host: upstream main **1654 passed /
+14 failed / 120 ignored**, integrated adapter plus corrections **1661 passed /
+14 failed / 120 ignored**. Failure-name sets are identical. The previous Mac
+and device-only snapshots above remain separate historical results.
+
+The integrated GPU Q4_0 regressions pass **2/2**, and the scalar-dispatch
+ordinary/tiled control passes **1/1**. Qwen3.5 focused checks pass **111 / 25
+ignored**, SenseNova **13 / 1 ignored**, and HTTP tool/template tests **19/19**.
+All-target compile checking with `vulkan,parity-trace` passes. The rebuilt
+CLI/server/oracle runner use the corrected production source; 865 source,
+shader, manifest and build-input file hashes match across local and remote
+snapshots, with no temporary first-layer diagnostic code remaining.
+
+Fresh image replay after integration, with the unchanged independent reference
+and gates:
+
+| Backend | Failed / all checks | Failed / same-prefix checks | Greedy IDs |
+| --- | ---: | ---: | --- |
+| CPU | 132 / 172 | 18 / 58 | `[10025, 13, 248046]` |
+| strict Vulkan | 133 / 172 | 19 / 58 | `[10025, 13, 248046]` |
+| Auto -> Vulkan | 133 / 172 | 19 / 58 | `[10025, 13, 248046]` |
+
+Both device runs submit 15,146 times. All three native paths now generate
+`Blue.<|im_end|>`, while the independent reference generates the different but
+also correct `The image is` prefix. This observation belongs to the integrated
+snapshot; the contribution of the CPU lane correction to the generated token
+change was not isolated from main's new reduction algorithm.
+
+The direct CPU-derived GPU diagnostic now has a common generated history for
+all three steps, but still fails **43/172** checks on both device policies
+(worst max_abs about 20.48, RMSE 0.4155, cosine 0.99214). It remains a diagnostic,
+not an independent oracle. No numerical gate is cleared merely because the
+answers agree. The earlier one-layer traces were not rerun on this integrated
+snapshot and cannot establish the cause of all these failures.
+
+CPU and strict Vulkan each complete four CLI and six HTTP operations again.
+Both return `Blue.` for the image, including stream/nonstream HTTP generation;
+within each backend text agrees and text/image JEV probability max_abs is 0.
+CLI/server use `--no-thinking`, matching HTTP `enable_thinking=false` after
+main's thinking-option API change. These request timings are not controlled
+throughput measurements.
+
+[Integration evidence](q4-image-integration.json) records the exact failure
+names, raw zero-weight regression failure, source hash verification, commands,
+backend execution and numerical/interface results. This integration adds no
+NVIDIA, Preview, other-model real-weight Q4_0 or other-format full-model proof.
+The PR remains **Draft / Experimental / partial adaptation** with the independent
+reference and CPU/GPU numerical acceptance gaps open.

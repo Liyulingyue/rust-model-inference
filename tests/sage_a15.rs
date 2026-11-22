@@ -86,7 +86,7 @@ fn sage_contract_and_tokenizer() {
                 "user", "你好",
             )],
             true,
-            false,
+            Some(false),
             &rust_model_inference::prompt::jinja::SpecialTokens::default(),
         )
         .unwrap();

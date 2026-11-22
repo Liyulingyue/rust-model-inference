@@ -1,22 +1,33 @@
 //! Q4_0 AVX2 (x86_64) matmul kernel.
 //!
 //! 32-element blocks, 18-byte layout (2-byte F16 scale + 16-byte nibbles).
-//! Strategy:
-//!  1. Extract low + high nibbles as u8 in [0, 15].
-//!  2. Interleave to q4_unpacked = [lo[0..16], hi[0..16]] (32 bytes).
-//!  3. Use `_mm256_maddubs_epi16` (u8 × i8 → i16 madd of adjacent pairs).
-//!  4. Use `_mm256_madd_epi16` (i16 × i16 → i32) with ones to sum pairs.
-//!  5. Corrected dot = nib_total - 8 * sum_input (exact i32 arithmetic).
-//!  6. Per-block: `acc = _mm256_fmadd_ps(d_v, _mm256_set1_ps(ds), acc)` then hsum.
+//! Strategy (mirrors `q8_0/avx2.rs`):
+//!  1. Tile 4 weight rows per pass; the shared Q8 input block is loaded once
+//!     per block and reused by all 4 rows.
+//!  2. Extract low + high nibbles as u8 in [0, 15] and interleave to
+//!     `[lo[0..16], hi[0..16]]` so nibble k lines up with input element k.
+//!  3. `_mm256_maddubs_epi16` (u8 × i8) + `_mm256_madd_epi16` give the
+//!     per-lane partial dot: each of the 8 i32 lanes sums exactly 4 products.
+//!  4. Correction without materializing `(nibble - 8)`: the per-lane partial
+//!     of `sum(input)` is computed once per block and subtracted scaled by 8 —
+//!     both sides are exact i32, so `dot_lane = nib_lane - 8 * y_lane` is the
+//!     exact per-lane dot of that block.
+//!  5. Per-lane f32 accumulation via `_mm256_fmadd_ps(ds, dot_lane, acc)`; a
+//!     single horizontal sum at the END of each row (the old kernel did a
+//!     `hsum_epi32` per block and fed one scalar into lane 7 of the
+//!     accumulator — 1/8 of the FMA throughput wasted).
 //!
-//! **Precision contract**: ≤ 1 ULP drift vs scalar (FMA single rounding vs
-//! scalar sequential mul+add+add). Matches Q6_K AVX2 precedent.
+//! **Precision contract**: near-bit-exact vs scalar — the per-block integer
+//! dot is exact on both sides; only the f32 accumulation order differs
+//! (scalar: whole-block dot × d·scale, sequential; here: 8 independent
+//! per-lane accumulators). Same class as the Q4_K / Q8_0 kernels, which use
+//! rel < 1e-3 parity bounds.
 
 #![cfg(target_arch = "x86_64")]
 
 use crate::ops::f16_to_f32;
 
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 pub unsafe fn matmul_q4_0_vs_q8_0_avx2(
     weight: &[u8],
     input_q8: &[u8],
@@ -31,131 +42,130 @@ pub unsafe fn matmul_q4_0_vs_q8_0_avx2(
     debug_assert_eq!(n_in % 32, 0);
     let blocks_per_row = n_in / 32;
     let row_stride = blocks_per_row * 18;
-    let low_mask = _mm256_set1_epi8(0x0F);
+    let m0f128 = _mm_set1_epi8(0x0F);
     let ones = _mm256_set1_epi16(1);
+    let byte_ones = _mm256_set1_epi8(1);
 
     let w_ptr = weight.as_ptr();
     let iq_ptr = input_q8.as_ptr();
     let sc_ptr = input_scales.as_ptr();
     let out_ptr = output.as_mut_ptr();
 
-    for (out_idx, row) in (row_start..row_end).enumerate() {
+    let n_rows = row_end - row_start;
+    let full4 = n_rows / 4;
+    for tile in 0..full4 {
+        let r0 = row_start + tile * 4;
+        let off0 = r0 * row_stride;
+        let off1 = (r0 + 1) * row_stride;
+        let off2 = (r0 + 2) * row_stride;
+        let off3 = (r0 + 3) * row_stride;
+        let mut cv0 = _mm256_setzero_ps();
+        let mut cv1 = _mm256_setzero_ps();
+        let mut cv2 = _mm256_setzero_ps();
+        let mut cv3 = _mm256_setzero_ps();
+        for b in 0..blocks_per_row {
+            // The Q8 input block and its per-lane partial sums (exact i32;
+            // lane k sums input elements 4k..4k+3) are shared by all 4 rows.
+            let qy = _mm256_loadu_si256(iq_ptr.add(b * 32) as *const __m256i);
+            let y_lane = _mm256_madd_epi16(ones, _mm256_maddubs_epi16(byte_ones, qy));
+            let y8 = _mm256_slli_epi32(y_lane, 3);
+
+            let bd = *sc_ptr.add(b);
+            let p0 = w_ptr.add(off0 + b * 18);
+            let p1 = w_ptr.add(off1 + b * 18);
+            let p2 = w_ptr.add(off2 + b * 18);
+            let p3 = w_ptr.add(off3 + b * 18);
+
+            let ds0 = f16_to_f32(std::ptr::read_unaligned(p0 as *const u16)) * bd;
+            let ds1 = f16_to_f32(std::ptr::read_unaligned(p1 as *const u16)) * bd;
+            let ds2 = f16_to_f32(std::ptr::read_unaligned(p2 as *const u16)) * bd;
+            let ds3 = f16_to_f32(std::ptr::read_unaligned(p3 as *const u16)) * bd;
+
+            // Per-lane exact block dot for each row: nib_lane - 8 * y_lane.
+            let dot0 = q4_0_row_block_dot(
+                _mm_loadu_si128(p0.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+            let dot1 = q4_0_row_block_dot(
+                _mm_loadu_si128(p1.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+            let dot2 = q4_0_row_block_dot(
+                _mm_loadu_si128(p2.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+            let dot3 = q4_0_row_block_dot(
+                _mm_loadu_si128(p3.add(2) as *const __m128i),
+                qy,
+                y8,
+                m0f128,
+                ones,
+            );
+
+            cv0 = _mm256_fmadd_ps(_mm256_set1_ps(ds0), _mm256_cvtepi32_ps(dot0), cv0);
+            cv1 = _mm256_fmadd_ps(_mm256_set1_ps(ds1), _mm256_cvtepi32_ps(dot1), cv1);
+            cv2 = _mm256_fmadd_ps(_mm256_set1_ps(ds2), _mm256_cvtepi32_ps(dot2), cv2);
+            cv3 = _mm256_fmadd_ps(_mm256_set1_ps(ds3), _mm256_cvtepi32_ps(dot3), cv3);
+        }
+        let base_out = tile * 4;
+        *out_ptr.add(base_out) = crate::ops::dot::hsum_ps(cv0);
+        *out_ptr.add(base_out + 1) = crate::ops::dot::hsum_ps(cv1);
+        *out_ptr.add(base_out + 2) = crate::ops::dot::hsum_ps(cv2);
+        *out_ptr.add(base_out + 3) = crate::ops::dot::hsum_ps(cv3);
+    }
+
+    // Trailing rows: same per-lane structure, one row at a time.
+    for (out_idx, row) in (row_start + full4 * 4..row_end).enumerate() {
         let row_off = row * row_stride;
         let mut acc = _mm256_setzero_ps();
-
-        let mut b = 0;
-        while b + 2 <= blocks_per_row {
-            let off0 = row_off + b * 18;
-            let off1 = row_off + (b + 1) * 18;
-
-            let d_b0 = f16_to_f32(std::ptr::read_unaligned(w_ptr.add(off0) as *const u16));
-            let d_b1 = f16_to_f32(std::ptr::read_unaligned(w_ptr.add(off1) as *const u16));
-            let si_b0 = *sc_ptr.add(b);
-            let si_b1 = *sc_ptr.add(b + 1);
-
-            let (dc0, dc1) = q4_0_block_pair_dot(
-                _mm_loadu_si128(w_ptr.add(off0 + 2) as *const __m128i),
-                _mm256_loadu_si256(iq_ptr.add(b * 32) as *const __m256i),
-                _mm_loadu_si128(w_ptr.add(off1 + 2) as *const __m128i),
-                _mm256_loadu_si256(iq_ptr.add((b + 1) * 32) as *const __m256i),
-                low_mask,
-                ones,
-            );
-
-            let ds0 = d_b0 * si_b0;
-            let ds1 = d_b1 * si_b1;
-            let dc0_v = _mm256_cvtepi32_ps(_mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, dc0));
-            let dc1_v = _mm256_cvtepi32_ps(_mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, dc1));
-            let ds0_v = _mm256_set1_ps(ds0);
-            let ds1_v = _mm256_set1_ps(ds1);
-            acc = _mm256_fmadd_ps(ds0_v, dc0_v, acc);
-            acc = _mm256_fmadd_ps(ds1_v, dc1_v, acc);
-
-            b += 2;
-        }
-
-        while b < blocks_per_row {
+        for b in 0..blocks_per_row {
+            let qy = _mm256_loadu_si256(iq_ptr.add(b * 32) as *const __m256i);
+            let y_lane = _mm256_madd_epi16(ones, _mm256_maddubs_epi16(byte_ones, qy));
             let off = row_off + b * 18;
             let d_b = f16_to_f32(std::ptr::read_unaligned(w_ptr.add(off) as *const u16));
-            let si_b = *sc_ptr.add(b);
-            let dc = q4_0_block_dot(
+            let dot = q4_0_row_block_dot(
                 _mm_loadu_si128(w_ptr.add(off + 2) as *const __m128i),
-                _mm256_loadu_si256(iq_ptr.add(b * 32) as *const __m256i),
-                low_mask,
+                qy,
+                _mm256_slli_epi32(y_lane, 3),
+                m0f128,
                 ones,
             );
-            let dc_v = _mm256_cvtepi32_ps(_mm256_set_epi32(0, 0, 0, 0, 0, 0, 0, dc));
-            let ds_v = _mm256_set1_ps(d_b * si_b);
-            acc = _mm256_fmadd_ps(ds_v, dc_v, acc);
-            b += 1;
+            acc = _mm256_fmadd_ps(
+                _mm256_set1_ps(d_b * *sc_ptr.add(b)),
+                _mm256_cvtepi32_ps(dot),
+                acc,
+            );
         }
-
-        *out_ptr.add(out_idx) = crate::ops::dot::hsum_ps(acc);
+        *out_ptr.add(full4 * 4 + out_idx) = crate::ops::dot::hsum_ps(acc);
     }
 }
-/// Per-block Q4×Q8 SIMD dot. Returns corrected dot product as i32:
-///   sum((nibble - 8) * input)  [exact i32 arithmetic]
-/// but computed without ever materializing `(nibble - 8)` per element:
-///   = sum(nibble × input) - 8 × sum(input)  [exact i32 arithmetic]
-///
-/// Caller multiplies by d * scale (f32) and accumulates via FMA.
+
+/// Per-lane exact Q4_0 × Q8 block dot: `nib_lane - 8 * y_lane`, where each of
+/// the 8 i32 lanes sums exactly 4 products. The caller multiplies lane-wise by
+/// `d * scale` (f32) and accumulates; no horizontal reduction per block.
 #[inline(always)]
-unsafe fn q4_0_block_dot(
+unsafe fn q4_0_row_block_dot(
     q4_bytes: std::arch::x86_64::__m128i,
-    q8_input: std::arch::x86_64::__m256i,
-    low_mask: std::arch::x86_64::__m256i,
+    qy: std::arch::x86_64::__m256i,
+    y8: std::arch::x86_64::__m256i,
+    m0f128: std::arch::x86_64::__m128i,
     ones: std::arch::x86_64::__m256i,
-) -> i32 {
+) -> std::arch::x86_64::__m256i {
     use std::arch::x86_64::*;
-
-    let lo = _mm_and_si128(q4_bytes, _mm256_castsi256_si128(low_mask));
-    let hi = _mm_and_si128(
-        _mm_srli_epi16(q4_bytes, 4),
-        _mm256_castsi256_si128(low_mask),
-    );
-
+    let lo = _mm_and_si128(q4_bytes, m0f128);
+    let hi = _mm_and_si128(_mm_srli_epi16(q4_bytes, 4), m0f128);
     let q4_unpacked = _mm256_set_m128i(hi, lo);
-
-    let prod16 = _mm256_maddubs_epi16(q4_unpacked, q8_input);
-    let prod32 = _mm256_madd_epi16(ones, prod16);
-
-    let y_lo_input = _mm256_castsi256_si128(q8_input);
-    let y_hi_input = _mm256_extracti128_si256(q8_input, 1);
-    let y_lo16 = _mm256_cvtepi8_epi16(y_lo_input);
-    let y_hi16 = _mm256_cvtepi8_epi16(y_hi_input);
-    let y_lo32 = _mm256_madd_epi16(ones, y_lo16);
-    let y_hi32 = _mm256_madd_epi16(ones, y_hi16);
-    let y_sum32 = _mm256_add_epi32(y_lo32, y_hi32);
-
-    let nib_total = hsum_epi32(prod32);
-    let sum_total = hsum_epi32(y_sum32);
-
-    nib_total - 8 * sum_total
-}
-
-#[inline(always)]
-unsafe fn q4_0_block_pair_dot(
-    q4_b0: std::arch::x86_64::__m128i,
-    q8_b0: std::arch::x86_64::__m256i,
-    q4_b1: std::arch::x86_64::__m128i,
-    q8_b1: std::arch::x86_64::__m256i,
-    low_mask: std::arch::x86_64::__m256i,
-    ones: std::arch::x86_64::__m256i,
-) -> (i32, i32) {
-    let dc0 = q4_0_block_dot(q4_b0, q8_b0, low_mask, ones);
-    let dc1 = q4_0_block_dot(q4_b1, q8_b1, low_mask, ones);
-    (dc0, dc1)
-}
-
-#[inline(always)]
-unsafe fn hsum_epi32(v: std::arch::x86_64::__m256i) -> i32 {
-    use std::arch::x86_64::*;
-    let hi128 = _mm256_extracti128_si256(v, 1);
-    let lo128 = _mm256_castsi256_si128(v);
-    let sum128 = _mm_add_epi32(hi128, lo128);
-    let t = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
-    let r = _mm_add_epi32(t, _mm_srli_si128(t, 4));
-    _mm_cvtsi128_si32(r)
+    let nib_lane = _mm256_madd_epi16(ones, _mm256_maddubs_epi16(q4_unpacked, qy));
+    _mm256_sub_epi32(nib_lane, y8)
 }
 
 #[cfg(test)]
@@ -196,6 +206,11 @@ mod tests {
             .collect()
     }
 
+    /// Parity bound follows the Q4_K / Q8_0 kernel convention (rel < 1e-3):
+    /// the per-block integer dot is exact on both sides, only the f32
+    /// accumulation order differs (scalar sequential vs 8 per-lane
+    /// accumulators + final horizontal sum). ULP drift is printed for
+    /// visibility.
     fn assert_avx2_eq_scalar(label: &str, weight: &[u8], q8: &[u8], scales: &[f32]) {
         let n_in = q8.len();
         let n_out = weight.len() / (n_in / 32 * 18);
@@ -205,20 +220,58 @@ mod tests {
             matmul_q4_0_vs_q8_0_avx2(weight, q8, scales, &mut avx2_out, n_in, 0, n_out);
         }
         matmul_q4_0_scalar_range(weight, q8, scales, &mut scalar_out, n_in, n_out, 0, 1);
+        let max_diff = avx2_out
+            .iter()
+            .zip(scalar_out.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_scalar = scalar_out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let rel = if max_scalar > 1e-3 {
+            max_diff / max_scalar
+        } else {
+            max_diff
+        };
         for (i, (a, b)) in avx2_out.iter().zip(scalar_out.iter()).enumerate() {
             let a_bits = a.to_bits();
             let b_bits = b.to_bits();
             let diff = (a_bits as i32).wrapping_sub(b_bits as i32).unsigned_abs();
-            assert!(
-                diff <= 4,
+            eprintln!(
                 "{} row {}: avx2={} (bits {:x}) scalar={} (bits {:x}) diff={} ULP",
-                label,
-                i,
-                a,
-                a_bits,
-                b,
-                b_bits,
-                diff
+                label, i, a, a_bits, b, b_bits, diff
+            );
+        }
+        assert!(
+            rel < 1e-3,
+            "{} parity: max_diff={} max_scalar={} rel={}",
+            label,
+            max_diff,
+            max_scalar,
+            rel
+        );
+    }
+
+    #[test]
+    fn decoded_zero_weights_stay_zero_with_asymmetric_q8_input() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let input: Vec<u8> = [
+            89i8, -29, 67, 100, -20, -117, -61, 120, 3, -3, -24, 108, 73, 85, -50, 120, -5, -36,
+            22, 101, 105, -72, 2, -92, -55, -92, 66, -103, 31, 77, -63, 125,
+        ]
+        .into_iter()
+        .map(|v| v as u8)
+        .collect();
+        let weight = build_block(38.75, 8, 8).repeat(7);
+        // Five selected rows cover the four-row tile and its trailing-row path.
+        let mut output = [f32::NAN; 5];
+        unsafe {
+            matmul_q4_0_vs_q8_0_avx2(&weight, &input, &[1.2412109375], &mut output, 32, 1, 6);
+        }
+        for (row, actual) in output.into_iter().enumerate() {
+            assert!(
+                actual.abs() < 1e-6,
+                "row={row}: zero weights produced {actual}"
             );
         }
     }

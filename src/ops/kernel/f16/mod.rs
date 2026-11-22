@@ -257,6 +257,12 @@ impl<'a> Kernel for F16Kernel<'a> {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
+        // Token-tiled path when available: identical per-(row, token) values,
+        // weight rows reused from L1/L2 instead of re-streamed per token.
+        if n_tokens >= 2 && self.supports_token_tiled_batching(n_in) {
+            self.forward_batched_rows(input, output, n_in, n_out, n_tokens, 0, n_out);
+            return;
+        }
         for t in 0..n_tokens {
             if forward_f16_dispatch(
                 self.weight,
@@ -276,6 +282,46 @@ impl<'a> Kernel for F16Kernel<'a> {
                 n_out,
             );
         }
+    }
+
+    fn supports_token_tiled_batching(&self, _n_in: usize) -> bool {
+        true
+    }
+
+    /// Token-tiled batching that reproduces `forward_scaled_rows(…, 1.0, …)`
+    /// per (row, token) exactly: the activation is rounded to f16 once per
+    /// token, then the F16×F16 dot runs with the weight row held in L1 across
+    /// tokens. `dot_f16_f16_bytes` carries its own SIMD dispatch, so this is
+    /// portable. The F16×F32 AVX2 kernel (`matmul_f16_vs_f32_avx2_tiled`) is
+    /// NOT used here — it skips the activation f16 rounding and would change
+    /// the numbers.
+    fn forward_batched_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        n_tokens: usize,
+        row_start: usize,
+        row_end: usize,
+    ) -> bool {
+        let mut input_f16 = vec![0u16; n_tokens * n_in];
+        for (token, chunk) in input.chunks_exact(n_in).take(n_tokens).enumerate() {
+            crate::ops::f32_slice_to_f16(chunk, &mut input_f16[token * n_in..(token + 1) * n_in]);
+        }
+        let inverse_scale = 1.0f32.recip();
+        for row in row_start..row_end {
+            let row_off = row * n_in * 2;
+            let weight_row = &self.weight[row_off..row_off + n_in * 2];
+            for token in 0..n_tokens {
+                output[token * n_out + row] = crate::ops::dot_f16_f16_bytes(
+                    &input_f16[token * n_in..(token + 1) * n_in],
+                    weight_row,
+                    n_in,
+                ) * inverse_scale;
+            }
+        }
+        true
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {

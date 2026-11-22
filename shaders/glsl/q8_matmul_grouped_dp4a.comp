@@ -60,7 +60,7 @@ void main() {
     uint blocks_per_row = pc.blocks_per_row;
     uint row_offset = read_row * blocks_per_row * 34u;
     // The expert index is folded into a temporary and added unconditionally.
-    // Adding a constant inside the branch makes driver 580.173.02 on GB10
+    // Adding a constant inside the branch makes driver 580.173.02 on the aarch64 box
     // trap inside libnvidia-gpucomp while compiling this shader (SIGTRAP in
     // vkCreateComputePipelines); the temporary form compiles and the value is
     // identical, because a non-MoE stack keeps expert_count at zero.

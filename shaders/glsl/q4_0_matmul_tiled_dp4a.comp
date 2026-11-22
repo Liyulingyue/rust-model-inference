@@ -19,7 +19,7 @@ int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // through the packed dot product instead of scalar multiplies.
 //
 // The integer dot is exact; per-block accumulation uses the same selected
-// CPU contract as the per-row kernel, including AVX2's FMA.
+// scale and FMA order as the per-row kernel.
 //
 // The k walk is chunked rather than staged whole: a full row of q8
 // activations is blocks_per_row * 8 words, which would be past the shared

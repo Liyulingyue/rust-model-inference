@@ -188,7 +188,7 @@ impl Qwen3JevScorer {
         max_context: usize,
     ) -> Result<Self, String> {
         let mut jinja = jinja.clone();
-        jinja.jinja |= source.metadata("wevisone_vl.source_revision").is_some();
+        jinja.jinja |= crate::models::qwen3::is_wevisone(source.as_ref());
         jinja.jinja |= crate::app::arch_of(source.as_ref()) == "mage_vl";
         let jinja = jinja.resolve(&|k| source.metadata(k).cloned())?;
         let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())

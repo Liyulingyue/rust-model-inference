@@ -303,7 +303,8 @@ pub fn load_logical_cpu(...) -> Result<LogicalCpuDeviceLoad, ...>
 | Vulkan | `--features vulkan` | `src/vulkan/{ops,qwen3,qwen35}.rs`（290 KB） | Qwen3 dense（Q8_0/Q4_0/Q4_1/Q4_K/Q6_K/F16）；Qwen3.5 dense + recurrent + SSM（BF16） |
 | wgpu | `--features wgpu` | `src/wgpu.rs` | 实验性 |
 
-详见 [`docs/develop/VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md) / [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md)。
+详见 [`docs/develop/VULKAN.md`](VULKAN.md) / [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md)（Vulkan 的设计取舍与历史硬件矩阵在
+[`VULKAN.md`](VULKAN.md)；2026-09 的 DESIGN/PLAN 两文档已被吸收删除）。
 
 ### 7.2 异构派发原则
 
@@ -413,12 +414,13 @@ Worker 的 `my_epoch` 必须从 `0` 初始化，**不能**读 `inner.epoch.load(
 本规范只写跨模块的设计契约；以下子系统的设计细节独立成文：
 
 * [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md) — 模型 `trunk/` + sibling 目录结构与依赖方向
+* [`ARCHITECTURE_EVOLUTION.md`](ARCHITECTURE_EVOLUTION.md) — 架构数线性增长的中长期解（layer_template / 组件组装 / feature gate）
 * [`SUPPORTED_MODELS.md`](SUPPORTED_MODELS.md) — 每个具体型号的"已验证格式 + Oracle + 限制"矩阵
 * [`SERVER_BACKEND_SELECTION.md`](SERVER_BACKEND_SELECTION.md) — server 的 `Backend` 选择：哪些靠 flag、哪些靠 GGUF 元数据探测，以及新增后端时怎么判断
 * [`KV_CACHE_DESIGN.md`](KV_CACHE_DESIGN.md) — KV cache 共享条件 + Ephemeral/Timed/Persistent 生命周期
 * [`GGUFRS.md`](GGUFRS.md) — `.ggufrs` 物理布局
 * [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md) — "标量为底 + 后端注册表"原则
-* [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md) — Vulkan 后端覆盖范围与限制
+* [`VULKAN.md`](VULKAN.md) — Vulkan 后端覆盖范围与限制（含设计取舍；旧 DESIGN/PLAN 已吸收删除）
 * [`PARALLEL_MATMUL_SAFETY.md`](PARALLEL_MATMUL_SAFETY.md) — Issue 4：并行 matmul 形式别名违规
 * [`OPTIMIZATION.md`](OPTIMIZATION.md) — 性能基线、已修复 bug、已验证无效方向
 * [`LFM25_OPTIMIZATION.md`](LFM25_OPTIMIZATION.md) / [`LFM25_MOE_OPTIMIZATION.md`](LFM25_MOE_OPTIMIZATION.md) / [`ZIMAGE_OPTIMIZATION.md`](ZIMAGE_OPTIMIZATION.md) — 子模型/子方向优化记录

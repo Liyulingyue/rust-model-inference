@@ -190,7 +190,7 @@ question run reports `A: 0.2219 / B: 0.7781` on both backends.
 
 ### But the device path is slower than the CPU path
 
-Measured on the GB10 box (12B Q8_0, `--threads 8`, prompt "What is 2+2?",
+Measured on the aarch64 box (12B Q8_0, `--threads 8`, prompt "What is 2+2?",
 8 output tokens, wall clock of the whole run):
 
 | backend | wall | note |

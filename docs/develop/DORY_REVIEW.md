@@ -6,7 +6,7 @@
 （3,673,288,864 bytes，SHA-256 `96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0`）。
 权重在本次审阅里重新下载并**逐字节校验**过 SHA-256，与 `SUPPORTED_MODELS.md` 的 pin 一致。
 
-审阅主机：**NVIDIA GB10**（集成 GPU，`PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU`），
+审阅主机：**aarch64 Vulkan 主机**（集成 GPU，`PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU`），
 驱动 580.173.02，Vulkan API 1.4.312。
 
 ## 结论
@@ -19,7 +19,7 @@ Dory 1.0 的实现是**完整且正确的**，文档里列出的两个最大缺�
 |---|---|
 | CPU 契约 | ✓ 结构 / token / embedding 精确检查通过 |
 | 前向语义 | ✓ 与参考实现（200 行的 `dory.cpp`）逐项对拍一致，未发现正确性缺陷 |
-| Vulkan 设备路径 | ✓ GB10 上 5 个硬件测试全过，GPU↔CPU **逐位一致** |
+| Vulkan 设备路径 | ✓ aarch64 上 5 个硬件测试全过，GPU↔CPU **逐位一致** |
 | 性能 | ✓ 拿到首个基线：设备路径比 CPU 快 **2.7×** |
 | CLI / HTTP / JEV | ✓ 三条入口都实测通（见下表） |
 | 文档一致性 | ✗ 三处与实测不符（CLI/HTTP 的提示分叉、JEV 的 backend 提示、缺 BOS），已记在发现里 |
@@ -32,7 +32,7 @@ Dory 1.0 的实现是**完整且正确的**，文档里列出的两个最大缺�
 `vulkaninfo`（NVIDIA ICD）实测：
 
 ```
-deviceName                = NVIDIA GB10
+deviceName                = NVIDIA <GPU>
 apiVersion                = 1.4.312
 shaderFloat64             = true
 shaderInt64               = true
@@ -40,7 +40,7 @@ maxStorageBufferRange     = 4294967295   (4 GiB)
 ```
 
 Dory 的设备路径硬性要求 `shaderFloat64`（`src/vulkan/dory.rs:372`），
-GB10 满足；Dory 初始化需要 2,996,551,680 bytes ≈ 3.0 GB，落在 4 GiB 的
+aarch64 满足；Dory 初始化需要 2,996,551,680 bytes ≈ 3.0 GB，落在 4 GiB 的
 `maxStorageBufferRange` 内但余量不大 —— **换到 storage-buffer range 更小的设备时
 Dory 会直接被拒**，这是既有设计，不是新问题。
 
@@ -63,7 +63,7 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
 
 5 个被 `#[ignore]` 的硬件测试，179.87 s，零失败。
 
-设备自报 `NVIDIA GB10 (int8 dot product: supported, shader f16: supported)`，
+设备自报 `NVIDIA <GPU> (int8 dot product: supported, shader f16: supported)`，
 Q8_0 matmul 选了 packed int8 dot product —— **走的是与 RADV 同一套 device path，
 不是回退**。
 
@@ -76,7 +76,7 @@ Q8_0 matmul 选了 packed int8 dot product —— **走的是与 RADV 同一套 
 | 路径 | prefill | 生成 | 端到端 |
 |---|---|---|---|
 | CPU | 2.3–3.2 t/s | 2.8–2.9 t/s | 2.5–3.0 tok/s |
-| **Vulkan（GB10）** | **12.0 t/s** | **5.9–6.0 t/s** | **8.1 tok/s** |
+| **Vulkan（aarch64）** | **12.0 t/s** | **5.9–6.0 t/s** | **8.1 tok/s** |
 
 → 设备路径端到端 **2.7×**；prefill **3.9×**，生成只有 **2.0×**。
 
@@ -318,10 +318,10 @@ arch 不该打这句提示，或者把提示改成按 arch 措辞。
 
 | 范围 | 状态 | 说明 |
 |---|---|---|
-| 完整 262 144 上下文 | 未验收 | GGUF 声明 `dory.context_length = 262144`。要验收需要一条 262k token 的提示；设备侧还要看 KV 区域能不能放进 `maxStorageBufferRange`（GB10 上是 4 GiB，Dory 初始化就要 3.0 GB）。**这是当前最大的未覆盖面。** |
+| 完整 262 144 上下文 | 未验收 | GGUF 声明 `dory.context_length = 262144`。要验收需要一条 262k token 的提示；设备侧还要看 KV 区域能不能放进 `maxStorageBufferRange`（aarch64 上是 4 GiB，Dory 初始化就要 3.0 GB）。**这是当前最大的未覆盖面。** |
 | GGUF 自带 chat template 本身 | 未验收 | F1 说明了默认路径与它不同；模板本身（含 tools / `<think>` / `medium_effort` 分支）在本仓库只被 `--jinja` 走过，没有对拍。 |
 | Q6_K | 仅为计算路径 | Q6_K 文件是由 Q5_K 重新量化得到的测试文件，不代表官方原生 Q6 的质量。 |
-| 其它 GPU / 驱动 | 部分 | 现在有 AMD RADV NAVI31 与 NVIDIA GB10 两家；软件 ICD（lavapipe 等）会被 `is_software_icd()` 拒绝。 |
+| 其它 GPU / 驱动 | 部分 | 现在有 AMD RADV NAVI31 与 aarch64 Vulkan 主机两家；软件 ICD（lavapipe 等）会被 `is_software_icd()` 拒绝。 |
 
 ## 五、复现
 
@@ -350,4 +350,4 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
 ```
 
 更多证据见 [oracle README](../../tools/oracle/dory/README.md) 的
-「Second GPU device: NVIDIA GB10 (2026-11-05)」一节。
+「Second GPU device: aarch64 Vulkan box (2026-11-05)」一节。

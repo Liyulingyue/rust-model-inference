@@ -56,6 +56,11 @@ struct Linear<'a> {
     dtype: GGMLType,
     input: usize,
     output: usize,
+    /// The same bytes through the shared kernel, so the device can take the
+    /// whole sequence in one dispatch. `None` for a dtype the device cannot
+    /// hold, which leaves the CPU path as the only one.
+    #[cfg(feature = "vulkan")]
+    gpu: Option<crate::ops::kernel::Weight<'a>>,
 }
 impl<'a> Linear<'a> {
     fn load(
@@ -65,21 +70,60 @@ impl<'a> Linear<'a> {
         output: usize,
         dtype: GGMLType,
     ) -> Result<Self, String> {
+        let weight = tensor(
+            source,
+            &format!("{name}.weight"),
+            &[input as u64, output as u64],
+            dtype,
+        )?;
+        // The published LongCat checkpoints are Q8_0, which the device holds
+        // as-is. A dtype it cannot hold gets no device weight, so `forward`
+        // stays on the CPU for it.
+        #[cfg(feature = "vulkan")]
+        let gpu = if dtype == GGMLType::Q8_0 {
+            Some(crate::ops::kernel::Weight::from_quantized(
+                crate::ops::kernel::QuantizedTensor::from_bytes(weight, dtype, input, output),
+            ))
+        } else {
+            None
+        };
         Ok(Self {
-            weight: tensor(
-                source,
-                &format!("{name}.weight"),
-                &[input as u64, output as u64],
-                dtype,
-            )?,
+            weight,
             bias: vector(source, &format!("{name}.bias"), output)?,
             dtype,
             input,
             output,
+            #[cfg(feature = "vulkan")]
+            gpu,
         })
     }
     fn forward(&self, x: &[f32]) -> Vec<f32> {
         assert_eq!(x.len() % self.input, 0);
+        // Device path: one dispatch covers every row of the call.
+        //
+        // The CPU loop below walks the sequence a row at a time, and each row
+        // is a separate fence. On the device that is the shape that costs
+        // more than it saves: the weight is re-uploaded for every row, and a
+        // single-row dispatch has no arithmetic to amortize the fence over.
+        // The shared kernel takes the whole call as one matrix instead, so
+        // the weight is uploaded once per projection.
+        //
+        // The device returns false for a shape it will not take, for a dtype
+        // it cannot hold, and whenever the CPU scope asks for the exact CPU
+        // path, so the CPU loop stays authoritative for those.
+        #[cfg(feature = "vulkan")]
+        if let Some(weight) = &self.gpu {
+            let rows = x.len() / self.input;
+            let mut out = vec![0.0; rows * self.output];
+            if weight.try_vulkan_rows(x, &mut out, rows) {
+                for chunk in out.chunks_exact_mut(self.output) {
+                    for (value, bias) in chunk.iter_mut().zip(&self.bias) {
+                        *value += bias;
+                    }
+                }
+                return out;
+            }
+        }
         // `RMI_SCALAR=1` keeps the ggml parity contract (BF16-rounded
         // activations, F64 accumulation, scalar Q8_0). Without it the packed
         // NEON/AVX2 kernels run instead: same weight precision, same exact

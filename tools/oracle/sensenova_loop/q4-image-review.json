@@ -793,7 +793,7 @@
     ],
     "exit_code": 101
   },
-  "scope": "Q4_0 AVX2-host accumulation correction; full-model numeric acceptance remains failed. First-layer instrumentation is temporary and absent from production sources.",
+  "scope": "Q4_0 AVX2-host accumulation correction; full-model numeric acceptance remains failed. First-layer instrumentation is temporary and absent from production sources. Subsequent main integration and CPU lane correction are a separate snapshot.",
   "cancellation_regression": {
     "before": [
       "test vulkan::ops::tests::vulkan_q4_0_preserves_cancellation_with_cpu_fma ... FAILED",
@@ -921,5 +921,6 @@
       "test vulkan::ops::tests::vulkan_q4_0_tiled_matches_the_per_row_kernel ... ok",
       "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2000 filtered out; finished in 0.11s"
     ]
-  }
+  },
+  "snapshot_commit": "a4a5ed71ad581f9a5ac123dc9af15e6b694117e6"
 }

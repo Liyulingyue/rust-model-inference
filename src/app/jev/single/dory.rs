@@ -92,7 +92,7 @@ impl JevScorer for DoryJevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

@@ -480,6 +480,51 @@ pub fn load_f32_tensor<S: TensorSource + ?Sized>(
             info.dims, info.ggml_type, dims, DECODABLE_TO_F32
         ));
     }
+    decode_tensor_to_f32(source, name, &info)
+}
+
+/// Load a tensor as `Vec<f32>` by element count instead of by shape.
+///
+/// The same tensor ships with different shapes across model variants: the
+/// Flux2 VAE that ERNIE-Image uses keeps its attention projections as
+/// two-dimensional matrices while the Flux1 one keeps them flat. The payload
+/// and the element order are the same in both, so the element count is the
+/// contract that matters, and the shape only selects the decoder for the
+/// block-quantized layouts.
+pub fn load_f32_tensor_flat<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    elements: usize,
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if !DECODABLE_TO_F32.contains(&info.ggml_type) {
+        return Err(format!(
+            "Invalid tensor {name}: type {:?}; expected one of {:?}",
+            info.ggml_type, DECODABLE_TO_F32
+        ));
+    }
+    let count = info
+        .dims
+        .iter()
+        .try_fold(1u64, |acc, &dim| acc.checked_mul(dim))
+        .ok_or_else(|| format!("Invalid tensor dims for {name}"))?;
+    if count != elements as u64 {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?} holds {count} elements; expected {elements}",
+            info.dims
+        ));
+    }
+    decode_tensor_to_f32(source, name, &info)
+}
+
+/// Decode a validated tensor's payload into F32.
+fn decode_tensor_to_f32<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    info: &crate::core::tensor::TensorInfo,
+) -> Result<Vec<f32>, String> {
     let expected = usize::try_from(
         info.checked_nbytes()
             .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
@@ -512,13 +557,162 @@ pub fn load_f32_tensor<S: TensorSource + ?Sized>(
     // token, so the cost is amortized away. The big projections never come
     // through this path; they stay quantized and are consumed by
     // `QuantizedTensor::from_bytes`.
-    let n_cols = *dims.first().ok_or_else(|| format!("{name}: no dims"))? as usize;
-    let n_rows = dims[1..]
+    let n_cols = *info
+        .dims
+        .first()
+        .ok_or_else(|| format!("{name}: no dims"))? as usize;
+    let n_rows = info.dims[1..]
         .iter()
         .try_fold(1usize, |acc, &d| acc.checked_mul(d as usize))
         .ok_or_else(|| format!("{name}: dims overflow"))?;
     crate::ops::quant::dequantize_tensor(bytes, info.ggml_type, n_cols, n_rows)
         .map_err(|e| format!("{name}: {e}"))
+}
+
+/// Load an optional tensor's values as F32.
+///
+/// The format comes from the tensor's own metadata, not from its byte
+/// length. F16 and BF16 are both two bytes per element, and they decode to
+/// different values, so a length cannot tell them apart — a checkpoint that
+/// stores a tensor in BF16 has to be read as BF16, and the only place that
+/// knows which it is, is the header.
+///
+/// A missing tensor is `Ok(None)`: the caller decides whether the tensor is
+/// optional. A present tensor in a format that cannot be decoded is an
+/// error, because reading it as something else would produce numbers that
+/// look fine and are wrong.
+pub fn optional_f32_values<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+) -> Result<Option<Vec<f32>>, String> {
+    let Some(info) = source.tensor_info(name) else {
+        return Ok(None);
+    };
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    let expected = usize::try_from(
+        info.checked_nbytes()
+            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
+    )
+    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    Ok(Some(match info.ggml_type {
+        GGMLType::F32 => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        GGMLType::BF16 => bytes
+            .chunks_exact(2)
+            .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect(),
+        GGMLType::F16 => bytes
+            .chunks_exact(2)
+            .map(|c| crate::ops::float::f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect(),
+        other => return Err(format!("{name} must be F32, BF16 or F16, found {other:?}")),
+    }))
+}
+
+/// Load a matrix as F32, using the format the tensor declares.
+///
+/// This is the matrix counterpart of [`optional_f32_values`]. It also
+/// accepts the block-quantized layout, because the vision towers ship
+/// Q8_0 matrices as well.
+///
+/// The reason this exists is the same one: the format has to come from the
+/// header. Guessing it from the byte length cannot tell BF16 from F16.
+pub fn load_f32_matrix<S: TensorSource + ?Sized>(
+    source: &S,
+    name: &str,
+    dims: &[u64],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor info: {name}"))?;
+    let flattened = [n_in as u64, n_out as u64];
+    if info.dims != dims && !(info.ggml_type == GGMLType::Q8_0 && info.dims == flattened) {
+        return Err(format!(
+            "Invalid tensor {name}: shape {:?}; expected {dims:?}",
+            info.dims
+        ));
+    }
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0
+    ) || (info.ggml_type == GGMLType::Q8_0 && n_in % 32 != 0)
+    {
+        return Err(format!("Unsupported matrix {name}: {:?}", info.ggml_type));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    decode_f32_matrix(info.ggml_type, bytes, n_in, n_out)
+        .map_err(|error| format!("Invalid tensor {name}: {error}"))
+}
+
+/// Decode borrowed matrix bytes into F32, using the format the header declares.
+///
+/// This is the decode half of [`load_f32_matrix`], for callers that already
+/// hold the bytes — the vision towers borrow them straight from the mapped
+/// file, so they never get the name back — but still need the format that
+/// the header declared.
+///
+/// The format cannot be guessed from the byte length: F16 and BF16 are both
+/// two bytes per element, and a BF16 `1.0` read as F16 comes back as `1.875`.
+/// The block-quantized layout is accepted too, because the vision towers
+/// ship Q8_0 matrices as well.
+pub fn decode_f32_matrix(
+    ggml_type: GGMLType,
+    bytes: &[u8],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, String> {
+    let elements = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| "Tensor element count overflow".to_string())?;
+    let expected = match ggml_type {
+        GGMLType::F32 => elements.checked_mul(4),
+        GGMLType::F16 | GGMLType::BF16 => elements.checked_mul(2),
+        GGMLType::Q8_0 => {
+            if n_in % 32 != 0 {
+                return Err(format!(
+                    "Q8_0 matrix needs a multiple of 32 columns, got {n_in}"
+                ));
+            }
+            Some(elements / 32 * 34)
+        }
+        other => return Err(format!("Unsupported matrix format {other:?}")),
+    }
+    .ok_or_else(|| "Tensor byte size overflow".to_string())?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "byte length {} differs from expected {expected}",
+            bytes.len()
+        ));
+    }
+    Ok(match ggml_type {
+        GGMLType::F32 => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        GGMLType::F16 => bytes
+            .chunks_exact(2)
+            .map(|c| crate::ops::float::f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect(),
+        GGMLType::BF16 => bytes
+            .chunks_exact(2)
+            .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect(),
+        _ => crate::ops::quant::dequant_q80_weight(bytes, n_in, n_out),
+    })
 }
 
 /// Tensor types `load_f32_tensor` will expand to F32 on load.
@@ -603,6 +797,55 @@ mod tests {
         assert_eq!(
             typed_tensor_bytes(&source, "weight", &[4], GGMLType::F32).map(|b| b.len()),
             Ok(16)
+        );
+    }
+
+    /// The format has to come from the header. BF16 and F16 are both two
+    /// bytes per element, so a byte length cannot tell them apart — and the
+    /// two readings differ: `1.0` in BF16 read as F16 comes back as `1.875`.
+    #[test]
+    fn decode_f32_matrix_follows_the_declared_format() {
+        let bf16_one = 1.0f32.to_le_bytes();
+        let bf16_bytes = [bf16_one[2], bf16_one[3]];
+        assert_eq!(
+            decode_f32_matrix(GGMLType::BF16, &bf16_bytes, 1, 1).unwrap(),
+            vec![1.0]
+        );
+        // The same bytes read as F16 are a different number, which is exactly
+        // why the length cannot be used to pick the format.
+        assert_eq!(
+            decode_f32_matrix(GGMLType::F16, &bf16_bytes, 1, 1).unwrap(),
+            vec![1.875]
+        );
+
+        let f32_bytes = 1.0f32.to_le_bytes();
+        assert_eq!(
+            decode_f32_matrix(GGMLType::F32, &f32_bytes, 1, 1).unwrap(),
+            vec![1.0]
+        );
+    }
+
+    #[test]
+    fn decode_f32_matrix_rejects_a_format_it_cannot_expand() {
+        let error = decode_f32_matrix(GGMLType::Q4_0, &[0u8; 18], 1, 1).unwrap_err();
+        assert!(error.contains("Unsupported matrix format"), "{error}");
+    }
+
+    #[test]
+    fn decode_f32_matrix_rejects_a_length_that_does_not_match_the_format() {
+        // Two BF16 values are four bytes; six bytes cannot be read as them.
+        let error = decode_f32_matrix(GGMLType::BF16, &[0u8; 6], 2, 1).unwrap_err();
+        assert!(error.contains("byte length 6"), "{error}");
+    }
+
+    #[test]
+    fn optional_f32_values_follows_the_declared_format() {
+        let bf16_one = 1.0f32.to_le_bytes();
+        let mut source = source(GGMLType::BF16, &[1]);
+        source.bytes = vec![bf16_one[2], bf16_one[3]];
+        assert_eq!(
+            optional_f32_values(&source, "weight").unwrap(),
+            Some(vec![1.0])
         );
     }
 

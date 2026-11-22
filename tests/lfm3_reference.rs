@@ -141,7 +141,7 @@ fn lfm3_forward_smoke() {
         },
         &|key| source.metadata(key).cloned(),
         "Reply with exactly one short sentence.",
-        true,
+        Some(true),
     )
     .expect("render LFM3 chat template")
     .expect("LFM3 ships a chat template");

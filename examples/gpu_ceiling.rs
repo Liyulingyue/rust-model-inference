@@ -1,7 +1,7 @@
-//! What is the GB10 actually capable of, and where does the crossover sit?
+//! What is the aarch64 box actually capable of, and where does the crossover sit?
 //!
 //! The CPU path sustains 201 GOP/s on this box's int8 NEON. The article the
-//! user keeps citing does Z-Image-Turbo in 13 s at 1024x1024 on the same GB10,
+//! user keeps citing does Z-Image-Turbo in 13 s at 1024x1024 on the same aarch64 box,
 //! and every GPU attempt so far has lost to the CPU. Those facts are only
 //! consistent if the GPU is being asked the wrong question, so this measures
 //! the device rather than the model:

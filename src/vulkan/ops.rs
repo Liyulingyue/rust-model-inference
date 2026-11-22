@@ -27,7 +27,7 @@ const Q8_MATMUL_GROUPED_TILED_WIDE_SHADER: &[u8] =
 /// Unfused twin of the wide kernel, for hosts whose CPU reduction does not
 /// contract. Both are the same code with the accumulate folded to a single
 /// operation, because testing `reduction_mode` costs about 40% of the kernel
-/// on GB10 and the mode is known on the host.
+/// on the aarch64 box and the mode is known on the host.
 const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_add.spv");
 const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
@@ -72,6 +72,14 @@ const Q4_0_MATMUL_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q4_0_matmul_tiled_dp4a.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
+const IQ4_XS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq4_xs_matmul.spv");
+const IQ2_XXS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_xxs_matmul.spv");
+const IQ2_XS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_xs_matmul.spv");
+const IQ2_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_s_matmul.spv");
+const IQ3_XXS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq3_xxs_matmul.spv");
+const IQ3_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq3_s_matmul.spv");
+const IQ1_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq1_s_matmul.spv");
+const IQ1_M_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq1_m_matmul.spv");
 const Q4_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/q4_k_matmul_cooperative.spv");
 /// Q5_0 grouped matmul. The 30B-A3B's attention, SSM and expert
@@ -275,6 +283,14 @@ const PIVO_RMS_NORM: usize = 70;
 const PIVO_CONV1D: usize = 71;
 const PIVO_SWIGLU: usize = 72;
 const PIVO_SILU: usize = 73;
+const IQ4_XS_MATMUL: usize = 75;
+const IQ2_XXS_MATMUL: usize = 76;
+const IQ2_XS_MATMUL: usize = 77;
+const IQ2_S_MATMUL: usize = 78;
+const IQ3_XXS_MATMUL: usize = 79;
+const IQ3_S_MATMUL: usize = 80;
+const IQ1_S_MATMUL: usize = 81;
+const IQ1_M_MATMUL: usize = 82;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -429,6 +445,14 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "pivo_swiglu",
     "pivo_silu",
     "q4_0_matmul_tiled_dp4a",
+    "iq4_xs_matmul",
+    "iq2_xxs_matmul",
+    "iq2_xs_matmul",
+    "iq2_s_matmul",
+    "iq3_xxs_matmul",
+    "iq3_s_matmul",
+    "iq1_s_matmul",
+    "iq1_m_matmul",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -554,7 +578,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 75] = [
+const OPERATOR_SHADERS: [&[u8]; 83] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -630,11 +654,27 @@ const OPERATOR_SHADERS: [&[u8]; 75] = [
     PIVO_SWIGLU_SHADER,
     PIVO_SILU_SHADER,
     Q4_0_MATMUL_TILED_SHADER,
+    IQ4_XS_MATMUL_SHADER,
+    IQ2_XXS_MATMUL_SHADER,
+    IQ2_XS_MATMUL_SHADER,
+    IQ2_S_MATMUL_SHADER,
+    IQ3_XXS_MATMUL_SHADER,
+    IQ3_S_MATMUL_SHADER,
+    IQ1_S_MATMUL_SHADER,
+    IQ1_M_MATMUL_SHADER,
 ];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub(crate) enum GpuWeightFormat {
     Q8_0,
+    IQ4_XS,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ2_S,
+    IQ3_XXS,
+    IQ3_S,
+    IQ1_S,
+    IQ1_M,
     Q4_0,
     Q4_1,
     Q5_0,
@@ -652,7 +692,7 @@ pub(crate) enum GpuWeightFormat {
 /// Whether the Q8_0 device matmul uses the transposed weight layout.
 ///
 /// The transposed layout reads the weight the way a GEMV wants to read it:
-/// 2.7x the bandwidth of ggml's own layout on the GB10 box (163 GB/s
+/// 2.7x the bandwidth of ggml's own layout on the aarch64 box (163 GB/s
 /// against 60 GB/s) for the same result, bit for bit. Rewriting the
 /// weight costs about 26 ms per 240 MB, once, when the weight is
 /// uploaded.
@@ -701,7 +741,7 @@ impl GpuWeightFormat {
     ///
     /// The transposed Q8_0 layout turns the weight reads into one
     /// contiguous run per warp, which is 2.5-2.7x the bandwidth of the
-    /// native layout on the GB10 box. It applies to both Q8_0 matmul
+    /// native layout on the aarch64 box. It applies to both Q8_0 matmul
     /// kernels: the one-row kernel gives every lane one output row, and
     /// the tiled kernel gives every lane one output column, so both read
     /// rows that are `blocks_per_row * 34` bytes apart in the native
@@ -788,6 +828,14 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q4K => Ok(Self::Q4_K),
             crate::core::tensor::GGMLType::Q5K => Ok(Self::Q5_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
+            crate::core::tensor::GGMLType::IQ4_XS => Ok(Self::IQ4_XS),
+            crate::core::tensor::GGMLType::IQ2_XXS => Ok(Self::IQ2_XXS),
+            crate::core::tensor::GGMLType::IQ2_XS => Ok(Self::IQ2_XS),
+            crate::core::tensor::GGMLType::IQ2_S => Ok(Self::IQ2_S),
+            crate::core::tensor::GGMLType::IQ3_XXS => Ok(Self::IQ3_XXS),
+            crate::core::tensor::GGMLType::IQ3_S => Ok(Self::IQ3_S),
+            crate::core::tensor::GGMLType::IQ1_S => Ok(Self::IQ1_S),
+            crate::core::tensor::GGMLType::IQ1_M => Ok(Self::IQ1_M),
             crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
             crate::core::tensor::GGMLType::BF16 => Ok(Self::BF16),
             crate::core::tensor::GGMLType::F32 => Ok(Self::F32),
@@ -797,7 +845,7 @@ impl GpuWeightFormat {
         }
     }
 
-    fn layout(self) -> (usize, usize, usize) {
+    pub(crate) fn layout(self) -> (usize, usize, usize) {
         match self {
             Self::Q8_0 => (32, 34, Q8_MATMUL_GROUPED),
             Self::Q4_0 => (32, 18, Q4_0_MATMUL),
@@ -807,6 +855,14 @@ impl GpuWeightFormat {
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
+            Self::IQ4_XS => (256, 136, IQ4_XS_MATMUL),
+            Self::IQ2_XXS => (256, 66, IQ2_XXS_MATMUL),
+            Self::IQ2_XS => (256, 74, IQ2_XS_MATMUL),
+            Self::IQ2_S => (256, 82, IQ2_S_MATMUL),
+            Self::IQ3_XXS => (256, 98, IQ3_XXS_MATMUL),
+            Self::IQ3_S => (256, 110, IQ3_S_MATMUL),
+            Self::IQ1_S => (256, 50, IQ1_S_MATMUL),
+            Self::IQ1_M => (256, 56, IQ1_M_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
             Self::BF16 => (1, 2, BF16_MATMUL),
             Self::F32 => (1, 4, F32_MATMUL),
@@ -845,7 +901,17 @@ pub(crate) fn required_activation_contracts(
             | GpuWeightFormat::Q5_1 => {
                 contracts.q8_0 = true;
             }
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
+            GpuWeightFormat::Q4_K
+            | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q6_K
+            | GpuWeightFormat::IQ4_XS
+            | GpuWeightFormat::IQ2_XXS
+            | GpuWeightFormat::IQ2_XS
+            | GpuWeightFormat::IQ2_S
+            | GpuWeightFormat::IQ3_XXS
+            | GpuWeightFormat::IQ3_S
+            | GpuWeightFormat::IQ1_S
+            | GpuWeightFormat::IQ1_M => {
                 contracts.q8_k = true;
             }
             GpuWeightFormat::F16
@@ -3479,6 +3545,23 @@ impl AttentionRuntime {
         output: &mut [f32],
         spec: crate::ops::nn::AttentionSpec,
     ) -> Result<(), VulkanError> {
+        self.forward_windowed(q, k, v, output, spec, 0, 0)
+    }
+
+    /// Full attention when `window == 0`. Otherwise query `p` only sees keys in
+    /// the same `window x window` block of a `grid`-wide patch grid, which is
+    /// the block-diagonal mask the vit_merger applies after its window-major
+    /// reorder (`window = 2`, `grid = patches per row`).
+    pub(crate) fn forward_windowed(
+        &mut self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output: &mut [f32],
+        spec: crate::ops::nn::AttentionSpec,
+        window: u32,
+        grid: u32,
+    ) -> Result<(), VulkanError> {
         if spec.query_tokens == 0
             || spec.key_tokens == 0
             || spec.head_dim == 0
@@ -3499,6 +3582,7 @@ impl AttentionRuntime {
             || v.len() != k.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
+            || (window != 0 && (grid == 0 || grid < window))
         {
             return Err(VulkanError::UnsupportedShape(
                 "invalid online attention geometry".into(),
@@ -3517,6 +3601,9 @@ impl AttentionRuntime {
             as_u32(spec.head_dim, "attention dimension")?,
             spec.scale.to_bits(),
             u32::from(spec.causal),
+            window,
+            // The shader divides by the grid only when `window != 0`.
+            if window == 0 { 1 } else { grid },
         ];
         let dispatch = row_dispatch(
             spec.query_tokens
@@ -4616,7 +4703,17 @@ impl<'a> Qwen3Ops<'a> {
             | GpuWeightFormat::F32
             | GpuWeightFormat::MlxAffine4
             | GpuWeightFormat::MlxAffine8 => (input, q8_scales, None),
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
+            GpuWeightFormat::Q4_K
+            | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q6_K
+            | GpuWeightFormat::IQ4_XS
+            | GpuWeightFormat::IQ2_XXS
+            | GpuWeightFormat::IQ2_XS
+            | GpuWeightFormat::IQ2_S
+            | GpuWeightFormat::IQ3_XXS
+            | GpuWeightFormat::IQ3_S
+            | GpuWeightFormat::IQ1_S
+            | GpuWeightFormat::IQ1_M => {
                 let push = quantize_rows_push(
                     self.arena.size as usize,
                     input,
@@ -4910,7 +5007,7 @@ impl<'a> Qwen3Ops<'a> {
         // shader derives the token tile from the workgroup id, so a mismatch
         // here would read and write the wrong rows rather than fail.
         //
-        // Measured on GB10 at Z-Image's W2 shape, streaming eight distinct
+        // Measured on the aarch64 box at Z-Image's W2 shape, streaming eight distinct
         // weight matrices: 8 -> 64.4 ms, 16 -> 32.0 ms, 32 -> 20.6 ms,
         // 64 -> 48.9 ms. Sixty-four accumulators per lane is past what the
         // register file holds, so 32 is where the curve turns.
@@ -9223,6 +9320,14 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
         GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
+        GpuWeightFormat::IQ4_XS => 1024,
+        GpuWeightFormat::IQ2_XXS => 1024,
+        GpuWeightFormat::IQ2_XS => 1024,
+        GpuWeightFormat::IQ2_S => 1024,
+        GpuWeightFormat::IQ3_XXS => 1024,
+        GpuWeightFormat::IQ3_S => 1024,
+        GpuWeightFormat::IQ1_S => 1024,
+        GpuWeightFormat::IQ1_M => 1024,
         GpuWeightFormat::F16 => 1024,
         GpuWeightFormat::BF16 => 1024,
         GpuWeightFormat::F32 => 1024,
@@ -9576,6 +9681,52 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         *value = low | (high << 4);
                     }
                 }
+                GpuWeightFormat::IQ4_XS => {
+                    // d = 0 on the first block so the exact-comparison output
+                    // of the zero-row stays 0; the rest is patterned data
+                    // covering every nibble and scale-bit combination.
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    let scales_h: u16 = (((row * 5 + block * 3 + 1) & 0xff) as u16) << 8
+                        | (((row * 7 + block * 11 + 2) & 0xff) as u16);
+                    data[offset + 2..offset + 4].copy_from_slice(&scales_h.to_le_bytes());
+                    for (index, value) in data[offset + 4..offset + 8].iter_mut().enumerate() {
+                        *value = ((row * 13 + block * 7 + index * 29 + 5) & 255) as u8;
+                    }
+                    for (index, value) in data[offset + 8..offset + 136].iter_mut().enumerate() {
+                        let low = ((row * 17 + block * 3 + index * 7 + 1) & 15) as u8;
+                        let high = ((row * 3 + block * 13 + index * 5 + 8) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::IQ2_XXS
+                | GpuWeightFormat::IQ2_XS
+                | GpuWeightFormat::IQ2_S
+                | GpuWeightFormat::IQ3_XXS
+                | GpuWeightFormat::IQ3_S
+                | GpuWeightFormat::IQ1_S
+                | GpuWeightFormat::IQ1_M => {
+                    // d = 0 on the first block (zero-row convention); the rest
+                    // is patterned bytes — every grid/sign/scale bit pattern
+                    // decodes, so the GPU/CPU comparison covers the format.
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 2..offset + bytes].iter_mut().enumerate() {
+                        *value = ((index * 37 + row * 17 + block * 11 + 3) & 255) as u8;
+                    }
+                }
                 GpuWeightFormat::Q5_K => {
                     data[offset..offset + 2].copy_from_slice(
                         &crate::ops::f32_to_f16(if row == 0 && block == 0 {
@@ -9779,6 +9930,108 @@ fn cpu_weight_matvec(
                     &weight[row * row_bytes..(row + 1) * row_bytes],
                     &q8k,
                 );
+            }
+        }
+        GpuWeightFormat::IQ4_XS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes =
+                    n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ4_XS_SIZE;
+                *output = crate::ops::quant::vec_dot_iq4_xs_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
+        GpuWeightFormat::IQ2_XXS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_XXS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_xxs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ2_XS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_XS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_xs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ2_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ3_XXS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ3_XXS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq3_xxs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ3_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ3_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq3_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ1_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ1_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq1_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ1_M => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ1_M_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq1_m_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
             }
         }
         GpuWeightFormat::Q5_K => {
@@ -11056,6 +11309,21 @@ mod tests {
             (PIVO_CONV1D, "pivo_conv1d", PIVO_CONV1D_SHADER),
             (PIVO_SWIGLU, "pivo_swiglu", PIVO_SWIGLU_SHADER),
             (PIVO_SILU, "pivo_silu", PIVO_SILU_SHADER),
+            (IQ4_XS_MATMUL, "iq4_xs_matmul", IQ4_XS_MATMUL_SHADER),
+            (IQ2_XXS_MATMUL, "iq2_xxs_matmul", IQ2_XXS_MATMUL_SHADER),
+            (IQ2_XS_MATMUL, "iq2_xs_matmul", IQ2_XS_MATMUL_SHADER),
+            (IQ2_S_MATMUL, "iq2_s_matmul", IQ2_S_MATMUL_SHADER),
+            (IQ3_XXS_MATMUL, "iq3_xxs_matmul", IQ3_XXS_MATMUL_SHADER),
+            (IQ3_S_MATMUL, "iq3_s_matmul", IQ3_S_MATMUL_SHADER),
+            (IQ1_S_MATMUL, "iq1_s_matmul", IQ1_S_MATMUL_SHADER),
+            (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
+            (IQ2_XXS_MATMUL, "iq2_xxs_matmul", IQ2_XXS_MATMUL_SHADER),
+            (IQ2_XS_MATMUL, "iq2_xs_matmul", IQ2_XS_MATMUL_SHADER),
+            (IQ2_S_MATMUL, "iq2_s_matmul", IQ2_S_MATMUL_SHADER),
+            (IQ3_XXS_MATMUL, "iq3_xxs_matmul", IQ3_XXS_MATMUL_SHADER),
+            (IQ3_S_MATMUL, "iq3_s_matmul", IQ3_S_MATMUL_SHADER),
+            (IQ1_S_MATMUL, "iq1_s_matmul", IQ1_S_MATMUL_SHADER),
+            (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
@@ -11630,7 +11898,7 @@ mod tests {
     /// tiled one reads it once per (output column, k-block) and uses the
     /// packed dot product. The arithmetic is the same, so the results have
     /// to be the same: the integer sum is exact, and both kernels use the
-    /// selected per-block accumulation contract, including AVX2's FMA.
+    /// selected per-block scale and accumulation order, including FMA.
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
@@ -11710,9 +11978,8 @@ mod tests {
 
     #[test]
     #[ignore = "requires a Vulkan device with integer dot products and an AVX2/FMA host"]
-    fn vulkan_q4_0_preserves_cancellation_with_cpu_fma() {
+    fn vulkan_q4_0_preserves_cancellation_with_combined_scales() {
         use super::*;
-        use crate::ops::kernel::Kernel;
 
         assert!(crate::ops::has_avx2_fma());
         let context = VulkanContext::new().unwrap();
@@ -11745,12 +12012,6 @@ mod tests {
                     values
                 })
                 .collect();
-            for (row, values) in input.chunks_exact(64).enumerate() {
-                let mut cpu = [f32::NAN];
-                crate::ops::kernel::q4_0::Q4_0Kernel::new(&weight, 64, 1)
-                    .forward(values, &mut cpu, 64, 1);
-                assert!((cpu[0] - EXPECTED * [1.0, 0.5, 2.0][row % 3]).abs() < 1e-4);
-            }
             for tiled in [false, true] {
                 ops.write_f32(layout.input, &input).unwrap();
                 ops.write_f32(layout.output, &vec![f32::NAN; rows]).unwrap();
@@ -12123,7 +12384,7 @@ mod tests {
                     // The two wide kernels fold the host's accumulation
                     // contract into the shader instead of testing
                     // `reduction_mode` in the token loop (a runtime branch
-                    // there costs about 40% of the kernel on GB10), so
+                    // there costs about 40% of the kernel on the aarch64 box), so
                     // `_WIDE` only honours the fused contract and `_WIDE_ADD`
                     // only the unfused one.
                     if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE && mode != 1 {

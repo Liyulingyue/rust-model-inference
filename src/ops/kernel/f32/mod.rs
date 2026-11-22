@@ -205,6 +205,12 @@ impl Kernel for F32Kernel<'_> {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
+        // Token-tiled path when available: identical per-(row, token) values,
+        // weight rows reused from L1/L2 instead of re-streamed per token.
+        if n_tokens >= 2 && self.supports_token_tiled_batching(n_in) {
+            self.forward_batched_rows(input, output, n_in, n_out, n_tokens, 0, n_out);
+            return;
+        }
         for token in 0..n_tokens {
             forward_f32_rows_dispatch(
                 &self.weight,
@@ -216,6 +222,44 @@ impl Kernel for F32Kernel<'_> {
                 1,
             );
         }
+    }
+
+    fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
+        n_in % 8 == 0 && cfg!(target_arch = "x86_64") && crate::ops::has_avx2_fma()
+    }
+
+    /// Token-tiled batching for the AVX2 path (same gate as the per-token
+    /// row kernel); other paths keep the per-token loop.
+    fn forward_batched_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        n_tokens: usize,
+        row_start: usize,
+        row_end: usize,
+    ) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+                let weight_bytes: &[u8] = bytemuck::cast_slice(&self.weight);
+                unsafe {
+                    avx2::matmul_f32_vs_f32_avx2_tiled(
+                        weight_bytes,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, output: &mut [f32]) {

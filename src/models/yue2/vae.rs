@@ -276,6 +276,15 @@ impl Conv {
     /// several specialised paths, so it stays the default; this is only used
     /// when a device policy is requested. Transposed convolutions have no
     /// device kernel and return `None`, which keeps them on the CPU path.
+    ///
+    /// This calls `try_conv3d` directly instead of `ops::nn::conv1d`, because
+    /// the shared CPU kernel is a different (non-bit-identical) reference.
+    /// Under `RMI_GPU_CPU_CHECK=1` or strict `--compute vulkan` the device
+    /// result is therefore compared against this module's own CPU path, the
+    /// same switch that `ops::nn::conv_cpu_check_enabled` gates for shared
+    /// convolutions. The end-to-end acceptance criterion is at most one PCM16
+    /// step per sample (`vae_conv_device_matches_the_cpu_kernel` plus the
+    /// whole-chain comparison in `docs/usage/yue2.md`).
     #[cfg(feature = "vulkan")]
     fn forward_device(&self, input: &[f32], frames: usize) -> Option<(Vec<f32>, usize)> {
         if self.transpose {
@@ -304,6 +313,39 @@ impl Conv {
             spec,
         );
         if ok {
+            if crate::ops::nn::conv_cpu_check_enabled() {
+                // Verify against this module's CPU path, not the shared
+                // kernel: the two sum in different orders and the VAE is
+                // pinned to the torch reference.
+                let expected = {
+                    let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+                    match self.forward(input, frames) {
+                        Ok((values, _)) => values,
+                        Err(error) => {
+                            eprintln!(
+                                "[GPU-VERIFY] YuE2 VAE CPU reference failed ({error}); keeping the CPU path"
+                            );
+                            return None;
+                        }
+                    }
+                };
+                let scale = expected
+                    .iter()
+                    .fold(0.0f32, |peak, value| peak.max(value.abs()))
+                    .max(1.0);
+                let tolerance = 1.0e-4 * scale;
+                let worst = out
+                    .iter()
+                    .zip(&expected)
+                    .map(|(value, reference)| (value - reference).abs())
+                    .fold(0.0f32, f32::max);
+                if worst > tolerance {
+                    eprintln!(
+                        "[GPU-VERIFY] YuE2 VAE convolution disagreed with the CPU kernel (max_abs={worst:.3e}, tolerance={tolerance:.3e}); using the CPU result"
+                    );
+                    return None;
+                }
+            }
             Some((out, length))
         } else {
             None

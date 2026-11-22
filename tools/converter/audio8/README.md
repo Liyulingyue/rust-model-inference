@@ -92,8 +92,8 @@ cargo run --profile release-fast --example kquant_roundtrip -- \
   q5_k /tmp/values.f32 /tmp/payload.bin
 ```
 
-Measured on this repository's runtime, 4 s of the demo clip, GB10 / aarch64,
-`--threads 4`, machine otherwise idle:
+Measured on this repository's runtime, 4 s of the demo clip, aarch64 Vulkan box /
+aarch64 host, `--threads 4`, machine otherwise idle:
 
 | Format | Size | Peak RSS | Export | Wall clock | Transcript |
 |---|---|---|---|---|---|
@@ -113,7 +113,7 @@ scales against Q4_K's twenty, and it took 20 min.
 
 ### CPU and GPU wall clock
 
-The same 4 s of the demo clip on the GB10 (48 SMs, 20 aarch64 cores), one
+The same 4 s of the demo clip on the aarch64 box (48 SMs, 20 aarch64 cores), one
 transcription, `--threads 8` (the default cap) for the CPU rows:
 
 | Format | CPU | GPU | GPU kernel |
@@ -131,8 +131,8 @@ u32 word-level shader decode reduced weight unpacking overhead. For F16 the
 CPU path is faster because the GPU's per-submit overhead (~0.25 ms × ~32K
 submissions) dominates the actual compute.
 
-Comparing against PyTorch (fp16, same GB10 GPU, forward pass only —
-PyTorch's `generate` needs more KV-cache memory than the GB10's unified
+Comparing against PyTorch (fp16, the same aarch64 box's GPU, forward pass only —
+PyTorch's `generate` needs more KV-cache memory than the box's unified
 RAM allows):
 
 | Implementation | Wall clock | vs Rust CPU F16 |

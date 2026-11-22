@@ -10,7 +10,7 @@
 //! sectors that are one output row apart -- 32 separate 32-byte pieces
 //! spread over 78 KB -- and every 4-byte payload load straddles the
 //! 34-byte block boundary, so it has to be assembled from two words. On
-//! the GB10 box that reaches 60 GB/s, while the device itself streams
+//! the aarch64 box that reaches 60 GB/s, while the device itself streams
 //! 171 GB/s over the same bytes (a plain element-wise read of one big
 //! buffer) and PyTorch CUDA reaches 130 GB/s on the same model. The
 //! kernel was losing to its own access pattern, not to the memory system.

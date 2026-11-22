@@ -8,15 +8,22 @@
 
 ## 1. GPU 模块归属（已落地 · 第三条路径）
 
-**当前状态**（`wc -l` 实测 2026-09）：
+**当前状态**（`wc -l` 实测 2026-11-19，`c4c1685`）：
 
 | 文件 | 行数 | 角色 |
 |---|---:|---|
-| `src/vulkan.rs` | 1476 | 胶水层：声明 `pub(crate) mod ops/qwen3/qwen35;`，提供 `VulkanContext`、`gpu_broken()`、`mark_gpu_broken()`、`GPU_BROKEN`、`VulkanError`、`SHADER` 常量；`pub use ops::{run_batched_matmul_check, run_qwen3_operator_check}` 转发两条诊断入口 |
-| `src/vulkan/ops.rs` | 5039 | Vulkan 计算内核（buffer / arena / matmul / shader dispatch） |
-| `src/vulkan/qwen3.rs` | 1063 | Qwen3 trunk 专用 Vulkan session |
-| `src/vulkan/qwen35.rs` | 1755 | Qwen35 trunk 专用 Vulkan session |
-| `src/wgpu.rs` | 337 | 单一文件，未拆分（feature-gated `--features wgpu`） |
+| `src/vulkan.rs` | 2760 | 胶水层：声明 `pub(crate) mod {dense, dory, matmul_q4k, nemotron_h, ops, q8_layout, qwen3, qwen35, timestral, yue2}`（+ 测试内 `zimage_probe`），提供 `VulkanContext`、`gpu_broken()`、`mark_gpu_broken()`、`GPU_BROKEN`、`VulkanError`、`SHADER` 常量；`pub use ops::{run_batched_matmul_check, run_qwen3_operator_check}` 转发两条诊断入口 |
+| `src/vulkan/ops.rs` | 15059 | Vulkan 计算内核（buffer / arena / matmul / shader dispatch） |
+| `src/vulkan/qwen35.rs` | 4547 | Qwen35 trunk 专用 Vulkan session |
+| `src/vulkan/nemotron_h.rs` | 2234 | Nemotron-H / Dory 系 Vulkan session |
+| `src/vulkan/dense.rs` | 1160 | 稠密投影共享路径 |
+| `src/vulkan/dory.rs` | 1068 | Dory 1.0 Vulkan session |
+| `src/vulkan/yue2.rs` | 708 | YuE2 音频编解码 Vulkan path |
+| `src/vulkan/timestral.rs` | 569 | Timestral Vulkan session |
+| `src/vulkan/qwen3.rs` | 486 | Qwen3 trunk 专用 Vulkan session |
+| `src/vulkan/q8_layout.rs` | 405 | Q8_0 权重布局 helpers |
+| `src/vulkan/matmul_q4k.rs` | 230 | Q4_K matmul kernel |
+| `src/wgpu.rs` | 372 | 单一文件，未拆分（feature-gated `--features wgpu`） |
 
 布局形态是 Rust 2018+ 的 `foo.rs` + `foo/*.rs`，但**不是**原计划假设的两个方向（`并入 ops/` / `独立 backend/`）中的任何一个，而是第三条混合路径。
 
@@ -34,43 +41,49 @@
 
 ## 2. ggufrs.rs 内容拆分（风险：低）
 
-`format/ggufrs.rs` 仍是 **4107 行**单文件（读写/校验混在一起）。
+`format/ggufrs.rs` 仍是 **4362 行**单文件（读写/校验混在一起；2026-09 实测 4107 行，
+此后继续增长）。
 
 **做法**：按职责拆为 `format/ggufrs/{read,write,validate}.rs`，纯物理搬移不改逻辑。
 `lib.rs` 的 re-export 路径不变（`format::ggufrs::xxx` 通过 mod 转发）。
 
 ## 3. lib.rs 清理 glob re-export（风险：低）
 
-Phase 5 的"精选 re-export 替换一把梭"未完成，残留 **三处** glob（`grep -n "^\s*pub use .*\*;" src/lib.rs` 实测）：
+Phase 5 的"精选 re-export 替换一把梭"未完成，残留 **三处** glob（`grep -n "^\s*pub use .*\*;" src/lib.rs` 实测，2026-11-19）：
 
-- `lib.rs:38` `pub use models::qwen3::asr::model::*;`
-- `lib.rs:39` `pub use models::qwen3::*;`
-- `lib.rs:47` `pub use ops::*;`
+- `lib.rs:39` `pub use models::qwen3::asr::model::*;`
+- `lib.rs:40` `pub use models::qwen3::*;`
+- `lib.rs:49` `pub use ops::*;`
 
 **做法**：展开为显式 re-export 列表。`ops::*` 尤其要小心——`ops` 目录下的 `pub fn` 数量较多（`ops/float.rs`、`ops/dot.rs`、`ops/softmax.rs`、`ops/norm.rs`、`ops/sampling.rs`、`ops/rope.rs` 等），建议按"高频外部依赖 vs 内部 helper"两栏筛选后再展开。改完 `grep -rn 'crate::' src tests examples` 全仓库引用路径确认无遗漏。
 
 ## 4. 根目录散文件（新增登记）
 
-第 1-3 节假设"根目录只放入口（`main.rs`、`lib.rs`）+ GPU 模块"，但实测还有两处根文件未在任何文档登记：
+第 1-3 节假设"根目录只放入口（`main.rs`、`lib.rs`）+ GPU 模块"，但实测还有两处根条目未在任何文档登记（2026-11-19 复核）：
 
-| 文件 | 行数 | 门控 | 内容 |
+| 条目 | 行数 | 门控 | 内容 |
 |---|---:|---|---|
-| `src/parity_trace.rs` | 420 | `#[cfg(feature = "parity-trace")]`（`lib.rs:9-11`） | llama.cpp 逐层精度对比 debug 模块 |
-| `src/prompt.rs` | 242 | 无门控（`lib.rs:12` `pub mod prompt;`） | Chat 模板 builder（Qwen / Hunyuan） |
+| `src/parity_trace.rs` | 471 | `#[cfg(feature = "parity-trace")]`（`lib.rs:10-12`） | llama.cpp 逐层精度对比 debug 模块 |
+| `src/prompt/`（目录，`mod.rs` 462 + `jinja.rs` 1236 + `jinja_compat.rs` 683 + `legacy.rs` 265） | 2646 | 无门控（`lib.rs:13` `pub mod prompt;`，`lib.rs:50` `pub use prompt::{...}`） | Chat 模板 builder（Qwen / Hunyuan，含 Jinja 引擎） |
 
 **倾向**：
 - `parity_trace.rs` 迁入 `src/devtools/parity_trace.rs`（与"调试工具"语义一致）；或在 `MODEL_ORGANIZATION.md` §9「已知偏差」里登记为 feature-gated 例外。
-- `prompt.rs` 迁入 `src/core/prompt.rs`（与 `core/tokenizer`、`core/scratchpad` 同属"输入处理"层）；同步把 `pub use prompt::{...}` 在 `lib.rs` 里改成 `pub use core::prompt::{...}`。
+- `src/prompt/` 已从单文件长成根目录子模块（带 `legacy.rs` 兼容层）；待决问题收敛为是否进一步迁入 `src/core/prompt/`（与 `core/tokenizer`、`core/scratchpad` 同属"输入处理"层），迁移时同步把 `pub use prompt::{...}` 在 `lib.rs` 里改成 `pub use core::prompt::{...}`。
 
-**待决**：选一个方向统一处理，避免根目录继续累积散文件。
+**待决**：选一个方向统一处理，避免根目录继续累积散条目。
 
 ## 当前测试基线（残余项的回归判据）
 
-`cargo test --lib`：383 passed / 7 failed / 13 ignored。**该数字未注明快照时间与 git SHA，**需要在做任何残余项改动前用以下命令现场复核一次并把结果写到本节：
+`cargo test --profile release-fast --lib`（2026-11-19 实测，`c4c1685`）：
+**1615 passed / 18 failed / 117 ignored**。任何残余项改动前后该基线不得变化；
+改动后用以下命令现场复核：
 
 ```bash
 git rev-parse HEAD
-cargo test --lib 2>&1 | tail -n 5
+cargo test --profile release-fast --lib 2>&1 | tail -n 5
 ```
 
-7 个失败均为环境相关（sparse mmap、需模型 env 的用例等），与重构无关；残余项改动前后该基线不得变化。
+18 个失败均为预存平台/fixture 相关项（breeze / clm / gemma4 / funasr / qwen_drive /
+yue2 / z_image / rope / matmul / ggufrs 等，需模型 env 或特定硬件的用例），与
+重构无关；ignored 桶含大量需真实权重的重模型用例。新合入的模块测试
+（pjit / underdog_woof / d3_turbo / decision 等 58 项）全部通过，计入 passed。

@@ -809,6 +809,110 @@ fn qwen35_dspark_speculative_decoding_matches_greedy() {
 
 #[test]
 #[ignore = "requires RMI_QWEN35_MODEL"]
+fn qwen35_ngram_speculative_decoding_matches_greedy() {
+    // Same invariant as the DSpark test, with the token history drafting
+    // instead of a sidecar: the n-gram lookup only changes how many
+    // forward passes the tokens take, never which tokens come out. The
+    // acceptance rate (drafts the target accepted) is what says the
+    // lookup is finding anything at all.
+    //
+    // The prompt is a repeating number sequence so the history contains
+    // real n-gram matches from the start; the small lookup/draft sizes
+    // (4/4, against the upstream defaults of 12/48) keep the required
+    // history length within the prompt.
+    let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
+    let steps: usize = std::env::var("RMI_QWEN35_NGRAM_STEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(24);
+    let config = crate::core::ngram::NgramSimpleConfig {
+        size_n: 4,
+        size_m: 4,
+    };
+
+    let source =
+        crate::open_model_source(std::path::Path::new(&path), crate::ComponentRole::Llm).unwrap();
+    let tokenizer = crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })
+    .unwrap();
+    let tokens = tokenizer.encode(
+        "1 2 3 4 5 6 7 8 9 10 11 12 1 2 3 4 5 6 7 8 9 10 11 12 1 2 3",
+        crate::core::tokenizer::EncodeOptions::default(),
+    );
+    assert!(
+        !tokens.is_empty(),
+        "the prompt must tokenize to at least one token"
+    );
+    let mut model = Qwen35Model::from_source(source.as_ref()).unwrap();
+    // The speculative round writes the KV of the drafted tokens before it
+    // knows whether the target accepts them, so the cache needs one round
+    // of drafts on top of the committed tokens.
+    let n_ctx = model
+        .config
+        .n_ctx
+        .min(tokens.len() + steps + config.size_m + 2);
+    let pool = session_pool();
+    let positions: Vec<[usize; 4]> = (0..tokens.len()).map(|index| [index; 4]).collect();
+    // The scratchpad is sized for the larger of the prompt chunk and the
+    // verification batch (the bonus token plus the draft).
+    let batch = tokens.len().max(config.size_m + 1);
+
+    // The reference: the target on its own.
+    let mut greedy: Vec<u32> = Vec::with_capacity(steps);
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let mut logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let mut position = tokens.len();
+        for _ in 0..steps {
+            let token = crate::ops::sampling::argmax(&logits) as u32;
+            greedy.push(token);
+            logits = session
+                .step_with_tokens(&[token], &[[position, position, position, 0]])
+                .unwrap();
+            position += 1;
+        }
+    }
+
+    // The same run with the committed history drafting.
+    let mut speculative: Vec<u32> = Vec::with_capacity(steps);
+    let mut accepted = 0usize;
+    let mut drafted = 0usize;
+    let mut rounds = 0usize;
+    {
+        let mut session =
+            Qwen35Session::new_with_prefill_batch_size(&mut model, n_ctx, batch, pool.clone())
+                .unwrap();
+        let logits = session.step_with_tokens(&tokens, &positions).unwrap();
+        let generation = session
+            .ngram_generate_after_prefill(logits, &tokens, &positions, steps, &config)
+            .unwrap();
+        accepted += generation.accepted;
+        drafted += generation.drafted;
+        rounds += generation.rounds;
+        speculative.extend_from_slice(&generation.tokens[..steps.min(generation.tokens.len())]);
+        eprintln!("Qwen3.5 ngram acceptance: {accepted}/{drafted} over {rounds} rounds");
+    }
+
+    for (index, (speculative_token, greedy_token)) in
+        speculative.iter().zip(greedy.iter()).enumerate()
+    {
+        assert_eq!(
+            speculative_token, greedy_token,
+            "ngram speculative decoding diverged from greedy at step {index}"
+        );
+    }
+    assert!(
+        drafted >= 1,
+        "the lookup never drafted across {rounds} rounds: the history had no \
+         n-gram matches to propose"
+    );
+}
+
+#[test]
+#[ignore = "requires RMI_QWEN35_MODEL"]
 fn qwen38_q4_0_model_metadata_and_load() {
     let path = std::env::var("RMI_QWEN35_MODEL").expect("RMI_QWEN35_MODEL must be set");
     let source =

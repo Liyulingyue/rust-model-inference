@@ -85,7 +85,7 @@ Q4_K_M / Q5_K_M 的 Rust ARM64 路径已有标量点积。普通 Oracle 启用 C
 上表是 2026-09-10 的结果，当时**所有**档位都记为逐位一致。2026-11-12 用同一批
 文件（SHA 不变）复测后，无损档仍然是逐位一致，量化档不再逐位一致：
 
-| 档位 | 复测结果（2026-11-12，Linux aarch64 / NVIDIA GB10） |
+| 档位 | 复测结果（2026-11-12，Linux aarch64） |
 | --- | --- |
 | BF16（无损） | **逐位一致**：85 条 trace 记录、全部 checkpoint 与 logits 逐位相同，token id 相同 |
 | Q8_0 | GDN checkpoint 相对 L2 `2.2e-7`…`4.1e-7`（门槛 `1e-5`），greedy token 逐个相同；深层栈漂移 `layer_output-3` `1.6e-2`、`layer_output-31` `5.7e-2`、logits `6.4e-2` |

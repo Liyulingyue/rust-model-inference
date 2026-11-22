@@ -29,6 +29,11 @@ use super::scalar::matmul_q8_0_quantized_scalar_range;
 /// The production hot path for Q8_0 matmul. Tries GPU first (if feature
 /// enabled and context initialized), then architecture-specific SIMD,
 /// finally scalar fallback.
+///
+/// The AVX-VNNI kernel (`avxvnni::matmul_q8_0_vs_q8_0_avxvnni`) is
+/// deliberately NOT in this chain: it measured 2.2-2.4× slower than the AVX2
+/// kernel on the Meteor Lake dev box (see TODO-AVX-VNNI in
+/// docs/develop/TODO.md). Re-evaluate per part before ever wiring it in.
 pub fn matmul_q8_0_quantized_range(
     weight: &[u8],
     input_q8: &[u8],

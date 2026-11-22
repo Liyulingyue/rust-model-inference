@@ -99,10 +99,10 @@ selection and non-eight-step sampling are unsupported. The no-control T2V and
 first-frame I2V routes remain experimental; 15-second production-size generation
 and full end-to-end raw-bit parity remain unvalidated.
 
-## Local validation on the GB10 box (2026-10-21)
+## Local validation on the aarch64 box (2026-10-21)
 
-The branch was validated on an NVIDIA GB10 (128 GB unified memory, Vulkan 1.4,
-NVIDIA GB10 device) that a second tenant holds at 65 GB and 79–92% utilisation,
+The branch was validated on an aarch64 Vulkan box (128 GB unified memory,
+Vulkan 1.4, NVIDIA <GPU> device) that a second tenant holds at 65 GB and 79–92% utilisation,
 so every timing below is a shared-device number, not an isolated benchmark.
 
 ### Source weights and conversion

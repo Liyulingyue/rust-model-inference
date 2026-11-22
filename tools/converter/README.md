@@ -15,6 +15,7 @@ converter/
 ├── dreamx/       ← DreamX 转换器和测试
 ├── edge0/        ← Edge0-35B MLX-affine 转换器、反量化与测试
 ├── gliner/       ← GLiNER 转换器和测试
+├── minimind/     ← MiniMind-3 safetensors → `qwen3`/`qwen3moe`、MiniMind2-MoE `.pth` → `minimind2moe` 转换器和测试
 ├── neohorse/     ← NeoHorse 转换器和测试
 ├── ovisocr3/     ← OvisOCR3 Qwen3.5 主模型/mmproj 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
@@ -37,6 +38,8 @@ converter/
 | `dreamx/convert_dreamx_creator.py` | DreamX 主模型/mmproj 配对导出 |
 | `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
 | `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::decode_row` 对齐） |
+| `minimind/convert_minimind3.py` | [MiniMind-3 dense/MoE](minimind/README.md)：官方 safetensors → `qwen3`/`qwen3moe`；支持 `--quant f16/f32/bf16/q8_0/q4_0`，校验 Q/K norm、routed expert、tied `lm_head`、tokenizer 和全部形状；K-quant 因 2432 行宽不支持 |
+| `minimind/convert_minimind2moe.py` | [MiniMind2-MoE](minimind/README.md)：`.pth` → `minimind2moe`；支持 `--quant f16/f32/bf16/q8_0/q4_0`，校验 routed/shared expert、tied `lm_head` 和 tokenizer；K-quant 因 640/1728 行宽不支持 |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
 | `ovisocr3/convert_ovisocr3.py` | 校验 ModelScope OvisOCR3 的 473 个 BF16 张量，并用固定 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 导出 `qwen35` 主模型和 `qwen3vl` mmproj |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
@@ -259,7 +262,7 @@ python -m pytest -q tools/converter/utils/test_kquants.py \
 | `f16` | `breeze-tts-2-F16.gguf` | BF16 → F16 重编码 | ✅ | 59 frames / 222K wav |
 | `f32` | `breeze-tts-2-F32.gguf` | BF16 → F32 重编码 | ✅ | 44 frames / 166K wav |
 | `q8_0` | `breeze-tts-2-Q8_0.gguf` | learned 2D weight 矩阵量化到 Q8_0 | ✅ | 29 frames / 17s **3.6× speedup**（v3 baseline；md5 `b051f3c1...`） |
-| `q4_0` | `breeze-tts-2-Q4_0.gguf` | learned 2D weight 矩阵量化到 Q4_0 | ⚠️ | 128 frames / 481K wav — **输出退化**；`docs/TODO.md#todo-004` |
+| `q4_0` | `breeze-tts-2-Q4_0.gguf` | learned 2D weight 矩阵量化到 Q4_0 | ⚠️ | 128 frames / 481K wav — **输出退化**；`docs/develop/TODO.md#todo-004-breeze-q4_0-不可用--走-per-tensor-混合精度路径` |
 
 `--codec-quant` 默认 `f32`；可设 `q8_0` 把 Mimi codec 的 learned 2D weight 也量化。
 

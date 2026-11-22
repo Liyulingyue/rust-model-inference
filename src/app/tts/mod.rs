@@ -61,7 +61,7 @@ pub(crate) fn pivo_request(
         || options.jinja
         || options.chat_template.is_some()
         || options.chat_template_file.is_some()
-        || options.thinking
+        || options.thinking.unwrap_or(false)
         || options.tts_model.is_some()
         || options.tts_mmproj.is_some()
         || options.max_context.is_some()
@@ -406,7 +406,7 @@ pub(crate) fn arktts_sampling(
         || options.jinja
         || options.chat_template.is_some()
         || options.chat_template_file.is_some()
-        || options.thinking
+        || options.thinking.unwrap_or(false)
         || options.max_context.is_some()
         || options.prefill_batch_size.is_some()
         || options.repetition_penalty.is_some()

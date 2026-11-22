@@ -65,7 +65,7 @@ pub(crate) const MAX_BATCH_ROWS: usize = 256;
 ///
 /// The device amortises the weight read across the rows of one call, but
 /// every call ends in its own submission, and that submission costs ~0.4 ms
-/// on the GB10 box. Measured on that box (8 threads, 32 rows, Q8_0):
+/// on the aarch64 box. Measured on that box (8 threads, 32 rows, Q8_0):
 ///
 /// | projection | weight | device | CPU |
 /// | --- | --- | --- | --- |
@@ -92,7 +92,7 @@ fn device_worthwhile(weight: &Weight<'_>, rows: usize) -> bool {
 /// Off by default. The device reads a weight once for the whole batch, but
 /// it has to *upload* that weight first, and the host -> device path runs at
 /// ~10 GB/s while a DRAM read runs at ~100 GB/s. A prefill touches every
-/// weight exactly once, so the upload is pure overhead: measured on the GB10
+/// weight exactly once, so the upload is pure overhead: measured on the aarch64 box
 /// box with a 183 token prompt, the device took `wq` and `wo` of all 28
 /// layers and the prefill went from 1073 ms to 1460 ms.
 ///

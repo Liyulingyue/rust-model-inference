@@ -97,7 +97,7 @@ impl JevScorer for SparkJevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

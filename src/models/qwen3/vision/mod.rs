@@ -1,7 +1,7 @@
 pub mod clip_config;
 pub mod media;
 
-use crate::core::tensor::{optional_f32_tensor_bytes, TensorSource};
+use crate::core::tensor::{optional_f32_tensor_bytes, GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     gelu_inplace, rope_vision, softmax_inplace, sum_f32, sum_sq_centered_f32, vec_add, vec_add_into,
@@ -357,17 +357,17 @@ pub struct VisionEncoder<'a> {
     /// the thread count comes from the caller's `--threads` resolution
     /// instead of rayon's lazy global default.
     pub pool: Arc<ComputePool>,
-    pub patch_embd_weight: &'a [u8],
-    pub patch_embd_weight_1: Option<&'a [u8]>,
-    pub position_embd: Option<&'a [u8]>,
-    pub post_ln_weight: Option<&'a [u8]>,
-    pub post_ln_bias: Option<&'a [u8]>,
-    pub patch_bias: Option<&'a [u8]>,
+    pub patch_embd_weight: VisionMatrix<'a>,
+    pub patch_embd_weight_1: Option<VisionMatrix<'a>>,
+    pub position_embd: Option<Vec<f32>>,
+    pub post_ln_weight: Option<Vec<f32>>,
+    pub post_ln_bias: Option<Vec<f32>>,
+    pub patch_bias: Option<Vec<f32>>,
     pub layers: Vec<VisionLayer<'a>>,
-    pub mm_0_weight: &'a [u8],
-    pub mm_0_bias: Option<&'a [u8]>,
-    pub mm_2_weight: &'a [u8],
-    pub mm_2_bias: Option<&'a [u8]>,
+    pub mm_0_weight: VisionMatrix<'a>,
+    pub mm_0_bias: Option<Vec<f32>>,
+    pub mm_2_weight: VisionMatrix<'a>,
+    pub mm_2_bias: Option<Vec<f32>>,
     pub precomputed: Option<VisionPrecomputed>,
     preserve_f32: bool,
     /// The device-side ViT attention, built on first use. `None` until then
@@ -441,93 +441,83 @@ struct DeepstackPrecomputed {
     fc2_bias: Vec<f32>,
 }
 
+/// A borrowed matrix together with the format the GGUF header declares.
+///
+/// The vision tower used to infer the format from the byte length. That
+/// cannot tell F16 from BF16 — both are two bytes per element — so a BF16
+/// tower was silently read as F16: `1.0` came back as `1.875`, and nothing
+/// failed. Carrying the declared type with the bytes lets every consumer
+/// follow the header instead of the length.
+#[derive(Clone, Copy, Debug)]
+pub struct VisionMatrix<'a> {
+    bytes: &'a [u8],
+    ggml_type: GGMLType,
+}
+
+impl<'a> VisionMatrix<'a> {
+    /// Borrow `name` from `source` and record the format it declares.
+    fn load<S: TensorSource + ?Sized>(source: &'a S, name: &str) -> Result<Self, String> {
+        let info = source
+            .tensor_info(name)
+            .ok_or_else(|| format!("Missing tensor info: {name}"))?;
+        if !matches!(
+            info.ggml_type,
+            GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0
+        ) {
+            return Err(format!(
+                "Unsupported vision matrix {name}: {:?}",
+                info.ggml_type
+            ));
+        }
+        let bytes = source
+            .tensor_slice(name)
+            .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+        Ok(Self {
+            bytes,
+            ggml_type: info.ggml_type,
+        })
+    }
+
+    /// The format the header declares.
+    pub fn ggml_type(&self) -> GGMLType {
+        self.ggml_type
+    }
+
+    /// The borrowed bytes, in the declared format.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Decode into F32 using the declared format.
+    fn to_f32(&self, n_in: usize, n_out: usize) -> Vec<f32> {
+        crate::core::tensor::decode_f32_matrix(self.ggml_type, self.bytes, n_in, n_out)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+}
+
 pub struct VisionLayer<'a> {
-    pub ln1_weight: &'a [u8],
-    pub ln1_bias: Option<&'a [u8]>,
-    pub ln2_weight: &'a [u8],
-    pub ln2_bias: Option<&'a [u8]>,
-    pub qkv_weight: &'a [u8],
-    pub qkv_bias: Option<&'a [u8]>,
-    pub out_weight: &'a [u8],
-    pub out_bias: Option<&'a [u8]>,
-    pub ffn_up_weight: &'a [u8],
-    pub ffn_up_bias: Option<&'a [u8]>,
-    pub ffn_down_weight: &'a [u8],
-    pub ffn_down_bias: Option<&'a [u8]>,
+    pub ln1_weight: Vec<f32>,
+    pub ln1_bias: Option<Vec<f32>>,
+    pub ln2_weight: Vec<f32>,
+    pub ln2_bias: Option<Vec<f32>>,
+    pub qkv_weight: VisionMatrix<'a>,
+    pub qkv_bias: Option<Vec<f32>>,
+    pub out_weight: VisionMatrix<'a>,
+    pub out_bias: Option<Vec<f32>>,
+    pub ffn_up_weight: VisionMatrix<'a>,
+    pub ffn_up_bias: Option<Vec<f32>>,
+    pub ffn_down_weight: VisionMatrix<'a>,
+    pub ffn_down_bias: Option<Vec<f32>>,
     pub deepstack: Option<DeepstackWeights<'a>>,
 }
 
 pub struct DeepstackWeights<'a> {
-    pub norm_weight: &'a [u8],
-    pub norm_bias: &'a [u8],
-    pub fc1_weight: &'a [u8],
-    pub fc1_bias: &'a [u8],
-    pub fc2_weight: &'a [u8],
-    pub fc2_bias: &'a [u8],
-}
-
-fn decode_f16_slice_to_f32(data: &[u8]) -> Vec<f32> {
-    let n = data.len() / 2;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let bits = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
-        out.push(crate::ops::f16_to_f32(bits));
-    }
-    out
-}
-
-fn decode_f32_slice(data: &[u8]) -> Vec<f32> {
-    assert_eq!(data.len() % 4, 0);
-    let n = data.len() / 4;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let bits = u32::from_le_bytes([
-            data[i * 4],
-            data[i * 4 + 1],
-            data[i * 4 + 2],
-            data[i * 4 + 3],
-        ]);
-        out.push(f32::from_bits(bits));
-    }
-    out
-}
-
-fn dequant_q8_0_tensor(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
-    let blocks_per_row = n_cols / 32;
-    let mut out = vec![0.0f32; n_rows * n_cols];
-    for row in 0..n_rows {
-        for bi in 0..blocks_per_row {
-            let boff = row * blocks_per_row * 34 + bi * 34;
-            if boff + 34 > data.len() {
-                continue;
-            }
-            let d = crate::ops::f16_to_f32(u16::from_le_bytes([data[boff], data[boff + 1]]));
-            let out_base = row * n_cols + bi * 32;
-            for j in 0..32 {
-                let q = data[boff + 2 + j] as i8 as i32;
-                out[out_base + j] = d * q as f32;
-            }
-        }
-    }
-    out
-}
-
-fn decode_linear_weight(data: &[u8], n_in: usize, n_out: usize) -> Vec<f32> {
-    let elements = n_in
-        .checked_mul(n_out)
-        .expect("vision linear weight element count overflow");
-    if data.len() == elements * 4 {
-        decode_f32_slice(data)
-    } else if data.len() == elements * 2 {
-        decode_f16_slice_to_f32(data)
-    } else if n_in % 32 == 0 && data.len() == n_out * (n_in / 32) * 34 {
-        dequant_q8_0_tensor(data, n_in, n_out)
-    } else {
-        panic!(
-            "Unsupported vision linear weight byte length {} for [{n_in}, {n_out}]",
-            data.len()
-        );
-    }
+    pub norm_weight: Vec<f32>,
+    pub norm_bias: Vec<f32>,
+    pub fc1_weight: VisionMatrix<'a>,
+    pub fc1_bias: Vec<f32>,
+    pub fc2_weight: VisionMatrix<'a>,
+    pub fc2_bias: Vec<f32>,
 }
 
 fn disable_missing_deepstack_layers<S: TensorSource + ?Sized>(source: &S, layers: &mut [bool]) {
@@ -550,63 +540,74 @@ impl<'a> VisionEncoder<'a> {
         let mut config = ClipVisionConfig::from_source(source)?;
         disable_missing_deepstack_layers(source, &mut config.has_deepstack_layers);
 
-        let patch_embd_weight = source
-            .tensor_slice("v.patch_embd.weight")
-            .ok_or("Missing v.patch_embd.weight")?;
-        let patch_embd_weight_1 = source.tensor_slice("v.patch_embd.weight.1");
-        let position_embd = source.tensor_slice("v.position_embd.weight");
-        let post_ln_weight = source.tensor_slice("v.post_ln.weight");
-        let post_ln_bias = optional_f32_tensor_bytes(source, "v.post_ln.bias")?;
-        let patch_bias = optional_f32_tensor_bytes(source, "v.patch_embd.bias")?;
+        let patch_embd_weight = VisionMatrix::load(source, "v.patch_embd.weight")?;
+        let patch_embd_weight_1 = match source.tensor_info("v.patch_embd.weight.1") {
+            Some(_) => Some(VisionMatrix::load(source, "v.patch_embd.weight.1")?),
+            None => None,
+        };
+        let position_embd =
+            crate::core::tensor::optional_f32_values(source, "v.position_embd.weight")?;
+        let post_ln_weight = crate::core::tensor::optional_f32_values(source, "v.post_ln.weight")?;
+        let post_ln_bias = crate::core::tensor::optional_f32_values(source, "v.post_ln.bias")?;
+        let patch_bias = crate::core::tensor::optional_f32_values(source, "v.patch_embd.bias")?;
 
         let mut layers = Vec::with_capacity(config.n_layer);
         for i in 0..config.n_layer {
-            let ln1_weight = source
-                .tensor_slice(&format!("v.blk.{}.ln1.weight", i))
-                .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
-            let ln1_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln1.bias", i))?;
-            let ln2_weight = source
-                .tensor_slice(&format!("v.blk.{}.ln2.weight", i))
-                .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
-            let ln2_bias = optional_f32_tensor_bytes(source, &format!("v.blk.{}.ln2.bias", i))?;
-            let qkv_weight = source
-                .tensor_slice(&format!("v.blk.{}.attn_qkv.weight", i))
-                .ok_or_else(|| format!("Missing v.blk.{}.attn_qkv.weight", i))?;
-            let qkv_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_qkv.bias", i))?;
-            let out_weight = source
-                .tensor_slice(&format!("v.blk.{}.attn_out.weight", i))
-                .ok_or_else(|| format!("Missing v.blk.{}.attn_out.weight", i))?;
-            let out_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.attn_out.bias", i))?;
-            let ffn_up_weight = source
-                .tensor_slice(&format!("v.blk.{}.ffn_up.weight", i))
-                .ok_or_else(|| format!("Missing v.blk.{}.ffn_up.weight", i))?;
-            let ffn_up_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_up.bias", i))?;
-            let ffn_down_weight = source
-                .tensor_slice(&format!("v.blk.{}.ffn_down.weight", i))
-                .ok_or_else(|| format!("Missing v.blk.{}.ffn_down.weight", i))?;
-            let ffn_down_bias =
-                optional_f32_tensor_bytes(source, &format!("v.blk.{}.ffn_down.bias", i))?;
+            let ln1_weight = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ln1.weight", i),
+            )?
+            .ok_or_else(|| format!("Missing v.blk.{}.ln1.weight", i))?;
+            let ln1_bias =
+                crate::core::tensor::optional_f32_values(source, &format!("v.blk.{}.ln1.bias", i))?;
+            let ln2_weight = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ln2.weight", i),
+            )?
+            .ok_or_else(|| format!("Missing v.blk.{}.ln2.weight", i))?;
+            let ln2_bias =
+                crate::core::tensor::optional_f32_values(source, &format!("v.blk.{}.ln2.bias", i))?;
+            let qkv_weight = VisionMatrix::load(source, &format!("v.blk.{}.attn_qkv.weight", i))?;
+            let qkv_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.attn_qkv.bias", i),
+            )?;
+            let out_weight = VisionMatrix::load(source, &format!("v.blk.{}.attn_out.weight", i))?;
+            let out_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.attn_out.bias", i),
+            )?;
+            let ffn_up_weight = VisionMatrix::load(source, &format!("v.blk.{}.ffn_up.weight", i))?;
+            let ffn_up_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_up.bias", i),
+            )?;
+            let ffn_down_weight =
+                VisionMatrix::load(source, &format!("v.blk.{}.ffn_down.weight", i))?;
+            let ffn_down_bias = crate::core::tensor::optional_f32_values(
+                source,
+                &format!("v.blk.{}.ffn_down.bias", i),
+            )?;
             let deepstack = if config.has_deepstack_layers.get(i).copied().unwrap_or(false) {
-                let tensor = |suffix: &str| {
+                let matrix = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
-                    source
-                        .tensor_slice(&name)
-                        .ok_or_else(|| format!("Missing {name}"))
+                    VisionMatrix::load(source, &name)
                 };
                 let bias = |suffix: &str| {
                     let name = format!("v.deepstack.{i}.{suffix}");
-                    optional_f32_tensor_bytes(source, &name)?
+                    crate::core::tensor::optional_f32_values(source, &name)?
                         .ok_or_else(|| format!("Missing {name}"))
                 };
                 Some(DeepstackWeights {
-                    norm_weight: tensor("norm.weight")?,
+                    norm_weight: crate::core::tensor::optional_f32_values(
+                        source,
+                        &format!("v.deepstack.{i}.norm.weight"),
+                    )?
+                    .ok_or_else(|| format!("Missing v.deepstack.{i}.norm.weight"))?,
                     norm_bias: bias("norm.bias")?,
-                    fc1_weight: tensor("fc1.weight")?,
+                    fc1_weight: matrix("fc1.weight")?,
                     fc1_bias: bias("fc1.bias")?,
-                    fc2_weight: tensor("fc2.weight")?,
+                    fc2_weight: matrix("fc2.weight")?,
                     fc2_bias: bias("fc2.bias")?,
                 })
             } else {
@@ -630,14 +631,10 @@ impl<'a> VisionEncoder<'a> {
             });
         }
 
-        let mm_0_weight = source
-            .tensor_slice("mm.0.weight")
-            .ok_or("Missing mm.0.weight")?;
-        let mm_0_bias = optional_f32_tensor_bytes(source, "mm.0.bias")?;
-        let mm_2_weight = source
-            .tensor_slice("mm.2.weight")
-            .ok_or("Missing mm.2.weight")?;
-        let mm_2_bias = optional_f32_tensor_bytes(source, "mm.2.bias")?;
+        let mm_0_weight = VisionMatrix::load(source, "mm.0.weight")?;
+        let mm_0_bias = crate::core::tensor::optional_f32_values(source, "mm.0.bias")?;
+        let mm_2_weight = VisionMatrix::load(source, "mm.2.weight")?;
+        let mm_2_bias = crate::core::tensor::optional_f32_values(source, "mm.2.bias")?;
 
         Ok(Self {
             config,
@@ -653,7 +650,7 @@ impl<'a> VisionEncoder<'a> {
             mm_2_weight,
             mm_2_bias,
             precomputed: None,
-            preserve_f32: source.metadata("wevisone_vl.source_revision").is_some(),
+            preserve_f32: crate::models::qwen3::is_wevisone(source),
             pool,
             #[cfg(feature = "vulkan")]
             device: std::cell::RefCell::new(None),
@@ -730,44 +727,42 @@ impl<'a> VisionEncoder<'a> {
             n_embd * self.config.spatial_merge_size * self.config.spatial_merge_size;
 
         for layer in &self.layers {
-            let qkv_f32 = decode_linear_weight(layer.qkv_weight, qkv_n_in, qkv_n_out);
+            let qkv_f32 = layer.qkv_weight.to_f32(qkv_n_in, qkv_n_out);
             qkv_weights.push(weight(&qkv_f32, qkv_n_in, qkv_n_out));
-            qkv_biases.push(layer.qkv_bias.map(decode_f32_slice));
-            let out_f32 = decode_linear_weight(layer.out_weight, out_n_in, out_n_out);
+            qkv_biases.push(layer.qkv_bias.clone());
+            let out_f32 = layer.out_weight.to_f32(out_n_in, out_n_out);
             out_weights.push(weight(&out_f32, out_n_in, out_n_out));
-            out_biases.push(layer.out_bias.map(decode_f32_slice));
-            let ffn_up_f32 = decode_linear_weight(layer.ffn_up_weight, ffn_up_n_in, ffn_up_n_out);
+            out_biases.push(layer.out_bias.clone());
+            let ffn_up_f32 = layer.ffn_up_weight.to_f32(ffn_up_n_in, ffn_up_n_out);
             ffn_up_weights.push(weight(&ffn_up_f32, ffn_up_n_in, ffn_up_n_out));
-            ffn_up_biases.push(layer.ffn_up_bias.map(decode_f32_slice));
-            let ffn_down_f32 =
-                decode_linear_weight(layer.ffn_down_weight, ffn_down_n_in, ffn_down_n_out);
+            ffn_up_biases.push(layer.ffn_up_bias.clone());
+            let ffn_down_f32 = layer.ffn_down_weight.to_f32(ffn_down_n_in, ffn_down_n_out);
             ffn_down_weights.push(weight(&ffn_down_f32, ffn_down_n_in, ffn_down_n_out));
-            ffn_down_biases.push(layer.ffn_down_bias.map(decode_f32_slice));
-            ln1_weights.push(decode_f32_slice(layer.ln1_weight));
-            ln1_biases.push(layer.ln1_bias.map(decode_f32_slice));
-            ln2_weights.push(decode_f32_slice(layer.ln2_weight));
-            ln2_biases.push(layer.ln2_bias.map(decode_f32_slice));
+            ffn_down_biases.push(layer.ffn_down_bias.clone());
+            ln1_weights.push(layer.ln1_weight.clone());
+            ln1_biases.push(layer.ln1_bias.clone());
+            ln2_weights.push(layer.ln2_weight.clone());
+            ln2_biases.push(layer.ln2_bias.clone());
             deepstack.push(layer.deepstack.as_ref().map(|weights| {
-                let fc1 = decode_linear_weight(weights.fc1_weight, mm_merged_embd, mm_merged_embd);
-                let fc2 = decode_linear_weight(
-                    weights.fc2_weight,
-                    mm_merged_embd,
-                    self.config.projection_dim,
-                );
+                let fc1 = weights.fc1_weight.to_f32(mm_merged_embd, mm_merged_embd);
+                let fc2 = weights
+                    .fc2_weight
+                    .to_f32(mm_merged_embd, self.config.projection_dim);
                 DeepstackPrecomputed {
-                    norm_weight: decode_f32_slice(weights.norm_weight),
-                    norm_bias: decode_f32_slice(weights.norm_bias),
+                    norm_weight: weights.norm_weight.clone(),
+                    norm_bias: weights.norm_bias.clone(),
                     fc1_weight: weight(&fc1, mm_merged_embd, mm_merged_embd),
-                    fc1_bias: decode_f32_slice(weights.fc1_bias),
+                    fc1_bias: weights.fc1_bias.clone(),
                     fc2_weight: weight(&fc2, mm_merged_embd, self.config.projection_dim),
-                    fc2_bias: decode_f32_slice(weights.fc2_bias),
+                    fc2_bias: weights.fc2_bias.clone(),
                 }
             }));
         }
 
-        let mm0_f32 = decode_linear_weight(self.mm_0_weight, mm_merged_embd, mm_merged_embd);
-        let mm2_f32 =
-            decode_linear_weight(self.mm_2_weight, mm_merged_embd, self.config.projection_dim);
+        let mm0_f32 = self.mm_0_weight.to_f32(mm_merged_embd, mm_merged_embd);
+        let mm2_f32 = self
+            .mm_2_weight
+            .to_f32(mm_merged_embd, self.config.projection_dim);
 
         self.precomputed = Some(VisionPrecomputed {
             lossless,
@@ -784,13 +779,13 @@ impl<'a> VisionEncoder<'a> {
             ln1_biases,
             ln2_weights,
             ln2_biases,
-            post_ln_weight: self.post_ln_weight.map_or_else(Vec::new, decode_f32_slice),
-            post_ln_bias: self.post_ln_bias.map(decode_f32_slice),
-            patch_bias: self.patch_bias.map(decode_f32_slice),
+            post_ln_weight: self.post_ln_weight.clone().unwrap_or_default(),
+            post_ln_bias: self.post_ln_bias.clone(),
+            patch_bias: self.patch_bias.clone(),
             mm_0_weight: weight(&mm0_f32, mm_merged_embd, mm_merged_embd),
-            mm_0_bias: self.mm_0_bias.map(decode_f32_slice),
+            mm_0_bias: self.mm_0_bias.clone(),
             mm_2_weight: weight(&mm2_f32, mm_merged_embd, self.config.projection_dim),
-            mm_2_bias: self.mm_2_bias.map(decode_f32_slice),
+            mm_2_bias: self.mm_2_bias.clone(),
             deepstack,
         });
     }
@@ -904,8 +899,8 @@ impl<'a> VisionEncoder<'a> {
                     }
                 }
             }
-        } else if let Some(patch_bias_data) = self.patch_bias {
-            let bias = decode_f32_slice(patch_bias_data);
+        } else if let Some(patch_bias_data) = self.patch_bias.as_ref() {
+            let bias = patch_bias_data;
             for token in 0..n_tokens {
                 let offset = token * n_embd;
                 for embd in 0..n_embd {
@@ -916,7 +911,7 @@ impl<'a> VisionEncoder<'a> {
         let t_bias = t_bias.elapsed();
 
         let t_pos = std::time::Instant::now();
-        if let Some(position_data) = self.position_embd {
+        if let Some(position_data) = self.position_embd.as_ref() {
             self.apply_position_embedding_merged(
                 &mut scratch.merged[..n_tokens * n_embd],
                 n_patches_x,
@@ -986,10 +981,10 @@ impl<'a> VisionEncoder<'a> {
                 }
             }
         } else if let (Some(weight_data), Some(bias_data)) =
-            (self.post_ln_weight, self.post_ln_bias)
+            (self.post_ln_weight.as_ref(), self.post_ln_bias.as_ref())
         {
-            let weight = decode_f32_slice(weight_data);
-            let bias = decode_f32_slice(bias_data);
+            let weight = weight_data;
+            let bias = bias_data;
             for token in 0..n_tokens {
                 let offset = token * n_embd;
                 layer_norm_with_bias(
@@ -1048,11 +1043,10 @@ impl<'a> VisionEncoder<'a> {
 
         if scratch.patch_weight_buf.is_empty() {
             let patch_dim = 3 * ps * ps;
-            scratch.patch_weight_buf =
-                decode_linear_weight(self.patch_embd_weight, patch_dim, n_embd);
+            scratch.patch_weight_buf = self.patch_embd_weight.to_f32(patch_dim, n_embd);
             scratch.patch_weight_1_buf = self
                 .patch_embd_weight_1
-                .map(|data| decode_linear_weight(data, patch_dim, n_embd));
+                .map(|matrix| matrix.to_f32(patch_dim, n_embd));
         }
         let w0 = &scratch.patch_weight_buf;
         let w1 = scratch.patch_weight_1_buf.as_deref();
@@ -1156,20 +1150,18 @@ impl<'a> VisionEncoder<'a> {
         n_patches_y: usize,
         n_embd: usize,
         merge: usize,
-        pos_data: &[u8],
+        pos: &[f32],
         pos_merged_buf: &mut [f32],
     ) {
-        let pos_len = pos_data.len() / 4;
-        let pos_per_side = (pos_len / n_embd) as usize;
+        let pos_per_side = (pos.len() / n_embd) as usize;
         let pos_side = (pos_per_side as f64).sqrt() as usize;
 
         let decoded_pos: Vec<f32>;
         if pos_side == n_patches_x && pos_side == n_patches_y {
-            decoded_pos = decode_f32_slice(pos_data);
+            decoded_pos = pos.to_vec();
         } else {
-            let raw = decode_f32_slice(pos_data);
             decoded_pos = bilinear_resize_2d(
-                &raw,
+                pos,
                 pos_side,
                 pos_side,
                 n_embd,
@@ -1355,14 +1347,14 @@ impl<'a> VisionEncoder<'a> {
         } else {
             let layer = &self.layers[il];
 
-            if let Some(bias_data) = layer.ln1_bias {
-                let w = decode_f32_slice(layer.ln1_weight);
-                let b = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ln1_bias {
+                let w = &layer.ln1_weight;
+                let b = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     layer_norm_with_bias(
                         &mut scratch.merged[off..off + n_embd],
-                        &w,
+                        w,
                         &b,
                         eps,
                         false,
@@ -1370,18 +1362,18 @@ impl<'a> VisionEncoder<'a> {
                     );
                 }
             } else {
-                let w = decode_f32_slice(layer.ln1_weight);
+                let w = &layer.ln1_weight;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
-                    layer_norm_without_bias(&mut scratch.merged[off..off + n_embd], &w, eps);
+                    layer_norm_without_bias(&mut scratch.merged[off..off + n_embd], w, eps);
                 }
             }
 
             for t in 0..n_tokens {
                 let inp_off = t * n_embd;
                 let out_off = t * n_embd * 3;
-                matmul_f16_f32_single(
-                    layer.qkv_weight,
+                matmul_matrix_single(
+                    &layer.qkv_weight,
                     &scratch.merged[inp_off..inp_off + n_embd],
                     &mut scratch.qkv_buf[out_off..out_off + n_embd * 3],
                     n_embd,
@@ -1389,8 +1381,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.qkv_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.qkv_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     for j in 0..n_embd * 3 {
                         scratch.qkv_buf[t * n_embd * 3 + j] += bias[j];
@@ -1581,16 +1573,16 @@ impl<'a> VisionEncoder<'a> {
             for t in 0..n_tokens {
                 let inp_off = t * n_embd;
                 let out_off = t * n_embd;
-                matmul_f16_f32_single(
-                    layer.out_weight,
+                matmul_matrix_single(
+                    &layer.out_weight,
                     &scratch.attn_concat[inp_off..inp_off + n_embd],
                     &mut scratch.proj_buf[out_off..out_off + n_embd],
                     n_embd,
                     n_embd,
                 );
             }
-            if let Some(bias_data) = layer.out_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.out_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
@@ -1650,14 +1642,14 @@ impl<'a> VisionEncoder<'a> {
             }
         } else {
             let layer = &self.layers[il];
-            if let Some(bias_data) = layer.ln2_bias {
-                let w = decode_f32_slice(layer.ln2_weight);
-                let b = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ln2_bias {
+                let w = &layer.ln2_weight;
+                let b = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     layer_norm_with_bias(
                         &mut scratch.merged[off..off + n_embd],
-                        &w,
+                        w,
                         &b,
                         eps,
                         false,
@@ -1665,18 +1657,18 @@ impl<'a> VisionEncoder<'a> {
                     );
                 }
             } else {
-                let w = decode_f32_slice(layer.ln2_weight);
+                let w = &layer.ln2_weight;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
-                    layer_norm_without_bias(&mut scratch.merged[off..off + n_embd], &w, eps);
+                    layer_norm_without_bias(&mut scratch.merged[off..off + n_embd], w, eps);
                 }
             }
 
             for t in 0..n_tokens {
                 let inp_off = t * n_embd;
                 let out_off = t * cfg.n_ff;
-                matmul_f16_f32_single(
-                    layer.ffn_up_weight,
+                matmul_matrix_single(
+                    &layer.ffn_up_weight,
                     &scratch.merged[inp_off..inp_off + n_embd],
                     &mut scratch.ffn_buf[out_off..out_off + cfg.n_ff],
                     n_embd,
@@ -1684,8 +1676,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.ffn_up_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_up_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * cfg.n_ff;
                     vec_add_into(&bias, &mut scratch.ffn_buf[off..off + cfg.n_ff]);
@@ -1725,8 +1717,8 @@ impl<'a> VisionEncoder<'a> {
             for t in 0..n_tokens {
                 let inp_off = t * cfg.n_ff;
                 let out_off = t * n_embd;
-                matmul_f16_f32_single(
-                    layer.ffn_down_weight,
+                matmul_matrix_single(
+                    &layer.ffn_down_weight,
                     &scratch.ffn_buf[inp_off..inp_off + cfg.n_ff],
                     &mut scratch.proj_buf[out_off..out_off + n_embd],
                     cfg.n_ff,
@@ -1734,8 +1726,8 @@ impl<'a> VisionEncoder<'a> {
                 );
             }
 
-            if let Some(bias_data) = layer.ffn_down_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = layer.ffn_down_bias {
+                let bias = bias_data;
                 for t in 0..n_tokens {
                     let off = t * n_embd;
                     vec_add_into(&bias, &mut scratch.proj_buf[off..off + n_embd]);
@@ -1814,16 +1806,16 @@ impl<'a> VisionEncoder<'a> {
             for t in 0..n_projected {
                 let src_off = t * merged_embd;
                 let dst_off = t * merged_embd;
-                matmul_f16_f32_single(
-                    self.mm_0_weight,
+                matmul_matrix_single(
+                    &self.mm_0_weight,
                     &concat_buf[src_off..src_off + merged_embd],
                     &mut mm0_out[dst_off..dst_off + merged_embd],
                     merged_embd,
                     merged_embd,
                 );
             }
-            if let Some(bias_data) = self.mm_0_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = self.mm_0_bias.as_ref() {
+                let bias = bias_data;
                 for t in 0..n_projected {
                     for j in 0..bias.len().min(merged_embd) {
                         mm0_out[t * merged_embd + j] += bias[j];
@@ -1861,16 +1853,16 @@ impl<'a> VisionEncoder<'a> {
             for t in 0..n_projected {
                 let src_off = t * merged_embd;
                 let dst_off = t * proj_dim;
-                matmul_f16_f32_single(
-                    self.mm_2_weight,
+                matmul_matrix_single(
+                    &self.mm_2_weight,
                     &mm0_out[src_off..src_off + merged_embd],
                     &mut out[dst_off..dst_off + proj_dim],
                     merged_embd,
                     proj_dim,
                 );
             }
-            if let Some(bias_data) = self.mm_2_bias {
-                let bias = decode_f32_slice(bias_data);
+            if let Some(ref bias_data) = self.mm_2_bias.as_ref() {
+                let bias = bias_data;
                 for t in 0..n_projected {
                     for j in 0..proj_dim {
                         out[t * proj_dim + j] += bias[j];
@@ -2353,13 +2345,32 @@ fn patch_embed_scalar(
     }
 }
 
-fn matmul_f16_f32_single(
-    weight: &[u8],
+/// One row of the matrix times one input row, in the format the header
+/// declares.
+///
+/// The Q8_0 block layout keeps the path it always had; the plain float
+/// formats are borrowed straight from the mapped file and dotted with the
+/// shared SIMD helpers, so no copy is made.
+fn matmul_matrix_single(
+    weight: &VisionMatrix<'_>,
     input: &[f32],
     output: &mut [f32],
     n_in: usize,
     n_out: usize,
 ) {
+    match weight.ggml_type() {
+        GGMLType::Q8_0 => matmul_q8_0_single(weight.bytes(), input, output, n_in, n_out),
+        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 => {
+            for row in 0..n_out {
+                output[row] = dot_matrix_row(weight, row, input, n_in);
+            }
+        }
+        other => panic!("unsupported vision matrix format {other:?}"),
+    }
+}
+
+/// The Q8_0 block layout: a per-32-value scale plus 32 signed bytes.
+fn matmul_q8_0_single(weight: &[u8], input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {
     let blocks = n_in / 32;
     let mut scales = vec![0.0f32; blocks];
     let mut q8_buf = vec![0u8; n_in];
@@ -2380,10 +2391,70 @@ fn matmul_f16_f32_single(
     }
 }
 
+/// Dot one weight row with the input row, in the format the header declares.
+fn dot_matrix_row(weight: &VisionMatrix<'_>, row: usize, input: &[f32], n_in: usize) -> f32 {
+    let bytes = weight.bytes();
+    match weight.ggml_type() {
+        GGMLType::F32 => {
+            let row_bytes = &bytes[row * n_in * 4..(row + 1) * n_in * 4];
+            let values = f32_row(row_bytes);
+            crate::ops::dot_f32(input, &values, n_in)
+        }
+        GGMLType::F16 => {
+            let row_bytes = &bytes[row * n_in * 2..(row + 1) * n_in * 2];
+            let values = f16_row(row_bytes);
+            crate::ops::dot_f16_f32(input, &values, n_in)
+        }
+        GGMLType::BF16 => {
+            let row_bytes = &bytes[row * n_in * 2..(row + 1) * n_in * 2];
+            crate::ops::dot_bf16_f32(input, row_bytes, n_in)
+        }
+        other => panic!("unsupported vision matrix format {other:?}"),
+    }
+}
+
+/// Borrow a row of F32 weight bytes as `f32` values.
+///
+/// The mapped file is aligned, so the borrow is the normal case. The copy
+/// is the fallback for a source whose bytes are not aligned — and for
+/// big-endian hosts, where the reinterpretation would read the wrong
+/// numbers.
+fn f32_row(row_bytes: &[u8]) -> std::borrow::Cow<'_, [f32]> {
+    #[cfg(target_endian = "little")]
+    if let Ok(values) = bytemuck::try_cast_slice::<u8, f32>(row_bytes) {
+        return std::borrow::Cow::Borrowed(values);
+    }
+    std::borrow::Cow::Owned(
+        row_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
+}
+
+/// Borrow a row of F16 weight bytes as `u16` values.
+fn f16_row(row_bytes: &[u8]) -> std::borrow::Cow<'_, [u16]> {
+    #[cfg(target_endian = "little")]
+    if let Ok(values) = bytemuck::try_cast_slice::<u8, u16>(row_bytes) {
+        return std::borrow::Cow::Borrowed(values);
+    }
+    std::borrow::Cow::Owned(
+        row_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decode_linear_weight, disable_missing_deepstack_layers, spatial_blocks, Q8Weight};
+    use super::{
+        disable_missing_deepstack_layers, spatial_blocks, Q8Weight, VisionEncoder, VisionMatrix,
+    };
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+    use crate::core::thread_pool::ComputePool;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     struct TensorNames(Vec<String>);
 
@@ -2408,23 +2479,284 @@ mod tests {
         }
     }
 
+    /// A source that hands out one tensor with a declared format.
+    struct TypedSource {
+        info: TensorInfo,
+        bytes: Vec<u8>,
+    }
+
+    impl TensorSource for TypedSource {
+        fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+            None
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.info.name).then_some(self.bytes.as_slice())
+        }
+    }
+
+    fn typed(ggml_type: GGMLType, bytes: Vec<u8>) -> TypedSource {
+        TypedSource {
+            info: TensorInfo {
+                name: "v.blk.0.attn_qkv.weight".into(),
+                dims: vec![2, 1],
+                ggml_type,
+                offset: 0,
+            },
+            bytes,
+        }
+    }
+
+    /// The tower used to pick the format from the byte length. F16 and BF16
+    /// are both two bytes per element, so a BF16 tower was read as F16 and
+    /// every weight came out as a different number — silently.
     #[test]
-    fn linear_weight_decoder_accepts_f32_f16_and_q8_0() {
+    fn a_bf16_matrix_is_decoded_as_bf16_not_as_f16() {
+        let one = 1.0f32.to_le_bytes();
+        let bf16_bytes = vec![one[2], one[3]];
+
+        let source = typed(GGMLType::BF16, bf16_bytes);
+        let matrix = VisionMatrix::load(&source, "v.blk.0.attn_qkv.weight").unwrap();
+        assert_eq!(matrix.ggml_type(), GGMLType::BF16);
+        assert_eq!(matrix.to_f32(1, 1), vec![1.0]);
+
+        // The same bytes under the F16 reading are a different number, which
+        // is why the length cannot choose the format.
+        let source = typed(GGMLType::F16, vec![one[2], one[3]]);
+        let matrix = VisionMatrix::load(&source, "v.blk.0.attn_qkv.weight").unwrap();
+        assert_eq!(matrix.to_f32(1, 1), vec![1.875]);
+    }
+
+    #[test]
+    fn a_matrix_decodes_in_the_format_the_header_declares() {
         let f32_bytes = [1.0f32, -2.0]
             .into_iter()
             .flat_map(f32::to_le_bytes)
             .collect::<Vec<_>>();
-        assert_eq!(decode_linear_weight(&f32_bytes, 2, 1), [1.0, -2.0]);
+        let source = typed(GGMLType::F32, f32_bytes);
+        let matrix = VisionMatrix::load(&source, "v.blk.0.attn_qkv.weight").unwrap();
+        assert_eq!(matrix.to_f32(2, 1), [1.0, -2.0]);
 
         let f16_bytes = [1.0f32, -2.0]
             .into_iter()
             .flat_map(|value| crate::ops::f32_to_f16(value).to_le_bytes())
             .collect::<Vec<_>>();
-        assert_eq!(decode_linear_weight(&f16_bytes, 2, 1), [1.0, -2.0]);
+        let source = typed(GGMLType::F16, f16_bytes);
+        let matrix = VisionMatrix::load(&source, "v.blk.0.attn_qkv.weight").unwrap();
+        assert_eq!(matrix.to_f32(2, 1), [1.0, -2.0]);
 
         let mut q8_bytes = crate::ops::f32_to_f16(0.5).to_le_bytes().to_vec();
         q8_bytes.extend([2u8; 32]);
-        assert_eq!(decode_linear_weight(&q8_bytes, 32, 1), [1.0; 32]);
+        let source = typed(GGMLType::Q8_0, q8_bytes);
+        let matrix = VisionMatrix::load(&source, "v.blk.0.attn_qkv.weight").unwrap();
+        assert_eq!(matrix.to_f32(32, 1), [1.0; 32]);
+    }
+
+    /// An unsupported format is a load-time error, not a misread at run time.
+    #[test]
+    fn a_matrix_in_an_unsupported_format_is_refused_at_load() {
+        let source = typed(GGMLType::Q4_0, vec![0u8; 18]);
+        let error = VisionMatrix::load(&source, "v.blk.0.attn_qkv.weight").unwrap_err();
+        assert!(error.contains("Unsupported vision matrix"), "{error}");
+    }
+
+    /// A synthetic qwen3-VL vision tower, small enough to build in a test
+    /// and shaped like the published one.
+    struct VisionTower {
+        metadata: HashMap<String, MetaValue>,
+        tensors: HashMap<String, (TensorInfo, Vec<u8>)>,
+    }
+
+    impl VisionTower {
+        fn new() -> Self {
+            let mut metadata = HashMap::new();
+            metadata.extend([
+                ("clip.vision.image_size".into(), MetaValue::Uint32(4)),
+                ("clip.vision.patch_size".into(), MetaValue::Uint32(2)),
+                ("clip.vision.embedding_length".into(), MetaValue::Uint32(8)),
+                (
+                    "clip.vision.feed_forward_length".into(),
+                    MetaValue::Uint32(16),
+                ),
+                ("clip.vision.block_count".into(), MetaValue::Uint32(1)),
+                (
+                    "clip.vision.attention.head_count".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "clip.vision.attention.layer_norm_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+            ]);
+            Self {
+                metadata,
+                tensors: HashMap::new(),
+            }
+        }
+
+        /// Add a matrix in the given format, filled with ones.
+        fn matrix(&mut self, name: &str, dims: Vec<u64>, ggml_type: GGMLType) {
+            let count = dims.iter().product::<u64>() as usize;
+            let values = vec![1.0f32; count];
+            let bytes = match ggml_type {
+                GGMLType::F32 => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                GGMLType::BF16 => values
+                    .iter()
+                    .flat_map(|v| {
+                        let bits = v.to_le_bytes();
+                        [bits[2], bits[3]]
+                    })
+                    .collect(),
+                other => panic!("unsupported fixture format {other:?}"),
+            };
+            self.tensors.insert(
+                name.into(),
+                (
+                    TensorInfo {
+                        name: name.into(),
+                        dims,
+                        ggml_type,
+                        offset: 0,
+                    },
+                    bytes,
+                ),
+            );
+        }
+
+        /// Add a one-dimensional tensor in the given format.
+        fn vector(&mut self, name: &str, len: u64, ggml_type: GGMLType, values: &[f32]) {
+            let bytes = match ggml_type {
+                GGMLType::F32 => values.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                GGMLType::BF16 => values
+                    .iter()
+                    .flat_map(|v| {
+                        let bits = v.to_le_bytes();
+                        [bits[2], bits[3]]
+                    })
+                    .collect(),
+                other => panic!("unsupported fixture format {other:?}"),
+            };
+            self.tensors.insert(
+                name.into(),
+                (
+                    TensorInfo {
+                        name: name.into(),
+                        dims: vec![len],
+                        ggml_type,
+                        offset: 0,
+                    },
+                    bytes,
+                ),
+            );
+        }
+    }
+
+    impl TensorSource for VisionTower {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.metadata.get(key)
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.tensors.get(name).map(|(info, _)| info)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.tensors.get(name).map(|(_, bytes)| bytes.as_slice())
+        }
+    }
+
+    /// A one-layer tower whose matrices are BF16 and whose norms are F32 —
+    /// the mixed layout the TODO names: the formats differ inside one layer.
+    fn bf16_vision_tower() -> VisionTower {
+        const N_EMBD: u64 = 8;
+        const N_FF: u64 = 16;
+        let merged = N_EMBD * 4;
+        let mut tower = VisionTower::new();
+        tower.matrix("v.patch_embd.weight", vec![12, N_EMBD], GGMLType::BF16);
+        tower.vector("v.blk.0.ln1.weight", N_EMBD, GGMLType::F32, &[1.0; 8]);
+        tower.vector("v.blk.0.ln1.bias", N_EMBD, GGMLType::F32, &[0.0; 8]);
+        tower.vector("v.blk.0.ln2.weight", N_EMBD, GGMLType::F32, &[1.0; 8]);
+        tower.vector("v.blk.0.ln2.bias", N_EMBD, GGMLType::F32, &[0.0; 8]);
+        tower.matrix(
+            "v.blk.0.attn_qkv.weight",
+            vec![N_EMBD, N_EMBD * 3],
+            GGMLType::BF16,
+        );
+        tower.vector(
+            "v.blk.0.attn_qkv.bias",
+            N_EMBD * 3,
+            GGMLType::F32,
+            &[0.0; 24],
+        );
+        tower.matrix(
+            "v.blk.0.attn_out.weight",
+            vec![N_EMBD, N_EMBD],
+            GGMLType::BF16,
+        );
+        tower.vector("v.blk.0.attn_out.bias", N_EMBD, GGMLType::F32, &[0.0; 8]);
+        tower.matrix("v.blk.0.ffn_up.weight", vec![N_EMBD, N_FF], GGMLType::BF16);
+        tower.vector("v.blk.0.ffn_up.bias", N_FF, GGMLType::F32, &[0.0; 16]);
+        tower.matrix(
+            "v.blk.0.ffn_down.weight",
+            vec![N_FF, N_EMBD],
+            GGMLType::BF16,
+        );
+        tower.vector("v.blk.0.ffn_down.bias", N_EMBD, GGMLType::F32, &[0.0; 8]);
+        tower.matrix("mm.0.weight", vec![merged, merged], GGMLType::BF16);
+        tower.matrix("mm.2.weight", vec![merged, 4], GGMLType::BF16);
+        tower
+    }
+
+    /// The acceptance case: a BF16 tower decodes to the values the header
+    /// declares. Read as F16 — which is what the byte length used to imply
+    /// — every one of these weights would come out as 1.875.
+    #[test]
+    fn a_bf16_vision_tower_decodes_to_the_values_the_header_declares() {
+        let source = bf16_vision_tower();
+        let pool = Arc::new(ComputePool::new(1));
+        let mut encoder = VisionEncoder::from_source(&source, pool).unwrap();
+        encoder.precompute_lossless();
+        let precomputed = encoder.precomputed.as_ref().unwrap();
+
+        let declared = crate::core::tensor::decode_f32_matrix(
+            GGMLType::BF16,
+            &source.tensors["v.blk.0.attn_qkv.weight"].1,
+            8,
+            24,
+        )
+        .unwrap();
+        let decoded = precomputed.qkv_weights[0].f32_data.as_ref().unwrap();
+        assert_eq!(decoded, &declared);
+        assert_eq!(decoded[0], 1.0);
+
+        // The projector and the merge blocks go through the same path.
+        let declared = crate::core::tensor::decode_f32_matrix(
+            GGMLType::BF16,
+            &source.tensors["mm.2.weight"].1,
+            32,
+            4,
+        )
+        .unwrap();
+        let decoded = precomputed.mm_2_weight.f32_data.as_ref().unwrap();
+        assert_eq!(decoded, &declared);
+        assert_eq!(decoded[0], 1.0);
+    }
+
+    /// The one-dimensional norms are read in the format they declare too.
+    /// They used to be decoded as F32 whatever the file said.
+    #[test]
+    fn a_bf16_norm_vector_is_decoded_as_bf16() {
+        let mut source = bf16_vision_tower();
+        source.vector("v.blk.0.ln1.weight", 8, GGMLType::BF16, &[1.0; 8]);
+        let pool = Arc::new(ComputePool::new(1));
+        let mut encoder = VisionEncoder::from_source(&source, pool).unwrap();
+        encoder.precompute_lossless();
+        let precomputed = encoder.precomputed.as_ref().unwrap();
+        assert_eq!(precomputed.ln1_weights[0][0], 1.0);
     }
 
     #[test]

@@ -37,6 +37,10 @@ pub(crate) struct LinearExecutor<'model, 'weights> {
     runtime: Option<crate::vulkan::ops::BatchedLinearRuntime>,
     #[cfg(feature = "vulkan")]
     staging: Vec<f32>,
+    /// Ask the device for the CPU's BF16 dot reduction instead of the
+    /// prepared kernel's own accumulation order.
+    #[cfg(feature = "vulkan")]
+    dot_contract: bool,
 }
 
 impl<'model, 'weights> LinearExecutor<'model, 'weights> {
@@ -165,7 +169,22 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             runtime,
             #[cfg(feature = "vulkan")]
             staging: Vec::new(),
+            #[cfg(feature = "vulkan")]
+            dot_contract: false,
         })
+    }
+
+    /// Match the CPU's BF16 dot reduction on the device.
+    ///
+    /// The prepared kernel accumulates in a different order: it is faster but
+    /// not bit-identical to the CPU. Callers whose device result feeds an
+    /// autoregressive or diffusion decision that is compared against the CPU
+    /// reference opt in here. See `models/yue2/nar.rs`, where the batched
+    /// q/k/v projections use this to keep the NAR latents bit-identical.
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn with_cpu_dot_contract(mut self) -> Self {
+        self.dot_contract = true;
+        self
     }
 
     pub(crate) fn id(&self, index: usize) -> Result<LinearId, ComputeError> {
@@ -329,7 +348,16 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
         rows: usize,
         outputs: &mut [&mut [f32]; N],
     ) -> Result<(), ComputeError> {
-        use crate::vulkan::ops::GpuMatmulSpec;
+        use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
+        let dot_contract = self.dot_contract;
+        let gpu_spec = |weight: &Weight<'_>| -> Result<GpuMatmulSpec, ComputeError> {
+            let dot_capable = (crate::ops::has_avx2_fma() && weight.n_in >= 8)
+                || (crate::ops::has_neon() && weight.n_in >= 4);
+            if dot_contract && dot_capable && weight.ggml_type == crate::GGMLType::BF16 {
+                return Ok(GpuWeightFormat::BF16.with_mode(GpuMatmulMode::Dot));
+            }
+            Ok(GpuMatmulSpec::prepared(weight)?)
+        };
         let runtime = self.runtime.as_mut().unwrap();
         let mut total = 0usize;
         // Validate the entire group before the first upload or output write.
@@ -352,7 +380,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             }
             runtime.validate(
                 bytes,
-                GpuMatmulSpec::prepared(w)?,
+                gpu_spec(w)?,
                 input.len(),
                 rows,
                 w.n_in,
@@ -372,7 +400,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                         binding.weight.kernel.weight_bytes().ok_or_else(|| {
                             ComputeError::Unsupported("kernel has no immutable storage view".into())
                         })?,
-                        GpuMatmulSpec::prepared(binding.weight)?,
+                        gpu_spec(binding.weight)?,
                         binding.weight.n_in,
                         binding.weight.n_out,
                     ))
@@ -401,7 +429,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             let w = binding.weight;
             group.push((
                 w.kernel.weight_bytes().unwrap(),
-                GpuMatmulSpec::prepared(w)?,
+                gpu_spec(w)?,
                 rows,
                 w.n_out,
             ));
@@ -804,6 +832,98 @@ mod tests {
                                 "{format:?} {policy:?} rows={count} width={width} index={index}: {value}"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device: checks the CPU BF16 dot contract of the grouped executor"]
+    fn grouped_bf16_dot_contract_matches_the_cpu_kernel_bit_for_bit() {
+        crate::ops::enable_gpu();
+        assert!(
+            crate::ops::get_vulkan_context().is_some(),
+            "Vulkan device required"
+        );
+        let n_in = 256usize;
+        let widths = [1024usize, 256, 256];
+        let rows = 40usize;
+        // Deterministic BF16 weights with a few mantissa bits set.
+        let mut state = 0x9e37_79b9u32;
+        let mut storages = Vec::new();
+        for width in widths {
+            let mut bytes = vec![0u8; n_in * width * 2];
+            for chunk in bytes.chunks_exact_mut(2) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let bits = ((state >> 17) & 0x3f) | 0x3c00;
+                chunk[0] = (bits & 0xff) as u8;
+                chunk[1] = (bits >> 8) as u8;
+            }
+            storages.push(Box::leak(bytes.into_boxed_slice()) as &'static [u8]);
+        }
+        let weights: Vec<_> = storages
+            .iter()
+            .zip(widths)
+            .map(|(bytes, width)| {
+                Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes,
+                    crate::GGMLType::BF16,
+                    n_in,
+                    width,
+                ))
+            })
+            .collect();
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|index| ((index % 29) as f32 - 14.0) / 32.0)
+            .collect();
+        let mut executor = LinearExecutor::new(
+            ComputePolicy::Auto,
+            weights
+                .iter()
+                .map(|weight| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+                .collect(),
+            rows,
+            pool(),
+        )
+        .unwrap()
+        .with_cpu_dot_contract();
+        assert!(executor.uses_vulkan());
+        let ids = std::array::from_fn(|i| executor.id(i).unwrap());
+        let mut outputs = widths.map(|width| vec![f32::NAN; rows * width]);
+        assert_eq!(
+            executor
+                .run_group(
+                    ids,
+                    &input,
+                    rows,
+                    outputs.each_mut().map(|output| output.as_mut_slice()),
+                )
+                .unwrap(),
+            [UsedBackend::Vulkan; 3]
+        );
+        // The CPU kernel `YuE2Weight::matmul_bf16_cpu` reduces four rows at a
+        // time against one weight load. The dot contract exists so the device
+        // reproduces that F32 reduction exactly; the caller rounds the result
+        // back to BF16 afterwards, as the CPU path does.
+        for ((output, bytes), width) in outputs.iter().zip(&storages).zip(widths) {
+            for row in (0..rows).step_by(4) {
+                let row_input = &input[row * n_in..(row + 4) * n_in];
+                for column in 0..width {
+                    let weight = &bytes[column * n_in * 2..(column + 1) * n_in * 2];
+                    let sums = crate::ops::dot_bf16_f32_4(row_input, weight, n_in);
+                    for (offset, sum) in sums.into_iter().enumerate() {
+                        let actual = output[(row + offset) * width + column];
+                        assert_eq!(
+                            sum.to_bits(),
+                            actual.to_bits(),
+                            "width={width} row={} column={column}",
+                            row + offset
+                        );
                     }
                 }
             }

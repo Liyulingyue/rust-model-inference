@@ -21,10 +21,34 @@
 > `qwen35` trunk captures its layers' input hidden states for the encoder,
 > and `HybridSession::{prefill_with_dspark, dspark_speculative_step,
 > dspark_generate}` drives the rounds with the same verify/rollback
-> machinery as the MTP path. Entry point: CLI `--dspark-model <sidecar>`.
+> machinery as the MTP path. Entry points: CLI `--dspark-model <sidecar>`
+> and HTTP `--serve --dspark-model <sidecar>` (both wired through
+> `RuntimeOptions::with_dspark_model`; `build_text_runtime` rejects
+> non-`qwen35` targets and device paths at startup, and non-greedy or
+> image-bearing requests at request time, instead of dropping the flag).
 > Draft tokens match `llama-server --spec-type draft-dspark` (b96806d)
 > token for token on Qwen3.5-2B + its DSpark sidecar. EAGLE3 and the
 > standalone draft remain unimplemented.
+>
+> **Also implemented 2026-11-18, the n-gram axis**: llama.cpp's
+> `ngram-simple`, the one draft strategy that needs neither a second model
+> nor extra weights — the committed token history proposes the draft
+> (`src/core/ngram.rs`, a line-by-line port of
+> `common_ngram_simple_draft` including its boundaries: position 0 is the
+> not-found sentinel, the backwards search skips the occurrence the round
+> sits on, `copy_max < size_n` and `cur_len <= n + m + 1` draft nothing),
+> and `HybridSession::{ngram_speculative_step, ngram_generate}` verifies
+> the proposal with the same batched-greedy verify/rollback machinery as
+> MTP / DSpark — a round with no lookup match degenerates into the plain
+> one-token step, so the output is always the greedy output. Entry points:
+> CLI `--ngram-draft N` / `--ngram-lookup N` and HTTP
+> `--serve --ngram-draft N` (`RuntimeOptions::with_ngram_draft /
+> with_ngram_lookup`, with the same gate shape: non-`qwen35`, device
+> paths, stacking with `--mtp-draft`/`--dspark-model`, budgets below the
+> lookup size, non-greedy and image-bearing requests all fail explicitly).
+> Acceptance is workload-dependent (repetitive text is where n-grams recur):
+> on Qwen3.5-2B, `--ngram-draft 8 --ngram-lookup 4` on a repeating prompt
+> runs 48 tokens in 47 rounds with 1/8 drafts accepted.
 
 ## Why
 
@@ -46,6 +70,7 @@ exclusive — any one can be combined with any other:
 | **MTP** (Multi-Token Prediction, DeepSeek-V3 style) | 1 token | N future logits | main model + N MTP heads (`nextn.eh_proj` + `nextn.hnorm` + `nextn.enorm`) |
 | **DFlash** (Qwen3 style) | 1 token + main hidden state at `target_layers` | K candidate tokens | main model + `dflash_attn_conv_*` + `dflash_selector_*` |
 | **DSpark** (DFlash + Markov head) | same as DFlash | K candidate tokens (better calibrated) | DFlash + `dsv4_hc_mult` + `dspark_markov_rank` |
+| **n-gram** (llama.cpp `ngram-simple`) | the committed token history | K tokens that followed a previous occurrence | none — no second model, no extra weights |
 | **EAGLE3** | 1 token + main hidden state at `target_layers` (concat multi-layer) | K candidate tokens | small auxiliary EAGLE3 model (`ctx_dft`) |
 | **Standalone draft** | 1 token | K candidate tokens | a separate small LLM (`ctx_dft`) |
 

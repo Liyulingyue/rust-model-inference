@@ -26,7 +26,7 @@
 //! the bug -- not the criterion for *acceptance*. See
 //! `docs/develop/GGML_PARITY_BOUNDARY.md`.
 //!
-//! The measured numbers on an RTX-class GB10 (see
+//! The measured numbers on an RTX-class aarch64 device (see
 //! `docs/develop/NEMOTRON3_NANO_30B_MOE.md` §B7 for the full attribution
 //! table) are 5.8% / 4.9% / 1.9% relative L2 for a one-, two- and
 //! three-token prefill. The gate is therefore 8% on both the relative L2
