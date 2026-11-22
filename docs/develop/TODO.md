@@ -516,17 +516,10 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 "已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
 
 
-- [ ] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** —
-      `src/app/cli/parse.rs` 的主循环统一解析所有 flag（`--gpu` 在第 389 行），
-      但每个模式在解析之后另有一段手写白名单，声明该模式接受哪些 flag，并对带值
-      参数补一次取值校验。`--enhance`、`--system-one-request`、`--decision-request`
-      各有一段，`--gpu` 已经是第 3 个模式接受共享 compute flag —— Vela3 混合投影
-      放开 `--system-one-request` 的 GPU 支持时，就得手改系统模式的白名单，那行
-      `| "--gpu"` 看着像特例，实际是共享 flag 列表的又一份副本。
-      方向：把「模式 → 允许的 flag 集」集中成一份声明，或反过来给 flag 标注归属
-      模式；两者都是**纯重构**，不改行为。`parse.rs` 是所有模型的入口，要**独立成
-      PR**，别混进模型适配。
-      详见 [TODO-064](#todo-064-模式互斥白名单手写枚举每加一个共享-flag-都要改多处---已完成2026-11-22)。
+- [x] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** — ✅ 已完成：
+      白名单收进 `src/app/cli/parse.rs` 的一张表（`FLAG_RULES`），每个 flag 只写
+      一次，共享 flag 写一次就够；`app/decision.rs` 里藏着的第四份副本也一起收了。
+      纯重构，接受 / 拒绝的集合逐项不变。详见 **TODO-064**（PR #267 已合入）。
 - [ ] **Vela3 的 F32 权重路径每次投影都整份拷贝** — `models/vela3/tensor.rs` 的
       `linear()` 用 `QuantizedTensor::from_bytes` 交权重：F16/BF16 借用 mmap 字节切片，
       **F32 会把整份权重 `collect()` 成 `Vec<f32>`**（`ops/kernel/quantized_tensor.rs`）。
