@@ -27,6 +27,12 @@ pub(super) fn matrix<'a>(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [input as u64, output as u64] {
+        return Err(format!(
+            "Invalid tensor shape for {name}: {:?}; expected [{input}, {output}]",
+            info.dims
+        ));
+    }
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;

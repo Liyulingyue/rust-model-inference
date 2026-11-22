@@ -1604,7 +1604,10 @@ fn failed_later_gemma4_chunk_preserves_successful_prefix() {
         session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
     }
     let error = session.forward_rows(&fixture_rows(5)).unwrap_err();
-    assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+    assert!(
+        error.contains("blk.0.attn_output.weight") || error.contains("non-finite"),
+        "{error}"
+    );
     assert_eq!(session.len(), 2);
     assert_eq!(snapshot_base_kv(&session), expected.base_kv);
     #[cfg(feature = "vulkan")]

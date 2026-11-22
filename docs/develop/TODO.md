@@ -1184,6 +1184,12 @@ for token in 0..n_tokens {
 任何数学，因此**不触碰任何逐位对齐契约**——与本分支已建立的"重结合可以、近似不行"
 原则相容。
 
+**阶段性实现（2026-11-22）**：aarch64 NEON 的 BF16 `forward_batched` 已接入四
+token 分块，单行算术顺序保持不变，并增加了 batched 与逐行路径的逐位回归。F16
+已使用上游的可移植 token-tiled 路径。Apple M3 Max 上直接 kernel
+microbenchmark（32×2048×2048，10 次中位数）测得 BF16 **3.48×**、F16 **3.28×**，
+输出逐位相同。
+
 实施注意：
 - `project_tokens` 当前按 token 分区，改成按行分区后 dispatch 次数会变多
   （QKV 从 1 次变 3 次）。需要权衡 dispatch 开销与流量节省，NR=4 时预计净收益为正。
