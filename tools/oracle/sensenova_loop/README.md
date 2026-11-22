@@ -32,6 +32,17 @@ so the underlying kernel/firmware/hardware cause is unresolved.
 The numeric matrix and old-model GPU regression precede this cache-maintenance
 correction; post-correction full-model GPU validation remains incomplete.
 
+The [2026-11-22 Q4_0 image follow-up](release-validation.md#q4_0-image-review-follow-up-2026-11-22)
+runs on a healthy RADV NAVI31 replacement host. CPU answers `The image is blue.`
+and Auto/strict Vulkan answer `Blue.`: the reported token divergence is real,
+but both answers correctly describe the blue fixture. A hardware regression
+fixes Q4_0 block-cancellation accuracy on AVX2/FMA hosts; it does **not** resolve
+the remaining full-model numerical failures. Independent re-encoding of captured
+first-layer GDN outputs shows sensitivity to Q8 activation-rounding boundaries;
+the device codes were not read back in that diagnostic.
+Original gates, before/after failures and CLI/HTTP/JEV checks are retained in
+[q4-image-review.json](q4-image-review.json). The PR remains Experimental.
+
 The converter exports F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K text
 weights, with F32 norms, recurrent parameters, mHC routers and projector.
 Conversion and independent tiny decode checks cover all nine formats; these do

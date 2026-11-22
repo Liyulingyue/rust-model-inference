@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "q4_0_accumulate.glsl"
 #extension GL_EXT_spirv_intrinsics : require
 spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018, 6019], id = 4450)
 int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
@@ -16,10 +18,8 @@ int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // unpacked once and used for every token of the tile, and the products go
 // through the packed dot product instead of scalar multiplies.
 //
-// The arithmetic is the per-row kernel's, in the same order: the integer
-// sum of the 32 products, then (sum * weight scale) * activation scale,
-// accumulated per block with a plain add. The results are the per-row
-// kernel's, bit for bit.
+// The integer dot is exact; per-block accumulation uses the same selected
+// CPU contract as the per-row kernel, including AVX2's FMA.
 //
 // The k walk is chunked rather than staged whole: a full row of q8
 // activations is blocks_per_row * 8 words, which would be past the shared
@@ -172,9 +172,8 @@ void main() {
                     uint word = g < 4u ? low_words[g] : high_words[g - 4u];
                     partial += dotPacked4x8EXT(int(word), int(input_stage[base + g]), 0u);
                 }
-                precise float product = float(partial) * weight_scale;
-                product = product * scale_stage[t * CHUNK_BLOCKS + b];
-                accumulator[t] = accumulator[t] + product;
+                accumulator[t] = q4_0_accumulate(accumulator[t], partial,
+                    weight_scale, scale_stage[t * CHUNK_BLOCKS + b], pc.reduction_mode);
             }
         }
         barrier();

@@ -1,15 +1,16 @@
 # SenseNova Loop 9B release validation
 
-Date: 2026-11-19 (Asia/Shanghai). Base: `44527e5ad`.
+Date: 2026-11-19; Q4_0 image follow-up: 2026-11-22 (Asia/Shanghai). Base: `44527e5ad`.
 Status: **Experimental / partial adaptation**.
 The 108-row [coverage matrix](release-matrix.csv) currently has 30 passed,
 78 failed and 0 pending combinations. Implementation and
 verification status are separate. [Machine-readable results](release-results.json)
 retain numeric metrics, interface comparisons, exported hashes and failure names.
 The counts retain the historical pre-correction snapshot; the corrected shared
-GPU path has not completed full-model acceptance.
+GPU path has not completed full-model acceptance. The [Q4_0 image follow-up](#q4_0-image-review-follow-up-2026-11-22)
+uses a healthy replacement GPU and retains the remaining numerical failures.
 
-**GPU continuation blocked:** SSH to `36.150.116.206:33162` works, but real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes fail with `device lost`. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
+**Historical GPU blocker on port 33162:** real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes failed with `device lost`. The replacement host on port 34695 executes Vulkan successfully; this does not erase the old host's failure record. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
 
 ## Contract and assets
 
@@ -558,3 +559,117 @@ fallback or are rejected by strict Vulkan. One final-message image is supported;
 historical images, multiple images, audio/video and MTP are not implemented for
 this adapter. Arbitrary resizing, long-context and broad task quality remain
 unvalidated. Reproduction commands are in [README.md](README.md).
+
+## Q4_0 image review follow-up (2026-11-22)
+
+This investigates [PR #256's Q4_0 image report](https://github.com/Liyulingyue/rust-model-inference/pull/256#issuecomment-7071771104).
+The baseline is `2c1ce45009e35487b6bcf50cf83cd59276424692`; the fix changes only
+Q4_0 device accumulation on AVX2/FMA hosts. [Machine-readable evidence](q4-image-review.json)
+records commands, backend submissions, original gates, interface checks and
+first-layer diagnostics. The historical 108-row matrix above is not overwritten.
+
+Host: `j-jpyh7yskfqdrt34pavbzlaa6nq`, SSH `36.150.116.206:34695`, RADV NAVI31,
+approximately 48 GiB VRAM, 55 GiB cgroup RAM. A standalone Vulkan integer-write
+probe returns 123; the model runs have no device-loss error. Source files and
+F32/Q4_0/projector exports match the pinned release hashes above. All weights
+remain under `/workspace/rmi-q4-image-2c1ce450/models` on this host; tools and
+dependencies stay in the repository `.venv` / `target`.
+
+### Output interpretation
+
+The reported token divergence reproduces, but describing it as nonsense was
+incorrect. CPU IDs `[760, 2099, 369]` decode to `The image is`; Vulkan/Auto IDs
+`[10025, 13, 248046]` decode to `Blue.<|im_end|>`. An eight-token CLI/HTTP run
+answers `The image is blue.` on CPU and `Blue.` on Vulkan. Both correctly name
+the 256x256 blue fixture. This one semantic success does not establish broad
+quality or numerical acceptance, and matching CPU greedy IDs does not prove
+that CPU quantized intermediates match the independent reference.
+
+### Confirmed arithmetic correction
+
+The old Q4_0 shader rounds `dot * weight_scale`, multiplies by activation scale,
+then adds. The CPU AVX2 kernel first combines the two scales and uses FMA.
+For two cancelling blocks, the exact decoded-weight/Q8-input result is
+`179642.578125 - 179642.010498046875 = 0.567626953125`.
+The old GPU returns `0.5625`; the corrected GPU returns approximately
+`0.56762695`. This is a small-result accuracy defect, independent of greedy IDs.
+
+Both ordinary and DP4A tiled shaders now share this accumulation helper.
+Push word 14 selects the FMA mode only on AVX2/FMA hosts; scalar/ARM retain
+their previous multiply/add contract. No model caller or CPU arithmetic changes.
+The hardware regression uses absolute tolerance `1e-4`, rows 1/3/33/84,
+multiple input scales, NaN-initialized outputs and an explicit tiled-capability
+assertion. It fails against the old shader (exit 101) and passes after the fix.
+This does not require bitwise equality for lossy arithmetic.
+
+### Full model results remain failed
+
+Reference: pinned official eager F32 implementation on ROCm, independently
+decoded same Q4_0 GGUF and NumPy activation QDQ, `--host-inputs`, three greedy
+steps. All native runs use the same 84 prompt IDs and native CPU vision path.
+The original quantized max-abs/RMSE/cosine gates are unchanged.
+
+| Backend | Before: failed / all checks | After: failed / all checks | Before -> after failed / same-prefix checks | Greedy IDs after |
+| --- | ---: | ---: | --- | --- |
+| CPU | 67 / 172 | 67 / 172 | 67 / 172 -> 67 / 172 | `[760, 2099, 369]` |
+| strict Vulkan | 132 / 172 | 133 / 172 | 18 / 58 -> 19 / 58 | `[10025, 13, 248046]` |
+| Auto -> Vulkan | 132 / 172 | 133 / 172 | 18 / 58 -> 19 / 58 | `[10025, 13, 248046]` |
+
+After the first generated token diverges, 114 checkpoints use different input
+histories; their failures cannot all be interpreted as same-input kernel error.
+A separate CPU-derived diagnostic, using the same lossy gates, has 15/58
+same-prefix failures before and 19/58 after on both GPU modes. It is **not an
+independent oracle**. The correction improves the isolated cancellation case
+but does not improve the full-model acceptance counts or resolve this divergence.
+CPU's 5,023 traced arrays and vision output are bitwise unchanged by this GPU-only
+fix. The older 49/172 CPU failure count above belongs to a different host/reference
+snapshot; the fresh reference on this host gives 67/172.
+After restoring the production sources, a final strict-Vulkan rerun again
+records 133/172 failed checks, 19/58 same-prefix failures and 15,146 device
+submissions. All 839 production-file hashes match the local source snapshot;
+the comparator exits 1, correctly retaining the failed acceptance result.
+
+Temporary first-layer tracing narrows the remaining discrepancy:
+
+| First-layer checkpoint (84 rows) | CPU/GPU max_abs |
+| --- | ---: |
+| normalized input, QKV, z, raw beta and alpha projections | 0 |
+| normalized Q / K | `1.79e-7` / `1.19e-7` |
+| GDN output before output projection | `1.91e-6` |
+| output after the first mHC visit | `9.04e-4` |
+
+Independent Q8_0 encoding of the captured GDN outputs changes two codes and
+one F16 scale. At row 16, block 27, lane 19, scaled values `-124.5000229`
+and `-124.5` round to `-125` and `-124`; the underlying values differ by about
+`1.12e-8`. This identifies a quantization-boundary amplification mechanism,
+not an integer-dot or first-input projection mismatch. These are diagnostic
+NumPy codes, not a readback of actual device codes. It does not prove the cause
+of every later checkpoint failure. The temporary one-layer early exit/tracing
+is removed from production sources. Raw traces and the temporary patch remain
+in remote `target/q4-image-review`.
+
+### Bounded regression and interfaces
+
+- Hardware Q4_0 tests: 2 passed; scalar-dispatch tiled/ordinary control: 1 passed.
+  `qwen35::`: 111 passed / 24 ignored; `sensenova_loop::`: 13 passed / 1 ignored.
+- Mac default library before and after: 1617 passed / 13 failed / 117 ignored,
+  with identical failure names. These are baseline failures, not a green-suite claim.
+  Names: `app::media::tests::stereo_uploads_are_refused`; the three
+  `models::breeze::tests::main_*` dtype/shape cases; the two `models::clm::tests`
+  golden/embedding cases; three `models::diffusion::z_image` NEON activation/softmax
+  cases; two `models::funasr::encoder::parity_tests` rounding cases;
+  `models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix`;
+  `ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum`.
+- CPU and strict Vulkan each complete four CLI operations (text/image generation
+  and text/image JEV) and six HTTP requests (stream/nonstream text/image and
+  text/image JEV). Within each backend, CLI/HTTP text matches and JEV probabilities
+  have max_abs 0. This does not establish cross-backend numerical equivalence.
+- Shader compilation uses glslang 15.1.0; both SPVs pass `spirv-val`, and manifest
+  hashes match. No new CLI target, dependency or model option is introduced.
+
+No full-weight regression of another model using Q4_0, corrected NVIDIA hardware
+run, corrected Preview run, other-format image rerun or controlled release-build
+throughput benchmark was performed in this follow-up. The shared change affects
+all Q4_0 device projections on AVX2/FMA hosts; synthetic operator coverage and
+Qwen unit tests do not replace those model-level checks. Keep the PR **Draft /
+Experimental / partial adaptation**; Q4_0 numerical acceptance remains open.

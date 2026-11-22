@@ -8089,6 +8089,10 @@ fn matmul_rows_push(
     if format == GpuWeightFormat::Q8_0 {
         push[14] = q8_dot_mode();
     }
+    if format == GpuWeightFormat::Q4_0 && crate::ops::has_avx2_fma() {
+        // Combining scales before FMA preserves small results when large blocks cancel.
+        push[14] = 8;
+    }
     push[2] = as_u32(n_in, "matmul width")?;
     push[3] = as_u32(blocks, "matmul blocks")?;
     push[13] = outputs.len() as u32;
@@ -11625,9 +11629,8 @@ mod tests {
     /// row) pair and multiplies the four-bit values one at a time; the
     /// tiled one reads it once per (output column, k-block) and uses the
     /// packed dot product. The arithmetic is the same, so the results have
-    /// to be the same: the integer sum of the 32 products is exact, and
-    /// the float part keeps the per-row kernel's order, (sum * weight
-    /// scale) * activation scale, added per block.
+    /// to be the same: the integer sum is exact, and both kernels use the
+    /// selected per-block accumulation contract, including AVX2's FMA.
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
@@ -11703,6 +11706,92 @@ mod tests {
             }
             unsafe { ops.context.destroy_completed_buffers(&[buffer]) }.unwrap();
         }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device with integer dot products and an AVX2/FMA host"]
+    fn vulkan_q4_0_preserves_cancellation_with_cpu_fma() {
+        use super::*;
+        use crate::ops::kernel::Kernel;
+
+        assert!(crate::ops::has_avx2_fma());
+        let context = VulkanContext::new().unwrap();
+        let weight: Vec<_> = (0..2)
+            .flat_map(|_| {
+                crate::ops::f32_to_f16(38.75)
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain([0x99; 16])
+            })
+            .collect();
+        let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+        // Exact decoded-weight/Q8-input result: 179642.578125 - 179642.010498046875.
+        const EXPECTED: f32 = 0.567626953125;
+        for rows in [1, 3, 33, 84] {
+            let layout = BatchedLinearLayout::new(rows, 64, 1).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, layout.size, 2).unwrap();
+            assert!(ops.q8_tiled, "fixture must exercise the tiled Q4 kernel");
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q4_0])
+                .unwrap();
+            let input: Vec<_> = (0..rows)
+                .flat_map(|row| {
+                    let factor = [1.0, 0.5, 2.0][row % 3];
+                    let mut values = [0.0; 64];
+                    values[..20].fill(127.0 * 1.796875 * factor);
+                    values[20] = 40.0 * 1.796875 * factor;
+                    values[32..61].fill(-127.0 * 1.2412109375 * factor);
+                    values[61] = -52.0 * 1.2412109375 * factor;
+                    values
+                })
+                .collect();
+            for (row, values) in input.chunks_exact(64).enumerate() {
+                let mut cpu = [f32::NAN];
+                crate::ops::kernel::q4_0::Q4_0Kernel::new(&weight, 64, 1)
+                    .forward(values, &mut cpu, 64, 1);
+                assert!((cpu[0] - EXPECTED * [1.0, 0.5, 2.0][row % 3]).abs() < 1e-4);
+            }
+            for tiled in [false, true] {
+                ops.write_f32(layout.input, &input).unwrap();
+                ops.write_f32(layout.output, &vec![f32::NAN; rows]).unwrap();
+                let commands = TokenCommands::begin(&context).unwrap();
+                let record = if tiled {
+                    Qwen3Ops::record_weight_matmul_tiled_rows
+                } else {
+                    Qwen3Ops::record_weight_matmul_ordinary_rows
+                };
+                record(
+                    &ops,
+                    &commands,
+                    bindings,
+                    layout.input,
+                    layout.q8,
+                    layout.scales,
+                    layout.sums,
+                    layout.q8,
+                    layout.scales,
+                    &[(layout.output, 1, 4)],
+                    64,
+                    rows,
+                    64,
+                )
+                .unwrap();
+                commands.submit_and_wait().unwrap();
+                for (row, &actual) in ops
+                    .read_f32(layout.output, rows)
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
+                    let expected = EXPECTED * [1.0, 0.5, 2.0][row % 3];
+                    assert!(
+                        (actual - expected).abs() < 1e-4,
+                        "rows={rows} row={row} tiled={tiled}: {actual} != {expected}"
+                    );
+                }
+            }
+        }
+        unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
     }
 
     #[test]
