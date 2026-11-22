@@ -746,16 +746,6 @@ Q8_0 没有 ground truth（量化本身有损），后续每次 SIMD 改动会�
 
 ---
 
-### TODO-007: Breeze `rope()` SIMD 路径精度破坏 — ✅ 已修复
-
-`src/ops/rope/neox.rs::rope_neox_inplace_with_table` 新增，BF16 round-trip 严格按 scalar op 顺序
-（mul → round → mul → round → add → round），AVX2 内核在每个乘加后立即 bf16 round。
-`src/models/breeze/transformer.rs::rope` 一行调用。Breeze 三档精度 (BF16/F16/F32/Q8_0) bit-exact。
-
-剩余：NEON 版本（aarch64）暂未实现，不阻塞 Breeze 路径。
-
----
-
 ### TODO-008: Breeze F16 合成听感更合理 / F32-BF16 需对齐
 
 人工听审发现：Breeze TTS 2 在 BF16 / F16 / F32 下比特级输出一致（BF16 ↔ F32 md5 `c19502ff...`），
@@ -1626,45 +1616,6 @@ SILU_ONLY=1 ./target/release/examples/vk_ops_check   # 只跑这一项
 
 ---
 
-### TODO-021: Z-Image FFN 合批 `record_ffn` — 已合入，依赖 TODO-020
-
-一次 command buffer 录 w1 → w3 → SiLU → w2，取代原来「3 次 submit + 2 次 readback +
-host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 49.7 s
-（512×512，8 步，seed 42，aarch64 Vulkan 主机）。
-
-**与 TODO-020 是同一件事的两端**：旧 clamp + 合批必然 `-inf`，两者必须一起看。
-
-排查时已排除（别重复）：barrier 覆盖范围、提交粒度、Q8 暂存别名（w3 已加独立
-`q8_up`）、region 重叠（bump allocator 不重叠）、validation layer（零警告，代码合规）。
-真正的根因在 silu 的数值，不在调度。
-
-`FFN_BATCH_MAX=<n>` 可限制合批生效的层数（默认全部），用于二分定位。
-
-**遗留**：合批后与 CPU 基线 PSNR 31.61 dB（改动前 33.34 dB），差异来自 TODO-020
-风险 1 的 silu 饱和。quantize reciprocal 的 1-ulp 修复（见
-[VULKAN.md](VULKAN.md)「已知问题与调试开关」）已把该值从 31.52 拉回
-32.21 dB（mean|Δ| 3.44 → 3.01），剩余差距仍主要来自 silu 饱和边界。
-
-### TODO-024: attention 相关自检的容差是照 x86 标定的 — ✅ 由 TODO-025 一并解决
-
-**根因**：`cpu_attention_scores` / `cpu_attention_values` /
-`check_attention_scores_match_cpu_reduction` 拿 `dot_f16` 当 oracle，而
-
-| 架构 | `dot_f16` | 累加 |
-|---|---|---|
-| x86_64 | `_mm256_cvtph_ps` + `_mm256_fmadd_ps` | **f32** |
-| aarch64 | `fmla .8h` | **f16** |
-
-容差是照 **x86 的 f32 参考**标定的（`attention_scores` 用 3e-5），在 ARM 上参考自带
-`sqrt(head_dim) * eps_f16` 误差（head_dim=128 时约 5e-3），与实测 6.6e-3 吻合——
-**原理上过不了**。
-
-**解法不在放宽容差，在换 oracle**：统一改用 `reference_dot_f16`（f64 精确求和）。
-oracle 是精确算术后，容差自然回到 3e-5 并且真的成立。详见 TODO-025。
-
-**教训**：一个有损的参考值，会让「校验 GPU」这件事悄悄变成「比较两个有损实现」。
-前者能发现 bug，后者只能发现巧合——而且它同时把容差推大到连真正的 GPU 回归都测不出来。
-
 ### TODO-025: `dot_f16` 在 aarch64 上用 f16 累加 — ✅ 已改，`ggml-f16-dot-parity` 保留旧行为
 
 新增 Cargo feature `ggml-f16-dot-parity`（默认关闭）：
@@ -2513,42 +2464,6 @@ CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个�
 下一步：在**独占设备**上重测（这台 aarch64 机器有另一个租户占着 65 GB 和 79–92% 利用率），
 确认是驱动/内存压力导致的偶发，还是我们自己的同步缺口。
 
-### TODO-041: Astronex 视频输出依赖系统 `ffmpeg` — ✅ 已完成（2026-11-22）
-
-**做完了**：两件都做了 —— 更早、更明确的报错，和 USAGE / 文档里的运行期依赖说明。
-
-**当时的失败点**：`src/models/diffusion/dreamx/media.rs` 直接 spawn `ffmpeg`，
-没有它的时候 `--astronex` 要**跑完采样和 VAE 解码**才在写视频时失败
-（`Start ffmpeg for DreamX video: No such file or directory`）——用户等的是整条
-管线的时间，换来一句看不出该怎么办的报错。
-
-**改法**：
-
-1. `media.rs` 新增 `require_ffmpeg()`：跑一次 `ffmpeg -version`，成功就放行。
-   失败时报的是**运行期依赖**而不是模型问题：
-   `ffmpeg is required to write the video but could not be started: … It is a
-   runtime dependency of the video path, not a model component: install it (for
-   example `winget install Gyan.FFmpeg`, `apt install ffmpeg`, or `brew install
-   ffmpeg`) and make sure it is on PATH.`
-2. **调用点提前到昂贵工作之前**：
-   - `--astronex`：`app::diffusion::run_astronex_cli` 里，参数校验之后、
-     `AstronexPipeline::load` 与采样 / VAE 解码之前。
-   - DreamX 视频路径：`app::diffusion::run_dreamx_cli` 里，模型加载与 denoise
-     之前；**dry run 不需要 ffmpeg**（它不写文件），所以用 `if !options.dry_run`
-     跳过。
-   ⇒ 现在缺 ffmpeg 是**开局就报错**，不是跑完再报错。
-3. 两处 spawn 的错误信息也补上了依赖说明（原来只有 `Start ffmpeg for DreamX
-   video: {error}`）。
-4. 文档：CLI 的 USAGE 里 Astronex 那行加上「writing the video needs ffmpeg on
-   PATH」；`docs/develop/ASTRONEX_WORLD.md` 新增一节 **Runtime dependencies**，
-   写清 ffmpeg 是运行期依赖（不是模型组件）、检查发生在采样之前、DreamX 路径同理。
-
-**验证**：`a_missing_external_program_is_reported_as_a_runtime_dependency` 用一个
-不存在的程序名验证报错形状（说清是运行期依赖、怎么装、PATH 这件事）。本机 PATH 上
-有 ffmpeg，所以「有 ffmpeg 时放行」这一侧由实跑覆盖。**未覆盖**：没有本地
-astronex / DreamX 权重，所以「检查确实发生在采样之前」的顺序是读代码确认的，没有
-端到端跑过一条没有 ffmpeg 的完整管线。
-
 ### TODO-042: Astronex 权重契约的 pinned commit 不公开
 
 转换器的形状契约来自 `references/astronex-world-contract`，钉在
@@ -2954,65 +2869,6 @@ token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏
 [TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)、
 `docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
 `docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
-
-### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖 — ✅ 已完成（2026-11-22）
-
-**做完了**：判定收敛到 1 处（`src/models/qwen3/mod.rs`），静默覆盖改成显式告警 +
-文档说明，并加了一条扫描式守卫测试防止它重新散开。
-
-#### 问题一（判定重复）——已收敛到 1 处
-
-先修一个前提：条目写的「6 处」是旧分支的数字，main 上实际是 **12 处**同样的
-写法 `source.metadata("wevisone_vl.source_revision").is_some()`。除了原先记的 6 处，
-main 还多出：`src/main.rs`（qwen3vl decoder 模式豁免）、`src/app/server/prediction.rs`
-（WeVisOne 组件校验）、`src/models/qwen3/trunk/prefill.rs`（Auto 投影下沉）、
-`src/models/qwen3/trunk/session.rs`（F32 KV 的 `[GPU]` 提示）、
-`src/models/wevisone_vl/mod.rs`（读 revision 的**值**而不是判定）、以及
-`src/app/server/api/tools.rs` 里的测试替身。**散得比记的多，是这条条目最该
-记下来的事实**——漏改一处就是静默的行为分叉。
-
-现在的形态：
-
-- `src/models/qwen3/mod.rs` 定义 `WEVISONE_SOURCE_REVISION_KEY` 与
-  `is_wevisone(source)`；**key 字面量在全仓只出现在这一个文件里**。
-- 12 处调用点全部改为调用 `is_wevisone`（`wevisone_vl/mod.rs` 需要 revision 的
-  值，改用 `WEVISONE_SOURCE_REVISION_KEY` 常量）。
-- 放在 `models::qwen3` 而不是 `models::wevisone_vl`：`wevisone_vl` 本来就依赖
-  `qwen3`，反过来会让基座家族依赖变体家族。
-
-守卫测试 `models::qwen3::tests::wevisone_marker_is_read_in_one_place` 扫 `src/`
-下所有 `.rs`，除 `models/qwen3/mod.rs` 外任何文件再写出这个 key 字面量就红。
-这是「哪些路径必须按 WeVisOne 处理」唯一能真正锁住的形态——单测一个
-`is_wevisone` 的布尔值锁不住「调用点有没有漏改」。
-
-**行为零变化**：强制 thinking 这件事本身是对的（WeVisOne 自带的
-`chat_template.jinja` 里完全没有 thinking 机制，没有 `enable_thinking` 变量、
-没有 `<think>` 标记，助手轮就是字面 `assistant\n`；官方实现走
-`AutoProcessor.apply_chat_template`，所以官方 prompt 永远不含空 think 块）。
-不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
-
-#### 问题二（对外可见的静默覆盖）——已改成显式告警 + 文档说明
-
-`src/app/server/api/protocol.rs` 的 `enable_thinking` 是**客户端字段**（顶层
-`"enable_thinking": false` 或嵌套 `chat_template_kwargs`）。原来的
-`enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
-覆盖成 true**。功能上无害（WeVisOne 本来就不 think），但 API 语义上是「显式请求
-被静默忽略」。
-
-两个修法都做了（条目说「二选一」，这里取的是叠加而非替代）：
-
-- `src/app/server/api/tools.rs` 在覆盖发生时打一条
-  `log::warn!("enable_thinking=false is ignored for WeVisOne: its chat template
-  has no thinking mode")`——沿用仓库既有的「字段被忽略」告警样式
-  （`protocol.rs` 里同类 `log::warn!`）。
-- `protocol.rs` 的字段注释写明 WeVisOne 是例外：模板没有 thinking 机制，该字段
-  对它无效，答案一律不带推理块。
-
-**验证**：`cargo test --profile release-fast --lib` 基线 1619 passed / 39 failed，
-本分支 1621 passed / 39 failed —— 失败集合逐条相同（均为预存失败：本机 Windows
-临时目录权限 + oracle 依赖类），新增的 2 个通过项就是本条新增的两条测试。
-
-**关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
 
 ### TODO-048: `--mmproj` + 纯文本仍会把 qwen2vl / qwen3vlmoe 送进 hybrid 分支报错
 
@@ -4022,63 +3878,6 @@ Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
 `run_forward_logits_*`、`src/models/nemotron_h/trunk/runtime.rs`、
 `docs/develop/jev.md`、TODO-053（30B 适配）。
 
-### TODO-064: 模式互斥白名单手写枚举，每加一个共享 flag 都要改多处 — ✅ 已完成（2026-11-22）
-
-**做完了**：白名单收进**一张表**，`parse.rs` 里三段内联 `match` 全部删掉；而且
-不止三处 —— 决策模式自己的检查里还有**第四份**共享 flag 副本，一起收了。
-
-**当时的四处**：
-
-| 位置 | 形式 |
-| --- | --- |
-| `app/cli/parse.rs` 的 enhance 段 | `--model/--audio/--out`（路径）、`--threads`（数字）、`--enhance/--compute/--gpu/--overwrite/--serve` |
-| `app/cli/parse.rs` 的 system-one 段 | `--model`、`--threads`、`--adapter/--system-one-request/--compute/--gpu` |
-| `app/cli/parse.rs` 的 decision 段 | **没有白名单**（任何 flag 都收），只对 `--model/--threads/--max-context` 校验取值 |
-| `app/decision.rs` 的 `validate_options` | `--model/--threads/--compute/--gpu/--max-context/--decision-thinker` —— **共享 flag 的第四份副本** |
-
-⇒ 一个共享 flag（`--gpu`、`--compute`…）要在**每一处**各写一遍；新增一个模式就是
-新增一份副本，漏一处就是「这个模式莫名其妙拒绝了一个 flag」。
-
-**改法**（选了条目里的**方向 2：按 flag 声明归属**，因为它才真的消掉多份副本）：
-
-- `app/cli/parse.rs` 新增 `Mode`（`Enhance` / `Decision` / `SystemOne`）、
-  `Value`（`None` / `Path` / `Number`）、`FlagRule`（flag + 取值 + 接受它的模式），
-  以及一张表 `FLAG_RULES`：**每个 flag 只写一次**，共享 flag 写一次就够，
-  「哪个模式收它」写在同一条目里。
-- 三段内联 `match` 换成一次 `apply_mode_flags(mode, args, &parsed_flags)`：查表 →
-  按 `Value` 校验取值 → 不在表里且该模式有白名单就报
-  「`<模式>` cannot be combined with `<flag>`」。
-- **第四份副本也收了**：`app/decision.rs` 的 `validate_options` 改用同一张表
-  （`flag_is_allowed_for(flag, Mode::Decision)`），只留下它自己的两条条件
-  （native decisions 在 `--serve` / `--jev` 下额外收自己的 flag）。
-- **纯重构**：接受 / 拒绝的集合逐项不变，错误文案也不变。
-
-**回归**（条目方向 3 要求的矩阵）：
-
-- `the_flag_table_matches_the_flags_each_mode_accepted` —— 把**旧白名单原样抄进
-  测试**（enhance 9 个、system-one 6 个、decision 7 个），逐个 flag × 逐个模式
-  比对表与旧行为。测试写的是**行为**，不是表自己，所以表和旧行为是被对照的两方，
-  不是表自证。
-- `the_flag_table_lists_each_flag_once` —— 表里不许有重复条目。
-- `every_mode_takes_the_shared_flags` —— 三个模式 × 三个共享 flag 的矩阵
-  （`--threads 2` / `--compute cpu` / `--gpu`）端到端过 `parse_cli_options`。
-- `a_mode_rejects_the_flags_of_another_mode` —— 跨模式的 flag 被拒。
-
-**顺带记一笔**：决策模式在 `parse.rs` 里**没有白名单**（任何 flag 都收），它的
-白名单其实在 `decision::validate_options` 里 —— 也就是说「模式收哪些 flag」这件事
-在代码里是**分裂**的。表把两边统一到一处之后，这种分裂不会再长出来。
-
-**验证**：`cargo test --profile release-fast --lib` 失败集合与改动前逐条相同（本机
-预存失败 39 条：Windows 临时目录权限 + oracle 依赖类），新增 4 条测试全过；
-`tests/system_one_cli` 全过；`tests/decision_cli` 的 5 条失败在改动前后**完全
-相同**（本机 Windows locale 的报错文案差异，已用 `git stash` 对拍确认）。
-
-**影响面**：`src/app/cli/parse.rs` 是**所有模型**的入口（Qwen3、GLM-4、
-llama、Vela3、Idol 等全走它）—— 本条**独立成 PR**，没有混进模型适配的 PR。
-
-**关联**：`src/app/cli/parse.rs`（`FLAG_RULES`）、`src/app/cli/mod.rs`、
-`src/app/decision.rs`、`src/app/cli/tests.rs`、`tests/system_one_cli.rs`。
-
 ### TODO-065: Vela3 的 F32 权重路径每次投影都整份拷贝
 
 **状态**：⚠️ 已知缺口，未排期。
@@ -4744,66 +4543,6 @@ kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 `src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
 `src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
 [TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
-
-### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读 — ✅ 已完成（2026-11-22）
-
-**做完了**：qwen3 视觉塔的每一个张量现在都按 GGUF 头里声明的格式读，不再有任何一处
-靠字节长度猜。
-
-**当时的缺陷比条目记的更宽**：条目只点了 `decode_linear_weight`（按字节长度猜），
-实际同一族里还有两处同源的硬编码：
-
-| 位置 | 当时的假设 | 后果 |
-| --- | --- | --- |
-| `decode_linear_weight`（2-D 矩阵） | 4 字节→F32，2 字节→**F16**，34 字节/32→Q8_0 | BF16 被当 F16 读（1.0 → 1.875） |
-| `decode_f32_slice`（1-D 向量：ln1/ln2/deepstack norm/post_ln/position_embd） | **恒为 F32** | F16/BF16 的 norm 向量按 4 字节一组读 → 数值全错 |
-| `matmul_f16_f32_single`（未 precompute 的那条路） | **恒为 Q8_0 块布局**（函数名有误导） | 任何非 Q8_0 的塔被当 Q8_0 解 → 数值全错 |
-
-三处都是「格式不由张量声明」，所以一起修。
-
-**改法**：
-
-1. `src/core/tensor.rs` 新增 `decode_f32_matrix(ggml_type, bytes, n_in, n_out)` —— 按
-   声明格式解码已借到的字节（F32 / F16 / BF16 / Q8_0）；`load_f32_matrix` 改为转调它，
-   core 里只有一份解码实现。（`load_f32_matrix` 是 `4c77690f` 为这一类加的，但**至今
-   没有调用方**；视觉塔拿到的是字节不是张量名，需要的是这个 bytes 级入口。）
-2. `src/models/qwen3/vision/mod.rs` 新增 `VisionMatrix<'a>`：**借到的字节 + 头部声明的
-   `ggml_type`**。`VisionLayer` / `DeepstackWeights` / `VisionEncoder` 的 2-D 权重字段
-   全部换成它，`decode_linear_weight`（按长度猜的那个）删除。
-3. 1-D 向量改走 `core::tensor::optional_f32_values` —— 它本来就按声明格式解
-   （F32 / BF16 / F16）。顺带副作用：**非 precompute 路径每层每帧都在重新解码
-   ln1/ln2 的老代码没有了**（现在加载期解一次）。
-4. 未 precompute 的那条路按声明格式分派：Q8_0 走原来的块路径，F32 / F16 / BF16 走
-   共享的 SIMD dot（`dot_f32` / `dot_f16_f32` / `dot_bf16_f32`），零拷贝借用映射来的
-   字节，不复制。
-5. 头部声明了不支持的格式（如 Q4_0）→ **加载期报错** `Unsupported vision matrix
-   {name}: {type:?}`，不再等到运行时读出一堆错值。
-
-**对现有模型零行为变化**：F32 / F16 / Q8_0 矩阵的解码与从前**逐位相同**（同一套字节
-布局：`dequant_q80_weight` 与被删掉的 `dequant_q8_0_tensor` 是同一个算法），F32 的
-1-D 向量也逐位相同。变的只有「头部声明 BF16 / F16 时读对了」和「1-D 向量按声明格式
-读」。
-
-**顺带查清的一件事**：未 precompute 的那条路（`matmul_f16_f32_single`）对 qwen3 塔
-**已经没有活调用方** —— qwen3 塔的三个使用方（`models/diffusion/mage_flow/text.rs`、
-`models/wevisone_vl/mod.rs`、`app/diffusion.rs` 的 qwen3vl 分支）都调了
-`precompute` / `precompute_lossless` / `precompute_ggml_f16`；而 vela3-d3、qwen_drive、
-thx02、longcat 用的都是 **qwen35** 塔（那条塔本来就 dtype-aware）。所以这条 Q8_0
-专用路径是一颗哑雷：谁把它复活配上 F16 塔，就是静默的错值。现在它按声明格式分派，
-哑雷拆了。
-
-**验收**：`a_bf16_vision_tower_decodes_to_the_values_the_header_declares` —— 造一个
-**混合格式**的合成塔（矩阵 BF16、norm F32），加载 + `precompute_lossless`，把解出来的
-权重与 `decode_f32_matrix(BF16, …)` 逐位对比，并断言首元素是 `1.0` 而不是 F16 读法
-的 `1.875`。另有 4 条 core 测试（`decode_f32_matrix` 的格式/长度/不支持分支、
-`optional_f32_values` 的 BF16 分支）+ 4 条视觉塔测试。
-
-**未覆盖**：本机没有 qwen3 塔的 mmproj（本地模型是 qwen35 塔 / 纯文本 / 扩散），
-端到端只有合成塔这一条证据；等有真实 BF16 的 qwen3vl mmproj 时应再跑一次实机。
-
-**关联**：`src/models/qwen3/vision/mod.rs`（`VisionMatrix`）、
-`src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
-`src/core/tensor.rs`（`decode_f32_matrix` ✓✓、`load_f32_matrix` ✓✓）。
 
 ### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
 

@@ -10521,7 +10521,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
 }
 
 /// Independent F64 accuracy reference, separate from CPU reduction parity.
-/// Changing `ggml-f16-dot-parity` must not change this reference. TODO-024.
+/// Changing `ggml-f16-dot-parity` must not change this reference.
 fn reference_dot_f16(a: &[u16], b: &[u16]) -> f64 {
     a.iter()
         .zip(b)

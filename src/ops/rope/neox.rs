@@ -325,10 +325,9 @@ pub(crate) fn rope_neox_inplace_scalar(
 /// keep its per-element bf-round trip semantics bit-exact while
 /// running the per-head rotation through SIMD.
 ///
-/// TODO-007: this is the rope wrapper that the Breeze dispatcher
-/// gates behind `cfg(any())`.  When this function lands, Breeze
-/// replaces its hand-written scalar rope with a single
-/// `rope_neox_inplace_with_table(...)` call.
+/// This is the wrapper the Breeze, Vela3 and Yue2 dispatchers call: one
+/// `rope_neox_inplace_with_table(...)` replaces their hand-written scalar
+/// rope, and the per-element bf-round trip stays bit-exact.
 #[allow(dead_code)]
 pub fn rope_neox_inplace_with_table(x: &mut [f32], head_dim: usize, cos: &[f32], sin: &[f32]) {
     debug_assert_eq!(cos.len(), sin.len());
