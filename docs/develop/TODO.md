@@ -2896,45 +2896,62 @@ token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏
 `docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
 `docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
 
-### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖
+### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖 — ✅ 已完成（2026-11-22）
 
-**现状**：WeVisOne-VL-4B 的适配在 6 个位置各自判断「这是不是 WeVisOne」，写法完全一样：
+**做完了**：判定收敛到 1 处（`src/models/qwen3/mod.rs`），静默覆盖改成显式告警 +
+文档说明，并加了一条扫描式守卫测试防止它重新散开。
 
-```rust
-source.metadata("wevisone_vl.source_revision").is_some()
-```
+#### 问题一（判定重复）——已收敛到 1 处
 
-| 位置 | 用途 |
-| --- | --- |
-| `src/app/server/api/tools.rs:505` | 强制 thinking（HTTP prompt 构造） |
-| `src/app/text/qwen3.rs:65` | 强制 thinking（CLI 文本路径） |
-| `src/models/qwen3/trunk/forward.rs:758` | 强制 thinking（generate 路径） |
-| `src/app/jev/single/qwen3.rs:171` | 强制 jinja 渲染 |
-| `src/app/server/mod.rs:1464` | 决定是否构造 `wevisone_options` |
-| `src/models/qwen3/vision/mod.rs:612` | 视觉预计算保留 F32 |
+先修一个前提：条目写的「6 处」是旧分支的数字，main 上实际是 **12 处**同样的
+写法 `source.metadata("wevisone_vl.source_revision").is_some()`。除了原先记的 6 处，
+main 还多出：`src/main.rs`（qwen3vl decoder 模式豁免）、`src/app/server/prediction.rs`
+（WeVisOne 组件校验）、`src/models/qwen3/trunk/prefill.rs`（Auto 投影下沉）、
+`src/models/qwen3/trunk/session.rs`（F32 KV 的 `[GPU]` 提示）、
+`src/models/wevisone_vl/mod.rs`（读 revision 的**值**而不是判定）、以及
+`src/app/server/api/tools.rs` 里的测试替身。**散得比记的多，是这条条目最该
+记下来的事实**——漏改一处就是静默的行为分叉。
 
-**强制 thinking 这件事本身是对的**：WeVisOne 自带的 `chat_template.jinja` 里**完全没有
-thinking 机制**（没有 `enable_thinking` 变量、没有 `<think>` 标记，助手轮就是字面
-`assistant\n`），官方实现走 `AutoProcessor.apply_chat_template`，所以官方 prompt
-永远不含空 think 块。不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+现在的形态：
 
-**问题一（判定重复）**：同一判定散 6 处，已经吃过一次亏——thinking 阈值在
-forward.rs / qwen3.rs / jev 三处各写一遍。将来加 WeVisOne 变体（或改名 revision
-标记）时漏改一处就是静默的行为分叉。**修复方向**：抽一个
-`qwen3::is_wevisone(source) -> bool`（或把它做成 `Qwen3Config` 的一个字段），
-6 处收敛到 1 处，并补一条单测锁住「哪些路径必须按 WeVisOne 处理」。
+- `src/models/qwen3/mod.rs` 定义 `WEVISONE_SOURCE_REVISION_KEY` 与
+  `is_wevisone(source)`；**key 字面量在全仓只出现在这一个文件里**。
+- 12 处调用点全部改为调用 `is_wevisone`（`wevisone_vl/mod.rs` 需要 revision 的
+  值，改用 `WEVISONE_SOURCE_REVISION_KEY` 常量）。
+- 放在 `models::qwen3` 而不是 `models::wevisone_vl`：`wevisone_vl` 本来就依赖
+  `qwen3`，反过来会让基座家族依赖变体家族。
 
-**问题二（对外可见的静默覆盖）**：`src/app/server/api/protocol.rs:52-58` 的
-`enable_thinking` 是**客户端字段**（顶层 `"enable_thinking": false` 或嵌套
-`chat_template_kwargs`）。`tools.rs:505` 的
+守卫测试 `models::qwen3::tests::wevisone_marker_is_read_in_one_place` 扫 `src/`
+下所有 `.rs`，除 `models/qwen3/mod.rs` 外任何文件再写出这个 key 字面量就红。
+这是「哪些路径必须按 WeVisOne 处理」唯一能真正锁住的形态——单测一个
+`is_wevisone` 的布尔值锁不住「调用点有没有漏改」。
+
+**行为零变化**：强制 thinking 这件事本身是对的（WeVisOne 自带的
+`chat_template.jinja` 里完全没有 thinking 机制，没有 `enable_thinking` 变量、
+没有 `<think>` 标记，助手轮就是字面 `assistant\n`；官方实现走
+`AutoProcessor.apply_chat_template`，所以官方 prompt 永远不含空 think 块）。
+不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
+
+#### 问题二（对外可见的静默覆盖）——已改成显式告警 + 文档说明
+
+`src/app/server/api/protocol.rs` 的 `enable_thinking` 是**客户端字段**（顶层
+`"enable_thinking": false` 或嵌套 `chat_template_kwargs`）。原来的
 `enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
-覆盖成 true**。功能上无害（WeVisOne 本来就不 think，客户端拿到的仍是「无思考」
-输出），但 API 语义上是「显式请求被静默忽略」。
-**修复方向**：要么在强制时打一条 warning，要么在 `protocol.rs` 的字段注释里写明
-「WeVisOne 忽略该开关，模型没有 think 模式」。后者零风险，前者更友好。
-注意本条与已有的
-[enable_thinking 默认值条目](#high-priority) 是**不同**的问题：那条讲的是
-`unwrap_or(false)` 这个默认值本身，那条讲的是 WeVisOne 的强制覆盖。
+覆盖成 true**。功能上无害（WeVisOne 本来就不 think），但 API 语义上是「显式请求
+被静默忽略」。
+
+两个修法都做了（条目说「二选一」，这里取的是叠加而非替代）：
+
+- `src/app/server/api/tools.rs` 在覆盖发生时打一条
+  `log::warn!("enable_thinking=false is ignored for WeVisOne: its chat template
+  has no thinking mode")`——沿用仓库既有的「字段被忽略」告警样式
+  （`protocol.rs` 里同类 `log::warn!`）。
+- `protocol.rs` 的字段注释写明 WeVisOne 是例外：模板没有 thinking 机制，该字段
+  对它无效，答案一律不带推理块。
+
+**验证**：`cargo test --profile release-fast --lib` 基线 1619 passed / 39 failed，
+本分支 1621 passed / 39 failed —— 失败集合逐条相同（均为预存失败：本机 Windows
+临时目录权限 + oracle 依赖类），新增的 2 个通过项就是本条新增的两条测试。
 
 **关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
 

@@ -279,11 +279,7 @@ impl<'model> Qwen3Session<'model> {
             return Err("Qwen3 Vulkan currently requires F16 KV".into());
         } else {
             if compute_policy != ComputePolicy::Cpu {
-                if model
-                    .source
-                    .metadata("wevisone_vl.source_revision")
-                    .is_some()
-                {
+                if crate::models::qwen3::is_wevisone(model.source.as_ref()) {
                     eprintln!("[GPU] WeVisOne retains F32 KV/attention on CPU; dense projections use Auto offload.");
                 } else {
                     eprintln!("[GPU] Qwen3 resident Vulkan decode requires F16 KV but got {kv_format:?}; text generation runs on the CPU. Pass --kv-cache f16 to enable the GPU path.");

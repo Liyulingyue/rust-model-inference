@@ -55,6 +55,12 @@ pub struct Request {
     /// thinking-tuned variants). `Some(false)` injects a non-thinking
     /// tail into the prompt and is the right answer for direct-answer
     /// workflows where the reasoning block is unwanted client-side.
+    ///
+    /// WeVisOne is the exception: its chat template has no thinking
+    /// mechanism at all, so the field is ignored and the answer comes
+    /// back without a reasoning block whatever the client asks for. An
+    /// explicit `false` is reported as a warning rather than dropped in
+    /// silence.
     pub enable_thinking: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1312,7 +1312,7 @@ fn main() {
                 options.embedding_output,
             );
         } else if arch == "qwen3vl"
-            && (source.metadata("wevisone_vl.source_revision").is_none()
+            && (!rust_model_inference::models::qwen3::is_wevisone(source.as_ref())
                 || options.dump_logits
                 || options.bench
                 || options.profile)

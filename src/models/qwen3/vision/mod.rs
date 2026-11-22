@@ -663,7 +663,7 @@ impl<'a> VisionEncoder<'a> {
             mm_2_weight,
             mm_2_bias,
             precomputed: None,
-            preserve_f32: source.metadata("wevisone_vl.source_revision").is_some(),
+            preserve_f32: crate::models::qwen3::is_wevisone(source),
             pool,
             #[cfg(feature = "vulkan")]
             device: std::cell::RefCell::new(None),

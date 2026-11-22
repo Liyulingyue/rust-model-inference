@@ -700,8 +700,18 @@ pub fn build_prompt(
         .map(|(role, content)| QwenMessage { role, content })
         .collect();
     // WeVisOne has think tokens, but its trained assistant prefix contains none.
-    let thinking = enable_thinking.unwrap_or(false)
-        || source.metadata("wevisone_vl.source_revision").is_some();
+    // The forced value wins over an explicit `enable_thinking: false`: the
+    // model has no thinking mechanism at all, so "off" is what it always
+    // does, and honouring the flag would insert the empty think block into a
+    // prompt the model was never trained on. The client's explicit request is
+    // still reported rather than dropped in silence.
+    let wevisone = crate::models::qwen3::is_wevisone(source);
+    if wevisone && enable_thinking == Some(false) {
+        log::warn!(
+            "enable_thinking=false is ignored for WeVisOne: its chat template has no thinking mode"
+        );
+    }
+    let thinking = enable_thinking.unwrap_or(false) || wevisone;
     let ids = build_qwen_chat_prompt(tokenizer, &messages, thinking)?;
     Ok((ids, attached_images))
 }
@@ -1497,7 +1507,7 @@ mod tests {
     struct TestSource(Option<MetaValue>);
     impl crate::core::tensor::TensorSource for TestSource {
         fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
-            (key == "wevisone_vl.source_revision")
+            (key == crate::models::qwen3::WEVISONE_SOURCE_REVISION_KEY)
                 .then_some(self.0.as_ref())
                 .flatten()
         }
