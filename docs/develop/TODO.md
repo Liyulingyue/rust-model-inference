@@ -54,16 +54,15 @@ NEON on aarch64; dev box 无 AVX-512，但 F32/BF16/F16 的 zmm matmul 已按运
       `iq_avx2_matches_llama_cpp_oracle_bitwise` 的 ARM 版 oracle harness）；仓库当前
       无 aarch64 CI 作业（见下方"aarch64 CI"条目），接入前先补交叉编译或 CI 门禁，
       不盲接 dispatch。
-- [ ] **BF16 / F32 的 NEON token-tiled batched（TODO-019 的 aarch64 侧）** —
-      token 分块的 x86 AVX2 版已落地（见 TODO-019），但 aarch64 上
-      `supports_token_tiled_batching` 对 BF16 / F32 返回 false——TODO-019 的痛点
-      机（20 核 aarch64，文本编码 11% 峰值）恰恰拿不到这个收益，仍是逐 token
-      重流整个权重矩阵。F16 不缺：其 tiled 实现是可移植的标量嵌套循环
-      （`dot_f16_f16_bytes` 自带 NEON dispatch），在 aarch64 上已生效。
-      **待做**：为 `bf16/avx2.rs`（BF16）与 `f32/avx2.rs`（F32）写 NEON tiled
+- [~] **BF16 / F32 的 NEON token-tiled batched（TODO-019 的 aarch64 侧）** —
+      BF16 的 aarch64 NEON tiled 路径已接入并完成逐位回归。F32 仍待做。token
+      分块的 x86 AVX2 版已落地（见 TODO-019），aarch64 的 BF16 现已复用同一
+      `supports_token_tiled_batching` / `forward_batched_rows` 入口。F16 不缺：其
+      tiled 实现是可移植的标量嵌套循环（`dot_f16_f16_bytes` 自带 NEON dispatch），
+      在 aarch64 上已生效。
+      **待做**：为 `f32/avx2.rs`（F32）写 NEON tiled
       kernel（2D (row-tile × token-tile) blocking，x86 宏
-      `avx2_matmul_packed_tiled!` 可作结构模板；BF16 unpack 用 NEON 的
-      u16→f32 高半移位，F32 用 `vld1q_f32`），把
+      `avx2_matmul_packed_tiled!` 可作结构模板，F32 用 `vld1q_f32`），把
       `supports_token_tiled_batching` / `forward_batched_rows` 的 aarch64 分支
       接上。**前置**：与所有 NEON kernel 相同——必须在 aarch64 机器上开发并跑
       `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
@@ -1266,6 +1265,11 @@ for token in 0..n_tokens {
 选项 1。理由：分块是纯粹的访存优化，不改权重精度、不改输入精度、不改累加顺序之外的
 任何数学，因此**不触碰任何逐位对齐契约**——与本分支已建立的"重结合可以、近似不行"
 原则相容。
+
+**阶段性实现（2026-11-22）**：aarch64 NEON 的 BF16 `forward_batched` 已接入四
+token 分块，单行算术顺序保持不变，并增加了 batched 与逐行路径的逐位回归。F16 已
+由通用 token-tiled 路径覆盖。Apple M3 Max 上直接 kernel microbenchmark
+（32×2048×2048，10 次中位数）测得 BF16 **3.48×**，输出逐位相同。
 
 实施注意：
 - `project_tokens` 当前按 token 分区，改成按行分区后 dispatch 次数会变多
