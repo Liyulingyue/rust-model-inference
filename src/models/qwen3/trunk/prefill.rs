@@ -209,11 +209,7 @@ impl Qwen3Session<'_> {
         let max_rows = chunk_size.min(self.capacity);
         if (self.hidden_linear.is_some()
             || (self.compute_policy == crate::compute::ComputePolicy::Auto
-                && self
-                    .model
-                    .source
-                    .metadata("wevisone_vl.source_revision")
-                    .is_some()))
+                && crate::models::qwen3::is_wevisone(self.model.source.as_ref())))
             && self
                 .hidden_linear
                 .as_ref()

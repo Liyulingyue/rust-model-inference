@@ -1,0 +1,112 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; uint blocks_per_row; uint output0_word; uint rows0; uint output0_stride; uint output1_word; uint rows1; uint output1_stride; uint output2_word; uint rows2; uint output2_stride; uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows; } pc;
+
+float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
+uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
+uint wbyte(uint slot, uint abs_byte) { return (weight_word(slot, abs_byte >> 2u) >> ((abs_byte & 3u) * 8u)) & 0xffu; }
+uint wshort(uint slot, uint abs_byte) { return wbyte(slot, abs_byte) | (wbyte(slot, abs_byte + 1u) << 8u); }
+int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
+
+// Q2_K block layout (84 bytes): scales+mins [0..16] (low nibble = sub-block
+// scale, high nibble = sub-block min), qs [16..80], d (f16) at 80, dmin (f16)
+// at 82. Each qs byte 32j+t packs the 2-bit codes of elements
+// {128j+t, 128j+32+t, 128j+64+t, 128j+96+t} at bit positions 0/2/4/6.
+//
+// This mirrors `vec_dot_q2k_q8k_avx2` (avx2_k.rs) bit for bit on the FMA
+// order: per block the mins term joins the accumulator first
+// (fma(dmin, prod[k])), the main term second (fma(d, sumi[k])); the final
+// reduction is the hsum256_ps tree. Integer lanes follow the AVX2 madd
+// mapping sumi[k] += scale(8j + 2s + (k>>2)) * dot(128j + 32s + 4k .. +3).
+
+shared int input_q8[256];
+
+void main() {
+    uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    bool valid_row = slot < pc.group_count && row < rows;
+    precise float acc_lane[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        for (uint local = gl_LocalInvocationID.x; local < 256u; local += 64u) {
+            input_q8[local] = q8(block * 256u + local);
+        }
+        barrier();
+        if (valid_row) {
+            uint rb = row * pc.blocks_per_row * 84u + block * 84u;
+
+            precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
+            precise float d = f16_decode(wshort(slot, rb + 80u) & 0xffffu) * q8_scale;
+            precise float dmin = -f16_decode(wshort(slot, rb + 82u) & 0xffffu) * q8_scale;
+
+            int sc[16];
+            int mn[16];
+            for (uint i = 0u; i < 16u; ++i) {
+                uint b = wbyte(slot, rb + i);
+                sc[i] = int(b & 0xfu);
+                mn[i] = int((b >> 4u) & 0xfu);
+            }
+
+            // bsums[g] = sum of the 16 quantized activations of group g; the
+            // AVX2 kernel folds mins x bsums with madd_epi16 as
+            // prod[k] = mins[2k]*bsums[2k] + mins[2k+1]*bsums[2k+1].
+            int bsums[16];
+            for (uint g = 0u; g < 16u; ++g) {
+                int sum = 0;
+                for (uint r = 0u; r < 16u; ++r) sum += input_q8[16u * g + r];
+                bsums[g] = sum;
+            }
+            int prod[8];
+            for (uint k = 0u; k < 8u; ++k) {
+                prod[k] = mn[2u * k] * bsums[2u * k] + mn[2u * k + 1u] * bsums[2u * k + 1u];
+            }
+            for (uint k = 0u; k < 8u; ++k) {
+                acc_lane[k] = fma(dmin, float(prod[k]), acc_lane[k]);
+            }
+
+            // qs[64] starts at rb+16; 84 % 4 == 0 keeps every block start
+            // word aligned, so the 64 bytes are 16 whole u32 words.
+            uint qs_w[16];
+            for (uint w = 0u; w < 16u; ++w) {
+                qs_w[w] = weight_word(slot, ((rb + 16u) >> 2u) + w);
+            }
+            uint qs_b[64];
+            for (uint u = 0u; u < 64u; ++u) {
+                qs_b[u] = (qs_w[u >> 2u] >> ((u & 3u) * 8u)) & 0xffu;
+            }
+
+            int sumi[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
+            for (uint j = 0u; j < 2u; ++j) {
+                for (uint s = 0u; s < 4u; ++s) {
+                    for (uint k = 0u; k < 8u; ++k) {
+                        int dot = 0;
+                        for (uint r = 0u; r < 4u; ++r) {
+                            // madd lane structure: i32 lane k owns elements
+                            // 4k..4k+3 of the (j, s) sub-chunk.
+                            uint t = 4u * k + r;
+                            uint v = (qs_b[32u * j + t] >> (2u * s)) & 3u;
+                            dot += int(v) * input_q8[128u * j + 32u * s + t];
+                        }
+                        sumi[k] += sc[8u * j + 2u * s + (k >> 2u)] * dot;
+                    }
+                }
+            }
+            for (uint k = 0u; k < 8u; ++k) {
+                acc_lane[k] = fma(d, float(sumi[k]), acc_lane[k]);
+            }
+        }
+        barrier();
+    }
+    if (!valid_row) return;
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint out_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    arena.data[output_word + token_row * out_stride + row] = floatBitsToUint(
+        ((acc_lane[4] + acc_lane[0]) + (acc_lane[6] + acc_lane[2]))
+        + ((acc_lane[5] + acc_lane[1]) + (acc_lane[7] + acc_lane[3])));
+}

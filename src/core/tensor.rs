@@ -651,26 +651,54 @@ pub fn load_f32_matrix<S: TensorSource + ?Sized>(
     {
         return Err(format!("Unsupported matrix {name}: {:?}", info.ggml_type));
     }
-    let elements = n_in
-        .checked_mul(n_out)
-        .ok_or_else(|| format!("Tensor element count overflow: {name}"))?;
-    let expected = match info.ggml_type {
-        GGMLType::F32 => elements.checked_mul(4),
-        GGMLType::F16 | GGMLType::BF16 => elements.checked_mul(2),
-        GGMLType::Q8_0 => Some(elements / 32 * 34),
-        _ => None,
-    }
-    .ok_or_else(|| format!("Tensor byte size overflow: {name}"))?;
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    decode_f32_matrix(info.ggml_type, bytes, n_in, n_out)
+        .map_err(|error| format!("Invalid tensor {name}: {error}"))
+}
+
+/// Decode borrowed matrix bytes into F32, using the format the header declares.
+///
+/// This is the decode half of [`load_f32_matrix`], for callers that already
+/// hold the bytes — the vision towers borrow them straight from the mapped
+/// file, so they never get the name back — but still need the format that
+/// the header declared.
+///
+/// The format cannot be guessed from the byte length: F16 and BF16 are both
+/// two bytes per element, and a BF16 `1.0` read as F16 comes back as `1.875`.
+/// The block-quantized layout is accepted too, because the vision towers
+/// ship Q8_0 matrices as well.
+pub fn decode_f32_matrix(
+    ggml_type: GGMLType,
+    bytes: &[u8],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, String> {
+    let elements = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| "Tensor element count overflow".to_string())?;
+    let expected = match ggml_type {
+        GGMLType::F32 => elements.checked_mul(4),
+        GGMLType::F16 | GGMLType::BF16 => elements.checked_mul(2),
+        GGMLType::Q8_0 => {
+            if n_in % 32 != 0 {
+                return Err(format!(
+                    "Q8_0 matrix needs a multiple of 32 columns, got {n_in}"
+                ));
+            }
+            Some(elements / 32 * 34)
+        }
+        other => return Err(format!("Unsupported matrix format {other:?}")),
+    }
+    .ok_or_else(|| "Tensor byte size overflow".to_string())?;
     if bytes.len() != expected {
         return Err(format!(
-            "Invalid tensor {name}: byte length {}; expected {expected}",
+            "byte length {} differs from expected {expected}",
             bytes.len()
         ));
     }
-    Ok(match info.ggml_type {
+    Ok(match ggml_type {
         GGMLType::F32 => bytes
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -769,6 +797,55 @@ mod tests {
         assert_eq!(
             typed_tensor_bytes(&source, "weight", &[4], GGMLType::F32).map(|b| b.len()),
             Ok(16)
+        );
+    }
+
+    /// The format has to come from the header. BF16 and F16 are both two
+    /// bytes per element, so a byte length cannot tell them apart — and the
+    /// two readings differ: `1.0` in BF16 read as F16 comes back as `1.875`.
+    #[test]
+    fn decode_f32_matrix_follows_the_declared_format() {
+        let bf16_one = 1.0f32.to_le_bytes();
+        let bf16_bytes = [bf16_one[2], bf16_one[3]];
+        assert_eq!(
+            decode_f32_matrix(GGMLType::BF16, &bf16_bytes, 1, 1).unwrap(),
+            vec![1.0]
+        );
+        // The same bytes read as F16 are a different number, which is exactly
+        // why the length cannot be used to pick the format.
+        assert_eq!(
+            decode_f32_matrix(GGMLType::F16, &bf16_bytes, 1, 1).unwrap(),
+            vec![1.875]
+        );
+
+        let f32_bytes = 1.0f32.to_le_bytes();
+        assert_eq!(
+            decode_f32_matrix(GGMLType::F32, &f32_bytes, 1, 1).unwrap(),
+            vec![1.0]
+        );
+    }
+
+    #[test]
+    fn decode_f32_matrix_rejects_a_format_it_cannot_expand() {
+        let error = decode_f32_matrix(GGMLType::Q4_0, &[0u8; 18], 1, 1).unwrap_err();
+        assert!(error.contains("Unsupported matrix format"), "{error}");
+    }
+
+    #[test]
+    fn decode_f32_matrix_rejects_a_length_that_does_not_match_the_format() {
+        // Two BF16 values are four bytes; six bytes cannot be read as them.
+        let error = decode_f32_matrix(GGMLType::BF16, &[0u8; 6], 2, 1).unwrap_err();
+        assert!(error.contains("byte length 6"), "{error}");
+    }
+
+    #[test]
+    fn optional_f32_values_follows_the_declared_format() {
+        let bf16_one = 1.0f32.to_le_bytes();
+        let mut source = source(GGMLType::BF16, &[1]);
+        source.bytes = vec![bf16_one[2], bf16_one[3]];
+        assert_eq!(
+            optional_f32_values(&source, "weight").unwrap(),
+            Some(vec![1.0])
         );
     }
 

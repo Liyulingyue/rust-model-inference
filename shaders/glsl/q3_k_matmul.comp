@@ -1,0 +1,98 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; uint blocks_per_row; uint output0_word; uint rows0; uint output0_stride; uint output1_word; uint rows1; uint output1_stride; uint output2_word; uint rows2; uint output2_stride; uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows; } pc;
+
+float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
+uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
+uint wbyte(uint slot, uint abs_byte) { return (weight_word(slot, abs_byte >> 2u) >> ((abs_byte & 3u) * 8u)) & 0xffu; }
+uint wshort(uint slot, uint abs_byte) { return wbyte(slot, abs_byte) | (wbyte(slot, abs_byte + 1u) << 8u); }
+uint wword4(uint slot, uint abs_byte) { return wbyte(slot, abs_byte) | (wbyte(slot, abs_byte + 1u) << 8u) | (wbyte(slot, abs_byte + 2u) << 16u) | (wbyte(slot, abs_byte + 3u) << 24u); }
+int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
+
+// Q3_K block layout (110 bytes): hmask [0..32] (sign bits; element
+// e = 128j + 32s + t tests bit 4j+s of hmask[t]), qs [32..96] (same
+// stride-32 packing as Q2_K), 12 packed scale bytes [96..108], d (f16) at
+// 108. The signed 6-bit scales decode from aux0/aux1/aux2 (u32 at
+// rb+96/100/104) with the same bit surgery as the scalar/AVX2 kernels,
+// minus 32.
+//
+// This mirrors `vec_dot_q3k_q8k_avx2` (avx2_k.rs) bit for bit: per block a
+// single fma(d, sumi[k]) joins the accumulator; the final reduction is the
+// hsum256_ps tree. Integer lanes follow the AVX2 madd mapping
+// sumi[k] += scale(8j + 2s + (k>>2)) * dot(128j + 32s + 4k .. +3) with
+// q3 = ((qs >> 2s) & 3) - 4*(hmask bit clear).
+
+shared int input_q8[256];
+
+void main() {
+    uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    bool valid_row = slot < pc.group_count && row < rows;
+    precise float acc_lane[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        for (uint local = gl_LocalInvocationID.x; local < 256u; local += 64u) {
+            input_q8[local] = q8(block * 256u + local);
+        }
+        barrier();
+        if (valid_row) {
+            uint rb = row * pc.blocks_per_row * 110u + block * 110u;
+
+            precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
+            precise float d = f16_decode(wshort(slot, rb + 108u) & 0xffffu) * q8_scale;
+
+            uint aux0 = wword4(slot, rb + 96u);
+            uint aux1 = wword4(slot, rb + 100u);
+            uint aux2 = wword4(slot, rb + 104u);
+            int sc[16];
+            for (uint k = 0u; k < 4u; ++k) {
+                sc[k] = int(((aux0 >> (8u * k)) & 0x0fu) | (((aux2 >> (8u * k)) & 0x03u) << 4u)) - 32;
+                sc[4u + k] = int(((aux1 >> (8u * k)) & 0x0fu) | (((aux2 >> (8u * k + 2u)) & 0x03u) << 4u)) - 32;
+                sc[8u + k] = int(((aux0 >> (8u * k + 4u)) & 0x0fu) | (((aux2 >> (8u * k + 4u)) & 0x03u) << 4u)) - 32;
+                sc[12u + k] = int(((aux1 >> (8u * k + 4u)) & 0x0fu) | (((aux2 >> (8u * k + 6u)) & 0x03u) << 4u)) - 32;
+            }
+
+            // 110 % 4 == 2: block starts are only half-word aligned, so the
+            // hmask and qs regions are read byte by byte.
+            uint hm[32];
+            for (uint t = 0u; t < 32u; ++t) hm[t] = wbyte(slot, rb + t);
+            uint qs_b[64];
+            for (uint u = 0u; u < 64u; ++u) qs_b[u] = wbyte(slot, rb + 32u + u);
+
+            int sumi[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
+            for (uint j = 0u; j < 2u; ++j) {
+                for (uint s = 0u; s < 4u; ++s) {
+                    for (uint k = 0u; k < 8u; ++k) {
+                        int dot = 0;
+                        for (uint r = 0u; r < 4u; ++r) {
+                            // madd lane structure: i32 lane k owns elements
+                            // 4k..4k+3 of the (j, s) sub-chunk.
+                            uint t = 4u * k + r;
+                            uint v = (qs_b[32u * j + t] >> (2u * s)) & 3u;
+                            bool bit_set = ((hm[t] >> (4u * j + s)) & 1u) == 1u;
+                            int q3 = int(v) - (bit_set ? 0 : 4);
+                            dot += q3 * input_q8[128u * j + 32u * s + t];
+                        }
+                        sumi[k] += sc[8u * j + 2u * s + (k >> 2u)] * dot;
+                    }
+                }
+            }
+            for (uint k = 0u; k < 8u; ++k) {
+                acc_lane[k] = fma(d, float(sumi[k]), acc_lane[k]);
+            }
+        }
+        barrier();
+    }
+    if (!valid_row) return;
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint out_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    arena.data[output_word + token_row * out_stride + row] = floatBitsToUint(
+        ((acc_lane[4] + acc_lane[0]) + (acc_lane[6] + acc_lane[2]))
+        + ((acc_lane[5] + acc_lane[1]) + (acc_lane[7] + acc_lane[3])));
+}

@@ -70,8 +70,8 @@ fn parse_options(
         match flag.as_ref() {
             "--all-formats" => {
                 formats = [
-                    "q8_0", "q4_0", "q4_1", "q4_k", "q5_k", "q6_k", "f16", "bf16", "f32", "mlx4",
-                    "mlx8",
+                    "q8_0", "q4_0", "q4_1", "q4_k", "q5_k", "q6_k", "q2_k", "q3_k", "f16", "bf16",
+                    "f32", "mlx4", "mlx8",
                 ]
                 .into_iter()
                 .map(str::to_owned)
@@ -112,7 +112,7 @@ mod tests {
         let (formats, rows) =
             super::parse_options(["--all-formats", "--rows", "3"].into_iter()).unwrap();
         assert_eq!(rows, 3);
-        assert_eq!(formats.len(), 11);
+        assert_eq!(formats.len(), 13);
         assert!(formats.iter().any(|format| format == "q8_0"));
         assert!(super::parse_options(["--rows", "0"].into_iter()).is_err());
     }

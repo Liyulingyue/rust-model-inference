@@ -1,0 +1,2043 @@
+{
+  "date": "2026-11-19",
+  "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+  "scope": "Supplementary diagnostics; checkpoint pass does not override a failed decoded-video gate. Tensor payloads stay remote.",
+  "reports": {
+    "fallback-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Auto fallback with missing Vulkan ICD, distinct from actual Auto device acceptance",
+      "process_environment": {
+        "VK_DRIVER_FILES": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/missing-icd.json",
+        "VK_ICD_FILENAMES": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/missing-icd.json"
+      },
+      "auto": {
+        "format": "bf16",
+        "backend": "auto",
+        "model": {
+          "format": "bf16",
+          "size": 41892093248,
+          "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+        },
+        "cli": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-cli.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 88.12854862958193,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-cli.log",
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-cli.jsonl",
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "comparison": {
+            "passed": true,
+            "checkpoints": 411,
+            "max_relative_rmse": 2.794884733482099e-05,
+            "min_cosine": 0.9999999997176138,
+            "first_failure": null
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2203
+          },
+          "pixels": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          }
+        },
+        "http": {
+          "status": 200,
+          "content_type": "video/mp4",
+          "cache_control": "no-store",
+          "bytes": 1829,
+          "mp4": {
+            "exit_code": 0,
+            "decoded_bytes": 3840,
+            "expected_bytes": 3840,
+            "valid": true
+          },
+          "elapsed_seconds": 58.38349624350667,
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-server",
+            "--model",
+            "/root/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--threads",
+            "24",
+            "--compute",
+            "auto",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18144"
+          ],
+          "body": {
+            "prompt": "A red ball rolls on a table.",
+            "width": 16,
+            "height": 16,
+            "frames": 5,
+            "fps": 16,
+            "seed": 17
+          },
+          "trace": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-http.jsonl",
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/matrix-bf16-auto-http.log",
+          "comparison": {
+            "passed": true,
+            "checkpoints": 411,
+            "max_relative_rmse": 2.794884733482099e-05,
+            "min_cosine": 0.9999999997176138,
+            "first_failure": null
+          },
+          "backend_evidence": {
+            "vulkan_operator_records": 0,
+            "cpu_operator_records": 2203
+          },
+          "pixels": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          }
+        }
+      },
+      "strict_unavailable": {
+        "command": [
+          "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+          "--model",
+          "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+          "--prompt",
+          "A red ball rolls on a table.",
+          "--width",
+          "16",
+          "--height",
+          "16",
+          "--video-frames",
+          "5",
+          "--compute",
+          "vulkan",
+          "--out",
+          "/workspace/rust-model-inference-fastframes/target/fastframes/fallback/strict.mp4"
+        ],
+        "exit_code": 2,
+        "stderr": "--compute vulkan requires a usable Vulkan device: compute device failure: Vulkan init failed: Unable to find a Vulkan driver\n"
+      }
+    },
+    "extended-results.json": [
+      {
+        "case": "bf16-32x32-9frames-cpu",
+        "width": 32,
+        "height": 32,
+        "frames": 9,
+        "backend": "cpu",
+        "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+        "native": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "32",
+            "--height",
+            "32",
+            "--video-frames",
+            "9",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "cpu",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 161.78088029287755,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.log"
+        },
+        "controlled_reference": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "32",
+            "--height",
+            "32",
+            "--frames",
+            "9",
+            "--seed",
+            "17",
+            "--recipe",
+            "controlled",
+            "--gguf",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-reference-bf16-32x32-9frames-cpu"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 742.5322114098817,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-reference-bf16-32x32-9frames-cpu.log"
+        },
+        "comparison": {
+          "passed": true,
+          "checkpoints": 578,
+          "max_relative_rmse": 7.116039816112045e-05,
+          "min_cosine": 0.9999999975714114,
+          "first_failure": null
+        },
+        "pixels": {
+          "max_abs": 0.09019607843137256,
+          "rmse": 0.007592180372839715,
+          "relative_rmse": 0.012085716537673437,
+          "cosine": 0.9999269925418053
+        },
+        "published_reference": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-32x32-9frames-cpu.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "32",
+            "--height",
+            "32",
+            "--frames",
+            "9",
+            "--seed",
+            "17",
+            "--recipe",
+            "published",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-published-bf16-32x32-9frames-cpu"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 380.80959446914494,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-published-bf16-32x32-9frames-cpu.log"
+        },
+        "published_drift": {
+          "max_abs": 0.0980392156862745,
+          "rmse": 0.011251397167858146,
+          "relative_rmse": 0.01779351554733961,
+          "cosine": 0.9998425441558143,
+          "rmse_max": 0.08
+        }
+      },
+      {
+        "case": "bf16-832x480-5frames-vulkan",
+        "width": 832,
+        "height": 480,
+        "frames": 5,
+        "backend": "vulkan",
+        "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+        "native": {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "A red ball rolls on a table.",
+            "--width",
+            "832",
+            "--height",
+            "480",
+            "--video-frames",
+            "5",
+            "--fps",
+            "16",
+            "--seed",
+            "17",
+            "--threads",
+            "24",
+            "--compute",
+            "vulkan",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.mp4"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 10845.660709502175,
+          "log": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.log"
+        },
+        "controlled_reference": {
+          "recipe": "controlled",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "832",
+            "--height",
+            "480",
+            "--frames",
+            "5",
+            "--seed",
+            "17",
+            "--recipe",
+            "controlled",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-controlled",
+            "--gguf",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 535.401931386441,
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-controlled",
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "checkpoints": 412
+        },
+        "published_reference": {
+          "recipe": "published",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "832",
+            "--height",
+            "480",
+            "--frames",
+            "5",
+            "--seed",
+            "17",
+            "--recipe",
+            "published",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-published",
+            "--benchmark"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 115.54489267244935,
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-published",
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "gguf_sha256": null,
+          "checkpoints": 0
+        },
+        "reference_reuse": {
+          "scope": "Completed native result and exact-noise ahead references. Original duplicate reference driver was stopped after native exit 0; no native computation was stopped.",
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9"
+        },
+        "comparison": {
+          "passed": true,
+          "checkpoints": 411,
+          "max_relative_rmse": 0.003756432053285011,
+          "min_cosine": 0.9999929447946526,
+          "first_failure": null
+        },
+        "pixels": {
+          "max_abs": 0.20784313725490194,
+          "rmse": 0.008177586129195849,
+          "relative_rmse": 0.015758214165296283,
+          "cosine": 0.9998758482355368,
+          "rmse_max": 0.01,
+          "cosine_min": 0.9999,
+          "passed": false
+        },
+        "published_drift": {
+          "max_abs": 1.0,
+          "rmse": 0.10040362877346713,
+          "relative_rmse": 0.1921561748261572,
+          "cosine": 0.9815560650382746,
+          "rmse_max": 0.08,
+          "passed": false
+        },
+        "backend_evidence": {
+          "vulkan_operator_records": 2211,
+          "cpu_operator_records": 0,
+          "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5640, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 121086047268, host_read_bytes: 110108897408, transfer_submissions: 2861, live_allocation_bytes: 8546070064, peak_allocation_bytes: 17215993808 }",
+          "scope": "Instrumented projections; fixed CPU attention and depthwise stages remain documented separately"
+        },
+        "acceptance_passed": false
+      }
+    ],
+    "f16-pixel-investigation-results.json": {
+      "raw_rgb_vs_official": {
+        "max_abs": 0.0039215686274510775,
+        "rmse": 0.0007434191611815244,
+        "relative_rmse": 0.0015396502915748739,
+        "cosine": 0.9999988157999307
+      },
+      "reencode_vs_native_mp4": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 1.0
+      },
+      "decoded_original_vs_official": {
+        "max_abs": 0.07450980392156858,
+        "rmse": 0.014410152859932579,
+        "relative_rmse": 0.03013650488225897,
+        "cosine": 0.9995483949878057
+      },
+      "different_u8_components": 138,
+      "total_u8_components": 3840,
+      "max_u8_difference": 1,
+      "native_frame_info": [
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   0 pts:      0 pts_time:0       duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:1 type:I checksum:FE49DEE7 plane_checksum:[CF39A240 BC151DC3 DCF51EE4] mean:[162 119 124] stdev:[41.9 16.9 13.5]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   1 pts:   1024 pts_time:0.0625  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:A6EB7A3A plane_checksum:[99873358 3D712943 D1081D9F] mean:[51 165 118] stdev:[8.3 3.1 4.7]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   2 pts:   2048 pts_time:0.125   duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:I checksum:DEDF9278 plane_checksum:[34804F09 4F1529AD 689C19C2] mean:[79 167 103] stdev:[13.2 3.4 9.4]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   3 pts:   3072 pts_time:0.1875  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:96B09CF1 plane_checksum:[ACD85C4C 4AC629C6 043B16DF] mean:[92 167 91] stdev:[13.1 2.7 8.0]",
+        "[Parsed_showinfo_0 @ 0x7dd13c002cc0] n:   4 pts:   4096 pts_time:0.25    duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:2E3FA85E plane_checksum:[24DB6BB9 3DA52922 A2F01383] mean:[108 165 78] stdev:[16.7 3.6 11.1]"
+      ],
+      "reference_frame_info": [
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   0 pts:      0 pts_time:0       duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:1 type:I checksum:FC76DEE8 plane_checksum:[CD60A240 BC151DC3 DCFB1EE5] mean:[162 119 124] stdev:[41.9 16.9 13.0]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   1 pts:   1024 pts_time:0.0625  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:A80F7A3D plane_checksum:[99873358 3DD52946 D1081D9F] mean:[51 165 118] stdev:[8.3 2.6 4.7]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   2 pts:   2048 pts_time:0.125   duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:I checksum:E8C39286 plane_checksum:[37644F17 4F1529AD 689C19C2] mean:[79 167 103] stdev:[13.2 3.4 9.4]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   3 pts:   3072 pts_time:0.1875  duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:EEF39C5F plane_checksum:[45FB5C06 4107296B 06E916EE] mean:[92 166 92] stdev:[13.5 2.9 8.3]",
+        "[Parsed_showinfo_0 @ 0x7cd76c002cc0] n:   4 pts:   4096 pts_time:0.25    duration:   1024 duration_time:0.0625  fmt:yuv420p cl:left sar:0/1 s:16x16 i:P iskey:0 type:P checksum:509BA8F0 plane_checksum:[2E6C6BC0 3AB82946 B22813EA] mean:[108 165 80] stdev:[16.6 3.4 11.1]"
+      ]
+    },
+    "format-quality-results.json": {
+      "scope": "16x16, 5 frames; same-noise format recipe drift against BF16 storage controlled-F32 baseline, using official RGB before encoding",
+      "includes": "Effective weight quantization and per-format prepared activation rounding; distinct from native implementation error",
+      "quality_acceptance": "Diagnostic only; no per-format full-resolution quality pass claimed",
+      "results": [
+        {
+          "format": "bf16",
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "shared_noise_exact": true
+        },
+        {
+          "format": "f32",
+          "max_abs": 0.007843137254901933,
+          "rmse": 0.0017708227321753377,
+          "relative_rmse": 0.0036672951961515157,
+          "cosine": 0.9999932775998749,
+          "shared_noise_exact": true
+        }
+      ]
+    },
+    "http-boundary-results.json": {
+      "scope": "Actual HTTP and CLI invalid-input handling; no generation or cancellation/concurrency claim",
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "server_command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+        "--threads",
+        "1",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18256"
+      ],
+      "http": [
+        {
+          "request": {
+            "prompt": "a",
+            "model": "not-the-loaded-model"
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"Unknown model\"}}"
+        },
+        {
+          "request": {
+            "prompt": " "
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"prompt must contain 1..=65536 bytes\"}}"
+        },
+        {
+          "request": {
+            "prompt": "a",
+            "width": 17
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60\"}}"
+        },
+        {
+          "request": {
+            "prompt": "a",
+            "frames": 82
+          },
+          "expected_status": 400,
+          "status": 400,
+          "response": "{\"error\":{\"message\":\"FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60\"}}"
+        },
+        {
+          "request": {
+            "prompt": "a",
+            "steps": 1
+          },
+          "expected_status": 422,
+          "status": 422,
+          "response": "Failed to deserialize the JSON body into the target type: steps: unknown field `steps`, expected one of `prompt`, `model`, `width`, `height`, `frames`, `fps`, `seed` at line 1 column 23"
+        }
+      ],
+      "cli": [
+        {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "a",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/boundary-width.mp4",
+            "--video-frames",
+            "5",
+            "--height",
+            "16",
+            "--compute",
+            "cpu",
+            "--width",
+            "17"
+          ],
+          "exit_code": 1,
+          "stderr": "Inference error: FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60\n",
+          "output_exists": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "a",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/boundary-steps.mp4",
+            "--video-frames",
+            "5",
+            "--height",
+            "16",
+            "--compute",
+            "cpu",
+            "--steps",
+            "1"
+          ],
+          "exit_code": 1,
+          "stderr": "Inference error: FastFrames-L does not support --steps\n",
+          "output_exists": false
+        },
+        {
+          "command": [
+            "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+            "--model",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "--prompt",
+            "a",
+            "--out",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/boundary-kv-cache.mp4",
+            "--video-frames",
+            "5",
+            "--height",
+            "16",
+            "--compute",
+            "cpu",
+            "--kv-cache",
+            "f16"
+          ],
+          "exit_code": 1,
+          "stderr": "Inference error: FastFrames-L does not support --kv-cache\n",
+          "output_exists": false
+        }
+      ]
+    },
+    "effective-format-quality-results.json": {
+      "scope": "Official raw RGB before encoding at 16x16/5frames; same-noise effective-format drift vs BF16 controlled-F32 baseline",
+      "boundary": "Includes storage quantization and prepared-activation recipe; diagnostic only, separate from native implementation error and full-resolution quality",
+      "results": [
+        {
+          "format": "bf16",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "relative_rmse": 0.0,
+          "cosine": 1.0000000000000002
+        },
+        {
+          "format": "f32",
+          "gguf_sha256": "59a25d64eee0d6981a9f57db479291f31329d745f644d32c77d09d69938c2735",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.007843137254901933,
+          "rmse": 0.0017708227321753377,
+          "relative_rmse": 0.0036672951961515157,
+          "cosine": 0.9999932775998749
+        },
+        {
+          "format": "f16",
+          "gguf_sha256": "ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.007843137254901933,
+          "rmse": 0.0017977569432247305,
+          "relative_rmse": 0.0037230747504789154,
+          "cosine": 0.999993069894151
+        },
+        {
+          "format": "q8_0",
+          "gguf_sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.04313725490196074,
+          "rmse": 0.008125040048600518,
+          "relative_rmse": 0.016826596924339132,
+          "cosine": 0.9998659995539856
+        },
+        {
+          "format": "q4_0",
+          "gguf_sha256": "4fb5d484abc09f19b26bcece217c30dbb05227bf3384d65ee12a911aad3baa60",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.611764705882353,
+          "rmse": 0.07676210773656451,
+          "relative_rmse": 0.15897091438562724,
+          "cosine": 0.9873200219950757
+        },
+        {
+          "format": "q4_1",
+          "gguf_sha256": "f8f236c6fbf92e75cc9bbc3a6a74d4bb139f7e23a2eddfcbd3e0b542cf7eea17",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.36078431372549025,
+          "rmse": 0.07404414063429274,
+          "relative_rmse": 0.15334212528305308,
+          "cosine": 0.9895139645283072
+        },
+        {
+          "format": "q4_k",
+          "gguf_sha256": "541c03d997e76cbb48579c8071a3990dc2fd850975344b32ef0e09ab3140f07a",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.33725490196078434,
+          "rmse": 0.061804991271307466,
+          "relative_rmse": 0.12799539076902353,
+          "cosine": 0.9918292078055071
+        },
+        {
+          "format": "q5_k",
+          "gguf_sha256": "2d8190faca35ae9ed37126d51efdcefbf39aae94228b7b789944a371d3e10455",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.2784313725490196,
+          "rmse": 0.032771175186533934,
+          "relative_rmse": 0.06786764770417228,
+          "cosine": 0.9977989238084379
+        },
+        {
+          "format": "q6_k",
+          "gguf_sha256": "c8fc66953258f6869cd32b58b291398f58cab8dde671fb4218992e83f0ed94f8",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "max_abs": 0.1215686274509804,
+          "rmse": 0.02115429424643419,
+          "relative_rmse": 0.0438096034449609,
+          "cosine": 0.9991827501527523
+        }
+      ]
+    },
+    "q8-norm-investigation-results.json": {
+      "native_norm_vs_independent": {
+        "max_abs": 1.1920928955078125e-07,
+        "rmse": 4.452866633458177e-09,
+        "relative_rmse": 6.345244102547456e-08,
+        "cosine": 0.9999999999999983
+      },
+      "oracle_norm_vs_independent": {
+        "max_abs": 5.960464477539063e-08,
+        "rmse": 4.552330415237982e-09,
+        "relative_rmse": 6.479511113971075e-08,
+        "cosine": 0.9999999999999973
+      },
+      "normalized_block_difference": {
+        "max_abs": 0.010055214166641235,
+        "rmse": 0.0016979956665259192,
+        "relative_rmse": 0.024168240855061602,
+        "cosine": 0.9997082747363032
+      },
+      "raw_block_difference": {
+        "max_abs": 58.478515625,
+        "rmse": 1.9186868185430013,
+        "relative_rmse": 0.00246098840286423,
+        "cosine": 0.9999973788191555
+      }
+    },
+    "q8-prefix-results.json": {
+      "scope": "Incomplete Q8_0 CPU diagnostic prefix; not case acceptance",
+      "checkpoints": 203,
+      "first_failed": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "max_abs": 0.010055199265480042,
+        "rmse": 0.00023730209097359275,
+        "relative_rmse": 0.024168239126007365,
+        "cosine": 0.9997082747515944
+      },
+      "worst": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "max_abs": 0.010055199265480042,
+        "rmse": 0.00023730209097359275,
+        "relative_rmse": 0.024168239126007365,
+        "cosine": 0.9997082747515944
+      }
+    },
+    "release-build-completed-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "profile": "release, fat LTO",
+      "completion_log": "    Finished `release` profile [optimized + debuginfo] target(s) in 6m 04s",
+      "artifacts": [
+        {
+          "binary": "rust-model-inference",
+          "size": 37219224,
+          "sha256": "12231c3a570f98e5c29f29c32107a45e5722278175f40b27ca6beb5d85ebe749",
+          "mtime_epoch": 1795025201.7699785
+        },
+        {
+          "binary": "rust-model-server",
+          "size": 29232136,
+          "sha256": "663231b9f53a573f40625410110d47cc09bcdf2bcec5d210d5b163ce2d3b22a0",
+          "mtime_epoch": 1795019249.2339966
+        }
+      ]
+    },
+    "release-pixels-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Fat-LTO release outputs versus same-noise controlled BF16 reference; checkpoint tracing disabled for these timing samples",
+      "decoded_rmse_max": 0.01,
+      "decoded_cosine_min": 0.9999,
+      "results": [
+        {
+          "file": "target/fastframes/timing-auto-0.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-auto-1.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-auto-2.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-auto-3.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-0.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-1.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-2.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-cpu-3.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-0.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-1.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-2.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        },
+        {
+          "file": "target/fastframes/timing-vulkan-3.mp4",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 0.9999999999999999
+          },
+          "passed": true
+        }
+      ]
+    },
+    "timing-reference-quality-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Benchmark-mode official raw RGB versus controlled BF16 acceptance baseline; no checkpoint acceptance claim; published drift uses its predeclared separate quality gate",
+      "results": [
+        {
+          "kind": "controlled",
+          "warmup": true,
+          "directory": "target/fastframes/timing-controlled-0",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "controlled",
+          "warmup": false,
+          "directory": "target/fastframes/timing-controlled-1",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "controlled",
+          "warmup": false,
+          "directory": "target/fastframes/timing-controlled-2",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "controlled",
+          "warmup": false,
+          "directory": "target/fastframes/timing-controlled-3",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "comparison": {
+            "max_abs": 0.0,
+            "rmse": 0.0,
+            "relative_rmse": 0.0,
+            "cosine": 1.0000000000000002
+          },
+          "published_drift_rmse_max": null,
+          "published_drift_passed": null
+        },
+        {
+          "kind": "published",
+          "warmup": true,
+          "directory": "target/fastframes/timing-published-0",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        },
+        {
+          "kind": "published",
+          "warmup": false,
+          "directory": "target/fastframes/timing-published-1",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        },
+        {
+          "kind": "published",
+          "warmup": false,
+          "directory": "target/fastframes/timing-published-2",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        },
+        {
+          "kind": "published",
+          "warmup": false,
+          "directory": "target/fastframes/timing-published-3",
+          "shared_noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+          "gguf_sha256": null,
+          "comparison": {
+            "max_abs": 0.03137254901960784,
+            "rmse": 0.004773227941892371,
+            "relative_rmse": 0.00988514298093212,
+            "cosine": 0.9999549148163189
+          },
+          "published_drift_rmse_max": 0.08,
+          "published_drift_passed": true
+        }
+      ]
+    },
+    "quantized-block-replay-results.json": {
+      "scope": "Diagnostic replay of pinned official text blocks using captured native inputs. CPU/short-sequence replay is distinct from the padded GPU acceptance oracle; no full-model acceptance claim.",
+      "official_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "official_source_sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "device": "cpu",
+      "threads": 4,
+      "results": [
+        {
+          "format": "q8_0",
+          "layer": 1,
+          "same_native_input_block_error": {
+            "max_abs": 0.052734375,
+            "rmse": 0.0030870102530630894,
+            "relative_rmse": 2.3028591636053686e-05,
+            "cosine": 0.9999999997355365
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.0654296875,
+            "rmse": 0.0038326164601438454,
+            "relative_rmse": 2.859084062706791e-05,
+            "cosine": 0.9999999996014216
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 0.763671875,
+            "rmse": 0.04319246846690555,
+            "relative_rmse": 0.00032221042597635875,
+            "cosine": 0.9999999481040015
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 6,
+          "same_native_input_block_error": {
+            "max_abs": 0.04300117492675781,
+            "rmse": 0.004240977672956084,
+            "relative_rmse": 2.429029919840053e-05,
+            "cosine": 0.9999999997063613
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.0267333984375,
+            "rmse": 0.003631476080026594,
+            "relative_rmse": 2.0799731025967355e-05,
+            "cosine": 0.9999999997837569
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 1.2760009765625,
+            "rmse": 0.07781681435361291,
+            "relative_rmse": 0.0004457054850932493,
+            "cosine": 0.9999999008303125
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 12,
+          "same_native_input_block_error": {
+            "max_abs": 0.056896209716796875,
+            "rmse": 0.005379883337898599,
+            "relative_rmse": 1.8990960295477427e-05,
+            "cosine": 0.9999999998197941
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.1436767578125,
+            "rmse": 0.012682010782050323,
+            "relative_rmse": 4.476999380541027e-05,
+            "cosine": 0.9999999990164995
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 2.1277084350585938,
+            "rmse": 0.12878134024633275,
+            "relative_rmse": 0.00045462347447623166,
+            "cosine": 0.9999998983014919
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 17,
+          "same_native_input_block_error": {
+            "max_abs": 0.0357666015625,
+            "rmse": 0.002133148774794276,
+            "relative_rmse": 6.611600142536248e-06,
+            "cosine": 0.9999999999781912
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.2916259765625,
+            "rmse": 0.02617605030565254,
+            "relative_rmse": 8.110905387984274e-05,
+            "cosine": 0.9999999967108884
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 10.1552734375,
+            "rmse": 0.43213991918143274,
+            "relative_rmse": 0.0013390278357216024,
+            "cosine": 0.9999991415649181
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 18,
+          "same_native_input_block_error": {
+            "max_abs": 0.154296875,
+            "rmse": 0.010793803341967476,
+            "relative_rmse": 3.2239118316123155e-05,
+            "cosine": 0.9999999994803201
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.1153411865234375,
+            "rmse": 0.007495983833626928,
+            "relative_rmse": 2.239069294903665e-05,
+            "cosine": 0.9999999997493552
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 8.9736328125,
+            "rmse": 0.5162151778359524,
+            "relative_rmse": 0.0015419477681776997,
+            "cosine": 0.999998813705197
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 22,
+          "same_native_input_block_error": {
+            "max_abs": 0.403564453125,
+            "rmse": 0.014947794735543092,
+            "relative_rmse": 2.1384423777337058e-05,
+            "cosine": 0.9999999997718223
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.43975830078125,
+            "rmse": 0.01676481397506658,
+            "relative_rmse": 2.397071248211576e-05,
+            "cosine": 0.9999999997129606
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 39.14453125,
+            "rmse": 1.4272674583158855,
+            "relative_rmse": 0.002040739487432002,
+            "cosine": 0.9999980669903717
+          }
+        },
+        {
+          "format": "q8_0",
+          "layer": 23,
+          "same_native_input_block_error": {
+            "max_abs": 0.22027587890625,
+            "rmse": 0.010329141525357239,
+            "relative_rmse": 1.326059083081708e-05,
+            "cosine": 0.9999999999120939
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.515869140625,
+            "rmse": 0.020104420184009073,
+            "relative_rmse": 2.5786774809203715e-05,
+            "cosine": 0.9999999996693603
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 58.478515625,
+            "rmse": 1.9186868185430013,
+            "relative_rmse": 0.00246098840286423,
+            "cosine": 0.999997378819156
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 1,
+          "same_native_input_block_error": {
+            "max_abs": 0.0087890625,
+            "rmse": 0.00040280204981439887,
+            "relative_rmse": 3.016105915446707e-06,
+            "cosine": 0.9999999999954885
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.026505470275878906,
+            "rmse": 0.0022285750538394893,
+            "relative_rmse": 1.668811024657854e-05,
+            "cosine": 0.999999999860778
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 0.38623046875,
+            "rmse": 0.034856966754716265,
+            "relative_rmse": 0.0002610174169641962,
+            "cosine": 0.99999996759096
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 6,
+          "same_native_input_block_error": {
+            "max_abs": 0.0562744140625,
+            "rmse": 0.0027235375486209046,
+            "relative_rmse": 1.5666903586774504e-05,
+            "cosine": 0.9999999998781146
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.005855560302734375,
+            "rmse": 0.00041869316460166816,
+            "relative_rmse": 2.408697339960948e-06,
+            "cosine": 0.9999999999971697
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 3.250244140625,
+            "rmse": 0.1528769489860396,
+            "relative_rmse": 0.0008794848626543639,
+            "cosine": 0.9999996168287996
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 12,
+          "same_native_input_block_error": {
+            "max_abs": 0.004085540771484375,
+            "rmse": 0.00027024413046807915,
+            "relative_rmse": 9.632524687655947e-07,
+            "cosine": 0.9999999999995365
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.095947265625,
+            "rmse": 0.005839351620253299,
+            "relative_rmse": 2.080497030446623e-05,
+            "cosine": 0.9999999997839489
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 6.077392578125,
+            "rmse": 0.2971943435166758,
+            "relative_rmse": 0.0010588708975966007,
+            "cosine": 0.9999995263822554
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 17,
+          "same_native_input_block_error": {
+            "max_abs": 0.0302734375,
+            "rmse": 0.0022492270249362956,
+            "relative_rmse": 7.03726927292456e-06,
+            "cosine": 0.9999999999754465
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.84716796875,
+            "rmse": 0.03228331129693007,
+            "relative_rmse": 0.00010103145830588928,
+            "cosine": 0.9999999949336813
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 22.710693359375,
+            "rmse": 1.0260143626708613,
+            "relative_rmse": 0.0032109385047277366,
+            "cosine": 0.999994876947841
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 18,
+          "same_native_input_block_error": {
+            "max_abs": 0.0137939453125,
+            "rmse": 0.0005249854527686525,
+            "relative_rmse": 1.576516121881219e-06,
+            "cosine": 0.9999999999987638
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.9306640625,
+            "rmse": 0.047570028421940296,
+            "relative_rmse": 0.00014278859959984067,
+            "cosine": 0.9999999898182593
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 65.650634765625,
+            "rmse": 1.9774689514794455,
+            "relative_rmse": 0.005935670667030438,
+            "cosine": 0.9999824728899126
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 22,
+          "same_native_input_block_error": {
+            "max_abs": 0.739013671875,
+            "rmse": 0.03791553454243392,
+            "relative_rmse": 5.1645542778042046e-05,
+            "cosine": 0.9999999986664311
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.86572265625,
+            "rmse": 0.050731606627304165,
+            "relative_rmse": 3.9102286428338756e-05,
+            "cosine": 0.9999999992365937
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 35711.2109375,
+            "rmse": 783.8478070775278,
+            "relative_rmse": 0.6041646126790414,
+            "cosine": 0.8440104208589453
+          }
+        },
+        {
+          "format": "q4_k",
+          "layer": 23,
+          "same_native_input_block_error": {
+            "max_abs": 0.02459716796875,
+            "rmse": 0.001649973588965011,
+            "relative_rmse": 2.0319880824138077e-06,
+            "cosine": 0.9999999999979352
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.7825546264648438,
+            "rmse": 0.026459892711170042,
+            "relative_rmse": 1.952684684326151e-05,
+            "cosine": 0.9999999998095598
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 36266.6806640625,
+            "rmse": 794.5386861650261,
+            "relative_rmse": 0.5863529155294382,
+            "cosine": 0.8471392632561627
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 1,
+          "same_native_input_block_error": {
+            "max_abs": 0.1513671875,
+            "rmse": 0.005529852450258322,
+            "relative_rmse": 4.1290890884515606e-05,
+            "cosine": 0.9999999991547255
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.00390625,
+            "rmse": 6.073778052768475e-05,
+            "relative_rmse": 4.5367083141795523e-07,
+            "cosine": 0.9999999999998972
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 2.4561767578125,
+            "rmse": 0.1018247204546738,
+            "relative_rmse": 0.0007605629508723444,
+            "cosine": 0.9999997637413722
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 6,
+          "same_native_input_block_error": {
+            "max_abs": 0.004856228828430176,
+            "rmse": 0.00045525489865099866,
+            "relative_rmse": 2.6100328123760725e-06,
+            "cosine": 0.9999999999965988
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.059783935546875,
+            "rmse": 0.00594494181212358,
+            "relative_rmse": 3.409181772074334e-05,
+            "cosine": 0.9999999994211884
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 3.205078125,
+            "rmse": 0.16028695054359252,
+            "relative_rmse": 0.0009191803172576397,
+            "cosine": 0.9999996104479694
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 12,
+          "same_native_input_block_error": {
+            "max_abs": 0.153076171875,
+            "rmse": 0.012483489724378873,
+            "relative_rmse": 4.4262513555286815e-05,
+            "cosine": 0.9999999990207411
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.09908294677734375,
+            "rmse": 0.009615402941534963,
+            "relative_rmse": 3.406801248871968e-05,
+            "cosine": 0.9999999994201088
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 10.3330078125,
+            "rmse": 0.39317182197691486,
+            "relative_rmse": 0.0013930339292867898,
+            "cosine": 0.9999993017515219
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 17,
+          "same_native_input_block_error": {
+            "max_abs": 0.386688232421875,
+            "rmse": 0.01821390350939339,
+            "relative_rmse": 5.661712287818738e-05,
+            "cosine": 0.9999999983980211
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.2568359375,
+            "rmse": 0.013086816139398917,
+            "relative_rmse": 4.065436198575214e-05,
+            "cosine": 0.9999999991737678
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 24.133544921875,
+            "rmse": 1.0492495681557334,
+            "relative_rmse": 0.003259507224891488,
+            "cosine": 0.9999948800567854
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 18,
+          "same_native_input_block_error": {
+            "max_abs": 0.001953125,
+            "rmse": 3.548989033015772e-05,
+            "relative_rmse": 1.0632247247169425e-07,
+            "cosine": 0.9999999999999941
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.986572265625,
+            "rmse": 0.040515122037608715,
+            "relative_rmse": 0.00012142027681414825,
+            "cosine": 0.9999999926614871
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 47.77874755859375,
+            "rmse": 1.8122811201375115,
+            "relative_rmse": 0.005431247993474857,
+            "cosine": 0.9999853185804324
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 22,
+          "same_native_input_block_error": {
+            "max_abs": 1.04541015625,
+            "rmse": 0.06246755312537946,
+            "relative_rmse": 9.054559811931801e-05,
+            "cosine": 0.9999999959072435
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.3759765625,
+            "rmse": 0.030966992726329606,
+            "relative_rmse": 4.483323333447722e-05,
+            "cosine": 0.9999999989960785
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 183.83984375,
+            "rmse": 5.270830900873845,
+            "relative_rmse": 0.00763097643138364,
+            "cosine": 0.999971544203051
+          }
+        },
+        {
+          "format": "q6_k",
+          "layer": 23,
+          "same_native_input_block_error": {
+            "max_abs": 0.029296875,
+            "rmse": 0.0014266084587532227,
+            "relative_rmse": 1.8531231196323374e-06,
+            "cosine": 0.9999999999982854
+          },
+          "cpu_short_replay_vs_gpu_padded_baseline": {
+            "max_abs": 0.1737213134765625,
+            "rmse": 0.006597320303452991,
+            "relative_rmse": 8.552163722868495e-06,
+            "cosine": 0.9999999999634313
+          },
+          "accumulated_native_vs_reference": {
+            "max_abs": 283.38330078125,
+            "rmse": 7.977943063132495,
+            "relative_rmse": 0.01034187702117808,
+            "cosine": 0.9999485176999365
+          }
+        }
+      ],
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "script_sha256": "6b1e19c1202fec1dae566f0d659f7256e246648c976b5c7157d0f3e56b9efcd0",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "-u",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/replay_quantized_blocks.py"
+      ],
+      "completed": true,
+      "single_block_thresholds": {
+        "relative_rmse_max": 0.005,
+        "cosine_min": 0.9999,
+        "all_21_passed": true,
+        "does_not_replace_failed_full_model_gates": true
+      },
+      "input_provenance": {
+        "q8_0": {
+          "gguf": {
+            "format": "q8_0",
+            "size": 22274854208,
+            "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "native_trace_sha256": "93da0d70bee09769b4d3ba072233eae3cbb66e7720e7d988be6cded1f75f6501",
+          "controlled_manifest_sha256": "29bc96dea3554822cc3367efe236ceedcd24904c3b7b5c407563e0a01139cca7"
+        },
+        "q4_k": {
+          "gguf": {
+            "format": "q4_k",
+            "size": 11813453120,
+            "sha256": "541c03d997e76cbb48579c8071a3990dc2fd850975344b32ef0e09ab3140f07a",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "native_trace_sha256": "543ac6446a9f5342a7b091efb60e7d5bc9ff8691fff2b34ca3d3d1feddb3dbf8",
+          "controlled_manifest_sha256": "5b798aaa49460b8c009685b7f1727c0436ddc907566b6af94f8bbbdb4fae9f85"
+        },
+        "q6_k": {
+          "gguf": {
+            "format": "q6_k",
+            "size": 17208109376,
+            "sha256": "c8fc66953258f6869cd32b58b291398f58cab8dde671fb4218992e83f0ed94f8",
+            "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+          },
+          "native_trace_sha256": "87c49299acbb2b839075a03b8a81e84c0a6a15fcc35e2615c53d4bc5d024e4aa",
+          "controlled_manifest_sha256": "f18f7b1a132fe7a069af42b57a364bfc845f8d5daaa12dea6488c82e6a4fb009"
+        }
+      }
+    },
+    "http-concurrency-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "command": [
+        "/workspace/rust-model-inference-fastframes/target/native-build/release/rust-model-server",
+        "--model",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+        "--threads",
+        "4",
+        "--compute",
+        "cpu",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "18149"
+      ],
+      "body": {
+        "prompt": "A red ball rolls on a table.",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "fps": 16,
+        "seed": 17
+      },
+      "scope": "Real BF16 CPU HTTP busy and client-disconnect lifecycle, isolated port",
+      "passed": true,
+      "concurrent_request": {
+        "status": 429,
+        "elapsed_seconds": 0.03897511400282383
+      },
+      "immediately_after_disconnect": {
+        "status": 429,
+        "elapsed_seconds": 0.0008800514042377472
+      },
+      "probes": [
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007597822695970535,
+          "sent_seconds_after_disconnect": 1.001212451606989
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008532516658306122,
+          "sent_seconds_after_disconnect": 2.0020646806806326
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007802937179803848,
+          "sent_seconds_after_disconnect": 3.0029989760369062
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.01635296642780304,
+          "sent_seconds_after_disconnect": 4.003862364217639
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008118804544210434,
+          "sent_seconds_after_disconnect": 5.020303228870034
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.000806732103228569,
+          "sent_seconds_after_disconnect": 6.02120815962553
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0028655212372541428,
+          "sent_seconds_after_disconnect": 7.022097332403064
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007495321333408356,
+          "sent_seconds_after_disconnect": 8.025048406794667
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.005824577063322067,
+          "sent_seconds_after_disconnect": 9.025902671739459
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007954109460115433,
+          "sent_seconds_after_disconnect": 10.03184668533504
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0011625681072473526,
+          "sent_seconds_after_disconnect": 11.032726844772696
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.005947249010205269,
+          "sent_seconds_after_disconnect": 12.033978460356593
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007449109107255936,
+          "sent_seconds_after_disconnect": 13.040024667978287
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007411129772663116,
+          "sent_seconds_after_disconnect": 14.040853140875697
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007318519055843353,
+          "sent_seconds_after_disconnect": 15.04168876633048
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0012193266302347183,
+          "sent_seconds_after_disconnect": 16.04250712133944
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007012337446212769,
+          "sent_seconds_after_disconnect": 17.043842734768987
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0010472778230905533,
+          "sent_seconds_after_disconnect": 18.07750364392996
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008135400712490082,
+          "sent_seconds_after_disconnect": 19.078649239614606
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007733013480901718,
+          "sent_seconds_after_disconnect": 20.079569432884455
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007404312491416931,
+          "sent_seconds_after_disconnect": 21.080429883673787
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0009431913495063782,
+          "sent_seconds_after_disconnect": 22.081257259473205
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008531417697668076,
+          "sent_seconds_after_disconnect": 23.082275934517384
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008340217173099518,
+          "sent_seconds_after_disconnect": 24.08321207948029
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008818916976451874,
+          "sent_seconds_after_disconnect": 25.084112918004394
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0008116327226161957,
+          "sent_seconds_after_disconnect": 26.085097055882215
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007959045469760895,
+          "sent_seconds_after_disconnect": 27.085973316803575
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.000806022435426712,
+          "sent_seconds_after_disconnect": 28.08683598972857
+        },
+        {
+          "status": 429,
+          "elapsed_seconds": 0.0007954835891723633,
+          "sent_seconds_after_disconnect": 29.08773247152567
+        },
+        {
+          "status": 200,
+          "elapsed_seconds": 67.88807088322937,
+          "sent_seconds_after_disconnect": 30.088622257113457
+        }
+      ],
+      "completed_generations": {
+        "fastframes.noise": 2,
+        "fastframes.pixel_tokens": 2
+      },
+      "first_pixel_before_second_token_ids": true,
+      "decoded_bytes": 3840,
+      "elapsed_seconds": 138.29384766705334
+    },
+    "precomputed480-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "Ahead-of-native controlled checkpoint reference and published raw RGB; no native acceptance claim yet",
+      "runs": [
+        {
+          "recipe": "controlled",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "832",
+            "--height",
+            "480",
+            "--frames",
+            "5",
+            "--seed",
+            "17",
+            "--recipe",
+            "controlled",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-controlled",
+            "--gguf",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 535.401931386441,
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-controlled",
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "checkpoints": 412
+        },
+        {
+          "recipe": "published",
+          "command": [
+            "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+            "-m",
+            "tools.oracle.fastframes_l.run_reference",
+            "--reference",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "--model-dir",
+            "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "--text-dir",
+            "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "--noise",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+            "--device",
+            "cuda",
+            "--threads",
+            "8",
+            "--width",
+            "832",
+            "--height",
+            "480",
+            "--frames",
+            "5",
+            "--seed",
+            "17",
+            "--recipe",
+            "published",
+            "--output",
+            "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-published",
+            "--benchmark"
+          ],
+          "exit_code": 0,
+          "elapsed_seconds": 115.54489267244935,
+          "output": "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-published",
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "gguf_sha256": null,
+          "checkpoints": 0
+        }
+      ]
+    },
+    "480-pixel-investigation-results.json": {
+      "scope": "Independent 480p pixel-token layout and same-settings re-encoding diagnostic; full acceptance failures remain retained",
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "native_pixel_tokens_sha256": "b72662828b154d2927cb02888553a146fa27acc4a035d02e5c9f0957b7213fa2",
+      "reference_pixel_tokens_sha256": "0840feb0c26dce8a54e7f85e85c35002df3001cb9744ea1c84beeea8b80cb7e6",
+      "independent_reference_layout_exact": true,
+      "raw_rgb_vs_controlled": {
+        "max_abs": 0.02352941176470591,
+        "rmse": 0.000387182768588293,
+        "relative_rmse": 0.0007402979786154428,
+        "cosine": 0.9999997259876185
+      },
+      "native_reencode_vs_production": {
+        "max_abs": 0.0,
+        "rmse": 0.0,
+        "relative_rmse": 0.0,
+        "cosine": 0.9999999999999999
+      },
+      "native_reencode_decoded_exact": true,
+      "native_raw_rgb_vs_published": {
+        "max_abs": 1.0,
+        "rmse": 0.10039486713436548,
+        "relative_rmse": 0.19213940647748748,
+        "cosine": 0.9815592000896627
+      },
+      "different_u8_components": 50845,
+      "total_u8_components": 5990400,
+      "maximum_u8_difference": 6,
+      "encoder_command": [
+        "/workspace/rust-model-inference-fastframes/target/bin/ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-video_size",
+        "832x480",
+        "-r",
+        "16",
+        "-i",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/480-native-reconstructed.rgb.u8",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/480-native-reencoded.mp4"
+      ]
+    },
+    "480-reference-provenance-results.json": {
+      "source_head": "b44d4b3019fc900ad17b76e61deee98e8b08bf71",
+      "scope": "480p controlled and published provenance after completion; benchmark published output provides RGB quality only",
+      "native_binary": {
+        "path": "/workspace/rust-model-inference-fastframes/target/native-build/release-fast/rust-model-inference",
+        "sha256": "f1c4f5a2996395d1d4cf0ad68fc536883f9547a335a16fac3bfd881eecf4f73c",
+        "profile": "release-fast, parity and compute trace enabled"
+      },
+      "references": {
+        "controlled": {
+          "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+          "reference_files_verified": true,
+          "wrapper_sha256": {
+            "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+            "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+            "effective_weights.py": "7e66bdae6e8d31f66e2aba00c190f09b2cd4190fdade47e06ede86885bb4b4cd"
+          },
+          "tokenizer_sha256": {
+            "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+            "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+            "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+            "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+          },
+          "checkpoint_sha256": {
+            "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+            "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+            "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+            "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+            "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+          },
+          "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+          "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+          "recipe": "controlled",
+          "device": "cuda",
+          "torch": "2.9.1+gitff65f5b",
+          "numpy": "2.1.2",
+          "ftfy": "6.3.1",
+          "dependencies": {
+            "transformers": "4.57.1",
+            "tokenizers": "0.22.2",
+            "gguf": "0.18.0",
+            "safetensors": "0.7.0"
+          },
+          "elapsed_seconds": 391.9104803428054,
+          "args": {
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "model_dir": "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "text_dir": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "output": "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-controlled",
+            "gguf": "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+            "noise": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+            "width": 832,
+            "height": 480,
+            "frames": 5,
+            "prompt": "A red ball rolls on a table.",
+            "seed": 17,
+            "threads": 8,
+            "recipe": "controlled",
+            "device": "cuda",
+            "benchmark": false
+          },
+          "checkpoint_count": 412,
+          "manifest_sha256": "d9aa1428f8e6ae34a62f56116f70fb600452c9a3309f32d81609b83a647d9f9c",
+          "rgb_sha256": "8a221da73d2d4510dac1070418f925dfb0f15d793cf420b092ccf2359f35581f"
+        },
+        "published": {
+          "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+          "reference_files_verified": true,
+          "wrapper_sha256": {
+            "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+            "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+            "effective_weights.py": "7e66bdae6e8d31f66e2aba00c190f09b2cd4190fdade47e06ede86885bb4b4cd"
+          },
+          "tokenizer_sha256": {
+            "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+            "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+            "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+            "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+          },
+          "checkpoint_sha256": {
+            "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+            "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+            "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+            "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+            "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+          },
+          "gguf_sha256": null,
+          "noise_sha256": "ff6a9143e31fb1e9b17074a62182f8d73720bbb77eb4ee6c263184b00d7b6320",
+          "timing_kind": "generation_including_rgb_transfer_write_and_streamed_weights",
+          "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+          "recipe": "published",
+          "device": "cuda",
+          "torch": "2.9.1+gitff65f5b",
+          "numpy": "2.1.2",
+          "ftfy": "6.3.1",
+          "dependencies": {
+            "transformers": "4.57.1",
+            "tokenizers": "0.22.2",
+            "gguf": "0.18.0",
+            "safetensors": "0.7.0"
+          },
+          "elapsed_seconds": 57.605546997860074,
+          "args": {
+            "reference": "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+            "model_dir": "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+            "text_dir": "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+            "output": "/workspace/rust-model-inference-fastframes/target/fastframes/ahead-480-published",
+            "gguf": null,
+            "noise": "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+            "width": 832,
+            "height": 480,
+            "frames": 5,
+            "prompt": "A red ball rolls on a table.",
+            "seed": 17,
+            "threads": 8,
+            "recipe": "published",
+            "device": "cuda",
+            "benchmark": true
+          },
+          "checkpoint_count": 0,
+          "manifest_sha256": "d86ef4a09dbc8f189f70ced3c37e7eea690a0fdd5cb6877b0190d5caee600edc",
+          "rgb_sha256": "c1e89252b94a5936cfb0e3c32701cd48b5b45f25996bf0edb2d3bddd99d024ab"
+        }
+      }
+    },
+    "reference-duplicate-stop-results.json": {
+      "action": "SIGTERM to verified task-owned duplicate controlled reference only",
+      "pid": 163481,
+      "parent_pid": 60348,
+      "command": [
+        "/workspace/rust-model-inference-fastframes/.venv/bin/python",
+        "-m",
+        "tools.oracle.fastframes_l.run_reference",
+        "--reference",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/reference",
+        "--model-dir",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L",
+        "--text-dir",
+        "/workspace/rust-model-inference-fastframes/models/Wan2.1-T2V-14B",
+        "--noise",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/extended-bf16-832x480-5frames-vulkan.jsonl.fastframes.noise.f32",
+        "--device",
+        "cuda",
+        "--threads",
+        "8",
+        "--width",
+        "832",
+        "--height",
+        "480",
+        "--frames",
+        "5",
+        "--seed",
+        "17",
+        "--recipe",
+        "controlled",
+        "--gguf",
+        "/workspace/rust-model-inference-fastframes/models/FastFrames-L-bf16.gguf",
+        "--output",
+        "/workspace/rust-model-inference-fastframes/target/fastframes/extended-reference-bf16-832x480-5frames-vulkan"
+      ],
+      "native_exit_code": 0,
+      "native_elapsed_seconds": 10845.660709502175,
+      "reason": "Exact-noise ahead reference already running; avoid duplicate GPU/model work. Native process was not signalled."
+    }
+  }
+}
