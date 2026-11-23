@@ -55,6 +55,12 @@ def install_prepared_activations(modules,fast,formats,tensors=None):
             return torch.from_numpy(array.astype(np.float32).reshape(int(tensor.shape[1]),-1)).to(device)
         def bind(names,weight,grouped=False):
             names=(names,) if isinstance(names,str) else tuple(names)
+            # FF-S's converter prefixes the plain decoder's keys with
+            # ``pixel_head.``; FF-L's bridged decoder names them directly.
+            if names[0].startswith('decoder.') and names[0] not in formats:
+                alternative=f'decoder.pixel_head.{names[0][8:]}'
+                if alternative in formats:
+                    names=(alternative,)+tuple(names[1:])
             pointers[weight.data_ptr()]=formats[names[0]]
             if formats[names[0]]==3:
                 key=(names,weight.data_ptr())
@@ -73,10 +79,11 @@ def install_prepared_activations(modules,fast,formats,tensors=None):
                     if name.startswith('heads_grouped.gemms.0.') and name.endswith('_w'):
                         field=name.rsplit('.',1)[-1][:-2]
                         bind([f'refiner.heads.{i}.{field}.weight' for i in range(parameter.shape[0])],parameter,True)
-        for layer,qkv in enumerate(fast.qkv):
+        for layer,qkv in enumerate(fast.qkv if fast is not None else []):
             if qkv is not None and not qkv[0].is_meta:
                 bind([f'dit.blocks.{layer}.self_attn.{name}.weight' for name in ['q','k','v']],qkv[0])
-        bind('dit.patch_embedding.weight',fast.patch_weight)
+        if fast is not None:
+            bind('dit.patch_embedding.weight',fast.patch_weight)
         cached.clear()
         cached.update(current)
     refresh()

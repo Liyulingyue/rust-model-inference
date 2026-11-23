@@ -1,4 +1,6 @@
-//! Native FastFrames-L video generation.
+//! Native FastFrames video generation: the `fastframes_l` architecture serves
+//! both the L (14B) and S (1.3B Causal-Forcing++) variants; per-variant specs
+//! and shared-noise layouts dispatch off the GGUF's variant field.
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -33,7 +35,7 @@ impl Options {
             || !(1..=60).contains(&self.fps)
         {
             return Err(
-                "FastFrames-L requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60"
+                "FastFrames requires multiples of 16 up to 832x480, 1..=81 frames and fps 1..=60"
                     .into(),
             );
         }
@@ -42,6 +44,21 @@ impl Options {
 
     pub fn latent_frames(&self) -> usize {
         (self.frames + 3).div_ceil(4)
+    }
+}
+
+/// Shared-noise F32 value count for the bundle's variant.
+///
+/// FF-L pregenerates three full-frame transition blocks; FF-S draws one
+/// single-frame block per transition (frame 0's three steps, then one per
+/// later frame).
+pub fn noise_value_count(source: &dyn TensorSource, options: &Options) -> usize {
+    let frames = options.latent_frames();
+    let count = frames * 16 * (options.height / 8) * (options.width / 8);
+    let frame_count = 16 * (options.height / 8) * (options.width / 8);
+    match weights::Variant::of(source) {
+        Some(weights::Variant::S) => count + (2 + frames) * frame_count,
+        _ => 4 * count,
     }
 }
 
@@ -106,7 +123,7 @@ use crate::compute::ComputePolicy;
 use crate::core::{tensor::TensorSource, thread_pool::ComputePool};
 use crate::models::diffusion::z_image::dit::TorchMt19937;
 use std::sync::Arc;
-use weights::Graph;
+use weights::{Graph, NoiseMode};
 
 pub use weights::matches_model;
 
@@ -127,7 +144,7 @@ pub struct Video {
 impl Engine {
     pub fn load(source: Arc<dyn TensorSource>, threads: usize) -> Result<Self, String> {
         if threads == 0 {
-            return Err("FastFrames-L thread count must be positive".into());
+            return Err("FastFrames thread count must be positive".into());
         }
         Graph::load(source.as_ref())?;
         let tokenizer = text::tokenizer(source.as_ref())?;
@@ -148,7 +165,7 @@ impl Engine {
         options.validate()?;
         let _scope = policy.enter_legacy_scope();
         if prompt.len() > 65536 {
-            return Err("FastFrames-L prompt exceeds 64 KiB".into());
+            return Err("FastFrames prompt exceeds 64 KiB".into());
         }
         let ids = text::ids(&self.tokenizer, prompt)?;
         let h = options.height / 8;
@@ -156,41 +173,65 @@ impl Engine {
         let tokens = h * w / 4;
         let frames = options.latent_frames();
         let count = frames * 16 * h * w;
+        let frame_count = 16 * h * w;
+        let g = Graph::load(self.source.as_ref())?;
+        let spec = g.spec;
+        let dim = spec.dims.dim;
+        // Noise layout: the released FF-L recipe pre-generates three full-frame
+        // transition blocks; FF-S draws each frame's transition noise from the
+        // same generator when it is needed. A shared `noise` slice follows the
+        // draw order of the recipe (initial, then every transition).
+        let shared_layout = match spec.recipe.noise {
+            NoiseMode::Pregenerated => 4 * count,
+            NoiseMode::Sequential => count + (2 + frames) * frame_count,
+        };
         if let Some(noise) = noise {
-            if noise.len() != 4 * count || noise.iter().any(|v| !v.is_finite()) {
-                return Err(format!("FastFrames-L shared noise needs {} finite F32 values (initial + 3 transitions)",4*count));
+            if noise.len() != shared_layout || noise.iter().any(|v| !v.is_finite()) {
+                return Err(format!(
+                    "{} shared noise needs {} finite F32 values",
+                    spec.name, shared_layout
+                ));
             }
         }
-        let g = Graph::load(self.source.as_ref())?;
         let mut ex = g.executor(policy, tokens.max(512), Arc::clone(&self.pool))?;
-        eprintln!("FastFrames-L: requested_compute={policy:?}; activations/KV=F32; text relative-bias attention and normalization on CPU");
+        eprintln!(
+            "{}: requested_compute={policy:?}; activations/KV=F32; text relative-bias attention and normalization on CPU",
+            spec.name
+        );
         let embeds = text::encode(&g, &mut ex, &ids)?;
         let text_cache = dit::text_cache(&g, &mut ex, &embeds)?;
-        let noise = if let Some(noise) = noise {
+        // The transition noise blocks in draw order: frame 0's three steps,
+        // then one per later frame.
+        let mut noise = if let Some(noise) = noise {
             noise.to_vec()
         } else {
-            let mut noise = vec![0.; 4 * count];
-            TorchMt19937::new(options.seed).fill_normal(&mut noise);
+            let mut rng = TorchMt19937::new(options.seed);
+            let mut noise = vec![0.; shared_layout];
+            rng.fill_normal(&mut noise[..count]);
+            rng.fill_normal(&mut noise[count..]);
             noise
         };
         math::trace("fastframes.noise", &noise);
-        let mut cache = (0..40)
+        let mut cache = (0..spec.dims.layers)
             .map(|_| dit::Cache {
-                k: vec![0.; frames * tokens * 5120],
-                v: vec![0.; frames * tokens * 5120],
+                k: vec![0.; frames * tokens * dim],
+                v: vec![0.; frames * tokens * dim],
             })
             .collect::<Vec<_>>();
-        let mut features = Vec::with_capacity(frames * tokens * 5120);
-        let mut modulation = Vec::with_capacity(frames * 5120);
-        let times = [1000., 937., 833., 625., 0.]
+        let mut features = Vec::with_capacity(frames * tokens * dim);
+        let mut modulation = Vec::with_capacity(frames * dim);
+        let times = spec
+            .conditioning_times()
             .into_iter()
-            .map(|t| dit::time(&g, &mut ex, t).map(|time| (t as usize, time)))
+            .map(|t| dit::time(&g, &mut ex, t).map(|time| (t.to_bits(), time)))
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        // Index (in `noise`) of the next sequential transition block.
+        let mut next_transition = count;
         for frame in 0..frames {
-            let schedule: &[usize] = if frame == 0 {
-                &[1000, 937, 833, 625]
+            let schedule: &[f32] = if frame == 0 {
+                &spec.recipe.first_frame
             } else {
-                &[1000, 833]
+                &spec.recipe.timesteps
             };
             let start = frame * 16 * h * w;
             let end = start + 16 * h * w;
@@ -203,31 +244,41 @@ impl Engine {
                     h,
                     w,
                     frame,
-                    &times[&t],
+                    &times[&t.to_bits()],
                     &text_cache,
                     &mut cache,
                     policy,
                     &self.pool,
                 )?;
-                let current_sigma = sigma(t as f32) as f64;
+                let current_sigma = sigma(t) as f64;
                 for (x, f) in x.iter_mut().zip(flow) {
                     *x = (*x as f64 - current_sigma * f as f64) as f32;
                 }
                 if x.iter().any(|v| !v.is_finite()) {
                     return Err(format!(
-                        "non-finite FastFrames-L latent at frame {frame}, timestep {t}"
+                        "non-finite {} latent at frame {frame}, timestep {t}",
+                        spec.name
                     ));
                 }
                 math::trace("fastframes.x0", &x);
                 if let Some(&next) = schedule.get(step + 1) {
-                    let s = sigma(next as f32);
-                    let eps = &noise[(step + 1) * count + start..(step + 1) * count + end];
+                    let s = sigma(next);
+                    let eps: &[f32] = match spec.recipe.noise {
+                        NoiseMode::Pregenerated => {
+                            &noise[(step + 1) * count + start..(step + 1) * count + end]
+                        }
+                        NoiseMode::Sequential => {
+                            let block = &noise[next_transition..next_transition + frame_count];
+                            next_transition += frame_count;
+                            block
+                        }
+                    };
                     for (x, eps) in x.iter_mut().zip(eps) {
                         *x = (1. - s) * *x + s * eps;
                     }
                 } else {
                     features.extend(feature);
-                    modulation.extend_from_slice(&times[&t].head);
+                    modulation.extend_from_slice(&times[&t.to_bits()].head);
                 }
             }
             if frame == 0 {
@@ -238,7 +289,7 @@ impl Engine {
                     h,
                     w,
                     frame,
-                    &times[&0],
+                    &times[&0f32.to_bits()],
                     &text_cache,
                     &mut cache,
                     policy,
@@ -248,7 +299,7 @@ impl Engine {
                 let stem = dit::embed(&g, &mut ex, &x, h, w)?;
                 refiner::refine(&g, &mut ex, &stem, frame, &mut cache)?;
             }
-            eprintln!("FastFrames-L: latent frame {}/{}", frame + 1, frames);
+            eprintln!("{}: latent frame {}/{}", spec.name, frame + 1, frames);
         }
         drop(cache);
         drop(text_cache);

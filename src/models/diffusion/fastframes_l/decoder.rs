@@ -13,24 +13,31 @@ pub(super) fn decode<'a>(
     modulation: &[f32],
     options: &Options,
 ) -> Result<Vec<u8>, String> {
-    const D: usize = 1536;
+    let d = g.spec.dims.decoder_dim;
     let frames = options.latent_frames();
     let h = options.height / 16;
     let w = options.width / 16;
     let rows = frames * h * w;
-    let mut x = linear(g, ex, "decoder.bridge", features)?;
-    let m = linear(g, ex, "decoder.bridge", modulation)?;
-    x = norm(&x, D, 1e-6)?;
+    // FF-S decodes its 1536-wide features directly; FF-L bridges 5120 -> 1536.
+    let (mut x, m) = if g.spec.dims.bridge {
+        (
+            linear(g, ex, "decoder.bridge", features)?,
+            linear(g, ex, "decoder.bridge", modulation)?,
+        )
+    } else {
+        (features.to_vec(), modulation.to_vec())
+    };
+    x = norm(&x, d, 1e-6)?;
     let e = &g.floats["decoder.pixel_head.modulation"];
-    for (frame, x) in x.chunks_exact_mut(h * w * D).enumerate() {
-        let shift = e[..D]
+    for (frame, x) in x.chunks_exact_mut(h * w * d).enumerate() {
+        let shift = e[..d]
             .iter()
-            .zip(&m[frame * D..(frame + 1) * D])
+            .zip(&m[frame * d..(frame + 1) * d])
             .map(|(a, b)| a + b)
             .collect::<Vec<_>>();
-        let scale = e[D..]
+        let scale = e[d..]
             .iter()
-            .zip(&m[frame * D..(frame + 1) * D])
+            .zip(&m[frame * d..(frame + 1) * d])
             .map(|(a, b)| a + b)
             .collect::<Vec<_>>();
         modulate(x, &shift, &scale);
@@ -45,7 +52,7 @@ pub(super) fn decode<'a>(
         let mut z = causal_depthwise(
             pool,
             &x,
-            D,
+            d,
             frames,
             h,
             w,
@@ -59,10 +66,10 @@ pub(super) fn decode<'a>(
         residual(&mut x, &z, None);
         trace(p, &x);
     }
-    assert_eq!(x.len(), rows * D);
+    assert_eq!(x.len(), rows * d);
     let pixels = linear(g, ex, "decoder.pixel_head.fc_out", &x)?;
     if pixels.iter().any(|v| !v.is_finite()) {
-        return Err("non-finite FastFrames-L decoder pixels".into());
+        return Err("non-finite FastFrames decoder pixels".into());
     }
     trace("fastframes.pixel_tokens", &pixels);
     Ok(unpatchify_pixels(&pixels, frames, h, w, options.frames))

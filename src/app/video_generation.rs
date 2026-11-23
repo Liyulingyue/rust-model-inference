@@ -30,7 +30,7 @@ pub fn options(cli: &CliOptions, server: bool) -> Result<Options, String> {
             ))
             || (server && flag == "--serve");
         if !supported {
-            return Err(format!("FastFrames-L does not support {flag}"));
+            return Err(format!("FastFrames does not support {flag}"));
         }
     }
     if server && (cli.prompt.is_some() || cli.out.is_some() || cli.noise.is_some() || cli.overwrite)
@@ -44,7 +44,7 @@ pub fn options(cli: &CliOptions, server: bool) -> Result<Options, String> {
         frames: cli.astronex_frames.unwrap_or(d.frames),
         fps: cli.fps.unwrap_or(d.fps),
         seed: u64::try_from(cli.seed.unwrap_or(0))
-            .map_err(|_| "FastFrames-L --seed must be non-negative")?,
+            .map_err(|_| "FastFrames --seed must be non-negative")?,
     };
     options.validate()?;
     Ok(options)
@@ -60,23 +60,24 @@ pub fn run_cli(
         .prompt
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .ok_or("FastFrames-L requires --prompt")?;
+        .ok_or("FastFrames requires --prompt")?;
     let out = cli
         .out
         .as_deref()
-        .ok_or("FastFrames-L requires --out video.mp4")?;
+        .ok_or("FastFrames requires --out video.mp4")?;
     if out.extension().and_then(|s| s.to_str()) != Some("mp4") {
-        return Err("FastFrames-L --out must end in .mp4".into());
+        return Err("FastFrames --out must end in .mp4".into());
     }
     if !cli.overwrite && out.exists() {
         return Err(format!("output already exists: {}", out.display()));
     }
     if prompt.len() > 65536 {
-        return Err("FastFrames-L prompt exceeds 64 KiB".into());
+        return Err("FastFrames prompt exceeds 64 KiB".into());
     }
     if let Some(path) = cli.noise.as_deref() {
         let expected =
-            4 * options.latent_frames() * 16 * (options.height / 8) * (options.width / 8) * 4;
+            crate::models::diffusion::fastframes_l::noise_value_count(source.as_ref(), &options)
+                * 4;
         if std::fs::metadata(path).map_err(|e| e.to_string())?.len() != expected as u64 {
             return Err(format!("shared noise must contain {expected} bytes"));
         }

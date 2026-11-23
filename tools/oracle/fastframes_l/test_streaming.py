@@ -63,6 +63,45 @@ class StreamingTests(unittest.TestCase):
             torch.testing.assert_close(cache[0]['v'], expected_kv[1])
             self.assertTrue(all(p.is_meta for p in dit.blocks[0].cross_attn.parameters()))
 
+    def test_attach_blocks_accepts_fast_none_for_no_fast_ops_recipes(self):
+        torch.manual_seed(17)
+        dit, text = Trunk(Block()), Trunk(torch.nn.Linear(4, 4))
+        modules = [dit, torch.nn.Linear(4, 4), torch.nn.Linear(4, 4), text]
+        states = [{k: v.clone() for k, v in m.state_dict().items()} for m in modules]
+        x = torch.randn(2, 4)
+        expected = dit.blocks[0](x)
+        for module in modules:
+            module.to_empty(device='meta')
+        weights = StreamingWeights(states, torch.device('cpu'), torch.float32)
+        weights.initialize(modules)
+        weights.attach_blocks(dit, text, None)
+        for _ in range(2):
+            torch.testing.assert_close(dit.blocks[0](x), expected)
+            self.assertTrue(all(p.is_meta for p in dit.blocks[0].parameters()))
+
+    def test_decoder_value_falls_back_to_pixel_head_prefix(self):
+        torch.manual_seed(17)
+        decoder = torch.nn.Linear(4, 4)
+        # The official FF-S decoder safetensors uses bare keys; the converted
+        # GGUF namespace prefixes them with ``pixel_head.``.
+        states = [dict(), dict(), {k: v.clone() for k, v in decoder.state_dict().items()}, dict()]
+        for module in [torch.nn.Module(), torch.nn.Module(), decoder, torch.nn.Module()]:
+            module.to_empty(device='meta')
+        weights = StreamingWeights(states, torch.device('cpu'), torch.float32)
+        raw = {f'decoder.pixel_head.{name}': value.detach().numpy().copy()
+               for name, value in states[2].items()}
+        tensors = {name: SimpleNamespace(data=raw[name], tensor_type=0) for name in raw}
+        weights.reader, weights.tensors, weights.formats = object(), tensors, {name: 0 for name in tensors}
+        import gguf
+        original = gguf.quants.dequantize
+        gguf.quants.dequantize = lambda data, ttype: data
+        try:
+            value = weights.value('decoder', 'weight')
+        finally:
+            gguf.quants.dequantize = original
+        torch.testing.assert_close(value, states[2]['weight'])
+        self.assertTrue(isinstance(value, torch.Tensor))
+
     def test_activation_qdq_handles_zero_and_signed_dominant_blocks(self):
         for kind, width in [(8, 32), (2, 32), (3, 32), (12, 256), (13, 256), (14, 256)]:
             x = torch.zeros(2, width)
