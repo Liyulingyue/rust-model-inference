@@ -50,6 +50,12 @@ pub unsafe fn matmul_bf16_vs_f32_neon(
 /// input rows. Each row keeps the same vector accumulation order as the
 /// single-row kernel, so batching changes memory traffic without changing
 /// the per-row arithmetic contract.
+///
+/// Only the `[row_start, row_end)` output rows are computed and written:
+/// the shared dispatcher (`src/ops/kernel/mod.rs`) hands each pool worker a
+/// disjoint row range over a full-size output buffer, and a kernel that
+/// writes outside its range races with the worker that owns those rows
+/// (docs/develop/PARALLEL_MATMUL_SAFETY.md §4).
 #[target_feature(enable = "neon")]
 pub unsafe fn matmul_bf16_vs_f32_neon_batched(
     weight: &[u8],
@@ -58,18 +64,21 @@ pub unsafe fn matmul_bf16_vs_f32_neon_batched(
     n_in: usize,
     n_out: usize,
     n_tokens: usize,
+    row_start: usize,
+    row_end: usize,
 ) {
     use std::arch::aarch64::*;
 
     debug_assert_eq!(weight.len(), n_in * n_out * 2);
     debug_assert_eq!(input.len(), n_tokens * n_in);
     debug_assert_eq!(output.len(), n_tokens * n_out);
+    debug_assert!(row_start <= row_end && row_end <= n_out);
 
     let weight_ptr = weight.as_ptr();
     let input_ptr = input.as_ptr();
     let output_ptr = output.as_mut_ptr();
 
-    for row in 0..n_out {
+    for row in row_start..row_end {
         let row_byte = row * n_in * 2;
         for token_group in (0..n_tokens).step_by(4) {
             let group_len = (n_tokens - token_group).min(4);
@@ -224,36 +233,57 @@ mod tests {
 
     #[test]
     fn neon_batched_matches_single_rows_bitwise() {
-        let n_tokens = 4;
-        let n_in = 13;
-        let n_out = 3;
-        let values: Vec<f32> = (0..n_in * n_out)
-            .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
-            .collect();
-        let weight: Vec<u8> = values
-            .iter()
-            .flat_map(|&value| crate::f32_to_bf16(value).to_le_bytes())
-            .collect();
-        let input: Vec<f32> = (0..n_tokens * n_in)
-            .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
-            .collect();
-        let mut actual = vec![0.0f32; n_tokens * n_out];
-        let mut expected = vec![0.0f32; n_tokens * n_out];
+        // (n_tokens, n_in) matrix: token counts 2..9 cover the tail groups
+        // (group_len < 4) of the 4-token tiling; n_in 13 leaves a scalar
+        // tail, 8 is an exact vector multiple, 40 spans several blocks.
+        for &(n_tokens, n_in) in &[
+            (2usize, 13usize),
+            (3, 13),
+            (5, 13),
+            (6, 13),
+            (7, 13),
+            (9, 13),
+            (4, 8),
+            (6, 40),
+        ] {
+            let n_out = 3;
+            let values: Vec<f32> = (0..n_in * n_out)
+                .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
+                .collect();
+            let weight: Vec<u8> = values
+                .iter()
+                .flat_map(|&value| crate::f32_to_bf16(value).to_le_bytes())
+                .collect();
+            let input: Vec<f32> = (0..n_tokens * n_in)
+                .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+                .collect();
+            let mut actual = vec![0.0f32; n_tokens * n_out];
+            let mut expected = vec![0.0f32; n_tokens * n_out];
 
-        unsafe {
-            matmul_bf16_vs_f32_neon_batched(&weight, &input, &mut actual, n_in, n_out, n_tokens);
-            for token in 0..n_tokens {
-                matmul_bf16_vs_f32_neon(
+            unsafe {
+                matmul_bf16_vs_f32_neon_batched(
                     &weight,
-                    &input[token * n_in..(token + 1) * n_in],
-                    &mut expected[token * n_out..(token + 1) * n_out],
+                    &input,
+                    &mut actual,
                     n_in,
+                    n_out,
+                    n_tokens,
                     0,
                     n_out,
                 );
+                for token in 0..n_tokens {
+                    matmul_bf16_vs_f32_neon(
+                        &weight,
+                        &input[token * n_in..(token + 1) * n_in],
+                        &mut expected[token * n_out..(token + 1) * n_out],
+                        n_in,
+                        0,
+                        n_out,
+                    );
+                }
             }
-        }
 
-        assert_eq!(actual, expected);
+            assert_eq!(actual, expected, "n_tokens={n_tokens} n_in={n_in}");
+        }
     }
 }

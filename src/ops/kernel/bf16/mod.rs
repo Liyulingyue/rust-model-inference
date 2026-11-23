@@ -358,6 +358,8 @@ impl<'a> Kernel for BF16Kernel<'a> {
                     n_in,
                     n_out,
                     n_tokens,
+                    row_start,
+                    row_end,
                 );
             }
             return true;
@@ -430,7 +432,12 @@ mod tests {
     }
 
     #[test]
-    fn bf16_kernel_batched_matches_single_rows() {
+    fn bf16_kernel_batched_rows_respects_row_range() {
+        // Mirrors the shared dispatcher (src/ops/kernel/mod.rs): each pool
+        // worker calls forward_batched_rows with a DISJOINT row range over a
+        // full-size output buffer. A kernel that writes rows outside
+        // [row_start, row_end) races with the worker that owns them
+        // (docs/develop/PARALLEL_MATMUL_SAFETY.md §4).
         let n_tokens = 4;
         let n_in = 13;
         let n_out = 3;
@@ -443,10 +450,8 @@ mod tests {
             .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
             .collect();
         let kernel = BF16Kernel::new(&weight);
-        let mut actual = vec![0.0f32; n_tokens * n_out];
+        let mut output = vec![0.0f32; n_tokens * n_out];
         let mut expected = vec![0.0f32; n_tokens * n_out];
-
-        kernel.forward_batched(&input, &mut actual, n_in, n_out);
         for token in 0..n_tokens {
             kernel.forward(
                 &input[token * n_in..(token + 1) * n_in],
@@ -456,6 +461,55 @@ mod tests {
             );
         }
 
-        assert_eq!(actual, expected);
+        let handled = kernel.forward_batched_rows(&input, &mut output, n_in, n_out, n_tokens, 0, 2);
+        assert!(handled, "kernel must opt in to the tiled path");
+
+        for token in 0..n_tokens {
+            // Rows inside [0, 2) carry the correct values…
+            assert_eq!(
+                output[token * n_out..token * n_out + 2],
+                expected[token * n_out..token * n_out + 2],
+                "token {token}: in-range rows are wrong"
+            );
+            // …and rows outside [0, 2) belong to another worker: untouched.
+            assert_eq!(
+                output[token * n_out + 2],
+                0.0,
+                "row 2 outside [0,2) was written by a [0,2) range call"
+            );
+        }
+    }
+
+    #[test]
+    fn bf16_kernel_batched_matches_single_rows() {
+        // n_tokens 2..9 covers the tail groups of the 4-token tiling
+        // (group_len < 4) alongside the full groups.
+        for &n_tokens in &[2usize, 3, 4, 5, 6, 7, 8, 9] {
+            let n_in = 13;
+            let n_out = 3;
+            let weight = bf16_bytes(
+                &(0..n_in * n_out)
+                    .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
+                    .collect::<Vec<_>>(),
+            );
+            let input: Vec<f32> = (0..n_tokens * n_in)
+                .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+                .collect();
+            let kernel = BF16Kernel::new(&weight);
+            let mut actual = vec![0.0f32; n_tokens * n_out];
+            let mut expected = vec![0.0f32; n_tokens * n_out];
+
+            kernel.forward_batched(&input, &mut actual, n_in, n_out);
+            for token in 0..n_tokens {
+                kernel.forward(
+                    &input[token * n_in..(token + 1) * n_in],
+                    &mut expected[token * n_out..(token + 1) * n_out],
+                    n_in,
+                    n_out,
+                );
+            }
+
+            assert_eq!(actual, expected, "n_tokens={n_tokens}");
+        }
     }
 }
