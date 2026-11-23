@@ -1,8 +1,4 @@
-use super::{
-    dit::{Cache, DIM},
-    math::*,
-    weights::Graph,
-};
+use super::{dit::Cache, math::*, weights::Graph};
 use crate::compute::linear::LinearExecutor;
 use crate::ops::nn::{gelu_approx_inplace, silu_inplace};
 
@@ -13,9 +9,14 @@ pub(super) fn refine<'a>(
     frame: usize,
     cache: &mut [Cache],
 ) -> Result<(), String> {
-    const D: usize = 768;
-    let tokens = stem.len() / DIM;
-    let mut e = linear(g, ex, "refiner.t_embed.mlp.0", &sinusoidal(833., 256))?;
+    let dim = g.spec.dims.dim;
+    let tokens = stem.len() / dim;
+    let mut e = linear(
+        g,
+        ex,
+        "refiner.t_embed.mlp.0",
+        &sinusoidal(g.spec.recipe.refine, 256),
+    )?;
     silu_inplace(&mut e);
     let e = linear(g, ex, "refiner.t_embed.mlp.2", &e)?;
     let mut se = e.clone();
@@ -24,22 +25,22 @@ pub(super) fn refine<'a>(
     for layer in 0..4 {
         let p = format!("refiner.stem_blocks.{layer}");
         let m = linear(g, ex, &format!("{p}.mod.lin"), &se)?;
-        let m = m.chunks_exact(D).collect::<Vec<_>>();
-        let mut z = norm(&x, D, 1e-5)?;
+        let m = m.chunks_exact(g.spec.dims.refiner_dim).collect::<Vec<_>>();
+        let mut z = norm(&x, g.spec.dims.refiner_dim, 1e-5)?;
         modulate(&mut z, m[0], m[1]);
         let qkv = linear(g, ex, &format!("{p}.qkv"), &z)?;
-        let mut q = Vec::with_capacity(tokens * D);
+        let mut q = Vec::with_capacity(tokens * g.spec.dims.refiner_dim);
         let mut k = q.clone();
         let mut v = q.clone();
-        for row in qkv.chunks_exact(3 * D) {
-            q.extend_from_slice(&row[..D]);
-            k.extend_from_slice(&row[D..2 * D]);
-            v.extend_from_slice(&row[2 * D..]);
+        for row in qkv.chunks_exact(3 * g.spec.dims.refiner_dim) {
+            q.extend_from_slice(&row[..g.spec.dims.refiner_dim]);
+            k.extend_from_slice(&row[g.spec.dims.refiner_dim..2 * g.spec.dims.refiner_dim]);
+            v.extend_from_slice(&row[2 * g.spec.dims.refiner_dim..]);
         }
         let a = attention(&q, &k, &v, 8, 96)?;
         let z = linear(g, ex, &format!("{p}.proj"), &a)?;
         residual(&mut x, &z, Some(m[2]));
-        let mut z = norm(&x, D, 1e-5)?;
+        let mut z = norm(&x, g.spec.dims.refiner_dim, 1e-5)?;
         modulate(&mut z, m[3], m[4]);
         let mut z = linear(g, ex, &format!("{p}.mlp.0"), &z)?;
         gelu_approx_inplace(&mut z);
@@ -49,31 +50,37 @@ pub(super) fn refine<'a>(
     x = affine_norm(g, "refiner.stem_norm", &x, 1e-5)?;
     let phi = linear(g, ex, "refiner.heads_grouped.phi_proj.768", &x)?;
     trace("fastframes.refiner.phi", &phi);
-    let start = frame * tokens * DIM;
-    let end = start + tokens * DIM;
+    let start = frame * tokens * dim;
+    let end = start + tokens * dim;
     for (layer, cache) in cache.iter_mut().enumerate() {
         let p = format!("refiner.heads.{layer}");
         let pk = linear(g, ex, &format!("{p}.proj_k"), &cache.k[start..end])?;
         let pv = linear(g, ex, &format!("{p}.proj_v"), &cache.v[start..end])?;
-        let mut joined = Vec::with_capacity(tokens * 3 * D);
+        let mut joined = Vec::with_capacity(tokens * 3 * g.spec.dims.refiner_dim);
         for i in 0..tokens {
             for data in [&pk, &pv, &phi] {
-                joined.extend_from_slice(&data[i * D..(i + 1) * D]);
+                joined.extend_from_slice(
+                    &data[i * g.spec.dims.refiner_dim..(i + 1) * g.spec.dims.refiner_dim],
+                );
             }
         }
         let mut h = linear(g, ex, &format!("{p}.fuse"), &joined)?;
         let m = linear(g, ex, &format!("{p}.mod"), &se)?;
-        h = norm(&h, D, 1e-5)?;
-        modulate(&mut h, &m[..D], &m[D..]);
+        h = norm(&h, g.spec.dims.refiner_dim, 1e-5)?;
+        modulate(
+            &mut h,
+            &m[..g.spec.dims.refiner_dim],
+            &m[g.spec.dims.refiner_dim..],
+        );
         let mut h = linear(g, ex, &format!("{p}.m0"), &h)?;
         gelu_approx_inplace(&mut h);
         let h = linear(g, ex, &format!("{p}.m2"), &h)?;
         let dk = linear(g, ex, &format!("{p}.dK"), &h)?;
         let dv = linear(g, ex, &format!("{p}.dV"), &h)?;
-        repair_keys(&mut cache.k[start..end], &dk, 128);
+        repair_keys(&mut cache.k[start..end], &dk, g.spec.head_dim());
         let scale = &g.floats[&format!("{p}.v_logscale")];
         for (i, (v, d)) in cache.v[start..end].iter_mut().zip(&dv).enumerate() {
-            *v = (*v + d) * scale[i % DIM].exp();
+            *v = (*v + d) * scale[i % dim].exp();
         }
         trace(
             &format!("fastframes.refiner.{layer}.k"),

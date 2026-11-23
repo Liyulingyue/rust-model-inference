@@ -10,14 +10,19 @@ use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
 
 pub(super) fn tokenizer(source: &dyn TensorSource) -> Result<tokenizers::Tokenizer, String> {
-    let json = source
-        .metadata("fastframes_l.tokenizer_json")
-        .and_then(MetaValue::to_string_val)
-        .ok_or("missing FF-L tokenizer JSON")?;
+    // Both variants share the pinned umT5 tokenizer; either key is accepted.
+    let json = ["fastframes_l", "fastframes_s"]
+        .iter()
+        .find_map(|variant| {
+            source
+                .metadata(&format!("{variant}.tokenizer_json"))
+                .and_then(MetaValue::to_string_val)
+        })
+        .ok_or("missing FastFrames tokenizer JSON")?;
     if format!("{:x}", Sha256::digest(json.as_bytes()))
         != "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
     {
-        return Err("FastFrames-L tokenizer SHA256 mismatch".into());
+        return Err("FastFrames tokenizer SHA256 mismatch".into());
     }
     let mut tokenizer =
         tokenizers::Tokenizer::from_bytes(json.as_bytes()).map_err(|e| e.to_string())?;
@@ -29,7 +34,7 @@ pub(super) fn tokenizer(source: &dyn TensorSource) -> Result<tokenizers::Tokeniz
         }))
         .map_err(|e| e.to_string())?;
     if tokenizer.get_vocab_size(true) != 256300 {
-        return Err("FastFrames-L tokenizer vocabulary mismatch".into());
+        return Err("FastFrames tokenizer vocabulary mismatch".into());
     }
     Ok(tokenizer)
 }

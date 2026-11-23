@@ -1,7 +1,9 @@
 # FastFrames-L（Experimental）
 
 `fastframes_l` 显式架构接入现有 CLI 和 `POST /v1/videos/generations`，复用原生
-Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。当前是**部分验收 / Experimental**：
+Rust 算子与 `LinearExecutor`，不新增可执行文件或加速库。同架构另承载
+FastFrames-S（1.3B Causal-Forcing++ 变体），见
+[FASTFRAMES_S.md](FASTFRAMES_S.md)。当前是**部分验收 / Experimental**：
 首次矩阵中，16×16 / 5 帧 BF16 的 CPU/Auto/严格 Vulkan 在 CLI/HTTP 各 411 个检查点和视频像素通过；
 F32 CPU/Auto/Vulkan 两入口也通过。F16 各后端两入口的检查点通过，但压缩后视频比较失败；Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K 数值对齐失败，54 个格式/后端/入口组合已跑完，12 个通过、42 个失败；480p 检查点通过，但压缩视频和 BF16 配方漂移超阈值。
 见 [验证记录](../../tools/oracle/fastframes_l/validation.md) 和

@@ -226,7 +226,7 @@ fn prompt_cleaning_matches_unicode_whitespace_entities_and_encoding_fixtures() {
 
 #[test]
 fn contract_expands_all_components_and_grouped_shapes() {
-    let shapes = weights::shapes();
+    let shapes = weights::shapes(&weights::Variant::L);
     assert_eq!(shapes["refiner.heads.39.dK.weight"], [5120, 768]);
     assert_eq!(shapes["dit.patch_embedding.weight"], [5120, 64]);
     assert_eq!(
@@ -235,6 +235,29 @@ fn contract_expands_all_components_and_grouped_shapes() {
     );
     assert_eq!(shapes["text.blocks.23.attn.q.weight"], [4096, 4096]);
     assert_eq!(shapes.len(), 1095 + 32 + 242 + 49 + 40 * 17);
+}
+
+#[test]
+fn s_contract_expands_the_1_3b_dit_and_variant_specs() {
+    let shapes = weights::shapes(&weights::Variant::S);
+    assert_eq!(shapes["refiner.heads.29.dK.weight"], [1536, 768]);
+    assert_eq!(shapes["dit.patch_embedding.weight"], [1536, 64]);
+    assert_eq!(shapes["text.blocks.23.attn.q.weight"], [4096, 4096]);
+    assert_eq!(shapes["dit.head.head.weight"], [64, 1536]);
+    assert_eq!(shapes["dit.blocks.29.ffn.0.weight"], [8960, 1536]);
+    assert!(!shapes.contains_key("decoder.bridge.weight"));
+    // The FF-S recipe: fractional first-frame timesteps, sequential noise.
+    let spec = weights::Variant::S.spec();
+    assert_eq!(spec.dims.layers, 30);
+    assert_eq!(spec.dims.heads, 12);
+    assert_eq!(spec.head_dim(), 128);
+    assert!(matches!(spec.recipe.noise, weights::NoiseMode::Sequential));
+    assert_eq!(spec.recipe.first_frame[1], 937.5);
+    assert_eq!(spec.recipe.timesteps[1], 833.3333129882812);
+    // FF-L keeps its whole-frame pregenerated transition layout.
+    let l = weights::Variant::L.spec();
+    assert!(matches!(l.recipe.noise, weights::NoiseMode::Pregenerated));
+    assert_eq!(l.dims.layers, 40);
 }
 
 #[test]

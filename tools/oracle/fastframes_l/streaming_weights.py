@@ -31,7 +31,14 @@ class StreamingWeights:
                 parts.append(part.T if suffix == '.weight' else part)
             value = torch.stack(parts).reshape(original.shape)
         else:
-            tensor = self.tensors[f'{component}.{name}']
+            key = f'{component}.{name}'
+            # FF-S's converter prefixes the plain decoder's keys with
+            # ``pixel_head.``; FF-L's bridged decoder names them directly.
+            if component == 'decoder' and key not in self.tensors:
+                alternative = f'decoder.pixel_head.{name}'
+                if alternative in self.tensors:
+                    key = alternative
+            tensor = self.tensors[key]
             array = gguf.quants.dequantize(tensor.data, tensor.tensor_type).reshape(tuple(original.shape))
             value = torch.from_numpy(np.array(array, dtype=np.float32, copy=True))
         return value.to(device=self.device, dtype=self.dtype)
@@ -49,18 +56,19 @@ class StreamingWeights:
             self.load(module, component, deferred=('blocks.',) if component in {'dit', 'text'} else ())
 
     def attach_blocks(self, dit, text, fast):
+        """Stream per-block weights; ``fast`` (fused QKV/patch views) is optional."""
         for component, model in [('dit', dit), ('text', text)]:
             for index, block in enumerate(model.blocks):
                 def before(module, args, component=component, index=index):
                     self.load(module, component, f'blocks.{index}.')
-                    if component == 'dit':
+                    if component == 'dit' and fast is not None:
                         sa = module.self_attn
                         fast.qkv[index] = (torch.cat([sa.q.weight, sa.k.weight, sa.v.weight]).detach(),
                                            torch.cat([sa.q.bias, sa.k.bias, sa.v.bias]).detach())
                     self.refresh()
 
                 def after(module, args, output, component=component, index=index):
-                    if component == 'dit':
+                    if component == 'dit' and fast is not None:
                         fast.qkv[index] = None
                     module.to_empty(device='meta')
 
