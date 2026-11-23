@@ -2232,7 +2232,7 @@ dense 路径强。
 - **8B-Q8_0 的 GPU 运行峰值 RSS 约 18.7 GB**，超过 15 GiB 预算；
   一次性 CLI 同时持有 mmap 权重和显存副本是原因之一。
 
-### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍
+### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍 — ✅ 已完成（2026-11-23）
 
 接着 TODO-031 往下挖，发现 Q4_K 家族在 dense Vulkan 路径上缺少向量化 kernel，
 这是 Q4_K_M 特别慢的**结构性**原因。
@@ -2269,7 +2269,24 @@ DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，
 Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
 Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。
 
-### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率
+**完成记录（2026-11-23）**：五个 shader（`q4_k_matmul.comp`、
+`q4_k_matmul_cooperative.comp`、`q5_k_matmul.comp`、
+`q5_k_matmul_cooperative.comp`、`q6_k_matmul.comp`）的权重读取全部重写为
+u32 word 级向量化（寄存器内 nibble/字节提取，没有用 buffer 声明，SSBO
+对齐风险为零），q5_k row 从每块 512 次字节载降到 44 个 word。AVX2
+oracle 位级公式逐 lane 派生并保留（含 Q6_K 的 correction 错位复刻、
+`hsum_ps` 树、浮点表达式顺序）。验证：`matmul_iq` 12-case 位级一致
+（真实权重，含 151936 行 token_embd）、`q4_k_cooperative_matches_row_kernel`
+两种 reduction 位级一致、`vk_ops_check --formats q4_k,q5_k,q6_k`
+`max_abs=0`、全量 lib 测试与基线一致（1814/25 预存）。E2E（0.6B
+UD-Q3_K_XL）：GPU 常驻生成 54.8 t/s vs CPU 62.3 t/s（17.6x 病理消除）；
+`qwen3.rs` eligibility 黑名单删除，UD-Q3_K_XL / UD-Q2_K_XL（5×Q4K
+attn_v）首次全常驻。已知边界：长 prompt（Q3_K_XL 约 >380 token）+ f16
+KV 时 admission contract 会保守回退 CPU——这是预存的 GPU f16-KV
+attention 数值发散（UD-IQ1_S 在 1400 token 同样触发，与本次 kernel 无关），
+f32 KV 或短 prompt 全通过。
+
+### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率 — ✅ 已完成（2026-11-23，并入 TODO-032）
 
 接着 TODO-032，真的去写了一个 rows==1 的 split-K GEMV（`q4_k_matmul.comp`
 里新增分支：rows==1 时不让 64 个 lane 各领一个输出行，而是让 64 个 lane
@@ -2306,6 +2323,13 @@ Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
   scale 提取外提提速 2.3~2.6 倍（位精确）；
 - rows=1 的 Q4_K（MoE decode、单 token）仍然只有 0.98 GB/s，
   继续走 `7750eeb` 的 CPU 门控。
+
+**完成记录（2026-11-23）**：按本条诊断的方向（weight 读取向量化）与
+TODO-032 合并实施——所有 Q4_K/Q5_K/Q6_K kernel 的 `weight_byte()`
+逐字节提取已消灭，改为 u32 word 载 + 寄存器级提取（Q6_K 用两词滑窗
+处理 210B 块的 mod4 错位）。单发 matvec 的 wall 现在被提交延迟主导
+（~0.35ms），不再是 2.11ms 的字节级访问病理；0.98 GB/s 指标对应的
+kernel 已不存在。位级对齐见 TODO-032 的完成记录。
 
 ### TODO-034: Z-Image GPU 路径罕见地不可复现（同 seed 约 1/20 次输出不同）
 
@@ -4604,7 +4628,7 @@ kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 **关联**：`src/models/diffusion/ernie_image/{gpu.rs,dit.rs,mod.rs}`、
 `src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
 `src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
-[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
+[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍---已完成2026-11-23)。
 
 ### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
 

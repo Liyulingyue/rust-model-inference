@@ -42,29 +42,18 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
         return Err("unsupported Vulkan weight format: no weights".into());
     }
     for &format in &facts.weight_formats {
-        let gpu = GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
-        // Q4_K/Q5_K/Q6_K only have a single scalar matmul shader: the Q8_0
-        // operator gets a DP4A replacement plus a tiled variant, these do not.
-        // Measured on Qwen3-8B-Q4_K_M, the resident dense path ran 17.6x
-        // slower than the CPU (45.8s vs 2.6s wall, prefill 0.4 vs 13.0 t/s)
-        // because every projection falls to that scalar kernel. Until those
-        // families get a vectorised kernel the per-layer projections must
-        // stay on the CPU.
-        if matches!(
-            gpu,
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K
-        ) {
-            return Err(format!(
-                "{format:?} weights have no vectorised Vulkan matmul kernel; \
-                 the resident decoder is far slower than the CPU for this model"
-            ));
-        }
+        // Q4_K/Q5_K/Q6_K used to gate the resident decoder out: their
+        // matmul shaders read weights byte-by-byte, which measured 17.6x
+        // slower than the CPU on Qwen3-8B-Q4_K_M (45.8s vs 2.6s wall,
+        // prefill 0.4 vs 13.0 t/s). The row and cooperative kernels now
+        // load weights as u32 words with in-register nibble extraction,
+        // verified bit-identical to the CPU AVX2 oracle, so these formats
+        // run resident like every other k-quant family.
+        GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
     }
-    // The output head is exempt from that gate: it runs one matmul per
-    // token (not one per layer projection), so the scalar Q4_K/Q5_K/Q6_K
-    // shader there does not dominate the step. This is what lets mixed UD
-    // files with a tied Q5_K/Q6_K token_embd (UD-IQ1_S, UD-Q2_K_XL) go
-    // fully resident once their dense projections are all vectorised.
+    // The output head follows the same eligibility rule; it runs one matmul
+    // per token (not one per layer projection), so mixed UD files with a tied
+    // Q5_K/Q6_K token_embd (UD-IQ1_S, UD-Q2_K_XL) go fully resident too.
     GpuWeightFormat::from_ggml_type(facts.output_weight_format)
         .map_err(|error| error.to_string())?;
     if facts
@@ -442,15 +431,15 @@ mod tests {
     }
 
     #[test]
-    fn scalar_k_quant_dense_projections_stay_on_cpu() {
+    fn scalar_k_quant_dense_projections_go_resident() {
+        // Q4_K/Q5_K/Q6_K dense projections used to be rejected because the
+        // byte-wise matmul shaders made the resident decoder far slower than
+        // the CPU. The word-wise kernels closed that gap, so a Q4_K dense
+        // projection is now eligible (the blacklist test used to assert the
+        // opposite).
         let mut facts = eligible_facts();
         facts.weight_formats[7] = GGMLType::Q4K;
-        let error = check_eligibility(&facts)
-            .expect_err("dense scalar-kernel projections must be rejected");
-        assert!(
-            error.contains("no vectorised Vulkan matmul kernel"),
-            "{error}"
-        );
+        assert_eq!(check_eligibility(&facts), Ok(()));
     }
 
     #[test]
