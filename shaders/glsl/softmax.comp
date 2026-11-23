@@ -2,6 +2,14 @@
 #extension GL_GOOGLE_include_directive : require
 #include "f16_rounding.glsl"
 
+// The CPU reference (`softmax_inplace`) computes `exp` with the host's
+// glibc `expf`, whose 0.502-ulp error disagrees with the correctly rounded
+// `exp_accurate` by one ulp on rare arguments. When the scaled probability
+// lands exactly on an F16 tie, the two round to different probabilities,
+// and the difference survives into the logits. So the kernel transcribes
+// glibc's `expf` instead of computing a more accurate exponential.
+#include "glibc_expf.glsl"
+
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
@@ -21,8 +29,6 @@ shared float partial[64];
 shared float partial_error[64];
 shared float row_max;
 shared float inverse_sum;
-
-#include "exp_accurate.glsl"
 
 void add_pair(
     inout float high,
@@ -64,7 +70,7 @@ void main() {
     float sum_error = 0.0;
     for (uint index = lane; index < visible; index += 64u) {
         float score = uintBitsToFloat(arena.data[base + index]);
-        float value = exp_accurate(score - row_max);
+        float value = glibc_expf(score - row_max);
         arena.data[base + index] = floatBitsToUint(value);
         add_pair(sum, sum_error, value, 0.0);
     }

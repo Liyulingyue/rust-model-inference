@@ -292,8 +292,16 @@ mod gpu_cpu_parity {
                 continue;
             }
 
+            // Pseudo-random activations: real streams are irrational-ish f32s,
+            // while the historical (i%97-48)/32 pattern only produces 97 exact
+            // binary fractions that never sit on a rounding boundary.
+            let mut lcg = 0x2f6e2b1u32;
             let input: Vec<f32> = (0..n_in)
-                .map(|i| (((i * 31 + 7) % 97) as f32 - 48.0) / 32.0)
+                .map(|_| {
+                    lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    let unit = (lcg >> 8) as f32 / 16_777_216.0;
+                    unit * 3.0 - 1.5
+                })
                 .collect();
 
             // CPU reference: the AVX2 kernel over the whole tensor.
@@ -395,6 +403,149 @@ mod gpu_cpu_parity {
                 );
                 eprintln!("[iq-gpu] {label}: rows=2 row kernel bit-identical to CPU AVX2");
             }
+        }
+    }
+
+    /// Replay real activation rows dumped from the CPU reference prefill
+    /// (`RMI_DUMP_NORMED_LAYER`/`RMI_DUMP_NORMED_DIR`) through the production
+    /// Q5_K V projection. Random activations pass bit-exactly while the real
+    /// layer-23 stream flips two F16 cache entries, so the real values are
+    /// the only way to reproduce a value-dependent divergence.
+    #[test]
+    fn q5_k_v_projection_replays_dumped_activations_bitwise() {
+        use crate::core::tensor::GGMLType;
+        let context = match VulkanContext::new() {
+            Ok(ctx) => ctx,
+            Err(_) => return,
+        };
+        if context.is_software_icd() {
+            eprintln!("[skip] software ICD detected");
+            return;
+        }
+        let (dir, layer) = match (
+            std::env::var("RMI_DUMP_NORMED_DIR"),
+            std::env::var("RMI_DUMP_NORMED_LAYER"),
+        ) {
+            (Ok(dir), Ok(layer)) => (std::path::PathBuf::from(dir), layer),
+            _ => {
+                eprintln!("[skip] RMI_DUMP_NORMED_DIR/LAYER not set");
+                return;
+            }
+        };
+        let prefix = format!("normed_L{layer}_");
+        let mut chunks: Vec<(usize, usize, Vec<u8>)> = Vec::new();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => panic!("dump dir {dir:?} unreadable: {error}"),
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&prefix) || !name.ends_with(".f32") {
+                continue;
+            }
+            let middle = name
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".f32"))
+                .unwrap_or_default();
+            let mut base = None;
+            let mut rows = None;
+            for part in middle.split('_') {
+                if let Some(value) = part.strip_prefix("base") {
+                    base = value.parse::<usize>().ok();
+                }
+                if let Some(value) = part.strip_prefix("rows") {
+                    rows = value.parse::<usize>().ok();
+                }
+            }
+            if let (Some(base), Some(rows)) = (base, rows) {
+                match std::fs::read(entry.path()) {
+                    Ok(bytes) => chunks.push((base, rows, bytes)),
+                    Err(error) => panic!("dump {name} unreadable: {error}"),
+                }
+            }
+        }
+        if chunks.is_empty() {
+            panic!("{dir:?} holds no {prefix}*.f32 dumps");
+        }
+        chunks.sort_by_key(|(base, _, _)| *base);
+
+        let path = "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-Q3_K_XL.gguf";
+        let loader = match GGUFLoader::from_file(path) {
+            Ok(loader) => loader,
+            Err(_) => panic!("{path} not present"),
+        };
+        let tensor_name = format!("blk.{layer}.attn_v.weight");
+        let tensor = loader
+            .tensors()
+            .iter()
+            .find(|t| t.name == tensor_name)
+            .unwrap_or_else(|| panic!("{path}: no {tensor_name} tensor"));
+        assert_eq!(tensor.ggml_type, GGMLType::Q5K);
+        let n_in = tensor.dims[0] as usize;
+        let n_out = tensor.dims[1] as usize;
+        let weight = loader.tensor_slice(&tensor_name).unwrap();
+        let format = GpuWeightFormat::Q5_K;
+        let (block_elements, block_bytes, _) = format.layout();
+        assert_eq!(weight.len(), n_out * (n_in / block_elements) * block_bytes);
+        let cpu_fn = cpu_iq_vec_dot(format);
+        let row_bytes = n_in / block_elements * block_bytes;
+
+        for (base, rows, bytes) in chunks {
+            assert_eq!(bytes.len(), rows * n_in * 4, "dump base {base}");
+            let input: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect();
+            let mut cpu_output = vec![0.0f32; rows * n_out];
+            for row in 0..rows {
+                let q8k =
+                    crate::ops::quant::quantize_row_q8_k(&input[row * n_in..(row + 1) * n_in]);
+                for (out_row, out) in cpu_output[row * n_out..(row + 1) * n_out]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    *out = cpu_fn(&weight[out_row * row_bytes..], &q8k);
+                }
+            }
+            let mut gpu_output = vec![0.0f32; rows * n_out];
+            match matmul_iq(
+                &context,
+                format,
+                weight,
+                &input,
+                rows,
+                n_in,
+                n_out,
+                &mut gpu_output,
+            ) {
+                Ok(()) => {}
+                Err(VulkanError::UnsupportedShape(e)) => {
+                    panic!("dump base {base} UnsupportedShape: {e}");
+                }
+                Err(error) => panic!("dump base {base} GPU matmul failed: {error}"),
+            }
+            let mut mismatches = 0usize;
+            for (i, (g, c)) in gpu_output.iter().zip(cpu_output.iter()).enumerate() {
+                if g.to_bits() != c.to_bits() {
+                    mismatches += 1;
+                    if mismatches <= 8 {
+                        eprintln!(
+                            "dump base {base} row {} out {}: gpu={g} ({:08x}) cpu={c} ({:08x})",
+                            i / n_out,
+                            i % n_out,
+                            g.to_bits(),
+                            c.to_bits()
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                mismatches,
+                0,
+                "dump base {base}: GPU vs CPU {mismatches}/{} differ",
+                rows * n_out
+            );
+            eprintln!("[v-proj] base {base} rows {rows}: bit-identical to CPU AVX2");
         }
     }
 }

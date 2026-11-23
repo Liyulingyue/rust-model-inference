@@ -2403,6 +2403,63 @@ abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
 同时记录：unified 分支的 decoder 路径比 `main` 快 6 倍以上
 （8B Q8_0 generation 5.1 t/s vs 0.8 t/s），这是该分支的目标，回归要盯住这条线。
 
+**2026-11-23 新证据（来自 TODO-032 收尾时的 E2E）**：长 prompt + f16 KV 的
+admission contract 失败是**可稳定复现、与权重量化格式无关**的——0.6B 上
+三档量化（UD-IQ1_S / UD-Q2_K_XL / UD-Q3_K_XL）在长 prompt 下全部触发
+`model logit mismatch`，误差随 prompt 长度近似线性增长：
+
+| 模型（0.6B） | prompt 长度 | KV | contract | rel |
+|---|---|---|---|---|
+| UD-Q3_K_XL | ~700 tok | f16 | 失败 | 2.4e-2 |
+| UD-Q3_K_XL | ~380 tok | f16 | 失败 | 1.2e-2 |
+| UD-Q3_K_XL | ~120 tok | f16 | 通过 | - |
+| UD-Q3_K_XL | ~700 tok | **f32** | **通过** | - |
+| UD-Q2_K_XL | ~1400 tok | f16 | 失败 | 2.5e-2 |
+| UD-IQ1_S（不含 Q4/5/6_K dense） | ~1400 tok | f16 | 失败 | 3.9e-3 |
+
+UD-IQ1_S 在改动前就是全常驻合格模型，其 dense 投影不含 Q4_K/Q5_K/Q6_K，
+**说明发散源不在 k-quant matmul，而在 GPU 的 f16-KV attention 计算路径**。
+疑点落点：GPU 恒走 `AttentionMode::PreparedF16`（`src/vulkan/qwen3.rs:199`），
+CPU 参考会话硬编码 `KvFormat::F16`（`src/models/qwen3/trunk/prefill.rs:367`），
+`attention_dot_mode`（`src/vulkan/ops.rs:8044`）在 x86+AVX2+F16C 走模式 8，
+另有 `ggml-f16-dot-parity` feature 分支——f16 dot 归约的舍入差随序列长度
+复利，是第一假设。TODO-036 的 4B（hidden 2560/36 层）大概率是同一根因
+在另一个形状上的放大。诊断工具已就绪：f32/f16-KV 对照、prompt 长度二分、
+`vk_ops_check` 算子级对拍。
+
+**2026-11-23 根因定位并修复（softmax 的 exp 精度差，不是 f16 dot）**：逐层
+trace + 算子重放（`check_attention_replay_dumped`，`src/vulkan/ops.rs`，
+`RMI_ATTENTION_REPLAY_DIR` 触发）把发散收敛到**单个 softmax 概率位翻转**：
+
+- 层 22、chunk base=128、row 28、head 15、token 41：score−max 后的
+  e^x（Decimal 80 位真值）落在 f32 中点下方 7.7e-5 ULP——正确舍入值是
+  `0x3990aee9`（GPU `exp_accurate` 算的就是它），而 CPU 参考用的 glibc
+  `expf` 有 0.502 ULP 误差、返回 `0x3990aeea`。两者差 1 ULP。
+- 该概率 `exp × scale` 的 f32 积恰好落在 **F16 舍入中点**（`0x39348000`），
+  RTE 下 GPU 翻到 `09a4`、CPU 翻到 `09a5`。这个 1-ULP 概率翻转经后续层
+  复利成全部 123 处 attention 输出差异，直至 logit mismatch。
+- 即：**GPU 的 `exp_accurate` 数学上是对的，但 contract 要求它逐位复现
+  CPU 的 glibc `expf`**。上文「f16 dot 归约舍入差复利」的假设被证伪
+  （scores 阶段 0 差异；f16 dot 逐位一致）。
+
+修复：`shaders/glsl/glibc_expf.glsl`（从 `nemotron_h_ssm_libm.glsl` 提取的
+glibc `e_expf` 精确转录，真 GLSL `double`，Python 对拍 glibc 0/200000 差异），
+`softmax.comp` / `softmax_f32.comp` 的 `exp_accurate` 全部换成 `glibc_expf`；
+`nemotron_h_ssm_libm.glsl` 改为 include 共享同一份转录（SPIR-V 指令流验证
+逐位等价）。两个 softmax record 管线随之需要 `shaderFloat64`，按 Nemotron
+SSM 的既有模式加了 pipeline 占位 + recorder 拒绝（不支持 f64 的设备会走
+contract 失败 → CPU 回退，而不是 pipeline 创建整体失败）。
+
+验证：重放四级全部 0 差异；381-token UD-Q3_K_XL 与 UD-Q2_K_XL 端到端
+contract 通过（`[contract] KV bit-exact across all layers`）；lib 套件
+1815 pass / 25 pre-existing fail（与基线同名集合）。
+
+遗留（同 exp 类、后续单独处理）：`attention_values.comp` / `timestral.comp`
+仍直接调 `exp_accurate`（当前路径未触发差异，bisect 证明 values kernel 在
+PreparedF16 下逐位一致）；`silu_exp.glsl` 尾部 `exp_reference` 走
+`exp_accurate`（spec constant 默认 false）与 CPU 的 glibc expf 同属潜在
+类；4B 原始 Q8_0 案例另有 `q8_matvec` 5.96e-8 的真实 kernel 差异待收口。
+
 ### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
 
 Qwen3-0.6B Q8_0，20 核 aarch64，greedy，64 token：
