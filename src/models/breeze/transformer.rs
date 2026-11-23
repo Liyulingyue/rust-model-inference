@@ -520,8 +520,8 @@ fn rope(x: &mut [f32], hd: usize, pos: usize, freq: &[f32]) {
     // Pre-compute a bf-quantised cos/sin table once per call (matches
     // the upstream `bf(angle.cos())` / `bf(angle.sin())` round-trips)
     // and delegate the per-head rotation to the SIMD-capable
-    // `rope_neox_inplace_with_table` helper.  See TODO-007 for the
-    // derivation history: the previous hand-written AVX2 SIMD path
+    // `rope_neox_inplace_with_table` helper.  The derivation history: the
+    // previous hand-written AVX2 SIMD path
     // gated behind `cfg(any())` produced 7-frame garbage output
     // because the per-lane bf-round emulation diverged from scalar;
     // the new wrapper fixes that by matching the scalar op order

@@ -20,6 +20,8 @@ use std::borrow::Cow;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512;
 pub mod ggml;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
@@ -225,11 +227,14 @@ impl Kernel for F32Kernel<'_> {
     }
 
     fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
+        if cfg!(target_arch = "x86_64") && crate::ops::has_avx512_fma() && n_in % 16 == 0 {
+            return true;
+        }
         n_in % 8 == 0 && cfg!(target_arch = "x86_64") && crate::ops::has_avx2_fma()
     }
 
-    /// Token-tiled batching for the AVX2 path (same gate as the per-token
-    /// row kernel); other paths keep the per-token loop.
+    /// Token-tiled batching: the AVX-512 (zmm) path when `n_in % 16 == 0`,
+    /// otherwise the AVX2 path (same gates as the per-token row kernel).
     fn forward_batched_rows(
         &self,
         input: &[f32],
@@ -242,6 +247,22 @@ impl Kernel for F32Kernel<'_> {
     ) -> bool {
         #[cfg(target_arch = "x86_64")]
         {
+            if n_in % 16 == 0 && crate::ops::has_avx512_fma() {
+                let weight_bytes: &[u8] = bytemuck::cast_slice(&self.weight);
+                unsafe {
+                    avx512::matmul_f32_vs_f32_avx512_tiled(
+                        weight_bytes,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
             if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
                 let weight_bytes: &[u8] = bytemuck::cast_slice(&self.weight);
                 unsafe {
@@ -292,6 +313,17 @@ pub(crate) fn forward_f32_rows_dispatch(
 ) {
     #[cfg(target_arch = "x86_64")]
     {
+        if n_in % 16 == 0 && crate::ops::has_avx512_fma() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                let weight_bytes: &[u8] = bytemuck::cast_slice(weight);
+                unsafe {
+                    avx512::matmul_f32_vs_f32_avx512(weight_bytes, input, my_out, n_in, start, end);
+                    return;
+                }
+            }
+        }
         if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
             let (start, end) = scalar::row_range(n_out, ith, nth);
             if end > start {

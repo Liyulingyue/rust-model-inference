@@ -90,21 +90,25 @@ macro_rules! avx2_matmul_packed {
                     let w_lo128 = $unpack_4(w_ptr, row_byte, i);
                     let zero = _mm256_setzero_ps();
                     let w_f = _mm256_insertf128_ps(zero, w_lo128, 0);
-                    let x_f = _mm256_loadu_ps(i_ptr.add(i));
+                    let x_f = _mm256_insertf128_ps(zero, _mm_loadu_ps(i_ptr.add(i)), 0);
                     acc0 = _mm256_fmadd_ps(w_f, x_f, acc0);
                     i += 4;
                 }
+                // Scalar tail: a lane-wide FMA into the accumulator would be
+                // counted once per lane by the horizontal sum, so the tail
+                // keeps its own accumulator instead.
+                let mut tail_sum = 0.0f32;
                 while i < n_in {
                     let w_val = $scalar_unpack(w_ptr, row_byte, i);
                     let x_val = *i_ptr.add(i);
-                    acc0 = _mm256_fmadd_ps(_mm256_set1_ps(w_val), _mm256_set1_ps(x_val), acc0);
+                    tail_sum = w_val.mul_add(x_val, tail_sum);
                     i += 1;
                 }
 
                 let total = unsafe {
                     $crate::ops::kernel::simd_avx2::hsum256(acc0)
                         + $crate::ops::kernel::simd_avx2::hsum256(acc1)
-                };
+                } + tail_sum;
                 *out_ptr.add(out_local) = total;
                 out_local += 1;
             }
@@ -180,25 +184,24 @@ macro_rules! avx2_matmul_packed_tiled {
                                 let w_lo128 = $unpack_4(w_ptr, row_byte, i);
                                 let zero = _mm256_setzero_ps();
                                 let w_f = _mm256_insertf128_ps(zero, w_lo128, 0);
-                                let x_f = _mm256_loadu_ps(i_ptr.add(i));
+                                let x_f = _mm256_insertf128_ps(zero, _mm_loadu_ps(i_ptr.add(i)), 0);
                                 acc0 = _mm256_fmadd_ps(w_f, x_f, acc0);
                                 i += 4;
                             }
+                            // Scalar tail: same separate accumulator as the
+                            // per-token kernel (see the comment there).
+                            let mut tail_sum = 0.0f32;
                             while i < n_in {
                                 let w_val = $scalar_unpack(w_ptr, row_byte, i);
                                 let x_val = *i_ptr.add(i);
-                                acc0 = _mm256_fmadd_ps(
-                                    _mm256_set1_ps(w_val),
-                                    _mm256_set1_ps(x_val),
-                                    acc0,
-                                );
+                                tail_sum = w_val.mul_add(x_val, tail_sum);
                                 i += 1;
                             }
 
                             let total = unsafe {
                                 $crate::ops::kernel::simd_avx2::hsum256(acc0)
                                     + $crate::ops::kernel::simd_avx2::hsum256(acc1)
-                            };
+                            } + tail_sum;
                             *out_row.add(token * n_out) = total;
                         }
                     }

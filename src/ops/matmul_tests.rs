@@ -834,7 +834,7 @@ fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
 ///
 /// The comparison is deliberately against f64 and not against ggml: this is the
 /// path the Vulkan operator check uses as its reference, and a reference that is
-/// itself off by an f16 ulp cannot certify anything finer than that. TODO-024.
+/// itself off by an f16 ulp cannot certify anything finer than that.
 #[cfg(all(target_arch = "aarch64", not(feature = "ggml-f16-dot-parity")))]
 #[test]
 fn neon_f16_attention_dot_accumulates_in_f32() {

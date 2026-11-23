@@ -13,6 +13,7 @@ pub(crate) struct EligibilityFacts {
     pub(crate) has_qkv_bias: bool,
     pub(crate) rope: Qwen3Rope,
     pub(crate) weight_formats: Vec<GGMLType>,
+    pub(crate) output_weight_format: GGMLType,
     pub(crate) gate_up_formats: Vec<[GGMLType; 2]>,
 }
 
@@ -41,23 +42,20 @@ pub(crate) fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> 
         return Err("unsupported Vulkan weight format: no weights".into());
     }
     for &format in &facts.weight_formats {
-        let gpu = GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
-        // Q4_K/Q5_K/Q6_K only have a single scalar matmul shader: the Q8_0
-        // operator gets a DP4A replacement plus a tiled variant, these do not.
-        // Measured on Qwen3-8B-Q4_K_M, the resident dense path ran 17.6x
-        // slower than the CPU (45.8s vs 2.6s wall, prefill 0.4 vs 13.0 t/s)
-        // because every projection falls to that scalar kernel. Until those
-        // families get a vectorised kernel they must stay on the CPU.
-        if matches!(
-            gpu,
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K
-        ) {
-            return Err(format!(
-                "{format:?} weights have no vectorised Vulkan matmul kernel; \
-                 the resident decoder is far slower than the CPU for this model"
-            ));
-        }
+        // Q4_K/Q5_K/Q6_K used to gate the resident decoder out: their
+        // matmul shaders read weights byte-by-byte, which measured 17.6x
+        // slower than the CPU on Qwen3-8B-Q4_K_M (45.8s vs 2.6s wall,
+        // prefill 0.4 vs 13.0 t/s). The row and cooperative kernels now
+        // load weights as u32 words with in-register nibble extraction,
+        // verified bit-identical to the CPU AVX2 oracle, so these formats
+        // run resident like every other k-quant family.
+        GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
     }
+    // The output head follows the same eligibility rule; it runs one matmul
+    // per token (not one per layer projection), so mixed UD files with a tied
+    // Q5_K/Q6_K token_embd (UD-IQ1_S, UD-Q2_K_XL) go fully resident too.
+    GpuWeightFormat::from_ggml_type(facts.output_weight_format)
+        .map_err(|error| error.to_string())?;
     if facts
         .gate_up_formats
         .iter()
@@ -135,7 +133,9 @@ impl Qwen3VulkanSession {
         context
             .validate_qwen3_core_contract()
             .map_err(VulkanError::UnsupportedShape)?;
-        let contracts = required_activation_contracts(&facts.weight_formats)
+        let mut contract_formats = facts.weight_formats.clone();
+        contract_formats.push(facts.output_weight_format);
+        let contracts = required_activation_contracts(&contract_formats)
             .map_err(VulkanError::UnsupportedShape)?;
         if contracts.q8_0 {
             context
@@ -242,7 +242,7 @@ fn dense_weights(model: &Qwen3Model) -> Result<DenseWeights<'_>, VulkanError> {
 }
 
 fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {
-    let mut weight_formats = Vec::with_capacity(model.config.n_layer * 7 + 1);
+    let mut weight_formats = Vec::with_capacity(model.config.n_layer * 7);
     let mut gate_up_formats = Vec::with_capacity(model.config.n_layer);
     for layer in 0..model.config.n_layer {
         for suffix in [
@@ -267,13 +267,11 @@ fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {
         ]);
     }
     let output_name = output_tensor_name(model);
-    weight_formats.push(
-        model
-            .source
-            .tensor_info(output_name)
-            .ok_or_else(|| format!("missing Qwen3 tensor {output_name}"))?
-            .ggml_type,
-    );
+    let output_weight_format = model
+        .source
+        .tensor_info(output_name)
+        .ok_or_else(|| format!("missing Qwen3 tensor {output_name}"))?
+        .ggml_type;
     Ok(EligibilityFacts {
         architecture: model.config.architecture.clone(),
         has_moe: model.config.moe.is_some(),
@@ -281,6 +279,7 @@ fn eligibility_facts(model: &Qwen3Model) -> Result<EligibilityFacts, String> {
         has_qkv_bias: model.config.has_qkv_bias,
         rope: model.config.rope,
         weight_formats,
+        output_weight_format,
         gate_up_formats,
     })
 }
@@ -308,7 +307,8 @@ mod tests {
             n_deepstack_layers: 0,
             has_qkv_bias: false,
             rope: Qwen3Rope::Neox,
-            weight_formats: vec![GGMLType::Q8_0; 198],
+            weight_formats: vec![GGMLType::Q8_0; 196],
+            output_weight_format: GGMLType::Q8_0,
             gate_up_formats: vec![[GGMLType::Q8_0, GGMLType::Q8_0]; 28],
         }
     }
@@ -409,15 +409,8 @@ mod tests {
             (
                 "weight format",
                 EligibilityFacts {
-                    // Q5_0 and Q5_1 have device kernels since the 30B-A3B
-                    // adaptation; Q2_K is still host-only.
-                    weight_formats: vec![GGMLType::Q2K],
-                    ..eligible_facts()
-                },
-            ),
-            (
-                "weight format",
-                EligibilityFacts {
+                    // Q2_K and Q3_K gained vectorised device kernels, so they
+                    // are eligible now; Q8K weights remain host-only.
                     weight_formats: vec![GGMLType::Q8K],
                     ..eligible_facts()
                 },
@@ -435,6 +428,30 @@ mod tests {
                 .expect_err("unsupported facts must be rejected")
                 .contains(message));
         }
+    }
+
+    #[test]
+    fn scalar_k_quant_dense_projections_go_resident() {
+        // Q4_K/Q5_K/Q6_K dense projections used to be rejected because the
+        // byte-wise matmul shaders made the resident decoder far slower than
+        // the CPU. The word-wise kernels closed that gap, so a Q4_K dense
+        // projection is now eligible (the blacklist test used to assert the
+        // opposite).
+        let mut facts = eligible_facts();
+        facts.weight_formats[7] = GGMLType::Q4K;
+        assert_eq!(check_eligibility(&facts), Ok(()));
+    }
+
+    #[test]
+    fn scalar_output_head_does_not_block_resident_decode() {
+        // UD-IQ1_S shape: vectorised IQ/Q2_K dense projections with a tied
+        // Q5_K token_embd as the output head.
+        let mut facts = eligible_facts();
+        facts.weight_formats = vec![GGMLType::IQ1_S; 196];
+        facts.weight_formats[56] = GGMLType::Q2K;
+        facts.output_weight_format = GGMLType::Q5K;
+        facts.gate_up_formats = vec![[GGMLType::IQ1_S, GGMLType::IQ1_S]; 28];
+        assert_eq!(check_eligibility(&facts), Ok(()));
     }
 
     #[test]
