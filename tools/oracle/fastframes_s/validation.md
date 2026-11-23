@@ -113,6 +113,15 @@ diagnostic size the device path pays per-projection upload/download on tiny
 matrices; larger resolutions remain unmeasured and no isolated-performance
 claim is made. Details in [performance.json](performance.json).
 
+## Rebase note
+
+After the shared-kernel commits #269 (AVX-512 zmm matmul) and #270 (Vulkan
+Q2_K/Q3_K shaders) landed on `main`, the branch was rebased onto `3a1e3b4`
+and the numerical gates re-run on that base: CPU 321/321 (worst `7.05e-06`)
+and strict Vulkan 321/321 (worst `6.67e-06`, 1,690 `backend=Vulkan` / 0
+`backend=Cpu` events) — identical to the pre-rebase numbers, now proven rather
+than assumed on the merged kernel state.
+
 ## Reproduction
 
 ```bash
