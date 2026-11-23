@@ -14,6 +14,8 @@ use super::Kernel;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 #[cfg(target_arch = "aarch64")]
@@ -76,6 +78,23 @@ impl<'a> BF16Kernel<'a> {
         }
         #[cfg(target_arch = "x86_64")]
         {
+            if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() {
+                let (start, end) = Self::row_range(n_out, ith, nth);
+                if end > start {
+                    let my_out = &mut output[start..end];
+                    unsafe {
+                        avx512::matmul_bf16_vs_f32_avx512(
+                            self.weight,
+                            input,
+                            my_out,
+                            n_in,
+                            start,
+                            end,
+                        );
+                        return;
+                    }
+                }
+            }
             if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
                 let (start, end) = Self::row_range(n_out, ith, nth);
                 if end > start {
@@ -201,6 +220,12 @@ pub fn matmul_bf16_vs_f32_range(
     let out = &mut output[row_start..row_end];
     #[cfg(target_arch = "x86_64")]
     {
+        if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() {
+            unsafe {
+                avx512::matmul_bf16_vs_f32_avx512(weight, input, out, n_in, row_start, row_end);
+            }
+            return;
+        }
         if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
             unsafe {
                 avx2::matmul_bf16_vs_f32_avx2(weight, input, out, n_in, row_start, row_end);
@@ -300,13 +325,23 @@ impl<'a> Kernel for BF16Kernel<'a> {
     }
 
     fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
-        !self.bf16_input
-            && n_in % 8 == 0
+        if self.bf16_input {
+            return false;
+        }
+        if cfg!(target_arch = "x86_64")
+            && crate::ops::has_avx512_fma()
+            && crate::ops::has_avx512bw()
+            && n_in % 16 == 0
+        {
+            return true;
+        }
+        n_in % 8 == 0
             && cfg!(target_arch = "x86_64")
             && crate::ops::has_avx2_fma()
     }
 
-    /// Token-tiled batching for the standard f32-input AVX2 path. The
+    /// Token-tiled batching for the standard f32-input path: the AVX-512
+    /// (zmm) kernel when `n_in % 16 == 0`, otherwise the AVX2 kernel. The
     /// bf16-input rounding contract (`use_scalar_reference`) keeps the
     /// per-token path.
     fn forward_batched_rows(
@@ -324,6 +359,21 @@ impl<'a> Kernel for BF16Kernel<'a> {
         }
         #[cfg(target_arch = "x86_64")]
         {
+            if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() {
+                unsafe {
+                    avx512::matmul_bf16_vs_f32_avx512_tiled(
+                        self.weight,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
             if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
                 unsafe {
                     avx2::matmul_bf16_vs_f32_avx2_tiled(

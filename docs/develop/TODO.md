@@ -7,7 +7,8 @@ investigation notes; the top half carries the at-a-glance priority list.
 
 CPU SIMD capability assumed throughout: see [SIMD extension inventory](#simd-extension-inventory)
 at the bottom of this file (AVX2 + FMA + F16C + AVX-VNNI on Intel Core Ultra 5 125H;
-NEON on aarch64; no AVX-512).
+NEON on aarch64; dev box 无 AVX-512，但 F32/BF16/F16 的 zmm matmul 已按运行时 gate
+接线并在 Xeon Silver 4410Y（Sapphire Rapids）实测——见 TODO-005 2026-11-23 补充).
 
 ---
 
@@ -704,6 +705,26 @@ BF16 / F16 / F32 三档精度 matmul 共享 `avx2_matmul_packed!` 宏。
 实测：Breeze `--quant f32` scalar 234s → AVX2 54s (4.3×)，`--quant f16` 47s → 31s (1.5×)。
 F32 与 BF16 md5 bit-exact (a7c5e3f5...)，三档精度 md5 都已记录 baseline。
 
+**2026-11-23 补充：AVX-512（zmm）接线（Sapphire Rapids 实测）**。新增
+`src/ops/kernel/simd_avx512.rs`（`avx512_matmul_packed!` / `avx512_matmul_packed_tiled!`
+宏，与 AVX2 宏同构的 16-lane 骨架）+ `f32/avx512.rs`、`bf16/avx512.rs`（+tiled）、
+`f16/avx512.rs`（仅 per-token；F16 tiled 的可移植 F16×F16 契约不变，见 TODO-019）。
+Dispatch：`n_in % 16 == 0 && has_avx512_fma()` 时优先 zmm，否则回落 AVX2（`n_in % 8`）；
+BF16 追加 `avx512bw`（`vpmovzxwd` zmm），F16 走 F16C ymm ×2 + `vinsertf64x4` 合并
+（不依赖 AVX512-FP16，Zen4 也可用）。门禁在 `src/ops/float.rs`（`has_avx512_fma` /
+`has_avx512bw`，`RMI_SCALAR=1` 同样能压掉）。
+测试：每档 vs scalar 容差对拍（small/large/tail 3x40）、zmm tiled 与 per-token
+位级一致（n_in=192 跨 32 行/32 token tile 边界）；顺带修复了共享 AVX2 宏的
+**潜在尾部 bug**（scalar 尾乘进 lane 累加器会被 hsum 按 lane 数重复计数；
+4-wide 尾 `_mm256_loadu_ps` 超 4 元素越界读——两者都在 `n_in % 8 != 0` 的直连调用才可达，
+dispatch 的 `n_in % 8 == 0` 门使生产路径从未走过，已加 n_in=42/44 回归测试锁住）。
+实测（Xeon Silver 4410Y，单线程，`--release` fat LTO，`avx512_vs_avx2_perf_probe`）：
+GEMV per-token **1.01×**（8MB 权重带宽 bound，符合预期）、tiled x64 1.11×、
+**L2 常驻 tiled x64 1.33×**（25.1 → 33.6 GFLOPS）；release-fast 下三者
+0.99×/1.05×/1.01×（见 fast-profile-iteration 的 profile 门槛说明）。
+结论：解码 GEMV 无收益，prefill/batched 有 1.1-1.33×；接线为 AVX-512 级机器
+（Granite Rapids / Zen 5）铺路，未测机器无回归（dispatch 按检测位回退）。
+
 ---
 
 ### TODO-006: Q8_0 Breeze output drifts ~1 ULP under SIMD activation/matmul
@@ -1308,7 +1329,7 @@ This project targets the following SIMD instruction sets:
 | Architecture | Extensions used | Detection | Files |
 |---|---|---|---|
 | **x86_64** (Intel Core Ultra 5 125H, AMD Zen 4, etc.) | SSE2 / SSE4.2 / AVX / **AVX2** / **FMA** / **F16C** / **BMI2** | `is_x86_feature_detected!` | `src/ops/simd_avx2.rs`, `src/ops/kernel/*/avx2*.rs` |
-| x86_64 (Skylake-X, Ice Lake, Sapphire Rapids, Zen 5) | + **AVX-512F** / **AVX-512BW** / **AVX-512VNNI** | runtime gate | (not yet wired) |
+| x86_64 (Skylake-X, Ice Lake, Sapphire Rapids, Zen 5) | + **AVX-512F** / **AVX-512BW** / **AVX-512VNNI** | runtime gate | `src/ops/kernel/simd_avx512.rs`（F32/BF16/F16 zmm matmul 已接线，见 TODO-005 2026-11-23 补充；VNNI 仍开放） |
 | x86_64 (Intel Alder Lake+, Zen 5) | + **AVX-VNNI** (`vpdpbusd`/`vpdpwssd`) | CPUID `avx_vnni` | `src/ops/kernel/q8_0/avxvnni.rs`（仅参考实现，实测更慢，dispatch 未接线——见 TODO-AVX-VNNI） |
 | x86_64 (Arrow Lake, Lunar Lake, Granite Rapids, Zen 5) | + **AVX-VNNI-INT8** (`vpdpbssd`) | CPUID `avxvnniint8` | (not yet wired — see TODO-AVX-VNNI below) |
 | **aarch64** | NEON / NEON-F16 / NEON-F32 | `is_aarch64_feature_detected!` | `src/ops/kernel/*/neon*.rs` |
