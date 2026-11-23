@@ -184,8 +184,7 @@ macro_rules! avx2_matmul_packed_tiled {
                                 let w_lo128 = $unpack_4(w_ptr, row_byte, i);
                                 let zero = _mm256_setzero_ps();
                                 let w_f = _mm256_insertf128_ps(zero, w_lo128, 0);
-                                let x_f =
-                                    _mm256_insertf128_ps(zero, _mm_loadu_ps(i_ptr.add(i)), 0);
+                                let x_f = _mm256_insertf128_ps(zero, _mm_loadu_ps(i_ptr.add(i)), 0);
                                 acc0 = _mm256_fmadd_ps(w_f, x_f, acc0);
                                 i += 4;
                             }

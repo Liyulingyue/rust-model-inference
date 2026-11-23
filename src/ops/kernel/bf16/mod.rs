@@ -335,9 +335,7 @@ impl<'a> Kernel for BF16Kernel<'a> {
         {
             return true;
         }
-        n_in % 8 == 0
-            && cfg!(target_arch = "x86_64")
-            && crate::ops::has_avx2_fma()
+        n_in % 8 == 0 && cfg!(target_arch = "x86_64") && crate::ops::has_avx2_fma()
     }
 
     /// Token-tiled batching for the standard f32-input path: the AVX-512

@@ -128,8 +128,9 @@ mod tests {
             .collect();
 
         let mut expected = vec![0.0f32; rows * n_out];
-        for (input_row, output_row) in
-            input.chunks_exact(n_in).zip(expected.chunks_exact_mut(n_out))
+        for (input_row, output_row) in input
+            .chunks_exact(n_in)
+            .zip(expected.chunks_exact_mut(n_out))
         {
             unsafe {
                 matmul_bf16_vs_f32_avx512(&weight, input_row, output_row, n_in, 0, n_out);
@@ -150,7 +151,15 @@ mod tests {
             );
         }
         for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(a.to_bits(), e.to_bits(), "row {}/{}: tiled={} per-token={}", i % n_out, i / n_out, a, e);
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "row {}/{}: tiled={} per-token={}",
+                i % n_out,
+                i / n_out,
+                a,
+                e
+            );
         }
     }
 }

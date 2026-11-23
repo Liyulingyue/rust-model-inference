@@ -18,7 +18,9 @@ use crate::avx512_matmul_packed;
 unsafe fn unpack_f16_16(w: *const u8, row_byte: usize, col: usize) -> std::arch::x86_64::__m512 {
     use std::arch::x86_64::*;
     let lo = _mm256_cvtph_ps(_mm_loadu_si128(w.add(row_byte + col * 2) as *const __m128i));
-    let hi = _mm256_cvtph_ps(_mm_loadu_si128(w.add(row_byte + (col + 8) * 2) as *const __m128i));
+    let hi = _mm256_cvtph_ps(_mm_loadu_si128(
+        w.add(row_byte + (col + 8) * 2) as *const __m128i
+    ));
     let with_hi = _mm512_insertf64x4(_mm512_setzero_pd(), _mm256_castps_pd(hi), 1);
     _mm512_castpd_ps(_mm512_insertf64x4(with_hi, _mm256_castps_pd(lo), 0))
 }
@@ -41,7 +43,13 @@ mod tests {
     use super::matmul_f16_vs_f32_avx512;
     use crate::ops::kernel::f16::scalar::forward_f16_rows;
 
-    fn assert_avx512_eq_scalar(label: &str, weight: &[u8], input: &[f32], n_in: usize, n_out: usize) {
+    fn assert_avx512_eq_scalar(
+        label: &str,
+        weight: &[u8],
+        input: &[f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
         let mut avx512_out = vec![0.0f32; n_out];
         let mut scalar_out = vec![0.0f32; n_out];
         unsafe {

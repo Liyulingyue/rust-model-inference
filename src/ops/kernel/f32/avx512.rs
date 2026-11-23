@@ -115,8 +115,9 @@ mod tests {
         let weight_bytes: &[u8] = bytemuck::cast_slice(&weight);
 
         let mut expected = vec![0.0f32; rows * n_out];
-        for (input_row, output_row) in
-            input.chunks_exact(n_in).zip(expected.chunks_exact_mut(n_out))
+        for (input_row, output_row) in input
+            .chunks_exact(n_in)
+            .zip(expected.chunks_exact_mut(n_out))
         {
             unsafe {
                 matmul_f32_vs_f32_avx512(weight_bytes, input_row, output_row, n_in, 0, n_out);
@@ -135,9 +136,17 @@ mod tests {
                 0,
                 n_out,
             );
-            }
+        }
         for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(a.to_bits(), e.to_bits(), "row {}/{}: tiled={} per-token={}", i % n_out, i / n_out, a, e);
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "row {}/{}: tiled={} per-token={}",
+                i % n_out,
+                i / n_out,
+                a,
+                e
+            );
         }
     }
 
@@ -147,14 +156,16 @@ mod tests {
     #[test]
     #[ignore]
     fn avx512_vs_avx2_perf_probe() {
+        use super::{matmul_f32_vs_f32_avx512, matmul_f32_vs_f32_avx512_tiled};
         use crate::ops::kernel::f32::avx2::matmul_f32_vs_f32_avx2;
         use crate::ops::kernel::f32::avx2::matmul_f32_vs_f32_avx2_tiled;
-        use super::{matmul_f32_vs_f32_avx512, matmul_f32_vs_f32_avx512_tiled};
 
         let n_in = 2048usize;
         let n_out = 1024usize;
         let tokens = 64usize;
-        let weight: Vec<f32> = (0..n_in * n_out).map(|i| ((i * 31 % 97) as f32 - 48.0) / 32.0).collect();
+        let weight: Vec<f32> = (0..n_in * n_out)
+            .map(|i| ((i * 31 % 97) as f32 - 48.0) / 32.0)
+            .collect();
         let input: Vec<f32> = (0..tokens * n_in)
             .map(|i| ((i * 29 % 89) as f32 - 44.0) / 32.0)
             .collect();
@@ -168,30 +179,88 @@ mod tests {
         }
         let mut batched = vec![0.0f32; tokens * n_out];
         unsafe {
-            matmul_f32_vs_f32_avx2_tiled(weight_bytes, &input, &mut batched, n_in, n_out, tokens, 0, n_out);
-            matmul_f32_vs_f32_avx512_tiled(weight_bytes, &input, &mut batched, n_in, n_out, tokens, 0, n_out);
+            matmul_f32_vs_f32_avx2_tiled(
+                weight_bytes,
+                &input,
+                &mut batched,
+                n_in,
+                n_out,
+                tokens,
+                0,
+                n_out,
+            );
+            matmul_f32_vs_f32_avx512_tiled(
+                weight_bytes,
+                &input,
+                &mut batched,
+                n_in,
+                n_out,
+                tokens,
+                0,
+                n_out,
+            );
         }
 
         let repeats = 20usize;
         let t = std::time::Instant::now();
         for _ in 0..repeats {
-            unsafe { matmul_f32_vs_f32_avx2(std::hint::black_box(weight_bytes), std::hint::black_box(&input[..n_in]), std::hint::black_box(&mut out), n_in, 0, n_out); }
+            unsafe {
+                matmul_f32_vs_f32_avx2(
+                    std::hint::black_box(weight_bytes),
+                    std::hint::black_box(&input[..n_in]),
+                    std::hint::black_box(&mut out),
+                    n_in,
+                    0,
+                    n_out,
+                );
+            }
         }
         let avx2_ms = t.elapsed().as_secs_f64() * 1000.0 / repeats as f64;
         let t = std::time::Instant::now();
         for _ in 0..repeats {
-            unsafe { matmul_f32_vs_f32_avx512(std::hint::black_box(weight_bytes), std::hint::black_box(&input[..n_in]), std::hint::black_box(&mut out), n_in, 0, n_out); }
+            unsafe {
+                matmul_f32_vs_f32_avx512(
+                    std::hint::black_box(weight_bytes),
+                    std::hint::black_box(&input[..n_in]),
+                    std::hint::black_box(&mut out),
+                    n_in,
+                    0,
+                    n_out,
+                );
+            }
         }
         let avx512_ms = t.elapsed().as_secs_f64() * 1000.0 / repeats as f64;
 
         let t = std::time::Instant::now();
         for _ in 0..repeats {
-            unsafe { matmul_f32_vs_f32_avx2_tiled(std::hint::black_box(weight_bytes), std::hint::black_box(&input), std::hint::black_box(&mut batched), n_in, n_out, tokens, 0, n_out); }
+            unsafe {
+                matmul_f32_vs_f32_avx2_tiled(
+                    std::hint::black_box(weight_bytes),
+                    std::hint::black_box(&input),
+                    std::hint::black_box(&mut batched),
+                    n_in,
+                    n_out,
+                    tokens,
+                    0,
+                    n_out,
+                );
+            }
         }
         let avx2_tiled_ms = t.elapsed().as_secs_f64() * 1000.0 / repeats as f64;
         let t = std::time::Instant::now();
         for _ in 0..repeats {
-            unsafe { matmul_f32_vs_f32_avx512_tiled(std::hint::black_box(weight_bytes), std::hint::black_box(&input), std::hint::black_box(&mut batched), n_in, n_out, tokens, 0, n_out); }
+            unsafe {
+                matmul_f32_vs_f32_avx512_tiled(
+                    std::hint::black_box(weight_bytes),
+                    std::hint::black_box(&input),
+                    std::hint::black_box(&mut batched),
+                    n_in,
+                    n_out,
+                    tokens,
+                    0,
+                    n_out,
+                );
+            }
         }
         let avx512_tiled_ms = t.elapsed().as_secs_f64() * 1000.0 / repeats as f64;
 
@@ -213,7 +282,9 @@ mod tests {
         let n_in = 512usize;
         let n_out = 512usize;
         let tokens = 64usize;
-        let weight: Vec<f32> = (0..n_in * n_out).map(|i| ((i * 31 % 97) as f32 - 48.0) / 32.0).collect();
+        let weight: Vec<f32> = (0..n_in * n_out)
+            .map(|i| ((i * 31 % 97) as f32 - 48.0) / 32.0)
+            .collect();
         let input: Vec<f32> = (0..tokens * n_in)
             .map(|i| ((i * 29 % 89) as f32 - 44.0) / 32.0)
             .collect();
@@ -221,18 +292,58 @@ mod tests {
         let flops = 2.0 * (n_in as f64) * (n_out as f64);
         let mut batched = vec![0.0f32; tokens * n_out];
         unsafe {
-            matmul_f32_vs_f32_avx2_tiled(weight_bytes, &input, &mut batched, n_in, n_out, tokens, 0, n_out);
-            matmul_f32_vs_f32_avx512_tiled(weight_bytes, &input, &mut batched, n_in, n_out, tokens, 0, n_out);
+            matmul_f32_vs_f32_avx2_tiled(
+                weight_bytes,
+                &input,
+                &mut batched,
+                n_in,
+                n_out,
+                tokens,
+                0,
+                n_out,
+            );
+            matmul_f32_vs_f32_avx512_tiled(
+                weight_bytes,
+                &input,
+                &mut batched,
+                n_in,
+                n_out,
+                tokens,
+                0,
+                n_out,
+            );
         }
         let repeats = 50usize;
         let t = std::time::Instant::now();
         for _ in 0..repeats {
-            unsafe { matmul_f32_vs_f32_avx2_tiled(std::hint::black_box(weight_bytes), std::hint::black_box(&input), std::hint::black_box(&mut batched), n_in, n_out, tokens, 0, n_out); }
+            unsafe {
+                matmul_f32_vs_f32_avx2_tiled(
+                    std::hint::black_box(weight_bytes),
+                    std::hint::black_box(&input),
+                    std::hint::black_box(&mut batched),
+                    n_in,
+                    n_out,
+                    tokens,
+                    0,
+                    n_out,
+                );
+            }
         }
         let avx2_l2_ms = t.elapsed().as_secs_f64() * 1000.0 / repeats as f64;
         let t = std::time::Instant::now();
         for _ in 0..repeats {
-            unsafe { matmul_f32_vs_f32_avx512_tiled(std::hint::black_box(weight_bytes), std::hint::black_box(&input), std::hint::black_box(&mut batched), n_in, n_out, tokens, 0, n_out); }
+            unsafe {
+                matmul_f32_vs_f32_avx512_tiled(
+                    std::hint::black_box(weight_bytes),
+                    std::hint::black_box(&input),
+                    std::hint::black_box(&mut batched),
+                    n_in,
+                    n_out,
+                    tokens,
+                    0,
+                    n_out,
+                );
+            }
         }
         let avx512_l2_ms = t.elapsed().as_secs_f64() * 1000.0 / repeats as f64;
         println!(
