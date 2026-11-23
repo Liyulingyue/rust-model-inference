@@ -39,6 +39,12 @@ jobs:
       - run: 'cargo test --locked --lib models::qwen3::tests::'
       - run: 'cargo test --locked --lib models::qwen3::vision::tests::'
       - run: 'cargo test --locked --lib core::tensor::tests::'
+      # The loader unification's differential test: the shared loader has to
+      # agree with the per-model loaders it replaced, tensor by tensor. The
+      # synthetic half needs no checkpoint, so it runs here; the real-weight
+      # half is `#[ignore]`d and runs with `--ignored` on a machine that has
+      # the GGUFs.
+      - run: cargo test --locked --test todo003_loader_diff
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
       - run: 'cargo test --locked --lib models::nemotron_reuse::'
