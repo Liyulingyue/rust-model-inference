@@ -35,7 +35,14 @@ impl<'a> BF16Kernel<'a> {
     }
 
     /// Use the scalar llama.cpp BF16 activation and accumulation contract.
-    pub(crate) fn with_bf16_input(weight: &'a [u8]) -> Self {
+    ///
+    /// A model whose weights are BF16 can need either contract: the default
+    /// one keeps the activations in F32, this one pins them to BF16 the way
+    /// llama.cpp does. The trunks that need it (qwen35, qwen3, dflash,
+    /// ERNIE-Image) swap the kernel in right after the weight is loaded, so
+    /// the constructor is public: the contract is a property of the model,
+    /// and a caller outside this crate has to be able to ask for it.
+    pub fn with_bf16_input(weight: &'a [u8]) -> Self {
         Self {
             weight,
             bf16_input: true,
