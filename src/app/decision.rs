@@ -31,15 +31,12 @@ pub(crate) fn validate_options(options: &CliOptions) -> Result<(), String> {
         return Err(format!("{mode} requires --model"));
     }
     for flag in &options.supplied_flags {
-        let allowed = matches!(
-            flag.as_str(),
-            "--model"
-                | "--threads"
-                | "--compute"
-                | "--gpu"
-                | "--max-context"
-                | "--decision-thinker"
-        ) || (options.decision_request.is_some() && flag == "--decision-request")
+        // The shared flags live in one table with the other modes'
+        // (`cli::parse::FLAG_RULES`), so a flag that several modes accept
+        // is listed once. The two clauses below are the native decisions'
+        // own: they are the flags the mode takes only when it runs as a
+        // server or as a JEV request.
+        let allowed = crate::app::cli::flag_is_allowed_for(flag, crate::app::cli::Mode::Decision)
             || (options.decision_request.is_none() && options.serve && flag == "--serve")
             || (options.decision_request.is_none()
                 && options.jev

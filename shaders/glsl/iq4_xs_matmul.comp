@@ -1,0 +1,97 @@
+#version 450
+
+// IQ4_XS matmul: one lane per output row, mirroring `q4_k_matmul.comp`'s
+// structure (shared Q8_K input block in shared memory, one output row per
+// lane, chunked submission) and `vec_dot_iq4_xs_q8k_avx2`'s arithmetic:
+//
+// block layout (136 bytes, QK_K=256):
+//   [0..2)   f16 d
+//   [2..4)   scales_h (u16; 2 bits per sub-block)
+//   [4..8)   scales_l (4 bytes; nibble ib = sub-block ib's low 4 bits)
+//   [8..136) 128 bytes of packed nibbles (256 values, kvalues_iq4nl LUT)
+//
+// sub-block ib (of 8): scale = nibble(ib of scales_l) | (((scales_h >> 2*ib)
+// & 3) << 4); dl = d * (scale - 32) with d = f16(block.d) * q8k_scale;
+// value = kvalues[nibble].
+//
+// NIBBLE → VALUE MAPPING (matches `dequantize_row_iq4_xs`): sub-block ib
+// occupies bytes [16*ib, 16*ib+16); the LO nibbles of those bytes are values
+// ib*32+0..15 and the HI nibbles are values ib*32+16..31 — lo-first-then-hi,
+// NOT interleaved per byte. (The AVX2 kernel's lo/hi split pairs q8[0..16]
+// with the lo nibbles and q8[16..32] with the hi nibbles for the same
+// reason.)
+//
+// The accumulation order matches the CPU AVX2 kernel exactly: each
+// sub-block's 32-value integer dot is computed exactly, converted to f32,
+// then `acc += dl * dot` as SEPARATE multiply and add (`precise` forbids the
+// fma contraction the CPU does not perform), in ascending sub-block order.
+// The GPU result is bit-identical to `vec_dot_iq4_xs_q8k_avx2` for the same
+// weight bytes and Q8_K activation.
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC { uint q8_word; uint scales_word; uint n_in; uint blocks_per_row; uint output0_word; uint rows0; uint output0_stride; uint output1_word; uint rows1; uint output1_stride; uint output2_word; uint rows2; uint output2_stride; uint group_count; uint input_sum_word; uint input_stride; uint q8_stride; uint scales_stride; uint input_sum_stride; uint q8k_stride; uint q8k_scales_stride; uint token_rows; } pc;
+
+float f16_decode(uint bits) { uint sign = (bits >> 15u) & 1u; int exponent = int((bits >> 10u) & 0x1fu); uint mantissa = bits & 0x3ffu; float value = exponent == 0 ? float(mantissa) * exp2(-24.0) : (exponent == 31 ? 0.0 : (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15))); return sign == 0u ? value : -value; }
+uint weight_word(uint slot, uint index) { return slot == 0u ? w0.data[index] : (slot == 1u ? w1.data[index] : w2.data[index]); }
+int q8(uint index) { uint value = (arena.data[pc.q8_word + (gl_WorkGroupID.z / pc.group_count) * pc.q8_stride + (index >> 2u)] >> ((index & 3u) * 8u)) & 0xffu; return value >= 128u ? int(value) - 256 : int(value); }
+
+// kvalues_iq4nl: the 16-entry non-linear LUT shared with IQ4_NL. Same table
+// as `KVALUES_IQ4NL` in `ops::quant` and llama.cpp's `kvalues_iq4nl`.
+const int KVALUES[16] = int[16](-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113);
+
+shared int input_q8[256];
+
+void main() {
+    uint token_row = gl_WorkGroupID.z / pc.group_count; uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint row = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    bool valid_row = slot < pc.group_count && row < rows;
+    precise float acc = 0.0;
+    for (uint block = 0u; block < pc.blocks_per_row; ++block) {
+        for (uint local = gl_LocalInvocationID.x; local < 256u; local += 64u) {
+            input_q8[local] = q8(block * 256u + local);
+        }
+        barrier();
+        if (valid_row) {
+            // Block = 136 bytes = 34 words: word 0 = d + scales_h, word 1 =
+            // scales_l (4 bytes), words 2.. = nibbles (the nibble region
+            // starts at byte 8, which is word 2's start).
+            uint base_word = (row * pc.blocks_per_row * 136u + block * 136u) >> 2u;
+            precise float q8_scale = uintBitsToFloat(arena.data[pc.scales_word + token_row * pc.scales_stride + block]);
+            precise float d = f16_decode(weight_word(slot, base_word) & 0xffffu) * q8_scale;
+            uint scales_h = (weight_word(slot, base_word) >> 16u) & 0xffffu;
+            uint scales_l = weight_word(slot, base_word + 1u);
+
+            for (uint ib = 0u; ib < 8u; ++ib) {
+                uint sl = (scales_l >> (4u * ib)) & 0xfu;
+                uint sh = (scales_h >> (2u * ib)) & 0x3u;
+                precise float dl = d * (float(int(sl | (sh << 4u))) - 32.0);
+
+                // 32 values per sub-block = 16 bytes = 4 words starting at
+                // word base_word + 2 + 4*ib. Byte k of the word holds value
+                // w*4 + k (lo nibble) and value 16 + w*4 + k (hi nibble).
+                int dot = 0;
+                for (uint w = 0u; w < 4u; ++w) {
+                    uint word = weight_word(slot, base_word + 2u + 4u * ib + w);
+                    for (uint k = 0u; k < 4u; ++k) {
+                        uint byte_val = (word >> (8u * k)) & 0xffu;
+                        dot += KVALUES[byte_val & 0xfu]
+                            * input_q8[ib * 32u + w * 4u + k];
+                        dot += KVALUES[(byte_val >> 4u) & 0xfu]
+                            * input_q8[ib * 32u + 16u + w * 4u + k];
+                    }
+                }
+                acc += dl * float(dot);
+            }
+        }
+        barrier();
+    }
+    if (!valid_row) return;
+    uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+    uint out_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+    arena.data[output_word + token_row * out_stride + row] = floatBitsToUint(acc);
+}

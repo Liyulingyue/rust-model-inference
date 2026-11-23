@@ -1867,7 +1867,7 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     });
     let compiled_chat_template =
         std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
-    let wevisone_options = if source.metadata("wevisone_vl.source_revision").is_some() {
+    let wevisone_options = if crate::models::qwen3::is_wevisone(source.as_ref()) {
         Some(crate::models::wevisone_vl::PredictionOptions::from_cli(
             options,
         )?)

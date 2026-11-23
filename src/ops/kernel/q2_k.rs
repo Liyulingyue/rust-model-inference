@@ -1,8 +1,8 @@
 //! Q2_K super-block matmul kernel implementation.
 //!
-//! Q2_K uses 256-element super-blocks (84 bytes). The hot path uses the
-//! scalar Q2_K × Q8_K kernel (`vec_dot_q2k_q8k_scalar`); an AVX2 SIMD
-//! variant can be added later (mirrors the q6_k / q5_k layout).
+//! Q2_K uses 256-element super-blocks (84 bytes). The hot path dispatches to
+//! the AVX2 Q2_K × Q8_K kernel in `super::avx2_k` (`vec_dot_q2k_q8k_avx2`);
+//! non-x86_64 targets fall back to `vec_dot_q2k_q8k_scalar`.
 
 use super::Kernel;
 

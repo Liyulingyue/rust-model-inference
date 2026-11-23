@@ -1743,3 +1743,164 @@ fn kv_cache_is_only_rejected_when_the_user_asked_for_it() {
     assert!(options.kv_format_explicit);
     assert_eq!(options.kv_format, KvFormat::F32);
 }
+
+/// The flags each mode accepted before the flag table existed, written out
+/// here so the table is compared against the behaviour it replaced rather
+/// than against itself.
+///
+/// The decision mode's list is the effective one — its own check lives in
+/// `app::decision::validate_options`, which used to hold a fourth copy of
+/// the shared flags.
+const LEGACY_MODE_FLAGS: &[(Mode, &[&str])] = &[
+    (
+        Mode::Enhance,
+        &[
+            "--model",
+            "--audio",
+            "--out",
+            "--threads",
+            "--enhance",
+            "--compute",
+            "--gpu",
+            "--overwrite",
+            "--serve",
+        ],
+    ),
+    (
+        Mode::SystemOne,
+        &[
+            "--model",
+            "--threads",
+            "--adapter",
+            "--system-one-request",
+            "--compute",
+            "--gpu",
+        ],
+    ),
+    (
+        Mode::Decision,
+        &[
+            "--model",
+            "--threads",
+            "--compute",
+            "--gpu",
+            "--max-context",
+            "--decision-thinker",
+            "--decision-request",
+        ],
+    ),
+];
+
+/// Every flag any mode lists, so the matrix below covers the flags that
+/// belong to the other modes too.
+fn every_listed_flag() -> Vec<&'static str> {
+    let mut flags: Vec<&'static str> = LEGACY_MODE_FLAGS
+        .iter()
+        .flat_map(|(_, flags)| flags.iter().copied())
+        .collect();
+    flags.sort_unstable();
+    flags.dedup();
+    flags
+}
+
+/// The mode × flag matrix: the table takes exactly the flags each mode
+/// took before.
+#[test]
+fn the_flag_table_matches_the_flags_each_mode_accepted() {
+    for (mode, flags) in LEGACY_MODE_FLAGS {
+        for flag in every_listed_flag() {
+            assert_eq!(
+                flag_is_allowed_for(flag, *mode),
+                flags.contains(&flag),
+                "{mode:?} and {flag}"
+            );
+        }
+    }
+}
+
+/// The table lists each flag once, so a flag cannot end up with two
+/// different values.
+#[test]
+fn the_flag_table_lists_each_flag_once() {
+    let mut names: Vec<&str> = super::parse::FLAG_RULES
+        .iter()
+        .map(|rule| rule.name)
+        .collect();
+    let count = names.len();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), count, "the flag table lists a flag twice");
+}
+
+/// Every mode takes the flags the modes share.
+#[test]
+fn every_mode_takes_the_shared_flags() {
+    for base in [
+        vec!["rmi", "--enhance", "--model", "m.gguf"],
+        vec!["rmi", "--decision-request", "req.json", "--model", "m.gguf"],
+        vec![
+            "rmi",
+            "--system-one-request",
+            "req.json",
+            "--model",
+            "m.gguf",
+        ],
+    ] {
+        for extra in [
+            vec!["--threads", "2"],
+            vec!["--compute", "cpu"],
+            vec!["--gpu"],
+        ] {
+            let values: Vec<&str> = base.iter().chain(extra.iter()).copied().collect();
+            parse_cli_options(&args(&values)).unwrap_or_else(|error| panic!("{values:?}: {error}"));
+        }
+    }
+}
+
+/// A mode rejects the flags that belong to another mode.
+#[test]
+fn a_mode_rejects_the_flags_of_another_mode() {
+    for (base, flag, value) in [
+        (
+            vec!["rmi", "--enhance", "--model", "m.gguf"],
+            "--adapter",
+            "vela",
+        ),
+        (
+            vec![
+                "rmi",
+                "--system-one-request",
+                "req.json",
+                "--model",
+                "m.gguf",
+            ],
+            "--audio",
+            "a.wav",
+        ),
+        (
+            vec![
+                "rmi",
+                "--system-one-request",
+                "req.json",
+                "--model",
+                "m.gguf",
+            ],
+            "--max-context",
+            "128",
+        ),
+        (
+            vec!["rmi", "--decision-request", "req.json", "--model", "m.gguf"],
+            "--adapter",
+            "vela",
+        ),
+    ] {
+        let mut values = base.clone();
+        values.push(flag);
+        values.push(value);
+        let error = parse_cli_options(&args(&values)).unwrap_err();
+        assert!(
+            error.contains("cannot be combined with"),
+            "{values:?}: {error}"
+        );
+    }
+}
