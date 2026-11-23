@@ -107,22 +107,31 @@ NEON on aarch64; dev box 无 AVX-512，但 F32/BF16/F16 的 zmm matmul 已按运
       即可闭环,无需 `amd-cloud-gpu-test`。已知边界：IQ4_XS 模型的**整模型 GPU 常驻
       解码**还需文件内其它格式（如 Q6_K token_embd）也有 GPU kernel——Qwen3-0.6B-IQ4_XS
       的 `--compute auto --kv-cache f16` 目前按设计落回 CPU（单投影 GPU 路径已通）。
-- [ ] **Q2_K / Q3_K 的 GPU matmul shader（IQ 模型整模型常驻的最后一缺口）** —
+- [x] **Q2_K / Q3_K 的 GPU matmul shader（IQ 模型整模型常驻的最后一缺口）** —
       IQ 单投影验证已 7/7 闭环（上一条），但 UD 混合量化文件里挡住"整模型
       GPU 常驻解码"的是混布的 k-quant 张量。以 UD-IQ1_S 为例（GGUF 头部实测）：
       `blk.8-25.attn_v.weight` 是 **Q2_K ×18**，`token_embd.weight` 是 Q5_K（已有
       `q5_k_matmul.comp`）；UD-IQ3_XXS / UD-Q3_K_XL 同理含 Q3_K 张量。Q4_K / Q5_K /
       Q6_K 的 shader 都在，**唯独 Q2_K / Q3_K 没写**，这两个格式的投影按设计逐 op
       落回 CPU，整模型常驻建不起来。
-      **待做**：按 `q4_k_matmul.comp` 模板补 `q2_k_matmul.comp` / `q3_k_matmul.comp`
-      （块布局见 `tensor.rs`：Q2K = 84B/256（d+dmin+scales[16]+qs[64]），
-      Q3K = 110B/256（d+hmask[32]+qs[64]+scales[12]），对齐本仓 CPU kernel 的
-      8-lane 结构），
-      `GpuWeightFormat` 注册 + kernel hook + `matmul_iq` 同款 per-format runtime。
-      验证：`q2_k` / `q3_k` 权重的 GPU vs CPU 位级对拍（照抄
-      `iq_gpu_matches_cpu_avx2_bitwise_on_real_weights` 的按 `ggml_type` 选张量模板，
-      UD-IQ1_S 的 blk.8.attn_v 即真 Q2_K 张量）+ UD-IQ1_S `--compute auto` 全链路。
-      无新硬件需求，本机 iGPU 可闭环。
+      **已交付**（L20 实测，UD-Q2_K_XL 真实权重对拍）：`q2_k_matmul.comp` /
+      `q3_k_matmul.comp`（Q2K 块 84B：scales 低 nibble=scale 高=min、每块先
+      `fma(dmin, prod[k])` 后 `fma(d, sumi[k])`；Q3K 块 110B：hmask 符号位取
+      `hm[t]` 的 bit `4j+s`、12B scale 位手术 −32；最终归约按 `hsum256_ps` 树
+      `((v0+v4)+(v2+v6))+((v1+v5)+(v3+v7))`），`GpuWeightFormat` 注册
+      （`Q2_K_MATMUL=83` / `Q3_K_MATMUL=84`）+ kernel hook + `matmul_iq` 位级
+      harness。验证：两格式各 1024 行 GPU vs CPU AVX2 **bit-identical**；UD-Q2_K_XL
+      的 72×Q2K + 69×Q3K 全覆盖；`vk_ops_check --formats q2_k,q3_k`（batched
+      exact_bits、matvec max_abs=0、quantize_q8_k bytes_exact）；`wide_quantized_
+      matvec_runs_on_vulkan`（17408 宽）max_abs=0。
+      **eligibility 门更新**：Q4/5/6_K scalar-kernel 黑名单改为只查每层 dense
+      投影，豁免 output head（tied token_embd Q5_K/Q6_K 每 token 只跑一次，
+      scalar shader 不主导；`EligibilityFacts` 拆出 `output_weight_format` 字段）。
+      UD-IQ1_S `--compute auto --kv-cache f16` 全链路常驻已通（无回退日志；
+      0.6B 上 resident 12.7 t/s vs CPU 49 t/s——与既有 Q8_0 eligible 模型同取舍，
+      L20 per-token 提交开销主导，非本格式问题；IQ1_S 输出本身为乱码级，两路径同
+      质）。边界：UD-Q2_K_XL / UD-Q3_K_XL 仍按设计落回 CPU（dense 层含 Q4K/Q5K/
+      Q6K，黑名单正确拦截），待 Q4/5/6_K 向量化 kernel（另一 TODO）后解锁。
 - [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
