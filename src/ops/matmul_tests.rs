@@ -1073,7 +1073,6 @@ fn neon_softmax_matches_scalar_exp_and_f64_sum() {
     }
 }
 
-
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn neon_silu_matches_qwen35_recurrent_four_lane_fixture() {

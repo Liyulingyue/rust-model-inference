@@ -100,6 +100,24 @@ fn f32_preflight_rejects_non_f32_or_bf16_tensors() {
 }
 
 #[test]
+fn from_source_still_runs_the_dtype_preflight() {
+    // Wiring, not logic: `from_source` must keep invoking the preflight
+    // before any other validation, so a source whose preflight tensors are
+    // not F32/BF16 is refused up front instead of reaching later stages.
+    let source = Source::with_tensor(
+        "depth_decoder.codebooks_head.weight",
+        &[1, 1],
+        GGMLType::Q8_0,
+        Vec::new(),
+    );
+    let error = BreezeModel::from_source(&source, 1).err().unwrap();
+    assert!(
+        error.contains("depth_decoder.codebooks_head.weight") && error.contains("F32 or BF16"),
+        "{error}"
+    );
+}
+
+#[test]
 fn f32_preflight_accepts_original_bf16_and_legacy_codec_f32() {
     for &(name, dims) in NON_MATRIX_TENSORS.iter().chain(std::iter::once(&(
         "codec_model.quantizer.acoustic_residual_vector_quantizer.layers.0.codebook.initialized",
