@@ -86,6 +86,11 @@ pub fn run_cli(
         .as_deref()
         .map(crate::app::read_f32_file)
         .transpose()?;
+    // ffmpeg writes the video. Check it here, before the weight load and
+    // the diffusion rollout, so a machine without it fails at the start of
+    // the run rather than after the whole pipeline (same rule the Astronex
+    // and DreamX video paths apply).
+    crate::models::diffusion::dreamx::media::require_ffmpeg()?;
     let video = Engine::load(source, threads)?.generate(
         prompt,
         &options,

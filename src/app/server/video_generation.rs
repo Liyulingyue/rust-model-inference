@@ -22,6 +22,11 @@ pub(super) fn build(
     source: Arc<dyn TensorSource>,
 ) -> Result<VideoBackend, String> {
     let defaults = crate::app::video_generation::options(cli, true)?;
+    // The only route this backend mounts writes an MP4 through ffmpeg.
+    // Check it before the weight load so a machine without it fails at
+    // startup with the real reason instead of on every request after the
+    // full rollout (the same rule the CLI video path applies).
+    crate::models::diffusion::dreamx::media::require_ffmpeg()?;
     let available = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
