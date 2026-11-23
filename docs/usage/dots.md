@@ -92,6 +92,8 @@ cargo run --release --bin rust-model-inference -- \
 | `--temperature` | 采样温度 | — |
 
 `--seed` 给定时 sampling 温度会被强制设为 `0.9`（`dots.rs:72-74`），仅锁定 RNG。
+**这条覆盖 `--temperature`**：`--temp 0 --seed 42` 实际是 0.9 的采样，不是贪心。
+理由是 seed 只固定 RNG，采样参数若不固定，同一个 seed 也不会给出同一段音频。
 
 ## 5. 与 Oracle 的对齐
 
