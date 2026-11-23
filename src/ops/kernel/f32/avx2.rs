@@ -96,6 +96,33 @@ mod tests {
         let input: Vec<f32> = (0..n_in).map(|i| (i as f32 - 20.0) * 0.03).collect();
         assert_avx2_eq_scalar("tail 3x40", &weight, &input, n_in, n_out);
     }
+
+    /// `n_in % 8 == 4` walks the 4-wide tail; the kernel used to read 8
+    /// input floats there (4 out of bounds). Locks the in-bounds fix.
+    #[test]
+    fn avx2_matches_scalar_four_wide_tail() {
+        let n_in = 44;
+        let n_out = 3;
+        let weight: Vec<f32> = (0..n_in * n_out)
+            .map(|i| ((i * 19) as f32 * 0.011).sin())
+            .collect();
+        let input: Vec<f32> = (0..n_in).map(|i| (i as f32 - 22.0) * 0.03).collect();
+        assert_avx2_eq_scalar("tail 3x44", &weight, &input, n_in, n_out);
+    }
+
+    /// `n_in % 8 == 2` walks the scalar tail; the kernel used to fold it
+    /// into the lane accumulator (counted once per lane by the horizontal
+    /// sum). Locks the separate tail accumulator fix.
+    #[test]
+    fn avx2_matches_scalar_one_wide_tail() {
+        let n_in = 42;
+        let n_out = 3;
+        let weight: Vec<f32> = (0..n_in * n_out)
+            .map(|i| ((i * 23) as f32 * 0.009).sin())
+            .collect();
+        let input: Vec<f32> = (0..n_in).map(|i| (i as f32 - 21.0) * 0.03).collect();
+        assert_avx2_eq_scalar("tail 3x42", &weight, &input, n_in, n_out);
+    }
 }
 
 avx2_matmul_packed_tiled!(
