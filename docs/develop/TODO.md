@@ -656,6 +656,21 @@ AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体�
 3. **`qwen35::trunk::util` 里的 `f16_at` / `f16_bits_to_f32` 变成死代码**（只有旧的
    `load_weight_f32` 用），随本次改动删除。
 
+#### 两处行为变化（不是修复，是口径变了）
+
+1. **qwen35 的 `n_out` 从 `dims[1]` 变成 `dims[1..]` 的乘积**。二维张量完全一样；
+   三维及以上的**矩阵**张量形状会变。旧口径把三维张量读成 `dims[0] × dims[1]`，
+   **丢掉了剩下的行** —— 那是错的，不是另一种约定，所以统一入口按 GGUF 的口径
+   （第一维是行长，其余维度的乘积是行数）读。
+   现在的 qwen35 家族没有受影响的张量：本仓库所有 `arch=qwen35` 的模型
+   （OvisOCR3 / Intern-Decision-0.8B / LensVLM-9B / MiniCPM-V-4.7-1B /
+   ZDTaichu5.0-9B）矩阵都是二维的；`arch=qwen35moe`（Occamy-1.0 /
+   MiniCPM-V-4.7-35B-A3B）确实有三维张量，但那是 MoE 专家权重，走的是另一个函数
+   `load_moe_weights`（读原始字节，不经过 `load_weight`）。
+2. **qwen35 新增了字节长度校验**。旧的 `load_weight` 不看载荷长度，一个截断或
+   格式不符的 GGUF 张量以前能加载（然后在内核里读越界），现在被拒（WARNING +
+   `None`）。这是修复，但确实改变了「哪些文件能加载」。
+
 #### 保留在模型侧的东西（各自有理由）
 
 - **qwen35 的 BF16 激活契约**：qwen35 要 llama.cpp 的 BF16 输入与累加契约
@@ -670,19 +685,36 @@ AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体�
 
 #### 验证
 
-- 新增 5 条 core 单测：`load_weight_any` 按声明格式解码（BF16 不会被当 F16）、
-  **F32 权重确实借的是原始字节**（指针相等）、白名单外的格式被拒、字节长度不符被拒、
-  块对齐的行被拒。
+- **core 单测**（8 条，`cargo test --locked --lib core::tensor::tests::` 在 CI 里跑）：
+  `load_weight_any` 按声明格式解码（BF16 不会被当 F16）、**F32 权重确实借的是
+  原始字节**（指针相等）、白名单外的格式被拒、字节长度不符被拒、块对齐的行被拒、
+  **没有内核的格式被拒而不是 panic**（I8/I16/I32/I64/F64/Q8_1/Q8K）、
+  **`QuantizedTensor::supports` 与内核构造器的可接受集合逐条一致**（防止两个
+  列表脱节后又走回 panic）。
+- **差分测试** `tests/todo003_loader_diff.rs` 分两层：
+  - **合成层**（不需要任何权重，**CI 里跑**）：五个 loader 各自的旧实现被逐行
+    抄在测试文件里（抄自 `fd6f1b7d`），在一个测试自己造的 `TensorSource` 上
+    逐张量对比 —— 格式、形状、内核看到的字节、算出来的数。覆盖 qwen35 的九种
+    格式、dots 的 `[.., n_in, n_out]` 形状约定、gemma4 的单类型与白名单两个入口、
+    以及 norm/bias 的 F32/F16/BF16 读取。F16 解码器换了实现，所以**全部 65536 个
+    F16 位型逐个比过**（真实数字 0 差异，只有 NaN 载荷不同）。
+  - **真实权重层**（`#[ignore]`，用 `--ignored` 跑）：`OvisOCR3.Q8_0.gguf` 与
+    `OvisOCR3-BF16.gguf`（qwen35 家族，**187 个矩阵张量 / 187 次 matmul**）、
+    `dots-tts-base`（**946 个矩阵张量 / 925 次 matmul**，含 631 个三维与 12 个
+    四维张量）、`gemma-4-12b-it-Q8_0.gguf`（**329 个矩阵张量 / 273 次 matmul**）。
+    三档都是**逐字节相同**。
 - **真实模型**：`OvisOCR3.Q8_0.gguf`（qwen35 家族，Q8_0）与
   `OvisOCR3-BF16.gguf`（BF16）各跑一次贪心生成，**输出与改动前逐字相同**
   （"The ocean is a vast and mysterious place that holds the secrets of the
   world."）—— 覆盖了 qwen35 loader 的 Q8_0 与 BF16 两条路径。
 - `cargo test --profile release-fast --lib` 失败集合与改动前逐条相同（本机预存失败
-  39 条），新增 5 条测试全过。
+  39 条），新增测试全过。
 
 **关联**：`src/core/tensor.rs`（`load_weight_any`）、
+`src/ops/kernel/quantized_tensor.rs`（`QuantizedTensor::supports`）、
 `src/models/dots/weights.rs`、`src/models/qwen35/trunk/weights.rs`、
-`src/models/gemma4/trunk/weights.rs`、`src/models/qwen35/trunk/util.rs`。
+`src/models/gemma4/trunk/weights.rs`、`src/models/qwen35/trunk/util.rs`、
+`tests/todo003_loader_diff.rs`。
 
 ---
 
