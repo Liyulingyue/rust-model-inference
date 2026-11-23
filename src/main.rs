@@ -148,6 +148,17 @@ fn main() {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let n_threads = app::resolve_thread_count(options.threads, available_threads);
+    if let Ok(source) = open_model_source(&options.model, ComponentRole::Llm) {
+        if rust_model_inference::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
+            app::init_rayon_global_pool(n_threads);
+            app::run_or_exit(app::video_generation::run_cli(
+                Arc::from(source),
+                &options,
+                n_threads,
+            ));
+            return;
+        }
+    }
     if options.decision_request.is_some() {
         app::init_rayon_global_pool(n_threads);
         app::run_or_exit(app::decision::run_cli(&options, n_threads));
