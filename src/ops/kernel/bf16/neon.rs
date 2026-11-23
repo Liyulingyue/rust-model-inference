@@ -46,71 +46,9 @@ pub unsafe fn matmul_bf16_vs_f32_neon(
     }
 }
 
-/// Batched BF16×F32 matmul that reuses each loaded weight vector for four
-/// input rows. Each row keeps the same vector accumulation order as the
-/// single-row kernel, so batching changes memory traffic without changing
-/// the per-row arithmetic contract.
-#[target_feature(enable = "neon")]
-pub unsafe fn matmul_bf16_vs_f32_neon_batched(
-    weight: &[u8],
-    input: &[f32],
-    output: &mut [f32],
-    n_in: usize,
-    n_out: usize,
-    n_tokens: usize,
-) {
-    use std::arch::aarch64::*;
-
-    debug_assert_eq!(weight.len(), n_in * n_out * 2);
-    debug_assert_eq!(input.len(), n_tokens * n_in);
-    debug_assert_eq!(output.len(), n_tokens * n_out);
-
-    let weight_ptr = weight.as_ptr();
-    let input_ptr = input.as_ptr();
-    let output_ptr = output.as_mut_ptr();
-
-    for row in 0..n_out {
-        let row_byte = row * n_in * 2;
-        for token_group in (0..n_tokens).step_by(4) {
-            let group_len = (n_tokens - token_group).min(4);
-            let mut acc = [vdupq_n_f32(0.0); 4];
-            let mut index = 0;
-
-            while index + 4 <= n_in {
-                let bf16 = vld1_u16(weight_ptr.add(row_byte + index * 2).cast());
-                let values = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(bf16), 16));
-                for token in 0..group_len {
-                    let input_row = input_ptr.add((token_group + token) * n_in + index);
-                    acc[token] = vfmaq_f32(acc[token], values, vld1q_f32(input_row));
-                }
-                index += 4;
-            }
-
-            let mut totals = [0.0f32; 4];
-            for token in 0..group_len {
-                totals[token] = vaddvq_f32(acc[token]);
-            }
-            while index < n_in {
-                let offset = row_byte + index * 2;
-                let bits =
-                    u16::from_le_bytes([*weight_ptr.add(offset), *weight_ptr.add(offset + 1)]);
-                let value = crate::ops::bf16_to_f32(bits);
-                for token in 0..group_len {
-                    totals[token] += value * *input_ptr.add((token_group + token) * n_in + index);
-                }
-                index += 1;
-            }
-
-            for token in 0..group_len {
-                *output_ptr.add((token_group + token) * n_out + row) = totals[token];
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{matmul_bf16_vs_f32_neon, matmul_bf16_vs_f32_neon_batched};
+    use super::matmul_bf16_vs_f32_neon;
     use crate::ops::kernel::bf16::scalar::forward_f32_rows_scalar;
 
     #[test]
@@ -220,40 +158,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn neon_batched_matches_single_rows_bitwise() {
-        let n_tokens = 4;
-        let n_in = 13;
-        let n_out = 3;
-        let values: Vec<f32> = (0..n_in * n_out)
-            .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
-            .collect();
-        let weight: Vec<u8> = values
-            .iter()
-            .flat_map(|&value| crate::f32_to_bf16(value).to_le_bytes())
-            .collect();
-        let input: Vec<f32> = (0..n_tokens * n_in)
-            .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
-            .collect();
-        let mut actual = vec![0.0f32; n_tokens * n_out];
-        let mut expected = vec![0.0f32; n_tokens * n_out];
-
-        unsafe {
-            matmul_bf16_vs_f32_neon_batched(&weight, &input, &mut actual, n_in, n_out, n_tokens);
-            for token in 0..n_tokens {
-                matmul_bf16_vs_f32_neon(
-                    &weight,
-                    &input[token * n_in..(token + 1) * n_in],
-                    &mut expected[token * n_out..(token + 1) * n_out],
-                    n_in,
-                    0,
-                    n_out,
-                );
-            }
-        }
-
-        assert_eq!(actual, expected);
     }
 }
