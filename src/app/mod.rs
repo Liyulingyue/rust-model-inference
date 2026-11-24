@@ -6,6 +6,8 @@ pub(crate) mod diffusion;
 pub(crate) mod jev;
 pub(crate) mod media;
 pub(crate) mod omni;
+mod pixel_art;
+pub use pixel_art::run_pixel_art_cli;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;
 pub mod server;

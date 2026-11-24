@@ -84,6 +84,7 @@ fn hy_transcription_task<T: Send + 'static>(
 enum Backend {
     Text(TextBackend),
     Pjit(image_generation::PjitBackend),
+    Tessera(image_generation::PixelBackend),
     Video(video_generation::VideoBackend),
     /// The text-to-image diffusion models: Z-Image and ERNIE-Image. They
     /// share the image-generation route with P-JiT and differ only in the
@@ -133,6 +134,7 @@ impl Backend {
             Self::ArkTts(_) => "arktts",
             Self::Auk(_) => "auk",
             Self::Pjit(_) => "pjit",
+            Self::Tessera(_) => "tessera",
             Self::Video(_) => "video-generation",
             Self::Diffusion(backend) => backend.label(),
             Self::Rerank(_) => "rerank",
@@ -1194,6 +1196,12 @@ fn build_backend(
     }
     if let Ok(source) = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
     {
+        if crate::models::tessera::matches(source.as_ref()) {
+            return Ok(Arc::new(Backend::Tessera(image_generation::build_pixel(
+                options,
+                Arc::from(source),
+            )?)));
+        }
         if crate::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
             return Ok(Arc::new(Backend::Video(video_generation::build(
                 options,
@@ -2183,10 +2191,9 @@ pub fn run_server() {
     // invocation, so they are skipped for it, exactly like the main binary
     // does.
     let auk_source = auk::probe_invocation(&options);
-    let pjit_invocation =
-        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-            .ok()
-            .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    let image_arch = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+        .ok()
+        .map(|s| crate::app::arch_of(s.as_ref()));
     let video_invocation =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
@@ -2203,7 +2210,12 @@ pub fn run_server() {
             eprintln!("{error}");
             std::process::exit(2);
         }
-    } else if pjit_invocation {
+    } else if image_arch.as_deref() == Some("tessera") {
+        if let Err(error) = crate::app::pixel_art::options(&options, true) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if image_arch.as_deref() == Some("pjit") {
         if let Err(error) = crate::app::diffusion::pjit_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
@@ -2296,7 +2308,7 @@ pub fn run_server() {
             "/v1/videos/generations",
             post(video_generation::generate).layer(DefaultBodyLimit::max(256 * 1024)),
         ),
-        Backend::Pjit(_) | Backend::Diffusion(_) => {
+        Backend::Pjit(_) | Backend::Diffusion(_) | Backend::Tessera(_) => {
             router.route("/v1/images/generations", post(image_generation::generate))
         }
         Backend::WeVisOne(_) => router.merge(api::routes()).route(

@@ -2834,6 +2834,12 @@ impl PivoRuntime {
         context: &'static VulkanContext,
         capacity: PivoCapacity,
     ) -> Result<Self, VulkanError> {
+        // The acoustic attention shader accumulates softmax probabilities in F64.
+        if !context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo attention requires shaderFloat64".into(),
+            ));
+        }
         if capacity.activation == 0
             || capacity.rope_table == 0
             || capacity.weight == 0
@@ -3864,11 +3870,11 @@ pub(crate) fn build_operator_pipelines(
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
-                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE | PIVO_ATTENTION
             ) && !context.shader_float64
             {
-                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
-                // Their recorders reject unsupported devices before this placeholder is used.
+                // Optional FP64 kernels must not prevent ordinary projections from loading.
+                // Their runtimes reject unsupported devices before this placeholder is used.
                 ATTENTION_SCORES_SHADER
             } else {
                 *shader
@@ -15131,7 +15137,7 @@ mod tests {
     fn pivo_operators_match_the_host_kernels() {
         use super::*;
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
-        let mut runtime = PivoRuntime::new(
+        let runtime = PivoRuntime::new(
             context,
             PivoCapacity {
                 activation: 16 * 1024,
@@ -15139,8 +15145,14 @@ mod tests {
                 weight: 16 * 1024,
                 bias: 64,
             },
-        )
-        .unwrap();
+        );
+        if !context.shader_float64 {
+            assert!(
+                matches!(runtime, Err(VulkanError::UnsupportedShape(msg)) if msg.contains("shaderFloat64"))
+            );
+            return;
+        }
+        let mut runtime = runtime.unwrap();
         let mut state = 0x1234_5678u32;
         let mut next = move || {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
