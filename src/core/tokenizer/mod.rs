@@ -76,7 +76,14 @@ struct SpecialToken {
 }
 
 #[derive(Debug)]
+struct EmbeddedByteLevel {
+    ordinary: tokenizers::Tokenizer,
+    parse_control: tokenizers::Tokenizer,
+}
+
+#[derive(Debug)]
 pub struct BPETokenizer {
+    huggingface: Option<Box<EmbeddedByteLevel>>,
     tokens: Vec<String>,
     token_types: Vec<TokenType>,
     token_to_id: HashMap<String, u32>,
@@ -394,6 +401,7 @@ impl BPETokenizer {
         let eos_id = token_to_id.get("<|endoftext|>").copied();
 
         let tokenizer = Self {
+            huggingface: None,
             tokens,
             token_types,
             token_to_id,
@@ -508,6 +516,7 @@ impl BPETokenizer {
         semantic_token_names.insert("endoftext".into(), token_to_id["<|endoftext|>"]);
 
         let tokenizer = BPETokenizer {
+            huggingface: None,
             tokens,
             token_types,
             token_to_id,
@@ -543,9 +552,12 @@ impl BPETokenizer {
         let gemma4 = match get_meta("tokenizer.ggml.model") {
             Some(MetaValue::String(value)) if value == "gpt2" => false,
             Some(MetaValue::String(value)) if value == "gemma4" => true,
+            Some(MetaValue::String(value)) if value == "huggingface" => {
+                return Self::from_huggingface_metadata(get_meta);
+            }
             Some(MetaValue::String(value)) => {
                 return Err(format!(
-                    "Unsupported tokenizer.ggml.model {value:?}; expected gpt2 or gemma4"
+                    "Unsupported tokenizer.ggml.model {value:?}; expected gpt2, gemma4 or huggingface"
                 ));
             }
             _ => return Err("Missing or invalid tokenizer.ggml.model".into()),
@@ -806,6 +818,7 @@ impl BPETokenizer {
         };
 
         Ok(Self {
+            huggingface: None,
             tokens,
             token_types,
             token_to_id,
@@ -824,6 +837,91 @@ impl BPETokenizer {
                 get_meta("tokenizer.ggml.normalizer.nfc"),
                 "tokenizer.ggml.normalizer.nfc",
             )?,
+        })
+    }
+
+    fn from_huggingface_metadata(
+        get_meta: impl Fn(&str) -> Option<MetaValue>,
+    ) -> Result<Self, String> {
+        let Some(MetaValue::String(json)) = get_meta("tokenizer.huggingface.json") else {
+            return Err("Missing tokenizer.huggingface.json".into());
+        };
+        let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+            .map_err(|error| format!("Invalid Hugging Face tokenizer: {error}"))?;
+        if !matches!(
+            tokenizer.get_decoder(),
+            Some(tokenizers::decoders::DecoderWrapper::ByteLevel(_))
+        ) {
+            return Err("Embedded Hugging Face tokenizer requires a ByteLevel decoder".into());
+        }
+        let vocab = tokenizer.get_vocab(true);
+        let added = tokenizer.get_added_tokens_decoder();
+        let mut tokens = vec![String::new(); vocab.len()];
+        let mut token_types = vec![TokenType::Normal; vocab.len()];
+        let mut special_tokens = Vec::new();
+        for (text, &id) in &vocab {
+            let slot = tokens
+                .get_mut(id as usize)
+                .ok_or("Tokenizer vocabulary IDs must be dense")?;
+            if text.is_empty() || !slot.is_empty() {
+                return Err("Tokenizer vocabulary contains empty tokens or duplicate IDs".into());
+            }
+            *slot = text.clone();
+            if let Some(token) = added.get(&id) {
+                let kind = if token.special {
+                    TokenType::Control
+                } else {
+                    TokenType::UserDefined
+                };
+                token_types[id as usize] = kind;
+                special_tokens.push(SpecialToken {
+                    text: text.clone(),
+                    id,
+                    kind,
+                });
+            }
+        }
+        let bos_id = optional_token_id(
+            get_meta("tokenizer.ggml.bos_token_id"),
+            "tokenizer.ggml.bos_token_id",
+        )?;
+        let eos_id = optional_token_id(
+            get_meta("tokenizer.ggml.eos_token_id"),
+            "tokenizer.ggml.eos_token_id",
+        )?;
+        validate_token_id(bos_id, tokens.len(), "tokenizer.ggml.bos_token_id")?;
+        validate_token_id(eos_id, tokens.len(), "tokenizer.ggml.eos_token_id")?;
+        let byte_decoder = build_byte_encoder()
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.chars().next().unwrap(), i as u8))
+            .collect();
+        let semantic_tokens = QWEN_SEMANTIC_TOKENS
+            .iter()
+            .filter_map(|&(text, name)| vocab.get(text).map(|&id| (name.to_owned(), id)))
+            .collect();
+        let mut ordinary = tokenizer.clone();
+        ordinary.set_encode_special_tokens(true);
+        Ok(Self {
+            huggingface: Some(Box::new(EmbeddedByteLevel {
+                ordinary,
+                parse_control: tokenizer,
+            })),
+            tokens,
+            token_types,
+            token_to_id: vocab.into_iter().collect(),
+            merge_ranks: HashMap::new(),
+            byte_encoder: Vec::new(),
+            byte_decoder,
+            pre: PreTokenizer::Gpt4o,
+            special_tokens,
+            semantic_tokens,
+            bos_id,
+            eos_id,
+            add_bos: false,
+            add_eos: false,
+            byte_fallback: false,
+            normalize_nfc: false,
         })
     }
 
@@ -890,6 +988,17 @@ impl BPETokenizer {
     }
 
     pub fn encode(&self, text: &str, options: EncodeOptions) -> Vec<u32> {
+        if let Some(tokenizers) = &self.huggingface {
+            let tokenizer = if options.parse_special {
+                &tokenizers.parse_control
+            } else {
+                &tokenizers.ordinary
+            };
+            return tokenizer
+                .encode_fast(text, options.add_special)
+                .map(|encoding| encoding.get_ids().to_vec())
+                .unwrap_or_default();
+        }
         let mut ids = self.encode_partitioned(text, options.parse_special);
         if self.pre == PreTokenizer::Gemma4 {
             ids.insert(0, self.bos_id.expect("Gemma4 requires bos_id"));
@@ -1005,8 +1114,10 @@ impl BPETokenizer {
         if matches!(kind, TokenType::Control | TokenType::Unknown) && !render_special {
             return Vec::new();
         }
-        if let Some(byte) = hex_byte(token) {
-            return vec![byte];
+        if self.huggingface.is_none() {
+            if let Some(byte) = hex_byte(token) {
+                return vec![byte];
+            }
         }
         if self.pre == PreTokenizer::Gemma4 && kind == TokenType::Normal {
             // Gemma4 token pieces are raw UTF-8 but use the SentencePiece `▁`

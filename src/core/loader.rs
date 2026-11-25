@@ -439,6 +439,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             | "lfm2"
             | "lfm2moe"
             | "lfm3"
+            | "aion_instruct"
             | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
@@ -678,6 +679,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
         || arch == "nanbeige"
         || arch == "mellum"
         || arch == "hy_v3"
+        || arch == "aion_instruct"
     {
         if n_head == 0 {
             return Err(format!(

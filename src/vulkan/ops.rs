@@ -3073,6 +3073,11 @@ impl PivoRuntime {
         window: usize,
         causal: bool,
     ) -> Result<(), VulkanError> {
+        if !self.ops.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo attention requires shaderFloat64".into(),
+            ));
+        }
         let q_stride = q_heads * head_dim;
         let kv_stride = kv_heads * head_dim;
         let push = [
@@ -3864,10 +3869,10 @@ pub(crate) fn build_operator_pipelines(
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
-                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE | PIVO_ATTENTION
             ) && !context.shader_float64
             {
-                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
+                // Optional FP64 kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
                 ATTENTION_SCORES_SHADER
             } else {

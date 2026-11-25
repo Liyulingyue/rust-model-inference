@@ -759,6 +759,20 @@ fn main() {
         .as_deref()
         .filter(|path| !path.as_os_str().is_empty());
 
+    if arch == "aion_instruct"
+        && (explicit_mmproj.is_some()
+            || image.is_some()
+            || audio.is_some()
+            || video.is_some()
+            || options.embedding
+            || options.dump_logits)
+    {
+        app::run_or_exit(Err(
+            "Aion supports text generation and JEV. Media, projector, embedding and --dump-logits options are unsupported".into(),
+        ));
+        return;
+    }
+
     if options.jev && (options.embedding || video.is_some() || audio.is_some()) {
         app::run_or_exit(Err(
             "--jev supports --image, not --video, --audio, or --embedding".into(),

@@ -1,3 +1,4 @@
+pub mod aion;
 pub mod arktts;
 pub mod audio8;
 pub mod bert_family;

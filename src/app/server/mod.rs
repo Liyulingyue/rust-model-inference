@@ -1842,7 +1842,10 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
             }
             Err(error)
                 if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
-                    || arch == crate::models::sensenova_loop::ARCH
+                    || matches!(
+                        arch.as_str(),
+                        crate::models::sensenova_loop::ARCH | "aion_instruct"
+                    )
                     || dspark_requested
                     || ngram_requested =>
             {
@@ -1862,11 +1865,17 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     // user explicitly asked for a template, and a config error should surface
     // at startup rather than on the first request.
     let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
-        jinja: options.jinja || arch == "mage_vl",
+        jinja: options.jinja || matches!(arch.as_str(), "mage_vl" | "aion_instruct"),
         file: options.chat_template_file.clone(),
     });
-    let compiled_chat_template =
-        std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
+    let compiled_chat_template = std::sync::Arc::new(if arch == "aion_instruct" {
+        Some(crate::models::aion::prompt::load_template(
+            source.as_ref(),
+            &chat_template,
+        )?)
+    } else {
+        chat_template.resolve(&|k| source.metadata(k).cloned())?
+    });
     let wevisone_options = if crate::models::qwen3::is_wevisone(source.as_ref()) {
         Some(crate::models::wevisone_vl::PredictionOptions::from_cli(
             options,

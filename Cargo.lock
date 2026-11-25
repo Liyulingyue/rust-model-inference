@@ -1474,6 +1474,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link",
 ]
 
 [[package]]
@@ -2614,6 +2615,7 @@ dependencies = [
  "futures",
  "half",
  "image",
+ "jiff",
  "log",
  "memmap2",
  "minijinja",

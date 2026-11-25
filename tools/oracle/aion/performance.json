@@ -1,0 +1,1031 @@
+{
+  "date": "2026-11-26",
+  "host": "Apple M3 Max, macOS 27.2, MoltenVK 1.4.2",
+  "threads": 8,
+  "profile": "release-fast",
+  "kv": "F32",
+  "notes": "Single runs during validation. Device prefill includes the first uploads in each session.",
+  "arithmetic_pytorch": [
+    {
+      "format": "F32",
+      "reference_activation": "f32",
+      "prompt_tokens": 56,
+      "prefill_seconds": 2.7984143749345094,
+      "decode_seconds": [
+        0.7463345001451671,
+        0.20589454099535942,
+        0.2015611669048667
+      ]
+    },
+    {
+      "format": "F16",
+      "reference_activation": "f32",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.2664629579521716,
+      "decode_seconds": [
+        0.18771333317272365,
+        0.11809087498113513,
+        0.11219299980439246
+      ]
+    },
+    {
+      "format": "BF16",
+      "reference_activation": "f32",
+      "prompt_tokens": 56,
+      "prefill_seconds": 2.7984143749345094,
+      "decode_seconds": [
+        0.7463345001451671,
+        0.20589454099535942,
+        0.2015611669048667
+      ]
+    },
+    {
+      "format": "Q8_0",
+      "reference_activation": "rounded",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.3846900830976665,
+      "decode_seconds": [
+        0.15205029188655317,
+        0.14727683318778872,
+        0.14719758392311633
+      ]
+    },
+    {
+      "format": "Q4_0",
+      "reference_activation": "rounded",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.4031623341143131,
+      "decode_seconds": [
+        0.15988125000149012,
+        0.1680476658511907,
+        0.17521062516607344
+      ]
+    },
+    {
+      "format": "Q4_1",
+      "reference_activation": "rounded",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.4517458751797676,
+      "decode_seconds": [
+        0.17372774984687567,
+        0.1565633330028504,
+        0.16488354210741818
+      ]
+    },
+    {
+      "format": "Q4_K",
+      "reference_activation": "rounded",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.4800866669975221,
+      "decode_seconds": [
+        0.20097029185853899,
+        0.21717991610057652,
+        0.20960437506437302
+      ]
+    },
+    {
+      "format": "Q5_K",
+      "reference_activation": "rounded",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.32859137491323054,
+      "decode_seconds": [
+        0.11605333304032683,
+        0.12111237505450845,
+        0.1188900419510901
+      ]
+    },
+    {
+      "format": "Q6_K",
+      "reference_activation": "rounded",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.4737316248938441,
+      "decode_seconds": [
+        0.18316029221750796,
+        0.19640787481330335,
+        0.20885433303192258
+      ]
+    }
+  ],
+  "arithmetic_rust": [
+    {
+      "format": "F32",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 16.603076959,
+      "decode_seconds": [
+        0.718171167,
+        0.941287292,
+        0.723038417
+      ]
+    },
+    {
+      "format": "F32",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 31.768881792,
+      "decode_seconds": [
+        1.137311875,
+        0.610929333,
+        0.373680958
+      ]
+    },
+    {
+      "format": "F32",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 36.77227125,
+      "decode_seconds": [
+        0.105353167,
+        0.097102542,
+        0.098767125
+      ]
+    },
+    {
+      "format": "F16",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 7.37338375,
+      "decode_seconds": [
+        0.480593,
+        0.336735834,
+        0.286824333
+      ]
+    },
+    {
+      "format": "F16",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 12.16553875,
+      "decode_seconds": [
+        0.06252475,
+        0.060741708,
+        0.053260959
+      ]
+    },
+    {
+      "format": "F16",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 19.080401583,
+      "decode_seconds": [
+        0.095929959,
+        0.078463125,
+        0.085927458
+      ]
+    },
+    {
+      "format": "BF16",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 9.487947166,
+      "decode_seconds": [
+        0.382286542,
+        0.283262667,
+        0.567750625
+      ]
+    },
+    {
+      "format": "BF16",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 26.3027,
+      "decode_seconds": [
+        0.119477917,
+        0.121786,
+        0.121323125
+      ]
+    },
+    {
+      "format": "BF16",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 27.576762,
+      "decode_seconds": [
+        0.427714791,
+        0.328729584,
+        0.304106208
+      ]
+    },
+    {
+      "format": "Q8_0",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.164987083,
+      "decode_seconds": [
+        0.173611667,
+        0.232693083,
+        0.159932
+      ]
+    },
+    {
+      "format": "Q8_0",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 5.623610375,
+      "decode_seconds": [
+        0.996961625,
+        1.198644583,
+        1.466078833
+      ]
+    },
+    {
+      "format": "Q8_0",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.6326815,
+      "decode_seconds": [
+        0.207122875,
+        0.283701584,
+        0.275655958
+      ]
+    },
+    {
+      "format": "Q4_0",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 6.57444225,
+      "decode_seconds": [
+        0.154544041,
+        0.061376375,
+        0.090731792
+      ]
+    },
+    {
+      "format": "Q4_0",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 3.3238823330000002,
+      "decode_seconds": [
+        0.045653833,
+        0.043546,
+        0.0460635
+      ]
+    },
+    {
+      "format": "Q4_0",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 4.4699495,
+      "decode_seconds": [
+        0.300322041,
+        0.160974292,
+        0.14587225
+      ]
+    },
+    {
+      "format": "Q4_1",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.39185575,
+      "decode_seconds": [
+        0.174182084,
+        0.14081375,
+        0.153483167
+      ]
+    },
+    {
+      "format": "Q4_1",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 3.812520083,
+      "decode_seconds": [
+        0.031270208,
+        0.031491958,
+        0.032547959
+      ]
+    },
+    {
+      "format": "Q4_1",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 4.283982792,
+      "decode_seconds": [
+        0.168830625,
+        0.170504,
+        0.126695667
+      ]
+    },
+    {
+      "format": "Q4_K",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.421753417,
+      "decode_seconds": [
+        0.015883833,
+        0.015265833,
+        0.014756541
+      ]
+    },
+    {
+      "format": "Q4_K",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.867780542,
+      "decode_seconds": [
+        0.020455834,
+        0.019648,
+        0.021287792
+      ]
+    },
+    {
+      "format": "Q4_K",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.66372675,
+      "decode_seconds": [
+        0.051197375,
+        0.047076291,
+        0.052402917
+      ]
+    },
+    {
+      "format": "Q5_K",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.586322333,
+      "decode_seconds": [
+        0.018118875,
+        0.017500458,
+        0.017279708
+      ]
+    },
+    {
+      "format": "Q5_K",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.514599125,
+      "decode_seconds": [
+        0.01716925,
+        0.015700958,
+        0.016729708
+      ]
+    },
+    {
+      "format": "Q5_K",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.507971084,
+      "decode_seconds": [
+        0.043148709,
+        0.0347145,
+        0.038912917
+      ]
+    },
+    {
+      "format": "Q6_K",
+      "compute": "cpu",
+      "prompt_tokens": 56,
+      "prefill_seconds": 0.732890375,
+      "decode_seconds": [
+        0.022418667,
+        0.020107708,
+        0.018569375
+      ]
+    },
+    {
+      "format": "Q6_K",
+      "compute": "auto",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.485478416,
+      "decode_seconds": [
+        0.023434584,
+        0.027036333,
+        0.021358416
+      ]
+    },
+    {
+      "format": "Q6_K",
+      "compute": "vulkan",
+      "prompt_tokens": 56,
+      "prefill_seconds": 1.550763875,
+      "decode_seconds": [
+        0.063115417,
+        0.058987041,
+        0.061091375
+      ]
+    }
+  ],
+  "chat_endpoints": [
+    {
+      "format": "Aion-2.3B-F32",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 27.44924324983731,
+      "http_seconds": 16.545813374919817,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-F32",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 32.34822337492369,
+      "http_seconds": 44.775780624942854,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-F32",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 23.146288542076945,
+      "http_seconds": 25.368006333941594,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-F16",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 9.256880624918267,
+      "http_seconds": 5.051389042055234,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-F16",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 3.837642083177343,
+      "http_seconds": 3.4222017920110375,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-F16",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 6.564164666924626,
+      "http_seconds": 2.228036417160183,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-BF16",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 14.495694915996864,
+      "http_seconds": 5.022062375210226,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 902,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-BF16",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 26.840377333108336,
+      "http_seconds": 22.41492012492381,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-BF16",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 39.6094120410271,
+      "http_seconds": 24.507607582956553,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q8_0",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 3.4991803341545165,
+      "http_seconds": 1.5735073329415172,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q8_0",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 9.194290708983317,
+      "http_seconds": 2.0916234171018004,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q8_0",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 1.583661749958992,
+      "http_seconds": 1.3438430409878492,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_0",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 6.220014208927751,
+      "http_seconds": 5.743314999854192,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_0",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 5.90647687506862,
+      "http_seconds": 1.7571689998731017,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_0",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 5.620085875038058,
+      "http_seconds": 2.2482412920799106,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_1",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 3.0959895418491215,
+      "http_seconds": 1.8831705001648515,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_1",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 3.2933661669958383,
+      "http_seconds": 1.5265690409578383,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_1",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 2.6290049999952316,
+      "http_seconds": 2.093701957957819,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_K",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 1.0020849171560258,
+      "http_seconds": 0.401757457992062,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_K",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 2.8285472500137985,
+      "http_seconds": 1.6245805001817644,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q4_K",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 4.696235124953091,
+      "http_seconds": 2.803571167169139,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q5_K",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 1.5777955420780927,
+      "http_seconds": 1.3344884580001235,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q5_K",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 3.301637666998431,
+      "http_seconds": 0.7704550840426236,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q5_K",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 6.437633709050715,
+      "http_seconds": 1.2574763339944184,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q6_K",
+      "compute": "cpu",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 5.824658250203356,
+      "http_seconds": 3.3383328749332577,
+      "cli": {
+        "vulkan_projections": 0,
+        "cpu_projections": 226,
+        "device_submissions": 0
+      },
+      "http": {
+        "vulkan_projections": 0,
+        "cpu_projections": 452,
+        "device_submissions": 0
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q6_K",
+      "compute": "auto",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 2.645512541057542,
+      "http_seconds": 2.3081329581327736,
+      "cli": {
+        "vulkan_projections": 114,
+        "cpu_projections": 112,
+        "device_submissions": 115
+      },
+      "http": {
+        "vulkan_projections": 228,
+        "cpu_projections": 224,
+        "device_submissions": 229
+      }
+    },
+    {
+      "format": "Aion-2.3B-Q6_K",
+      "compute": "vulkan",
+      "kv": "f32",
+      "text": "OK",
+      "usage": {
+        "prompt_tokens": 44,
+        "completion_tokens": 1,
+        "total_tokens": 45
+      },
+      "cli_seconds": 3.54132412513718,
+      "http_seconds": 3.671913041966036,
+      "cli": {
+        "vulkan_projections": 226,
+        "cpu_projections": 0,
+        "device_submissions": 227
+      },
+      "http": {
+        "vulkan_projections": 452,
+        "cpu_projections": 0,
+        "device_submissions": 453
+      }
+    }
+  ]
+}

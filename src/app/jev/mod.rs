@@ -22,6 +22,7 @@
 //!   the `adapters` layout and is already merged/verified).
 
 pub mod adapters;
+mod aion;
 pub(crate) mod clm;
 pub(crate) mod grouped;
 pub(crate) mod single;

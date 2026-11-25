@@ -168,6 +168,16 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
+        "aion_instruct" => {
+            let mut scorer = super::aion::AionScorer::new(
+                source.clone(),
+                n_threads_arg,
+                prefill_batch_size,
+                max_context,
+                &jinja,
+            )?;
+            run_jev_decision_core(context, &prepared, false, &mut scorer)
+        }
         "lfm3" => lfm3::run_jev_decision_lfm3(
             source.clone(),
             context,
