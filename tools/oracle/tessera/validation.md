@@ -1,5 +1,35 @@
 # Tessera-small 对齐记录
 
+## 当前实现（2026-11-25）
+
+单张、批量、渐进预览和局部重绘使用同一个模型采样器。CPU 保持 SIMD 路径。Auto 和严格 Vulkan 在 M3 Max 上把 CLIP、去噪器、CFG、颜色过滤和选择、空间 NMS、提交以及 polish 重掩码放到设备。主机负责分词、与 PyTorch CPU 相同顺序的随机数、批次及步调度、RGBA 输出。每步读回提交状态；开启自条件时也会回传下一步使用的概率。无驱动时，Auto 实际以 CPU 完成推理，指定 Vulkan 会在计算前报错。[分组件数值与设备记录](device.md)
+
+九档权重的默认 16 步均以作者的同权重 PyTorch 作参考。每档各跑 CPU、Auto、严格 Vulkan，每组分别运行两个独立 CLI 进程和同一 HTTP 服务上的两次请求。各组四张图像素一致。最终任务指标和 ERNIE-Image、P-JiT 的真实权重回归列于[默认采样矩阵](full_steps.md)。
+
+四步 greedy 使用 CFG 3，颜色和位置选择温度均为 0。下表给出每 256 个像素中与同权重官方参考一致的个数。每行的 CLI 和 HTTP 都逐像素相同。四个掩码像素的单步重绘在 27 个组合下均与官方一致，含原样保留的 252 个像素。后者每次执行 60 个去噪投影，Auto 和严格 Vulkan 均全部在 GPU 执行。
+
+| 格式 | CPU | Auto | Vulkan |
+| --- | ---: | ---: | ---: |
+| F32 | 256 | 256 | 256 |
+| F16 | 256 | 256 | 256 |
+| BF16 | 254 | 254 | 254 |
+| Q8_0 | 243 | 246 | 246 |
+| Q4_0 | 243 | 229 | 229 |
+| Q4_1 | 241 | 240 | 240 |
+| Q4_K | 201 | 194 | 194 |
+| Q5_K | 233 | 222 | 222 |
+| Q6_K | 247 | 217 | 217 |
+
+F32、seed 17、每批两张，分别测试重复提示词和不同提示词，四步 decode 后再 polish 一步。三种后端的 60 张预览和 12 张最终图均与官方的对应图完全一致。逐张核对了 HTTP SSE 顺序、阶段、索引、结束事件和非流式结果，重复提示词还逐字节对照了 CLI 文件。真实服务在 SSE 运行时对非法批量返回 400、对并发生成返回 429，断开客户端后的下一次生成成功。极大有限 guidance 引起非有限 logits 时，服务发出 error 事件。[复现脚本](batch.py)
+
+已用 Z-Image Turbo Q8_0 的原始 CLI、HTTP 请求复测公共图像入口，64×64 单步 PNG 与初版基线的 SHA256 相同。默认库测试的 24 项失败与改动前逐项相同。下文保留初版的设备分工及入口重构证据，当前设备分工与输出以本节链接的记录为准。
+
+### 同机耗时
+
+固定 F16、seed 0、8 线程、16 步、单图，各测三次。Rust CLI 的墙钟中位数为 CPU 4.475 秒、Auto 3.065 秒、严格 Vulkan 3.085 秒，包含进程启动、加载、采样和 PNG 输出。官方 PyTorch CPU 在载入同权重后进行分词、CLIP 编码、采样和转图，中位数为 15.686 秒。初版混合 Vulkan CLI 的同样例单次耗时为 7.61 秒。当前实现把同一前向的设备算子录入同一个命令缓冲区，减少了各层之间的主机往返。[三次原始计时](performance.json) · [复测脚本](performance.py)
+
+## 初版适配（2026-11-24）
+
 2026-11-24，在 Apple M3 Max（ARM64 NEON、MoltenVK 1.4.2）上验证作者发布的 Tessera-small。标准输入是 `golden crown with blue gems`，批量大小为 1。独立参考直接运行固定 revision 的作者代码，并用 gguf-py 反量化相应 GGUF 替换权重。F32 导出的 CLIP 隐状态、两个 CFG 分支的 logits 和四步 greedy 结果，与直接加载原始文件的参考输出一致。[环境和复现命令](README.md)
 
 ## CPU、Auto 和 Vulkan
@@ -88,4 +118,4 @@ cargo test --locked --profile release-fast --features vulkan --lib tessera_denoi
 
 复跑九档 GGUF × 三种计算策略的生成、重绘矩阵，两条入口共 108 张 PNG，与重构前逐文件比对，108 对字节一致。全量库测试为 1699 passed / 24 failed / 121 ignored，失败名单与基线一致。
 
-另用 Z-Image Turbo Q8_0、Qwen3-4B Q8_0 和 F16 VAE 验证已有 RGB 路径。CPU、8 线程、64×64、1 步、seed 42，前后两版的 CLI 和 HTTP 输出共四张图，PNG SHA256 均为 `2be759c21a6be8bee1f7aea790c487781605b3d8bd15666214179d0cc1cefabb`。四类无效请求的 HTTP 状态与错误正文也相同。ERNIE-Image 和 P-JiT 本轮只跑了请求契约测试，本机缺少完整权重。
+另用 Z-Image Turbo Q8_0、Qwen3-4B Q8_0 和 F16 VAE 验证已有 RGB 路径。CPU、8 线程、64×64、1 步、seed 42，前后两版的 CLI 和 HTTP 输出共四张图，PNG SHA256 均为 `2be759c21a6be8bee1f7aea790c487781605b3d8bd15666214179d0cc1cefabb`。四类无效请求的 HTTP 状态与错误正文也相同。后续取得 ERNIE-Image 和 P-JiT 的完整组件，并复跑了两种模型的真实 CLI 和 HTTP。[回归结果](full_steps.md)

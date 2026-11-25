@@ -115,3 +115,35 @@ cargo build --locked --profile release-fast --bins --features vulkan
 "$PY" tools/oracle/tessera/endpoints.py "$ASSETS" target/release-fast \
   "$ASSETS/parity/inpaint-endpoints" --inpaint > "$ASSETS/parity/inpaint-matrix.jsonl"
 ```
+
+九种格式的 CLIP 和去噪器误差、设备分工与 16 步随机采样结果见[设备矩阵](device.md)和[默认 16 步矩阵](full_steps.md)。
+
+## 批量生成和逐步预览
+
+CLI 用同一提示词生成多张图。下例在每个采样步为两张图各写一张 RGBA 预览，最终输出 `sprite-000.png` 和 `sprite-001.png`。省略 `--num-samples` 时最终文件仍为 `sprite.png`。预览文件名中的步号和图像序号均从 0 开始。
+
+```sh
+target/release-fast/rust-model-inference --model "$ASSETS/tessera-small-f16.gguf" \
+  --prompt 'golden crown with blue gems' --num-samples 2 --seed 17 \
+  --out sprite.png --preview-dir previews --compute vulkan
+```
+
+HTTP 同时接受单个提示词和提示词数组。`n` 是每个提示词的图数，单次请求最多 16 张，`data` 按提示词顺序排列。批次共享同一个随机数流，每一步先为整批抽颜色，再为整批抽位置。非流式请求直接返回最终 PNG。
+
+```sh
+curl -N http://127.0.0.1:8080/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":["golden crown","red apple"],"n":1,"seed":17,"stream":true}'
+```
+
+`image.preview` 事件包含 `step`、`total_steps`、`phase`、图像序号 `index` 和 base64 PNG。预览显示该步模型对每个像素的最高概率颜色，最终图保留按置信度逐步提交的采样颜色。全部掩码提前填满时会跳过余下的 decode 步。启用 polish 后，后续事件的 `phase` 为 `polish`。最后一个 `image.completed` 事件包含与非流式接口相同结构的 `data` 数组。流开始后若计算失败，会收到 `error` 事件。
+
+以下脚本比较同提示词双图和不同提示词双图的预览与最终结果，同时检查断开 SSE 后计算槽可再次使用。
+
+```sh
+"$PY" tools/oracle/tessera/batch.py "$ASSETS" "$ASSETS/parity/batch" --reference
+for mode in cpu auto vulkan; do
+  "$PY" tools/oracle/tessera/batch.py "$ASSETS" "$ASSETS/parity/batch" \
+    --bin-dir target/release-fast --policy "$mode" || exit 1
+done
+```
