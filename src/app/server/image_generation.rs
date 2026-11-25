@@ -11,30 +11,8 @@ use crate::{
 };
 use axum::{extract::State, http::StatusCode, Json};
 use base64::Engine;
-use image::ImageEncoder;
 use serde::Deserialize;
 use std::sync::Arc;
-
-pub(super) struct PixelBackend {
-    pipeline: tessera::Pipeline,
-    defaults: tessera::Options,
-}
-pub(super) fn build_pixel(
-    options: &CliOptions,
-    source: Arc<dyn TensorSource>,
-) -> Result<PixelBackend, String> {
-    let defaults = crate::app::pixel_art::options(options, true)?;
-    let threads = crate::app::resolve_thread_count(
-        options.threads,
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1),
-    );
-    Ok(PixelBackend {
-        pipeline: tessera::Pipeline::load(source, threads, options.compute_policy())?,
-        defaults,
-    })
-}
 
 pub(super) struct PjitBackend {
     pipeline: PjitPipeline,
@@ -84,8 +62,8 @@ pub(super) struct Request {
     pub(super) seed: Option<u64>,
     pub(super) guidance: Option<f32>,
     pub(super) negative_prompt: Option<String>,
-    temperature: Option<f32>,
-    pixel_options: Option<tessera::PixelOptions>,
+    pub(super) temperature: Option<f32>,
+    pub(super) pixel_options: Option<tessera::PixelOptions>,
 }
 type ApiError = (StatusCode, Json<serde_json::Value>);
 fn error(status: StatusCode, message: impl ToString) -> ApiError {
@@ -123,15 +101,16 @@ impl Request {
         Ok(Some(width))
     }
 
-    /// The prompt, if it is one the models can encode.
-    ///
-    /// Checked before the generation slot is taken, so an empty prompt
-    /// fails fast instead of queueing behind a running generation.
-    pub(super) fn prompt_text(&self) -> Result<&str, String> {
+    /// Validate inputs to the RGB pipelines. Tessera accepts empty text and
+    /// defines its own pixel sampler options.
+    pub(super) fn validate_rgb_inputs(&self) -> Result<(), String> {
+        if self.pixel_options.is_some() || self.temperature.is_some() {
+            return Err("unsupported pixel sampling options for this model".into());
+        }
         if self.prompt.trim().is_empty() || self.prompt.len() > 32768 {
             return Err("prompt must contain 1..=32768 bytes".into());
         }
-        Ok(&self.prompt)
+        Ok(())
     }
 
     /// The shared request shape every image-generation backend accepts.
@@ -150,30 +129,8 @@ impl Request {
         Ok(())
     }
 
-    fn pixel_options(&self, defaults: &tessera::Options) -> Result<tessera::Options, String> {
-        self.single_image()?;
-        if self.resolution()?.is_some_and(|v| v != tessera::GRID) || self.negative_prompt.is_some()
-        {
-            return Err(
-                "Tessera-small requires 16x16 and uses learned unconditional guidance".into(),
-            );
-        }
-        let options = tessera::Options {
-            steps: self.steps.unwrap_or(defaults.steps),
-            seed: self.seed.unwrap_or(defaults.seed),
-            guidance: self.guidance.unwrap_or(defaults.guidance),
-            temperature: self.temperature.unwrap_or(defaults.temperature),
-            pixel: self
-                .pixel_options
-                .clone()
-                .unwrap_or_else(|| defaults.pixel.clone()),
-        };
-        options.validate()?;
-        Ok(options)
-    }
-
     fn options(&self, defaults: &PjitOptions) -> Result<PjitOptions, String> {
-        self.prompt_text()?;
+        self.validate_rgb_inputs()?;
         self.single_image()?;
         let mut options = defaults.clone();
         if let Some(size) = &self.size {
@@ -211,7 +168,6 @@ impl Request {
 }
 /// What the request resolved to, per backend.
 enum Plan {
-    Tessera(tessera::Options),
     Pjit(PjitOptions),
     Diffusion(super::diffusion::DiffusionPlan),
 }
@@ -229,20 +185,7 @@ pub(super) async fn generate(
     }
     // Resolve the request before taking the slot, so a bad request never
     // queues behind a running generation.
-    if (request.pixel_options.is_some() || request.temperature.is_some())
-        && !matches!(state.model.as_ref(), Backend::Tessera(_))
-    {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "unsupported pixel sampling options for this model",
-        ));
-    }
     let plan = match state.model.as_ref() {
-        Backend::Tessera(backend) => Plan::Tessera(
-            request
-                .pixel_options(&backend.defaults)
-                .map_err(|e| error(StatusCode::BAD_REQUEST, e))?,
-        ),
         Backend::Pjit(backend) => Plan::Pjit(
             request
                 .options(&backend.defaults)
@@ -255,14 +198,7 @@ pub(super) async fn generate(
         ),
         _ => return Err(error(StatusCode::NOT_FOUND, "Image generation unavailable")),
     };
-    // The prompt is checked with the rest of the request shape, before the
-    // generation slot is taken.
-    let prompt = match &plan {
-        Plan::Tessera(_) => tessera::validate_prompt(&request.prompt),
-        _ => request.prompt_text(),
-    }
-    .map_err(|e| error(StatusCode::BAD_REQUEST, e))?
-    .to_string();
+    let prompt = request.prompt;
     let permit = state
         .generation_slot
         .clone()
@@ -271,28 +207,16 @@ pub(super) async fn generate(
     let model = state.model.clone();
     let data = compute_task(state.compute, move || {
         let _permit = permit;
-        if let (Backend::Tessera(backend), Plan::Tessera(options)) = (model.as_ref(), &plan) {
-            let png = crate::app::pixel_art::png(backend.pipeline.generate(&prompt, options)?)?;
-            return Ok(base64::engine::general_purpose::STANDARD.encode(png));
-        }
-        let rgb = match (model.as_ref(), &plan) {
-            (Backend::Pjit(backend), Plan::Pjit(options)) => {
-                backend.pipeline.generate(&prompt, options, None)?
-            }
+        let image = match (model.as_ref(), &plan) {
+            (Backend::Pjit(backend), Plan::Pjit(options)) => crate::app::diffusion::into_rgb_image(
+                backend.pipeline.generate(&prompt, options, None)?,
+            )?,
             (Backend::Diffusion(backend), Plan::Diffusion(plan)) => {
                 backend.generate(plan, &prompt)?
             }
             _ => unreachable!(),
         };
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(
-                &rgb.bytes,
-                rgb.width,
-                rgb.height,
-                image::ColorType::Rgb8.into(),
-            )
-            .map_err(|e| e.to_string())?;
+        let png = crate::app::diffusion::encode_image_png(&image)?;
         Ok::<_, String>(base64::engine::general_purpose::STANDARD.encode(png))
     })
     .await
@@ -305,19 +229,6 @@ pub(super) async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn pixel_requests_validate_the_fixed_canvas_and_sampler_before_the_slot() {
-        for fields in [
-            serde_json::json!({"prompt":"x","size":"32x32"}),
-            serde_json::json!({"prompt":"x","negative_prompt":"blur"}),
-            serde_json::json!({"prompt":"x","steps":0}),
-            serde_json::json!({"prompt":"x","pixel_options":{"canvas":[512]}}),
-            serde_json::json!({"prompt":"x","pixel_options":{"canvas":vec![512;256]}}),
-        ] {
-            let request: Request = serde_json::from_value(fields).unwrap();
-            assert!(request.pixel_options(&tessera::Options::default()).is_err());
-        }
-    }
     #[test]
     fn rejects_cli_only_server_options_before_loading() {
         for extra in [

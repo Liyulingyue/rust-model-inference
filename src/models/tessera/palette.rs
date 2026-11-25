@@ -2,7 +2,7 @@
 use super::{COLORS, MASK, PIXELS};
 use serde::Deserialize;
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(untagged)]
 pub enum Pixel {
     Id(u16),

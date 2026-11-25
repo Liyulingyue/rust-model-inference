@@ -81,3 +81,9 @@ export TESSERA_COMPUTE=vulkan
 cargo test --locked --profile release-fast --features vulkan --lib tessera_clip_oracle -- --ignored --nocapture
 cargo test --locked --profile release-fast --features vulkan --lib tessera_denoiser_oracle -- --ignored --nocapture
 ```
+
+## 2026-11-25 图像生成入口回归
+
+以 PR 提交 `517fbfdf6` 的二进制为基线，在同一台 Apple M3 Max 上对照合入公共 diffusion 入口后的 CLI 和 HTTP。F16 CPU、8 线程、seed 0，四步随机生成、四步 greedy 和单步重绘三个样例的两条入口都和重构前产生相同的 PNG 字节。三张图分别包含 92、122、96 个透明像素。F32 HTTP 的空提示返回 200，错误尺寸返回 400，缺少提示字段返回 422。
+
+另用 Z-Image Turbo Q8_0、Qwen3-4B Q8_0 和 F16 VAE 验证已有 RGB 路径。CPU、8 线程、64×64、1 步、seed 42，前后两版的 CLI 和 HTTP 输出共四张图，PNG SHA256 均为 `2be759c21a6be8bee1f7aea790c487781605b3d8bd15666214179d0cc1cefabb`。四类无效请求的 HTTP 状态与错误正文也相同。ERNIE-Image 和 P-JiT 本轮只跑了请求契约测试，本机缺少完整权重。

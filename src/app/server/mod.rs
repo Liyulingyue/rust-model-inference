@@ -84,9 +84,8 @@ fn hy_transcription_task<T: Send + 'static>(
 enum Backend {
     Text(TextBackend),
     Pjit(image_generation::PjitBackend),
-    Tessera(image_generation::PixelBackend),
     Video(video_generation::VideoBackend),
-    /// The text-to-image diffusion models: Z-Image and ERNIE-Image. They
+    /// The text-to-image diffusion models: Z-Image, ERNIE-Image and Tessera. They
     /// share the image-generation route with P-JiT and differ only in the
     /// pipeline behind it.
     Diffusion(diffusion::DiffusionBackend),
@@ -134,7 +133,6 @@ impl Backend {
             Self::ArkTts(_) => "arktts",
             Self::Auk(_) => "auk",
             Self::Pjit(_) => "pjit",
-            Self::Tessera(_) => "tessera",
             Self::Video(_) => "video-generation",
             Self::Diffusion(backend) => backend.label(),
             Self::Rerank(_) => "rerank",
@@ -1196,12 +1194,6 @@ fn build_backend(
     }
     if let Ok(source) = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
     {
-        if crate::models::tessera::matches(source.as_ref()) {
-            return Ok(Arc::new(Backend::Tessera(image_generation::build_pixel(
-                options,
-                Arc::from(source),
-            )?)));
-        }
         if crate::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
             return Ok(Arc::new(Backend::Video(video_generation::build(
                 options,
@@ -1224,17 +1216,13 @@ fn build_backend(
             Arc::from(source),
         )?)));
     }
-    // The text-to-image diffusion models (Z-Image, ERNIE-Image). They are
-    // recognized by their weights rather than by a flag, because the CLI
-    // recognizes them the same way and the two entry points must agree on
-    // what a file is.
     let diffusion_source =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
-            .filter(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
-    if let Some(source) = diffusion_source {
-        let kind = diffusion::DiffusionKind::detect(source.as_ref())
-            .ok_or("the diffusion model could not be identified")?;
+            .and_then(|source| {
+                diffusion::DiffusionKind::detect(source.as_ref()).map(|kind| (source, kind))
+            });
+    if let Some((source, kind)) = diffusion_source {
         let available = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
@@ -2191,27 +2179,15 @@ pub fn run_server() {
     // invocation, so they are skipped for it, exactly like the main binary
     // does.
     let auk_source = auk::probe_invocation(&options);
-    let image_arch = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-        .ok()
-        .map(|s| crate::app::arch_of(s.as_ref()));
-    let video_invocation =
-        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-            .ok()
-            .is_some_and(|s| crate::models::diffusion::fastframes_l::matches_model(s.as_ref()));
-    // The text-to-image diffusion models are recognized by their weights.
-    // Their CLI validator wants --out and --prompt, both of which the
-    // server takes from the request instead.
-    let diffusion_invocation =
-        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-            .ok()
-            .is_some_and(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
+    let source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm).ok();
+    let image_arch = source.as_deref().map(crate::app::arch_of);
+    let video_invocation = source
+        .as_deref()
+        .is_some_and(crate::models::diffusion::fastframes_l::matches_model);
+    let diffusion_kind = source.as_deref().and_then(diffusion::DiffusionKind::detect);
+    drop(source);
     if video_invocation {
         if let Err(error) = crate::app::video_generation::options(&options, true) {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    } else if image_arch.as_deref() == Some("tessera") {
-        if let Err(error) = crate::app::pixel_art::options(&options, true) {
             eprintln!("{error}");
             std::process::exit(2);
         }
@@ -2220,8 +2196,8 @@ pub fn run_server() {
             eprintln!("{error}");
             std::process::exit(2);
         }
-    } else if diffusion_invocation {
-        if let Err(error) = diffusion::validate_server_options(&options) {
+    } else if let Some(kind) = diffusion_kind {
+        if let Err(error) = diffusion::validate_server_options(kind, &options) {
             eprintln!("{error}");
             std::process::exit(2);
         }
@@ -2308,7 +2284,7 @@ pub fn run_server() {
             "/v1/videos/generations",
             post(video_generation::generate).layer(DefaultBodyLimit::max(256 * 1024)),
         ),
-        Backend::Pjit(_) | Backend::Diffusion(_) | Backend::Tessera(_) => {
+        Backend::Pjit(_) | Backend::Diffusion(_) => {
             router.route("/v1/images/generations", post(image_generation::generate))
         }
         Backend::WeVisOne(_) => router.merge(api::routes()).route(

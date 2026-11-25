@@ -744,3 +744,52 @@ pub fn z_image_cli_options(options: &CliOptions) -> Result<Option<ZImageCliOptio
         out,
     }))
 }
+
+pub(crate) fn tessera_options(
+    cli: &CliOptions,
+    server: bool,
+) -> Result<crate::models::tessera::Options, String> {
+    use crate::models::tessera::{Options, PixelOptions, GRID};
+    for flag in &cli.supplied_flags {
+        match flag.as_str() {
+            "--model" | "--steps" | "--seed" | "--guidance" | "--cfg" | "--cfg-scale"
+            | "--temperature" | "--width" | "--height" | "--resolution" | "--compute" | "--gpu"
+            | "--threads" => {}
+            "--prompt" | "--out" | "--input" | "--overwrite" if !server => {}
+            "--serve" if server => {}
+            other => return Err(format!("Tessera does not accept {other} in this mode")),
+        }
+    }
+    if [cli.width, cli.height, cli.resolution]
+        .into_iter()
+        .flatten()
+        .any(|side| side != GRID)
+    {
+        return Err("Tessera-small generates 16x16 sprites".into());
+    }
+    let guidance: Vec<_> = [cli.guidance, cli.cfg, cli.cfg_scale]
+        .into_iter()
+        .flatten()
+        .collect();
+    if guidance.len() > 1 {
+        return Err("supply only one guidance option".into());
+    }
+    let defaults = Options::default();
+    let pixel: PixelOptions = if let Some(path) = &cli.input {
+        let file =
+            std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        serde_json::from_reader(std::io::BufReader::new(file))
+            .map_err(|e| format!("invalid pixel options: {e}"))?
+    } else {
+        PixelOptions::default()
+    };
+    let out = Options {
+        pixel,
+        steps: cli.steps.unwrap_or(defaults.steps),
+        seed: u64::try_from(cli.seed.unwrap_or(0)).map_err(|_| "seed must be non-negative")?,
+        guidance: guidance.first().copied().unwrap_or(defaults.guidance),
+        temperature: cli.temperature.unwrap_or(defaults.temperature),
+    };
+    out.validate()?;
+    Ok(out)
+}

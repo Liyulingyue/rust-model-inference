@@ -2,7 +2,7 @@ use super::{palette::Pixel, COLORS, GRID, MASK, PIXELS};
 use crate::{models::diffusion::z_image::dit::TorchMt19937, ops::softmax_inplace};
 use serde::Deserialize;
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuidanceSchedule {
     #[default]
@@ -13,7 +13,7 @@ pub enum GuidanceSchedule {
 
 /// Optional controls for the published confidence-ordered sampler. A null
 /// canvas entry is regenerated; a palette ID (including transparent 0) is kept.
-#[derive(Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PixelOptions {
     pub canvas: Option<Vec<Option<Pixel>>>,
@@ -51,7 +51,7 @@ impl Default for PixelOptions {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub steps: usize,
     pub seed: u64,

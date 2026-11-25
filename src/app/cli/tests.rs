@@ -1904,3 +1904,23 @@ fn a_mode_rejects_the_flags_of_another_mode() {
         );
     }
 }
+
+#[test]
+fn rejects_conflicting_modes_sizes_and_server_only_input_sources() {
+    for (extra, server) in [
+        (vec!["--jev"], false),
+        (vec!["--resolution", "32"], false),
+        (vec!["--cfg", "1", "--guidance", "2"], false),
+        (vec!["--prompt", "sprite"], true),
+        (vec!["--input", "local.json"], true),
+        (vec!["--temperature", "NaN"], false),
+    ] {
+        let args: Vec<_> = ["rmi", "--model", "tessera.gguf"]
+            .into_iter()
+            .chain(extra)
+            .map(String::from)
+            .collect();
+        let cli = crate::app::parse_cli_options(&args).unwrap();
+        assert!(super::tessera_options(&cli, server).is_err());
+    }
+}

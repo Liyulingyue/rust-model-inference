@@ -151,11 +151,7 @@ fn main() {
     if let Ok(source) = open_model_source(&options.model, ComponentRole::Llm) {
         if rust_model_inference::models::tessera::matches(source.as_ref()) {
             app::init_rayon_global_pool(n_threads);
-            app::run_or_exit(app::run_pixel_art_cli(
-                Arc::from(source),
-                &options,
-                n_threads,
-            ));
+            app::run_or_exit(app::run_tessera_cli(Arc::from(source), &options, n_threads));
             return;
         }
         if rust_model_inference::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
