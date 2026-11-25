@@ -104,7 +104,8 @@ def main():
     parser.add_argument("model_dir", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--gguf", type=Path, help="install the independently dequantized GGUF weights")
-    parser.add_argument("--round-activations", action="store_true")
+    parser.add_argument("--round-activations", action="store_true",
+                        help="diagnose historical Q8-activation traces; production uses F32 activations")
     parser.add_argument("--date", default="2026-11-26")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--steps", type=int, default=4)

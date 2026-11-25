@@ -37,6 +37,8 @@ def device_receipt(log):
     return {
         "vulkan_projections": data.count("scope=host_linear backend=Vulkan"),
         "cpu_projections": data.count("scope=host_linear backend=Cpu"),
+        "vulkan_attention_calls": data.count("scope=aion_attention_kv backend=Vulkan"),
+        "cpu_attention_calls": data.count("scope=aion_attention_kv backend=Cpu"),
         "device_submissions": max(counts, default=0),
     }
 
@@ -153,6 +155,7 @@ def main():
     results["http"] = device_receipt(server_log)
     if args.compute == "vulkan":
         assert all(results[entry]["vulkan_projections"] > 0 and results[entry]["cpu_projections"] == 0
+                   and results[entry]["vulkan_attention_calls"] > 0 and results[entry]["cpu_attention_calls"] == 0
                    for entry in ("cli", "http")), results
     (args.log_dir / "result.json").write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(results, ensure_ascii=False), flush=True)

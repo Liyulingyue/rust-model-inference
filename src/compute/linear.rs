@@ -10,6 +10,8 @@ use std::sync::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinearMode {
     Prepared,
+    /// Decode packed weights while keeping the incoming activations in F32.
+    WeightOnly,
     Forward,
     F16Strict,
 }
@@ -18,6 +20,17 @@ pub(crate) enum LinearMode {
 pub(crate) struct LinearBinding<'model, 'weights> {
     pub weight: &'model Weight<'weights>,
     pub mode: LinearMode,
+}
+
+impl<'model, 'weights> LinearBinding<'model, 'weights> {
+    pub(crate) fn weight_only(weight: &'model Weight<'weights>) -> Self {
+        let mode = if weight.ggml_type.type_traits().0 > 1 {
+            LinearMode::WeightOnly
+        } else {
+            LinearMode::Prepared
+        };
+        Self { weight, mode }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +122,16 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                 return Err(ComputeError::Unsupported(
                     "kernel does not implement F16Strict".into(),
                 ));
+            }
+            if binding.mode == LinearMode::WeightOnly {
+                use crate::GGMLType::{Q4K, Q4_0, Q4_1, Q5K, Q6K, Q8_0};
+                if !matches!(w.ggml_type, Q8_0 | Q4_0 | Q4_1 | Q4K | Q5K | Q6K)
+                    || w.n_out > u32::MAX as usize
+                {
+                    return Err(ComputeError::Unsupported(
+                        "unsupported packed weight-only projection".into(),
+                    ));
+                }
             }
             if policy == ComputePolicy::Vulkan {
                 gpu_compatible(*binding)?;
@@ -308,6 +331,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                         .prepared
                         .matmul(weight, input, output, &self.pool)
                         .map_err(ComputeError::InvalidInput)?,
+                    LinearMode::WeightOnly => weight.matmul_weight_only(input, output, &self.pool),
                     mode => {
                         for (x, y) in input
                             .chunks_exact(weight.n_in)
@@ -329,7 +353,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                                         ));
                                     }
                                 }
-                                LinearMode::Prepared => unreachable!(),
+                                LinearMode::Prepared | LinearMode::WeightOnly => unreachable!(),
                             }
                         }
                     }
@@ -350,7 +374,12 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
     ) -> Result<(), ComputeError> {
         use crate::vulkan::ops::{GpuMatmulMode, GpuMatmulSpec, GpuWeightFormat};
         let dot_contract = self.dot_contract;
-        let gpu_spec = |weight: &Weight<'_>| -> Result<GpuMatmulSpec, ComputeError> {
+        let gpu_spec = |binding: &LinearBinding<'_, '_>| -> Result<GpuMatmulSpec, ComputeError> {
+            let weight = binding.weight;
+            if binding.mode == LinearMode::WeightOnly {
+                let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
+                return Ok(format.with_mode(GpuMatmulMode::WeightOnly));
+            }
             let dot_capable = (crate::ops::has_avx2_fma() && weight.n_in >= 8)
                 || (crate::ops::has_neon() && weight.n_in >= 4);
             if dot_contract && dot_capable && weight.ggml_type == crate::GGMLType::BF16 {
@@ -380,7 +409,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             }
             runtime.validate(
                 bytes,
-                gpu_spec(w)?,
+                gpu_spec(binding)?,
                 input.len(),
                 rows,
                 w.n_in,
@@ -400,7 +429,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
                         binding.weight.kernel.weight_bytes().ok_or_else(|| {
                             ComputeError::Unsupported("kernel has no immutable storage view".into())
                         })?,
-                        gpu_spec(binding.weight)?,
+                        gpu_spec(binding)?,
                         binding.weight.n_in,
                         binding.weight.n_out,
                     ))
@@ -429,7 +458,7 @@ impl<'model, 'weights> LinearExecutor<'model, 'weights> {
             let w = binding.weight;
             group.push((
                 w.kernel.weight_bytes().unwrap(),
-                gpu_spec(w)?,
+                gpu_spec(binding)?,
                 rows,
                 w.n_out,
             ));
@@ -1055,6 +1084,7 @@ mod tests {
                             .forward_prepared(input, &[], &[], None, output, 32, 2, 0, 1)
                     }
                     LinearMode::Forward => weight.kernel.forward(input, output, 32, 2),
+                    LinearMode::WeightOnly => unreachable!("packed weights only"),
                     LinearMode::F16Strict => {
                         assert!(weight.kernel.forward_f16_strict(input, output, 32, 2))
                     }

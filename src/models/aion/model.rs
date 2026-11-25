@@ -1,4 +1,4 @@
-use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
+use crate::compute::linear::{LinearBinding, LinearExecutor};
 use crate::compute::ComputePolicy;
 use crate::core::loader::model_config_from_source;
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
@@ -252,6 +252,12 @@ struct LayerCache {
     ring: Option<usize>,
 }
 
+enum AttentionCache {
+    Host(Vec<LayerCache>),
+    #[cfg(feature = "vulkan")]
+    Device(Vec<crate::vulkan::ops::CachedAttention>),
+}
+
 impl LayerCache {
     fn new(
         format: KvFormat,
@@ -306,7 +312,8 @@ pub struct AionSession<'m, 'w> {
     model: &'m AionModel<'w>,
     linear: LinearExecutor<'m, 'w>,
     output: LinearExecutor<'m, 'w>,
-    cache: Vec<LayerCache>,
+    cache: AttentionCache,
+    policy: ComputePolicy,
     scratch: ExecutionScratchpad,
     max_rows: usize,
     capacity: usize,
@@ -329,16 +336,12 @@ impl<'m, 'w> AionSession<'m, 'w> {
             return Err("Aion cannot use strict Vulkan with scalar reference arithmetic".into());
         }
         let max_rows = max_rows.min(capacity);
-        let binding = |weight| LinearBinding {
-            weight,
-            mode: LinearMode::Prepared,
-        };
         let linear = LinearExecutor::new(
             policy,
             model
                 .layers
                 .iter()
-                .flat_map(|l| l.weights.iter().map(binding))
+                .flat_map(|l| l.weights.iter().map(LinearBinding::weight_only))
                 .collect(),
             max_rows,
             model.pool.clone(),
@@ -348,31 +351,67 @@ impl<'m, 'w> AionSession<'m, 'w> {
         // it separate avoids allocating vocab × prefill_batch scratch on GPU.
         let output = LinearExecutor::new(
             policy,
-            vec![binding(&model.embedding)],
+            vec![LinearBinding::weight_only(&model.embedding)],
             1,
             model.pool.clone(),
         )
         .map_err(|e| e.to_string())?;
         let cfg = &model.config;
         let kv_width = cfg.n_head_kv * cfg.n_embd_head;
-        let cache = model
-            .layers
-            .iter()
-            .map(|l| {
-                LayerCache::new(
-                    format,
-                    capacity,
-                    kv_width,
-                    l.sliding.then_some(model.window),
-                    max_rows,
-                )
-            })
-            .collect();
+        let host_cache = || {
+            AttentionCache::Host(
+                model
+                    .layers
+                    .iter()
+                    .map(|l| {
+                        LayerCache::new(
+                            format,
+                            capacity,
+                            kv_width,
+                            l.sliding.then_some(model.window),
+                            max_rows,
+                        )
+                    })
+                    .collect(),
+            )
+        };
+        #[cfg(feature = "vulkan")]
+        let cache = if let Some(context) = linear.vulkan_context() {
+            let caches = model
+                .layers
+                .iter()
+                .map(|layer| {
+                    crate::vulkan::ops::CachedAttention::new(
+                        context,
+                        capacity,
+                        max_rows,
+                        layer.sliding.then_some(model.window),
+                        cfg.n_head,
+                        cfg.n_head_kv,
+                        cfg.n_embd_head,
+                        format,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match caches {
+                Ok(caches) => AttentionCache::Device(caches),
+                Err(e) if policy == ComputePolicy::Auto => {
+                    log::info!("Aion attention using CPU: {e}");
+                    host_cache()
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        } else {
+            host_cache()
+        };
+        #[cfg(not(feature = "vulkan"))]
+        let cache = host_cache();
         Ok(Self {
             model,
             linear,
             output,
             cache,
+            policy,
             scratch: ExecutionScratchpad::new_batched(
                 cfg.n_embd,
                 cfg.n_head * cfg.n_embd_head,
@@ -389,6 +428,14 @@ impl<'m, 'w> AionSession<'m, 'w> {
         })
     }
 
+    /// Number of tokens committed by complete prefill or decode chunks.
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Append tokens and return the last row of logits. If a later chunk
+    /// fails, `position()` identifies the first token to retry. A lost
+    /// device requires replaying the prompt in a fresh session.
     pub fn forward(&mut self, tokens: &[u32]) -> Result<&mut [f32], String> {
         self.model.validate_tokens(tokens)?;
         if tokens.len() > self.capacity - self.position {
@@ -482,18 +529,29 @@ impl<'m, 'w> AionSession<'m, 'w> {
                     crate::ops::rope::neox::rope_neox_f32_with_table(values, dim, &cos, &sin);
                 }
             }
-            let cache = &mut self.cache[i];
-            cache.append(self.position, kv_width, k, v);
-            attention(
-                model,
-                layer,
-                cache,
-                self.position,
-                q,
-                a,
-                &mut s.scores,
-                s.score_stride,
-            );
+            let backend = match &mut self.cache {
+                AttentionCache::Host(caches) => {
+                    let cache = &mut caches[i];
+                    cache.append(self.position, kv_width, k, v);
+                    attention(
+                        model,
+                        layer,
+                        cache,
+                        self.position,
+                        q,
+                        a,
+                        &mut s.scores,
+                        s.score_stride,
+                    );
+                    crate::compute::UsedBackend::Cpu
+                }
+                #[cfg(feature = "vulkan")]
+                AttentionCache::Device(caches) => {
+                    caches[i].forward(self.position, q, k, v, a)?;
+                    crate::compute::UsedBackend::Vulkan
+                }
+            };
+            self.policy.trace("aion_attention_kv", backend, rows);
             self.linear.run(wo, a, rows, residual)?;
             #[cfg(feature = "parity-trace")]
             trace_projections(
@@ -655,6 +713,81 @@ fn attention(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn device_cache_preserves_causality_and_grouped_heads_across_wraps() {
+        let context = ComputePolicy::Vulkan.context().unwrap().unwrap();
+        let (capacity, batch, heads, kv_heads, dim) = (28, 5, 4, 2, 128);
+        for window in [Some(3), None] {
+            for format in [KvFormat::F32, KvFormat::F16] {
+                let mut cache = crate::vulkan::ops::CachedAttention::new(
+                    context, capacity, batch, window, heads, kv_heads, dim, format,
+                )
+                .unwrap();
+                let stored = |value: f32| match format {
+                    KvFormat::F16 => crate::ops::f16_to_f32(crate::ops::f32_to_f16(value)),
+                    KvFormat::F32 => value,
+                };
+                let key = |p: usize, h: usize| ((p * 5 + h * 3) % 17) as f32 / 7.0;
+                let value = |p: usize, h: usize, d: usize| ((p + h * 13 + d) % 19) as f32 / 11.0;
+                let mut pos = 0;
+                for rows in [5, 1, 4, 5, 3, 5, 5] {
+                    let mut q = vec![0.0; rows * heads * dim];
+                    let mut k = vec![0.0; rows * kv_heads * dim];
+                    let mut v = vec![0.0; k.len()];
+                    for r in 0..rows {
+                        for h in 0..heads {
+                            q[(r * heads + h) * dim] = (h + 1) as f32;
+                        }
+                        for h in 0..kv_heads {
+                            let base = (r * kv_heads + h) * dim;
+                            k[base] = key(pos + r, h);
+                            for d in 0..dim {
+                                v[base + d] = value(pos + r, h, d);
+                            }
+                        }
+                    }
+                    let mut output = vec![f32::NAN; q.len()];
+                    if pos == 10 {
+                        // A later layer may have failed after this layer wrote KV.
+                        // Replacing that chunk must preserve its visible prefix.
+                        cache
+                            .forward(pos, &q, &k, &vec![0.0; v.len()], &mut output)
+                            .unwrap();
+                    }
+                    cache.forward(pos, &q, &k, &v, &mut output).unwrap();
+                    for r in 0..rows {
+                        let end = pos + r + 1;
+                        let start = window.map_or(0, |w| end.saturating_sub(w));
+                        for h in 0..heads {
+                            let kv_head = h / (heads / kv_heads);
+                            let weights: Vec<_> = (start..end)
+                                .map(|p| {
+                                    (f64::from(stored(key(p, kv_head))) * (h + 1) as f64
+                                        / (dim as f64).sqrt())
+                                    .exp()
+                                })
+                                .collect();
+                            let sum: f64 = weights.iter().sum();
+                            for d in [0, 63, 127] {
+                                let expected = (start..end)
+                                    .zip(&weights)
+                                    .map(|(p, w)| w * f64::from(stored(value(p, kv_head, d))))
+                                    .sum::<f64>()
+                                    / sum;
+                                let actual = output[(r * heads + h) * dim + d];
+                                assert!((f64::from(actual) - expected).abs() < 2e-5,
+                                    "{format:?} window={window:?} pos={pos} row={r} head={h} dim={d}: {actual} vs {expected}");
+                            }
+                        }
+                    }
+                    pos += rows;
+                }
+            }
+        }
+    }
 
     #[test]
     fn sliding_window_keeps_current_token_and_wraps_for_chunks() {

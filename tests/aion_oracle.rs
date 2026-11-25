@@ -13,6 +13,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+fn top_token(logits: &[f32]) -> u32 {
+    // Reverse iteration makes an exact tie select the lower token ID, as PyTorch does.
+    logits
+        .iter()
+        .enumerate()
+        .rev()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .unwrap()
+        .0 as u32
+}
+
 #[test]
 #[ignore = "requires the Aion checkpoint and generated PyTorch logits"]
 fn aion_logits_match_pinned_pytorch() {
@@ -46,14 +57,15 @@ fn aion_logits_match_pinned_pytorch() {
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(oracle.join("cases.json")).unwrap()).unwrap();
     let precision = path.file_stem().unwrap().to_str().unwrap();
-    let quantized = precision.contains("-Q");
-    // The independent oracle dequantizes weights and keeps activations in F32.
-    // Quantized CPU kernels also round their inputs to Q8, so assign them a
-    // separate budget. F16 KV stores rotated keys and values with rounding.
-    let rounded = manifest["rounded_activations"].as_bool().unwrap_or(false);
-    let (max_abs, max_rmse, min_cosine) = if quantized && rounded {
-        (0.20, 0.025, 0.9999)
-    } else if quantized {
+    let storage = source.tensor_info("token_embd.weight").unwrap().ggml_type;
+    let (block_elements, _) = storage.type_traits();
+    let quantized = block_elements > 1;
+    assert!(
+        !manifest["rounded_activations"].as_bool().unwrap_or(false),
+        "the production oracle requires independently unpacked weights and F32 activations"
+    );
+    // Retain the pre-established budgets for the same-weight F32-activation reference.
+    let (max_abs, max_rmse, min_cosine) = if quantized {
         (0.80, 0.12, 0.999)
     } else if kv == KvFormat::F16 {
         (0.10, 0.015, 0.99999)
@@ -62,7 +74,9 @@ fn aion_logits_match_pinned_pytorch() {
     };
     let mut all_results = Vec::new();
     let mut violations = Vec::new();
-    for case in manifest["cases"].as_array().unwrap() {
+    let cases = manifest["cases"].as_array().unwrap();
+    assert!(!cases.is_empty(), "empty reference suite");
+    for case in cases {
         let name = case["name"].as_str().unwrap();
         let rendered = template
             .render_context(&json!({
@@ -82,6 +96,8 @@ fn aion_logits_match_pinned_pytorch() {
         assert_eq!(ids, expected_ids, "{name} tokenizer");
         let expected_greedy: Vec<u32> = serde_json::from_value(case["greedy"].clone()).unwrap();
         let forced: Vec<u32> = serde_json::from_value(case["forced"].clone()).unwrap();
+        assert!(!forced.is_empty(), "{name}: missing prefill");
+        assert_eq!(forced.len(), expected_greedy.len(), "{name}: decode steps");
         let data = std::fs::read(oracle.join(format!("{name}.f32"))).unwrap();
         let vocab = tokenizer.vocab_size();
         assert_eq!(data.len(), forced.len() * vocab * 4);
@@ -96,10 +112,16 @@ fn aion_logits_match_pinned_pytorch() {
             let start = Instant::now();
             let logits = session.forward(&input).unwrap();
             let seconds = start.elapsed().as_secs_f64();
+            assert_eq!(logits.len(), vocab, "{name} step {step}: vocabulary size");
             let expected: Vec<_> = data[step * vocab * 4..(step + 1) * vocab * 4]
                 .chunks_exact(4)
                 .map(|row| f32::from_le_bytes(row.try_into().unwrap()))
                 .collect();
+            assert_eq!(
+                top_token(&expected),
+                oracle_top,
+                "{name} step {step}: reference top-1"
+            );
             let mut max = 0.0f64;
             let (mut squared, mut dot, mut actual_norm, mut expected_norm) = (0.0, 0.0, 0.0, 0.0);
             for (&a, &b) in logits.iter().zip(&expected) {
@@ -113,20 +135,13 @@ fn aion_logits_match_pinned_pytorch() {
             }
             let rmse = (squared / vocab as f64).sqrt();
             let cosine = dot / (actual_norm * expected_norm).sqrt();
-            // Reverse iteration makes an exact tie select the lower token ID.
-            let token = logits
-                .iter()
-                .enumerate()
-                .rev()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .unwrap()
-                .0 as u32;
+            let token = top_token(logits);
             greedy.push(token);
             let margin = expected[oracle_top as usize] - expected[token as usize];
             steps.push(json!({"max_abs":max,"rmse":rmse,"cosine":cosine,
                              "margin":margin,"seconds":seconds}));
             println!("{precision} {policy:?} {kv:?} {name} step={step} token={token}/{oracle_top} max_abs={max:.7} rmse={rmse:.7} cosine={cosine:.10} margin={margin:.5} secs={seconds:.5}");
-            if max > max_abs || rmse > max_rmse || cosine < min_cosine {
+            if !(max <= max_abs && rmse <= max_rmse && cosine >= min_cosine) {
                 violations.push(format!("{name} step {step}: outside numeric budget"));
             }
             if (quantized && margin > 0.20) || (!quantized && token != oracle_top) {
@@ -134,11 +149,12 @@ fn aion_logits_match_pinned_pytorch() {
                     "{name} step {step}: greedy token {token}/{oracle_top}, margin {margin}"
                 ));
             }
+            assert_eq!(session.position(), ids.len() + step);
             input = vec![next];
         }
         all_results.push(
             json!({"name":name,"input_tokens":ids.len(),"setup_seconds":setup_seconds,
-                                "greedy":greedy,"steps":steps}),
+                                "greedy":greedy,"oracle_greedy":expected_greedy,"steps":steps}),
         );
     }
     if let Ok(path) = std::env::var("AION_RESULT") {
@@ -146,7 +162,7 @@ fn aion_logits_match_pinned_pytorch() {
             path,
             serde_json::to_string_pretty(&json!({
                 "format":precision,"compute":format!("{policy:?}"),"kv":format!("{kv:?}"),
-                "batch":batch,"threads":threads,"rounded_activations":rounded,
+                "batch":batch,"threads":threads,"rounded_activations":false,
             "violations":violations,"cases":all_results,
             }))
             .unwrap(),

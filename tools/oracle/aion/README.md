@@ -17,34 +17,43 @@ target/release-fast/rust-model-server --model "$model_dir/Aion-2.3B-BF16.gguf" \
   --host 127.0.0.1 --port 8080 --compute auto
 ```
 
-The converter also accepts F32, F16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. RMSNorm weights are stored in F32. Runtime activation and accumulation precision follow the shared kernels for the chosen format. `--kv-cache f16|f32` controls only KV storage. Aion chat uses its checkpoint template by default and accepts a `--chat-template-file` override. HTTP JEV scoring uses the checkpoint template and stores KV in F32.
+The converter also accepts F32, F16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K and Q6_K. RMSNorm weights are stored in F32. Packed projections retain the GGUF weights in memory and multiply their unpacked values by F32 activations on both CPU and Vulkan. `--kv-cache f16|f32` controls only KV storage. Aion chat uses its checkpoint template by default and accepts a `--chat-template-file` override. HTTP JEV scoring uses the checkpoint template and stores KV in F32.
 
 Chat is available through `POST /v1/chat/completions`. Tool arguments are returned as JSON, and tools run on the client side. Text decision scores are available through `/v1/jev/score` and `/v1/jev/grouped`, and the equivalent CLI uses `--jev`.
 
 ## Reproduce alignment
 
-The reference is Microsoft's model source at the file revision in [validation.md](validation.md). The reference math runs in F32 with eager attention. For quantized and F16 GGUFs, current gguf-py independently unpacks the same stored values into the official PyTorch module. This preserves the model contract while exposing the error from the runtime's activation rounding separately.
+The reference runs Microsoft's model in F32 with eager attention. For quantized and F16 GGUFs, gguf-py independently unpacks the same stored values into the official PyTorch module. Each comparison covers every vocabulary logit at prefill and three teacher-forced decode steps. The test also checks the rendered prompt, token IDs and greedy predictions. Use the pinned Microsoft and llama.cpp revisions in [validation.md](validation.md).
 
 ```sh
 python -m tools.oracle.aion.oracle "$model_dir" target/aion-oracle/bf16
 AION_GGUF="$model_dir/Aion-2.3B-BF16.gguf" AION_ORACLE=target/aion-oracle/bf16 \
   cargo test --locked --profile release-fast --features vulkan --test aion_oracle -- --ignored --nocapture
 
-PYTHONPATH="$llama_cpp/gguf-py" python -m tools.oracle.aion.oracle \
-  "$model_dir" target/aion-oracle/q8_0 --gguf "$model_dir/Aion-2.3B-Q8_0.gguf" \
-  --follow target/aion-oracle/bf16/cases.json
-AION_GGUF="$model_dir/Aion-2.3B-Q8_0.gguf" AION_ORACLE=target/aion-oracle/q8_0 AION_COMPUTE=vulkan \
-  cargo test --locked --profile release-fast --features vulkan --test aion_oracle -- --ignored --nocapture
+for quant in Q8_0 Q4_0 Q4_1 Q4_K Q5_K Q6_K; do
+  gguf="$model_dir/Aion-2.3B-$quant.gguf"
+  oracle="target/aion-oracle/$quant"
+  PYTHONPATH="$llama_cpp/gguf-py" python -m tools.oracle.aion.oracle \
+    "$model_dir" "$oracle" --gguf "$gguf" --follow target/aion-oracle/bf16/cases.json || exit 1
+  for backend in cpu auto vulkan; do
+    AION_GGUF="$gguf" AION_ORACLE="$oracle" AION_COMPUTE="$backend" AION_RESULT="$oracle/$backend.json" \
+      cargo test --locked --profile release-fast --features vulkan --test aion_oracle -- --ignored --nocapture || exit 1
+  done
+done
 
 python -m tools.oracle.aion.verify_endpoints \
   "$model_dir/Aion-2.3B-BF16.gguf" target/aion-oracle/endpoints --compute cpu --jev
+
+python -m tools.oracle.aion.oracle "$model_dir" target/aion-oracle/long --long-context --steps 2
+AION_GGUF="$model_dir/Aion-2.3B-BF16.gguf" AION_ORACLE=target/aion-oracle/long AION_COMPUTE=vulkan \
+  cargo test --locked --profile release-fast --features vulkan --test aion_oracle -- --ignored --nocapture
 ```
 
 `--long-context` generates the 2094-token sliding-window case. `AION_KV=f16` selects half-precision KV in the Rust probe. `AION_COMPUTE=auto|vulkan` selects the device policy and `RMI_COMPUTE_TRACE=1` exposes projection dispatches and device submissions. On macOS, set `VK_DRIVER_FILES` to the installed MoltenVK ICD JSON.
 
 ## Replay packed projections
 
-The whole-model rounded-activation comparison can show drift from different FP32 reductions feeding later integer rounding. Replay the captured row at every projection to check the packed kernels with an identical input. This includes Q/K/V, attention output, both FFN input projections, the FFN output and the tied vocabulary projection.
+To locate a projection error, replay its captured input row in PyTorch using the independently unpacked GGUF matrix. The script checks every layer's Q/K/V, attention output, FFN gate/up/down and the tied vocabulary projection at each trace step.
 
 ```sh
 cargo build --locked --profile release-fast --features vulkan,parity-trace --bin rust-model-inference
@@ -55,6 +64,6 @@ PYTHONPATH="$llama_cpp/gguf-py" python -m tools.oracle.aion.replay_projections \
   "$model_dir/Aion-2.3B-Q8_0.gguf" target/aion-oracle/projections.jsonl
 ```
 
-Use a new trace file for each run. Set `--compute vulkan` to trace the same projections on a supported device. Add `--round-activations` to the oracle to reproduce the separate end-to-end quantitative gate for packed kernels.
+Use a new trace file for each run. Set `--compute vulkan` to trace the same projections on a supported device. For traces captured before Aion switched to weight-only projection, `replay_projections --round-activations` reproduces the former Q8 activation packing.
 
 [Verification results and remaining coverage](validation.md)

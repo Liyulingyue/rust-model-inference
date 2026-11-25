@@ -1,0 +1,93 @@
+#version 450
+
+// Packed K/V are persistent in the arena. One dispatch appends the new rows;
+// the second computes causal GQA for those rows with a streaming softmax.
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word; uint new_k_word; uint new_v_word; uint out_word;
+    uint k_word; uint v_word; uint position; uint slots;
+    uint rows; uint heads; uint kv_heads; uint dim;
+    uint window; uint packed; float scale; uint append;
+} pc;
+
+float cached(uint base, uint index) {
+    if (pc.packed == 0u) return uintBitsToFloat(arena.data[base + index]);
+    return unpackHalf2x16(arena.data[base + index / 2u])[index % 2u];
+}
+
+uint packed_pair(uint base) {
+    return packHalf2x16(vec2(uintBitsToFloat(arena.data[base]),
+                             uintBitsToFloat(arena.data[base + 1u])));
+}
+
+shared float query[128];
+shared float scores[32];
+shared float previous_scale;
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint width = pc.kv_heads * pc.dim;
+    if (pc.append != 0u) {
+        uint row = gl_WorkGroupID.z;
+        uint per_word = 1u + pc.packed;
+        uint element = (group * 32u + lane) * per_word;
+        if (element >= width) return;
+        uint src = row * width + element;
+        uint dst = (((pc.position + row) % pc.slots) * width + element) / per_word;
+        if (pc.packed != 0u) {
+            arena.data[pc.k_word + dst] = packed_pair(pc.new_k_word + src);
+            arena.data[pc.v_word + dst] = packed_pair(pc.new_v_word + src);
+        } else {
+            arena.data[pc.k_word + dst] = arena.data[pc.new_k_word + src];
+            arena.data[pc.v_word + dst] = arena.data[pc.new_v_word + src];
+        }
+        return;
+    }
+    if (group >= pc.rows) return;
+    uint head = gl_WorkGroupID.z;
+    uint kv_head = head / (pc.heads / pc.kv_heads);
+    uint q_offset = (group * pc.heads + head) * pc.dim;
+    for (uint d = lane; d < pc.dim; d += 32u)
+        query[d] = uintBitsToFloat(arena.data[pc.q_word + q_offset + d]);
+    barrier();
+
+    uint end = pc.position + group + 1u;
+    uint start = end - min(pc.window, end);
+    float maximum = -3.402823466e38, normalizer = 0.0;
+    vec4 acc = vec4(0.0);
+    for (uint tile = start; tile < end; tile += 32u) {
+        uint live = min(32u, end - tile);
+        float dot_value = 0.0;
+        if (lane < live) {
+            uint base = (((tile + lane) % pc.slots) * pc.kv_heads + kv_head) * pc.dim;
+            for (uint d = 0u; d < pc.dim; ++d) dot_value = fma(query[d], cached(pc.k_word, base + d), dot_value);
+        }
+        scores[lane] = dot_value * pc.scale;
+        barrier();
+        if (lane == 0u) {
+            float next_max = maximum;
+            for (uint j = 0u; j < live; ++j) next_max = max(next_max, scores[j]);
+            previous_scale = exp(maximum - next_max);
+            normalizer *= previous_scale;
+            for (uint j = 0u; j < live; ++j) {
+                scores[j] = exp(scores[j] - next_max);
+                normalizer += scores[j];
+            }
+            maximum = next_max;
+        }
+        barrier();
+        acc *= previous_scale;
+        for (uint j = 0u; j < live; ++j) {
+            uint base = (((tile + j) % pc.slots) * pc.kv_heads + kv_head) * pc.dim;
+            for (uint d = lane; d < pc.dim; d += 32u)
+                acc[d / 32u] = fma(scores[j], cached(pc.v_word, base + d), acc[d / 32u]);
+        }
+        barrier();
+    }
+    if (lane == 0u) scores[0] = normalizer;
+    barrier();
+    for (uint d = lane; d < pc.dim; d += 32u)
+        arena.data[pc.out_word + q_offset + d] = floatBitsToUint(acc[d / 32u] / scores[0]);
+}
