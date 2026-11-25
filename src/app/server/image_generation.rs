@@ -9,7 +9,15 @@ use crate::{
         tessera,
     },
 };
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
+    Json,
+};
 use base64::Engine;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -49,9 +57,25 @@ fn server_defaults(options: &CliOptions) -> Result<PjitOptions, String> {
     Ok(defaults)
 }
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum Prompts {
+    One(String),
+    Many(Vec<String>),
+}
+impl Prompts {
+    fn as_slice(&self) -> &[String] {
+        match self {
+            Self::One(s) => std::slice::from_ref(s),
+            Self::Many(v) => v,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Request {
-    pub(super) prompt: String,
+    prompt: Prompts,
+    stream: Option<bool>,
     pub(super) model: Option<String>,
     pub(super) size: Option<String>,
     pub(super) n: Option<usize>,
@@ -107,7 +131,13 @@ impl Request {
         if self.pixel_options.is_some() || self.temperature.is_some() {
             return Err("unsupported pixel sampling options for this model".into());
         }
-        if self.prompt.trim().is_empty() || self.prompt.len() > 32768 {
+        if self.stream.is_some() {
+            return Err("this image model does not support stream".into());
+        }
+        let Prompts::One(prompt) = &self.prompt else {
+            return Err("this image model requires a single prompt".into());
+        };
+        if prompt.trim().is_empty() || prompt.len() > 32768 {
             return Err("prompt must contain 1..=32768 bytes".into());
         }
         Ok(())
@@ -125,6 +155,22 @@ impl Request {
                 .is_some_and(|f| f != "b64_json")
         {
             return Err("image generation supports n=1 and response_format=b64_json".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_pixel_inputs(&self) -> Result<(), String> {
+        if self
+            .response_format
+            .as_deref()
+            .is_some_and(|f| f != "b64_json")
+        {
+            return Err("Tessera supports response_format=b64_json".into());
+        }
+        let prompts = self.prompt.as_slice();
+        tessera::validate_batch_size(prompts.len().saturating_mul(self.n.unwrap_or(1)))?;
+        for prompt in prompts {
+            tessera::validate_prompt(prompt)?;
         }
         Ok(())
     }
@@ -175,7 +221,7 @@ enum Plan {
 pub(super) async fn generate(
     State(state): State<AppState>,
     Json(request): Json<Request>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     if request
         .model
         .as_deref()
@@ -198,33 +244,77 @@ pub(super) async fn generate(
         ),
         _ => return Err(error(StatusCode::NOT_FOUND, "Image generation unavailable")),
     };
-    let prompt = request.prompt;
+    let stream = request.stream.unwrap_or(false);
     let permit = state
         .generation_slot
         .clone()
         .try_acquire_owned()
         .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "Image generation is busy"))?;
     let model = state.model.clone();
-    let data = compute_task(state.compute, move || {
+    let generate = move |preview: Option<&mut tessera::Preview<'_>>| {
         let _permit = permit;
-        let image = match (model.as_ref(), &plan) {
-            (Backend::Pjit(backend), Plan::Pjit(options)) => crate::app::diffusion::into_rgb_image(
-                backend.pipeline.generate(&prompt, options, None)?,
-            )?,
+        let prompts: Vec<_> = request
+            .prompt
+            .as_slice()
+            .iter()
+            .flat_map(|s| std::iter::repeat_n(s.as_str(), request.n.unwrap_or(1)))
+            .collect();
+        let images = match (model.as_ref(), &plan) {
+            (Backend::Pjit(backend), Plan::Pjit(options)) => {
+                vec![crate::app::diffusion::into_rgb_image(
+                    backend.pipeline.generate(prompts[0], options, None)?,
+                )?]
+            }
             (Backend::Diffusion(backend), Plan::Diffusion(plan)) => {
-                backend.generate(plan, &prompt)?
+                backend.generate(plan, &prompts, preview)?
             }
             _ => unreachable!(),
         };
-        let png = crate::app::diffusion::encode_image_png(&image)?;
-        Ok::<_, String>(base64::engine::general_purpose::STANDARD.encode(png))
-    })
-    .await
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
-    .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(
-        serde_json::json!({"created":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),"data":[{"b64_json":data}]}),
-    ))
+        let data = images
+            .into_iter()
+            .map(|image| Ok(serde_json::json!({"b64_json":encode_png(&image)?})))
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok::<_, String>(
+            serde_json::json!({"created":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),"data":data}),
+        )
+    };
+    if stream {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(2);
+        let previews = tx.clone();
+        let job = compute_task(state.compute, move || {
+            generate(Some(&mut |step, index, image| {
+                let payload = serde_json::json!({"step":step.index, "total_steps":step.total, "index":index,
+                    "phase":if step.polish {"polish"} else {"decode"}, "b64_json":encode_png(&image.into())?});
+                previews
+                    .blocking_send(Ok(Event::default()
+                        .event("image.preview")
+                        .data(payload.to_string())))
+                    .map_err(|_| "client disconnected".to_owned())
+            }))
+        });
+        tokio::spawn(async move {
+            let (event, payload) = match job.await.map_err(|e| e.to_string()).and_then(|r| r) {
+                Ok(data) => ("image.completed", data),
+                Err(e) => ("error", serde_json::json!({"error":{"message":e}})),
+            };
+            let _ = tx
+                .send(Ok(Event::default().event(event).data(payload.to_string())))
+                .await;
+        });
+        return Ok(Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+            .keep_alive(KeepAlive::default())
+            .into_response());
+    }
+    let data = compute_task(state.compute, move || generate(None))
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(data).into_response())
+}
+
+fn encode_png(image: &image::DynamicImage) -> Result<String, String> {
+    Ok(base64::engine::general_purpose::STANDARD
+        .encode(crate::app::diffusion::encode_image_png(image)?))
 }
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,9 @@
 //! The frozen OpenAI CLIP ViT-B/32 text tower used to condition Tessera.
 //! Every one of its 24 rows (including EOS padding) conditions the pixel stream.
 
+#[cfg(feature = "vulkan")]
+mod device;
+
 use std::sync::Arc;
 
 use tokenizers::{Tokenizer, TruncationParams};
@@ -143,6 +146,8 @@ impl<'a> Block<'a> {
 
 pub(super) struct TextEncoder<'a> {
     tokenizer: Tokenizer,
+    #[cfg(feature = "vulkan")]
+    device: Option<device::Device>,
     tokens: Weight<'a>,
     positions: Weight<'a>,
     blocks: Vec<Block<'a>>,
@@ -172,6 +177,8 @@ impl<'a> TextEncoder<'a> {
             .map_err(|error| format!("CLIP truncation: {error}"))?;
         Ok(Self {
             tokenizer,
+            #[cfg(feature = "vulkan")]
+            device: None,
             tokens: matrix(
                 source,
                 "text_model.embeddings.token_embedding.weight",
@@ -209,7 +216,7 @@ impl<'a> TextEncoder<'a> {
     }
 
     pub(super) fn encode(
-        &self,
+        &mut self,
         prompt: &str,
         policy: ComputePolicy,
         pool: Arc<ComputePool>,
@@ -219,6 +226,45 @@ impl<'a> TextEncoder<'a> {
             .iter()
             .position(|&id| id == EOS)
             .ok_or("missing CLIP EOS")?;
+        #[cfg(feature = "vulkan")]
+        if policy != ComputePolicy::Cpu {
+            // Auto retries this encode on CPU only if setting up or executing the
+            // device graph failed. Strict Vulkan propagates the original error.
+            let device_output = (|| -> Result<_, String> {
+                let ctx = if crate::ops::scalar_mode() {
+                    policy.context_with(|| Err("CLIP scalar mode requires CPU".into()))
+                } else {
+                    policy.context()
+                }
+                .map_err(|e| e.to_string())?;
+                let Some(context) = ctx else { return Ok(None) };
+                let device = match &self.device {
+                    Some(device) => device,
+                    None => {
+                        let device =
+                            device::Device::new(self, context).map_err(|e| e.to_string())?;
+                        self.device.insert(device)
+                    }
+                };
+                device
+                    .encode(&ids, &self.tokens)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            })();
+            match device_output {
+                Ok(Some(states)) => {
+                    let pooled = states[eos * WIDTH..(eos + 1) * WIDTH].to_vec();
+                    return Ok((states, pooled));
+                }
+                Err(error) if policy == ComputePolicy::Vulkan => return Err(error),
+                Err(error) => {
+                    log::info!("Tessera CLIP falling back to CPU: {error}");
+                    self.device = None;
+                }
+                Ok(None) => {}
+            }
+        }
+        policy.check_build()?;
         let mut hidden = vec![0.; CONTEXT * WIDTH];
         let mut pos_embedding = vec![0.; WIDTH];
         for (pos, (&token, row)) in ids.iter().zip(hidden.chunks_exact_mut(WIDTH)).enumerate() {
@@ -233,8 +279,8 @@ impl<'a> TextEncoder<'a> {
             .flat_map(|b| [&b.q, &b.k, &b.v, &b.out, &b.fc1, &b.fc2])
             .map(Linear::binding)
             .collect();
-        let mut executor =
-            LinearExecutor::new(policy, bindings, CONTEXT, pool).map_err(|e| e.to_string())?;
+        let mut executor = LinearExecutor::new(ComputePolicy::Cpu, bindings, CONTEXT, pool)
+            .map_err(|e| e.to_string())?;
         for block in &self.blocks {
             block.forward(&mut hidden, &mut executor)?;
         }

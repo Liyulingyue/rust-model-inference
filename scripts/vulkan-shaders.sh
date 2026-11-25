@@ -87,6 +87,10 @@ shader_names=(
     pivo_conv1d
     pivo_swiglu
     pivo_silu
+    tessera_block
+    tessera_clip
+    tessera_sample
+    tessera_commit
 )
 manifest="$root_dir/shaders/manifest.sha256"
 
@@ -153,7 +157,7 @@ check_workgroup_limit() {
     # Optional DiT attention is gated on both device limits in Vulkan ops;
     # keep the baseline shaders within the original 64x1x1 requirement.
     case "${shader##*/}" in
-        attention_scores_tiled.spv|attention_online.spv|attention_online_wide.spv) limit=256 ;;
+        attention_scores_tiled.spv|attention_online.spv|attention_online_wide.spv|tessera_commit.spv) limit=256 ;;
     esac
     spirv-dis "$shader" -o - | awk -v shader="$shader" -v limit="$limit" '
         $1 == "OpExecutionMode" && $3 == "LocalSize" {

@@ -64,13 +64,13 @@ pub(super) enum DiffusionPlan {
 /// so a bad request fails fast instead of queueing behind a running
 /// generation.
 fn plan(defaults: DiffusionPlan, request: &Request) -> Result<DiffusionPlan, String> {
-    request.single_image()?;
     if !matches!(defaults, DiffusionPlan::Tessera(_)) {
+        request.single_image()?;
         request.validate_rgb_inputs()?;
     }
     match defaults {
         DiffusionPlan::Tessera(mut options) => {
-            tessera::validate_prompt(&request.prompt)?;
+            request.validate_pixel_inputs()?;
             if request.resolution()?.is_some_and(|v| v != tessera::GRID)
                 || request.negative_prompt.is_some()
             {
@@ -333,21 +333,24 @@ impl DiffusionBackend {
     pub(super) fn generate(
         &self,
         plan: &DiffusionPlan,
-        prompt: &str,
-    ) -> Result<image::DynamicImage, String> {
+        prompts: &[&str],
+        preview: Option<&mut tessera::Preview<'_>>,
+    ) -> Result<Vec<image::DynamicImage>, String> {
         match (self, plan) {
-            (Self::Tessera { pipeline, .. }, DiffusionPlan::Tessera(options)) => {
-                pipeline.generate(prompt, options).map(Into::into)
-            }
+            (Self::Tessera { pipeline, .. }, DiffusionPlan::Tessera(options)) => Ok(pipeline
+                .generate_batch(prompts, options, preview)?
+                .into_iter()
+                .map(Into::into)
+                .collect()),
             (Self::ZImage { pipeline, .. }, DiffusionPlan::ZImage(options)) => {
-                crate::app::diffusion::into_rgb_image(DiffusionPipeline::generate_rgb(
-                    pipeline, prompt, options,
-                )?)
+                Ok(vec![crate::app::diffusion::into_rgb_image(
+                    DiffusionPipeline::generate_rgb(pipeline, prompts[0], options)?,
+                )?])
             }
             (Self::Ernie { pipeline, .. }, DiffusionPlan::Ernie(options)) => {
-                crate::app::diffusion::into_rgb_image(DiffusionPipeline::generate_rgb(
-                    pipeline, prompt, options,
-                )?)
+                Ok(vec![crate::app::diffusion::into_rgb_image(
+                    DiffusionPipeline::generate_rgb(pipeline, prompts[0], options)?,
+                )?])
             }
             _ => Err("the plan does not match the loaded model".into()),
         }
@@ -388,6 +391,11 @@ mod tests {
             serde_json::json!({"prompt":"x","size":"32x32"}),
             serde_json::json!({"prompt":"x","negative_prompt":"blur"}),
             serde_json::json!({"prompt":"x","steps":0}),
+            serde_json::json!({"prompt":[]}),
+            serde_json::json!({"prompt":"x","n":0}),
+            serde_json::json!({"prompt":["x","y"],"n":9}),
+            serde_json::json!({"prompt":"x","n":usize::MAX}),
+            serde_json::json!({"prompt":"x","response_format":"url"}),
             serde_json::json!({"prompt":"x","pixel_options":{"canvas":[512]}}),
             serde_json::json!({"prompt":"x","pixel_options":{"canvas":vec![512;256]}}),
         ] {
@@ -404,6 +412,8 @@ mod tests {
         for json in [
             r#"{"prompt":""}"#,
             r#"{"prompt":"cat","temperature":0}"#,
+            r#"{"prompt":["", "second"], "n":2, "stream":true}"#,
+            r#"{"prompt":"cat","stream":true}"#,
             r#"{"prompt":"cat","pixel_options":{"self_cond":false}}"#,
         ] {
             let req = request(json);

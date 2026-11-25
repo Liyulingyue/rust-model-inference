@@ -1,0 +1,114 @@
+#version 450
+// Fixed 16x16 palette transformer. All activation buffers use row-major F32.
+layout(local_size_x=64) in;
+layout(std430,binding=0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform Params { uint op, a, b, c, d, e, f, g, h, j; } pc;
+
+const uint D=512, FF=1536, PREFIX=28, REG=4, MASK=512, NONE=0xffffffffu;
+shared float sum_q[64], sum_k[64];
+float at(uint i) { return uintBitsToFloat(arena.data[i]); }
+void put(uint i,float x) { arena.data[i]=floatBitsToUint(x); }
+float optional(uint off,uint i) { return off == NONE ? 0.0 : at(off+i); }
+float silu(float x) { return x/(1.0+exp(-x)); }
+uint packed_pixel(uint i) {
+    uint y=i/16u, x=i%16u;
+    return ((y/2u)*8u+x/2u)*4u + (y%2u)*2u + x%2u;
+}
+
+void main() {
+    uint lane=gl_LocalInvocationID.x, group=gl_WorkGroupID.x, i=64u*group+lane;
+    if (pc.op==0u) {
+        // In-place bias/residual and optional SiLU. Separate offsets permit broadcasting.
+        if (i>=pc.f) return;
+        float x=at(pc.a+i)+optional(pc.b,i%pc.d)+optional(pc.c,i%pc.d);
+        put(pc.a+i,pc.e!=0u?silu(x):x);
+    } else if (pc.op==1u) {
+        // RMS norm followed by optional gamma or adaLN shift/scale (one group per row).
+        uint row=group, width=pc.c;
+        float sum=0.0;
+        for (uint c=lane;c<width;c+=64u) {
+            float x=at(pc.a+row*width+c);sum+=x*x;
+        }
+        sum_q[lane]=sum;barrier();
+        for (uint k=32u;k>0u;k>>=1) { if (lane<k) sum_q[lane]+=sum_q[lane+k];barrier(); }
+        float inv=inversesqrt(sum_q[0]/float(width)+1e-6);
+        for (uint c=lane;c<width;c+=64u) {
+            float x=at(pc.a+row*width+c)*inv;
+            if (pc.d!=NONE) x*=at(pc.d+c);
+            if (pc.e!=NONE) {
+                x=x*(1.0+at(pc.e+width+c)+optional(pc.f,width+c))
+                        +(at(pc.e+c)+optional(pc.f,c));
+            }
+            put(pc.b+row*width+c,x);
+        }
+    } else if (pc.op==2u) {
+        // One workgroup normalizes a Q/K head and applies the split-half axial rotation.
+        uint row=gl_WorkGroupID.y, off=row*3u*D+group*64u;
+        float q=at(pc.a+off+lane), k=at(pc.a+off+D+lane);
+        sum_q[lane]=q*q;sum_k[lane]=k*k;barrier();
+        for (uint s=32u;s>0u;s>>=1) {
+            if (lane<s) {sum_q[lane]+=sum_q[lane+s];sum_k[lane]+=sum_k[lane+s];} barrier();
+        }
+        float nq=inversesqrt(sum_q[0]/64.0+1e-6), nk=inversesqrt(sum_k[0]/64.0+1e-6);
+        uint peer=lane^32u;
+        float qp=at(pc.a+off+peer)*nq*at(pc.e+peer);
+        float kp=at(pc.a+off+D+peer)*nk*at(pc.f+peer);
+        uint rot=pc.g+row*64u+(lane%32u)*2u;
+        float sn=at(rot)*(lane<32u?-1.0:1.0), cs=at(rot+1u);
+        uint dst=row*D+64u*group+lane;
+        put(pc.b+dst,q*nq*at(pc.e+lane)*cs+qp*sn);
+        put(pc.c+dst,k*nk*at(pc.f+lane)*cs+kp*sn);
+        put(pc.d+dst,at(pc.a+off+2u*D+lane));
+    } else if (pc.op==3u) {
+        if (i>=pc.e) return;
+        put(pc.a+i,at(pc.a+i)+at(pc.b+i)*(at(pc.c+i%D)+at(pc.d+i%D)));
+    } else if (pc.op==4u) {
+        // w12 is [up | gate] per row. A residual 3x3 cross-correlation is applied only to image tokens.
+        if (i>=pc.f) return;
+        uint row=i/FF, c=i%FF, offset=pc.a+row*2u*FF+c;
+        float gate=at(offset+FF);
+        if(row>=PREFIX) {
+            int grid=int(pc.e), pixel=int(row-PREFIX), y=pixel/grid, x=pixel%grid;
+            float conv=at(pc.d+c);
+            for(int ky=0;ky<3;ky++) for(int kx=0;kx<3;kx++) {
+                int yy=y+ky-1, xx=x+kx-1;
+                if(yy<0 || xx<0 || yy>=grid || xx>=grid) continue;
+                uint src=pc.a+(PREFIX+uint(yy*grid+xx))*2u*FF+FF+c;
+                conv+=at(src)*at(pc.c+uint(ky*3+kx)*FF+c);
+            }
+            gate+=conv;
+        }
+        put(pc.b+i,at(offset)*silu(gate));
+    } else if(pc.op==5u) {
+        if(i>=(PREFIX+256u)*D) return;
+        uint r=i/D,c=i%D; float x;
+        if(r<REG) x=at(pc.e+i);
+        else if(r<PREFIX) x=at(pc.f+(r-REG)*D+c);
+        else {
+            uint pix=r-PREFIX, id=arena.data[pc.b+pix];
+            x=at(pc.c+id*D+c)+at(pc.d+pix*D+c);
+            if(id==MASK && pc.g!=NONE) x+=at(pc.g+pix*D+c);
+        }
+        put(pc.a+i,x);
+    } else if(pc.op==6u || pc.op==7u) {
+        // Preserve the skip tensor during merge; restore its image rows by residual addition on split.
+        if(i>=(PREFIX+256u)*D) return;
+        if(i<PREFIX*D) {arena.data[pc.b+i]=arena.data[pc.a+i]; return;}
+        uint src=i-PREFIX*D, packed=packed_pixel(src/D)*D+src%D;
+        if(pc.op==6u) arena.data[pc.c+packed]=arena.data[pc.a+i];
+        else put(pc.b+i,at(pc.b+i)+at(pc.c+packed));
+    } else if(pc.op==8u) {
+        if(i<pc.c) put(pc.a+i,at(pc.a+i)+at(pc.b+i));
+    } else if(pc.op==9u) {
+        // Mask ratio is shared across the whole sprite. The 16 channels are
+        // eight sine frequencies followed by their cosine counterparts.
+        float masked=0.0;
+        for(uint pixel=lane;pixel<256u;pixel+=64u) masked+=float(arena.data[pc.a+pixel]==MASK);
+        sum_q[lane]=masked;barrier();
+        for(uint k=32u;k>0u;k>>=1) {if(lane<k)sum_q[lane]+=sum_q[lane+k];barrier();}
+        if(lane<16u) {
+            float angle=(sum_q[0]/128.0-1.0)*(3.141592653589793*float(1u<<(lane%8u)));
+            put(pc.b+lane,lane<8u?sin(angle):cos(angle));
+        }
+    }
+}

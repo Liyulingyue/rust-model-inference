@@ -755,7 +755,9 @@ pub(crate) fn tessera_options(
             "--model" | "--steps" | "--seed" | "--guidance" | "--cfg" | "--cfg-scale"
             | "--temperature" | "--width" | "--height" | "--resolution" | "--compute" | "--gpu"
             | "--threads" => {}
-            "--prompt" | "--out" | "--input" | "--overwrite" if !server => {}
+            "--prompt" | "--out" | "--input" | "--overwrite" | "--num-samples"
+            | "--preview-dir"
+                if !server => {}
             "--serve" if server => {}
             other => return Err(format!("Tessera does not accept {other} in this mode")),
         }

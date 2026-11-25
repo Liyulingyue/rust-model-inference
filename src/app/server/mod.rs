@@ -2065,6 +2065,9 @@ fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeSc
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.preview_dir.is_some() {
+        return Err("HTTP previews are returned with stream=true".into());
+    }
     if options.decision_request.is_some() {
         return Err("--decision-request is a CLI input; server decisions use /v1/decide".into());
     }

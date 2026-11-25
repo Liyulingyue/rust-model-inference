@@ -27,6 +27,7 @@ pub struct CliOptions {
     pub frames: Option<PathBuf>,
     pub planning_mode: Option<String>,
     pub num_samples: Option<usize>,
+    pub preview_dir: Option<PathBuf>,
     pub num_steps: Option<usize>,
     pub output: Option<PathBuf>,
     pub model: PathBuf,

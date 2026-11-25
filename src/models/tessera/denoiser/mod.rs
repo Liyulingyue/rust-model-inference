@@ -1,4 +1,6 @@
 //! Tessera-small hourglass transformer, with pixel and patch tokens in a common RoPE frame.
+#[cfg(feature = "vulkan")]
+mod gpu;
 mod weights;
 pub use weights::Weights;
 
@@ -135,7 +137,7 @@ impl Projections<'_, '_> {
     }
 }
 
-pub struct Denoiser<'m, 'w> {
+struct Cpu<'m, 'w> {
     weights: &'m Weights<'w>,
     linear: Projections<'m, 'w>,
     pixel_rope: Rope,
@@ -144,7 +146,7 @@ pub struct Denoiser<'m, 'w> {
     policy: ComputePolicy,
 }
 
-impl<'m, 'w> Denoiser<'m, 'w> {
+impl<'m, 'w> Cpu<'m, 'w> {
     pub fn new(
         weights: &'m Weights<'w>,
         pool: Arc<ComputePool>,
@@ -186,14 +188,6 @@ impl<'m, 'w> Denoiser<'m, 'w> {
         sc_probs: Option<&[f32]>,
         unconditional: bool,
     ) -> Result<Vec<f32>, String> {
-        if ids.len() != PIXELS
-            || ids.iter().any(|&x| usize::from(x) > VOCAB)
-            || text_states.len() != TEXT_LEN * D
-            || pooled.len() != D
-            || sc_probs.is_some_and(|s| s.len() != PIXELS * VOCAB)
-        {
-            return Err("Invalid Tessera denoiser inputs".into());
-        }
         let _scope = self.policy.enter_legacy_scope();
         let w = self.weights;
         let mut h = w.positions.clone();
@@ -259,6 +253,191 @@ impl<'m, 'w> Denoiser<'m, 'w> {
         let img = &mut xs[PREFIX * D..];
         modulate(img, &params[..D], &params[D..]);
         self.linear.apply(w.head, img)
+    }
+}
+
+use super::sampler::{commit_cpu, draw_cpu, Draw, DrawOptions, PixelOptions, SamplingModel};
+
+pub struct Denoiser<'m, 'w> {
+    backend: Backend<'m, 'w>,
+}
+enum Backend<'m, 'w> {
+    Cpu(Cpu<'m, 'w>),
+    #[cfg(feature = "vulkan")]
+    Device {
+        model: Box<gpu::Device<'m, 'w>>,
+        weights: &'m Weights<'w>,
+        pool: Arc<ComputePool>,
+        policy: ComputePolicy,
+    },
+}
+
+fn validate_inputs(
+    ids: &[u16],
+    states: &[f32],
+    pooled: &[f32],
+    sc: Option<&[f32]>,
+) -> Result<(), String> {
+    if ids.len() != PIXELS
+        || ids.iter().any(|&id| id as usize > VOCAB)
+        || states.len() != TEXT_LEN * D
+        || pooled.len() != D
+        || sc.is_some_and(|p| p.len() != PIXELS * VOCAB)
+    {
+        return Err("invalid Tessera denoiser inputs".into());
+    }
+    Ok(())
+}
+
+impl<'m, 'w> Denoiser<'m, 'w> {
+    pub fn new(
+        weights: &'m Weights<'w>,
+        pool: Arc<ComputePool>,
+        policy: ComputePolicy,
+    ) -> Result<Self, String> {
+        policy.check_build()?;
+        #[cfg(feature = "vulkan")]
+        if let Some(context) = policy.context().map_err(|e| e.to_string())? {
+            match gpu::Device::new(context, weights) {
+                Ok(model) => {
+                    return Ok(Self {
+                        backend: Backend::Device {
+                            model: Box::new(model),
+                            weights,
+                            pool,
+                            policy,
+                        },
+                    })
+                }
+                Err(error) if policy == ComputePolicy::Auto => {
+                    eprintln!("Tessera denoiser: CPU fallback: {error}")
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(Self {
+            backend: Backend::Cpu(Cpu::new(weights, pool, ComputePolicy::Cpu)?),
+        })
+    }
+    pub fn counts(&self) -> (usize, usize) {
+        match &self.backend {
+            Backend::Cpu(cpu) => cpu.counts(),
+            #[cfg(feature = "vulkan")]
+            Backend::Device { model, .. } => model.counts(),
+        }
+    }
+    #[cfg(feature = "vulkan")]
+    fn recover(&mut self, error: crate::vulkan::VulkanError) -> Result<(), String> {
+        if let Backend::Device {
+            weights,
+            pool,
+            policy: ComputePolicy::Auto,
+            ..
+        } = &self.backend
+        {
+            eprintln!("Tessera denoiser: CPU fallback: {error}");
+            self.backend = Backend::Cpu(Cpu::new(weights, pool.clone(), ComputePolicy::Cpu)?);
+            Ok(())
+        } else {
+            Err(error.to_string())
+        }
+    }
+    #[cfg(test)]
+    pub fn forward(
+        &mut self,
+        ids: &[u16],
+        states: &[f32],
+        pooled: &[f32],
+        sc: Option<&[f32]>,
+        unconditional: bool,
+    ) -> Result<Vec<f32>, String> {
+        validate_inputs(ids, states, pooled, sc)?;
+        loop {
+            match &mut self.backend {
+                Backend::Cpu(cpu) => return cpu.forward(ids, states, pooled, sc, unconditional),
+                #[cfg(feature = "vulkan")]
+                Backend::Device { model, .. } => {
+                    match model.forward(ids, states, pooled, sc, unconditional) {
+                        Ok(logits) => return Ok(logits),
+                        Err(err) => self.recover(err)?,
+                    }
+                }
+            }
+        }
+    }
+}
+impl SamplingModel for Denoiser<'_, '_> {
+    fn draw(
+        &mut self,
+        ids: &[u16],
+        states: &[f32],
+        pooled: &[f32],
+        sc: Option<&[f32]>,
+        opts: &DrawOptions<'_>,
+        noise: &[f32],
+    ) -> Result<Draw, String> {
+        validate_inputs(ids, states, pooled, sc)?;
+        if opts.temperature > 0. && noise.len() != PIXELS * VOCAB {
+            return Err("invalid Tessera exponential noise length".into());
+        }
+        loop {
+            match &mut self.backend {
+                Backend::Cpu(cpu) => {
+                    let cond = cpu.forward(ids, states, pooled, sc, false)?;
+                    let uncond = if (opts.guidance - 1.).abs() > 1e-6 {
+                        Some(cpu.forward(ids, states, pooled, sc, true)?)
+                    } else {
+                        None
+                    };
+                    return draw_cpu(cond, uncond, opts, noise);
+                }
+                #[cfg(feature = "vulkan")]
+                Backend::Device { model, .. } => {
+                    match model.draw(ids, states, pooled, sc, opts, noise) {
+                        Ok(draw) => return Ok(draw),
+                        Err(err) => self.recover(err)?,
+                    }
+                }
+            }
+        }
+    }
+    fn remask(
+        &mut self,
+        canvas: &mut [u16],
+        confidence: &[f32],
+        count: usize,
+    ) -> Result<(), String> {
+        if count == 0 {
+            return Ok(());
+        }
+        #[cfg(feature = "vulkan")]
+        if let Backend::Device { model, .. } = &self.backend {
+            match model.remask(canvas, confidence, count) {
+                Ok(()) => return Ok(()),
+                Err(err) => self.recover(err)?,
+            }
+        }
+        super::sampler::remask_cpu(canvas, confidence, count);
+        Ok(())
+    }
+    fn commit(
+        &mut self,
+        canvas: &mut [u16],
+        conf: &mut [f32],
+        draw: &Draw,
+        gumbels: &[f32],
+        remaining: usize,
+        p: &PixelOptions,
+    ) -> Result<(), String> {
+        #[cfg(feature = "vulkan")]
+        if let Backend::Device { model, .. } = &self.backend {
+            match model.commit(canvas, conf, draw, gumbels, remaining, p) {
+                Ok(()) => return Ok(()),
+                Err(err) => self.recover(err)?,
+            }
+        }
+        commit_cpu(canvas, conf, draw, gumbels, remaining, p);
+        Ok(())
     }
 }
 

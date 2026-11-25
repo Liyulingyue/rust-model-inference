@@ -336,7 +336,7 @@ pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), Vul
     Ok(())
 }
 
-fn require_online_attention(context: &VulkanContext) -> Result<(), VulkanError> {
+pub(crate) fn require_online_attention(context: &VulkanContext) -> Result<(), VulkanError> {
     require_tiled_attention(context)?;
     // Sixteen queries plus 32 staged keys/values and their online softmax state.
     if context.limits.max_compute_shared_memory_size < 27 * 1024 {
@@ -3589,6 +3589,60 @@ impl AttentionRuntime {
         window: u32,
         grid: u32,
     ) -> Result<(), VulkanError> {
+        let q_len = product(
+            "attention Q",
+            &[spec.query_tokens, spec.query_heads, spec.head_dim],
+        )?;
+        let kv_len = product(
+            "attention KV",
+            &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
+        )?;
+        if q.len() != q_len
+            || k.len() != kv_len
+            || v.len() != kv_len
+            || output.len() != q_len
+            || q_len > self.capacity.0
+            || kv_len > self.capacity.1
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid online attention tensor lengths".into(),
+            ));
+        }
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.write_f32(self.q, q)?;
+        self.ops.write_f32(self.k, k)?;
+        self.ops.write_f32(self.v, v)?;
+        self.ops.record_online_attention(
+            &commands,
+            self.q,
+            self.k,
+            self.v,
+            self.output,
+            spec,
+            window,
+            grid,
+        )?;
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
+        Ok(())
+    }
+}
+
+impl Qwen3Ops<'_> {
+    /// Record online softmax attention on F32 regions in the same arena.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_online_attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        output: ArenaRegion,
+        spec: crate::ops::nn::AttentionSpec,
+        window: u32,
+        grid: u32,
+    ) -> Result<(), VulkanError> {
+        require_online_attention(self.context)?;
         if spec.query_tokens == 0
             || spec.key_tokens == 0
             || spec.head_dim == 0
@@ -3596,17 +3650,6 @@ impl AttentionRuntime {
             || spec.query_heads == 0
             || spec.key_value_heads == 0
             || spec.query_heads % spec.key_value_heads != 0
-            || q.len()
-                != product(
-                    "attention Q",
-                    &[spec.query_tokens, spec.query_heads, spec.head_dim],
-                )?
-            || k.len()
-                != product(
-                    "attention K",
-                    &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
-                )?
-            || v.len() != k.len()
             || !spec.scale.is_finite()
             || (spec.causal && spec.query_tokens > spec.key_tokens)
             || (window != 0 && (grid == 0 || grid < window))
@@ -3615,12 +3658,19 @@ impl AttentionRuntime {
                 "invalid online attention geometry".into(),
             ));
         }
+        let q_len = product(
+            "attention Q",
+            &[spec.query_tokens, spec.query_heads, spec.head_dim],
+        )?;
+        let kv_len = product(
+            "attention KV",
+            &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
+        )?;
         let push = [
-            self.ops.f32_word(self.q, q.len(), "attention Q")?,
-            self.ops.f32_word(self.k, k.len(), "attention K")?,
-            self.ops.f32_word(self.v, v.len(), "attention V")?,
-            self.ops
-                .f32_word(self.output, q.len(), "attention output")?,
+            self.f32_word(q, q_len, "attention Q")?,
+            self.f32_word(k, kv_len, "attention K")?,
+            self.f32_word(v, kv_len, "attention V")?,
+            self.f32_word(output, q_len, "attention output")?,
             as_u32(spec.query_tokens, "attention queries")?,
             as_u32(spec.key_tokens, "attention keys")?,
             as_u32(spec.query_heads, "attention heads")?,
@@ -3629,32 +3679,25 @@ impl AttentionRuntime {
             spec.scale.to_bits(),
             u32::from(spec.causal),
             window,
-            // The shader divides by the grid only when `window != 0`.
             if window == 0 { 1 } else { grid },
         ];
         let dispatch = row_dispatch(
             spec.query_tokens
                 .div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
             spec.query_heads,
-            &self.ops.context.limits,
+            &self.context.limits,
         )?;
-        let commands = TokenCommands::begin(self.ops.context)?;
-        self.ops.write_f32(self.q, q)?;
-        self.ops.write_f32(self.k, k)?;
-        self.ops.write_f32(self.v, v)?;
-        self.ops.record_linear_dispatch(
-            &commands,
+        self.record_linear_dispatch(
+            commands,
             if spec.head_dim <= 128 {
                 ATTENTION_ONLINE
             } else {
                 ATTENTION_ONLINE_WIDE
             },
-            self.ops.arena_bindings,
+            self.arena_bindings,
             &push,
             dispatch,
         );
-        commands.submit_and_wait()?;
-        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
         Ok(())
     }
 }

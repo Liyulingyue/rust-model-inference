@@ -737,13 +737,15 @@ pub fn run_mage_flow_cli(
 /// atomically publish the PNG. Each model supplies its component layout.
 fn run_diffusion_cli<P>(
     name: &str,
-    out: &Path,
+    outputs: &[PathBuf],
     overwrite: bool,
     load: impl FnOnce() -> Result<P, String>,
-    generate: impl FnOnce(P) -> Result<image::DynamicImage, String>,
+    generate: impl FnOnce(P) -> Result<Vec<image::DynamicImage>, String>,
 ) -> Result<(), String> {
-    if !overwrite && out.exists() {
-        return Err(format!("Output already exists: {}", out.display()));
+    for out in outputs {
+        if !overwrite && out.exists() {
+            return Err(format!("Output already exists: {}", out.display()));
+        }
     }
     let started = Instant::now();
     let pipeline = load()?;
@@ -751,14 +753,29 @@ fn run_diffusion_cli<P>(
         "{name} components loaded in {}ms",
         started.elapsed().as_millis()
     );
-    let image = generate(pipeline)?;
-    write_output_atomically(out, &encode_image_png(&image)?, overwrite)?;
-    println!(
-        "{name} PNG saved to {} in {}ms",
-        out.display(),
-        started.elapsed().as_millis()
-    );
+    let images = generate(pipeline)?;
+    if images.len() != outputs.len() {
+        return Err("unexpected image batch size".into());
+    }
+    for (out, image) in outputs.iter().zip(images) {
+        write_output_atomically(out, &encode_image_png(&image)?, overwrite)?;
+        println!(
+            "{name} PNG saved to {} in {}ms",
+            out.display(),
+            started.elapsed().as_millis()
+        );
+    }
     Ok(())
+}
+
+fn image_filename(out: &Path, suffix: &str) -> Result<OsString, String> {
+    let mut name = out
+        .file_stem()
+        .ok_or("expected an output filename")?
+        .to_os_string();
+    name.push(suffix);
+    name.push(".png");
+    Ok(name)
 }
 
 pub fn run_tessera_cli(
@@ -771,12 +788,42 @@ pub fn run_tessera_cli(
     let prompt =
         tessera::validate_prompt(cli.prompt.as_deref().ok_or("Tessera requires --prompt")?)?;
     let out = cli.out.as_deref().ok_or("Tessera requires --out")?;
+    let count = cli.num_samples.unwrap_or(1);
+    tessera::validate_batch_size(count)?;
+    let outputs = if count == 1 {
+        vec![out.to_owned()]
+    } else {
+        (0..count)
+            .map(|i| Ok(out.with_file_name(image_filename(out, &format!("-{i:03}"))?)))
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    if let Some(dir) = &cli.preview_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("create preview directory {}: {e}", dir.display()))?;
+    }
     run_diffusion_cli(
         "Tessera",
-        out,
+        &outputs,
         cli.overwrite,
         || tessera::Pipeline::load(source, threads, cli.compute_policy()),
-        |pipeline| Ok(pipeline.generate(prompt, &options)?.into()),
+        |pipeline| {
+            let mut callback = cli.preview_dir.as_ref().map(|dir| {
+                move |step: tessera::Step, i: usize, image: image::RgbaImage| {
+                    let name = image_filename(out, &format!("-step-{:03}-{i:03}", step.index))?;
+                    write_output_atomically(
+                        &dir.join(name),
+                        &encode_image_png(&image.into())?,
+                        cli.overwrite,
+                    )
+                }
+            });
+            let preview = callback.as_mut().map(|f| f as &mut tessera::Preview<'_>);
+            Ok(pipeline
+                .generate_batch(&vec![prompt; count], &options, preview)?
+                .into_iter()
+                .map(Into::into)
+                .collect())
+        },
     )
 }
 
@@ -801,13 +848,13 @@ pub fn run_z_image_cli(
     };
     run_diffusion_cli(
         "Z-Image",
-        &out,
+        std::slice::from_ref(&out),
         true,
         || <ZImagePipeline as DiffusionPipeline>::load(diffusion, text, vae, n_threads),
         |pipeline| {
-            into_rgb_image(DiffusionPipeline::generate_rgb(
+            Ok(vec![into_rgb_image(DiffusionPipeline::generate_rgb(
                 &pipeline, prompt, &options,
-            )?)
+            )?)?])
         },
     )
 }
@@ -970,13 +1017,13 @@ pub fn run_ernie_image_cli(
     };
     run_diffusion_cli(
         "ERNIE-Image",
-        &out,
+        std::slice::from_ref(&out),
         true,
         || <ErnieImagePipeline as DiffusionPipeline>::load(diffusion, text, vae, n_threads),
         |pipeline| {
-            into_rgb_image(DiffusionPipeline::generate_rgb(
+            Ok(vec![into_rgb_image(DiffusionPipeline::generate_rgb(
                 &pipeline, prompt, &options,
-            )?)
+            )?)?])
         },
     )
 }

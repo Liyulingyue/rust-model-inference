@@ -8,7 +8,7 @@ fn tessera_clip_oracle() {
     let gguf = PathBuf::from(env::var_os("TESSERA_GGUF").expect("set TESSERA_GGUF"));
     let dir = PathBuf::from(env::var_os("TESSERA_FIXTURE_DIR").expect("set TESSERA_FIXTURE_DIR"));
     let source = open_model_source(&gguf, ComponentRole::Llm).unwrap();
-    let encoder = TextEncoder::load(source.as_ref()).unwrap();
+    let mut encoder = TextEncoder::load(source.as_ref()).unwrap();
     let prompt = "golden crown with blue gems";
     let ids = fs::read(dir.join("ids.u32")).unwrap();
     assert_eq!(ids.len(), CONTEXT * 4);
@@ -70,5 +70,47 @@ fn tessera_clip_oracle() {
             relative_rmse <= rrmse_limit && cosine >= cosine_floor,
             "{name} {ty:?} {policy:?}"
         );
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a Vulkan device and TESSERA_GGUF"]
+fn tessera_clip_reuses_device_across_prompts() {
+    use crate::format::ggufrs::{open_model_source, ComponentRole};
+    use std::{env, path::PathBuf};
+    let gguf = PathBuf::from(env::var_os("TESSERA_GGUF").expect("set TESSERA_GGUF"));
+    let source = open_model_source(&gguf, ComponentRole::Llm).unwrap();
+    let mut encoder = TextEncoder::load(source.as_ref()).unwrap();
+    let pool = Arc::new(ComputePool::new(8));
+    let a = "golden crown with blue gems";
+    let b = "red apple with a leaf";
+    let first = encoder
+        .encode(a, ComputePolicy::Vulkan, pool.clone())
+        .unwrap();
+    let second = encoder
+        .encode(b, ComputePolicy::Vulkan, pool.clone())
+        .unwrap();
+    let replay = encoder
+        .encode(a, ComputePolicy::Vulkan, pool.clone())
+        .unwrap();
+    let reference = encoder.encode(b, ComputePolicy::Cpu, pool).unwrap();
+    fn relative_error(actual: &[f32], reference: &[f32]) -> f64 {
+        assert_eq!(actual.len(), reference.len());
+        let error = actual
+            .iter()
+            .zip(reference)
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum::<f64>();
+        let norm = reference.iter().map(|&b| f64::from(b).powi(2)).sum::<f64>();
+        (error / norm).sqrt()
+    }
+    for (first, second, replay, reference) in [
+        (&first.0, &second.0, &replay.0, &reference.0),
+        (&first.1, &second.1, &replay.1, &reference.1),
+    ] {
+        assert!(relative_error(replay, first) < 5e-4);
+        assert!(relative_error(second, reference) < 0.075);
+        assert!(relative_error(first, reference) > 0.075);
     }
 }

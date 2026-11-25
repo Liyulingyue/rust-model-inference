@@ -1,0 +1,113 @@
+#version 450
+
+// CLIP ViT-B/32 uses 24 positions, width 512, and QuickGELU in its MLP.
+// All offsets passed by the host are in 32-bit arena words.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform Params {
+    uint op;
+    uint a; uint b; uint c;
+    uint x; uint y; uint z;
+} pc;
+
+float value(uint i) { return uintBitsToFloat(arena.data[i]); }
+void store(uint i, float x) { arena.data[i] = floatBitsToUint(x); }
+uint byte_at(uint base, uint i) {
+    return (arena.data[base + i / 4u] >> ((i % 4u) * 8u)) & 255u;
+}
+int signed_byte(uint x) { return x >= 128u ? int(x) - 256 : int(x); }
+float half_at(uint base, uint i) {
+    return unpackHalf2x16(arena.data[base + i / 4u])[(i % 4u) / 2u];
+}
+
+// The host copies only the 24 selected rows, still in their GGUF storage type.
+// Decode by element so position and token embeddings can have different types.
+float embedding(uint base, uint i, uint format) {
+    if (format == 0u) return value(base + i);                         // F32
+    if (format == 1u) return half_at(base, i * 2u);                  // F16
+    if (format == 30u) {                                              // BF16
+        uint halfword = arena.data[base + i / 2u] >> ((i % 2u) * 16u);
+        return uintBitsToFloat(halfword << 16u);
+    }
+    uint k = i % 32u;
+    if (format == 8u) {                                               // Q8_0
+        uint o = (i / 32u) * 34u;
+        return half_at(base, o) * float(signed_byte(byte_at(base, o + 2u + k)));
+    }
+    if (format == 2u || format == 3u) {                              // Q4_0 or Q4_1
+        uint header = format == 2u ? 2u : 4u;
+        uint o = (i / 32u) * (16u + header);
+        uint q = (byte_at(base, o + header + k % 16u) >> (4u * (k / 16u))) & 15u;
+        return format == 2u ? half_at(base, o) * float(int(q) - 8)
+                            : half_at(base, o) * float(q) + half_at(base, o + 2u);
+    }
+    uint j = i % 256u;
+    uint g = j / 32u;
+    if (format == 14u) {                                              // Q6_K
+        uint o = (i / 256u) * 210u;
+        uint section = j / 128u, quarter = g % 4u, lane = j % 32u;
+        uint low = byte_at(base, o + section * 64u + (quarter % 2u) * 32u + lane);
+        low = (low >> (4u * (quarter / 2u))) & 15u;
+        uint high = (byte_at(base, o + 128u + section * 32u + lane) >> (2u * quarter)) & 3u;
+        return half_at(base, o + 208u) * float(signed_byte(byte_at(base, o + 192u + j / 16u)))
+             * float(int(low | (high << 4u)) - 32);
+    }
+    // Q4_K and Q5_K share the per-group scales/minima and low nibble layout.
+    bool q5 = format == 13u;
+    uint o = (i / 256u) * (q5 ? 176u : 144u);
+    uint s = o + 4u;
+    uint scale = g < 4u ? byte_at(base, s + g) & 63u
+        : (byte_at(base, s + g + 4u) & 15u) | ((byte_at(base, s + g - 4u) >> 6u) << 4u);
+    uint minimum = g < 4u ? byte_at(base, s + g + 4u) & 63u
+        : (byte_at(base, s + g + 4u) >> 4u) | ((byte_at(base, s + g) >> 6u) << 4u);
+    uint packed = byte_at(base, o + (q5 ? 48u : 16u) + (g / 2u) * 32u + j % 32u);
+    uint code = (packed >> ((g % 2u) * 4u)) & 15u;
+    if (q5) code |= ((byte_at(base, o + 16u + j % 32u) >> g) & 1u) << 4u;
+    return half_at(base, o) * float(scale * code) - half_at(base, o + 2u) * float(minimum);
+}
+
+shared float partial[64];
+float reduce_sum(float x, uint lane) {
+    partial[lane] = x;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        barrier();
+    }
+    float result = partial[0];
+    barrier();
+    return result;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint i = gl_GlobalInvocationID.x;
+    if (pc.op == 0u) {                                                // Embedding sum
+        store(pc.c + i, embedding(pc.a, i, pc.x) + embedding(pc.b, i, pc.y));
+    } else if (pc.op == 1u) {                                         // Affine LayerNorm
+        uint row = gl_WorkGroupID.x * 512u;
+        float sum = 0.0;
+        for (uint d = lane; d < 512u; d += 64u) sum += value(pc.a + row + d);
+        float mean = reduce_sum(sum, lane) / 512.0;
+        sum = 0.0;
+        for (uint d = lane; d < 512u; d += 64u) {
+            float centered = value(pc.a + row + d) - mean;
+            sum += centered * centered;
+        }
+        float inv = inversesqrt(reduce_sum(sum, lane) / 512.0 + 1e-5);
+        for (uint d = lane; d < 512u; d += 64u) {
+            float normed = (value(pc.a + row + d) - mean) * inv;
+            store(pc.b + row + d, normed * value(pc.x + d) + value(pc.y + d));
+        }
+    } else if (pc.op == 2u) {                                         // QKV biases
+        uint d = i % 512u;
+        store(pc.a + i, value(pc.a + i) + value(pc.x + d));
+        store(pc.b + i, value(pc.b + i) + value(pc.y + d));
+        store(pc.c + i, value(pc.c + i) + value(pc.z + d));
+    } else if (pc.op == 3u) {                                         // Projection bias + residual
+        store(pc.b + i, value(pc.b + i) + (value(pc.a + i) + value(pc.x + i % 512u)));
+    } else if (pc.op == 4u) {                                         // Projection bias + QuickGELU
+        float x = value(pc.a + i) + value(pc.x + i % 2048u);
+        store(pc.a + i, x / (1.0 + exp(-1.702 * x)));
+    }
+}

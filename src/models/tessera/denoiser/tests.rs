@@ -81,6 +81,11 @@ fn tessera_denoiser_oracle() {
     let mut net = Denoiser::new(&weights, Arc::new(ComputePool::new(8)), policy).unwrap();
     let states = read_f32("states.f32");
     let pooled = read_f32("pooled.f32");
+    #[cfg(feature = "vulkan")]
+    let initial = match &net.backend {
+        Backend::Device { model, .. } => Some(model.counters()),
+        _ => None,
+    };
     let mut ids = vec![VOCAB as u16; PIXELS];
     let mut sc = None;
     for suffix in ["", "_2"] {
@@ -114,6 +119,14 @@ fn tessera_denoiser_oracle() {
             eprintln!("Tessera logits_{branch}{suffix} {ty:?} {policy:?}: max_abs={max:.6} rmse={rmse:.6} cosine={cosine:.8}");
             assert!(rmse <= rmse_limit && cosine >= cosine_min);
         }
+    }
+    #[cfg(feature = "vulkan")]
+    if let (Some((before, dispatches)), Backend::Device { model, .. }) = (initial, &net.backend) {
+        let (after, end) = model.counters();
+        let stats = after.since(before);
+        eprintln!("Tessera resident forwards=4 dispatches={} submissions={} host_upload={} host_download={}",
+            end-dispatches,stats.submissions,stats.host_write_bytes,stats.host_read_bytes);
+        assert!(end - dispatches > 4 * 12 && stats.submissions >= 4);
     }
     let (cpu, gpu) = net.counts();
     eprintln!("Tessera denoiser projections: cpu={cpu} vulkan={gpu}");

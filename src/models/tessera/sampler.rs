@@ -192,125 +192,260 @@ fn priorities(mask: &[u16], score: &[f32], confidence: &[f32], opt: &PixelOption
     order
 }
 
-/// Predict returns guided, unnormalized logits in [pixel, palette ID] order.
+pub(super) struct DrawOptions<'a> {
+    pub pixel: &'a PixelOptions,
+    pub temperature: f32,
+    pub guidance: f32,
+}
+
+pub(super) struct Draw {
+    pub probs: Vec<f32>,
+    pub ids: Vec<u16>,
+    pub confidence: Vec<f32>,
+    pub best: Vec<u16>,
+}
+
+pub(super) fn draw_cpu(
+    mut cond: Vec<f32>,
+    uncond: Option<Vec<f32>>,
+    opts: &DrawOptions<'_>,
+    noise: &[f32],
+) -> Result<Draw, String> {
+    if let Some(uncond) = uncond {
+        for (c, u) in cond.iter_mut().zip(uncond) {
+            *c = u + opts.guidance * (*c - u);
+        }
+    }
+    if cond.len() != PIXELS * COLORS || cond.iter().any(|v| !v.is_finite()) {
+        return Err("invalid Tessera logits".into());
+    }
+    let p = opts.pixel;
+    let mut probs = cond.clone();
+    let mut ids = Vec::with_capacity(PIXELS);
+    let mut best = Vec::with_capacity(PIXELS);
+    let mut confidence = Vec::with_capacity(PIXELS);
+    for (i, (row, logits)) in probs
+        .chunks_exact_mut(COLORS)
+        .zip(cond.chunks_exact_mut(COLORS))
+        .enumerate()
+    {
+        let peak = argmax(logits);
+        best.push(peak as u16);
+        softmax_inplace(row);
+        let distribution = if opts.temperature > 0.
+            && (opts.temperature != 1. || p.top_k > 0 || p.top_p < 1. || p.min_p > 0.)
+        {
+            let shift = logits[peak];
+            for v in logits.iter_mut() {
+                *v = (*v - shift) / opts.temperature;
+            }
+            filter(logits, p);
+            &*logits
+        } else {
+            &*row
+        };
+        let mut chosen = peak;
+        if opts.temperature > 0. {
+            let mut high = -1.;
+            for (j, (&v, &exp)) in distribution.iter().zip(&noise[i * COLORS..]).enumerate() {
+                let val = v / exp;
+                if val > high {
+                    chosen = j;
+                    high = val;
+                }
+            }
+        }
+        ids.push(chosen as u16);
+        confidence.push(distribution[chosen]);
+    }
+    Ok(Draw {
+        probs,
+        ids,
+        confidence,
+        best,
+    })
+}
+
+pub(super) fn commit_cpu(
+    canvas: &mut [u16],
+    commit_conf: &mut [f32],
+    draw: &Draw,
+    gumbels: &[f32],
+    remaining: usize,
+    p: &PixelOptions,
+) {
+    let score: Vec<_> = draw
+        .confidence
+        .iter()
+        .zip(gumbels)
+        .map(|(v, g)| v.max(1e-12).ln() + g)
+        .collect();
+    let masked = canvas.iter().filter(|&&v| v == MASK).count();
+    let threshold = if p.commit_threshold > 0. {
+        (0..PIXELS)
+            .filter(|&i| canvas[i] == MASK && draw.confidence[i] >= p.commit_threshold)
+            .count()
+    } else {
+        0
+    };
+    let count = masked.saturating_sub(remaining).max(1).max(threshold);
+    for i in priorities(canvas, &score, &draw.confidence, p)
+        .into_iter()
+        .take(count)
+    {
+        canvas[i] = draw.ids[i];
+        commit_conf[i] = draw.confidence[i];
+    }
+}
+
+pub(super) fn remask_cpu(canvas: &mut [u16], conf: &[f32], count: usize) {
+    let mut low: Vec<_> = (0..PIXELS).filter(|&i| conf[i].is_finite()).collect();
+    low.sort_by(|&a, &b| conf[a].total_cmp(&conf[b]));
+    for i in low.into_iter().take(count) {
+        canvas[i] = MASK;
+    }
+}
+
+pub(super) trait SamplingModel {
+    fn remask(&mut self, canvas: &mut [u16], conf: &[f32], count: usize) -> Result<(), String> {
+        remask_cpu(canvas, conf, count);
+        Ok(())
+    }
+    fn draw(
+        &mut self,
+        ids: &[u16],
+        states: &[f32],
+        pooled: &[f32],
+        sc: Option<&[f32]>,
+        opts: &DrawOptions<'_>,
+        noise: &[f32],
+    ) -> Result<Draw, String>;
+    fn commit(
+        &mut self,
+        canvas: &mut [u16],
+        commit_conf: &mut [f32],
+        draw: &Draw,
+        gumbels: &[f32],
+        remaining: usize,
+        p: &PixelOptions,
+    ) -> Result<(), String> {
+        commit_cpu(canvas, commit_conf, draw, gumbels, remaining, p);
+        Ok(())
+    }
+}
+
+/// Indexed like the author's SampleStep: decode steps first, then polish steps.
+#[derive(Clone, Copy, Debug)]
+pub struct Step {
+    pub index: usize,
+    pub total: usize,
+    pub polish: bool,
+}
+
+struct Canvas {
+    ids: Vec<u16>,
+    confidence: Vec<f32>,
+    sc: Option<Vec<f32>>,
+}
+
 pub(super) fn sample(
     opt: &Options,
-    mut canvas: Vec<u16>,
-    mut predict: impl FnMut(&[u16], Option<&[f32]>, f32) -> Result<Vec<f32>, String>,
-) -> Result<Vec<u16>, String> {
-    opt.validate()?;
+    initial: &[u16],
+    conditioning: &[(&[f32], &[f32])],
+    model: &mut impl SamplingModel,
+    mut preview: impl FnMut(Step, usize, &[u16]) -> Result<(), String>,
+) -> Result<Vec<Vec<u16>>, String> {
     let p = &opt.pixel;
-
-    let start = canvas.iter().filter(|&&v| v == MASK).count();
-    if start == 0 {
-        return Ok(canvas);
-    }
+    let start = initial.iter().filter(|&&v| v == MASK).count();
+    let mut canvases: Vec<_> = conditioning
+        .iter()
+        .map(|_| Canvas {
+            ids: initial.to_vec(),
+            confidence: vec![f32::INFINITY; PIXELS],
+            sc: None,
+        })
+        .collect();
     let mut rng = TorchMt19937::new(opt.seed);
-    let mut commit_conf = vec![f32::INFINITY; PIXELS];
-    let mut sc = None;
-    for k in 0..opt.steps + p.polish_steps {
+    let total = opt.steps + p.polish_steps;
+    for k in 0..total {
         let polish = k >= opt.steps;
-        let frac = ((k + 1) as f64 / opt.steps as f64).min(1.);
-        if polish {
-            let mut low: Vec<_> = (0..PIXELS)
-                .filter(|&i| commit_conf[i].is_finite())
-                .collect();
-            low.sort_by(|&a, &b| commit_conf[a].total_cmp(&commit_conf[b]));
-            for &i in low
-                .iter()
-                .take((p.polish_frac * PIXELS as f32).round_ties_even().max(1.) as usize)
-            {
-                canvas[i] = MASK;
-            }
-        }
-        let masked = canvas.iter().filter(|&&id| id == MASK).count();
-        if masked == 0 {
+        if !polish && canvases.iter().all(|c| !c.ids.contains(&MASK)) {
             continue;
         }
-        let logits = predict(&canvas, sc.as_deref(), opt.guidance_at(frac as f32))?;
-        if logits.len() != PIXELS * COLORS || logits.iter().any(|v| !v.is_finite()) {
-            return Err("invalid Tessera logits".into());
-        }
-        let mut probs = logits.clone();
-        for row in probs.chunks_exact_mut(COLORS) {
-            softmax_inplace(row);
-        }
-        let temp = p.temperature_end.map_or(opt.temperature, |end| {
-            opt.temperature + (end - opt.temperature) * k as f32 / (opt.steps - 1).max(1) as f32
-        });
-        let mut ids = vec![0; PIXELS];
-        let mut confidence = vec![0.; PIXELS];
-        for (i, row) in probs.chunks_exact(COLORS).enumerate() {
-            let (id, prob) = if temp == 0. || polish {
-                let j = argmax(&logits[i * COLORS..(i + 1) * COLORS]);
-                (j, row[j])
-            } else {
-                let mut filtered;
-                let distribution = if temp == 1. && p.top_k == 0 && p.top_p == 1. && p.min_p == 0. {
-                    row
-                } else {
-                    filtered = logits[i * COLORS..(i + 1) * COLORS].to_vec();
-                    let shift = filtered[argmax(&filtered)];
-                    for v in &mut filtered {
-                        *v = (*v - shift) / temp;
-                    }
-                    filter(&mut filtered, p);
-                    &filtered
-                };
-                // PyTorch CPU multinomial with one sample uses an exponential
-                // race, consuming one double uniform per color, even on kept pixels.
-                let mut best = 0;
-                let mut high = -1.;
-                for (j, &v) in distribution.iter().enumerate() {
-                    let exp = -(-rng.sample_uniform_f64()).ln_1p() as f32;
-                    let val = v / exp;
-                    if val > high {
-                        best = j;
-                        high = val;
-                    }
-                }
-                (best, distribution[best])
-            };
-            ids[i] = id as u16;
-            confidence[i] = prob;
-        }
-        let mut score = confidence
-            .iter()
-            .map(|v| v.max(1e-12).ln())
-            .collect::<Vec<_>>();
-        if !polish && p.choice_temperature > 0. {
-            for v in &mut score {
-                let u = rng.sample_uniform_f32().max(1e-10);
-                *v -= p.choice_temperature * (1. - frac as f32) * (-u.ln()).ln();
-            }
-        }
+        let frac = ((k + 1) as f64 / opt.steps as f64).min(1.);
         let remaining = if frac == 1. {
             0
         } else {
             (start as f32 * (frac * std::f64::consts::FRAC_PI_2).cos() as f32).floor() as usize
         };
-        let threshold = if p.commit_threshold > 0. {
-            (0..PIXELS)
-                .filter(|&i| canvas[i] == MASK && confidence[i] >= p.commit_threshold)
-                .count()
+        let temperature = if polish {
+            0.
         } else {
-            0
+            p.temperature_end.map_or(opt.temperature, |end| {
+                opt.temperature + (end - opt.temperature) * k as f32 / (opt.steps - 1).max(1) as f32
+            })
         };
-        let commit = masked.saturating_sub(remaining).max(1).max(threshold);
-        for i in priorities(&canvas, &score, &confidence, p)
-            .into_iter()
-            .take(commit)
-        {
-            canvas[i] = ids[i];
-            commit_conf[i] = confidence[i];
+        let opts = DrawOptions {
+            pixel: p,
+            temperature,
+            guidance: opt.guidance_at(frac as f32),
+        };
+        let mut draws = Vec::with_capacity(canvases.len());
+        // PyTorch multinomial consumes a double uniform per color, including
+        // kept pixels, for the entire batch before drawing spatial Gumbels.
+        for (canvas, &(states, pooled)) in canvases.iter_mut().zip(conditioning) {
+            if polish {
+                let count = (p.polish_frac * PIXELS as f32).round_ties_even().max(1.) as usize;
+                model.remask(&mut canvas.ids, &canvas.confidence, count)?;
+            }
+            let noise = if temperature > 0. {
+                (0..PIXELS * COLORS)
+                    .map(|_| -(-rng.sample_uniform_f64()).ln_1p() as f32)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            draws.push(model.draw(
+                &canvas.ids,
+                states,
+                pooled,
+                canvas.sc.as_deref(),
+                &opts,
+                &noise,
+            )?);
         }
-        if p.self_cond {
-            sc = Some(probs);
+        for (i, (canvas, draw)) in canvases.iter_mut().zip(draws).enumerate() {
+            let mut gumbels = [0.; PIXELS];
+            if !polish && p.choice_temperature > 0. {
+                for g in &mut gumbels {
+                    let u = rng.sample_uniform_f32().max(1e-10);
+                    *g = -p.choice_temperature * (1. - frac as f32) * (-u.ln()).ln();
+                }
+            }
+            model.commit(
+                &mut canvas.ids,
+                &mut canvas.confidence,
+                &draw,
+                &gumbels,
+                remaining,
+                p,
+            )?;
+            preview(
+                Step {
+                    index: k,
+                    total,
+                    polish,
+                },
+                i,
+                &draw.best,
+            )?;
+            if p.self_cond {
+                canvas.sc = Some(draw.probs);
+            }
         }
     }
-    Ok(canvas)
+    Ok(canvases.into_iter().map(|c| c.ids).collect())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,17 +457,31 @@ mod tests {
         let mut opt = Options::default();
         opt.pixel.polish_steps = 1;
         opt.temperature = 0.;
-        let mut calls = 0;
-        let result = sample(&opt, canvas, |ids, sc, _| {
-            assert_eq!(ids.iter().filter(|&&id| id == MASK).count(), 1);
-            assert_eq!(sc.is_some(), calls > 0);
-            calls += 1;
-            let mut logits = vec![0.; PIXELS * COLORS];
-            logits[77 * COLORS + 13] = 10.;
-            Ok(logits)
-        })
-        .unwrap();
-        assert_eq!(calls, 2);
+        struct Mock(usize);
+        impl SamplingModel for Mock {
+            fn draw(
+                &mut self,
+                ids: &[u16],
+                _: &[f32],
+                _: &[f32],
+                sc: Option<&[f32]>,
+                opts: &DrawOptions,
+                noise: &[f32],
+            ) -> Result<Draw, String> {
+                assert_eq!(ids.iter().filter(|&&id| id == MASK).count(), 1);
+                assert_eq!(sc.is_some(), self.0 > 0);
+                self.0 += 1;
+                let mut logits = vec![0.; PIXELS * COLORS];
+                logits[77 * COLORS + 13] = 10.;
+                draw_cpu(logits, None, opts, noise)
+            }
+        }
+        let mut mock = Mock(0);
+        let result = sample(&opt, &canvas, &[(&[], &[])], &mut mock, |_, _, _| Ok(()))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(mock.0, 2);
         assert_eq!(result[77], 13);
         assert_eq!(result[31], 15);
         assert_eq!(result.iter().filter(|&&t| t == 0).count(), 254);

@@ -1,0 +1,56 @@
+#version 450
+// The entire 16x16 canvas fits in one group. Each masked pixel computes
+// its rank against the same snapshot before publishing its token.
+layout(local_size_x=256) in;
+layout(set=0,binding=0,std430) buffer Arena { uint data[]; };
+layout(push_constant) uniform Params {
+    uint canvas, commit_conf, ids, confidence, gumbel, remaining, spatial_nms;
+    float nms_threshold, commit_threshold;
+    uint remask_count;
+} p;
+shared uint masked[256], n_masked, above;
+shared float score[256], conf[256], priority[256];
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    if (p.remask_count != 0) {
+        conf[i] = uintBitsToFloat(data[p.commit_conf + i]);
+        barrier();
+        // Kept pixels carry +infinity and are never polished.
+        if (isinf(conf[i])) return;
+        uint rank = 0;
+        for (uint j = 0; j < 256; ++j)
+            if (conf[j] < conf[i] || (conf[j] == conf[i] && j < i)) ++rank;
+        if (rank < p.remask_count) data[p.canvas+i] = 512;
+        return;
+    }
+    if (i == 0) { n_masked = 0; above = 0; }
+    barrier();
+    masked[i] = uint(data[p.canvas + i] == 512);
+    conf[i] = uintBitsToFloat(data[p.confidence + i]);
+    score[i] = log(max(1e-12, conf[i])) + uintBitsToFloat(data[p.gumbel + i]);
+    if (masked[i] == 1) {
+        atomicAdd(n_masked, 1);
+        if (p.commit_threshold > 0. && conf[i] >= p.commit_threshold) atomicAdd(above, 1);
+    }
+    barrier();
+    bool eligible = true;
+    if (p.spatial_nms != 0 && conf[i] < p.nms_threshold) {
+        int x = int(i % 16), y = int(i / 16);
+        for (int ny = max(y-1, 0); ny <= min(y+1, 15); ++ny)
+            for (int nx = max(x-1, 0); nx <= min(x+1, 15); ++nx) {
+                int j = ny * 16 + nx;
+                if (masked[j] != 0 && conf[j] < p.nms_threshold && score[j] > score[i]) eligible = false;
+            }
+    }
+    priority[i] = score[i] + (eligible && p.spatial_nms != 0 ? 1e4 : 0.);
+    barrier();
+    if (masked[i] == 0) return;
+    uint count = max(max(n_masked - min(n_masked, p.remaining), 1u), above);
+    uint rank = 0;
+    for (uint j = 0; j < 256; ++j)
+        if (masked[j] != 0 && (priority[j] > priority[i] || (priority[j] == priority[i] && j < i))) ++rank;
+    if (rank < count) {
+        data[p.canvas+i] = data[p.ids+i];
+        data[p.commit_conf+i] = floatBitsToUint(conf[i]);
+    }
+}

@@ -1,11 +1,13 @@
 //! Tessera-small, a CLIP-conditioned discrete diffusion model for palette sprites.
 mod denoiser;
+#[cfg(feature = "vulkan")]
+mod device;
 mod palette;
 mod sampler;
 mod text;
 
 pub use palette::Pixel;
-pub use sampler::{Options, PixelOptions};
+pub use sampler::{Options, PixelOptions, Step};
 
 use crate::{
     compute::ComputePolicy,
@@ -89,6 +91,26 @@ pub fn validate_prompt(prompt: &str) -> Result<&str, String> {
     Ok(prompt)
 }
 
+/// A request holds one self-conditioning distribution per image across steps.
+pub const MAX_BATCH: usize = 16;
+pub fn validate_batch_size(n: usize) -> Result<(), String> {
+    if (1..=MAX_BATCH).contains(&n) {
+        Ok(())
+    } else {
+        Err(format!("Tessera batch size must be 1..={MAX_BATCH}"))
+    }
+}
+
+pub type Preview<'a> = dyn FnMut(Step, usize, image::RgbaImage) -> Result<(), String> + 'a;
+
+fn render(ids: &[u16], palette: &[[u8; 3]]) -> image::RgbaImage {
+    image::RgbaImage::from_fn(GRID as u32, GRID as u32, |x, y| {
+        let id = ids[y as usize * GRID + x as usize] as usize;
+        let [r, g, b] = palette[id];
+        image::Rgba([r, g, b, if id == 0 { 0 } else { 255 }])
+    })
+}
+
 impl Pipeline {
     pub fn load(
         source: Arc<dyn TensorSource>,
@@ -107,36 +129,56 @@ impl Pipeline {
     }
 
     pub fn generate(&self, prompt: &str, options: &Options) -> Result<image::RgbaImage, String> {
+        Ok(self.generate_batch(&[prompt], options, None)?.remove(0))
+    }
+
+    /// Decode the batch in lockstep using one seeded generator. Repeated
+    /// prompts share an encoding but receive independent color and position draws.
+    pub fn generate_batch(
+        &self,
+        prompts: &[&str],
+        options: &Options,
+        mut preview: Option<&mut Preview<'_>>,
+    ) -> Result<Vec<image::RgbaImage>, String> {
         options.validate()?;
-        validate_prompt(prompt)?;
+        validate_batch_size(prompts.len())?;
+        for prompt in prompts {
+            validate_prompt(prompt)?;
+        }
         let weights = denoiser::Weights::load(self.source.as_ref())?;
-        let encoder = text::TextEncoder::load(self.source.as_ref())?;
-        let (states, pooled) = encoder.encode(prompt, self.policy, self.pool.clone())?;
+        let mut encoder = text::TextEncoder::load(self.source.as_ref())?;
+        let mut cache = std::collections::HashMap::new();
+        for &prompt in prompts {
+            if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(prompt) {
+                entry.insert(encoder.encode(prompt, self.policy, self.pool.clone())?);
+            }
+        }
+        // Release the text tower device weights before allocating the denoiser arena.
+        drop(encoder);
+        let conditioning = prompts
+            .iter()
+            .map(|p| {
+                let (states, pooled) = &cache[p];
+                (states.as_slice(), pooled.as_slice())
+            })
+            .collect::<Vec<_>>();
         let mut net = denoiser::Denoiser::new(&weights, self.pool.clone(), self.policy)?;
-        let canvas =
-            palette::initial_canvas(options.pixel.canvas.as_deref(), weights.palette_rgb());
-        let ids = sampler::sample(options, canvas, |ids, sc, guidance| {
-            let cond = net.forward(ids, &states, &pooled, sc, false)?;
-            if (guidance - 1.).abs() <= 1e-6 {
-                return Ok(cond);
-            }
-            let mut uncond = net.forward(ids, &states, &pooled, sc, true)?;
-            for (u, c) in uncond.iter_mut().zip(cond) {
-                *u += guidance * (c - *u);
-            }
-            Ok(uncond)
-        })?;
+        let palette = weights.palette_rgb();
+        let canvas = palette::initial_canvas(options.pixel.canvas.as_deref(), palette);
+        let ids = sampler::sample(
+            options,
+            &canvas,
+            &conditioning,
+            &mut net,
+            |step, index, ids| {
+                if let Some(cb) = preview.as_mut() {
+                    cb(step, index, render(ids, palette))?;
+                }
+                Ok(())
+            },
+        )?;
         let (cpu, gpu) = net.counts();
         eprintln!("Tessera denoiser projections: cpu={cpu} vulkan={gpu}");
-        let palette = weights.palette_rgb();
-        Ok(image::RgbaImage::from_fn(
-            GRID as u32,
-            GRID as u32,
-            |x, y| {
-                let id = ids[(y as usize) * GRID + x as usize] as usize;
-                let [r, g, b] = palette[id];
-                image::Rgba([r, g, b, if id == 0 { 0 } else { 255 }])
-            },
-        ))
+        Ok(ids.iter().map(|ids| render(ids, palette)).collect())
     }
 }
