@@ -69,7 +69,7 @@ CLIP 的验收阈值（相对 RMSE 上限 / cosine 下限）为 F32 `0.0005 / 0.
 - 另外对上述全部 27 个“精度 × 后端”组合，逐项通过 CLI 和 HTTP 对同一画布做局部重绘。每组两个入口都与本档 PyTorch 一致，均保留 252/252 个已知像素、重绘 4/4 个指定像素。一次去噪的 60 次投影在 CPU / Auto / Vulkan 策略下分别有 0 / 53 / 60 次实际在设备上执行。
 - 在 `an emerald shield with golden trim` 上，通过 OKLab 映射任意 RGBA，覆盖透明度 127/128 的边界和不透明黑色。F32 CPU 在 5 步生成和 2 步 polish 后保留 156/156 个指定像素，100/100 个重绘像素与作者 `TesseraPipeline.inpaint` 相同。[复现脚本](inpaint.py)
 - 自审修复了空提示词的传递，以及无 `shaderFloat64` 设备初始化公共投影时误编译 PiVo 专用 attention 的问题。旧版的共享 Vulkan 投影测试在 M3 Max 复现 shader 初始化失败，修复后 11 种格式的共享 batched-linear 设备测试及 PiVo 能力门禁测试通过。实跑 PiVo F32 的 CPU 和 Auto WAV 都是 29,920 个样本，SHA256 均为 `416a79b0a166ac750ff39cdb81ebb11b38a558ed7b98c8f4e0ddd4fd97a83bc8`。该机器无法验证需要 FP64 的 PiVo shader。
-- `cargo test --locked --lib` 在上游基线为 1691 passed / 24 failed / 119 ignored，此分支为 1698 passed / 24 failed / 121 ignored。逐名比对 24 个失败完全一致。新增两项 ignored 是需要真实文件的 CLIP 与去噪 oracle，已在上表逐格执行。Cargo 元数据中的 9 个二进制名称、路径与基线一致。
+- `cargo test --locked --lib` 在上游基线为 1691 passed / 24 failed / 119 ignored，首次适配提交 `517fbfdf6` 为 1698 passed / 24 failed / 121 ignored。逐名比对 24 个失败完全一致。新增两项 ignored 是需要真实文件的 CLIP 与去噪 oracle，已在上表逐格执行。Cargo 元数据中的 9 个二进制名称、路径与基线一致。
 
 真实权重的中间值验证可按下列命令复现，`TESSERA_COMPUTE` 可选 `cpu`、`auto` 或 `vulkan`。
 
@@ -85,5 +85,7 @@ cargo test --locked --profile release-fast --features vulkan --lib tessera_denoi
 ## 2026-11-25 图像生成入口回归
 
 以 PR 提交 `517fbfdf6` 的二进制为基线，在同一台 Apple M3 Max 上对照合入公共 diffusion 入口后的 CLI 和 HTTP。F16 CPU、8 线程、seed 0，四步随机生成、四步 greedy 和单步重绘三个样例的两条入口都和重构前产生相同的 PNG 字节。三张图分别包含 92、122、96 个透明像素。F32 HTTP 的空提示返回 200，错误尺寸返回 400，缺少提示字段返回 422。
+
+复跑九档 GGUF × 三种计算策略的生成、重绘矩阵，两条入口共 108 张 PNG，与重构前逐文件比对，108 对字节一致。全量库测试为 1699 passed / 24 failed / 121 ignored，失败名单与基线一致。
 
 另用 Z-Image Turbo Q8_0、Qwen3-4B Q8_0 和 F16 VAE 验证已有 RGB 路径。CPU、8 线程、64×64、1 步、seed 42，前后两版的 CLI 和 HTTP 输出共四张图，PNG SHA256 均为 `2be759c21a6be8bee1f7aea790c487781605b3d8bd15666214179d0cc1cefabb`。四类无效请求的 HTTP 状态与错误正文也相同。ERNIE-Image 和 P-JiT 本轮只跑了请求契约测试，本机缺少完整权重。
