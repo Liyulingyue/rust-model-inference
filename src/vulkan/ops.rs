@@ -809,6 +809,8 @@ impl GpuWeightFormat {
 pub(crate) enum GpuMatmulMode {
     #[default]
     Prepared,
+    /// Q4_0 storage with one signed Q8_K activation scale per 256 values.
+    Q8KInput,
     /// Round F16 activations, then accumulate in F32 (diffusion contract).
     RoundedInputF32,
     /// Round BF16 activations; F32 products use a compensated wide sum.
@@ -834,6 +836,8 @@ impl GpuMatmulSpec {
         let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
         Ok(format.with_mode(if weight.kernel.rounds_bf16_input() {
             GpuMatmulMode::RoundedBf16
+        } else if weight.kernel.q4_0_uses_q8_k_input() {
+            GpuMatmulMode::Q8KInput
         } else {
             GpuMatmulMode::Prepared
         }))
@@ -841,6 +845,7 @@ impl GpuMatmulSpec {
     fn validate(self) -> Result<(), VulkanError> {
         match (self.format, self.mode) {
             (_, GpuMatmulMode::Prepared)
+            | (GpuWeightFormat::Q4_0, GpuMatmulMode::Q8KInput)
             | (GpuWeightFormat::F16, GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot)
             | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16) => Ok(()),
             _ => Err(VulkanError::UnsupportedShape(
@@ -4387,6 +4392,49 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn block_q8_quantization(
+        &self,
+        mode: GpuMatmulMode,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        scales: ArenaRegion,
+        sums: ArenaRegion,
+        width: usize,
+        rows: usize,
+        input_stride: usize,
+    ) -> Result<(usize, [u32; 11], [u32; 3]), VulkanError> {
+        let (pipeline, block) = if mode == GpuMatmulMode::Q8KInput {
+            (QUANTIZE_K, 256)
+        } else {
+            (QUANTIZE, 32)
+        };
+        let mut push = quantize_rows_push(
+            self.arena.size as usize,
+            input,
+            q8,
+            scales,
+            Some(sums),
+            width,
+            rows,
+            input_stride,
+            block,
+        )?;
+        if mode == GpuMatmulMode::Q8KInput {
+            // The scalar, cooperative and tiled Q4_0 kernels all read one scale
+            // per 32 values. Repeat each Q8_K scale in that existing layout.
+            let scale_count = product("Q4_0 activation scales", &[rows, width / 32])?;
+            push[2] = self.f32_word(scales, scale_count, "Q4_0 activation scales")?;
+            push[6] = as_u32(width / 32, "Q4_0 activation scale stride")?;
+            push[9] = 8;
+        }
+        Ok((
+            pipeline,
+            push,
+            row_dispatch(width / block, rows, &self.context.limits)?,
+        ))
+    }
+
     pub(crate) fn record_quantize_q8_k(
         &self,
         commands: &TokenCommands<'_>,
@@ -4810,19 +4858,17 @@ impl<'a> Qwen3Ops<'a> {
                 (q8k, q8k_scales, Some((QUANTIZE_K, push, dispatch)))
             }
             _ => {
-                let push = quantize_rows_push(
-                    self.arena.size as usize,
+                let quantize = self.block_q8_quantization(
+                    bindings.weight_mode,
                     input,
                     q8,
                     q8_scales,
-                    Some(q4_1_input_sums),
+                    q4_1_input_sums,
                     n_in,
                     token_rows,
                     input_stride,
-                    32,
                 )?;
-                let dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
-                (q8, q8_scales, Some((QUANTIZE, push, dispatch)))
+                (q8, q8_scales, Some(quantize))
             }
         };
         let (mut push, dispatch) = matmul_rows_push(
@@ -5056,18 +5102,16 @@ impl<'a> Qwen3Ops<'a> {
                 input_stride,
             );
         }
-        let quantize_push = quantize_rows_push(
-            self.arena.size as usize,
+        let (quantize_pipeline, quantize_push, quantize_dispatch) = self.block_q8_quantization(
+            bindings.weight_mode,
             activation,
             q8,
             q8_scales,
-            Some(q4_1_input_sums),
+            q4_1_input_sums,
             n_in,
             token_rows,
             input_stride,
-            32,
         )?;
-        let quantize_dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
         let (push, _) = matmul_rows_push(
             self.arena.size as usize,
             &self.context.limits,
@@ -5113,7 +5157,7 @@ impl<'a> Qwen3Ops<'a> {
         // Validation is complete before the first command is recorded.
         self.record_linear_dispatch(
             commands,
-            QUANTIZE,
+            quantize_pipeline,
             self.arena_bindings,
             &quantize_push,
             quantize_dispatch,
@@ -8100,7 +8144,7 @@ fn quantize_rows_push(
             blocks,
             rows_u32,
             1, // All CPU Q8_K paths use a signed scale and ties-to-even.
-            0,
+            1, // Copies of each scale in the output buffer.
             0,
         ])
     }
@@ -12163,24 +12207,25 @@ mod tests {
         use super::*;
         // An odd block count alternates the halfword alignment between rows.
         // The seventeenth block also exercises the matvec's final partial tile.
-        const WIDTH: usize = 17 * 32;
         const OUTPUTS: usize = 129;
-        for rows in [1usize, 2, 3, 5] {
+        let context = VulkanContext::new().unwrap();
+        let ordinary = [1usize, 2, 3, 5].map(|r| (r, 17 * 32, GpuMatmulMode::Prepared));
+        let repacked = [1usize, 3].map(|r| (r, 512, GpuMatmulMode::Q8KInput));
+        for (rows, width, mode) in ordinary.into_iter().chain(repacked) {
             let mut cursor = 0;
-            let input = f32_region(&mut cursor, rows * WIDTH * 4).unwrap();
-            let q8 = region(&mut cursor, rows * WIDTH).unwrap();
-            let scales = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
-            let sums = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
-            let output = f32_region(&mut cursor, rows * OUTPUTS * 4).unwrap();
-            let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
-            let mut ops = Qwen3Ops::new_with_size(context, cursor, 2).unwrap();
-            let weight = synthetic_weight(GpuWeightFormat::Q4_0, WIDTH, OUTPUTS);
+            let input = f32_region(&mut cursor, rows * width).unwrap();
+            let q8 = region(&mut cursor, rows * width).unwrap();
+            let scales = f32_region(&mut cursor, rows * width / 32).unwrap();
+            let sums = f32_region(&mut cursor, rows * width / 32).unwrap();
+            let output = f32_region(&mut cursor, rows * OUTPUTS).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let weight = synthetic_weight(GpuWeightFormat::Q4_0, width, OUTPUTS);
             let buffer = unsafe { ops.context.upload_static(&weight) }.unwrap();
             let bindings = ops
-                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q4_0])
+                .bind_weight_buffers_mode(&[buffer], &[GpuWeightFormat::Q4_0], mode)
                 .unwrap();
-            let values: Vec<f32> = (0..rows * WIDTH)
-                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            let values: Vec<f32> = (0..rows * width)
+                .map(|i| ((i * 29 % 249) as f32 - 111.0) * (i / 256) as f32 / 97.0)
                 .collect();
 
             let supports_tiling = ops.q8_tiled;
@@ -12202,13 +12247,27 @@ mod tests {
                     q8,
                     scales,
                     &[(output, OUTPUTS, OUTPUTS * 4)],
-                    WIDTH,
+                    width,
                     rows,
-                    WIDTH,
+                    width,
                 )
                 .unwrap();
                 commands.submit_and_wait().unwrap();
                 ops.read_f32_into(output, target).unwrap();
+                if mode == GpuMatmulMode::Q8KInput {
+                    let stored = ops.read_f32(scales, rows * width / 32).unwrap();
+                    for (index, (block, copies)) in crate::ops::quant::quantize_row_q8_k(&values)
+                        .iter()
+                        .zip(stored.chunks_exact(8))
+                        .enumerate()
+                    {
+                        assert!(
+                            copies.iter().all(|&scale| (scale - block.d).abs() < 1e-7),
+                            "Q8_K block {index}: expected {}, got {copies:?}",
+                            block.d
+                        );
+                    }
+                }
             }
             for (index, (reference, actual)) in ordinary.iter().zip(&optimized).enumerate() {
                 let tolerance = 1e-5 * (1.0 + reference.abs());

@@ -82,6 +82,10 @@ impl Kernel for FoldedMatrix<'_> {
     fn hadamard_input_map(&self) -> Option<&[i32]> {
         Some(&self.map)
     }
+    #[cfg(feature = "vulkan")]
+    fn q4_0_uses_q8_k_input(&self) -> bool {
+        self.packed.ty == GGMLType::PQ2_0
+    }
 
     fn forward_prepared(
         &self,

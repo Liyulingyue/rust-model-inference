@@ -21,6 +21,11 @@ pub trait Kernel: Send + Sync {
     fn rounds_bf16_input(&self) -> bool {
         false
     }
+    /// A repacked Q4_0 projection may retain the source format's Q8_K activations.
+    #[cfg(feature = "vulkan")]
+    fn q4_0_uses_q8_k_input(&self) -> bool {
+        false
+    }
     /// Capability query before a strict group can modify any output.
     fn supports_f16_strict(&self) -> bool {
         false

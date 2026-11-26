@@ -85,6 +85,8 @@ fn inverse_embedding_and_forward_projection_use_the_same_signed_basis() {
             cpu_q4: OnceLock::new(),
             map: signed_map(&signs, None).unwrap(),
         };
+        #[cfg(feature = "vulkan")]
+        assert_eq!(kernel.q4_0_uses_q8_k_input(), ty == GGMLType::PQ2_0);
         let mut embedding = vec![0.0; BLOCK];
         kernel.embedding_lookup(1, BLOCK, &mut embedding);
         #[cfg(feature = "vulkan")]
