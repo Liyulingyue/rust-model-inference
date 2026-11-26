@@ -2340,13 +2340,15 @@ impl Qwen35VulkanSession {
             if self.mhc.is_some() {
                 let name = format!("loop.visit.{layer_index}");
                 if crate::parity_trace::enabled(&name) {
-                    commands = commands.flush()?;
+                    // A staged readback records a transfer under the same submission guard.
+                    commands.submit_and_wait()?;
                     let (region, width) = routed
                         .filter(|m| physical + 1 != m.end)
                         .map_or((self.layout.x, config.n_embd), |m| {
                             (self.layout.mhc_residual, config.n_embd * m.shape.streams)
                         });
                     self.trace_rows(&name, None, region, rows, width)?;
+                    commands = TokenCommands::begin(self.context)?;
                 }
             }
             #[cfg(feature = "parity-trace")]
@@ -2357,8 +2359,9 @@ impl Qwen35VulkanSession {
                     ));
                 }
                 commands.submit_and_wait()?;
+                let name = format!("l_out-{layer_index}");
                 self.trace_region(
-                    &format!("l_out-{layer_index}"),
+                    &name,
                     Some(layer_index),
                     cache_position,
                     self.layout.x,
@@ -2402,15 +2405,10 @@ impl Qwen35VulkanSession {
                         )?;
                     }
                 }
-                commands = TokenCommands::begin(self.context)?;
-            }
-            #[cfg(feature = "parity-trace")]
-            {
-                let name = format!("l_out-{layer_index}");
-                if self.mhc.is_none() && crate::parity_trace::enabled(&name) {
-                    commands = commands.flush()?;
+                if crate::parity_trace::enabled(&name) {
                     self.trace_rows(&name, Some(layer_index), self.layout.x, rows, config.n_embd)?;
                 }
+                commands = TokenCommands::begin(self.context)?;
             }
         }
 
