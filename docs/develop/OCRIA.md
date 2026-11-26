@@ -74,7 +74,7 @@ JEV 不适用：这是行检测 + CTC 识别的几何输出流水线，没有候
 | 严格设备模式 | 任一 | — | `--compute vulkan` | 启动即明确报错 | 启动即明确报错 | 无设备算子：发布方是 CPU 流水线，仓库 Vulkan 内核只覆盖线性投影，本模型的 dw/pw 卷积没有设备实现 | 不适用（契约依据见下）/ 未运行 |
 | 组件缺失/不匹配 | 任一 | — | 任一 | 缺张量、形状不符、charset 与 head 类数不符、`ocria.config` 与契约不符都在加载期指名报错 | 同上 | `contract.json` 342 个名字+形状双向校验；转换器与加载器共用同一 Q8_0 行宽规则 | 已实现 / 通过 |
 | 页面管线开关（faint / gutter / orient / rescue / junk） | 任一 | — | 任一 | 三页 fixture 分别覆盖单列、双列栏缝切分、四分之一转重试；`--ocr-options` 可覆盖 | 请求级 `options` 对象（非法值 400） | `sideways.png` 17 行、`two_column.png` 25 行与参考一致；`tests/ocria_cli.rs` 用 `faint_threshold:0` 验证开关生效 | 已实现 / 通过 |
-| LayoutNet（表格 + 版面块） | — | — | — | — | — | 未实现：`tools/oracle/ocria/layout-plan.md` 给出契约、可达性与工作量（≈2 800–3 600 行 Rust + 转换器），并指出 OCR 页路径硬依赖 LiteParse 的 projection 信号 | 未实现 / 未运行（第二层） |
+| LayoutNet（表格 + 版面块） | `ocria-layout-f32-v1`（110 F32）/ `ocria-layout-q8_0-v1`（75 F32 + 35 Q8_0） | F32 权重、F32 计算 | `--ocr-layout <gguf>` + `cpu`/`auto` | `--ocr-layout ocria-layout-f32.gguf --image table.png` → 1 张 4×3 表、表头 `[0]`、10 格 | `POST /v1/ocr`（带 `--ocr-layout` 启动）→ 同一张 4×3 表、4 个 `Table` 块 | 68 维特征 max abs 0.0、规则线 96/96 逐位一致、解码 2585 项 0 失败、网络逐阶段 ≤1.5e-5（门限 1e-4） | 已实现 / 通过 |
 | PDF 输入 | — | — | — | — | — | 仓库无 PDF 渲染器；本模型只接受页面图像 | 不适用 / 未运行 |
 
 `--compute vulkan` 判为不适用而非「未实现」的依据：发布方把本模型定义为 CPU 流水线
