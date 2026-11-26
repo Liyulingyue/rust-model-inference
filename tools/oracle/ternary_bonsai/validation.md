@@ -118,8 +118,16 @@ ignored), two for `app::jev::grouped::tests` and four for
 A real dense Qwen3.5-0.8B BF16 and its BF16 projector were run before and
 after against base `7dfd5f15` on Apple M3 Max. CPU text (18 prompt IDs, six
 generated tokens) and image (29 prompt IDs, red response) produced identical
-inputs and output text. The ordinary BF16 strict-Vulkan run reported the
-same shader initialization failure on both revisions. The full Mac shader
+inputs and output text. Before the FP64 capability fix, ordinary BF16
+strict Vulkan failed during pipeline initialization on both revisions.
+MoltenVK identified the `double local_sum` in PiVo acoustic attention.
+Loading Qwen now skips that optional pipeline on devices without
+`shaderFloat64`. On the M3 Max the original six-token strict-Vulkan run
+returned the same text as CPU. The text/image CLI, HTTP JSON and SSE
+returned `Paris` and `Red`. All single and grouped CLI/HTTP score
+probabilities agreed (single-choice P(A) 0.84985191 and 0.97221237).
+The physical-device PiVo test checked its explicit FP64 requirement.
+The full Mac shader
 rebuild also hit the same pre-existing binary difference in
 `nemotron_moe_route.spv`; the new shader rebuilt byte-for-byte and passed
 `spirv-val`. No 27B weight files were downloaded to the Mac.
