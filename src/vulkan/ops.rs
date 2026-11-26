@@ -66,6 +66,7 @@ const PIVO_SILU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_silu.spv"
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
+const Q4_0_MATVEC_DP4A_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matvec_dp4a.spv");
 /// Register-tiled Q4_0 matmul: the weight is read once per (output column,
 /// k-block) and reused across a tile of tokens.
 const Q4_0_MATMUL_TILED_SHADER: &[u8] =
@@ -300,6 +301,7 @@ const IQ1_M_MATMUL: usize = 82;
 /// indices stay valid.
 const Q2_K_MATMUL: usize = 83;
 const Q3_K_MATMUL: usize = 84;
+const Q4_0_MATVEC_DP4A: usize = 85;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -464,6 +466,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "iq1_m_matmul",
     "q2_k_matmul",
     "q3_k_matmul",
+    "q4_0_matvec_dp4a",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -589,7 +592,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 85] = [
+const OPERATOR_SHADERS: [&[u8]; 86] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -675,6 +678,7 @@ const OPERATOR_SHADERS: [&[u8]; 85] = [
     IQ1_M_MATMUL_SHADER,
     Q2_K_MATMUL_SHADER,
     Q3_K_MATMUL_SHADER,
+    Q4_0_MATVEC_DP4A_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -3854,6 +3858,8 @@ pub(crate) fn build_operator_pipelines(
                     | Q8_MATMUL_COOPERATIVE
                     | Q8_MATMUL_GROUPED_TILED_WIDE
                     | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
+                    | Q4_0_MATMUL_TILED
+                    | Q4_0_MATVEC_DP4A
             ) && !q8_tiled
             {
                 // The tiled kernel needs `dotPacked4x8EXT`, so on a device
@@ -4440,6 +4446,25 @@ impl<'a> Qwen3Ops<'a> {
                 }
             }
         }
+        // Sixteen lanes load consecutive Q4_0 blocks for each of four
+        // output rows. The shader adds their products in block order.
+        if pipeline == Q4_0_MATMUL
+            && self.q8_tiled
+            && tiled_matmul_enabled()
+            && push.len() == 26
+            && push[21] == 1
+        {
+            let columns = push[5].max(push[8]).max(push[11]) as usize;
+            if let Ok(grid) = matmul_dispatch(
+                columns.div_ceil(4),
+                1,
+                push[13] as usize,
+                &self.context.limits,
+            ) {
+                pipeline = Q4_0_MATVEC_DP4A;
+                dispatch = grid;
+            }
+        }
         if pipeline == Q8_MATMUL_GROUPED
             && self.q8_tiled
             && tiled_matmul_enabled()
@@ -4632,10 +4657,9 @@ impl<'a> Qwen3Ops<'a> {
         // per-row kernel reads it once per row.
         //
         // The Q4_0 kernel is tiled the same way. Its per-row kernel reads
-        // the weight once per row and multiplies the four-bit values one at
-        // a time; the tiled one reads it once per (column, k-block) and
-        // uses the packed dot product. A single row is still the per-row
-        // kernel's: the tile's staging is then pure overhead.
+        // the weight once per row; the tiled one shares it across tokens.
+        // For a single token, record_linear_dispatch selects the Q4_0
+        // matvec so that lanes can cooperate on the input blocks instead.
         let tiled = match format {
             GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0 => token_rows > 1,
             _ => false,
@@ -11418,6 +11442,11 @@ mod tests {
             (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
             (Q2_K_MATMUL, "q2_k_matmul", Q2_K_MATMUL_SHADER),
             (Q3_K_MATMUL, "q3_k_matmul", Q3_K_MATMUL_SHADER),
+            (
+                Q4_0_MATVEC_DP4A,
+                "q4_0_matvec_dp4a",
+                Q4_0_MATVEC_DP4A_SHADER,
+            ),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
@@ -11996,9 +12025,11 @@ mod tests {
     /// scale) * activation scale, added per block.
     #[test]
     #[ignore = "requires a Vulkan device"]
-    fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
+    fn vulkan_q4_0_matvec_and_tiled_prefill_match_the_scalar_shader() {
         use super::*;
-        const WIDTH: usize = 256;
+        // An odd block count alternates the halfword alignment between rows.
+        // The seventeenth block also exercises the matvec's final partial tile.
+        const WIDTH: usize = 17 * 32;
         const OUTPUTS: usize = 129;
         for rows in [1usize, 2, 3, 5] {
             let mut cursor = 0;
@@ -12018,53 +12049,38 @@ mod tests {
                 .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
                 .collect();
 
+            let supports_tiling = ops.q8_tiled;
             let mut ordinary = vec![0.0f32; rows * OUTPUTS];
-            let mut tiled = vec![0.0f32; rows * OUTPUTS];
-            for (target, tiled_kernel) in [(&mut ordinary, false), (&mut tiled, true)] {
+            let mut optimized = vec![0.0f32; rows * OUTPUTS];
+            for (target, enable_tiling) in [(&mut ordinary, false), (&mut optimized, true)] {
+                ops.q8_tiled = supports_tiling && enable_tiling;
                 ops.write_f32(input, &values).unwrap();
                 ops.write_f32(output, &vec![f32::NAN; rows * OUTPUTS])
                     .unwrap();
                 let commands = TokenCommands::begin(ops.context).unwrap();
-                let recorded = if tiled_kernel {
-                    ops.record_weight_matmul_tiled_rows(
-                        &commands,
-                        bindings,
-                        input,
-                        q8,
-                        scales,
-                        sums,
-                        q8,
-                        scales,
-                        &[(output, OUTPUTS, OUTPUTS * 4)],
-                        WIDTH,
-                        rows,
-                        WIDTH,
-                    )
-                } else {
-                    ops.record_weight_matmul_ordinary_rows(
-                        &commands,
-                        bindings,
-                        input,
-                        q8,
-                        scales,
-                        sums,
-                        q8,
-                        scales,
-                        &[(output, OUTPUTS, OUTPUTS * 4)],
-                        WIDTH,
-                        rows,
-                        WIDTH,
-                    )
-                };
-                recorded.unwrap();
+                ops.record_weight_matmul_rows(
+                    &commands,
+                    bindings,
+                    input,
+                    q8,
+                    scales,
+                    sums,
+                    q8,
+                    scales,
+                    &[(output, OUTPUTS, OUTPUTS * 4)],
+                    WIDTH,
+                    rows,
+                    WIDTH,
+                )
+                .unwrap();
                 commands.submit_and_wait().unwrap();
                 ops.read_f32_into(output, target).unwrap();
             }
-            for (index, (ordinary, tiled)) in ordinary.iter().zip(&tiled).enumerate() {
-                assert_eq!(
-                    ordinary.to_bits(),
-                    tiled.to_bits(),
-                    "rows={rows} value {index}"
+            for (index, (reference, actual)) in ordinary.iter().zip(&optimized).enumerate() {
+                let tolerance = 1e-5 * (1.0 + reference.abs());
+                assert!(
+                    reference.is_finite() && (reference - actual).abs() <= tolerance,
+                    "rows={rows} value {index}: expected {reference}, got {actual}"
                 );
             }
             unsafe { ops.context.destroy_completed_buffers(&[buffer]) }.unwrap();

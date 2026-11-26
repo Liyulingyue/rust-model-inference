@@ -17,6 +17,7 @@ shader_names=(
     q3_k_matmul
     q4_0_matmul
     q4_0_matmul_tiled_dp4a
+    q4_0_matvec_dp4a
     q4_1_matmul
     q4_k_matmul
     q4_k_matmul_cooperative

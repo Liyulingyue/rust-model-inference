@@ -44,3 +44,20 @@ python3 "$probe/compare.py" oracle.f32 rust.f32
 For image logits use the fixed red-image driver in `tools/oracle/holo4/27b/image.cpp` against the same publisher checkout. Substitute the publisher SHA for its printed `oracle_pin` label. Link the same libraries plus `-lmtmd` and include `$PUBLISHER/tools/mtmd`. Pass `MODEL MMPROJ oracle-image.f32`. Give the Rust image probe `MODEL MMPROJ cpu|auto|vulkan RED.png rust-image.f32` with a 64×64 solid RGB red PNG and compare both dumps with the same script.
 
 The text probe also supports `MODEL tokens PROMPT`. Compare the printed IDs to `/tmp/bonsai-ref --tokens "$MODEL" "$PROMPT"`. [Acceptance and observed runs](validation.md) · [Runtime examples](../../../docs/develop/TERNARY_BONSAI_25.md)
+
+### 8,192-token retrieval and forced continuation
+
+The prompt stores a recovery phrase before the archive entries and asks for it at the end. Generate it with the pinned tokenizer. Its SHA-256 is `3d5da3a016dd8b7120d87da1a253e8fd238f3beb2b8fbe91a53dafa537e8406f`. The drivers compare the final prefill logits and the next 15 positions using the publisher's continuation. Reuse one reference per decoder for all three compute policies.
+
+```sh
+python3 "$probe/long_prompt.py" /tmp/bonsai-ref "$MODEL" 8192 > archive.txt
+prompt=$(cat archive.txt)
+/tmp/bonsai-ref "$MODEL" "$prompt" archive-ref 8256 128 16 > archive-ref.txt
+for device in cpu auto vulkan; do
+  target/release-fast/examples/bonsai_text_probe "$MODEL" "$device" "$prompt" \
+    archive-ref.txt "archive-$device.f32" 8256 128 > "archive-$device.log"
+  python3 "$probe/compare.py" archive-ref.f32 "archive-$device.f32" --steps 16
+done
+```
+
+Each `step` in the Rust log records its greedy token ID, elapsed milliseconds and device submission count. The comparison reports the two highest logits from each runtime whenever the greedy tokens differ.

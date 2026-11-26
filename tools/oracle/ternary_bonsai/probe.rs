@@ -10,9 +10,9 @@ use std::{fs, io::Write, sync::Arc, time::Instant};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     let tokens_only = args.len() == 4 && args[2] == "tokens";
-    if !tokens_only && args.len() != 6 {
+    if !tokens_only && args.len() != 6 && args.len() != 8 {
         return Err(
-            "MODEL tokens PROMPT or MODEL cpu|auto|vulkan PROMPT REFERENCE.txt OUTPUT.f32".into(),
+            "MODEL tokens PROMPT or MODEL cpu|auto|vulkan PROMPT REFERENCE.txt OUTPUT.f32 [CTX BATCH]".into(),
         );
     }
     let source = GGUFLoader::from_file(&args[1])?;
@@ -53,11 +53,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "invalid ID")
         })
         .collect::<Result<_, _>>()?;
-    assert_eq!(
-        history.len(),
-        4,
-        "expected prefill and three decode positions"
-    );
+    let capacity = args.get(6).map_or(Ok(256), |s| s.parse::<usize>())?;
+    let batch = args.get(7).map_or(Ok(8), |s| s.parse::<usize>())?;
+    if batch == 0 {
+        return Err("batch size must be positive".into());
+    }
+    if ids.is_empty() || history.is_empty() || ids.len() + history.len() - 1 > capacity {
+        return Err("prompt and reference positions must fit in the context".into());
+    }
     let mode = match args[2].as_str() {
         "cpu" => ComputePolicy::Cpu,
         "auto" => ComputePolicy::Auto,
@@ -72,8 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let start = Instant::now();
     let mut model = Qwen35Model::from_source(&source)?;
-    let mut session =
-        Qwen35Session::new_with_compute(&mut model, 256, 8, Arc::new(ComputePool::new(8)), mode)?;
+    let mut session = Qwen35Session::new_with_compute(
+        &mut model,
+        capacity,
+        batch,
+        Arc::new(ComputePool::new(8)),
+        mode,
+    )?;
     println!("load_ms {}", start.elapsed().as_secs_f64() * 1000.0);
     let mut output = std::io::BufWriter::new(fs::File::create(&args[5])?);
     let mut tokens = ids;
