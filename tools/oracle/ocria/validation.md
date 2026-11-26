@@ -251,6 +251,78 @@ committed fixtures measure: detector `prob` max abs 1.85e-2 (gate 3e-2), router 
 when two classes are nearly tied, while `ids` is what reaches the text). The F32 fixture gates
 above are not applied to the Q8_0 file.
 
+**Performance, same host, after the 1x1 convolution fast path** (`ops::nn::conv3d_pointwise`):
+the generic kernel reduced a 1x1 convolution to one `dot_f32` of length 1 per input channel, so
+call and index overhead dominated; the new path walks the contiguous pixel plane once per
+(output channel, input channel) pair. The channel order and bias placement are the generic
+kernel's, so the arithmetic is bit-identical -- `ops::nn::tests::conv3d_pointwise_matches_generic`
+asserts that with `to_bits()` on four shapes (including `groups=2` and a 1x1 plane) in both
+dispatch modes, and the parity results in §7-§9 are unchanged.
+
+Apple M3 Max (16 cores, macOS 27.2, `release-fast`), `receipt.png`, cold process:
+
+| threads | before | after |
+| --- | ---: | ---: |
+| 1 | 10.36 s | 0.51 s |
+| 4 | 3.40 s | **0.17 s** |
+| 8 | 1.48 s | 0.14 s |
+
+Linux x86_64 (128 cores, shared, `release-fast`), `--threads 4`, cold process:
+
+| page | before | after |
+| --- | ---: | ---: |
+| `receipt.png` (19 lines) | 5.67 s | 1.04 s |
+| `two_column.png` (25 lines) | 9.74 s | 1.39 s |
+| `sideways.png` (17 lines, two detector passes) | 7.28 s | 1.11 s |
+
+The pre-optimization Linux row was measured on an earlier instance of the same machine class,
+so treat that ratio as indicative; the macOS row is a single host. The same-host LiteParse +
+ONNX Runtime comparison on this instance is **not run**: the reference build did not complete
+on the shared box (load average 35-42), and the number from the earlier instance (0.17 s for
+`receipt.png`) is from a different host, so it is not quoted as a comparison.
+
+What remains unoptimised is the depthwise 3x3 path (nine `dot_f32` of length 3 per output
+element), which is now the dominant cost.
+
+## 8. End-to-end page parity (Rust vs the pinned LiteParse engine)
+
+Recorded by the Lead on 2026-11-26 with the same command the test documents:
+
+```bash
+cargo build --locked --profile release-fast --bin rust-model-inference
+for p in receipt two_column sideways; do
+  target/release-fast/rust-model-inference --model ocria-f32.gguf \
+    --image tools/oracle/ocria/fixtures/pages/$p.png --out /tmp/$p.json --threads 4 --compute cpu
+done
+OCRIA_GGUF=ocria-f32.gguf OCRIA_PAGES=tools/oracle/ocria/fixtures/pages \
+  cargo test --locked --profile release-fast --lib models::ocria::tests -- --ignored --nocapture
+```
+
+Host: Apple M3 Max (16 cores), macOS 27.2, `rustc 1.99.1`. The oracle JSON next to each
+page was produced by the pinned LiteParse engine (`44ceb6ab`) through a small example added
+to a temporary copy of that checkout; it calls `OcriaEngine::run` directly, so its boxes are
+image pixels and not PDF points.
+
+| page | what it exercises | lines | text | boxes | worst line confidence | page mean confidence |
+| --- | --- | ---: | --- | --- | ---: | --- |
+| `receipt.png` | single column, faint tokens | 19 | exact | ≤1 px | 6.20e-2 | 0.986419 vs 0.988068 |
+| `two_column.png` | column-gutter split | 25 | exact | ≤1 px | 2.64e-2 | 0.987348 vs 0.985923 |
+| `sideways.png` | sideways-page retry (two det passes) | 17 | exact | ≤1 px | 6.20e-2 | 0.985115 vs 0.987098 |
+
+Text and line counts are exact on all three; the confidence difference is the `rec_latin`
+QDQ effect from §7 (one character on a near tie moves a short line's mean by a few
+hundredths, while the page mean stays within 2.0e-3).
+
+**Q8_0 export, same pages** (`page_read_q8_0_keeps_the_text`): text and line count are
+identical on all three pages; worst line confidence delta 6.96e-2, page means 0.986791 /
+0.986888 / 0.985523. The quantized file's per-graph drift against the F32 file is measured
+by `q8_0_weights_stay_within_the_measured_quantization_bounds`, which asserts the drift the
+committed fixtures measure: detector `prob` max abs 1.85e-2 (gate 3e-2), router logits
+6.08e-2 (gate 1e-1), recognizer `ids` 16/1064 timesteps = 1.5 % (gate 5 %) and a per-timestep
+`conf` delta of 2.08e-1 (gate 3e-1, a sanity bound: a timestep's softmax maximum moves a lot
+when two classes are nearly tied, while `ids` is what reaches the text). The F32 fixture gates
+above are not applied to the Q8_0 file.
+
 **Performance, same host** (Linux x86_64, 128 cores, no GPU; `release-fast`; wall clock
 from a cold process to the finished JSON, so model load is included on both sides):
 
