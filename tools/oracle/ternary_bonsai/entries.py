@@ -59,6 +59,8 @@ def main():
             run = cli("cli_" + kind, [*flags, "--prompt", prompt, "--temperature", "0", "--max-tokens", "6"])
             answer = run.stdout.split("--- Generation ---\n", 1)[1].split("\n--- End ---", 1)[0].strip()
             record("cli_" + kind, answer)
+            expected = "Paris" if kind == "text" else "Red"
+            assert answer.rstrip(".").casefold() == expected.casefold(), (kind, expected, answer)
             if args.mtp and kind == "text":
                 rounds = re.search(r"\[mtp\] (\d+) rounds, (\d+)/(\d+) drafts accepted", run.stderr)
                 assert rounds and int(rounds[3]) > 0, run.stderr
