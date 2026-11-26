@@ -16,44 +16,85 @@ and strict Vulkan. Record the actual execution backend separately.
 
 ## Full-model runs on 2026-11-26
 
-Both runs used an EPYC 9334, RADV NAVI31 and eight inference threads. The
-operator probes use a 256-token text context, eight rows per prefill chunk
-and F32 KV. The five input IDs for `The capital of France is` were
-`760 6511 314 9338 369` on both sides. The publisher and Rust produced
-`11751 13 248046 198` at all four positions for each of the six runs below.
-The decode steps consume the reference continuation even if a prediction
-differs. [Step-level results and timings](performance.json)
+The full-vocabulary comparisons and generation runs used commit `9cb45549`, an EPYC 9334, RADV NAVI31
+and eight inference threads. All three base files were compared to the
+publisher's CPU implementation using the same weights, five prompt IDs
+(`760 6511 314 9338 369`), 256-token context, eight-row Rust prefill chunks
+and F32 KV. Rust and the publisher predicted `11751 13 248046 198` at
+all four positions in every run. Each decode step consumed the reference
+continuation. The tokenizer also matched on empty input, mixed whitespace,
+Unicode and explicit chat delimiters. [Per-position metrics, timings and exact IDs](performance.json)
 
-| Decoder | CPU min cosine / max relative L2 | Vulkan min cosine / max relative L2 | Vulkan submissions per step |
+| Decoder | CPU min cosine / max relative L2 | Auto min cosine / max relative L2 | Strict Vulkan min cosine / max relative L2 |
 |---|---:|---:|---:|
-| PTQ1_0 | 0.99998510 / 0.00559489 | 0.99998565 / 0.00538422 | 62 |
-| PQ2_0 | 0.99997931 / 0.00678090 | 0.99998389 / 0.00587226 | 62 |
-| Q2_0 | 0.99997824 / 0.00670976 | 0.99998600 / 0.00531991 | 62 |
+| PTQ1_0 | 0.99998510 / 0.00559489 | 0.99998565 / 0.00538422 | 0.99998565 / 0.00538422 |
+| PQ2_0 | 0.99997931 / 0.00678090 | 0.99998389 / 0.00587226 | 0.99998389 / 0.00587226 |
+| Q2_0 | 0.99997824 / 0.00670976 | 0.99998600 / 0.00531991 | 0.99998600 / 0.00531991 |
 
-A 64×64 RGB red image produced nine projected tokens. Both projector files
-were compared against the publisher's CPU mtmd implementation with the PTQ1_0
-decoder. The first predicted token was `5844` (red) on all four runs.
+Auto and strict Vulkan submitted 62 times at each text position. The CPU
+submitted zero times. A 64×64 RGB red image produced nine projected tokens.
+With the PTQ1_0 decoder, every projector/backend pair predicted the
+publisher's first token `5844` (red). The image probe measured submissions
+over preprocessing, vision encoding and target prefill.
 
-| Projector | CPU cosine / relative L2 | Vulkan cosine / relative L2 |
-|---|---:|---:|
-| BF16 | 0.99998320 / 0.00579736 | 0.99997970 / 0.00693371 |
-| Q8_0 | 0.99998083 / 0.00643347 | 0.99995590 / 0.01190903 |
+| Projector | CPU cosine / relative L2 | Auto cosine / relative L2 | Strict Vulkan cosine / relative L2 | Auto / strict submissions |
+|---|---:|---:|---:|---:|
+| BF16 | 0.99998320 / 0.00579736 | 0.99997970 / 0.00693371 | 0.99997970 / 0.00693371 | 1,348 / 1,348 |
+| Q8_0 | 0.99998083 / 0.00643347 | 0.99995590 / 0.01190903 | 0.99995590 / 0.01190903 | 4,282 / 4,282 |
 
-## Entry and device coverage
+For each format, all 851 target tensors in the ordinary and MTP files
+matched by name, shape, type and payload bytes. Each MTP file adds 15
+tensors in block 64. The named-payload digests in the results are SHA-256
+over the sorted tensor names, each followed by a NUL byte and the SHA-256
+of that tensor's payload.
 
-| Input | Implementation | Observed on the 27B |
-|---|---|---|
-| Text, three base files | CLI and HTTP use the existing hybrid runtime | CPU and strict Vulkan numerical probes above. Auto completed the three four-step probes on RADV. The Auto dumps were not compared before the instance disconnected. |
-| MTP, three draft files | Shared NextN loader and text-only greedy speculation | PTQ1_0-MTP strict Vulkan CLI accepted 4/4 drafts in two rounds and returned the same six tokens as ordinary generation. PQ2_0-MTP and Q2_0-MTP entry runs are pending. |
-| Image, BF16 and Q8_0 | Shared vision encoder and hybrid decoder. CLI accepts an explicit thinking setting. | Both CPU and strict Vulkan passed the full-vocabulary probe. Image CLI ran on PTQ1_0. The original CLI ignored the explicit thinking setting for media. A corrected 27B entry run is pending. |
-| JEV, text and image | Shared scorers with the server's configured template | PTQ1_0 CPU text CLI selected A (red), probability 0.99988544. The 27B HTTP score and image-score comparisons are pending. |
-| HTTP chat and SSE | Existing OpenAI-compatible server | Q2_0 served its model ID. The inference host disconnected before the generation and streaming responses could be collected. |
+## CLI, HTTP and device coverage
 
-`entries.py BIN_DIR MODEL MMPROJ RED.png LOG_DIR cpu|auto|vulkan [--mtp] [--jev]`
-runs the two executables serially. It compares CLI, HTTP JSON and SSE text,
-checks the draft count when requested, and compares JEV choices and label
-probabilities (absolute difference below 0.01). The server is bound to
-loopback. Each completed result is written before the next request.
+Each of the six decoder files ran through the shipped CLI and a loopback
+HTTP server with `--compute cpu`, `auto` and `vulkan`. All 18 runs produced
+`Paris` for the capital question and `Red` for the image. Each answer was
+collected separately from CLI stdout, a JSON response and SSE deltas
+terminated by `[DONE]`. The base files used the BF16 projector. The files
+with a draft head used the Q8_0 projector. [Requests, answers and scores](entries.json)
+
+| File | CPU | Auto | Strict Vulkan | Exercised |
+|---|---|---|---|---|
+| PTQ1_0 | Passed | Passed | Passed | Text and image generation, single and grouped JEV |
+| PQ2_0 | Passed | Passed | Passed | Text and image generation, single and grouped JEV |
+| Q2_0 | Passed | Passed | Passed | Text and image generation, single and grouped JEV |
+| PTQ1_0-mtp | Passed | Passed | Passed | Speculative text and target-only image generation |
+| PQ2_0-mtp | Passed | Passed | Passed | Speculative text and target-only image generation |
+| Q2_0-mtp | Passed | Passed | Passed | Speculative text and target-only image generation |
+
+With `--mtp-draft 2`, the CLI accepted three of six proposals in three
+rounds for the one-word capital prompt in all nine file/backend pairs. A
+second eight-token counting prompt on CPU gave the same output with ordinary
+and speculative decoding for each format. All six proposals were accepted
+in three rounds. The image CLI used each MTP file with speculation disabled.
+A direct image request with the draft flag failed with
+`speculative decoding requires a text-only prompt`. Servers started with the
+draft flag served their image requests through the target model.
+
+The final JEV runs used commit `30379492`. Single-choice JEV compared both
+label probabilities and the selected label for text and image. Grouped JEV
+compared hue and brightness separately through `/v1/jev/grouped` and
+`/v1/jev/image_grouped`. The nine Bonsai base-file/backend combinations, a
+PTQ1_0 CPU template override and a dense Qwen3.5-0.8B BF16 CPU regression
+all passed. Across these 11 runs the largest CLI/HTTP probability difference
+was 0 at the serialized precision (44 single-choice and 88 grouped
+probabilities, tolerance 0.01). On PTQ1_0 CPU, prepending a fixed string
+to the checkpoint template changed the grouped image brightness probability
+from 0.93938524 to 0.95891809 in both interfaces. [Per-case results](entries.json)
+
+With an unavailable ICD, Auto ran all three decoders with zero GPU
+submissions and met the same oracle bounds at all four positions. Strict
+Vulkan exited with `Unable to find a Vulkan driver`. On RADV, text and image
+probes recorded the nonzero counts above. [Fallback measurements](performance.json)
+
+Run `entries.py BIN_DIR MODEL MMPROJ RED.png LOG_DIR cpu|auto|vulkan`.
+Add `--mtp` for a draft file, `--jev` to include the four scoring endpoints,
+or `--scores-only` to repeat scoring. `--template-file PATH` applies the same
+explicit template on both sides. Results are saved per response.
 
 ## Regression and review
 
@@ -64,8 +105,15 @@ single-coefficient matrix checks the inverse embedding and both forward
 activation quantizers against the expected signed Walsh column. A header
 fixture rejects a missing transform and a tied v1 output before reading
 any tensor. The loader shares the recurrent gather across all 48 GDN layers.
+The projection test also checks that row lookup and a Vulkan upload leave the CPU
+cache empty. After a CPU projection, an upload borrows the existing cache.
 An image speculative-prefill test rejects token-only input before reading
 the projector or decoder. Shader validation uses Vulkan 1.1.
+
+On the Linux host, `cargo test --locked --profile release-fast --features
+vulkan --lib FILTER` at `30379492` passed 126 tests for `qwen35` (24 marked
+ignored), two for `app::jev::grouped::tests` and four for
+`app::server::api::tests`.
 
 A real dense Qwen3.5-0.8B BF16 and its BF16 projector were run before and
 after against base `7dfd5f15` on Apple M3 Max. CPU text (18 prompt IDs, six
@@ -78,8 +126,11 @@ rebuild also hit the same pre-existing binary difference in
 
 The non-folded BF16 decoder SHA-256 was
 `cedf89af31c9041b601fa58303285bc46d99c51baee1b13f5e919626ca526ee5`.
-With explicit `--no-thinking --jinja`, the CLI, HTTP and SSE returned
+On the Mac with explicit `--no-thinking --jinja`, the CLI, HTTP and SSE returned
 `Paris` for the short-answer text prompt and `Red` for the red image.
 CLI and HTTP JEV returned A with probabilities 0.85150671 (text) and
 0.97095829 (image). With an unavailable Vulkan ICD the Auto text result
-matched CPU. These are shared-entry regression checks on the 0.8B decoder.
+matched CPU. On Linux at `30379492`, the same 0.8B decoder returned
+`Paris` and `Red` across all three interfaces. The CLI and HTTP single-choice
+probabilities were 0.85438418 (text) and 0.97294360 (image). The grouped
+results are in the `dense_qwen35_0_8b_bf16` entry. [Linux results](entries.json)

@@ -24,7 +24,7 @@ On the inference host, set `MODEL` to one decoder and `PUBLISHER` to a checkout 
 ```sh
 cmake -S "$PUBLISHER" -B "$PUBLISHER/build" -DCMAKE_BUILD_TYPE=Release \
   -DGGML_NATIVE=ON -DGGML_BLAS=OFF -DGGML_CUDA=OFF -DGGML_VULKAN=OFF \
-  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF
+  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_WEBUI=OFF
 cmake --build "$PUBLISHER/build" --target llama mtmd -j8
 probe=tools/oracle/ternary_bonsai
 lib="$PUBLISHER/build/bin"
