@@ -783,3 +783,36 @@ To restart layer 2 work on the box:
    only the 2.5 pt thickness cap (§2.3). Suggest recording it in the GGUF contract.
 5. **`N` ceiling.** Skip above 1500 units as the reference does, or truncate? Needs a
    measured page-count distribution from layer 1 first.
+
+## 8. Ablation run (2026-11-26): does LayoutNet need `ProjSignals`?
+
+The plan called this the first thing to settle, so it was run before any layer-2
+code. Instrumentation: [`tablenet_ablate.rs`](tablenet_ablate.rs) (a temporary example in a
+pinned LiteParse checkout, plus a `PageInput::from_ocr_units` constructor because the struct's
+`raw` field is private). It OCRs a page with the pinned engine, turns the line output into
+`units::Unit`s exactly the way `ocr_units` does, and calls `table_model::run_page` with
+`sig = None` — the path the reference refuses.
+
+Result on the two recorded pages (`--release`, ONNX Runtime CPU, tablenet.bin):
+
+| page | units | tables | grid | cells | blocks |
+| --- | ---: | ---: | --- | ---: | ---: |
+| `receipt.png` | 19 | 1 | 6x2 | 12 | 0 |
+| `two_column.png` | 25 | 0 | — | 0 | 0 |
+
+So **the model does run and produce a structured table with `proj = None`**: the projection
+signals are a runtime requirement of the reference's *code path*, not of the network. Cell
+contents on `receipt.png` are recognisable (`Coffee beans` / `2 12.50`, `Sourdough` / `4.20 1`),
+with the trailing digits coming from the OCR line text rather than from a word-level split.
+
+What this does **not** settle: the accuracy cost. The reference's own pipeline, with the
+projection signals it normally has, emits no Markdown table for the same content either
+(`lit parse receipt.png`, `lit parse integration_tests_data/receipt_scan.pdf`), so this page
+cannot discriminate. The ablation has to be repeated on a document where the reference
+actually emits a table, and the two table sets compared cell by cell.
+
+**Revised verdict for layer 2.** The `ProjSignals` port is no longer an assumed blocker: the
+remaining work is units → features (`proj = None`) → net → decode, i.e. the ~4 300 lines of
+§4 minus the 3 500–4 500 lines of `projection.rs`. What is still unknown is whether a model
+trained with those eight features tolerates their absence well enough to be worth shipping;
+that is one fixture and one comparison away, and it is now the first task of the layer.
