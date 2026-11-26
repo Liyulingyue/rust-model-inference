@@ -1,5 +1,7 @@
 # Qwen3.5 / Qwen3.8-27B：验证记录
 
+Nari Labs 的 Qwen3.8-27B GGUF 复用此架构，线性层和词表使用 NariQ v1。三档权重、CPU / Vulkan 计时和逐档精度见[实测记录](../../tools/oracle/nariq/validation.md)与[同机耗时](../../tools/oracle/nariq/performance.json)。
+
 > 本页汇总这个型号的验证证据、限制与实测数字。模型清单见
 > [SUPPORTED_MODELS.md](SUPPORTED_MODELS.md)；MTP 投机解码的实现沿革与逐条命令见
 > [TODO.md](TODO.md) 的 TODO-072；对拍测试见

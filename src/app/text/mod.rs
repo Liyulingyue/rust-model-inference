@@ -42,6 +42,7 @@ mod tests {
         output_weight.n_in = 2;
         output_weight.n_out = 3;
         Qwen35Model {
+            interleaved_mrope: false,
             config: Qwen35Config {
                 n_nextn: 0,
                 n_embd: 2,

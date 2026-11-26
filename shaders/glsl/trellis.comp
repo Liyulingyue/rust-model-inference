@@ -1,0 +1,87 @@
+#version 450
+// NariQ v1 block-Hadamard projection. One descriptor set per vocabulary band.
+// Mode 0 gathers/scales and rotates x, mode 1 multiplies by the coded grid,
+// mode 2 rotates/scales and scatters into the original output vocabulary.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { float a[]; };
+layout(std430, binding = 1) readonly buffer Codes { uint words[]; };
+layout(std430, binding = 2) readonly buffer Sides { uint side[]; };
+layout(std430, binding = 3) buffer Scratch { float tmp[]; };
+layout(push_constant) uniform Config {
+    uint mode, input_word, output_word, input_stride, output_stride, first_token;
+    uint k, n, bits, in_block, out_block;
+} pc;
+shared float work[4096];
+
+// The 16-bit window ends at (p + 1) * bits in a circular tile of 8 * bits words.
+float grid(uint tile, uint row, uint col) {
+    uint p = 8 * (4 * (row % 8) + (col % 8) / 2) + 4 * (row / 8) + 2 * (col / 8) + col % 2;
+    uint total = 256 * pc.bits;
+    uint start = ((p + 1) * pc.bits + total - 16) % total;
+    uint w = start / 32, off = start % 32, count = 8 * pc.bits;
+    uint hi = words[tile * count + w];
+    uint state;
+    if (off <= 16) {
+        state = hi >> (16 - off);
+    } else {
+        uint lo = words[tile * count + (w + 1) % count];
+        state = (hi << (off - 16)) | (lo >> (48 - off));
+    }
+    uint h = (state & 65535) * 0x83dcd12du;
+    return float(int(((h >> 2) & 63) + ((h >> 10) & 63) + ((h >> 18) & 63) + ((h >> 26) & 63)) - 126);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint token = pc.first_token + gl_WorkGroupID.y;
+    uint scratch = gl_WorkGroupID.y * (pc.k + pc.n);
+    uint group = gl_WorkGroupID.x;
+    // side layout in u32 words: pre[k], s16[k/16] as f32, post[n], pin[k], scatter[n].
+    uint post = pc.k + pc.k / 16;
+    uint pin = post + pc.n, scatter = pin + pc.k;
+    if (pc.mode == 1) {
+        uint row = lane % 16, part = lane / 16;
+        float sum = 0.0;
+        for (uint c = part; c < pc.k; c += 4) {
+            sum += tmp[scratch + c] * grid(group * (pc.k / 16) + c / 16, row, c % 16);
+        }
+        work[lane] = sum;
+        barrier();
+        if (lane < 16) {
+            tmp[scratch + pc.k + group * 16 + lane] = (work[lane] + work[lane + 16]) + (work[lane + 32] + work[lane + 48]);
+        }
+        return;
+    }
+    bool input_side = pc.mode == 0;
+    uint width = input_side ? pc.k : pc.n;
+    uint block = input_side ? pc.in_block : pc.out_block;
+    uint span = block == 1 ? 64 : block;
+    uint base = group * span;
+    for (uint j = lane; j < span && base + j < width; j += 64) {
+        uint i = base + j;
+        if (input_side) {
+            work[j] = a[pc.input_word + token * pc.input_stride + side[pin + i]] * uintBitsToFloat(side[i]);
+        } else {
+            work[j] = tmp[scratch + pc.k + i];
+        }
+    }
+    barrier();
+    for (uint h = 1; h < block; h *= 2) {
+        for (uint pair = lane; pair < block / 2; pair += 64) {
+            uint i = (pair / h) * 2 * h + pair % h;
+            float low = work[i], high = work[i + h];
+            work[i] = low + high;
+            work[i + h] = low - high;
+        }
+        barrier();
+    }
+    float norm = inversesqrt(float(block));
+    for (uint j = lane; j < span && base + j < width; j += 64) {
+        uint i = base + j;
+        if (input_side) {
+            tmp[scratch + i] = work[j] * norm * uintBitsToFloat(side[pc.k + i / 16]);
+        } else {
+            a[pc.output_word + token * pc.output_stride + side[scatter + i]] = work[j] * norm * uintBitsToFloat(side[post + i]);
+        }
+    }
+}

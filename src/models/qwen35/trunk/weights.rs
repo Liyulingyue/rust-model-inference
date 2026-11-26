@@ -12,8 +12,7 @@
 //! inside this module's loading path.
 
 use super::config::Qwen35Config;
-use crate::core::tensor::GGMLType;
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::models::edge0::weights::load_affine;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 #[cfg(feature = "vulkan")]
@@ -243,6 +242,8 @@ impl<'a> Qwen35MoeWeights<'a> {
 /// Qwen3.5 exposes this as `Qwen35Model`; Edge0 composes it with MoE weights.
 pub struct HybridTrunk<'a> {
     pub config: Qwen35Config,
+    /// Interleave the temporal and spatial RoPE frequency pairs for image tokens.
+    pub interleaved_mrope: bool,
     pub tok_embd: Weight<'a>,
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
@@ -512,48 +513,67 @@ impl<'a> HybridTrunk<'a> {
         config: Qwen35Config,
         edge0: bool,
     ) -> Result<Self, String> {
-        let token_info = source
-            .tensor_info("token_embd.weight")
-            .ok_or("Missing token_embd.weight")?;
-        let actual = token_info
-            .dims
-            .iter()
-            .map(|value| *value as usize)
-            .collect::<Vec<_>>();
-        // The lossless export stores packed 4-bit codes, so the embedding is
-        // one eighth as wide; the expanded modes store whole values instead.
+        let has_trellis = source.metadata("trellis.version").is_some();
+        let coded = |name: &str| has_trellis && crate::ops::kernel::trellis::is_coded(source, name);
         let expanded = crate::models::edge0::weights::is_expanded(source);
-        let expected = vec![
-            if edge0 && !expanded {
-                config.n_embd / 8
-            } else {
-                config.n_embd
-            },
-            config.vocab_size,
-        ];
-        if actual != expected {
-            return Err(format!(
-                "token_embd.weight shape mismatch: expected {expected:?}, got {actual:?}, dtype={:?}",
-                token_info.ggml_type
-            ));
-        }
-        let tok_embd = load_weight(source, "token_embd.weight").ok_or_else(|| {
-            format!(
-                "Unsupported token_embd.weight dtype: {:?}",
-                token_info.ggml_type
-            )
-        })?;
+        let tok_embd = if coded("token_embd.weight") {
+            crate::ops::kernel::trellis::load_weight(
+                source,
+                "token_embd.weight",
+                config.n_embd,
+                config.vocab_size,
+            )?
+        } else {
+            let token_info = source
+                .tensor_info("token_embd.weight")
+                .ok_or("Missing token_embd.weight")?;
+            let actual = token_info
+                .dims
+                .iter()
+                .map(|value| *value as usize)
+                .collect::<Vec<_>>();
+            // The lossless export stores packed 4-bit codes, so the embedding is
+            // one eighth as wide; the expanded modes store whole values instead.
+            let expected = vec![
+                if edge0 && !expanded {
+                    config.n_embd / 8
+                } else {
+                    config.n_embd
+                },
+                config.vocab_size,
+            ];
+            if actual != expected {
+                return Err(format!(
+                    "token_embd.weight shape mismatch: expected {expected:?}, got {actual:?}, dtype={:?}",
+                    token_info.ggml_type
+                ));
+            }
+            load_weight(source, "token_embd.weight").ok_or_else(|| {
+                format!(
+                    "Unsupported token_embd.weight dtype: {:?}",
+                    token_info.ggml_type
+                )
+            })?
+        };
 
         let output_norm =
             load_weight_f32(source, "output_norm.weight").ok_or("Missing output_norm.weight")?;
 
-        let output_weight = {
-            let name = if source.tensor_info("output.weight").is_some() {
-                "output.weight"
-            } else {
-                "token_embd.weight"
-            };
-            load_weight(source, name).ok_or("Missing output weight")?
+        let output_name = if source.tensor_info("output.weight").is_some() || coded("output.weight")
+        {
+            "output.weight"
+        } else {
+            "token_embd.weight"
+        };
+        let output_weight = if coded(output_name) {
+            crate::ops::kernel::trellis::load_weight(
+                source,
+                output_name,
+                config.n_embd,
+                config.vocab_size,
+            )?
+        } else {
+            load_weight(source, output_name).ok_or("Missing output weight")?
         };
         if edge0
             && !expanded
@@ -600,12 +620,22 @@ impl<'a> HybridTrunk<'a> {
                     .ok_or_else(|| format!("Missing blk.{}.post_attention_norm.weight", i))?;
             let is_recr = config.is_recurrent[i];
 
+            let projection = |suffix: &str, n_in: usize, n_out: usize| {
+                let name = format!("blk.{i}.{suffix}.weight");
+                if coded(&name) {
+                    crate::ops::kernel::trellis::load_weight(source, &name, n_in, n_out).map(Some)
+                } else {
+                    Ok(load_weight(source, &name))
+                }
+            };
+            let hidden = config.n_embd;
+            let q_width = config.n_head * config.n_embd_head();
             let (wq, wk, wv, wo, attn_q_norm, attn_k_norm) = if !is_recr {
                 (
-                    load_weight(source, &format!("blk.{}.attn_q.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_k.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_v.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_output.weight", i)),
+                    projection("attn_q", hidden, 2 * q_width)?,
+                    projection("attn_k", hidden, config.n_embd_gqa())?,
+                    projection("attn_v", hidden, config.n_head_kv * config.value_length)?,
+                    projection("attn_output", config.n_head * config.value_length, hidden)?,
                     load_weight_f32(source, &format!("blk.{}.attn_q_norm.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.attn_k_norm.weight", i)),
                 )
@@ -625,15 +655,15 @@ impl<'a> HybridTrunk<'a> {
                 ssm_out,
             ) = if is_recr {
                 (
-                    load_weight(source, &format!("blk.{}.attn_qkv.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_gate.weight", i)),
+                    projection("attn_qkv", hidden, config.conv_dim())?,
+                    projection("attn_gate", hidden, config.value_dim())?,
                     load_weight_f32(source, &format!("blk.{}.ssm_conv1d.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.ssm_dt.bias", i)),
                     load_weight_f32(source, &format!("blk.{}.ssm_a", i)),
-                    load_weight(source, &format!("blk.{}.ssm_beta.weight", i)),
-                    load_weight(source, &format!("blk.{}.ssm_alpha.weight", i)),
+                    projection("ssm_beta", hidden, config.ssm_dt_rank)?,
+                    projection("ssm_alpha", hidden, config.ssm_dt_rank)?,
                     load_weight_f32(source, &format!("blk.{}.ssm_norm.weight", i)),
-                    load_weight(source, &format!("blk.{}.ssm_out.weight", i)),
+                    projection("ssm_out", config.value_dim(), hidden)?,
                 )
             } else {
                 (None, None, None, None, None, None, None, None, None)
@@ -651,20 +681,21 @@ impl<'a> HybridTrunk<'a> {
                 None => None,
                 Some(moe) => Some(load_moe_weights(source, i, moe, config.n_embd)?),
             };
-            let dense = |name: &str| -> Result<Option<Weight<'a>>, String> {
-                if config.moe.is_some() {
-                    // qwen35moe carries no dense FFN; the per-expert tensors
-                    // stand in for it. Absent rather than mis-bound, so the
-                    // dispatch cannot silently run a dense block on a MoE model.
-                    return Ok(None);
-                }
-                load_weight(source, name)
-                    .map(Some)
-                    .ok_or_else(|| format!("Missing {name}"))
-            };
-            let ffn_gate = dense(&format!("blk.{i}.ffn_gate.weight"))?;
-            let ffn_up = dense(&format!("blk.{i}.ffn_up.weight"))?;
-            let ffn_down = dense(&format!("blk.{i}.ffn_down.weight"))?;
+            let dense =
+                |suffix: &str, n_in: usize, n_out: usize| -> Result<Option<Weight<'a>>, String> {
+                    if config.moe.is_some() {
+                        // qwen35moe carries no dense FFN; the per-expert tensors
+                        // stand in for it. Absent rather than mis-bound, so the
+                        // dispatch cannot silently run a dense block on a MoE model.
+                        return Ok(None);
+                    }
+                    projection(suffix, n_in, n_out)?
+                        .map(Some)
+                        .ok_or_else(|| format!("Missing blk.{i}.{suffix}.weight"))
+                };
+            let ffn_gate = dense("ffn_gate", hidden, config.n_ff)?;
+            let ffn_up = dense("ffn_up", hidden, config.n_ff)?;
+            let ffn_down = dense("ffn_down", config.n_ff, hidden)?;
             layers.push(Qwen35LayerWeights {
                 attn_norm,
                 attn_post_norm,
@@ -700,6 +731,12 @@ impl<'a> HybridTrunk<'a> {
         };
 
         Ok(Self {
+            // The NariQ v1 Qwen3.8 graph uses GGML_ROPE_TYPE_IMROPE. Equal
+            // text positions do not distinguish it from contiguous sections.
+            interleaved_mrope: matches!(
+                source.metadata("trellis.version"),
+                Some(MetaValue::Uint32(1))
+            ),
             config,
             tok_embd,
             output_norm,

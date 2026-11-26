@@ -39,6 +39,7 @@ pub mod q6_k;
 pub mod q8_0;
 pub mod simd_avx2;
 pub mod simd_avx512;
+pub mod trellis;
 
 mod qtensor_owned;
 mod quantized_tensor;
@@ -508,6 +509,7 @@ impl<'a> Weight<'a> {
         #[cfg(feature = "vulkan")]
         let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         let (input_q8, input_scales, q8_k) = match self.ggml_type {
+            ty if ty.trellis_bits().is_some() => (&[][..], &[][..], None),
             GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::I32 => {
                 (&[][..], &[][..], None)
             }

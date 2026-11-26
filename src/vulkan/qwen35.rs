@@ -31,6 +31,9 @@ fn check_eligibility(facts: &EligibilityFacts) -> Result<(), String> {
         return Err("unsupported Qwen3.5 Vulkan weight format: no weights".into());
     }
     for &format in &facts.weight_formats {
+        if format.trellis_bits().is_some() {
+            continue;
+        }
         GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())?;
     }
     if let Some(operation) = facts.unrecorded_operations.first() {
@@ -903,6 +906,7 @@ pub(crate) struct Qwen35VulkanSession {
     layers: Vec<LayerBindings>,
     plan: Vec<usize>,
     mhc: Option<MhcBindings>,
+    interleaved_mrope: bool,
     /// The draft head's weights, when the checkpoint has a head.
     mtp: Option<MtpBindings>,
     output_norm: OperatorBindings,
@@ -1021,6 +1025,15 @@ impl Qwen35VulkanSession {
                 .and_then(|n| count.checked_add(n))
                 .ok_or(VulkanError::OutOfMemory)
         })?;
+        let descriptor_capacity = descriptor_capacity
+            .checked_add(
+                model
+                    .output_weight
+                    .kernel
+                    .trellis()
+                    .map_or(0, |w| w.bands.len() - 1),
+            )
+            .ok_or(VulkanError::OutOfMemory)?;
         let descriptor_capacity = descriptor_capacity
             .checked_add(routing.as_ref().map_or(0, |r| 1 + r.routers.len() * 4))
             .ok_or(VulkanError::OutOfMemory)?;
@@ -1327,6 +1340,7 @@ impl Qwen35VulkanSession {
             _buffers: buffers,
             layers,
             plan,
+            interleaved_mrope: model.interleaved_mrope || mhc.is_some(),
             mhc,
             mtp,
             output_norm,
@@ -1913,7 +1927,7 @@ impl Qwen35VulkanSession {
                 position,
                 config.rope_dimension_sections,
                 config.rope_freq_base,
-                self.mhc.is_some(),
+                self.interleaved_mrope,
             )
             .map_err(VulkanError::UnsupportedShape)?;
         }
@@ -2556,7 +2570,7 @@ impl Qwen35VulkanSession {
                 [position, position, position, 0],
                 config.rope_dimension_sections,
                 config.rope_freq_base,
-                self.mhc.is_some(),
+                self.interleaved_mrope,
             )
             .map_err(VulkanError::UnsupportedShape)?;
         }
@@ -2959,6 +2973,9 @@ fn bind_weight(
     weight: &Weight<'_>,
     label: &str,
 ) -> Result<OperatorBindings, VulkanError> {
+    if let Some(trellis) = weight.kernel.trellis() {
+        return ops.bind_trellis(buffers, trellis);
+    }
     let (buffer, format) = upload_weight(buffers, weight, label)?;
     ops.bind_weight_buffers_mode(
         std::slice::from_ref(&buffer),
@@ -2972,6 +2989,15 @@ fn bind_weight_group<const N: usize>(
     buffers: &mut UploadedBuffers,
     weights: [(&Weight<'_>, &str); N],
 ) -> Result<WeightBindings<N>, VulkanError> {
+    if weights.iter().any(|(w, _)| w.kernel.trellis().is_some()) {
+        let split = weights
+            .into_iter()
+            .map(|(w, label)| bind_weight(ops, buffers, w, label))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(WeightBindings::Split(
+            split.try_into().map_err(|_| VulkanError::OutOfMemory)?,
+        ));
+    }
     let mut gpu_buffers = Vec::with_capacity(N);
     let mut formats = Vec::with_capacity(N);
     for (weight, label) in weights {

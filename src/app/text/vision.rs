@@ -19,6 +19,65 @@ pub(crate) fn encode_qwen35_image(
     encode_qwen35_image_dynamic(mmproj_source, &image, n_threads_arg)
 }
 
+/// Each temporal patch projects a pair of frames onto its own spatial grid.
+/// The final frame of an odd-length clip supplies both halves of its patch.
+pub(super) fn encode_qwen35_frame_pairs(
+    mmproj: &dyn TensorSource,
+    family: crate::app::media::ProjectorFamily,
+    path: &Path,
+    is_video: bool,
+    pool: &Arc<ComputePool>,
+) -> Result<(Vec<VisionGrid>, Vec<f32>), String> {
+    use crate::app::media::ProjectorFamily;
+    let frames = if is_video {
+        if !matches!(
+            family,
+            ProjectorFamily::Qwen3VlMerger | ProjectorFamily::Qwen25Omni
+        ) {
+            return Err(format!("{family:?} has no Qwen video encoder"));
+        }
+        crate::app::media::decode_video(path)?
+    } else {
+        vec![decode_image(path)?]
+    };
+    let first = frames.first().ok_or("media produced no frames")?;
+    let mut encoder = VisionEncoder::from_source(mmproj, Arc::clone(pool))?;
+    encoder.precompute();
+    let (mean, std) = if is_video {
+        encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+        encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+        (encoder.config.image_mean, encoder.config.image_std)
+    } else {
+        // Existing Qwen3.5 image scoring maps RGB to [-1, 1].
+        ([0.5; 3], [0.5; 3])
+    };
+    let grid = qwen_smart_resize(
+        first.width() as usize,
+        first.height() as usize,
+        &encoder.config,
+    )?;
+    let (width, height) = (grid.image_width(), grid.image_height());
+    let normalize =
+        |frame: &image::DynamicImage| normalize_resized_image(frame, width, height, &mean, &std);
+    let mut scratch = VisionScratchpad::new(&encoder.config);
+    let mut grids = Vec::new();
+    let mut projected = Vec::new();
+    for pair in frames.chunks(2) {
+        let a = normalize(&pair[0])?;
+        let b = pair.get(1).map(normalize).transpose()?;
+        grids.push(encoder.encode_pair(
+            &a,
+            b.as_deref().unwrap_or(&a),
+            width,
+            height,
+            &mut scratch,
+            pool,
+        )?);
+        projected.extend_from_slice(&scratch.projected);
+    }
+    Ok((grids, projected))
+}
+
 /// Encode one image with the RADIO projector (ZDTaichu5.0-9B).
 ///
 /// The projector is a RADIOv4-H tower plus a ReLU-squared MLP head, so the

@@ -1,0 +1,95 @@
+{
+  "date": "2026-11-26",
+  "cpu": "AMD EPYC 9334",
+  "vulkan_device": "AMD Radeon Graphics (RADV NAVI31)",
+  "threads": 8,
+  "prefill_batch_size": 8,
+  "prompt_tokens": 5,
+  "greedy_positions": 3,
+  "decode_evaluations": 2,
+  "unit": "seconds",
+  "notes": "Wall times exclude model construction. Reference text generation includes writing the captured logits. Rust release-fast with vulkan,parity-trace and tracing disabled. This host ran concurrent workloads under a shared CPU quota. Single observations vary with contention; decode is the total for both evaluations.",
+  "runs": [
+    {
+      "bpw": 2.0,
+      "backend": "reference CPU",
+      "prefill": 2.050260917,
+      "decode": 4.067080536
+    },
+    {
+      "bpw": 2.0,
+      "backend": "Rust CPU",
+      "prefill": 25.48613,
+      "decode": 10.71287,
+      "submissions": 0
+    },
+    {
+      "bpw": 2.0,
+      "backend": "Rust Auto",
+      "prefill": 5.68889,
+      "decode": 7.11571,
+      "submissions": 231
+    },
+    {
+      "bpw": 2.0,
+      "backend": "Rust strict Vulkan",
+      "prefill": 5.72098,
+      "decode": 3.69081,
+      "submissions": 231
+    },
+    {
+      "bpw": 2.5,
+      "backend": "reference CPU",
+      "prefill": 1.7663355,
+      "decode": 4.235804867
+    },
+    {
+      "bpw": 2.5,
+      "backend": "Rust CPU",
+      "prefill": 26.37945,
+      "decode": 11.27833,
+      "submissions": 0
+    },
+    {
+      "bpw": 2.5,
+      "backend": "Rust Auto",
+      "prefill": 10.41397,
+      "decode": 7.89324,
+      "submissions": 231
+    },
+    {
+      "bpw": 2.5,
+      "backend": "Rust strict Vulkan",
+      "prefill": 7.98772,
+      "decode": 6.99981,
+      "submissions": 231
+    },
+    {
+      "bpw": 3.0,
+      "backend": "reference CPU",
+      "prefill": 2.320580883,
+      "decode": 6.165195437
+    },
+    {
+      "bpw": 3.0,
+      "backend": "Rust CPU",
+      "prefill": 51.02418,
+      "decode": 14.74759,
+      "submissions": 0
+    },
+    {
+      "bpw": 3.0,
+      "backend": "Rust Auto",
+      "prefill": 9.00929,
+      "decode": 8.58935,
+      "submissions": 231
+    },
+    {
+      "bpw": 3.0,
+      "backend": "Rust strict Vulkan",
+      "prefill": 10.91519,
+      "decode": 7.73376,
+      "submissions": 231
+    }
+  ]
+}

@@ -15,6 +15,7 @@ shader_names=(
     q8_matmul_grouped
     q2_k_matmul
     q3_k_matmul
+    trellis
     q4_0_matmul
     q4_0_matmul_tiled_dp4a
     q4_1_matmul
