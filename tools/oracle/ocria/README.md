@@ -41,9 +41,28 @@ curl -f http://127.0.0.1:8080/v1/ocr -H 'Content-Type: application/json' \
 ```
 
 `image` accepts a `data:` URL or bare base64; remote URLs are refused. The
-input is a page image — this repository has no PDF renderer, so PDF input,
-the release's PDF text layer and LayoutNet are the second delivery layer (see
-[Limits](#limits) and [layout-plan.md](layout-plan.md)).
+input is a page image — this repository has no PDF renderer, so PDF input and
+the release's PDF text layer are out of scope.
+
+### Tables and layout blocks (layer 2)
+
+LayoutNet ships as its own GGUF; attach it and the page gains `tables` and
+`blocks`:
+
+```sh
+python3 -m tools.converter.ocria.convert_ocria_layout /tmp/OCRia-nano-1 \
+  models/OCRia-nano-1/ocria-layout-f32.gguf
+target/release-fast/rust-model-inference --model models/OCRia-nano-1/ocria-f32.gguf \
+  --ocr-layout models/OCRia-nano-1/ocria-layout-f32.gguf \
+  --image table.png --out page.json
+```
+
+Each table is `{bbox, rows, columns, head_rows, cells[{row, column, row_span,
+column_span, text, bbox}]}`; each block is `{bbox, class, class_name, text}` with
+`class_name` one of `Text, Heading, Title, PageHeader, PageFooter, List, Table,
+Caption, Footnote, Formula, Code, FigureText, KeyValue`. Without
+`--ocr-layout` the two arrays are empty and the output is exactly the layer-1
+document.
 
 ## Weight storage
 

@@ -1264,12 +1264,17 @@ fn build_backend(
             .unwrap_or(1);
         let source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .map_err(|error| error.to_string())?;
-        let model = crate::models::ocria::Model::from_source(
+        let mut model = crate::models::ocria::Model::from_source(
             source.as_ref(),
             options.compute_policy(),
             resolve_thread_count(options.threads, available),
             None,
         )?;
+        if let Some(path) = options.ocr_layout.as_ref() {
+            let layout = crate::format::ggufrs::open_model_source(path, ComponentRole::Llm)
+                .map_err(|error| error.to_string())?;
+            model = model.with_layout(layout.as_ref())?;
+        }
         return Ok(Arc::new(Backend::Ocria(Arc::new(model))));
     }
     if crate::models::unlimited_ocr::matches_model(&options.model) {

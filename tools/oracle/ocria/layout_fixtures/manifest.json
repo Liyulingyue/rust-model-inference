@@ -1,0 +1,778 @@
+{
+  "source": {
+    "file": "tablenet.onnx",
+    "sha256": "3b913866067d6e43f73a4e4c9c1eace955b7959447043cc39ea1d30e4c552a95",
+    "bytes": 17182635,
+    "opset": 17,
+    "config": {
+      "cfg": {
+        "d": 256,
+        "layers": 6,
+        "heads": 4,
+        "pair_d": 48,
+        "stack_feats": true,
+        "rule_feats": true,
+        "layout": true,
+        "n_cls": 13,
+        "img": {
+          "c": 64,
+          "xattn": 2
+        }
+      },
+      "feat_dim": 68
+    }
+  },
+  "generator": "python -m tools.oracle.ocria.layout_fixtures.make_fixtures",
+  "onnxruntime": "1.32.0",
+  "encoding": {
+    "float32": "raw little-endian f32, row-major, shape as listed",
+    "uint8": "raw bytes, row-major; `image` is ink (0 = white, 255 = black)",
+    "bool": "one byte per element, 0 or 1"
+  },
+  "intermediates": "light",
+  "cases": [
+    {
+      "name": "page",
+      "units": 8,
+      "valid": [
+        1.0,
+        1.0
+      ],
+      "blobs": [
+        {
+          "name": "feats",
+          "file": "page/feats.f32",
+          "shape": [
+            1,
+            8,
+            68
+          ],
+          "dtype": "float32",
+          "bytes": 2176,
+          "sha256": "bf46d122ecbac844e9d79d129e08b13c6fb45db3870f61d5ac57d86ce1fd3c4f",
+          "source": "graph input"
+        },
+        {
+          "name": "mask",
+          "file": "page/mask.u8",
+          "shape": [
+            1,
+            8
+          ],
+          "dtype": "bool",
+          "bytes": 8,
+          "sha256": "04abc8821a06e5a30937967d11ad10221cb5ac3b5273e434f1284ee87129a061",
+          "source": "graph input"
+        },
+        {
+          "name": "pairf",
+          "file": "page/pairf.f32",
+          "shape": [
+            1,
+            8,
+            8,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 512,
+          "sha256": "d4e68f6070f39822a81e5cb21a381ca5ae338515bd86d698b7979998b213a36a",
+          "source": "graph input"
+        },
+        {
+          "name": "image",
+          "file": "page/image.u8",
+          "shape": [
+            1024,
+            1024
+          ],
+          "dtype": "uint8",
+          "bytes": 1048576,
+          "sha256": "7c0ea8021ae50efd72e5f397023b932126904ea25e0effaab2df2720daa51cdb",
+          "source": "graph input raster (8-bit ink); see `decode`",
+          "decode": "canvas[1,1,1024,1024] = ink[1024,1024] as f32 / 255.0",
+          "decoded_sha256": "85e2039926fd98e263d94235a31719a251b802caa79df13d8a69b2ef53be1ca6"
+        },
+        {
+          "name": "boxes",
+          "file": "page/boxes.f32",
+          "shape": [
+            1,
+            8,
+            4
+          ],
+          "dtype": "float32",
+          "bytes": 128,
+          "sha256": "294b2811f19386ae9a8d41fcac2de04b64d38fbe37ade5aaeceb1ba1502f69cd",
+          "source": "graph input"
+        },
+        {
+          "name": "valid",
+          "file": "page/valid.f32",
+          "shape": [
+            1,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 8,
+          "sha256": "80b8fd6d60fa85fd14a38b5295cb92abd80dfec5ca406c9f969609a79d36809d",
+          "source": "graph input"
+        },
+        {
+          "name": "node",
+          "file": "page/node.f32",
+          "shape": [
+            1,
+            8,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 64,
+          "sha256": "021e6a6965a762da12805533fd6769726d10b1606605af1ac021d933e4afa532",
+          "source": "graph output (in_table, header)"
+        },
+        {
+          "name": "pair",
+          "file": "page/pair.f32",
+          "shape": [
+            1,
+            5,
+            8,
+            8
+          ],
+          "dtype": "float32",
+          "bytes": 1280,
+          "sha256": "a0a8664a1b059a8276dc6e48610e9a566ab8a3ed60f2af34cae6578008c47f94",
+          "source": "graph output, 5 pair heads"
+        },
+        {
+          "name": "cls",
+          "file": "page/cls.f32",
+          "shape": [
+            1,
+            8,
+            13
+          ],
+          "dtype": "float32",
+          "bytes": 416,
+          "sha256": "5e8cdfa7067092b51ba6b8cb04f7f7acff09ca8ead3ca9008583d4af22ba2d14",
+          "source": "graph output, 13 block classes"
+        },
+        {
+          "name": "grid",
+          "file": "page/grid.f32",
+          "shape": [
+            1,
+            16,
+            6,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 768,
+          "sha256": "fbd6681dc809288b49cf258d643b034541ae7ae653cf7d7bd3bc4caef48538a0",
+          "source": "the 2x6-per-box GridSample grid, (unit, gh) flattened"
+        },
+        {
+          "name": "unit_samples",
+          "file": "page/unit_samples.f32",
+          "shape": [
+            1,
+            8,
+            768
+          ],
+          "dtype": "float32",
+          "bytes": 24576,
+          "sha256": "0a5ec872beb4603f02b9c93294822ba682d920975be2f6b94beed92840c44b2f",
+          "source": "the [N,768] per-unit GridSample vector"
+        },
+        {
+          "name": "unit_mlp",
+          "file": "page/unit_mlp.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "592718d0f4cc845e497ee2a88afdb013a3634b574f3cea20dcde5c807a3bde83",
+          "source": "the image vector added to the encoder input"
+        },
+        {
+          "name": "embed",
+          "file": "page/embed.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "a8a09bbcb3f40a6966465d10f885ce50eb0cc14d0e9f83dd894b9baf1a91511a",
+          "source": "the encoder input (input MLP + image vector)"
+        },
+        {
+          "name": "pos2d_units",
+          "file": "page/pos2d_units.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "26b8904ff65a999e2e34c774e8fff7d2d721b0e12c56d9f59211fc887a675cd0",
+          "source": "pos2d of the unit box centres"
+        },
+        {
+          "name": "pos2d_freq",
+          "file": "page/pos2d_freq.f32",
+          "shape": [
+            64
+          ],
+          "dtype": "float32",
+          "bytes": 256,
+          "sha256": "811666f1e9e6807e252468ae3ecaa33297235bf2dea675dbedf45877149d1d43",
+          "source": "the token pos2d frequency table, as baked in the file"
+        },
+        {
+          "name": "pos2d_freq_runtime",
+          "file": "page/pos2d_freq_runtime.f32",
+          "shape": [
+            64
+          ],
+          "dtype": "float32",
+          "bytes": 256,
+          "sha256": "eb37332e406f537dba7993978b8b0926730c6c4938daf380442a6a20b5fd118e",
+          "source": "the unit pos2d frequency table, computed at run time"
+        },
+        {
+          "name": "token_mask",
+          "file": "page/token_mask.f32",
+          "shape": [
+            1,
+            1024
+          ],
+          "dtype": "float32",
+          "bytes": 4096,
+          "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+          "source": "1.0 = masked (a token past the page extent)"
+        },
+        {
+          "name": "enc_layer0",
+          "file": "page/enc_layer0.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "8904faa97711d7ea76d170393b2fffcb6cdd483c485b1e68c66a376f3d3bbd99",
+          "source": "the output of encoder layer 0"
+        },
+        {
+          "name": "enc_layer5",
+          "file": "page/enc_layer5.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "42a8be7f9803a565809049fd5372902500a8429ee530cc7df97f47bfc26de9a8",
+          "source": "the output of encoder layer 5"
+        },
+        {
+          "name": "hidden_final",
+          "file": "page/hidden_final.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "c1958cb7169cee75a35fd6fab62b1c255b9607aedc1abdea6976bd5fcdd67325",
+          "source": "after both cross-attentions: what the heads read"
+        }
+      ],
+      "preview": "page/canvas.png"
+    },
+    {
+      "name": "clip",
+      "units": 8,
+      "valid": [
+        0.78,
+        1.0
+      ],
+      "blobs": [
+        {
+          "name": "feats",
+          "file": "clip/feats.f32",
+          "shape": [
+            1,
+            8,
+            68
+          ],
+          "dtype": "float32",
+          "bytes": 2176,
+          "sha256": "c1a8cecec53bf1db961ec79d49c6d6ea8c2227350bf0676af0bf20d67d033c42",
+          "source": "graph input"
+        },
+        {
+          "name": "mask",
+          "file": "clip/mask.u8",
+          "shape": [
+            1,
+            8
+          ],
+          "dtype": "bool",
+          "bytes": 8,
+          "sha256": "04abc8821a06e5a30937967d11ad10221cb5ac3b5273e434f1284ee87129a061",
+          "source": "graph input"
+        },
+        {
+          "name": "pairf",
+          "file": "clip/pairf.f32",
+          "shape": [
+            1,
+            8,
+            8,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 512,
+          "sha256": "d4e68f6070f39822a81e5cb21a381ca5ae338515bd86d698b7979998b213a36a",
+          "source": "graph input"
+        },
+        {
+          "name": "image",
+          "file": "clip/image.u8",
+          "shape": [
+            1024,
+            1024
+          ],
+          "dtype": "uint8",
+          "bytes": 1048576,
+          "sha256": "6cc95679fa52f44b4deea72d701ae44bcbdb607eb1194dbad257f7c92c12d2a7",
+          "source": "graph input raster (8-bit ink); see `decode`",
+          "decode": "canvas[1,1,1024,1024] = ink[1024,1024] as f32 / 255.0",
+          "decoded_sha256": "2a123e9d58e91825c653b08a647c205ef09bfef0a762f0ad51d10ce37519c7f4"
+        },
+        {
+          "name": "boxes",
+          "file": "clip/boxes.f32",
+          "shape": [
+            1,
+            8,
+            4
+          ],
+          "dtype": "float32",
+          "bytes": 128,
+          "sha256": "cd8df2700d08db4a3418527b205f185e4b9d446cb9debbb564bba75b0931ec4a",
+          "source": "graph input"
+        },
+        {
+          "name": "valid",
+          "file": "clip/valid.f32",
+          "shape": [
+            1,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 8,
+          "sha256": "f4c5bb5e7e300e4184c797ce3a3ac28d0d44fee2f6b7db75188c288ab6a0a9ab",
+          "source": "graph input"
+        },
+        {
+          "name": "node",
+          "file": "clip/node.f32",
+          "shape": [
+            1,
+            8,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 64,
+          "sha256": "b30cccf09037d8f9165c4798009054b28ad6226cf49e5da2b707e87fc1574753",
+          "source": "graph output (in_table, header)"
+        },
+        {
+          "name": "pair",
+          "file": "clip/pair.f32",
+          "shape": [
+            1,
+            5,
+            8,
+            8
+          ],
+          "dtype": "float32",
+          "bytes": 1280,
+          "sha256": "7b6f05481dcf2bc9e3435dd289d06fe49c80fa3b880bd3b9c5ea2e34694d7610",
+          "source": "graph output, 5 pair heads"
+        },
+        {
+          "name": "cls",
+          "file": "clip/cls.f32",
+          "shape": [
+            1,
+            8,
+            13
+          ],
+          "dtype": "float32",
+          "bytes": 416,
+          "sha256": "b6d386b0f57ee47a1d5264a3abf3ecbcef9e14e7e21f1365f0b7b1a014c258ea",
+          "source": "graph output, 13 block classes"
+        },
+        {
+          "name": "grid",
+          "file": "clip/grid.f32",
+          "shape": [
+            1,
+            16,
+            6,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 768,
+          "sha256": "20b21723be5af9e49ce69ada9619ccebbacf6d7ee29ca6baa14f3b0a38e26cf8",
+          "source": "the 2x6-per-box GridSample grid, (unit, gh) flattened"
+        },
+        {
+          "name": "unit_samples",
+          "file": "clip/unit_samples.f32",
+          "shape": [
+            1,
+            8,
+            768
+          ],
+          "dtype": "float32",
+          "bytes": 24576,
+          "sha256": "df0198e80132a72a8b8ffa96d0ef30e362ac0e9c173b3662018bbde42dd894f1",
+          "source": "the [N,768] per-unit GridSample vector"
+        },
+        {
+          "name": "unit_mlp",
+          "file": "clip/unit_mlp.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "493d706dca373b8de518044ceccb071a12c1fe6e68c2f95ee6483a0c6be67221",
+          "source": "the image vector added to the encoder input"
+        },
+        {
+          "name": "embed",
+          "file": "clip/embed.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "4d51810ef0a9b3b690b97acdf889482cd33011dd883850f0bdcbb8a48b1aac3a",
+          "source": "the encoder input (input MLP + image vector)"
+        },
+        {
+          "name": "pos2d_units",
+          "file": "clip/pos2d_units.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "2968c7f388e3f61f46d71d50ec3a36b81099308eab9c94a9578211e7f870b563",
+          "source": "pos2d of the unit box centres"
+        },
+        {
+          "name": "pos2d_freq",
+          "file": "clip/pos2d_freq.f32",
+          "shape": [
+            64
+          ],
+          "dtype": "float32",
+          "bytes": 256,
+          "sha256": "811666f1e9e6807e252468ae3ecaa33297235bf2dea675dbedf45877149d1d43",
+          "source": "the token pos2d frequency table, as baked in the file"
+        },
+        {
+          "name": "pos2d_freq_runtime",
+          "file": "clip/pos2d_freq_runtime.f32",
+          "shape": [
+            64
+          ],
+          "dtype": "float32",
+          "bytes": 256,
+          "sha256": "eb37332e406f537dba7993978b8b0926730c6c4938daf380442a6a20b5fd118e",
+          "source": "the unit pos2d frequency table, computed at run time"
+        },
+        {
+          "name": "token_mask",
+          "file": "clip/token_mask.f32",
+          "shape": [
+            1,
+            1024
+          ],
+          "dtype": "float32",
+          "bytes": 4096,
+          "sha256": "1446de2f724bee5c3375adc2b48bc5b205da59e4c8354cc358d0d5af6b2406b3",
+          "source": "1.0 = masked (a token past the page extent)"
+        },
+        {
+          "name": "enc_layer0",
+          "file": "clip/enc_layer0.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "0b1911a752d6f53dbf9885b2e77b2e70129bb3e7cf80ae4473646ed70768cf37",
+          "source": "the output of encoder layer 0"
+        },
+        {
+          "name": "enc_layer5",
+          "file": "clip/enc_layer5.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "03661bbfb3664e0129d95dd17b4a4e66e97afbcb94515ac785797478c2a770bd",
+          "source": "the output of encoder layer 5"
+        },
+        {
+          "name": "hidden_final",
+          "file": "clip/hidden_final.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "0b27437c4c8733671a23649bb6344e3c57df8a7476c5a50f95b8ee3c445e9300",
+          "source": "after both cross-attentions: what the heads read"
+        }
+      ],
+      "preview": "clip/canvas.png"
+    },
+    {
+      "name": "blank",
+      "units": 8,
+      "valid": [
+        1.0,
+        1.0
+      ],
+      "blobs": [
+        {
+          "name": "feats",
+          "file": "blank/feats.f32",
+          "shape": [
+            1,
+            8,
+            68
+          ],
+          "dtype": "float32",
+          "bytes": 2176,
+          "sha256": "bf46d122ecbac844e9d79d129e08b13c6fb45db3870f61d5ac57d86ce1fd3c4f",
+          "source": "graph input"
+        },
+        {
+          "name": "mask",
+          "file": "blank/mask.u8",
+          "shape": [
+            1,
+            8
+          ],
+          "dtype": "bool",
+          "bytes": 8,
+          "sha256": "04abc8821a06e5a30937967d11ad10221cb5ac3b5273e434f1284ee87129a061",
+          "source": "graph input"
+        },
+        {
+          "name": "pairf",
+          "file": "blank/pairf.f32",
+          "shape": [
+            1,
+            8,
+            8,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 512,
+          "sha256": "d4e68f6070f39822a81e5cb21a381ca5ae338515bd86d698b7979998b213a36a",
+          "source": "graph input"
+        },
+        {
+          "name": "image",
+          "file": null,
+          "shape": [
+            1024,
+            1024
+          ],
+          "dtype": "uint8",
+          "bytes": null,
+          "sha256": null,
+          "fill": 0,
+          "decode": "canvas[1,1,1024,1024] = zeros",
+          "decoded_sha256": "bb9f8df61474d25e71fa00722318cd387396ca1736605e1248821cc0de3d3af8",
+          "source": "graph input raster: all white, the canvas is zeros"
+        },
+        {
+          "name": "boxes",
+          "file": "blank/boxes.f32",
+          "shape": [
+            1,
+            8,
+            4
+          ],
+          "dtype": "float32",
+          "bytes": 128,
+          "sha256": "294b2811f19386ae9a8d41fcac2de04b64d38fbe37ade5aaeceb1ba1502f69cd",
+          "source": "graph input"
+        },
+        {
+          "name": "valid",
+          "file": "blank/valid.f32",
+          "shape": [
+            1,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 8,
+          "sha256": "80b8fd6d60fa85fd14a38b5295cb92abd80dfec5ca406c9f969609a79d36809d",
+          "source": "graph input"
+        },
+        {
+          "name": "node",
+          "file": "blank/node.f32",
+          "shape": [
+            1,
+            8,
+            2
+          ],
+          "dtype": "float32",
+          "bytes": 64,
+          "sha256": "0effe76bdd3dd26b3e39ec585e1ea50546fe86538d9f7c02c347934760524ee0",
+          "source": "graph output (in_table, header)"
+        },
+        {
+          "name": "pair",
+          "file": "blank/pair.f32",
+          "shape": [
+            1,
+            5,
+            8,
+            8
+          ],
+          "dtype": "float32",
+          "bytes": 1280,
+          "sha256": "4681e247d630a5ce16b360d5c11237587b33c66bb9a35cffeeadb67a960fdeb8",
+          "source": "graph output, 5 pair heads"
+        },
+        {
+          "name": "cls",
+          "file": "blank/cls.f32",
+          "shape": [
+            1,
+            8,
+            13
+          ],
+          "dtype": "float32",
+          "bytes": 416,
+          "sha256": "88989911e460dc10b9896b24c36d2fac1c3ba2839bc6e4940b20733193180490",
+          "source": "graph output, 13 block classes"
+        },
+        {
+          "name": "unit_samples",
+          "file": "blank/unit_samples.f32",
+          "shape": [
+            1,
+            8,
+            768
+          ],
+          "dtype": "float32",
+          "bytes": 24576,
+          "sha256": "4c41590208e1b0286d899017cbb69728d40405c52dc8cb4b8784a34e857a33f4",
+          "source": "the [N,768] per-unit GridSample vector"
+        },
+        {
+          "name": "unit_mlp",
+          "file": "blank/unit_mlp.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "5d6b1ea1fd553dd79b758bd7f89fbcc170b8585e067c489be2769b672f90cec2",
+          "source": "the image vector added to the encoder input"
+        },
+        {
+          "name": "embed",
+          "file": "blank/embed.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "8ebcc937f23cfd1c56b22b1d47eb6760afade6cba8071b42e9b6700e2e67eef4",
+          "source": "the encoder input (input MLP + image vector)"
+        },
+        {
+          "name": "enc_layer0",
+          "file": "blank/enc_layer0.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "65bfd005ae4f747dbf450534bbb4be830af42cb7af6930163448e224608f72a3",
+          "source": "the output of encoder layer 0"
+        },
+        {
+          "name": "enc_layer5",
+          "file": "blank/enc_layer5.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "d01aa3789a94d9cf9859bbab2fba3cfc3d8a677ec29ae610c16f400518a3389b",
+          "source": "the output of encoder layer 5"
+        },
+        {
+          "name": "hidden_final",
+          "file": "blank/hidden_final.f32",
+          "shape": [
+            1,
+            8,
+            256
+          ],
+          "dtype": "float32",
+          "bytes": 8192,
+          "sha256": "8b51aee6c785a84c0f69a291ee94e895f419b2bc78b8ed8e09800badfeafbd06",
+          "source": "after both cross-attentions: what the heads read"
+        }
+      ]
+    }
+  ]
+}

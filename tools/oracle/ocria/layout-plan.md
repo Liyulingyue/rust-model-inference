@@ -784,6 +784,16 @@ To restart layer 2 work on the box:
 5. **`N` ceiling.** Skip above 1500 units as the reference does, or truncate? Needs a
    measured page-count distribution from layer 1 first.
 
+### As landed: the rule thickness cap
+
+As landed in `layout/features.rs`, `process_raster` caps rule thickness at
+`2.5 × max(1, max(w,h) / 842)` px: 842 pt is A4's long side, and the `max(1, ·)` floor
+treats a page shorter than 842 px as a 72 dpi scan so the cap never falls below 2.5 px
+(otherwise a small crop loses its own 2 px grid). Both constants live next to `THICK_MAX_PT`.
+This is identical to the reference on a 150 dpi A4 render and on `fixtures/layout/table.png`;
+the measured cost of the floor is that on synthetic pages under 842 px with 3–5 px bars we
+keep fewer rules than a 150 dpi interpretation would (700×500: 1 h + 0 v vs 3 h + 1 v).
+
 ## 8. Ablation run (2026-11-26): does LayoutNet need `ProjSignals`?
 
 The plan called this the first thing to settle, so it was run before any layer-2

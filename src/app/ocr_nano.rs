@@ -42,12 +42,17 @@ pub fn run_cli(options: &CliOptions, threads: usize) -> Result<(), String> {
     };
     let source = open_model_source(&options.model, ComponentRole::Llm)
         .map_err(|e| format!("Open {}: {e}", options.model.display()))?;
-    let model = Model::from_source(
+    let mut model = Model::from_source(
         source.as_ref(),
         options.compute_policy(),
         threads,
         overrides.as_ref(),
     )?;
+    if let Some(path) = options.ocr_layout.as_ref() {
+        let layout = open_model_source(path, ComponentRole::Llm)
+            .map_err(|e| format!("Open layout model {}: {e}", path.display()))?;
+        model = model.with_layout(layout.as_ref())?;
+    }
     let page = model
         .run(rgb.as_raw(), width, height)
         .map_err(|e| e.to_string())?;

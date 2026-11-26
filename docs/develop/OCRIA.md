@@ -126,18 +126,42 @@ Gemma 视觉塔等所有调用方，需要各自的回归证据，因此不在�
 
 参考基线不是硬门槛，但差距必须归因到具体算子——上面就是那个算子。
 
-## 分层交付
+## 分层交付：第二层已合入
 
-本 PR 是**第一层**：OCR 栈（det、router、四个识别器、页面管线）加 CLI/HTTP 入口。
+第一层是 OCR 栈（det、router、四个识别器、页面管线）。第二层是 LayoutNet：发布包的表格与版面模型
+（`tablenet.onnx`，4 268 063 参数，6 层 transformer + CNN 图像分支，13 类版面块），作为**独立的
+`ocria-layout` GGUF** 加载，不改变第一层的文件格式：
 
-**第二层（待合入）**：LayoutNet 表格与版面模型。范围、契约与工作量见
-[layout-plan.md](../../tools/oracle/ocria/layout-plan.md)：4 268 063 参数、110 个 ONNX
-初始化器与 `tablenet.bin` 已验证为同一组权重；新增内核只有 `GridSample`、`AveragePool 2x2`
-和 `sin/cos`，其余复用 `ops::nn` / `ops::norm` / `ops::softmax`。该计划的主要风险是
-OCR 页路径硬依赖 LiteParse 的 projection 信号（8/66 个特征 + `same_blk`/`same_leaf`，
-对应 3 500–4 500 行），因此第二层开工前先用一次消融实验判定是否必须移植该层。
+```bash
+python3 -m tools.converter.ocria.convert_ocria_layout <model-dir> ocria-layout-f32.gguf
+rust-model-inference --model ocria-f32.gguf --ocr-layout ocria-layout-f32.gguf --image page.png
+```
 
-第一层合入后模型状态是**部分适配（分层交付中）**，不是「适配完成」。
+| 组件 | 张量 | 说明 |
+| --- | ---: | --- |
+| `ocria-layout-f32-v1` | 110 | 4 268 063 个 F32；与 `tablenet.onnx` 逐位一致，也与发布包的 `tablenet.bin` 逐位一致（35 个转置矩阵、4 个卷积核+偏置在 f32 BN 折叠下） |
+| `ocria-layout-q8_0-v1` | 110（75 F32 + 35 Q8_0） | 4-D 卷积核保持 F32（`conv2d` 直接吃 `[cout,cin,kh,kw]`），其余行宽 32 倍数的二维矩阵走 Q8_0 |
+
+| 文件 | 大小 |
+| --- | ---: |
+| `ocria-layout-f32.gguf` | 17 098 496 B |
+| `ocria-layout-q8_0.gguf` | 4 934 976 B |
+
+**数值**（参考实现 LiteParse `44ceb6ab`，ONNX Runtime CPU）：
+
+| 检查点 | 结果 |
+| --- | --- |
+| 68 维单元特征（5 组 + pair 特征，60 个随机页） | max abs **0.0**（逐值相同） |
+| 规则线检测（96 个 页尺寸×scale×栅格 组合） | 逐位一致 |
+| 页面栅格 `process_raster` / `ImgInput.canvas` | 字节一致 / 0.0 |
+| 解码（`avg_link`、`reading_order`、`decode_tables`、`decode_grid`、分类/分块、三个 keep/drop 谓词） | **2585 项检查 0 失败**，213 个用例，含跨行跨列、owner-slot 收缩/追加、`squeeze_cols`、两种 wrap fold |
+| 端到端 `fixtures/layout/table.png` | 1 张表，**4 行 × 3 列、表头行 [0]、10 个单元格**，与参考 Markdown 表结构一致 |
+
+`--ocr-layout` 缺省时输出与第一层完全相同（`tables`/`blocks` 为空数组）。
+
+**消融结论**（[layout-plan.md](../../tools/oracle/ocria/layout-plan.md) §8）：参考实现的 OCR 页路径
+硬依赖 projection 信号，但实测在带线框表格上 `proj = None` 能复现同样的表格，因此第二层没有移植
+`projection.rs`（3 500–4 500 行），只移植了 units → features → net → decode。
 
 ## 限制
 

@@ -271,3 +271,41 @@ Runtime runs NCHWc-packed specialized pointwise/depthwise kernels. Fixing it mea
 those paths to the shared `src/ops/nn.rs`, which every convolution caller in the repository
 depends on; that is a separate change with its own caller-by-caller regression matrix, so it
 is recorded here as the follow-up rather than folded into this adaptation.
+
+## 9. Layer 2: LayoutNet
+
+Weights: `tools/converter/ocria/convert_ocria_layout.py` packs `tablenet.onnx` (110
+initializers, 4 268 063 f32) into its own GGUF.
+
+| file | size | tensors | F32 | Q8_0 |
+| --- | ---: | ---: | ---: | ---: |
+| `ocria-layout-f32.gguf` | 17 098 496 B | 110 | 110 | 0 |
+| `ocria-layout-q8_0.gguf` | 4 934 976 B | 110 | 75 | 35 |
+
+The `f32` file is bit-exact against the ONNX initializers **and** against the release's own
+`tablenet.bin` (35 matrices transposed, 4 conv kernels and biases under the f32 BN fold
+`sc = g / sqrt(var + 1e-5)`, the rest direct); the `q8_0` blocks are byte-identical to
+`quantize_q8_0` of the same arrays. Both are reproducible (re-running gives the same SHA256).
+
+Numerical checks against the pinned reference:
+
+| check | scope | result |
+| --- | --- | --- |
+| unit features `[N,68]` | 60 random pages + a degenerate page, all five feature groups | max abs **0.0**, 0 exact mismatches |
+| pair features `[N,N,2]` | same | max abs **0.0** |
+| `detect_rules` | 96 raster × scale combinations | bit-identical `h`/`v` vectors |
+| `process_raster` / `ImgInput.canvas` | 4 pages | bytes identical / 0.0 |
+| decode: `avg_link`, `reading_order`, `decode_tables`, `decode_grid`, classes, blocks, the three keep/drop predicates | 213 cases (200 random + 13 synthetic/degenerate) | **2585 checks, 0 failures** |
+| network against ONNX Runtime, per stage | 3 cases (`page`, `clip` with `valid=(0.78,1.0)`, `blank`), gate 1e-4 | `unit_mlp` 1.2e-6, `embed` 7.6e-6, `enc_layer0` 7.6e-6, `node` 7.2e-6, `pair` 6.7e-6, `cls` 9.5e-6; per-unit and per-pair argmax 8/8 and 64/64 |
+| end to end on `fixtures/layout/table.png` | one ruled 3-column table | 1 table, **4x3 grid, `head_rows [0]`, 10 cells**, matching the reference's Markdown table |
+
+The end-to-end run is the test `layout_finds_the_ruled_table`; the decode and feature
+comparisons were run with throwaway harnesses that compile the pinned reference code beside
+ours (not checked in — the committed evidence is the fixture below).
+
+`layout_fixtures/` (2.27 MB) holds two pages' graph inputs, the three outputs and eleven
+intermediates recorded from the pinned graph, so a network change can be localised to a stage
+(`embed` → `enc_layer0` → `enc_layer5` → `hidden_final` → logits, with `grid`, `unit_samples`
+and `unit_mlp` on the image side). The raster is committed as 8-bit ink plus the exact
+`ink/255` decode, which keeps the set inside its budget; `--with-intermediates` regenerates
+the three large tensors.

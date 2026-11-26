@@ -180,6 +180,11 @@ fn main() {
         app::run_or_exit(app::ocr_nano::run_cli(&options, n_threads));
         return;
     }
+    if options.ocr_layout.is_some() {
+        app::run_or_exit(Err(
+            "--ocr-layout requires an OCRia model (--model <ocria.gguf>)".into(),
+        ));
+    }
     if options.ocr_options.is_some() {
         app::run_or_exit(Err(
             "--ocr-options requires an OCRia model (--model <ocria.gguf>)".into(),

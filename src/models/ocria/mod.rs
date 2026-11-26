@@ -14,6 +14,7 @@
 //! parity fixtures.
 mod det;
 mod img;
+mod layout;
 mod page;
 mod rec;
 mod router;
@@ -240,6 +241,34 @@ impl Default for Options {
     }
 }
 
+/// The JSON view of one decoded table.
+fn table_json(table: &layout::Table) -> Table {
+    Table {
+        bbox: table.bbox,
+        rows: table.grid.n_rows,
+        columns: table.grid.n_cols,
+        head_rows: table.grid.head_rows.clone(),
+        cells: table
+            .grid
+            .cells
+            .iter()
+            .map(|cell| Cell {
+                row: cell.r0,
+                column: cell.c0,
+                row_span: cell.r1.saturating_sub(cell.r0) + 1,
+                column_span: cell.c1.saturating_sub(cell.c0) + 1,
+                text: cell.text.clone(),
+                bbox: cell.bx,
+            })
+            .collect(),
+    }
+}
+
+/// The text of the `index`-th line, if the index is in range.
+fn units_text(index: usize, lines: &[Line]) -> Option<String> {
+    lines.get(index).map(|line| line.text.clone())
+}
+
 /// One recognised text line.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Line {
@@ -262,6 +291,45 @@ pub struct Page {
     pub height: u32,
     /// Lines in reading order.
     pub lines: Vec<Line>,
+    /// Tables LayoutNet found, empty without a layout model.
+    pub tables: Vec<Table>,
+    /// Layout blocks, empty without a layout model.
+    pub blocks: Vec<Block>,
+}
+
+/// One table cell.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Cell {
+    pub row: usize,
+    pub column: usize,
+    pub row_span: usize,
+    pub column_span: usize,
+    pub text: String,
+    /// `[x1, y1, x2, y2]` in page pixels.
+    pub bbox: [f64; 4],
+}
+
+/// One decoded table.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Table {
+    /// `[x1, y1, x2, y2]` in page pixels.
+    pub bbox: [f64; 4],
+    pub rows: usize,
+    pub columns: usize,
+    /// Header row indices.
+    pub head_rows: Vec<usize>,
+    pub cells: Vec<Cell>,
+}
+
+/// One layout block.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Block {
+    pub bbox: [f64; 4],
+    /// Index into [`layout::BLOCK_CLASSES`].
+    pub class: usize,
+    /// The label that index stands for.
+    pub class_name: &'static str,
+    pub text: String,
 }
 
 #[derive(Debug)]
@@ -292,6 +360,8 @@ pub struct Model {
     pub format: WeightFormat,
     /// The policy the model was loaded with.
     policy: ComputePolicy,
+    /// The table and layout model, when one was attached.
+    layout: Option<layout::LayoutNet>,
 }
 
 /// One string metadata value, if the file has it.
@@ -476,7 +546,26 @@ impl Model {
             options,
             format,
             policy: compute,
+            layout: None,
         })
+    }
+
+    /// Attaches the table and layout model, read from its own GGUF.
+    pub fn with_layout(mut self, source: &dyn TensorSource) -> Result<Self, String> {
+        let meta = |key: &str| metadata_string(source, key);
+        if meta("general.architecture").as_deref() != Some(layout::ARCHITECTURE) {
+            return Err(format!(
+                "Expected the {} architecture for --ocr-layout",
+                layout::ARCHITECTURE
+            ));
+        }
+        self.layout = Some(layout::LayoutNet::from_source(source)?);
+        Ok(self)
+    }
+
+    /// Whether a layout model is attached.
+    pub fn has_layout(&self) -> bool {
+        self.layout.is_some()
     }
 
     /// The options this model was loaded with.
@@ -510,14 +599,54 @@ impl Model {
                 data.len()
             )));
         }
-        let page = self
+        let lines = self
             .run_page(&options, data, w, h)
             .map_err(OcrError::Numerical)?;
+        let (tables, blocks) = match &self.layout {
+            Some(layout) if !lines.is_empty() => {
+                let rgb = if data.len() == w * h {
+                    img::Img {
+                        w,
+                        h,
+                        ch: 1,
+                        data: data.to_vec(),
+                    }
+                    .to_rgb()
+                    .data
+                } else {
+                    data.to_vec()
+                };
+                let page = layout::units::page_layout(&lines, &rgb, w, h);
+                let decoded = layout.run(&page.units, Some(&page.rules), Some(&page.image));
+                (decoded.tables, decoded.blocks)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
         self.policy.trace("ocria", UsedBackend::Cpu, w * h);
+        let tables: Vec<Table> = tables.iter().map(table_json).collect();
+        let blocks: Vec<Block> = blocks
+            .iter()
+            .map(|block| Block {
+                bbox: block.bbox,
+                class: block.class,
+                class_name: layout::BLOCK_CLASSES
+                    .get(block.class)
+                    .copied()
+                    .unwrap_or("Text"),
+                text: block
+                    .units
+                    .iter()
+                    .filter_map(|&i| units_text(i, &lines))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            })
+            .collect();
         Ok(Page {
             width,
             height,
-            lines: page,
+            lines,
+            tables,
+            blocks,
         })
     }
 
