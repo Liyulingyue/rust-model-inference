@@ -281,8 +281,13 @@ ONNX Runtime comparison on this instance is **not run**: the reference build did
 on the shared box (load average 35-42), and the number from the earlier instance (0.17 s for
 `receipt.png`) is from a different host, so it is not quoted as a comparison.
 
-What remains unoptimised is the depthwise 3x3 path (nine `dot_f32` of length 3 per output
-element), which is now the dominant cost.
+The depthwise 3x3 path was tried next and **dropped after measurement**: a per-pixel kernel
+with the generic kernel's grouping (three taps per row, then added to the running sum) is
+bit-identical in the normal dispatch -- and not in the scalar one, where the generic kernel
+accumulates tap by tap instead, which the bit-identity test caught -- and it bought nothing:
+0.19 s against 0.17 s at `--threads 4` and 0.52 s against 0.51 s at one thread on the M3 Max,
+i.e. inside the noise. The depthwise convolution is memory-bound at these sizes, not
+call-overhead-bound like the 1x1 case, so the extra code was reverted rather than carried.
 
 ## 8. End-to-end page parity (Rust vs the pinned LiteParse engine)
 
