@@ -244,3 +244,46 @@ fn nariq_image_logits_match_oracle() {
     assert_eq!(serde_json::json!(top), oracle["top1"]);
     assert!(kl <= 1e-3, "image KL {kl}");
 }
+
+#[cfg(feature = "vulkan")]
+#[test]
+#[ignore = "requires a NariQ GGUF and Vulkan device"]
+fn nariq_vulkan_jev_stdout_is_json() {
+    let cli = env::var_os("NARIQ_CLI")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_rust-model-inference").into());
+    let output = std::process::Command::new(cli)
+        .arg("--model")
+        .arg(env::var_os("NARIQ_MODEL").unwrap())
+        .args([
+            "--compute",
+            "vulkan",
+            "--threads",
+            "8",
+            "--prefill-batch-size",
+            "8",
+            "--max-context",
+            "256",
+            "--jev",
+            "--jev-context",
+            "Red",
+            "--jev-question",
+            "Color?",
+            "--jev-option",
+            "Red",
+            "--jev-option",
+            "Blue",
+            "--jev-positive",
+            "A",
+            "--jev-output",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["choice"], "A");
+}

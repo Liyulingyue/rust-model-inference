@@ -8856,10 +8856,13 @@ pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
     Ok(nonfinite)
 }
 
-pub(crate) fn check_qwen3_core_contract(context: &VulkanContext) -> Result<(), String> {
-    check_attention_scores_match_cpu_reduction(context)?;
+pub(crate) fn check_qwen3_core_contract(
+    context: &VulkanContext,
+    report: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    check_attention_scores_match_cpu_reduction(context, report)?;
     check_softmax_f16_rounding(context)?;
-    check_attention_value_reduction(context)?;
+    check_attention_value_reduction(context, report)?;
     Ok(())
 }
 
@@ -8878,7 +8881,7 @@ pub(crate) fn check_q8_k_activation_contract(context: &VulkanContext) -> Result<
 }
 
 pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
-    check_qwen3_core_contract(context)?;
+    check_qwen3_core_contract(context, &mut std::io::stdout())?;
     if std::env::var("SILU_SCALE_ONLY").is_err() {
         match silu_ffn_scale_probe(context) {
             Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width={Z_IMAGE_FFN_WIDTH} finite=true"),
@@ -10739,7 +10742,10 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     Ok(())
 }
 
-fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result<(), String> {
+fn check_attention_scores_match_cpu_reduction(
+    context: &VulkanContext,
+    report: &mut dyn std::io::Write,
+) -> Result<(), String> {
     const HEAD_DIM: usize = 64;
     let layout = ArenaLayout::build(HEAD_DIM, HEAD_DIM, 1, 1, HEAD_DIM, 1, 1, 1)
         .map_err(|error| error.to_string())?;
@@ -10800,7 +10806,8 @@ fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result
     } else {
         3e-5
     };
-    check_close(
+    check_close_to(
+        report,
         "attention_score_reduction",
         &[actual],
         &[reference],
@@ -10809,7 +10816,10 @@ fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result
     )
 }
 
-fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String> {
+fn check_attention_value_reduction(
+    context: &VulkanContext,
+    report: &mut dyn std::io::Write,
+) -> Result<(), String> {
     const SEQUENCE: usize = 12;
     let layout =
         ArenaLayout::build(32, 32, 1, 1, 1, 1, 1, SEQUENCE).map_err(|error| error.to_string())?;
@@ -10866,7 +10876,7 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
             expected.to_bits()
         ));
     }
-    println!("operator=attention_value_reduction exact=true");
+    let _ = writeln!(report, "operator=attention_value_reduction exact=true");
     Ok(())
 }
 
@@ -11122,6 +11132,24 @@ fn check_close(
     absolute_tolerance: f32,
     relative_tolerance: f32,
 ) -> Result<(), String> {
+    check_close_to(
+        &mut std::io::stdout(),
+        name,
+        gpu,
+        cpu,
+        absolute_tolerance,
+        relative_tolerance,
+    )
+}
+
+fn check_close_to(
+    report: &mut dyn std::io::Write,
+    name: &str,
+    gpu: &[f32],
+    cpu: &[f32],
+    absolute_tolerance: f32,
+    relative_tolerance: f32,
+) -> Result<(), String> {
     if gpu.len() != cpu.len() {
         return Err(format!(
             "{name} length mismatch: gpu={} cpu={}",
@@ -11147,7 +11175,8 @@ fn check_close(
             first_bad = Some((index, gpu, cpu, absolute, relative));
         }
     }
-    println!(
+    let _ = writeln!(
+        report,
         "operator={name} max_abs={max_absolute:.3e} max_rel={max_relative:.3e} first_bad={:?}",
         first_bad.map(|value| value.0)
     );
@@ -11894,7 +11923,7 @@ mod tests {
         const ROWS: usize = 3;
         const OUTPUTS: usize = 5;
         let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
-        check_qwen3_core_contract(context).unwrap();
+        check_qwen3_core_contract(context, &mut std::io::stderr()).unwrap();
         for width in [32, 128, 256] {
             let weight: Vec<u8> = (0..width * OUTPUTS)
                 .flat_map(|index| {

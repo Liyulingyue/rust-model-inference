@@ -511,7 +511,7 @@ impl VulkanContext {
 
     pub(crate) fn validate_qwen3_core_contract(&self) -> Result<(), String> {
         self.qwen3_core_contract
-            .get_or_init(|| ops::check_qwen3_core_contract(self))
+            .get_or_init(|| ops::check_qwen3_core_contract(self, &mut std::io::stderr()))
             .clone()
     }
 
