@@ -32,6 +32,7 @@ pub mod mage_flow;
 pub mod pig;
 pub mod pjit;
 pub mod qwen_image_2_1;
+pub mod sensenova_u1;
 pub(crate) mod z_image;
 
 use std::sync::Arc;

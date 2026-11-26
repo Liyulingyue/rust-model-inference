@@ -150,6 +150,70 @@ const QWEN2_ORACLE_SPECIAL_TOKENS: &[&str] = &[
     "<|tms_token|>",
 ];
 
+/// HF `added_tokens.json` entries of the Qwen2-family tokenizer shipped with
+/// the SenseNova-U1.6 / Qwen2.5-VL / Qwen3-VL checkpoints, in id order
+/// starting at [`QWEN2_HF_ADDED_BASE`].
+///
+/// A HuggingFace `vocab.json` only names the *base* BPE vocabulary
+/// (ids 0..=151642 for this family); every chat/vision marker below lives in
+/// the sibling `added_tokens.json` instead. [`BPETokenizer::from_vocab_json_and_merges`]
+/// replays this table so that a caller holding just `vocab.json` +
+/// `merges.txt` still produces the ids `transformers` produces. Ids are
+/// pinned against `references/sn_tokenizer/added_tokens.json` by the
+/// `sensenova_hf_files_tokenizer_matches_added_tokens` test.
+const QWEN2_HF_ADDED_TOKENS: &[&str] = &[
+    "<|endoftext|>",        // 151643 (pad)
+    "<|im_start|>",         // 151644
+    "<|im_end|>",           // 151645 (eos)
+    "<|object_ref_start|>", // 151646
+    "<|object_ref_end|>",   // 151647
+    "<|box_start|>",        // 151648
+    "<|box_end|>",          // 151649
+    "<|quad_start|>",       // 151650
+    "<|quad_end|>",         // 151651
+    "<|vision_start|>",     // 151652
+    "<|vision_end|>",       // 151653
+    "<|vision_pad|>",       // 151654
+    "<|image_pad|>",        // 151655
+    "<|video_pad|>",        // 151656
+    "<tool_call>",          // 151657
+    "</tool_call>",         // 151658
+    "<|fim_prefix|>",       // 151659
+    "<|fim_middle|>",       // 151660
+    "<|fim_suffix|>",       // 151661
+    "<|fim_pad|>",          // 151662
+    "<|repo_name|>",        // 151663
+    "<|file_sep|>",         // 151664
+    "<tool_response>",      // 151665
+    "</tool_response>",     // 151666
+    "<think>",              // 151667
+    "</think>",             // 151668
+    "<IMG_CONTEXT>",        // 151669
+    "<img>",                // 151670
+    "</img>",               // 151671
+    "<quad>",               // 151672
+    "</quad>",              // 151673
+    "<ref>",                // 151674
+    "</ref>",               // 151675
+    "<box>",                // 151676
+    "</box>",               // 151677
+    "<|action_start|>",     // 151678
+    "<|action_end|>",       // 151679
+    "<|plugin|>",           // 151680
+    "<|interpreter|>",      // 151681
+];
+
+/// First id of [`QWEN2_HF_ADDED_TOKENS`], i.e. one past the last id the base
+/// `vocab.json` of the Qwen2 family names.
+const QWEN2_HF_ADDED_BASE: usize = 151_643;
+
+/// Embedding rows of the checkpoint that ships the Qwen2-family tokenizer
+/// files (`llm.vocab_size` of SenseNova-U1.6). Ids between the added-token
+/// table and this size are kept as deliberately unencodable placeholders,
+/// the same convention `from_qwen3_embedded_merges` uses for its reserved
+/// rows.
+const QWEN2_HF_VOCAB_ROWS: usize = 151_936;
+
 /// Qwen2.5-Omni-3B special tokens at ids 151643..151664. Replaces the
 /// standard Qwen2 oracle list and adds the audio-related tokens
 /// (`<|AUDIO|>` = 151646, `<|audio_bos|>` = 151647, `<|audio_eos|>` = 151648)
@@ -533,6 +597,198 @@ impl BPETokenizer {
                 "QWEN25_OMNI_SPECIAL_TOKENS[{i}] = {text:?} expected id {} got {id:?}",
                 151_643 + i as u32,
             );
+        }
+        Ok(tokenizer)
+    }
+
+    /// Build a Qwen-style BPE tokenizer from a HuggingFace `vocab.json` +
+    /// `merges.txt` pair (the layout shipped alongside many GGUF-less
+    /// checkpoints). Merge ranks are taken from line order; the `#version`
+    /// header of `merges.txt` is ignored.
+    ///
+    /// `vocab.json` is authoritative: `tokens[id]` is the literal the file
+    /// spells for `id`, byte-level unicode symbols (`Ġ`, `Ċ`, ...) included,
+    /// so the base ids come out exactly as `transformers`' `Qwen2Tokenizer`
+    /// produces them without reconstructing the vocabulary from the merges.
+    ///
+    /// `vocab.json` names only the base vocabulary, though; the chat/vision
+    /// markers of the family live in the sibling `added_tokens.json`. Those
+    /// are replayed from [`QWEN2_HF_ADDED_TOKENS`] at their published ids
+    /// (ids `>= QWEN2_HF_ADDED_BASE`) as `Control` tokens, and every id up to
+    /// [`QWEN2_HF_VOCAB_ROWS`] beyond them stays an unencodable placeholder —
+    /// the same treatment `from_qwen3_embedded_merges` gives its reserved
+    /// rows. Encoding and decoding are the same Qwen2 pipeline the embedded
+    /// constructor uses, so ids match the HF tokenizer as long as the caller
+    /// renders the chat template itself.
+    pub fn from_vocab_json_and_merges(vocab_json: &str, merges_txt: &str) -> Result<Self, String> {
+        let vocab: HashMap<String, u32> = serde_json::from_str(vocab_json)
+            .map_err(|error| format!("Invalid tokenizer vocab.json: {error}"))?;
+        if vocab.is_empty() {
+            return Err("Invalid tokenizer vocab.json: no entries".into());
+        }
+
+        // `vocab.json` maps token -> id. Place every token at its own id and
+        // reject holes/duplicates instead of silently renumbering: the ids are
+        // the contract, and a hole means the wrong file was passed.
+        let base_len = vocab
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |id| id as usize + 1);
+        if base_len > QWEN2_HF_VOCAB_ROWS {
+            // Guard the allocation below against a corrupt `vocab.json`.
+            return Err(format!(
+                "tokenizer vocab.json reaches id {}; the checkpoint only has {QWEN2_HF_VOCAB_ROWS} rows",
+                base_len - 1
+            ));
+        }
+        let mut slots: Vec<Option<String>> = vec![None; base_len];
+        for (token, &id) in &vocab {
+            let slot = slots
+                .get_mut(id as usize)
+                .ok_or_else(|| format!("tokenizer vocab.json id {id} is out of range"))?;
+            if slot.is_some() {
+                return Err(format!("tokenizer vocab.json assigns id {id} twice"));
+            }
+            *slot = Some(token.clone());
+        }
+        let mut tokens = Vec::with_capacity(QWEN2_HF_VOCAB_ROWS);
+        for (id, slot) in slots.into_iter().enumerate() {
+            tokens.push(
+                slot.ok_or_else(|| format!("tokenizer vocab.json leaves id {id} unassigned"))?,
+            );
+        }
+        if tokens.len() != QWEN2_HF_ADDED_BASE {
+            return Err(format!(
+                "tokenizer vocab.json names {} base ids; the Qwen2 added-token table starts at {QWEN2_HF_ADDED_BASE}",
+                tokens.len()
+            ));
+        }
+        let mut token_types = vec![TokenType::Normal; tokens.len()];
+
+        for token in QWEN2_HF_ADDED_TOKENS {
+            tokens.push((*token).into());
+            token_types.push(TokenType::Control);
+        }
+        if tokens.len() > QWEN2_HF_VOCAB_ROWS {
+            return Err(format!(
+                "tokenizer added-token table reaches id {}; the checkpoint only has {QWEN2_HF_VOCAB_ROWS} rows",
+                tokens.len()
+            ));
+        }
+        // Rows the tokenizer files never name stay unencodable placeholders
+        // rather than invented tokenizer semantics.
+        while tokens.len() < QWEN2_HF_VOCAB_ROWS {
+            tokens.push(format!("<|reserved_{}|>", tokens.len()));
+            token_types.push(TokenType::Unused);
+        }
+
+        // `merges.txt` line order is the rank. The `#version: 0.2` header is
+        // not a merge, but a merge of `#` + `#` (spelled `# #`) is, so only the
+        // leading header line is skipped — exactly like
+        // `transformers.convert_merges_to_hash`.
+        let mut merge_ranks = HashMap::new();
+        let mut rank = 0u32;
+        for (line_no, line) in merges_txt.lines().enumerate() {
+            if line_no == 0 && line.starts_with("#version") {
+                continue;
+            }
+            if line.is_empty() {
+                continue;
+            }
+            let (left, right) = line.split_once(' ').ok_or_else(|| {
+                format!("Invalid tokenizer merges.txt entry at line {}", line_no + 1)
+            })?;
+            if left.is_empty() || right.is_empty() {
+                return Err(format!(
+                    "Invalid tokenizer merges.txt entry at line {}",
+                    line_no + 1
+                ));
+            }
+            merge_ranks.insert((left.into(), right.into()), rank);
+            rank += 1;
+        }
+        if merge_ranks.is_empty() {
+            return Err("Invalid tokenizer merges.txt: no merges".into());
+        }
+
+        let byte_encoder = build_byte_encoder();
+        let mut byte_decoder = HashMap::new();
+        for (byte, symbol) in byte_encoder.iter().enumerate() {
+            let value = symbol
+                .chars()
+                .next()
+                .ok_or_else(|| "Invalid Qwen byte symbol".to_string())?;
+            byte_decoder.insert(value, byte as u8);
+        }
+
+        let token_to_id: HashMap<String, u32> = tokens
+            .iter()
+            .zip(&token_types)
+            .enumerate()
+            .filter(|(_, (_, kind))| **kind != TokenType::Unused)
+            .map(|(id, (token, _))| (token.clone(), id as u32))
+            .collect();
+        // Byte-level BPE can only encode what the byte encoder can look up. A
+        // `vocab.json` missing one of the 256 symbols is a different
+        // tokenizer, not a degraded one.
+        for symbol in &byte_encoder {
+            if !token_to_id.contains_key(symbol) {
+                return Err(format!(
+                    "tokenizer vocab.json is missing the byte-level symbol {symbol:?}"
+                ));
+            }
+        }
+
+        let mut special_tokens: Vec<_> = QWEN2_HF_ADDED_TOKENS
+            .iter()
+            .map(|text| SpecialToken {
+                text: (*text).into(),
+                id: *token_to_id
+                    .get(*text)
+                    .expect("added token was just inserted"),
+                kind: TokenType::Control,
+            })
+            .collect();
+        special_tokens.sort_by(|left, right| right.text.len().cmp(&left.text.len()));
+        let semantic_tokens = QWEN_SEMANTIC_TOKENS
+            .iter()
+            .filter_map(|(literal, name)| {
+                token_to_id
+                    .get(*literal)
+                    .map(|id| ((*name).to_string(), *id))
+            })
+            .collect();
+        // The family's `eos_token` is `<|im_end|>` (`tokenizer_config.json` and
+        // `config.json: eos_token_id = 151645`); `<|endoftext|>` is the pad.
+        // `add_bos`/`add_eos` stay off because `tokenizer_config.json` sets
+        // `add_bos_token = false` / `add_eos_token = false`, which is exactly
+        // what makes `tokenizer(text)` add nothing for
+        // `add_special_tokens=True`.
+        let eos_id = token_to_id.get("<|im_end|>").copied();
+
+        let tokenizer = Self {
+            tokens,
+            token_types,
+            token_to_id,
+            merge_ranks,
+            byte_encoder,
+            byte_decoder,
+            pre: PreTokenizer::Qwen2,
+            special_tokens,
+            semantic_tokens,
+            bos_id: None,
+            eos_id,
+            add_bos: false,
+            add_eos: false,
+            byte_fallback: false,
+            normalize_nfc: false,
+        };
+        if tokenizer.vocab_size() != QWEN2_HF_VOCAB_ROWS {
+            return Err(format!(
+                "tokenizer vocabulary has {} ids; expected {QWEN2_HF_VOCAB_ROWS}",
+                tokenizer.vocab_size()
+            ));
         }
         Ok(tokenizer)
     }
@@ -3726,3 +3982,103 @@ mod wpm_unk_tests {
 /// path level as BPE/SPM/WPM. `load_tokenizer` above routes
 /// `tokenizer.ggml.model = "t5"` GGUFs here.
 pub use ugm::{UgmError, UgmTokenizer};
+
+/// The tokenizer files of SenseNova-U1.6 are shipped beside the GGUF
+/// rather than inside it, so `vocab.json` + `merges.txt` + `added_tokens.json`
+/// are the only oracle for its ids. `references/sn_tokenizer/` is gitignored;
+/// without it the checks below report a skip.
+#[cfg(test)]
+mod sensenova_hf_tokenizer_tests {
+    use super::*;
+
+    /// `references/sn_tokenizer/` holds the real `vocab.json` / `merges.txt` /
+    /// `added_tokens.json` of SenseNova-U1.6. The directory is gitignored, so
+    /// a checkout that never fetched it skips these checks instead of failing.
+    fn sensenova_tokenizer_dir() -> Option<std::path::PathBuf> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("references/sn_tokenizer");
+        (dir.join("vocab.json").is_file() && dir.join("merges.txt").is_file()).then_some(dir)
+    }
+
+    #[test]
+    fn sensenova_hf_files_tokenizer_matches_added_tokens() {
+        let Some(dir) = sensenova_tokenizer_dir() else {
+            eprintln!("references/sn_tokenizer is absent, the HF-file tokenizer check is skipped");
+            return;
+        };
+        let vocab = std::fs::read_to_string(dir.join("vocab.json")).unwrap();
+        let merges = std::fs::read_to_string(dir.join("merges.txt")).unwrap();
+        let tokenizer = BPETokenizer::from_vocab_json_and_merges(&vocab, &merges).unwrap();
+
+        // `llm.vocab_size` of the checkpoint: base vocab + added tokens +
+        // unencodable placeholder rows.
+        assert_eq!(tokenizer.vocab_size(), 151_936);
+
+        // The ids of the added tokens are pinned by added_tokens.json next to
+        // the tokenizer files.
+        let added: HashMap<String, u32> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("added_tokens.json")).unwrap())
+                .unwrap();
+        assert_eq!(tokenizer.token_id("<|im_start|>"), Some(151_644));
+        assert_eq!(tokenizer.token_id("<|im_end|>"), Some(151_645));
+        assert_eq!(tokenizer.token_id("<img>"), Some(151_670));
+        for (offset, token) in QWEN2_HF_ADDED_TOKENS.iter().enumerate() {
+            assert_eq!(
+                tokenizer.token_id(token),
+                added.get(*token).copied(),
+                "{token} disagrees with added_tokens.json"
+            );
+            assert_eq!(
+                tokenizer.token_id(token),
+                Some(151_643 + offset as u32),
+                "{token} is not at its pinned id"
+            );
+        }
+        assert_eq!(tokenizer.eos_id(), Some(151_645));
+
+        // Byte-level BPE over ASCII + Chinese, ids from `transformers`'
+        // Qwen2Tokenizer on the same files.
+        let text = "Hello, 世界! tokenizer test 123.";
+        let ids = tokenizer.encode(
+            text,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        assert_eq!(
+            ids,
+            [9707u32, 11, 220, 99489, 0, 45958, 1273, 220, 16, 17, 18, 13]
+        );
+        assert_eq!(tokenizer.decode(&ids, false), text);
+
+        // The specials are matched whole, exactly like the HF added tokens.
+        let ids = tokenizer.encode(
+            "<|im_start|>user\nhi<|im_end|>\n<img>",
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        );
+        assert_eq!(ids, [151_644u32, 872, 198, 6023, 151_645, 198, 151_670]);
+    }
+
+    /// Only the *leading* `#version` line of `merges.txt` is a header. A merge
+    /// whose left half starts with `#` (the embedded z-image file spells
+    /// `# #` at rank 310) is a real merge and has to survive parsing, so the
+    /// ids below differ from the ones the shipped reference file produces
+    /// (`##` -> `[2, 2]`, because that copy has no `#`-starting merges).
+    #[test]
+    fn hash_merges_are_merges_not_headers() {
+        let Some(dir) = sensenova_tokenizer_dir() else {
+            return;
+        };
+        let vocab = std::fs::read_to_string(dir.join("vocab.json")).unwrap();
+        let tokenizer = BPETokenizer::from_vocab_json_and_merges(
+            &vocab,
+            include_str!("../../models/diffusion/z_image/qwen_merges.txt"),
+        )
+        .unwrap();
+        assert_eq!(tokenizer.encode("##", EncodeOptions::default()), [565]);
+        assert_eq!(tokenizer.encode("#", EncodeOptions::default()), [2]);
+    }
+}
