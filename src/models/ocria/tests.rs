@@ -1,0 +1,502 @@
+//! OCRia-nano-1 tests.
+//!
+//! The contract tests run everywhere: they check the packed model's metadata
+//! contract, the graph descriptions the loader enforces, and the pipeline
+//! pieces that need no weights.
+//!
+//! The parity tests need a packed GGUF and the fixtures `tools/oracle/ocria`
+//! records, so they are `#[ignore]`d. Run them with
+//!
+//! ```sh
+//! OCRIA_GGUF=models/OCRia-nano-1/ocria-f32.gguf \
+//! OCRIA_FIXTURES=tools/oracle/ocria/fixtures \
+//! OCRIA_PAGES=tools/oracle/ocria/fixtures/pages \
+//! cargo test --locked --profile release-fast --lib \
+//!   models::ocria::tests -- --ignored --nocapture
+//! ```
+//!
+//! Every numeric gate here is stated up front, in the test, with the value the
+//! oracle record measured; none of them is relaxed after a failure.
+
+use super::*;
+use std::path::{Path, PathBuf};
+
+/// The contract's `config`, which the GGUF must repeat exactly.
+fn contract() -> serde_json::Value {
+    serde_json::from_str(CONTRACT).unwrap()
+}
+
+#[test]
+fn contract_names_every_tensor_and_its_shape() {
+    let contract = contract();
+    let config: Config = serde_json::from_value(contract["config"].clone()).unwrap();
+    assert_eq!(
+        config.rec.groups,
+        ["latin", "cjk", "rtl", "world"],
+        "the four recognizers are addressed by these names"
+    );
+    assert_eq!(config.rec.visual_rtl, [false, false, true, false]);
+    assert_eq!(config.det.long_side, 1600);
+    assert_eq!(config.det.thresh, 0.55);
+    assert_eq!(config.det.merge, 0.6);
+
+    let tensors = contract["tensors"].as_object().unwrap();
+    let mut counts = std::collections::BTreeMap::new();
+    for (name, shape) in tensors {
+        let shape: Vec<usize> = serde_json::from_value(shape.clone()).unwrap();
+        assert!(!shape.is_empty() && shape.iter().all(|&d| d > 0), "{name}");
+        // Every weight is a flattened 2-D matrix [out, fan_in]; every bias is
+        // one-dimensional. The converter stores conv kernels C-order flattened
+        // so that a pointwise conv's row length is the 32-multiple Q8_0 needs.
+        assert!(
+            shape.len() == 1 || shape.len() == 2,
+            "{name} has shape {shape:?}; weights are [out, fan_in] and biases [out]"
+        );
+        let component = if let Some(rest) = name.strip_prefix("rec.") {
+            format!("rec.{}", rest.split('.').next().unwrap())
+        } else {
+            name.split('.').next().unwrap().to_string()
+        };
+        *counts.entry(component).or_insert(0usize) += 1;
+    }
+    assert_eq!(
+        counts,
+        [
+            ("det".to_string(), 74),
+            ("rec.cjk".to_string(), 60),
+            ("rec.latin".to_string(), 58),
+            ("rec.rtl".to_string(), 58),
+            ("rec.world".to_string(), 58),
+            ("router".to_string(), 34),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>(),
+        "the tensor set is pinned by the converter against the ONNX graphs"
+    );
+}
+
+#[test]
+fn contract_tensor_names_follow_the_node_path_rule() {
+    let contract = contract();
+    let tensors = contract["tensors"].as_object().unwrap();
+    for name in tensors.keys() {
+        let (stem, suffix) = name
+            .rsplit_once('.')
+            .unwrap_or_else(|| panic!("{name} has no suffix"));
+        assert!(
+            suffix == "weight" || suffix == "bias",
+            "{name} must end in .weight or .bias"
+        );
+        assert!(!stem.is_empty(), "{name}");
+        assert!(
+            !name.contains("//") && !name.starts_with('.') && !name.contains("/"),
+            "{name} must be the flattened ONNX node path"
+        );
+    }
+    for pinned in [
+        "det.stem.stem.0.weight",
+        "det.s4.s4.0.dw.weight",
+        "det.lat.3.weight",
+        "det.head.head.3.bias",
+        "router.group.weight",
+        "router.flip.bias",
+        "rec.latin.head.weight",
+        "rec.cjk.head.head.1.weight",
+        "rec.cjk.mix.mix.0.fc1.weight",
+    ] {
+        assert!(tensors.contains_key(pinned), "missing {pinned}");
+    }
+    // `det.lat.*` are the only bias-free convs in the release.
+    assert!(!tensors.contains_key("det.lat.3.bias"));
+}
+
+#[test]
+fn options_default_to_the_benchmarked_pipeline() {
+    let options = Options::default();
+    assert_eq!(options.det_long_side, 1600);
+    assert_eq!(options.det_merge, 0.6);
+    assert!(options.gutter && options.orient && options.rescue && options.junk);
+    assert_eq!(options.faint_max, 24);
+}
+
+#[test]
+fn a_non_ocria_file_is_not_claimed() {
+    assert!(!matches_model(Path::new("/nonexistent/ocria.gguf")));
+}
+
+// ---------------------------------------------------------------------------
+// Parity against the ONNX Runtime oracle
+// ---------------------------------------------------------------------------
+
+fn fixture_dir() -> PathBuf {
+    std::env::var_os("OCRIA_FIXTURES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("tools/oracle/ocria/fixtures"))
+}
+
+fn packed_model() -> Option<(Model, PathBuf)> {
+    let path = std::env::var_os("OCRIA_GGUF").map(PathBuf::from)?;
+    let source =
+        crate::format::ggufrs::open_model_source(&path, crate::format::ggufrs::ComponentRole::Llm)
+            .expect("open the packed OCRia GGUF");
+    let model = Model::from_source(source.as_ref(), ComputePolicy::Cpu, 2)
+        .expect("load the packed OCRia GGUF");
+    Some((model, path))
+}
+
+fn read_f32(dir: &Path, name: &str, count: usize) -> Vec<f32> {
+    let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(bytes.len(), count * 4, "{name} length");
+    bytes
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect()
+}
+
+fn read_i64(dir: &Path, name: &str, count: usize) -> Vec<i64> {
+    let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(bytes.len(), count * 8, "{name} length");
+    bytes
+        .chunks_exact(8)
+        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+        .collect()
+}
+
+fn manifest() -> Option<(serde_json::Value, PathBuf)> {
+    let dir = fixture_dir();
+    let path = dir.join("manifest.json");
+    if !path.is_file() {
+        return None;
+    }
+    Some((
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap(),
+        dir,
+    ))
+}
+
+fn max_abs(left: &[f32], right: &[f32]) -> f32 {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max)
+}
+
+/// The detector's probability map against ONNX Runtime's, on the same input.
+///
+/// The gate is absolute: the map is a sigmoid of a shallow network, and the
+/// oracle record measured 3.6e-6, so 1e-5 leaves room for a different
+/// convolution order without hiding a semantic difference.
+#[test]
+#[ignore = "requires OCRIA_GGUF and the ONNX Runtime fixtures"]
+fn detector_probability_map_matches_onnx() {
+    let Some((model, _)) = packed_model() else {
+        panic!("set OCRIA_GGUF");
+    };
+    let (manifest, dir) = manifest().expect("fixtures manifest.json");
+    let mut worst = 0.0f32;
+    for case in manifest["det"].as_array().unwrap() {
+        let (h, w) = (
+            case["height"].as_u64().unwrap() as usize,
+            case["width"].as_u64().unwrap() as usize,
+        );
+        let input = read_f32(&dir, case["input"].as_str().unwrap(), 3 * h * w);
+        let (ph, pw) = (h / 2, w / 2);
+        let expected = read_f32(&dir, case["prob"].as_str().unwrap(), ph * pw);
+        let (prob, got_h, got_w) = model.det.forward_prob(&input, h, w).unwrap();
+        assert_eq!((got_h, got_w), (ph, pw), "{}", case["name"]);
+        let delta = max_abs(&prob, &expected);
+        println!("det {}: max_abs {delta:.3e}", case["name"]);
+        worst = worst.max(delta);
+    }
+    assert!(worst <= 1e-5, "detector prob max_abs {worst:.3e} > 1e-5");
+}
+
+/// The router's group and flip logits against ONNX Runtime's.
+///
+/// The router ends in a `Gemm` over a pooled vector, so the gate is 1e-4
+/// absolute on the logits -- wide enough for the pooled sum's order, far
+/// narrower than the 0.9 override the page policy acts on.
+#[test]
+#[ignore = "requires OCRIA_GGUF and the ONNX Runtime fixtures"]
+fn router_logits_match_onnx() {
+    let Some((model, _)) = packed_model() else {
+        panic!("set OCRIA_GGUF");
+    };
+    let (manifest, dir) = manifest().expect("fixtures manifest.json");
+    let mut worst_group = 0.0f32;
+    let mut worst_flip = 0.0f32;
+    for case in manifest["router"].as_array().unwrap() {
+        let count = case["count"].as_u64().unwrap() as usize;
+        let input = read_f32(&dir, case["input"].as_str().unwrap(), count * 32 * 512);
+        let group = read_f32(&dir, case["group_logits"].as_str().unwrap(), count * 4);
+        let flip = read_f32(&dir, case["flip_logits"].as_str().unwrap(), count * 2);
+        let (got_group, got_flip) = model.router.forward_logits(&input, count).unwrap();
+        let dg = max_abs(&got_group, &group);
+        let df = max_abs(&got_flip, &flip);
+        println!("router {}: group {dg:.3e} flip {df:.3e}", case["name"]);
+        worst_group = worst_group.max(dg);
+        worst_flip = worst_flip.max(df);
+    }
+    assert!(
+        worst_group <= 1e-4 && worst_flip <= 1e-4,
+        "router logits max_abs group {worst_group:.3e} flip {worst_flip:.3e} > 1e-4"
+    );
+}
+
+/// The recognizers' per-timestep decisions against ONNX Runtime's.
+///
+/// `ids` is the contract the text is built from, so it is compared exactly.
+/// `conf` is the in-graph softmax maximum, compared at 1e-3.
+///
+/// `rec_latin`'s released graph is ONNX-Runtime-quantized: it snaps its weights
+/// *and* its activations to int8/uint8 grids inside the graph. This crate
+/// dequantizes the weights and computes in F32, so the fixture gives every
+/// group the faithful F32 graph's `ids_f32`/`conf_f32` as the target and keeps
+/// the QDQ graph's `ids`/`conf` for the record; the measured difference between
+/// the two is in `latin_qdq_effect.json` and `validation.md`.
+#[test]
+#[ignore = "requires OCRIA_GGUF and the ONNX Runtime fixtures"]
+fn recognizer_decisions_match_onnx() {
+    let Some((model, _)) = packed_model() else {
+        panic!("set OCRIA_GGUF");
+    };
+    let (manifest, dir) = manifest().expect("fixtures manifest.json");
+    let mut worst_conf = 0.0f32;
+    let mut id_mismatches = 0usize;
+    let mut id_total = 0usize;
+    for (index, group) in rec::GROUPS.iter().enumerate() {
+        for case in manifest["rec"][group].as_array().unwrap() {
+            let count = case["count"].as_u64().unwrap() as usize;
+            let width = case["width"].as_u64().unwrap() as usize;
+            let input = read_f32(&dir, case["input"].as_str().unwrap(), count * 32 * width);
+            let (logits, steps) = model.recs[index]
+                .forward_logits(&input, count, width)
+                .unwrap();
+            let classes = logits.len() / (count * steps);
+            // `rec_latin`'s graph is int8-quantized (QDQ) and snaps its
+            // activations at run time, which this crate does not reproduce;
+            // the fixture therefore carries the faithful F32 graph's answer
+            // (`ids_f32`/`conf_f32`) as the target for every group, and the
+            // QDQ graph's answer (`ids`/`conf`) for the record.
+            let (ids_key, conf_key) = if case.get("ids_f32").is_some() {
+                ("ids_f32", "conf_f32")
+            } else {
+                ("ids", "conf")
+            };
+            let ids = read_i64(&dir, case[ids_key].as_str().unwrap(), count * steps);
+            let conf = read_f32(&dir, case[conf_key].as_str().unwrap(), count * steps);
+            let mut got_ids = Vec::with_capacity(count * steps);
+            let mut got_conf = Vec::with_capacity(count * steps);
+            // `forward_logits` returns the head's channel-first plane, so a
+            // timestep's classes are strided by `steps`, not contiguous.
+            for step in 0..count * steps {
+                let row: Vec<f32> = (0..classes).map(|c| logits[c * steps + step]).collect();
+                let row = &row[..];
+                let mut best = 0usize;
+                for (k, &value) in row.iter().enumerate().skip(1) {
+                    if value > row[best] {
+                        best = k;
+                    }
+                }
+                let peak = row[best];
+                let sum: f32 = row.iter().map(|v| (v - peak).exp()).sum();
+                got_ids.push(best as i64);
+                got_conf.push(1.0 / sum);
+            }
+            let mismatch = ids
+                .iter()
+                .zip(&got_ids)
+                .filter(|(want, got)| want != got)
+                .count();
+            let delta = max_abs(&got_conf, &conf);
+            println!(
+                "rec.{group} {}: ids {mismatch}/{} differ, conf max_abs {delta:.3e}",
+                case["name"],
+                count * steps
+            );
+            id_mismatches += mismatch;
+            id_total += count * steps;
+            worst_conf = worst_conf.max(delta);
+        }
+    }
+    println!("rec: ids {id_mismatches}/{id_total} differ, worst conf {worst_conf:.3e}");
+    assert!(
+        worst_conf <= 1e-3,
+        "recognizer conf max_abs {worst_conf:.3e} > 1e-3"
+    );
+    // The latin graph is the only quantized one; the other three must match
+    // exactly. The count for latin is recorded in tools/oracle/ocria/README.md.
+    assert_eq!(
+        id_mismatches, 0,
+        "recognizer ids differ on {id_mismatches}/{id_total} timesteps"
+    );
+}
+
+/// The recorded pages and their oracle line lists.
+fn page_cases() -> Vec<(PathBuf, serde_json::Value)> {
+    let pages = std::env::var_os("OCRIA_PAGES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture_dir().join("pages"));
+    let mut cases = Vec::new();
+    for entry in std::fs::read_dir(&pages).expect("page fixture directory") {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("png") {
+            continue;
+        }
+        let oracle_path = path.with_extension("json");
+        if !oracle_path.is_file() {
+            continue;
+        }
+        let oracle: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&oracle_path).unwrap()).unwrap();
+        cases.push((path, oracle));
+    }
+    cases.sort_by(|a, b| a.0.cmp(&b.0));
+    assert!(!cases.is_empty(), "no page fixtures in {}", pages.display());
+    cases
+}
+
+fn mean_confidence(lines: impl Iterator<Item = f32>) -> f64 {
+    let (sum, count) = lines.fold((0.0f64, 0usize), |(sum, count), v| {
+        (sum + v as f64, count + 1)
+    });
+    sum / count as f64
+}
+
+/// End to end: the same page image through this crate and through the pinned
+/// LiteParse engine, on the F32 weights.
+///
+/// Text and the line count must match exactly, and the boxes within 1 px (the
+/// two sides round the same float differently on the way out).
+///
+/// Confidence gets two gates. The recognizers agree with their own graph to
+/// ~3e-6, but the oracle ran `rec_latin.onnx`, which snaps its activations to
+/// uint8 grids inside the graph and this crate does not: per timestep the
+/// effect is ~2e-2 and, when a character sits on a near tie, one character can
+/// move a whole line's mean by ~4e-2. So a line's confidence is compared at
+/// 2e-1 -- wide, but still narrow enough to catch a wrong CTC collapse or a
+/// wrong averaging denominator -- while the page's mean confidence, where the
+/// near ties average out, is compared at 5e-3. The measured values are printed
+/// and recorded in `validation.md`.
+#[test]
+#[ignore = "requires OCRIA_GGUF and the recorded page oracle"]
+fn page_read_matches_liteparse() {
+    let Some((model, _)) = packed_model() else {
+        panic!("set OCRIA_GGUF");
+    };
+    for (path, oracle) in page_cases() {
+        let image = image::open(&path).unwrap().to_rgb8();
+        let page = model
+            .run(image.as_raw(), image.width(), image.height())
+            .expect("read the page");
+        let expected = oracle["lines"].as_array().unwrap();
+        assert_eq!(
+            page.lines.len(),
+            expected.len(),
+            "{}: line count",
+            path.display()
+        );
+        let mut worst_confidence = 0.0f32;
+        for (got, want) in page.lines.iter().zip(expected) {
+            assert_eq!(
+                got.text,
+                want["text"].as_str().unwrap(),
+                "{}",
+                path.display()
+            );
+            let bbox = want["bbox"].as_array().unwrap();
+            for k in 0..4 {
+                let want = bbox[k].as_f64().unwrap() as f32;
+                assert!(
+                    (got.bbox[k] - want).abs() <= 1.0,
+                    "{}: bbox[{k}] {} vs {want}",
+                    path.display(),
+                    got.bbox[k]
+                );
+            }
+            let confidence = want["confidence"].as_f64().unwrap() as f32;
+            worst_confidence = worst_confidence.max((got.confidence - confidence).abs());
+            assert!(
+                (got.confidence - confidence).abs() <= 2e-1,
+                "{}: confidence {} vs {confidence}",
+                path.display(),
+                got.confidence
+            );
+            assert_eq!(
+                got.faint,
+                want["faint"].as_bool().unwrap_or(false),
+                "{}: faint flag",
+                path.display()
+            );
+        }
+        let got_mean = mean_confidence(page.lines.iter().map(|line| line.confidence));
+        let want_mean = mean_confidence(
+            expected
+                .iter()
+                .map(|line| line["confidence"].as_f64().unwrap() as f32),
+        );
+        assert!(
+            (got_mean - want_mean).abs() <= 5e-3,
+            "{}: mean confidence {got_mean:.6} vs {want_mean:.6}",
+            path.display()
+        );
+        println!(
+            "{}: {} lines match, worst line delta {worst_confidence:.2e}, mean confidence \
+             {got_mean:.6} vs {want_mean:.6}",
+            path.display(),
+            page.lines.len()
+        );
+    }
+}
+
+/// End to end on the quantized export.
+///
+/// The Q8_0 file stores 85 of the 342 tensors in 8-bit blocks, so its numbers
+/// move: the detector's probability map and the router's logits are measured
+/// against the F32 file in `validation.md`. What has to survive is the page:
+/// the same text, in the same order, from the same boxes. This asserts exactly
+/// that, and prints the confidence drift for the record.
+#[test]
+#[ignore = "requires OCRIA_GGUF (q8_0) and the recorded page oracle"]
+fn page_read_q8_0_keeps_the_text() {
+    let Some((model, path)) = packed_model() else {
+        panic!("set OCRIA_GGUF");
+    };
+    assert_eq!(model.format, WeightFormat::Q8_0, "{}", path.display());
+    for (path, oracle) in page_cases() {
+        let image = image::open(&path).unwrap().to_rgb8();
+        let page = model
+            .run(image.as_raw(), image.width(), image.height())
+            .expect("read the page");
+        let expected = oracle["lines"].as_array().unwrap();
+        assert_eq!(
+            page.lines.len(),
+            expected.len(),
+            "{}: line count",
+            path.display()
+        );
+        let mut worst = 0.0f32;
+        for (got, want) in page.lines.iter().zip(expected) {
+            assert_eq!(
+                got.text,
+                want["text"].as_str().unwrap(),
+                "{}",
+                path.display()
+            );
+            let confidence = want["confidence"].as_f64().unwrap() as f32;
+            worst = worst.max((got.confidence - confidence).abs());
+        }
+        let got_mean = mean_confidence(page.lines.iter().map(|line| line.confidence));
+        let want_mean = mean_confidence(
+            expected
+                .iter()
+                .map(|line| line["confidence"].as_f64().unwrap() as f32),
+        );
+        println!(
+            "{}: {} lines, text identical, worst line delta {worst:.2e}, mean confidence \
+             {got_mean:.6} vs {want_mean:.6}",
+            path.display(),
+            page.lines.len()
+        );
+    }
+}

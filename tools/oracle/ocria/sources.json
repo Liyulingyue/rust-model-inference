@@ -1,0 +1,194 @@
+{
+  "repo": "llamaindex/OCRia-nano-1",
+  "revision": "master",
+  "commit": "ca290e82458d32aa8b605dbf3248d7aaf895ea7e",
+  "commit_source": "LatestCommitter of https://modelscope.cn/api/v1/models/llamaindex/OCRia-nano-1/repo/files?Revision=master&Root= (the files API names no ref endpoint); every file below carries the revision of its own last commit",
+  "api": "https://modelscope.cn/api/v1/models/llamaindex/OCRia-nano-1/repo/files?Revision=master&Root=",
+  "resolve": "https://modelscope.cn/models/llamaindex/OCRia-nano-1/resolve/{Revision}/{Path}",
+  "license_files": [
+    "LICENSE"
+  ],
+  "license": "ocria-nano-1-license (AI Pubs Open RAIL-M, LlamaIndex, Inc.)",
+  "liteparse": {
+    "repo": "run-llama/liteparse",
+    "commit": "44ceb6ab160c64cc8b43aab4ed85251719495629",
+    "date": "2026-11-25T22:18:34Z",
+    "oracle_paths": [
+      "crates/liteparse/src/ocr/ocria/mod.rs",
+      "crates/liteparse/src/ocr/ocria/det.rs",
+      "crates/liteparse/src/ocr/ocria/rec.rs",
+      "crates/liteparse/src/ocr/ocria/page.rs",
+      "crates/liteparse/src/ocr/ocria/img.rs",
+      "crates/liteparse/src/ocr/ocria/package.rs",
+      "crates/liteparse/src/ocr/ocria/pool.rs"
+    ]
+  },
+  "files": [
+    {
+      "Path": "LICENSE",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 18383,
+      "Sha256": "f1cee1fc810a9ba0553df347ca1238eb43efb4c9c87f590a8b17a06af6dcfd46",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "README.md",
+      "Revision": "ca290e82458d32aa8b605dbf3248d7aaf895ea7e",
+      "Size": 10083,
+      "Sha256": "82ebde2103579a2e77306a49c4369a260f7cd7c775a4c2d63aa1c9e30aef6912",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "config.json",
+      "Revision": "ca290e82458d32aa8b605dbf3248d7aaf895ea7e",
+      "Size": 432,
+      "Sha256": "558aef7160c4e271b1d81297d5d924b5c6bab8d082a1df9b292ba0311bf9a58d",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "configuration.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 71,
+      "Sha256": "2e1c5a9e1cdae7ee2a28ac27d4e25172029cfa661cbeb4418f6be9998ef02f79",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "det.meta.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 17,
+      "Sha256": "ada6b3c5de0800eb43fa81dbec714d47cd2a712a22952ef23cf38c805b27350e",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "det.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 347580,
+      "Sha256": "70ea641d74c4d7d3acb734002cc1507350d8350ad44aeedc6f8ac6017dbcff7a",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_cjk.charset.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 43274,
+      "Sha256": "0e48eca81c1c0afa5a3e081fdf5fcbdc669e746e7e0a7f264e85ac76c496035b",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_cjk.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 5077778,
+      "Sha256": "ad7154b54a549dbfead48dd49142bcc76ee168cb0cd874f6efacab543f0b9262",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_latin.charset.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 4933,
+      "Sha256": "d386eea5691a4f3d9e40f48a3979cf859caf626c3ec43214c7911a713e1f4ed0",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_latin.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 943530,
+      "Sha256": "7ac8f6815b4b127f244c14f86c51f65224c82e022c1ee71f867f2be955be4da4",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_rtl.charset.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 1876,
+      "Sha256": "8ad9b8f6c1bdc17b42a2351948e84a73c487f5bed7f783bc5e8474efad126a80",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_rtl.meta.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 20,
+      "Sha256": "31fd2893cc4d48ec50b4b21a1f113f527ae9a4ac1b3ea395b0cc5969f56d46b5",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_rtl.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 2842451,
+      "Sha256": "9ccee36bb07b81ef310c6b50e707adabe8c6b92caea61105213686ea8977f4cf",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_world.charset.json",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 11602,
+      "Sha256": "ebfd39142cec3f267eda2b81b42966ac9b0f73841a52285770f4db40a016d689",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "rec_world.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 3913987,
+      "Sha256": "c57d01a945d741886d356bdedc636f0572d0810c6a7c2f26dbb9ce0466b92220",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "router.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 159029,
+      "Sha256": "daccb2e3ce3891b7cb95037ada3861e05fd288d7678d2a1e662d9483e04dd361",
+      "Role": "layer-1"
+    },
+    {
+      "Path": "tablenet.bin",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 17084482,
+      "Sha256": "27b5f3ff2d6842d397a21954026b1e6411e8b35085b0b32c616e67e33852d1b4",
+      "Reason": "table-structure model, a separate component the OCR pipeline does not run",
+      "Role": "layer-2"
+    },
+    {
+      "Path": "tablenet.onnx",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 17182635,
+      "Sha256": "3b913866067d6e43f73a4e4c9c1eace955b7959447043cc39ea1d30e4c552a95",
+      "Reason": "table-structure model, a separate component the OCR pipeline does not run",
+      "Role": "layer-2"
+    }
+  ],
+  "unused_files": [
+    {
+      "Path": ".gitattributes",
+      "Revision": "4f61e35605be2c62b523ca959019989a00506ef2",
+      "Size": 2075,
+      "Sha256": "247a3cfc672484dd40bdf07af0f83ee7a4457e9a995dadb47eedc36c630103b6",
+      "Reason": "git-lfs attributes only"
+    },
+    {
+      "Path": "assets/accuracy_cost.png",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 68836,
+      "Sha256": "fb40aa5bfc775ae03f6ca7a85383c67aee32da9202e30f9803667826a29caee1",
+      "Reason": "README image"
+    },
+    {
+      "Path": "assets/layout_blocks.png",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 311504,
+      "Sha256": "a1bf3a5996e47c072c6f065ef0a2df89329d64a391d9e00c3d63379bee7bbc56",
+      "Reason": "README image"
+    },
+    {
+      "Path": "assets/llamaindex-logo.png",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 14835,
+      "Sha256": "80daadd9893ea2b50f28f5750ca73b9ac848403b9f4f4864b8bf0e8f37ef2526",
+      "Reason": "README image"
+    },
+    {
+      "Path": "assets/ocr_routing.png",
+      "Revision": "90280523a6cbe3f2597b2127f5ccde149ef9e716",
+      "Size": 217067,
+      "Sha256": "0d2a8a6fee6097c6d8346673e6a817d9c7bc040c2bfd60608ed3e4391468ec8b",
+      "Reason": "README image"
+    }
+  ],
+  "layer2": "tablenet.onnx and tablenet.bin are pinned and downloaded but not read by the layer-1 converter (tools/converter/ocria) or by trace.py; the layer-2 table pipeline needs them."
+}

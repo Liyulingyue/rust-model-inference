@@ -5,6 +5,7 @@ pub mod decision;
 pub(crate) mod diffusion;
 pub(crate) mod jev;
 pub(crate) mod media;
+pub mod ocr_nano;
 pub(crate) mod omni;
 pub(crate) mod qwen_drive;
 pub(crate) mod selftest;

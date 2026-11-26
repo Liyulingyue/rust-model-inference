@@ -175,6 +175,11 @@ fn main() {
         app::run_or_exit(app::wevisone_vl::run_cli(&options, n_threads));
         return;
     }
+    if rust_model_inference::models::ocria::matches_model(&options.model) {
+        app::init_rayon_global_pool(n_threads);
+        app::run_or_exit(app::ocr_nano::run_cli(&options, n_threads));
+        return;
+    }
     if rust_model_inference::models::unlimited_ocr::matches_model(&options.model) {
         app::init_rayon_global_pool(n_threads);
         app::run_or_exit(rust_model_inference::models::unlimited_ocr::run_cli(

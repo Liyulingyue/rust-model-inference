@@ -38,6 +38,9 @@ tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["cors"] }
 rand = "0.8"
 unicode_categories = "0.1"
+# The OCRia RTL recognizer emits visual order; the reference runtime reorders
+# with unicode-bidi, so matching it needs the same algorithm.
+unicode-bidi = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }

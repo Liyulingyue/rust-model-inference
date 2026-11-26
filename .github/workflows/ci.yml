@@ -48,6 +48,7 @@ jobs:
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
       - run: 'cargo test --locked --lib models::nemotron_reuse::'
+      - run: 'cargo test --locked --lib models::ocria::'
       - run: cargo test --locked --test nemotron_reuse_cli
       - run: cargo test --locked --lib pjit
       - run: cargo test --locked --lib image_generation
