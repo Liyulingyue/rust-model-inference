@@ -69,6 +69,13 @@ pub enum GGMLType {
     /// cannot forward through the existing engine trunk yet.
     I2_S = 36,
     Q1_0 = 41,
+    // Fork-specific NariQ v1 types. Blocks span 16 rows; a row is not independently coded.
+    Trl1 = 44,
+    Trl2 = 45,
+    Trl3 = 46,
+    Trl4 = 47,
+    Trl5 = 48,
+    Trl6 = 49,
 }
 
 impl GGMLType {
@@ -105,6 +112,21 @@ impl GGMLType {
             30 => Some(Self::BF16),
             36 => Some(Self::I2_S),
             41 => Some(Self::Q1_0),
+            44 => Some(Self::Trl1),
+            45 => Some(Self::Trl2),
+            46 => Some(Self::Trl3),
+            47 => Some(Self::Trl4),
+            48 => Some(Self::Trl5),
+            49 => Some(Self::Trl6),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn trellis_bits(self) -> Option<usize> {
+        match self {
+            Self::Trl1 | Self::Trl2 | Self::Trl3 | Self::Trl4 | Self::Trl5 | Self::Trl6 => {
+                Some((self as usize) - Self::Trl1 as usize + 1)
+            }
             _ => None,
         }
     }
@@ -142,6 +164,12 @@ impl GGMLType {
             Self::BF16 => (1, 2),
             Self::I2_S => (128, 32),
             Self::Q1_0 => (128, 18),
+            Self::Trl1 => (16, 2),
+            Self::Trl2 => (16, 4),
+            Self::Trl3 => (16, 6),
+            Self::Trl4 => (16, 8),
+            Self::Trl5 => (16, 10),
+            Self::Trl6 => (16, 12),
         }
     }
 

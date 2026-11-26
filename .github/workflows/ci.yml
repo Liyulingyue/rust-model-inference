@@ -115,6 +115,7 @@ jobs:
           export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
           test -n "$VK_DRIVER_FILES"
           cargo test --locked --features vulkan --lib batched_linear_device_review_ -- --ignored --test-threads=1
+          cargo test --locked --features vulkan --lib trellis -- --include-ignored --test-threads=1
       - run: cargo test --locked --features vulkan --lib raw_hidden_
       - run: 'cargo test --locked --features vulkan --lib qwen_image_2_1::gpu::tests::'
       - run: cargo test --locked --features vulkan --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

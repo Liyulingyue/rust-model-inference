@@ -1,0 +1,20 @@
+{
+  "date": "2026-11-26",
+  "cpu": "AMD EPYC 9334",
+  "vulkan_device": "AMD Radeon Graphics (RADV NAVI31)",
+  "threads": 8,
+  "batch": 8,
+  "prompt_tokens": 5,
+  "greedy_positions": 3,
+  "decode_evaluations": 2,
+  "unit": "seconds",
+  "notes": "Rust release-fast session step wall times exclude model load. Reference CPU times include saving logits. Several jobs shared the host. Each row is a single observation from before the final review changes.",
+  "runs": [
+    {"bpw": 2.0, "backend": "reference CPU", "prefill": 1.93693, "decode": 2.95106},
+    {"bpw": 2.0, "backend": "Rust CPU", "prefill": 17.24814, "decode": 5.91022},
+    {"bpw": 2.0, "backend": "Rust strict Vulkan", "prefill": 6.26192, "decode": 4.46663, "submissions": 231},
+    {"bpw": 2.5, "backend": "reference CPU", "prefill": 12.79977, "decode": 23.71045},
+    {"bpw": 2.5, "backend": "Rust CPU", "prefill": 18.66278, "decode": 6.55283},
+    {"bpw": 3.0, "backend": "reference CPU", "prefill": 5.30589, "decode": 10.68366}
+  ]
+}

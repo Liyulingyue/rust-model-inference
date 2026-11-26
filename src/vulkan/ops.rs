@@ -1,3 +1,4 @@
+mod trellis;
 use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::models::qwen3::trunk::Qwen3Config;
 use crate::ops::rope::rope_neox_inplace;
@@ -912,6 +913,10 @@ pub(crate) fn required_activation_contracts(
     }
     let mut contracts = ActivationContracts::default();
     for &format in formats {
+        // Trellis transforms take F32 activations.
+        if format.trellis_bits().is_some() {
+            continue;
+        }
         match GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())? {
             GpuWeightFormat::Q8_0
             | GpuWeightFormat::Q4_0
@@ -2834,6 +2839,11 @@ impl PivoRuntime {
         context: &'static VulkanContext,
         capacity: PivoCapacity,
     ) -> Result<Self, VulkanError> {
+        if !context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo attention requires shaderFloat64".into(),
+            ));
+        }
         if capacity.activation == 0
             || capacity.rope_table == 0
             || capacity.weight == 0
@@ -3809,6 +3819,7 @@ pub(crate) enum TimestralOp {
 }
 
 pub(crate) struct Qwen3Ops<'a> {
+    trellis: trellis::TrellisBindings,
     context: &'a VulkanContext,
     arena: GpuBuffer,
     staging: Option<GpuBuffer>,
@@ -3864,11 +3875,10 @@ pub(crate) fn build_operator_pipelines(
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
-                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE | PIVO_ATTENTION
             ) && !context.shader_float64
             {
-                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
-                // Their recorders reject unsupported devices before this placeholder is used.
+                // These optional operators reject devices without FP64 before dispatch.
                 ATTENTION_SCORES_SHADER
             } else {
                 *shader
@@ -4041,6 +4051,7 @@ impl<'a> Qwen3Ops<'a> {
             staging,
             descriptor_pool,
             arena_bindings,
+            trellis: Default::default(),
             pipelines,
             q8_tiled: std::env::var("RUST_GPU_DP4A")
                 .map(|value| value != "0")
@@ -4620,6 +4631,17 @@ impl<'a> Qwen3Ops<'a> {
         token_rows: usize,
         input_stride: usize,
     ) -> Result<(), VulkanError> {
+        if self.record_trellis(
+            commands,
+            bindings,
+            input,
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )? {
+            return Ok(());
+        }
         let format = bindings.weight_format(outputs.len())?;
         // The Q8_0 kernel is the tiled one for a multi-row forward: the
         // tiled kernel shares the weight across the rows of a tile, and the

@@ -271,6 +271,15 @@ impl GGUFLoader {
             });
         }
 
+        if tensors.iter().any(|t| t.ggml_type.trellis_bits().is_some())
+            && !matches!(
+                metadata.iter().find(|(k, _)| k == "trellis.version"),
+                Some((_, MetaValue::Uint32(1)))
+            )
+        {
+            return Err("NariQ coded tensors require trellis.version = UINT32 1".into());
+        }
+
         // audio.cpp stores long tensor names as _audiocpp.N and records the
         // original names in this parallel array. Restore names without copying data.
         if let Some((_, value)) = metadata
@@ -1372,6 +1381,39 @@ mod tests {
                 .unwrap_err()
                 .contains("audiocpp.tensor_names"));
         }
+    }
+
+    #[test]
+    fn trellis_type_ids_require_the_forks_version_marker() {
+        let encoded = |version: Option<(MetaValueType, u32)>| {
+            let mut b = Vec::new();
+            b.extend_from_slice(b"GGUF");
+            push_u32(&mut b, 3);
+            push_u64(&mut b, 1);
+            push_u64(&mut b, u64::from(version.is_some()));
+            if let Some((ty, value)) = version {
+                push_kv(&mut b, "trellis.version", ty, |b| push_u32(b, value));
+            }
+            push_str(&mut b, "w.weight");
+            push_u32(&mut b, 2);
+            push_u64(&mut b, 16);
+            push_u64(&mut b, 16);
+            push_i32(&mut b, 45);
+            push_u64(&mut b, 0);
+            b.resize(b.len().next_multiple_of(32) + 64, 0);
+            b
+        };
+        for marker in [
+            None,
+            Some((MetaValueType::Int32, 1)),
+            Some((MetaValueType::Uint32, 2)),
+        ] {
+            assert!(parse_temp(&encoded(marker))
+                .unwrap_err()
+                .contains("trellis.version"));
+        }
+        let loader = parse_temp(&encoded(Some((MetaValueType::Uint32, 1)))).unwrap();
+        assert_eq!(loader.tensor_slice("w.weight").unwrap().len(), 64);
     }
 
     #[test]

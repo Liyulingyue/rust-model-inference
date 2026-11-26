@@ -40,6 +40,12 @@ pub trait Kernel: Send + Sync {
         false
     }
 
+    /// A trellis projection needs its transforms and vocabulary bands as well as the code bytes.
+    #[cfg(feature = "vulkan")]
+    fn trellis(&self) -> Option<&super::trellis::TrellisWeight<'_>> {
+        None
+    }
+
     /// Returns the backing F32 values for model-local native-F32 contracts.
     fn f32_slice(&self) -> Option<&[f32]> {
         None
