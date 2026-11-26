@@ -48,7 +48,7 @@ use crate::core::thread_pool::ComputePool;
 use crate::models::qwen35::trunk::weights::{load_weight, load_weight_f32};
 use crate::ops::attention_value::attention_value_reduce;
 use crate::ops::embedding::embedding_lookup;
-use crate::ops::kernel::{PreparedRows, Weight};
+use crate::ops::kernel::{PreparedRows, QTensorOwned, Weight};
 use crate::ops::rope::neox::rope_neox_inplace_scalar;
 use crate::ops::{
     dot_f32, rms_norm_inplace, rope_sin_cos, silu_inplace, softmax_inplace, vec_add_into,
@@ -640,6 +640,69 @@ struct LayerWeights<'a> {
     down: Weight<'a>,
 }
 
+/// Whether `RMI_DEQUANT_WEIGHTS` asks for weights dequantised to f32 at load.
+///
+/// The Q8_0 kernel quantises the *activation* inside `Kernel::forward` (the
+/// llama.cpp `vec_dot_q8_0_q8_0` contract needs a Q8_0 activation), so leaving
+/// activations in f32 does not avoid that rounding -- measured: identical
+/// results. The only way to reproduce a reference that multiplies f32
+/// activations by dequantised weights is to materialise the weights as f32 and
+/// run the F32 kernel, which is what this mode does. Costs ~2x resident memory
+/// for the quantised tensors; opt-in, read once per process.
+fn dequant_weights() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RMI_DEQUANT_WEIGHTS").is_some())
+}
+
+/// Expand ggml Q8_0 blocks (`{f16 d; i8 qs[32]}` per 32 values) to f32.
+fn dequant_q8_0(bytes: &[u8], n_in: usize, n_out: usize) -> Option<Vec<f32>> {
+    const BLOCK: usize = 32;
+    let blocks = n_in.div_ceil(BLOCK);
+    let needed = n_out.checked_mul(blocks)?.checked_mul(2 + BLOCK)?;
+    if bytes.len() < needed {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n_out * n_in);
+    for row in 0..n_out {
+        for block in 0..blocks {
+            let at = (row * blocks + block) * (2 + BLOCK);
+            let scale =
+                half::f16::from_bits(u16::from_le_bytes([bytes[at], bytes[at + 1]])).to_f32();
+            let qs = &bytes[at + 2..at + 2 + BLOCK];
+            for &q in qs.iter() {
+                out.push(scale * (q as i8) as f32);
+            }
+        }
+        out.truncate((row + 1) * n_in);
+    }
+    Some(out)
+}
+
+/// `load_weight`, but honouring [`dequant_weights`].
+fn load_weight_dispatch<'a>(source: &'a dyn TensorSource, name: &str) -> Option<Weight<'a>> {
+    if dequant_weights() {
+        if let (Some(info), Some(bytes)) = (source.tensor_info(name), source.tensor_slice(name)) {
+            if info.ggml_type == GGMLType::Q8_0 {
+                let n_in = *info.dims.first()? as usize;
+                let n_out = info.dims.get(1).copied().unwrap_or(1) as usize;
+                if let Some(data) = dequant_q8_0(bytes, n_in, n_out) {
+                    return Some(Weight {
+                        kernel: Box::new(QTensorOwned::F32 {
+                            data,
+                            n_cols: n_in,
+                            n_rows: n_out,
+                        }),
+                        ggml_type: GGMLType::F32,
+                        n_in,
+                        n_out,
+                    });
+                }
+            }
+        }
+    }
+    load_weight(source, name)
+}
+
 fn load_layer_weights<'a>(
     source: &'a dyn TensorSource,
     layer: usize,
@@ -648,7 +711,8 @@ fn load_layer_weights<'a>(
 ) -> Result<LayerWeights<'a>, String> {
     let names = LayerNames::new(layer, branch);
     let weight = |name: &str| -> Result<Weight<'a>, String> {
-        load_weight(source, name).ok_or_else(|| format!("Missing or unreadable tensor: {name}"))
+        load_weight_dispatch(source, name)
+            .ok_or_else(|| format!("Missing or unreadable tensor: {name}"))
     };
     let f32_values = |name: &str, width: usize| -> Result<Vec<f32>, String> {
         let values = load_weight_f32(source, name)

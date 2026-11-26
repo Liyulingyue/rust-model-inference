@@ -143,6 +143,27 @@ f32 rows just moves the same rounding one call deeper. `prepare_f32` is therefor
 a no-op for quantised weights (it stays useful for F32/F16 weights, where it is
 bit-exact against the quantised path).
 
+**Second correction (verified): weight-side dequant also came out bit-identical.**
+`RMI_DEQUANT_WEIGHTS=1` expands the ggml Q8_0 blocks to f32 at load and runs an
+owned F32 kernel (`QTensorOwned::F32`). Result: `prefix_l0_q` rel `1.958e-3`,
+`max_abs 2.287958e-03` -- **exactly** the same numbers as the quantised path and
+as the f32-activation attempt. Three different arithmetic configurations cannot
+plausibly agree to the last bit, so the switch is almost certainly **not taking
+effect** rather than the error living somewhere else; that is the thing to check
+next (`load_weight_dispatch` may not be the path `load_layer_weights` actually
+takes, or the env flag is read before it is set).
+
+The dequant path is also **unusably slow as written**: `load_layer_weights` runs
+inside `run_layer`, so every forward re-dequantises all 42 layers. A 1-step,
+cfg-1 prefix had not finished after 30 minutes. Any real parity mode needs the
+dequantised weights cached at load, not rebuilt per layer per call.
+
+**Cheaper next probe before writing more code:** compute `q_proj` in Python from
+the oracle's own bit-exact `prefix_l0_normed` and the GGUF Q8_0 weights
+dequantised in Python, then compare against the oracle's `prefix_l0_q`. If that
+does not match, the port's reading of the tensor (name, orientation, dequant
+layout) is wrong and no kernel change can fix it.
+
 **Real fix path:** dequantise the Q8_0 weights to f32 once at load and run an
 F32 kernel, i.e. a genuine "dequantised weights + f32 activations" mode, not just
 unquantised activations. That is a weight-side transform, not an activation-side
