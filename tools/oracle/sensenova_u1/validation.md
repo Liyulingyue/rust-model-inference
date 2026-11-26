@@ -133,6 +133,21 @@ difference by 4 every step, so the image collapses by step 3. Other models in
 this repo tolerate the same error because they are verified with error metrics,
 not by image parity against a torch oracle.
 
+**Correction (verified, this session): the f32-activation switch does NOT fix it.**
+`RMI_F32_ACTIVATIONS=1` was implemented and run against the real weights: the
+projection error is **bit-identical** to the quantised path
+(`prefix_l0_q` rel `1.958e-3`, `max_abs 2.287958e-03` both ways). The reason is
+that the Q8_0 kernel quantises the activation **inside** `Kernel::forward` — the
+llama.cpp `vec_dot_q8_0_q8_0` contract requires a Q8_0 activation, so handing it
+f32 rows just moves the same rounding one call deeper. `prepare_f32` is therefore
+a no-op for quantised weights (it stays useful for F32/F16 weights, where it is
+bit-exact against the quantised path).
+
+**Real fix path:** dequantise the Q8_0 weights to f32 once at load and run an
+F32 kernel, i.e. a genuine "dequantised weights + f32 activations" mode, not just
+unquantised activations. That is a weight-side transform, not an activation-side
+one.
+
 **Fix path:** give this model an f32-activation matmul. `Weight::matmul(&[f32])`
 already exists and runs the kernel with f32 activations (weights dequantized on
 the fly), and `QuantizedLinear::forward_dequant` does the same in `ops::linear`.
