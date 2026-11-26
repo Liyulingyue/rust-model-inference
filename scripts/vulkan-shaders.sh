@@ -44,6 +44,7 @@ shader_names=(
     bonsai_hadamard
     qwen35_dense_prepare
     qwen35_attention
+    qwen35_attention_online
     qwen35_recurrent_conv
     qwen35_recurrent_ssm
     qwen35_moe_route
@@ -152,10 +153,9 @@ check_hashes() {
 
 check_workgroup_limit() {
     local shader="$1" limit=64
-    # Optional DiT attention is gated on both device limits in Vulkan ops;
-    # keep the baseline shaders within the original 64x1x1 requirement.
+    # Optional attention kernels check device limits before dispatch.
     case "${shader##*/}" in
-        attention_scores_tiled.spv|attention_online.spv|attention_online_wide.spv) limit=256 ;;
+        attention_scores_tiled.spv|attention_online.spv|attention_online_wide.spv|qwen35_attention_online.spv) limit=256 ;;
     esac
     spirv-dis "$shader" -o - | awk -v shader="$shader" -v limit="$limit" '
         $1 == "OpExecutionMode" && $3 == "LocalSize" {

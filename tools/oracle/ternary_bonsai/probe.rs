@@ -3,7 +3,6 @@ use rust_model_inference::compute::ComputePolicy;
 use rust_model_inference::models::qwen35::Qwen35Session;
 use rust_model_inference::{
     qwen_text_positions, BPETokenizer, ComputePool, EncodeOptions, GGUFLoader, Qwen35Model,
-    TensorSource,
 };
 use std::{fs, io::Write, sync::Arc, time::Instant};
 

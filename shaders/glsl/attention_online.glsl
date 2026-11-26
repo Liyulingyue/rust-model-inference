@@ -10,6 +10,9 @@ layout(push_constant) uniform PC {
     // `window x window` block of the `grid`-wide patch grid matches its own,
     // which is the vit_merger's block-diagonal mask.
     uint window; uint grid;
+#ifdef ATTENTION_SIGMOID_GATE
+    uint gate_word;
+#endif
 } pc;
 shared float queries[8][128];
 // The extra column prevents every key lane from hitting the same shared bank.
@@ -104,8 +107,17 @@ void main() {
     if (query < pc.queries) {
         for (uint d = 0u; d < MAX_DIM / 32u; d++) {
             uint dimension = lane + 32u * d;
+#ifdef ATTENTION_SIGMOID_GATE
+            if (dimension < pc.dim) {
+                uint index = (query * pc.q_heads + head) * pc.dim + dimension;
+                float gate = uintBitsToFloat(arena.data[pc.gate_word + index]);
+                float value = out_value[d] / normalizer[q];
+                arena.data[pc.output_word + index] = floatBitsToUint(value / (1.0 + exp(-gate)));
+            }
+#else
             if (dimension < pc.dim) arena.data[pc.output_word + (query * pc.q_heads + head) * pc.dim + dimension]
                 = floatBitsToUint(out_value[d] / normalizer[q]);
+#endif
         }
     }
 }

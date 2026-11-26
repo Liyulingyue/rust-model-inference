@@ -1,6 +1,7 @@
 use super::ops::{
-    required_activation_contracts, ArenaRegion, ExpertSelection, GpuMatmulSpec, GpuWeightFormat,
-    MhcRegions, MhcShape, OperatorBindings, Qwen3Ops, TokenCommands,
+    require_qwen35_attention, required_activation_contracts, ArenaRegion, ExpertSelection,
+    GpuMatmulSpec, GpuWeightFormat, MhcRegions, MhcShape, OperatorBindings, Qwen3Ops,
+    TokenCommands,
 };
 use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
@@ -313,6 +314,7 @@ struct Qwen35ArenaLayout {
     q4_1_input_sums: ArenaRegion,
     q8k: ArenaRegion,
     q8k_scales: ArenaRegion,
+    dense_layers: usize,
     kv_k: ArenaRegion,
     kv_v: ArenaRegion,
     kv_delta_k: ArenaRegion,
@@ -359,6 +361,7 @@ impl Qwen35ArenaLayout {
         // The draft head has a KV cache of its own: it attends over the
         // committed and the drafted positions, not over the target's keys.
         let head_layers = usize::from(config.n_nextn > 0);
+        let dense_layers = config.is_recurrent.len() - recurrent_layers;
         let value_heads = config.ssm_dt_rank;
         let ffn_width = config
             .moe
@@ -419,8 +422,10 @@ impl Qwen35ArenaLayout {
                 0
             })
             .max(head_ffn);
-        let kv_cache =
-            qwen35_product("KV cache", &[layer_count + head_layers, capacity, dense_kv])?;
+        let kv_cache = qwen35_product(
+            "KV cache",
+            &[dense_layers + head_layers, capacity, dense_kv],
+        )?;
         let kv_delta = qwen35_product("KV delta", &[layer_count + head_layers, rows, dense_kv])?;
         let conv_state = qwen35_product(
             "convolution state",
@@ -633,6 +638,7 @@ impl Qwen35ArenaLayout {
             q4_1_input_sums,
             q8k,
             q8k_scales,
+            dense_layers,
             kv_k,
             kv_v,
             kv_delta_k,
@@ -989,7 +995,10 @@ impl Qwen35VulkanSession {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
         }
-        if let Err(reason) = validate_executor_shape(&model.config, capacity) {
+        if let Err(reason) = validate_executor_shape(&model.config, capacity).and_then(|_| {
+            require_qwen35_attention(context, capacity, model.config.n_embd_head())
+                .map_err(|err| err.to_string())
+        }) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
         }
@@ -1919,6 +1928,67 @@ impl Qwen35VulkanSession {
         )
     }
 
+    /// The device KV cache has one slot per dense visit and a final slot for
+    /// the draft head. Deltas keep their logical layer indices for the CPU shadow.
+    fn record_gated_attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        prepare: OperatorBindings,
+        cache_slot: usize,
+        logical_layer: usize,
+        position: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let c = &self.config;
+        let dim = c.n_embd_head();
+        let kv_row_bytes = qwen35_product("KV row bytes", &[c.n_head_kv, dim, 4])?;
+        let cache_offset =
+            qwen35_product("KV slot offset", &[cache_slot, self.capacity, kv_row_bytes])?;
+        let delta_offset = qwen35_product("KV delta offset", &[logical_layer, rows, kv_row_bytes])?;
+        let k = self.layout.kv_k.shifted(cache_offset);
+        let v = self.layout.kv_v.shifted(cache_offset);
+        self.ops.record_qwen35_dense_prepare(
+            commands,
+            prepare,
+            self.layout.raw_qkv,
+            self.layout.raw_k,
+            self.layout.v,
+            self.layout.q,
+            self.layout.z,
+            k,
+            v,
+            self.layout.kv_delta_k.shifted(delta_offset),
+            self.layout.kv_delta_v.shifted(delta_offset),
+            self.layout.rope,
+            0,
+            1,
+            position,
+            self.capacity,
+            c.n_head,
+            c.n_head_kv,
+            dim,
+            c.rope_dimension_count,
+            c.norm_eps,
+            rows,
+        )?;
+        self.ops.record_qwen35_attention(
+            commands,
+            self.layout.q,
+            self.layout.z,
+            k,
+            v,
+            self.layout.attn,
+            0,
+            1,
+            position,
+            self.capacity,
+            c.n_head,
+            c.n_head_kv,
+            dim,
+            rows,
+        )
+    }
+
     fn forward_chunk_inner(
         &mut self,
         input: &[f32],
@@ -2013,6 +2083,7 @@ impl Qwen35VulkanSession {
         // The recurrent layers in the order they run: the capture has one
         // slot for each of them.
         let mut recurrent_index = 0usize;
+        let mut dense_index = 0usize;
         for (layer_index, &physical) in self.plan.iter().enumerate() {
             let bindings = &self.layers[physical];
             let routed = self
@@ -2061,46 +2132,15 @@ impl Qwen35VulkanSession {
                         config.n_embd,
                         rows,
                     )?;
-                    self.ops.record_qwen35_dense_prepare(
+                    self.record_gated_attention(
                         &commands,
                         dense.prepare,
-                        self.layout.raw_qkv,
-                        self.layout.raw_k,
-                        self.layout.v,
-                        self.layout.q,
-                        self.layout.z,
-                        self.layout.kv_k,
-                        self.layout.kv_v,
-                        self.layout.kv_delta_k,
-                        self.layout.kv_delta_v,
-                        self.layout.rope,
+                        dense_index,
                         layer_index,
-                        layer_count,
                         cache_position,
-                        self.capacity,
-                        config.n_head,
-                        config.n_head_kv,
-                        head_dim,
-                        config.rope_dimension_count,
-                        config.norm_eps,
                         rows,
                     )?;
-                    self.ops.record_qwen35_attention(
-                        &commands,
-                        self.layout.q,
-                        self.layout.z,
-                        self.layout.kv_k,
-                        self.layout.kv_v,
-                        self.layout.attn,
-                        layer_index,
-                        layer_count,
-                        cache_position,
-                        self.capacity,
-                        config.n_head,
-                        config.n_head_kv,
-                        head_dim,
-                        rows,
-                    )?;
+                    dense_index += 1;
                     self.record_weights(
                         &commands,
                         dense.output,
@@ -2611,12 +2651,6 @@ impl Qwen35VulkanSession {
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
         let dense_raw_q = dense_q.checked_mul(2).ok_or(VulkanError::OutOfMemory)?;
-        let layer_count = config.n_layer_impl();
-        // The head has a KV cache of its own: it attends over the committed
-        // and the drafted positions, not over the target's keys. Its cache
-        // is the layer slot after the main stack.
-        let head_layer = layer_count;
-        let head_layer_count = layer_count + 1;
         let rope_dim = config.rope_dimension_count;
 
         self.ops.write_f32(self.layout.mtp_embed_in, embeddings)?;
@@ -2698,44 +2732,12 @@ impl Qwen35VulkanSession {
             n_embd,
             rows,
         )?;
-        self.ops.record_qwen35_dense_prepare(
+        self.record_gated_attention(
             &commands,
             mtp.prepare,
-            self.layout.raw_qkv,
-            self.layout.raw_k,
-            self.layout.v,
-            self.layout.q,
-            self.layout.z,
-            self.layout.kv_k,
-            self.layout.kv_v,
-            self.layout.kv_delta_k,
-            self.layout.kv_delta_v,
-            self.layout.rope,
-            head_layer,
-            head_layer_count,
+            self.layout.dense_layers,
+            config.n_layer_impl(),
             base_position,
-            self.capacity,
-            config.n_head,
-            config.n_head_kv,
-            head_dim,
-            rope_dim,
-            config.norm_eps,
-            rows,
-        )?;
-        self.ops.record_qwen35_attention(
-            &commands,
-            self.layout.q,
-            self.layout.z,
-            self.layout.kv_k,
-            self.layout.kv_v,
-            self.layout.attn,
-            head_layer,
-            head_layer_count,
-            base_position,
-            self.capacity,
-            config.n_head,
-            config.n_head_kv,
-            head_dim,
             rows,
         )?;
         self.record_weights(
@@ -3385,11 +3387,6 @@ fn validate_executor_shape(config: &Qwen35Config, capacity: usize) -> Result<(),
         return Err(format!(
             "session capacity {capacity} must be within 1..={}",
             config.n_ctx
-        ));
-    }
-    if capacity > 4096 {
-        return Err(format!(
-            "capacity {capacity} exceeds attention shader limit 4096"
         ));
     }
     if layer_count == 0
@@ -4447,10 +4444,12 @@ mod tests {
         let capacity = 7;
         let layout = Qwen35ArenaLayout::new(&config, capacity).unwrap();
 
-        // The draft head has a KV cache of its own: the layer slot after the
-        // main stack.
-        assert_eq!(layout.kv_k.size, 3 * capacity * 4 * 4);
-        assert_eq!(layout.kv_v.size, 3 * capacity * 4 * 4);
+        // One dense target visit plus the draft head. Deltas retain all
+        // three logical positions expected by the host shadow.
+        assert_eq!(layout.dense_layers, 1);
+        assert_eq!(layout.kv_k.size, 2 * capacity * 4 * 4);
+        assert_eq!(layout.kv_v.size, layout.kv_k.size);
+        assert_eq!(layout.kv_delta_k.size, 3 * 4 * 4);
         assert_eq!(layout.conv_state.size, 2 * 2 * 16 * 4);
         assert_eq!(layout.ssm_state.size, 2 * 2 * 4 * 4 * 4);
         // The quantized activation buffer holds the widest row of the

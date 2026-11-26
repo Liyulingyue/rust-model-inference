@@ -116,6 +116,10 @@ const MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/moe_reduce.sp
 const QWEN35_DENSE_PREPARE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_dense_prepare.spv");
 const QWEN35_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_attention.spv");
+const QWEN35_ATTENTION_ONLINE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qwen35_attention_online.spv");
+// Number of scores held in workgroup memory by qwen35_attention.comp.
+const QWEN35_SHARED_SCORES: usize = 4096;
 const QWEN35_RECURRENT_CONV_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_conv.spv");
 const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
@@ -302,6 +306,7 @@ const IQ1_M_MATMUL: usize = 82;
 const Q2_K_MATMUL: usize = 83;
 const Q3_K_MATMUL: usize = 84;
 const Q4_0_MATVEC_DP4A: usize = 85;
+const QWEN35_ATTENTION_ONLINE: usize = 86;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -347,6 +352,22 @@ fn require_online_attention(context: &VulkanContext) -> Result<(), VulkanError> 
         ));
     }
     Ok(())
+}
+
+pub(super) fn require_qwen35_attention(
+    context: &VulkanContext,
+    length: usize,
+    head_dim: usize,
+) -> Result<(), VulkanError> {
+    if length <= QWEN35_SHARED_SCORES {
+        return Ok(());
+    }
+    if head_dim > 1024 {
+        return Err(VulkanError::UnsupportedShape(format!(
+            "Qwen3.5 online attention supports head dimensions up to 1024, got {head_dim}"
+        )));
+    }
+    require_online_attention(context)
 }
 
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
@@ -467,6 +488,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q2_k_matmul",
     "q3_k_matmul",
     "q4_0_matvec_dp4a",
+    "qwen35_attention_online",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -592,7 +614,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 86] = [
+const OPERATOR_SHADERS: [&[u8]; 87] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -679,6 +701,7 @@ const OPERATOR_SHADERS: [&[u8]; 86] = [
     Q2_K_MATMUL_SHADER,
     Q3_K_MATMUL_SHADER,
     Q4_0_MATVEC_DP4A_SHADER,
+    QWEN35_ATTENTION_ONLINE_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -3256,7 +3279,11 @@ mod video_gpu_tests {
         let mut context = Box::new(VulkanContext::new().unwrap());
         context.limits.max_compute_shared_memory_size = 27 * 1024;
         assert!(require_online_attention(&context).is_ok());
+        assert!(require_qwen35_attention(&context, 8192, 256).is_ok());
+        assert!(require_qwen35_attention(&context, 8192, 1025).is_err());
         context.limits.max_compute_shared_memory_size = 16 * 1024 + 256;
+        assert!(require_qwen35_attention(&context, 4096, 256).is_ok());
+        assert!(require_qwen35_attention(&context, 4097, 256).is_err());
         let context = Box::leak(context);
         assert!(matches!(
             AttentionRuntime::new(context, (128, 128)),
@@ -3868,11 +3895,12 @@ pub(crate) fn build_operator_pipelines(
                 // dispatching this placeholder with a tiled grid.
                 Q8_MATMUL_GROUPED_SHADER
             } else if (index == ATTENTION_SCORES_TILED && require_tiled_attention(context).is_err())
-                || (matches!(index, ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE)
-                    && require_online_attention(context).is_err())
+                || (matches!(
+                    index,
+                    ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE | QWEN35_ATTENTION_ONLINE
+                ) && require_online_attention(context).is_err())
             {
-                // Keep ordinary Qwen operators available on baseline
-                // devices; DiT rejects this slot before recording it.
+                // Callers check the device limits before recording these slots.
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
@@ -6790,11 +6818,6 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
         )?;
-        if capacity > 4096 {
-            return Err(VulkanError::UnsupportedShape(format!(
-                "Qwen3.5 Vulkan capacity {capacity} exceeds attention shader limit 4096"
-            )));
-        }
         let q_count = q_heads
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -6805,24 +6828,54 @@ impl<'a> Qwen3Ops<'a> {
             .checked_mul(capacity)
             .and_then(|count| count.checked_mul(kv_count))
             .ok_or(VulkanError::OutOfMemory)?;
+        let elements = q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?;
+        let q_word = self.f32_word(q, elements, "Qwen3.5 attention Q")?;
+        let gate_word = self.f32_word(gate, elements, "Qwen3.5 attention gate")?;
+        let k_word = self.f32_word(cache_k, cache_count, "Qwen3.5 attention K cache")?;
+        let v_word = self.f32_word(cache_v, cache_count, "Qwen3.5 attention V cache")?;
+        let out_word = self.f32_word(output, elements, "Qwen3.5 attention output")?;
+        if sequence_length > QWEN35_SHARED_SCORES {
+            require_qwen35_attention(self.context, sequence_length, head_dim)?;
+            let layer_offset = as_u32(
+                product("Qwen3.5 KV layer offset", &[layer, capacity, kv_count])?,
+                "Qwen3.5 KV layer offset",
+            )?;
+            let push = [
+                q_word,
+                k_word
+                    .checked_add(layer_offset)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                v_word
+                    .checked_add(layer_offset)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                out_word,
+                as_u32(rows, "Qwen3.5 attention queries")?,
+                as_u32(sequence_length, "Qwen3.5 attention keys")?,
+                as_u32(q_heads, "Qwen3.5 attention Q heads")?,
+                as_u32(kv_heads, "Qwen3.5 attention KV heads")?,
+                as_u32(head_dim, "Qwen3.5 attention dimension")?,
+                (1.0 / (head_dim as f32).sqrt()).to_bits(),
+                1, // causal
+                0, // full attention window
+                1, // unused spatial grid width
+                gate_word,
+            ];
+            let grid = row_dispatch(rows.div_ceil(8), q_heads, &self.context.limits)?;
+            self.record_linear_dispatch(
+                commands,
+                QWEN35_ATTENTION_ONLINE,
+                self.arena_bindings,
+                &push,
+                grid,
+            );
+            return Ok(());
+        }
         let push = [
-            self.f32_word(
-                q,
-                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
-                "Qwen3.5 attention Q",
-            )?,
-            self.f32_word(
-                gate,
-                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
-                "Qwen3.5 attention gate",
-            )?,
-            self.f32_word(cache_k, cache_count, "Qwen3.5 attention K cache")?,
-            self.f32_word(cache_v, cache_count, "Qwen3.5 attention V cache")?,
-            self.f32_word(
-                output,
-                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
-                "Qwen3.5 attention output",
-            )?,
+            q_word,
+            gate_word,
+            k_word,
+            v_word,
+            out_word,
             as_u32(layer, "Qwen3.5 attention layer")?,
             as_u32(base_position, "Qwen3.5 attention base position")?,
             as_u32(capacity, "Qwen3.5 attention capacity")?,
@@ -11447,6 +11500,11 @@ mod tests {
                 "q4_0_matvec_dp4a",
                 Q4_0_MATVEC_DP4A_SHADER,
             ),
+            (
+                QWEN35_ATTENTION_ONLINE,
+                "qwen35_attention_online",
+                QWEN35_ATTENTION_ONLINE_SHADER,
+            ),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
@@ -12014,15 +12072,91 @@ mod tests {
         super::check_quantize_tie_even(&context).unwrap();
     }
 
-    /// The tiled Q4_0 kernel has to be the per-row kernel's, bit for bit.
-    ///
-    /// The per-row kernel reads the weight once per (output column, token
-    /// row) pair and multiplies the four-bit values one at a time; the
-    /// tiled one reads it once per (output column, k-block) and uses the
-    /// packed dot product. The arithmetic is the same, so the results have
-    /// to be the same: the integer sum of the 32 products is exact, and
-    /// the float part keeps the per-row kernel's order, (sum * weight
-    /// scale) * activation scale, added per block.
+    #[test]
+    #[ignore = "requires a Vulkan device with online attention support"]
+    fn qwen35_online_attention_respects_cache_layer_causal_rows_and_gate() {
+        use super::*;
+
+        const DIM: usize = 256;
+        const HEADS: usize = 4;
+        const KV_HEADS: usize = 2;
+        const PREFIX: usize = 4096;
+        const ROWS: usize = 3;
+        const CAPACITY: usize = PREFIX + 16;
+        const Q_LEN: usize = ROWS * HEADS * DIM;
+        const CACHE_LEN: usize = 2 * CAPACITY * KV_HEADS * DIM;
+        let mut cursor = 0;
+        let q = f32_region(&mut cursor, Q_LEN).unwrap();
+        let gate = f32_region(&mut cursor, Q_LEN).unwrap();
+        let k = f32_region(&mut cursor, CACHE_LEN).unwrap();
+        let v = f32_region(&mut cursor, CACHE_LEN).unwrap();
+        let output = f32_region(&mut cursor, Q_LEN).unwrap();
+        let context = VulkanContext::new().unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        let mut queries = vec![0.0; Q_LEN];
+        for head in queries.chunks_exact_mut(DIM) {
+            head[0] = (DIM as f32).sqrt();
+        }
+        let gates: Vec<f32> = (0..Q_LEN).map(|i| (i % 3) as f32 - 1.0).collect();
+        let mut keys = vec![0.0; CACHE_LEN];
+        let mut values = vec![-123.0; CACHE_LEN];
+        // Layer one has a constant prefix and two high-scoring suffix tokens.
+        // Each new query can see one more token. The common score of 1000
+        // also checks that the tile normalizer subtracts its running maximum.
+        for token in 0..PREFIX + 2 {
+            let (extra_score, extra_value) = match token {
+                PREFIX => (8.0, 8.0),
+                t if t == PREFIX + 1 => (9.0, -3.0),
+                _ => (0.0, 0.0),
+            };
+            for head in 0..KV_HEADS {
+                let base = ((CAPACITY + token) * KV_HEADS + head) * DIM;
+                keys[base] = 1000.0 + extra_score;
+                for (i, value) in values[base..base + DIM].iter_mut().enumerate() {
+                    *value = head as f32 + (i % 11) as f32 / 16.0 + extra_value;
+                }
+            }
+        }
+        for (region, data) in [(q, &queries), (gate, &gates), (k, &keys), (v, &values)] {
+            ops.write_f32(region, data).unwrap();
+        }
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_qwen35_attention(
+            &commands,
+            q,
+            gate,
+            k,
+            v,
+            output,
+            1,
+            2,
+            PREFIX - 1,
+            CAPACITY,
+            HEADS,
+            KV_HEADS,
+            DIM,
+            ROWS,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        let mut actual = vec![0.0; Q_LEN];
+        ops.read_f32_into(output, &mut actual).unwrap();
+        for (i, &value) in actual.iter().enumerate() {
+            let row = i / (HEADS * DIM);
+            let kv_head = (i / DIM % HEADS) / (HEADS / KV_HEADS);
+            let w1 = if row >= 1 { 8f64.exp() } else { 0.0 };
+            let w2 = if row >= 2 { 9f64.exp() } else { 0.0 };
+            let mean = kv_head as f64
+                + ((i % DIM) % 11) as f64 / 16.0
+                + (8.0 * w1 - 3.0 * w2) / (PREFIX as f64 + w1 + w2);
+            let expected = mean / (1.0 + (-f64::from(gates[i])).exp());
+            assert!(
+                (f64::from(value) - expected).abs() < 2e-4,
+                "output {i}: {value}, expected {expected}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn vulkan_q4_0_matvec_and_tiled_prefill_match_the_scalar_shader() {
