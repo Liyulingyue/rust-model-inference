@@ -251,10 +251,23 @@ committed fixtures measure: detector `prob` max abs 1.85e-2 (gate 3e-2), router 
 when two classes are nearly tied, while `ids` is what reaches the text). The F32 fixture gates
 above are not applied to the Q8_0 file.
 
-**Performance, same host** (`--threads 4`, wall clock including process start and GGUF
-load): 3.40 s for `receipt.png`, 4.84 s for `two_column.png`, 3.07 s for `sideways.png`
-(two detector passes), 2.65 s for `receipt.png` on Q8_0. `--threads 1` is 10.36 s and
-`--threads 8` is 1.48 s on the same page, i.e. the convolutions scale ~7x over eight
-threads. No same-host reference baseline was obtained: the LiteParse + ONNX Runtime oracle
-could not be built on this machine (crates.io download timeouts), so the CPU-versus-
-reference comparison is **not run** rather than borrowed from another host.
+**Performance, same host** (Linux x86_64, 128 cores, no GPU; `release-fast`; wall clock
+from a cold process to the finished JSON, so model load is included on both sides):
+
+| page | Rust `--threads 4` | Rust `--threads 16` | LiteParse + ONNX Runtime |
+| --- | ---: | ---: | ---: |
+| `receipt.png` (19 lines) | 5.67 s | 2.00 s | 0.17 s |
+| `two_column.png` (25 lines) | 9.74 s | 4.12 s | 0.15 s |
+| `sideways.png` (17 lines, two detector passes) | 7.28 s | 2.78 s | 0.20 s |
+
+On the macOS host (Apple M3 Max, `--threads 4`) the same three pages take 3.40 / 4.84 /
+3.07 s, `--threads 1` 10.36 s and `--threads 8` 1.48 s for `receipt.png`; Q8_0 is 2.65 s.
+The convolutions scale ~7x over eight threads.
+
+The 12-27x gap to ONNX Runtime is attributed, not unexplained: `ops::nn::conv3d_cpu`
+reduces a 1x1 pointwise convolution to one `dot_f32` of length 1 per input channel (and a
+depthwise 3x3 to nine dots of length 3), so per-element call overhead dominates, while ONNX
+Runtime runs NCHWc-packed specialized pointwise/depthwise kernels. Fixing it means adding
+those paths to the shared `src/ops/nn.rs`, which every convolution caller in the repository
+depends on; that is a separate change with its own caller-by-caller regression matrix, so it
+is recorded here as the follow-up rather than folded into this adaptation.
