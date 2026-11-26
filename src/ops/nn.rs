@@ -1551,6 +1551,128 @@ fn conv3d_cpu(
     output_shape: [usize; 4],
     spec: Conv3dSpec,
 ) {
+    if let Some(()) = conv3d_pointwise(
+        pool,
+        input,
+        weight,
+        bias,
+        output,
+        input_shape,
+        weight_shape,
+        spec,
+    ) {
+        return;
+    }
+    conv3d_generic_cpu(
+        pool,
+        input,
+        weight,
+        bias,
+        output,
+        input_shape,
+        weight_shape,
+        output_shape,
+        spec,
+    );
+}
+
+/// A 1x1 convolution (no padding, unit stride and dilation, one input plane)
+/// as one rank-1 accumulation per output channel.
+///
+/// The generic kernel reduces a 1x1 convolution to a `dot_f32` of length one per
+/// input channel, so the per-call overhead of the dot dominates a single
+/// multiply-add; this walks the pixel plane once per (output channel, input
+/// channel) pair instead, which vectorises over the contiguous plane. The
+/// accumulation order is the generic kernel's -- channel by channel, starting
+/// from the bias (or from zero and adding the bias last under the scalar
+/// dispatch) -- so the two produce the same bits; `conv3d_pointwise_matches_generic`
+/// asserts that on random tensors.
+fn conv3d_pointwise(
+    pool: &ComputePool,
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    spec: Conv3dSpec,
+) -> Option<()> {
+    let [input_channels, depth, height, width] = input_shape;
+    let [output_channels, weight_channels, kernel_depth, kernel_height, kernel_width] =
+        weight_shape;
+    if depth != 1
+        || kernel_depth != 1
+        || kernel_height != 1
+        || kernel_width != 1
+        || spec.stride != [1, 1, 1]
+        || spec.dilation != [1, 1, 1]
+        || spec.padding != [0, 0, 0]
+        || spec.groups == 0
+        || input_channels != weight_channels * spec.groups
+        || output_channels % spec.groups != 0
+    {
+        return None;
+    }
+    let plane = height * width;
+    if plane == 0
+        || input.len() != input_channels * plane
+        || weight.len() != output_channels * weight_channels
+        || output.len() != output_channels * plane
+    {
+        return None;
+    }
+    let output_per_group = output_channels / spec.groups;
+    let strict = crate::ops::scalar_mode();
+    // `compute` takes an `Fn`, so the workers write through the base pointer the
+    // way the generic kernel does; every worker owns a disjoint set of output
+    // channel planes, which is the partitioning its safety contract asks for.
+    let output_address = output.as_mut_ptr() as usize;
+    pool.compute(|thread, threads| {
+        for out_channel in (thread..output_channels).step_by(threads) {
+            let group = out_channel / output_per_group;
+            let row = &weight[out_channel * weight_channels..(out_channel + 1) * weight_channels];
+            // SAFETY: `out_channel` is unique to this worker, so the plane
+            // cannot alias another worker's writes.
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (output_address as *mut f32).add(out_channel * plane),
+                    plane,
+                )
+            };
+            match bias {
+                Some(bias) if !strict => dst.fill(bias[out_channel]),
+                _ => dst.fill(0.0),
+            }
+            for (channel, &w) in row.iter().enumerate() {
+                let base = (group * weight_channels + channel) * plane;
+                let src = &input[base..base + plane];
+                for (value, &pixel) in dst.iter_mut().zip(src) {
+                    *value += w * pixel;
+                }
+            }
+            if let (Some(bias), true) = (bias, strict) {
+                let b = bias[out_channel];
+                for value in dst.iter_mut() {
+                    *value += b;
+                }
+            }
+        }
+    });
+    Some(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn conv3d_generic_cpu(
+    pool: &ComputePool,
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    input_shape: [usize; 4],
+    weight_shape: [usize; 5],
+    output_shape: [usize; 4],
+    spec: Conv3dSpec,
+) {
     let [_, depth, height, width] = input_shape;
     let [output_channels, weight_channels, kernel_depth, kernel_height, kernel_width] =
         weight_shape;
@@ -2324,5 +2446,72 @@ mod tests {
         .unwrap();
         assert_eq!(shape, [1, 1, 1, 4]);
         assert_eq!(output, [10.0, 102.0, 20.0, 200.0]);
+    }
+
+    /// The 1x1 fast path has to be the generic kernel's arithmetic, not just
+    /// close to it: same accumulation order, so the same bits. A change that
+    /// reorders the channel loop would still be "correct" numerically and would
+    /// silently move every convolution caller in the repository.
+    #[test]
+    fn conv3d_pointwise_matches_generic() {
+        let pool = ComputePool::new(2);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 11) as f32 / (1u64 << 53) as f32) - 0.5
+        };
+        for &(channels, out_channels, height, width, groups) in &[
+            (16usize, 24usize, 5usize, 7usize, 1usize),
+            (192, 192, 3, 4, 1),
+            (8, 4, 1, 1, 2),
+            (1, 1, 2, 2, 1),
+        ] {
+            let in_per_group = channels / groups;
+            let input: Vec<f32> = (0..channels * height * width).map(|_| next()).collect();
+            let weight: Vec<f32> = (0..out_channels * in_per_group).map(|_| next()).collect();
+            let bias: Vec<f32> = (0..out_channels).map(|_| next()).collect();
+            let spec = Conv3dSpec {
+                stride: [1, 1, 1],
+                padding: [0, 0, 0],
+                dilation: [1, 1, 1],
+                groups,
+            };
+            let shape = [channels, 1, height, width];
+            let weight_shape = [out_channels, in_per_group, 1, 1, 1];
+            let output_shape = [out_channels, 1, height, width];
+            let mut fast = vec![0f32; out_channels * height * width];
+            let mut generic = vec![0f32; out_channels * height * width];
+            conv3d_pointwise(
+                &pool,
+                &input,
+                &weight,
+                Some(&bias),
+                &mut fast,
+                shape,
+                weight_shape,
+                spec,
+            )
+            .expect("the shape qualifies for the fast path");
+            conv3d_generic_cpu(
+                &pool,
+                &input,
+                &weight,
+                Some(&bias),
+                &mut generic,
+                shape,
+                weight_shape,
+                output_shape,
+                spec,
+            );
+            for (index, (a, b)) in fast.iter().zip(&generic).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "channel {index} differs: {a} vs {b} ({channels}x{height}x{width}, {out_channels} out, groups {groups})"
+                );
+            }
+        }
     }
 }

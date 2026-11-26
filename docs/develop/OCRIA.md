@@ -106,25 +106,34 @@ ONNX Runtime 1.32.0 CPU，`intra_op_num_threads=1`。
 
 ## 性能
 
-同一台机器（Linux x86_64，128 核，无 GPU；`release-fast`）上冷进程到出结果，含模型加载：
+`ops::nn` 的 1×1 快速路径上线后重测。同一台机器、同一组权重、冷进程到出结果：
 
-| 输入 | 行数 | Rust `--threads 4` | Rust `--threads 16` | LiteParse + ONNX Runtime |
-| --- | ---: | ---: | ---: | ---: |
-| `receipt.png`（600×800，单列） | 19 | 5.67 s | 2.00 s | 0.17 s |
-| `two_column.png`（600×800，双列） | 25 | 9.74 s | 4.12 s | 0.15 s |
-| `sideways.png`（800×600，侧转，两次检测） | 17 | 7.28 s | 2.78 s | 0.20 s |
+**Apple M3 Max（16 核，macOS 27.2，`release-fast`）**：
 
-**差距 12–27 倍，归因明确**：瓶颈是共享算子 `ops::nn::conv3d_cpu`。它对 1×1 逐点卷积走的是
-「每个输入通道一次长度为 1 的 `dot_f32`」——`kernel_width = 1` 时内层点积退化成标量乘法，
-192 个通道就是 192 次函数调用；深度可分离 3×3 同理是 9 次长度为 3 的点积。ONNX Runtime 用
-NCHWc 打包 + 专用 depthwise/pointwise 内核，所以差一个数量级。
+| 输入 | 优化前 `--threads 4` | 优化后 `--threads 1` / `4` / `8` |
+| --- | ---: | ---: |
+| `receipt.png`（19 行） | 3.40 s | 0.51 / **0.17** / 0.14 s |
 
-这不是本模型代码能局部修的：正确修法是在 `src/ops/nn.rs` 里加 1×1 与 depthwise 的专用路径
-（NHWC 打包后按通道做连续点积），属于共享算子改动，会影响 audio8、unlimited_ocr、mage_vae、
-Gemma 视觉塔等所有调用方，需要各自的回归证据，因此不在本 PR 内。记录在
-[validation.md](../../tools/oracle/ocria/validation.md) 的性能一节。
+同机前后 **20 倍**（4 线程）。
 
-参考基线不是硬门槛，但差距必须归因到具体算子——上面就是那个算子。
+**Linux x86_64（128 核，共享机，`release-fast`）**：
+
+| 输入 | 优化前 `--threads 4` | 优化后 `--threads 4` |
+| --- | ---: | ---: |
+| `receipt.png` | 5.67 s | **1.04 s** |
+| `two_column.png` | 9.74 s | **1.39 s** |
+| `sideways.png` | 7.28 s | **1.11 s** |
+
+**根因与修法**：`ops::nn::conv3d_cpu` 把 1×1 逐点卷积退化成"每个输入通道一次长度为 1 的
+`dot_f32`"，每次调用只做一次乘加，开销全在调用与下标计算上。新增的 `conv3d_pointwise`
+把同一件事写成"每个输出通道、每个输入通道一次沿像素平面的 rank-1 累加"：内层是对连续
+内存的乘加，能向量化。**累加顺序与通用内核逐位一致**（通道从小到大、bias 先加；标量
+dispatch 下 bias 最后加），`ops::nn::tests::conv3d_pointwise_matches_generic` 在四组形状
+（含 groups=2、1×1 空间）上用 `to_bits()` 断言两者相同，`RMI_SCALAR=1` 也跑过。因此这是
+一次纯性能改动：仓库里所有卷积调用方的输出不变。
+
+深度可分离 3×3 仍走通用内核（9 次长度为 3 的点积），是下一个可优化点；1×1 之后它成了
+主要开销。
 
 ## 分层交付：第二层已合入
 
