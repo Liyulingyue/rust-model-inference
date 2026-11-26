@@ -106,6 +106,41 @@ scalar `expf` softmax instead of the x86 `exp_approx_avx2` path) gives
 `psnr 7.83 dB` again — identical to 2 decimals. So the gap is not the
 approximate exponential, not reduction order, and not f32 rounding.
 
+### Root cause (this session): activation quantization, not a porting bug
+
+Bisecting the *prefix* (understanding) branch layer 0 — where there is no prefix
+cache, a plain causal mask, and the input is provably exact — pins it down:
+
+| point | corr | rel |
+| --- | --- | --- |
+| `prefix_embed` (embed_tokens output) | **1.00000000** | 0 |
+| `prefix_l0_normed` (input_layernorm) | **1.00000000** | 7.97e-8 |
+| `prefix_l0_q` (q_proj output) | 0.99999654 | **1.96e-3** |
+| `prefix_l0_k` (k_proj output) | 0.99999721 | 9.43e-4 |
+| `prefix_l0_v` (v_proj output) | 0.99998262 | 1.12e-3 |
+
+Embedding lookup and RMSNorm are **bit-exact**; the error appears exactly at the
+first projection. The port multiplies through `PreparedRows`
+(`Weight::quantize_and_matmul_with_scratch`), which **quantizes the activation to
+Q8_0** before the matmul — the llama.cpp-style fast path. The oracle dequantizes
+the Q8_0 weights and multiplies by **f32 activations**. A Q8_0 activation has
+~1/256 resolution, so ~1e-3 relative error per projection is expected and
+matches the measurement.
+
+That ~1e-3/layer is not a bug, but it is fatal here: 42 layers carry it to
+~1e-2, and the 4-step flow loop with `cfg_scale = 4.0` multiplies the branch
+difference by 4 every step, so the image collapses by step 3. Other models in
+this repo tolerate the same error because they are verified with error metrics,
+not by image parity against a torch oracle.
+
+**Fix path:** give this model an f32-activation matmul. `Weight::matmul(&[f32])`
+already exists and runs the kernel with f32 activations (weights dequantized on
+the fly), and `QuantizedLinear::forward_dequant` does the same in `ops::linear`.
+The contained change is inside `PreparedRows` in `trunk.rs`: add a passthrough
+mode that skips `quantize_q8_0_into` and calls `Weight::matmul` per row, selected
+by a parity flag. That trades speed for oracle parity; the fast quantized path
+should stay the default.
+
 **Next step (narrowed):** the first layer's *understanding* branch is the
 cheapest place to bisect further, because it is the same code with a causal mask
 and no prefix. Compare, at layer 0 of the prefix forward: `input_layernorm`

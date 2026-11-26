@@ -151,6 +151,9 @@ impl Trunk {
             len: rows,
             layers: Vec::with_capacity(dims.layers),
         };
+        if super::sampler::tracing() {
+            super::sampler::trace_dump("prefix_embed", &scratch.x[..rows * dims.hidden]);
+        }
         for layer in 0..dims.layers {
             let run = LayerRun {
                 branch: Branch::Und,
@@ -714,6 +717,9 @@ impl Trunk {
             normed_row.copy_from_slice(x_row);
             rms_norm_inplace(normed_row, &weights.input_norm, dims.eps);
         }
+        if layer == 0 && matches!(run.branch, Branch::Und) && super::sampler::tracing() {
+            super::sampler::trace_dump("prefix_l0_normed", &scratch.normed[..rows * dims.hidden]);
+        }
         scratch
             .prepared
             .prepare(
@@ -736,6 +742,12 @@ impl Trunk {
                 pool,
             )
             .map_err(|error| context(&error))?;
+
+        if layer == 0 && matches!(run.branch, Branch::Und) && super::sampler::tracing() {
+            super::sampler::trace_dump("prefix_l0_q", &scratch.q[..rows * dims.q_dim()]);
+            super::sampler::trace_dump("prefix_l0_k", &scratch.k[..rows * dims.kv_dim()]);
+            super::sampler::trace_dump("prefix_l0_v", &scratch.v[..rows * dims.kv_dim()]);
+        }
 
         // Per-head RMSNorm on the 64-wide t half and the 64-wide hw half
         // *before* the h/w split, then the three-segment rotation.
@@ -762,6 +774,11 @@ impl Trunk {
             &mut scratch.sin,
         );
 
+        if layer == 0 && matches!(run.branch, Branch::Und) && super::sampler::tracing() {
+            super::sampler::trace_dump("prefix_l0_q_rope", &scratch.q[..rows * dims.q_dim()]);
+            super::sampler::trace_dump("prefix_l0_k_rope", &scratch.k[..rows * dims.kv_dim()]);
+        }
+
         attend(
             &scratch.q,
             &scratch.k,
@@ -774,6 +791,9 @@ impl Trunk {
             pool,
         );
 
+        if layer == 0 && matches!(run.branch, Branch::Und) && super::sampler::tracing() {
+            super::sampler::trace_dump("prefix_l0_attn", &scratch.attn[..rows * dims.q_dim()]);
+        }
         scratch
             .prepared
             .prepare(&scratch.attn, rows, dims.q_dim(), meta.o_q8, meta.o_q8k)

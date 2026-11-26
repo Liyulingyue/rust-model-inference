@@ -1471,15 +1471,6 @@ pub fn run_sensenova_u1_cli(
                 .into(),
         );
     }
-    // There is no Vulkan path for this model yet. Reject the strict mode
-    // instead of silently running on the CPU.
-    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
-        return Err(
-            "SenseNova-U1.6 has no Vulkan kernels yet; --compute vulkan is not available \
-             (use --compute cpu or auto)"
-                .into(),
-        );
-    }
 
     // The tokenizer files ship next to the weights in the ModelScope repo, so
     // the directory holding `--model` is the tokenizer directory. (`--components`
@@ -1531,6 +1522,11 @@ pub fn run_sensenova_u1_cli(
     }
 
     crate::app::init_rayon_global_pool(n_threads);
+    // Device dispatch rides on the shared `Weight` kernels: with the `vulkan`
+    // feature on, `Weight::from_quantized` wraps every linear in a
+    // `VulkanKernel`, so `auto` offloads the projections and falls back to the
+    // CPU for the rest. `cpu` keeps everything on the host, `vulkan` is strict.
+    let _compute_scope = options.compute_policy().enter_legacy_scope();
     let pipeline = SensenovaU1Pipeline::load(source, components, n_threads)?;
     let image_options = SensenovaOptions {
         width,
