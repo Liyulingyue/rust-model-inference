@@ -2562,7 +2562,7 @@ fn decode_image_to_tempfile(image_url: &str) -> Result<std::path::PathBuf, Strin
     Ok(tmp)
 }
 
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+pub(super) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     base64::engine::general_purpose::STANDARD

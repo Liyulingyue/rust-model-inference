@@ -1,0 +1,199 @@
+{
+  "note": "Inputs are the post-preprocessing network tensors, not raw pixels. `ids`/`conf` (and `group`/`flip` logits) are ONNX Runtime's output of the pinned graph. `rec.latin` is the one ONNX-Runtime-quantized graph: its `ids_f32`/`conf_f32` come from the equivalent F32 graph the Rust implementation must reproduce exactly, while `ids`/`conf` are the official runtime's answer; `latin_qdq_effect.json` records the difference.",
+  "onnx_sha256": {
+    "det.onnx": "70ea641d74c4d7d3acb734002cc1507350d8350ad44aeedc6f8ac6017dbcff7a",
+    "router.onnx": "daccb2e3ce3891b7cb95037ada3861e05fd288d7678d2a1e662d9483e04dd361",
+    "rec_latin.onnx": "7ac8f6815b4b127f244c14f86c51f65224c82e022c1ee71f867f2be955be4da4",
+    "rec_cjk.onnx": "ad7154b54a549dbfead48dd49142bcc76ee168cb0cd874f6efacab543f0b9262",
+    "rec_rtl.onnx": "9ccee36bb07b81ef310c6b50e707adabe8c6b92caea61105213686ea8977f4cf",
+    "rec_world.onnx": "c57d01a945d741886d356bdedc636f0572d0810c6a7c2f26dbb9ce0466b92220"
+  },
+  "det": [
+    {
+      "name": "lines",
+      "height": 256,
+      "width": 256,
+      "input": "det_lines_input.f32",
+      "prob": "det_lines_prob.f32"
+    },
+    {
+      "name": "narrow",
+      "height": 96,
+      "width": 160,
+      "input": "det_narrow_input.f32",
+      "prob": "det_narrow_prob.f32"
+    }
+  ],
+  "router": [
+    {
+      "name": "latin",
+      "count": 2,
+      "input": "router_latin_input.f32",
+      "group_logits": "router_latin_group.f32",
+      "flip_logits": "router_latin_flip.f32"
+    },
+    {
+      "name": "cjk",
+      "count": 2,
+      "input": "router_cjk_input.f32",
+      "group_logits": "router_cjk_group.f32",
+      "flip_logits": "router_cjk_flip.f32"
+    }
+  ],
+  "rec": {
+    "latin": [
+      {
+        "name": "w64",
+        "count": 1,
+        "width": 64,
+        "input": "rec_latin_w64_input.f32",
+        "ids": "rec_latin_w64_ids.i64",
+        "conf": "rec_latin_w64_conf.f32",
+        "ids_f32": "rec_latin_w64_ids_f32.i64",
+        "conf_f32": "rec_latin_w64_conf_f32.f32"
+      },
+      {
+        "name": "w256",
+        "count": 1,
+        "width": 256,
+        "input": "rec_latin_w256_input.f32",
+        "ids": "rec_latin_w256_ids.i64",
+        "conf": "rec_latin_w256_conf.f32",
+        "ids_f32": "rec_latin_w256_ids_f32.i64",
+        "conf_f32": "rec_latin_w256_conf_f32.f32"
+      },
+      {
+        "name": "w384",
+        "count": 1,
+        "width": 384,
+        "input": "rec_latin_w384_input.f32",
+        "ids": "rec_latin_w384_ids.i64",
+        "conf": "rec_latin_w384_conf.f32",
+        "ids_f32": "rec_latin_w384_ids_f32.i64",
+        "conf_f32": "rec_latin_w384_conf_f32.f32"
+      },
+      {
+        "name": "w512",
+        "count": 1,
+        "width": 512,
+        "input": "rec_latin_w512_input.f32",
+        "ids": "rec_latin_w512_ids.i64",
+        "conf": "rec_latin_w512_conf.f32",
+        "ids_f32": "rec_latin_w512_ids_f32.i64",
+        "conf_f32": "rec_latin_w512_conf_f32.f32"
+      }
+    ],
+    "cjk": [
+      {
+        "name": "w64",
+        "count": 1,
+        "width": 64,
+        "input": "rec_cjk_w64_input.f32",
+        "ids": "rec_cjk_w64_ids.i64",
+        "conf": "rec_cjk_w64_conf.f32"
+      },
+      {
+        "name": "w256",
+        "count": 1,
+        "width": 256,
+        "input": "rec_cjk_w256_input.f32",
+        "ids": "rec_cjk_w256_ids.i64",
+        "conf": "rec_cjk_w256_conf.f32"
+      },
+      {
+        "name": "w384",
+        "count": 1,
+        "width": 384,
+        "input": "rec_cjk_w384_input.f32",
+        "ids": "rec_cjk_w384_ids.i64",
+        "conf": "rec_cjk_w384_conf.f32"
+      },
+      {
+        "name": "w512",
+        "count": 1,
+        "width": 512,
+        "input": "rec_cjk_w512_input.f32",
+        "ids": "rec_cjk_w512_ids.i64",
+        "conf": "rec_cjk_w512_conf.f32"
+      }
+    ],
+    "rtl": [
+      {
+        "name": "w64",
+        "count": 1,
+        "width": 64,
+        "input": "rec_rtl_w64_input.f32",
+        "ids": "rec_rtl_w64_ids.i64",
+        "conf": "rec_rtl_w64_conf.f32"
+      },
+      {
+        "name": "w256",
+        "count": 1,
+        "width": 256,
+        "input": "rec_rtl_w256_input.f32",
+        "ids": "rec_rtl_w256_ids.i64",
+        "conf": "rec_rtl_w256_conf.f32"
+      },
+      {
+        "name": "w384",
+        "count": 1,
+        "width": 384,
+        "input": "rec_rtl_w384_input.f32",
+        "ids": "rec_rtl_w384_ids.i64",
+        "conf": "rec_rtl_w384_conf.f32"
+      },
+      {
+        "name": "w512",
+        "count": 1,
+        "width": 512,
+        "input": "rec_rtl_w512_input.f32",
+        "ids": "rec_rtl_w512_ids.i64",
+        "conf": "rec_rtl_w512_conf.f32"
+      }
+    ],
+    "world": [
+      {
+        "name": "w64",
+        "count": 1,
+        "width": 64,
+        "input": "rec_world_w64_input.f32",
+        "ids": "rec_world_w64_ids.i64",
+        "conf": "rec_world_w64_conf.f32"
+      },
+      {
+        "name": "w256",
+        "count": 1,
+        "width": 256,
+        "input": "rec_world_w256_input.f32",
+        "ids": "rec_world_w256_ids.i64",
+        "conf": "rec_world_w256_conf.f32"
+      },
+      {
+        "name": "w384",
+        "count": 1,
+        "width": 384,
+        "input": "rec_world_w384_input.f32",
+        "ids": "rec_world_w384_ids.i64",
+        "conf": "rec_world_w384_conf.f32"
+      },
+      {
+        "name": "w512",
+        "count": 1,
+        "width": 512,
+        "input": "rec_world_w512_input.f32",
+        "ids": "rec_world_w512_ids.i64",
+        "conf": "rec_world_w512_conf.f32"
+      }
+    ]
+  },
+  "generated_by": {
+    "onnxruntime": "1.32.0",
+    "numpy": "2.5.5",
+    "intra_op_num_threads": 1,
+    "inter_op_num_threads": 1,
+    "optimization": "onnxruntime default",
+    "providers": [
+      "CPUExecutionProvider"
+    ]
+  }
+}

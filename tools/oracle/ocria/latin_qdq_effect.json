@@ -1,0 +1,211 @@
+{
+  "graph": "rec_latin.onnx",
+  "head_output_scale": 0.3328447639942169,
+  "note": "F32 side: the dequantized weights the GGUF carries, activation quantization rewired out, the Relus it folded in put back. QDQ side: the pinned graph as ONNX Runtime runs it. `text_*` is the raw CTC decode before any clean-up.",
+  "fixtures": [
+    {
+      "case": "w64",
+      "timesteps": 16,
+      "ids_differing": 1,
+      "text_f32": "I 1LI",
+      "text_qdq": "I- 1LI",
+      "differing_at": [
+        6
+      ],
+      "max_conf_delta": 0.15253767371177673,
+      "max_logit_delta": 1.7928333282470703,
+      "max_top2_gap_where_differing": 0.043702125549316406
+    },
+    {
+      "case": "w256",
+      "timesteps": 64,
+      "ids_differing": 3,
+      "text_f32": "H- ILI- ILI- ILI- 1LI- E",
+      "text_qdq": "H- 1LI- 1LI- 1LI- 1LI- E",
+      "differing_at": [
+        6,
+        20,
+        34
+      ],
+      "max_conf_delta": 0.19227111339569092,
+      "max_logit_delta": 2.3667492866516113,
+      "max_top2_gap_where_differing": 0.41147518157958984
+    },
+    {
+      "case": "w384",
+      "timesteps": 96,
+      "ids_differing": 6,
+      "text_f32": "ILI- ILI- ILI- ILI- ILI- ILI- II",
+      "text_qdq": "ILI ILI- 1LI- 1LI- 1LI- 1LI- 1I",
+      "differing_at": [
+        12,
+        30,
+        44,
+        58,
+        72,
+        86
+      ],
+      "max_conf_delta": 0.19227081537246704,
+      "max_logit_delta": 2.4858455657958984,
+      "max_top2_gap_where_differing": 0.5615506172180176
+    },
+    {
+      "case": "w512",
+      "timesteps": 128,
+      "ids_differing": 8,
+      "text_f32": "\u0426I- 1LI- ILI- ILI- ILI- ILI- ILI- ILI- ILI- I",
+      "text_qdq": "\u0426I 1LI- 1LI- 1LI- 1LI- 1LI- 1LI- 1LI- ILI I",
+      "differing_at": [
+        8,
+        26,
+        40,
+        54,
+        68,
+        82,
+        96,
+        120
+      ],
+      "max_conf_delta": 0.19227176904678345,
+      "max_logit_delta": 2.366746425628662,
+      "max_top2_gap_where_differing": 0.040879249572753906
+    }
+  ],
+  "real_text": [
+    {
+      "case": "y48",
+      "timesteps": 160,
+      "ids_differing": 1,
+      "text_f32": "CORNER STORE",
+      "text_qdq": "CORNER STORE",
+      "differing_at": [
+        48
+      ],
+      "max_conf_delta": 0.04661214351654053,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 0.6309986114501953
+    },
+    {
+      "case": "y96",
+      "timesteps": 160,
+      "ids_differing": 0,
+      "text_f32": "12 Market Street",
+      "text_qdq": "12 Market Street",
+      "differing_at": [],
+      "max_conf_delta": 0.06454074382781982,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 0.0
+    },
+    {
+      "case": "y144",
+      "timesteps": 160,
+      "ids_differing": 0,
+      "text_f32": "",
+      "text_qdq": "",
+      "differing_at": [],
+      "max_conf_delta": 0.24992352724075317,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 0.0
+    },
+    {
+      "case": "y192",
+      "timesteps": 160,
+      "ids_differing": 0,
+      "text_f32": "Coffee beans 2 12.50",
+      "text_qdq": "Coffee beans 2 12.50",
+      "differing_at": [],
+      "max_conf_delta": 0.21918445825576782,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 0.0
+    },
+    {
+      "case": "y240",
+      "timesteps": 160,
+      "ids_differing": 2,
+      "text_f32": "Sourdough 1 4.20",
+      "text_qdq": "Sourdough 1 4.20",
+      "differing_at": [
+        69,
+        70
+      ],
+      "max_conf_delta": 0.26569265127182007,
+      "max_logit_delta": 10.032480239868164,
+      "max_top2_gap_where_differing": 8.204364776611328
+    },
+    {
+      "case": "y288",
+      "timesteps": 160,
+      "ids_differing": 3,
+      "text_f32": "Ollve oll 1 8.90",
+      "text_qdq": "Olive oll1 8.90",
+      "differing_at": [
+        16,
+        29,
+        40
+      ],
+      "max_conf_delta": 0.31526535749435425,
+      "max_logit_delta": 8.523751258850098,
+      "max_top2_gap_where_differing": 0.6759767532348633
+    },
+    {
+      "case": "y336",
+      "timesteps": 160,
+      "ids_differing": 0,
+      "text_f32": "",
+      "text_qdq": "",
+      "differing_at": [],
+      "max_conf_delta": 0.17169147729873657,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 0.0
+    },
+    {
+      "case": "y384",
+      "timesteps": 160,
+      "ids_differing": 0,
+      "text_f32": "TOTAL 3235",
+      "text_qdq": "TOTAL 3235",
+      "differing_at": [],
+      "max_conf_delta": 0.3755686283111572,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 0.0
+    },
+    {
+      "case": "y432",
+      "timesteps": 160,
+      "ids_differing": 1,
+      "text_f32": "CARD 32.35",
+      "text_qdq": "CARD 32.35",
+      "differing_at": [
+        58
+      ],
+      "max_conf_delta": 0.10371297597885132,
+      "max_logit_delta": 8.523336410522461,
+      "max_top2_gap_where_differing": 3.7999229431152344
+    },
+    {
+      "case": "y528",
+      "timesteps": 160,
+      "ids_differing": 2,
+      "text_f32": "Thank yourshoping",
+      "text_qdq": "Thank yufrshoping",
+      "differing_at": [
+        27,
+        33
+      ],
+      "max_conf_delta": 0.4309159517288208,
+      "max_logit_delta": 9.370076179504395,
+      "max_top2_gap_where_differing": 1.8852801322937012
+    }
+  ],
+  "totals": {
+    "fixtures": {
+      "timesteps": 304,
+      "ids_differing": 18,
+      "percent": 5.921
+    },
+    "real_text": {
+      "timesteps": 1600,
+      "ids_differing": 9,
+      "percent": 0.562
+    }
+  }
+}

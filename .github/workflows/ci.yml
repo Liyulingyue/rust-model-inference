@@ -48,6 +48,7 @@ jobs:
       - run: 'cargo test --locked --lib format::safetensors::tests::'
       - run: cargo test --locked --test system_one_cli
       - run: 'cargo test --locked --lib models::nemotron_reuse::'
+      - run: 'cargo test --locked --lib models::ocria::'
       - run: cargo test --locked --test nemotron_reuse_cli
       - run: cargo test --locked --lib pjit
       - run: cargo test --locked --lib image_generation
@@ -75,6 +76,12 @@ jobs:
           target/woof-ci-venv/bin/python -m pip install -r tools/oracle/underdog_woof/requirements.txt
           target/woof-ci-venv/bin/python -m unittest tools.converter.underdog_woof.test_convert_underdog_woof
       - run: cargo test --locked --test pivo_cli
+      - run: cargo test --locked --test ocria_cli
+      - name: OCRia conversion regressions
+        run: |
+          python3 -m venv target/ocria-ci-venv
+          target/ocria-ci-venv/bin/python -m pip install -r tools/oracle/ocria/requirements.txt
+          target/ocria-ci-venv/bin/python -m unittest tools.converter.ocria.test_convert_ocria
       - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'
       - run: cargo test --locked --test unlimited_ocr_cli
       - run: cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

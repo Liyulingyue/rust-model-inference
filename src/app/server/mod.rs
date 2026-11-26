@@ -6,6 +6,7 @@ mod decision;
 mod diffusion;
 mod forecast;
 mod image_generation;
+mod page_ocr;
 mod prediction;
 mod rerank;
 mod speech;
@@ -114,6 +115,9 @@ enum Backend {
     Gliner2(Gliner2Backend),
     Gliner2Boundary(Gliner2BoundaryBackend),
     Timestral(TimestralBackend),
+    /// OCRia-nano-1: a page-image OCR pipeline in one GGUF (line detector,
+    /// script router, four CTC recognizers). Serves `/v1/ocr`.
+    Ocria(Arc<crate::models::ocria::Model>),
     Decision(crate::models::decision::Engine),
 }
 
@@ -140,6 +144,7 @@ impl Backend {
             Self::Gliner2(_) => "gliner2",
             Self::Gliner2Boundary(_) => "gliner2-boundary",
             Self::Timestral(_) => "timestral",
+            Self::Ocria(_) => "ocria",
             Self::Decision(_) => "decision",
         }
     }
@@ -1253,6 +1258,25 @@ fn build_backend(
     if options.decision_thinker.is_some() {
         return Err("--decision-thinker requires a THX-02 decision model".into());
     }
+    if crate::models::ocria::matches_model(&options.model) {
+        let available = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .map_err(|error| error.to_string())?;
+        let mut model = crate::models::ocria::Model::from_source(
+            source.as_ref(),
+            options.compute_policy(),
+            resolve_thread_count(options.threads, available),
+            None,
+        )?;
+        if let Some(path) = options.ocr_layout.as_ref() {
+            let layout = crate::format::ggufrs::open_model_source(path, ComponentRole::Llm)
+                .map_err(|error| error.to_string())?;
+            model = model.with_layout(layout.as_ref())?;
+        }
+        return Ok(Arc::new(Backend::Ocria(Arc::new(model))));
+    }
     if crate::models::unlimited_ocr::matches_model(&options.model) {
         crate::models::unlimited_ocr::validate_options(options)?;
         let model = Arc::new(crate::models::unlimited_ocr::Model::load(
@@ -2348,6 +2372,10 @@ pub fn run_server() {
         // "this server does not do that".
         Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
         Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
+        Backend::Ocria(_) => router.route(
+            page_ocr::ROUTE,
+            post(page_ocr::ocr).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
         Backend::Decision(_) => router.merge(decision::routes()),
     };
     if options.compute_policy() == crate::compute::ComputePolicy::Vulkan

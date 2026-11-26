@@ -1,0 +1,182 @@
+# OCRia-nano-1 适配记录
+
+> 本页汇总契约、入口、覆盖矩阵、数值证据与限制。逐检查点的实测数字与复现命令在
+> [oracle 记录](../../tools/oracle/ocria/README.md) 与
+> [validation.md](../../tools/oracle/ocria/validation.md)；模型清单见
+> [MODEL_LIST.md](../MODEL_LIST.md)。
+>
+> 更新于 2026-11-26。
+
+## 模型与组件
+
+`llamaindex/OCRia-nano-1` 是 LlamaIndex 发布的文档 OCR 流水线，原始权重是六个 ONNX 图，
+不是一个自带的推理脚本：`det.onnx`（行检测）、`router.onnx`（脚本路由，四组 + 倒置投票）、
+`rec_{latin,cjk,rtl,world}.onnx`（CTC 识别，图内直接输出 `ids`/`conf`），外加 LayoutNet
+（`tablenet.onnx` / `tablenet.bin`）。本仓库把前六个图打进一个 `ocria` GGUF，用仓库自己的
+卷积算子推理；LayoutNet 属于第二层，见 [分层交付](#分层交付)。
+
+| 组件 | 张量数 | 说明 |
+| --- | ---: | --- |
+| `det` | 74 | luma 混合 → stem → 4 个 dw/pw 阶段 → 1x1 侧向 → 最近邻 2x FPN → 头部 → 图内 `Sigmoid` |
+| `router` | 34 | stem → 7 个残差块 → `concat(mean_w, max_w)` → 两个 `Gemm(transB=1)` |
+| `rec.latin` | 58 | stem + 9 个 dw/pw 块 + 3 个 `mix` 块 + 单头 `[792,192]`；原图是 QDQ int8 |
+| `rec.cjk` | 60 | 同上，末端宽度也降采样（`T = W/8`），两个 head 卷积（中间无 Relu） |
+| `rec.rtl` | 58 | 同上，`visual_rtl=true`，输出按 bidi 还原为逻辑序 |
+| `rec.world` | 58 | 同上 |
+
+共 342 个张量。卷积核按 C 序展平成二维 `[out, fan_in]` 存储，所以逐点卷积的核是一行，
+Q8_0 的 32 值块能整块量化；偏置与 9 元素深度卷积核保持 F32。
+
+## 入口
+
+CLI（模型按 `general.architecture=ocria` 自动选中）：
+
+```bash
+rust-model-inference --model ocria-f32.gguf --image page.png --out lines.json \
+  [--threads N] [--compute cpu|auto] [--overwrite] [--ocr-options '<json>']
+```
+
+`--out` 省略时 JSON 写到 stdout。`--mmproj` 会被明确拒绝（一个 GGUF 自带全部组件）。
+
+`--ocr-options` 覆盖页面管线参数，缺省字段保留 GGUF 契约里的值（检测阈值/合并距离）或参考默认
+（各开关）：
+
+```json
+{"long_side":1600,"threshold":0.55,"merge":0.6,"gutter":true,
+ "orient":true,"rescue":true,"junk":true,"faint_threshold":0.1,"faint_max":24}
+```
+
+JSON 语法与字段名在参数解析阶段就校验（拼错不会等到加载模型），取值范围在套用到模型默认值时
+校验（`threshold` ∈ (0,1)、`long_side` ∈ [32,8192]、`merge` ≥ 0、`faint_threshold` ∈ [0,1] 等）。
+`--ocr-options` 用在非 `ocria` 模型上会明确报错，不会被静默忽略。
+
+HTTP：
+
+```bash
+rust-model-server --model ocria-f32.gguf --host 127.0.0.1 --port 8080
+curl -f http://127.0.0.1:8080/v1/ocr -H 'Content-Type: application/json' \
+  -d "{\"image\":\"data:image/png;base64,$(base64 -i page.png)\"}"
+```
+
+`image` 接受 `data:` URL 或裸 base64，远端 URL 明确拒绝（400）。请求可带一个 `options` 对象，
+字段与 `--ocr-options` 相同，用于覆盖这一页的参数（非法取值返回 400）。CLI 与 HTTP 返回同一份
+JSON（`width`/`height`/`lines[text,bbox,confidence,polygon,faint]`），`page_read_matches_liteparse`
+对同一页图像验证两者共用的 `Model::run`，`tests/ocria_cli.rs` 另外验证 CLI 的参数校验与真实出图。
+
+JEV 不适用：这是行检测 + CTC 识别的几何输出流水线，没有候选标签上的概率/评分语义。
+
+## 覆盖矩阵
+
+| 能力/组件 | 权重格式 | 计算/KV 精度 | 请求后端 | CLI 命令与结果 | HTTP 路由、请求与结果 | 实际执行后端、数值指标与证据 | 实现/验证状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 整页 OCR（det + router + 4×rec + 页面管线） | `ocria-nano-1-f32-v1`（342 F32） | F32 权重、F32 计算、无 KV | `--compute cpu` / `auto`（Auto 走 CPU） | `--model ocria-f32.gguf --image page.png --out lines.json` → 三页 fixture 文本逐行一致 | `POST /v1/ocr` + base64 图 → 同构 JSON | CPU（`ops::nn::conv2d/conv1d`、`dot_f32`、`softmax_inplace`）；det `prob` max abs 7.2e-7、router logits 2.9e-6、rec `ids` 0/1064、rec `conf` ≤2.7e-6；三页端到端文本/行数精确一致、bbox ≤1 px、页均值置信度差 ≤2.0e-3 | 已实现 / 通过 |
+| 同上 | `ocria-nano-1-q8_0-v1`（257 F32 + 85 Q8_0） | F32 计算（加载时反量化） | `--compute cpu` / `auto` | 同上，三页文本逐行一致 | 同上 | 同上；量化后 det `prob` max abs 1.9e-2、router logits 6.1e-2、rec `ids` 22/1064 差、行置信度差 ≤7.0e-2，**三页文本仍逐行一致** | 已实现 / 通过（文本一致；概率图与置信度按量化误差评估） |
+| 严格设备模式 | 任一 | — | `--compute vulkan` | 启动即明确报错 | 启动即明确报错 | 无设备算子：发布方是 CPU 流水线，仓库 Vulkan 内核只覆盖线性投影，本模型的 dw/pw 卷积没有设备实现 | 不适用（契约依据见下）/ 未运行 |
+| 组件缺失/不匹配 | 任一 | — | 任一 | 缺张量、形状不符、charset 与 head 类数不符、`ocria.config` 与契约不符都在加载期指名报错 | 同上 | `contract.json` 342 个名字+形状双向校验；转换器与加载器共用同一 Q8_0 行宽规则 | 已实现 / 通过 |
+| 页面管线开关（faint / gutter / orient / rescue / junk） | 任一 | — | 任一 | 三页 fixture 分别覆盖单列、双列栏缝切分、四分之一转重试；`--ocr-options` 可覆盖 | 请求级 `options` 对象（非法值 400） | `sideways.png` 17 行、`two_column.png` 25 行与参考一致；`tests/ocria_cli.rs` 用 `faint_threshold:0` 验证开关生效 | 已实现 / 通过 |
+| LayoutNet（表格 + 版面块） | `ocria-layout-f32-v1`（110 F32）/ `ocria-layout-q8_0-v1`（75 F32 + 35 Q8_0） | F32 权重、F32 计算 | `--ocr-layout <gguf>` + `cpu`/`auto` | `--ocr-layout ocria-layout-f32.gguf --image table.png` → 1 张 4×3 表、表头 `[0]`、10 格 | `POST /v1/ocr`（带 `--ocr-layout` 启动）→ 同一张 4×3 表、4 个 `Table` 块 | 68 维特征 max abs 0.0、规则线 96/96 逐位一致、解码 2585 项 0 失败、网络逐阶段 ≤1.5e-5（门限 1e-4） | 已实现 / 通过 |
+| PDF 输入 | — | — | — | — | — | 仓库无 PDF 渲染器；本模型只接受页面图像 | 不适用 / 未运行 |
+
+`--compute vulkan` 判为不适用而非「未实现」的依据：发布方把本模型定义为 CPU 流水线
+（模型卡 "CPU runtime, everywhere LiteParse runs"），参考实现也没有设备路径；仓库的
+Vulkan 能力目前只覆盖线性投影，而本模型的算力全在深度可分离卷积上。严格模式请求会
+在加载期报错退出，不静默降级。
+
+## 数值对齐
+
+固定输入：模型 `master` @ `ca290e82458d32aa8b605dbf3248d7aaf895ea7e`（逐文件 SHA256 见
+`sources.json`），参考实现 LiteParse `44ceb6ab160c64cc8b43aab4ed85251719495629`，
+ONNX Runtime 1.32.0 CPU，`intra_op_num_threads=1`。
+
+| 检查点 | 门槛 | 实测 |
+| --- | --- | --- |
+| det `prob`（256×256 与 96×160 非方图） | max abs ≤1e-5 | 7.15e-7 / 6.86e-7 |
+| router `group` / `flip` logits | max abs ≤1e-4 | 2.87e-6 / 4.77e-7 |
+| rec `ids`（4 组 × 4 宽度，1064 timestep） | 全等 | 0 差 |
+| rec `conf` | max abs ≤1e-3 | ≤2.68e-6 |
+| 端到端三页 | 文本+行数全等、bbox ≤1 px、页均值置信度 ≤5e-3 | 19/25/17 行全等；bbox ≤1 px；页均值差 ≤2.0e-3 |
+| 单行置信度 | ≤2e-1（近并列字符的 QDQ 效应） | ≤6.2e-2 |
+
+**逐位对齐的边界**：浮点路径（SIMD 卷积归约顺序、`ReduceLogSumExp`、`exp`）按误差门限
+验收，不做逐位比较；`ids` 这类离散契约要求全等。`rec_latin.onnx` 是 ONNX Runtime 量化
+图，会在图内把**激活**也吸附到 uint8 网格，本仓库不复制这一层（权重按 ONNX QDQ 公式
+反量化为 F32）：因此 latin 的 `conf` 与官方 QDQ 图有 ~2e-2/时间步的差，真实文本上
+0.56% 的时间步 `ids` 会翻（`latin_qdq_effect.json`）。fixture 里 latin 的对齐目标是
+忠实 F32 图的 `ids_f32`/`conf_f32`，QDQ 数字并列保留作记录——不把「激活量化」当成实现误差。
+
+## 性能
+
+`ops::nn` 的 1×1 快速路径上线后重测。同一台机器、同一组权重、冷进程到出结果：
+
+**Apple M3 Max（16 核，macOS 27.2，`release-fast`）**：
+
+| 输入 | 优化前 `--threads 4` | 优化后 `--threads 1` / `4` / `8` |
+| --- | ---: | ---: |
+| `receipt.png`（19 行） | 3.40 s | 0.51 / **0.17** / 0.14 s |
+
+同机前后 **20 倍**（4 线程）。
+
+**Linux x86_64（128 核，共享机，`release-fast`）**：
+
+| 输入 | 优化前 `--threads 4` | 优化后 `--threads 4` |
+| --- | ---: | ---: |
+| `receipt.png` | 5.67 s | **1.04 s** |
+| `two_column.png` | 9.74 s | **1.39 s** |
+| `sideways.png` | 7.28 s | **1.11 s** |
+
+**根因与修法**：`ops::nn::conv3d_cpu` 把 1×1 逐点卷积退化成"每个输入通道一次长度为 1 的
+`dot_f32`"，每次调用只做一次乘加，开销全在调用与下标计算上。新增的 `conv3d_pointwise`
+把同一件事写成"每个输出通道、每个输入通道一次沿像素平面的 rank-1 累加"：内层是对连续
+内存的乘加，能向量化。**累加顺序与通用内核逐位一致**（通道从小到大、bias 先加；标量
+dispatch 下 bias 最后加），`ops::nn::tests::conv3d_pointwise_matches_generic` 在四组形状
+（含 groups=2、1×1 空间）上用 `to_bits()` 断言两者相同，`RMI_SCALAR=1` 也跑过。因此这是
+一次纯性能改动：仓库里所有卷积调用方的输出不变。
+
+深度可分离 3×3 仍走通用内核（9 次长度为 3 的点积），是下一个可优化点；1×1 之后它成了
+主要开销。
+
+## 分层交付：第二层已合入
+
+第一层是 OCR 栈（det、router、四个识别器、页面管线）。第二层是 LayoutNet：发布包的表格与版面模型
+（`tablenet.onnx`，4 268 063 参数，6 层 transformer + CNN 图像分支，13 类版面块），作为**独立的
+`ocria-layout` GGUF** 加载，不改变第一层的文件格式：
+
+```bash
+python3 -m tools.converter.ocria.convert_ocria_layout <model-dir> ocria-layout-f32.gguf
+rust-model-inference --model ocria-f32.gguf --ocr-layout ocria-layout-f32.gguf --image page.png
+```
+
+| 组件 | 张量 | 说明 |
+| --- | ---: | --- |
+| `ocria-layout-f32-v1` | 110 | 4 268 063 个 F32；与 `tablenet.onnx` 逐位一致，也与发布包的 `tablenet.bin` 逐位一致（35 个转置矩阵、4 个卷积核+偏置在 f32 BN 折叠下） |
+| `ocria-layout-q8_0-v1` | 110（75 F32 + 35 Q8_0） | 4-D 卷积核保持 F32（`conv2d` 直接吃 `[cout,cin,kh,kw]`），其余行宽 32 倍数的二维矩阵走 Q8_0 |
+
+| 文件 | 大小 |
+| --- | ---: |
+| `ocria-layout-f32.gguf` | 17 098 496 B |
+| `ocria-layout-q8_0.gguf` | 4 934 976 B |
+
+**数值**（参考实现 LiteParse `44ceb6ab`，ONNX Runtime CPU）：
+
+| 检查点 | 结果 |
+| --- | --- |
+| 68 维单元特征（5 组 + pair 特征，60 个随机页） | max abs **0.0**（逐值相同） |
+| 规则线检测（96 个 页尺寸×scale×栅格 组合） | 逐位一致 |
+| 页面栅格 `process_raster` / `ImgInput.canvas` | 字节一致 / 0.0 |
+| 解码（`avg_link`、`reading_order`、`decode_tables`、`decode_grid`、分类/分块、三个 keep/drop 谓词） | **2585 项检查 0 失败**，213 个用例，含跨行跨列、owner-slot 收缩/追加、`squeeze_cols`、两种 wrap fold |
+| 网络逐阶段（3 个页面，门限 1e-4） | `unit_mlp` 9.5e-7、`embed` 9.5e-6、`enc_layer0` 9.5e-6、`enc_layer5` 1.1e-5、`hidden_final` 1.5e-5、`node` 6.7e-6、`pair` 7.6e-6、`cls` 8.1e-6；逐单元/逐对 argmax 8/8 与 64/64 |
+| 端到端 `fixtures/layout/table.png` | 1 张表，**4 行 × 3 列、表头行 [0]、10 个单元格**，与参考 Markdown 表结构一致（CLI 与 HTTP 两条入口都验过） |
+
+`--ocr-layout` 缺省时输出与第一层完全相同（`tables`/`blocks` 为空数组）。
+
+**消融结论**（[layout-plan.md](../../tools/oracle/ocria/layout-plan.md) §8）：参考实现的 OCR 页路径
+硬依赖 projection 信号，但实测在带线框表格上 `proj = None` 能复现同样的表格，因此第二层没有移植
+`projection.rs`（3 500–4 500 行），只移植了 units → features → net → decode。
+
+## 限制
+
+- 只接受页面图像：没有 PDF 渲染、没有 PDF 文本层、没有多页请求。
+- LayoutNet 未实现，所以没有表格/版面块输出。
+- `rec_latin` 的激活量化未复制（见上）；其余三个识别器是纯 F32。
+- 单页行数上限、`MAX_W = 1280` 的识别宽度裁剪沿用参考实现的语义：超过 40:1 的行会被
+  降采样读取（与参考一致），时间步不足时报错而不是截断。
