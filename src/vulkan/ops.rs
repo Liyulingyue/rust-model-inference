@@ -67,6 +67,9 @@ const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
 const Q4_0_MATVEC_DP4A_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matvec_dp4a.spv");
+const Q4_0_FOLDED_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_folded_matmul.spv");
+const Q4_0_FOLDED_MATMUL_DP4A_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q4_0_folded_matmul_dp4a.spv");
 /// Register-tiled Q4_0 matmul: the weight is read once per (output column,
 /// k-block) and reused across a tile of tokens.
 const Q4_0_MATMUL_TILED_SHADER: &[u8] =
@@ -307,6 +310,7 @@ const Q2_K_MATMUL: usize = 83;
 const Q3_K_MATMUL: usize = 84;
 const Q4_0_MATVEC_DP4A: usize = 85;
 const QWEN35_ATTENTION_ONLINE: usize = 86;
+const Q4_0_FOLDED_MATMUL: usize = 87;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -489,6 +493,7 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "q3_k_matmul",
     "q4_0_matvec_dp4a",
     "qwen35_attention_online",
+    "q4_0_folded_matmul",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -614,7 +619,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 87] = [
+const OPERATOR_SHADERS: [&[u8]; 88] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -702,6 +707,7 @@ const OPERATOR_SHADERS: [&[u8]; 87] = [
     Q3_K_MATMUL_SHADER,
     Q4_0_MATVEC_DP4A_SHADER,
     QWEN35_ATTENTION_ONLINE_SHADER,
+    Q4_0_FOLDED_MATMUL_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -809,6 +815,8 @@ impl GpuWeightFormat {
 pub(crate) enum GpuMatmulMode {
     #[default]
     Prepared,
+    /// Repacked folded Q4_0 weights with per-32 Q8_0 activations.
+    FoldedQ8_0,
     /// Q4_0 storage with one signed Q8_K activation scale per 256 values.
     Q8KInput,
     /// Round F16 activations, then accumulate in F32 (diffusion contract).
@@ -817,6 +825,12 @@ pub(crate) enum GpuMatmulMode {
     RoundedBf16,
     /// Match dot_f16_f16_bytes / dot_bf16_f32 reduction.
     Dot,
+}
+
+impl GpuMatmulMode {
+    fn folded_q4(self) -> bool {
+        matches!(self, Self::FoldedQ8_0 | Self::Q8KInput)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -838,6 +852,8 @@ impl GpuMatmulSpec {
             GpuMatmulMode::RoundedBf16
         } else if weight.kernel.q4_0_uses_q8_k_input() {
             GpuMatmulMode::Q8KInput
+        } else if format == GpuWeightFormat::Q4_0 && weight.kernel.hadamard_input_map().is_some() {
+            GpuMatmulMode::FoldedQ8_0
         } else {
             GpuMatmulMode::Prepared
         }))
@@ -845,7 +861,7 @@ impl GpuMatmulSpec {
     fn validate(self) -> Result<(), VulkanError> {
         match (self.format, self.mode) {
             (_, GpuMatmulMode::Prepared)
-            | (GpuWeightFormat::Q4_0, GpuMatmulMode::Q8KInput)
+            | (GpuWeightFormat::Q4_0, GpuMatmulMode::Q8KInput | GpuMatmulMode::FoldedQ8_0)
             | (GpuWeightFormat::F16, GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot)
             | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16) => Ok(()),
             _ => Err(VulkanError::UnsupportedShape(
@@ -3884,6 +3900,11 @@ pub(crate) fn build_operator_pipelines(
         .map(|(index, shader)| {
             if index == Q8_MATMUL_GROUPED && force_dp4a {
                 Q8_MATMUL_GROUPED_DP4A_SHADER
+            } else if index == Q4_0_FOLDED_MATMUL
+                && force_dp4a
+                && context.supports_integer_dot_product()
+            {
+                Q4_0_FOLDED_MATMUL_DP4A_SHADER
             } else if matches!(
                 index,
                 Q8_MATMUL_GROUPED_TILED
@@ -4929,7 +4950,9 @@ impl<'a> Qwen3Ops<'a> {
         }
         // The transposed kernel reads the transposed layout, so the layout
         // of the binding -- not a global flag -- decides which kernel runs.
-        let pipeline = if format == GpuWeightFormat::Q8_0
+        let pipeline = if bindings.weight_mode.folded_q4() {
+            Q4_0_FOLDED_MATMUL
+        } else if format == GpuWeightFormat::Q8_0
             && bindings.weight_layout == GpuWeightLayout::Transposed
         {
             Q8_MATMUL_TRANSPOSED
@@ -5086,7 +5109,10 @@ impl<'a> Qwen3Ops<'a> {
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
         }
-        if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0) || !self.q8_tiled {
+        if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0)
+            || !self.q8_tiled
+            || bindings.weight_mode.folded_q4()
+        {
             return self.record_weight_matmul_ordinary_rows(
                 commands,
                 bindings,
@@ -8386,7 +8412,9 @@ fn matmul_rows_push(
         max_output_rows = max_output_rows.max(n_out);
     }
     // BF16 dot streams occupy 4/8 lanes; use the rest for independent outputs.
-    let output_groups = if format == GpuWeightFormat::F32 {
+    let output_groups = if bindings.weight_mode.folded_q4() {
+        max_output_rows.div_ceil(8)
+    } else if format == GpuWeightFormat::F32 {
         max_output_rows.div_ceil(if push[1] == 16 { 4 } else { 64 })
     } else if format == GpuWeightFormat::BF16 && push[1] != 0 {
         max_output_rows.div_ceil(64 / push[1] as usize)
@@ -8421,7 +8449,9 @@ fn matmul_rows_push(
         max_output_rows
     };
     // Four tokens share each weight load; incomplete batches stay masked in shader.
-    let token_groups = if format == GpuWeightFormat::BF16 && push[1] > 1 && token_rows >= 4 {
+    let token_groups = if bindings.weight_mode.folded_q4() {
+        token_rows.div_ceil(32)
+    } else if format == GpuWeightFormat::BF16 && push[1] > 1 && token_rows >= 4 {
         token_rows.div_ceil(4)
     } else {
         token_rows
@@ -11549,6 +11579,11 @@ mod tests {
                 "qwen35_attention_online",
                 QWEN35_ATTENTION_ONLINE_SHADER,
             ),
+            (
+                Q4_0_FOLDED_MATMUL,
+                "q4_0_folded_matmul",
+                Q4_0_FOLDED_MATMUL_SHADER,
+            ),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
@@ -12210,7 +12245,12 @@ mod tests {
         const OUTPUTS: usize = 129;
         let context = VulkanContext::new().unwrap();
         let ordinary = [1usize, 2, 3, 5].map(|r| (r, 17 * 32, GpuMatmulMode::Prepared));
-        let repacked = [1usize, 3].map(|r| (r, 512, GpuMatmulMode::Q8KInput));
+        let repacked = [
+            (1, 17 * 32, GpuMatmulMode::FoldedQ8_0),
+            (33, 17 * 32, GpuMatmulMode::FoldedQ8_0),
+            (1, 512, GpuMatmulMode::Q8KInput),
+            (3, 512, GpuMatmulMode::Q8KInput),
+        ];
         for (rows, width, mode) in ordinary.into_iter().chain(repacked) {
             let mut cursor = 0;
             let input = f32_region(&mut cursor, rows * width).unwrap();
@@ -12266,6 +12306,34 @@ mod tests {
                             "Q8_K block {index}: expected {}, got {copies:?}",
                             block.d
                         );
+                    }
+                }
+            }
+            if mode.folded_q4() {
+                let codes = ops.read_bytes(q8, rows * width).unwrap();
+                let ds = ops.read_f32(scales, rows * width / 32).unwrap();
+                for ((x, scales), y) in codes
+                    .chunks_exact(width)
+                    .zip(ds.chunks_exact(width / 32))
+                    .zip(ordinary.chunks_exact_mut(OUTPUTS))
+                {
+                    for (row, expected) in weight.chunks_exact(width / 32 * 18).zip(y) {
+                        let mut sums = [0.0f32; 8];
+                        for ((w, x), &d) in row.chunks_exact(18).zip(x.chunks_exact(32)).zip(scales)
+                        {
+                            let scale =
+                                crate::ops::f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * d;
+                            for (lane, sum) in sums.iter_mut().enumerate() {
+                                let mut dot = 0i32;
+                                for i in 4 * lane..4 * lane + 4 {
+                                    let code = (w[2 + i % 16] >> (4 * (i / 16))) & 15;
+                                    dot += (i32::from(code) - 8) * i32::from(x[i] as i8);
+                                }
+                                *sum = (dot as f32).mul_add(scale, *sum);
+                            }
+                        }
+                        let [a, b, c, d, e, f, g, h] = sums;
+                        *expected = ((a + e) + (b + f)) + ((c + g) + (d + h));
                     }
                 }
             }
