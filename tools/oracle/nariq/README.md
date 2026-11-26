@@ -45,11 +45,15 @@ sed 's/b96806d96061049a5b574269b049bf6241d63d46/2644f7de461c27675eef373faa1776f2
   tools/oracle/holo4/27b/image.cpp > runs/nariq-image.cpp
 c++ -std=c++17 -O2 -Ioracle/include -Ioracle/ggml/include -Ioracle/tools/mtmd \
   runs/nariq-image.cpp -Loracle/build/bin -lmtmd -lllama -lggml -lggml-base -o runs/nariq-image
-export NARIQ_MODEL="${prefix}2.0bpw.gguf" NARIQ_MMPROJ="${prefix}mmproj-BF16.gguf"
-export NARIQ_IMAGE_ORACLE=runs/vision-2.0
-runs/nariq-image "$NARIQ_MODEL" "$NARIQ_MMPROJ" "$NARIQ_IMAGE_ORACLE.f32" > "$NARIQ_IMAGE_ORACLE.json"
-NARIQ_COMPUTE=cpu cargo test --locked --profile release-fast --features vulkan \
-  --test nariq_reference nariq_image_logits_match_oracle -- --ignored --nocapture
+export NARIQ_MMPROJ="${prefix}mmproj-BF16.gguf"
+for bpw in 2.0 2.5 3.0; do
+  export NARIQ_MODEL="${prefix}${bpw}bpw.gguf" NARIQ_IMAGE_ORACLE="runs/vision-$bpw"
+  runs/nariq-image "$NARIQ_MODEL" "$NARIQ_MMPROJ" "$NARIQ_IMAGE_ORACLE.f32" > "$NARIQ_IMAGE_ORACLE.json"
+  for mode in cpu auto vulkan; do
+    NARIQ_COMPUTE="$mode" cargo test --locked --profile release-fast --features vulkan \
+      --test nariq_reference nariq_image_logits_match_oracle -- --ignored --nocapture
+  done
+done
 ```
 
 ## Entry points
@@ -62,4 +66,17 @@ target/release-fast/rust-model-server --model "$NARIQ_MODEL" --mmproj "$NARIQ_MM
   --compute vulkan --host 127.0.0.1 --port 8080 --max-context 256
 ```
 
-Use the model ID returned by `GET /v1/models` in `POST /v1/chat/completions`. Chat accepts a text message or an image URL plus text. The existing JEV routes are `/v1/jev/score` and `/v1/jev/image`. [Measured coverage](validation.md)
+Use the model ID returned by `GET /v1/models` in `POST /v1/chat/completions`. Chat accepts text and OpenAI-style `image_url` content, including PNG data URLs. Set `"stream": true` to receive SSE chunks through `[DONE]`.
+
+The following CLI and HTTP requests score the same two labels. For image scoring add `--mmproj "$NARIQ_MMPROJ" --image red.png` to the CLI and send the image data URL in `image_url` to `/v1/jev/image`.
+
+```sh
+target/release-fast/rust-model-inference --model "$NARIQ_MODEL" --compute cpu \
+  --threads 8 --prefill-batch-size 8 --max-context 256 --jev \
+  --jev-context Red --jev-question 'Color?' --jev-option Red --jev-option Blue \
+  --jev-positive A --jev-output json
+curl -fsS http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json' \
+  -d '{"context":"Red","questions":[{"text":"Color?","options":["Red","Blue"]}],"positive":"A"}'
+```
+
+The validation record includes the logits, observed placement and public entry results for each released file. [Measured coverage](validation.md)
