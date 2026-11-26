@@ -35,4 +35,10 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 | PQ2_0 | 11,826 / 3.01 | 859 / 1.80 | 39.60 | 1,080 / 2.00 |
 | Q2_0 | 11,241 / 2.76 | 3,781 / 0.38 | 31.61 | 1,469 / 1.95 |
 
-Vulkan 每个文本位置实测 62 次提交。单行 decode 读取重排的投影权重，各层额外执行 Hadamard。发布方 CPU 直接读取紧凑三元块。各算子的耗时未单独采样。[对齐与回归记录](../../tools/oracle/ternary_bonsai/validation.md)
+提交 `a43c2d4a` 中，折叠投影用八路 FP32 累加，支持 packed int8 dot 的设备用一条指令计算每四对整数的点积。在 RADV NAVI31 上使用 PTQ1_0、一个输入 token 和八次续写与 `79af30ed` 对照。九个位置共执行 2,745 次 Q4_0 投影，GPU 时间从 2,589.40 ms 降至 821.11 ms。全部算子的 GPU 时间从 2,911.78 ms 降至 1,149.47 ms。
+
+同一轮验证中另做三轮交替的无插桩测试。排除模型加载和首 token 后，实际解码吞吐中位数从 2.36 提升至 4.43 tok/s。每个位置有 62 次设备提交，9 个 greedy token 均与发布方一致。墙钟计时包含主机调度、同步和同机其他任务的等待。[对齐与性能记录](../../tools/oracle/ternary_bonsai/validation.md)
+
+在固定的 8,192 token 检索提示上，三种权重分别覆盖 CPU、Auto 和严格 Vulkan。每组比较最后一个 prefill 位置和 15 个强制续写位置。144 个贪心 token 均与发布方一致，最低余弦为 0.996380，最大相对 L2 为 0.087993。三个解码器在首个结束标记前均输出 `The capital of France is Paris.`。[按权重和后端列出的结果](../../tools/oracle/ternary_bonsai/validation.md#8192-token-retrieval)
+
+长提示可用 `--max-context 8256 --prefill-batch-size 128 --kv-cache f32` 为 8,192 个输入 token 和后续生成预留空间。27B 的 64 层中有 16 个稠密注意力层，Vulkan 为这 16 层分配持久 KV，带 MTP 的文件为草稿头再分配一份。序列超过 4,096 时，设备使用分块 online softmax。该路径要求 256 线程工作组和至少 27 KiB 工作组共享内存。

@@ -14,7 +14,7 @@ Q4_0 MTP head, and BF16/Q8_0 vision projectors. Exercise text, image and JEV
 through CLI and HTTP, streaming and non-streaming generation, and CPU, Auto
 and strict Vulkan. Record the actual execution backend separately.
 
-## Full-model runs on 2026-11-26
+## Short-context runs on 2026-11-26
 
 The full-vocabulary comparisons and generation runs used commit `9cb45549`, an EPYC 9334, RADV NAVI31
 and eight inference threads. All three base files were compared to the
@@ -115,6 +115,10 @@ vulkan --lib FILTER` at `30379492` passed 126 tests for `qwen35` (24 marked
 ignored), two for `app::jev::grouped::tests` and four for
 `app::server::api::tests`.
 
+At `a43c2d4a` the same filters passed 126 (25 ignored), two and four tests respectively. The `vulkan_q4_0_matvec_and_tiled_prefill_match_the_scalar_shader` hardware test passed on RADV with packed integer dots and again with `RUST_GPU_DP4A=0`. It covers ordinary and folded Q4_0, including an incomplete 32-token tile and weight rows containing 17 blocks. The long attention test also passed with a nonzero cache layer, causal row masking and the output gate.
+
+`cargo metadata --locked --no-deps --format-version 1` reported the same nine binary targets and source paths at the PR base and the delivered runtime.
+
 A real dense Qwen3.5-0.8B BF16 and its BF16 projector were run before and
 after against base `7dfd5f15` on Apple M3 Max. CPU text (18 prompt IDs, six
 generated tokens) and image (29 prompt IDs, red response) produced identical
@@ -142,3 +146,58 @@ matched CPU. On Linux at `30379492`, the same 0.8B decoder returned
 `Paris` and `Red` across all three interfaces. The CLI and HTTP single-choice
 probabilities were 0.85438418 (text) and 0.97294360 (image). The grouped
 results are in the `dense_qwen35_0_8b_bf16` entry. [Linux results](entries.json)
+
+## 8,192-token retrieval
+
+The fixed archive prompt gives a recovery phrase near the beginning and requests it at the end. All three publisher decoders returned `The capital of France is Paris.` before the first end-of-message token. The comparison uses the final prefill position and 15 forced continuations, including the chat delimiters after that answer. It applies the same cosine and relative L2 limits to each full-vocabulary row. The probes also check every input token ID against the publisher. [Reproduction commands](README.md#8192-token-retrieval-and-forced-continuation)
+
+The production CLI and `/v1/chat/completions` ran the same prompt with PTQ1_0 on strict Vulkan. The embedded chat template produced 8,204 input tokens with thinking disabled. Both returned `The capital of France is Paris.` at temperature zero. HTTP reported 8,204 prompt tokens and seven completion tokens. These runs used a context of 8,320, a prefill batch of 128, F32 KV and eight threads.
+
+Each cell gives the minimum cosine and maximum relative L2 over 16 positions. All 144 greedy token IDs matched. The CPU runs used `ad24c11b`. The Auto and strict Vulkan runs used `a43c2d4a`. Auto and strict Vulkan recorded 3,968 device submissions for 64 prefill batches and 62 at each decode position. CPU recorded zero. [Per-position logits metrics, token IDs, timings and submissions](performance.json)
+
+| Decoder | CPU | Auto | Strict Vulkan |
+|---|---:|---:|---:|
+| PTQ1_0 | 0.999404 / 0.034935 | 0.996380 / 0.087993 | 0.996380 / 0.087993 |
+| PQ2_0 | 0.999355 / 0.036049 | 0.999859 / 0.016775 | 0.999859 / 0.016775 |
+| Q2_0 | 0.999866 / 0.016382 | 0.998060 / 0.064680 | 0.998060 / 0.064680 |
+
+At `0532ffa4`, strict Vulkan chose the same 16 tokens as the PTQ1_0 reference, but position 14 had relative L2 0.125917. In a trace at that position, the first inspected layer output differed by 0.000132 relative L2. The difference grew from 0.01644 at layer 39 to 0.23702 at layer 47. As a separate check, changing only the publisher's attention implementation gave a maximum logit relative L2 of 0.092659 on the same continuation. Its fixed reference reproduced exactly. With eight F32 accumulators per folded projection at `a43c2d4a`, the PTQ1_0 maximum fell to 0.087993 on strict Vulkan.
+
+The eight-stream shader also passed the short text probe on Auto and strict Vulkan for all three formats. The 24 greedy IDs matched, with a minimum cosine of 0.999957729 and a maximum relative L2 of 0.009307787. Across all three decoders, both vision projectors and all three compute policies, each of the 18 red-image comparisons selected token 5844. Their minimum cosine was 0.999928177 and their maximum relative L2 was 0.015193841. The CPU image measurements use `ad24c11b`.
+
+The delivered CLI, HTTP JSON and SSE returned `Paris` for the text question and `Red` for the image with PTQ1_0/BF16 on strict Vulkan, PQ2_0/Q8_0 on Auto, and Q2_0/BF16 on strict Vulkan. Single and grouped CLI/HTTP JEV matched for all 36 text and image probabilities in these runs. All three MTP files returned `Paris` on strict Vulkan, with three of six drafts accepted in each run. The Q2_0 MTP server with the Q8_0 projector also returned the expected text and image answers in JSON and SSE.
+
+## Single-token Vulkan decode
+
+The delivered folded projection at `a43c2d4a` accumulates eight F32 partial dots across the full input width. Ordinary dense Q4_0 weights use the packed matvec from `ad24c11b` for single-token decode on supported devices. The RADV run compared the folded projection to `79af30ed` with the same PTQ1_0 file, F32 KV, one-token input and eight publisher-forced decode steps. Both revisions matched all nine greedy IDs, with 62 submissions at each position. The delivered path had minimum cosine 0.99989178 and maximum relative L2 0.01948461.
+
+| Nine single-token positions | Baseline | Eight-stream folded projection |
+|---|---:|---:|
+| Q4_0 GPU time for 2,745 projections | 2,589.40 ms | 821.11 ms |
+| Sum of timed GPU dispatches | 2,911.78 ms | 1,149.47 ms |
+| Wall-clock decode, three-run median | 2.359 tok/s | 4.431 tok/s |
+
+Three alternating uninstrumented runs gave 2.359, 2.336 and 2.409 tok/s on the baseline and 4.410, 4.440 and 4.431 tok/s on the delivered path. Each rate divides eight decode evaluations by their combined elapsed time, excluding model loading and prefill. The shared host had a different load during the earlier measurements below. Compare wall time within each paired run.
+
+### Earlier Q4_0 matvec comparison
+
+On the EPYC 9334 / RADV NAVI31, runtime `ad24c11b` and baseline `79af30ed` ran the same PTQ1_0 file, F32 KV, eight threads and a one-token prompt (`1`, ID 16). Both evaluated the prefill position and eight publisher-forced decode positions. All nine greedy IDs agreed with the publisher. The lowest full-vocabulary cosine was 0.99996835 and the highest relative L2 was 0.00908625.
+
+The timestamp run bracketed each dispatch with Vulkan queries, collected results after fence completion and multiplied the raw ticks by the device's 10 ns timestamp period. The compute queue reported 64 valid timestamp bits. Matching the pipeline fingerprint to the checked-in SPIR-V identified 2,745 Q4_0 projection dispatches in each run.
+
+| Nine single-token positions | Baseline | Q4_0 matvec |
+|---|---:|---:|
+| Q4_0 projection GPU time | 2,591.70 ms | 204.20 ms |
+| Sum of timed GPU dispatches | 2,919.22 ms | 531.58 ms |
+| Q4_0 share of timed dispatches | 88.78% | 38.41% |
+| Wall-clock decode, three-run median | 0.353 tok/s | 0.473 tok/s |
+
+Wall-clock runs disabled the timestamp layer and alternated baseline/new, new/baseline, baseline/new. Each run divided eight decode evaluations by their total elapsed time. The host carried other inference workloads. Individual baseline runs ranged from 0.352 to 0.409 tok/s and the new runs from 0.468 to 0.553 tok/s. Both runtimes submitted 62 times at every position.
+
+On Apple M3 Max, three strict-Vulkan runs per revision generated the same text in 24 tokens on each dense Q4_0 model. Median decode throughput rose from 12.88 to 16.65 tok/s with Qwen3.5-4B and from 40.8 to 57.2 tok/s with Qwen3-0.6B. Forcing scalar int8 with `RUST_GPU_DP4A=0` retained the Qwen3 output. A device test compares the scalar projection with the selected kernel at one, two, three and five input rows, including a 17-block input and 129 output rows. It allows absolute and relative FP32 error.
+
+On the same Mac, `cargo test --locked --profile release-fast --features vulkan --lib -- --test-threads=4` reported 1,841 passed, 22 failed and 261 ignored on both revisions. The 22 failing test names were identical. The explicit Q4_0 physical-device test passed.
+
+The full library suite at the PR base `7dfd5f15` reported 1,818 passed, 39 failed and 261 ignored. Once the optional FP64 pipeline was fixed, running the server GPU flag test before either the Yue2 CPU convolution or the Q8 CPU partition test reproduced a change of backend through the process-wide GPU switch. Pinning the CPU tests to their intended policy gave 1,845 passed, 18 failed and 262 ignored at `a43c2d4a`. All 18 failures also occurred at the PR base.
+
+Using the same retrieval prompt on an M3 Max with an ordinary Qwen3.5-0.8B BF16 decoder, the embedded chat template produced 8,204 input tokens. Both CPU and strict Vulkan returned `The capital of France is Paris.`. With F32 KV, 128-token batches and six threads, CPU prefill took 2,715.21 s and Vulkan prefill took 256.77 s. The long-context attention, MTP head, speculative decode and SenseNova loop cache tests also passed on that device.

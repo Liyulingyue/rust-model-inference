@@ -17,6 +17,17 @@ The file prefix in the table is `Ternary-Bonsai-2.5-27B-`. The runtime borrows t
 | mmproj-BF16.gguf | 931145856 | `e287342d92332fa3577ed1d42e921dac9370c08da58ba9337fa450f6cc76cfd7` |
 | mmproj-Q8_0.gguf | 629246976 | `6807ede61d570bb86ba34b756a0fa109edc33668604de867c6ea6d8f1d631903` |
 
+Run the download on the inference host. For example, these commands resume the PTQ1_0 download in the current directory and verify its digest before renaming it. Use the corresponding filename and digest above for the other decoders and projectors.
+
+```sh
+revision=7d514b3e5efec2964456e23ddf012cc209b71ca8
+file=Ternary-Bonsai-2.5-27B-PTQ1_0.gguf
+curl --fail --location --retry 3 --continue-at - --output "$file.part" \
+  "https://modelscope.cn/models/prism-ml/Ternary-Bonsai-2.5-27B-GGUF/resolve/$revision/$file?download=true" &&
+  echo "929560ec9d37cf3cadd4b00cc87b51c570082a628dd830b4692dc0b2ed18dbbe  $file.part" | sha256sum --check - &&
+  mv "$file.part" "$file"
+```
+
 ## Reproduce the comparison
 
 On the inference host, set `MODEL` to one decoder and `PUBLISHER` to a checkout of PrismML's llama.cpp at `41c86f7d6d0ab27c5d0529958d7ee7aa3091309f`. Stock versions differ in their ternary decoder and Hadamard support. [Reference source](https://github.com/PrismML-Eng/llama.cpp/tree/41c86f7d6d0ab27c5d0529958d7ee7aa3091309f)
@@ -47,7 +58,7 @@ The text probe also supports `MODEL tokens PROMPT`. Compare the printed IDs to `
 
 ### 8,192-token retrieval and forced continuation
 
-The prompt stores a recovery phrase before the archive entries and asks for it at the end. Generate it with the pinned tokenizer. Its SHA-256 is `3d5da3a016dd8b7120d87da1a253e8fd238f3beb2b8fbe91a53dafa537e8406f`. The drivers compare the final prefill logits and the next 15 positions using the publisher's continuation. Reuse one reference per decoder for all three compute policies.
+The prompt stores a recovery phrase before the archive entries and asks for it at the end. Generate it with the pinned tokenizer. Its SHA-256 is `3d5da3a016dd8b7120d87da1a253e8fd238f3beb2b8fbe91a53dafa537e8406f`. The drivers compare the final prefill logits and the next 15 positions using the publisher's continuation, including the forced chat delimiters after the first end-of-message token. Reuse one reference per decoder for all three compute policies.
 
 ```sh
 python3 "$probe/long_prompt.py" /tmp/bonsai-ref "$MODEL" 8192 > archive.txt
@@ -61,3 +72,14 @@ done
 ```
 
 Each `step` in the Rust log records its greedy token ID, elapsed milliseconds and device submission count. The comparison reports the two highest logits from each runtime whenever the greedy tokens differ.
+
+### Single-token decode timing
+
+Use the PTQ1_0 decoder and the same nine reference positions for both runtimes. Run six trials in the order baseline, candidate, candidate, baseline, baseline, candidate. Keep timestamp instrumentation disabled for wall-clock timing.
+
+```sh
+/tmp/bonsai-ref "$MODEL" 1 one-ref 256 8 9 > one-ref.txt
+target/release-fast/examples/bonsai_text_probe "$MODEL" vulkan 1 one-ref.txt one.f32 > one.log
+python3 "$probe/compare.py" one-ref.f32 one.f32 --steps 9
+awk '$1 == "step" && ++steps > 1 { elapsed += $3 } END { print 1000 * (steps - 1) / elapsed, "tok/s" }' one.log
+```
