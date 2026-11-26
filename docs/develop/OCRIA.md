@@ -155,7 +155,8 @@ rust-model-inference --model ocria-f32.gguf --ocr-layout ocria-layout-f32.gguf -
 | 规则线检测（96 个 页尺寸×scale×栅格 组合） | 逐位一致 |
 | 页面栅格 `process_raster` / `ImgInput.canvas` | 字节一致 / 0.0 |
 | 解码（`avg_link`、`reading_order`、`decode_tables`、`decode_grid`、分类/分块、三个 keep/drop 谓词） | **2585 项检查 0 失败**，213 个用例，含跨行跨列、owner-slot 收缩/追加、`squeeze_cols`、两种 wrap fold |
-| 端到端 `fixtures/layout/table.png` | 1 张表，**4 行 × 3 列、表头行 [0]、10 个单元格**，与参考 Markdown 表结构一致 |
+| 网络逐阶段（3 个页面，门限 1e-4） | `unit_mlp` 9.5e-7、`embed` 9.5e-6、`enc_layer0` 9.5e-6、`enc_layer5` 1.1e-5、`hidden_final` 1.5e-5、`node` 6.7e-6、`pair` 7.6e-6、`cls` 8.1e-6；逐单元/逐对 argmax 8/8 与 64/64 |
+| 端到端 `fixtures/layout/table.png` | 1 张表，**4 行 × 3 列、表头行 [0]、10 个单元格**，与参考 Markdown 表结构一致（CLI 与 HTTP 两条入口都验过） |
 
 `--ocr-layout` 缺省时输出与第一层完全相同（`tables`/`blocks` 为空数组）。
 

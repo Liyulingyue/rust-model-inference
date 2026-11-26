@@ -697,40 +697,18 @@ fn layout_network_matches_onnx() {
                 .collect(),
             valid: (valid[0], valid[1]),
         };
-        // The image branch on its own, against the recorded `unit_mlp`.
-        let unit_mlp = model.net().debug_unit_mlp(&img, n).expect("image branch");
-        let (mlp_shape, mlp_path) = blob(case, "unit_mlp");
-        let want_mlp = read_f32_blob(&mlp_shape, &mlp_path);
-        let mlp = max_abs(&unit_mlp, &want_mlp);
-        println!("layout {} unit_mlp: max_abs {mlp:.3e}", case["name"]);
-        worst = worst.max(mlp);
-        // `embed` is the text path plus the image vector; the reference records
-        // both halves, so this pins the encoder's input exactly.
-        let text = model.net().debug_text_path(&feats, n);
-        let embed: Vec<f32> = text.iter().zip(&unit_mlp).map(|(a, b)| a + b).collect();
-        let (embed_shape, embed_path) = blob(case, "embed");
-        let want_embed = read_f32_blob(&embed_shape, &embed_path);
-        let embed_delta = max_abs(&embed, &want_embed);
-        println!("layout {} embed: max_abs {embed_delta:.3e}", case["name"]);
-        worst = worst.max(embed_delta);
-        // Layer 0 has no cross-attention, so it is directly comparable. The
-        // top two layers cross-attend inside the same iteration, so the
-        // recorded `enc_layer5` (the layer's `Add_3`) is not what a loop that
-        // applies the cross-attention afterwards produces; it is printed for
-        // the record and not asserted.
-        let layers = model.net().debug_encoder(&embed, n);
-        let (shape, path) = blob(case, "enc_layer0");
-        let want = read_f32_blob(&shape, &path);
-        let layer0 = max_abs(&layers[0], &want);
-        println!("layout {} enc_layer0: max_abs {layer0:.3e}", case["name"]);
-        worst = worst.max(layer0);
-        let (shape, path) = blob(case, "enc_layer5");
-        let want = read_f32_blob(&shape, &path);
-        println!(
-            "layout {} enc_layer5 (informational): max_abs {:.3e}",
-            case["name"],
-            max_abs(&layers[5], &want)
-        );
+        // Every stage the reference records, through the real forward path:
+        // the image branch's vector, the encoder input, the first encoder
+        // layer, the last encoder layer before its cross-attention, and the
+        // hidden state the heads read.
+        let stages = model.net().debug_stages(&feats, &pairs, Some(&img), n);
+        for (name, got) in &stages {
+            let (shape, path) = blob(case, name);
+            let want = read_f32_blob(&shape, &path);
+            let delta = max_abs(got, &want);
+            println!("layout {} {name}: max_abs {delta:.3e}", case["name"]);
+            worst = worst.max(delta);
+        }
         let logits = model.net().forward(&feats, &pairs, Some(&img), n);
         assert_eq!(logits.n, n);
         assert_eq!(logits.n_cls, 13);

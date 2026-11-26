@@ -296,7 +296,7 @@ Numerical checks against the pinned reference:
 | `detect_rules` | 96 raster × scale combinations | bit-identical `h`/`v` vectors |
 | `process_raster` / `ImgInput.canvas` | 4 pages | bytes identical / 0.0 |
 | decode: `avg_link`, `reading_order`, `decode_tables`, `decode_grid`, classes, blocks, the three keep/drop predicates | 213 cases (200 random + 13 synthetic/degenerate) | **2585 checks, 0 failures** |
-| network against ONNX Runtime, per stage | 3 cases (`page`, `clip` with `valid=(0.78,1.0)`, `blank`), gate 1e-4 | `unit_mlp` 1.2e-6, `embed` 7.6e-6, `enc_layer0` 7.6e-6, `node` 7.2e-6, `pair` 6.7e-6, `cls` 9.5e-6; per-unit and per-pair argmax 8/8 and 64/64 |
+| network against ONNX Runtime, per stage | 3 cases (`page`, `clip` with `valid=(0.78,1.0)`, `blank`), gate 1e-4 | `unit_mlp` 9.5e-7, `embed` 9.5e-6, `enc_layer0` 9.5e-6, `enc_layer5` 1.1e-5, `hidden_final` 1.5e-5, `node` 6.7e-6, `pair` 7.6e-6, `cls` 8.1e-6; per-unit and per-pair argmax 8/8 and 64/64 |
 | end to end on `fixtures/layout/table.png` | one ruled 3-column table | 1 table, **4x3 grid, `head_rows [0]`, 10 cells**, matching the reference's Markdown table |
 
 The end-to-end run is the test `layout_finds_the_ruled_table`; the decode and feature
@@ -309,3 +309,21 @@ intermediates recorded from the pinned graph, so a network change can be localis
 and `unit_mlp` on the image side). The raster is committed as 8-bit ink plus the exact
 `ink/255` decode, which keeps the set inside its budget; `--with-intermediates` regenerates
 the three large tensors.
+
+### The one bug the fixtures caught
+
+The first port matched the image branch (`unit_mlp` 1.2e-6) and the encoder input (`embed`
+7.6e-6) but was 2-3 logits off on `node`/`pair`/`cls`. Staged comparison put the first
+divergence at the first cross-attention: `cross_attention` took the **token key** projection
+from the packed `q|k|v` output's *query* block (`row[lo..hi]` instead of
+`row[D + lo..D + hi]`), so every unit attended with `Q·K_q` while mixing the correct `V`. The
+encoder's self-attention was unaffected because it indexes all three blocks explicitly, which
+is why layers 0-4 matched and only the cross-attention and everything downstream did not.
+A hand-built copy of that block, matched against the graph's own intermediate blobs at
+<=2e-5 while the production function was 2.27 off on the same input, localised it to the
+function; the final logits then matched at 6.7e-6.
+
+One residual difference, deliberate: `pos2d` is computed from one frequency table, which
+matches the graph's *runtime* table (unit positions) and differs from the graph's *baked*
+token table by 1 ulp on 50 of 64 entries (max 1.5e-5) -- inside the gate by an order of
+magnitude, and pinning both spellings would mean carrying two tables for a 1.5e-5 effect.
