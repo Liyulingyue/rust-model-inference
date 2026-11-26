@@ -1226,13 +1226,7 @@ fn main() {
                 questions,
                 mode,
             })) => {
-                if image.is_some() {
-                    app::run_or_exit(Err(
-                        "--jev --image supports single-question mode only".into()
-                    ));
-                    return;
-                }
-                app::run_or_exit(app::run_jev_grouped_decision(
+                app::run_or_exit(app::run_jev_grouped_decision_with_image(
                     source.clone(),
                     &context,
                     &questions,
@@ -1240,6 +1234,8 @@ fn main() {
                     n_threads,
                     prefill_batch_size,
                     options.jev_output_json,
+                    explicit_mmproj,
+                    image,
                     jinja_options.clone(),
                     options.effective_max_context(),
                 ));

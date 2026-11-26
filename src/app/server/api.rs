@@ -2484,10 +2484,8 @@ async fn run_multimodal_text_only(
         // projector and the same `run_qwen35_family_multimodal_logits` helper as
         // `qwen35`; only the arch string differs.
         "qwen35" | "qwen35moe" | "sensenova_loop" => {
-            let max_context = match state_for_max_ctx(&state) {
-                Ok(v) => v,
-                Err(e) => return Err(e),
-            };
+            let (options, _) = jev_prompt_options(&state);
+            let template = options.resolve(&|key| source.metadata(key).cloned())?;
             crate::app::run_qwen35_family_multimodal_logits(
                 source.as_ref(),
                 mmproj_path.as_path(),
@@ -2499,8 +2497,7 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
-                // This endpoint has no chat-template switch, so no template.
-                None,
+                template.as_ref(),
             )
         }
         other => Err(format!(

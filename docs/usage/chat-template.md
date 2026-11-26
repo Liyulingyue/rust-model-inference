@@ -222,8 +222,8 @@ system 是 `jev_system_prompt(mode)`、user 是 `jev_payload_json(...)`，都由
 现在每个 grouped wrapper 都把 `self.inner.jinja` 传进去。
 `qwen3` 走共享的 `build_jev_prompt`（`single.rs:461`）。
 
-**未接入**：JEV 的 HTTP 端点（`/v1/jev/score`、`/v1/jev/grouped`）显式传
-`Options::default()`，与 CLI 行为分开 —— 它们没有 chat-template 开关。
+JEV 的 HTTP 文本评分和分组评分使用服务启动时配置的 `--jinja` 或
+`--chat-template-file`。Qwen3.5 的图像评分和图像分组评分也使用该配置。
 
 **`--jev --image --jinja` 必须走多模态 forward。** 带图时 `build_prompt` 不再
 渲染文本，而是设 `pending` 并返回空 id，由 `forward_logits` 路由到
