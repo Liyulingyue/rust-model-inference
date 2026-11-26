@@ -1531,6 +1531,14 @@ pub(super) fn run_multimodal_with_video_ref(
         ));
     }
 
+    // Ordinary Qwen projectors expand both the pad IDs and the embedding
+    // rows. Equal lengths do not make those IDs usable by a text draft head.
+    if (image_path.is_some() || video_path.is_some())
+        && (mtp_draft > 0 || dspark_model.is_some() || ngram_draft > 0)
+    {
+        return Err("speculative decoding requires a text-only prompt".into());
+    }
+
     let t_img_start = std::time::Instant::now();
     // MiniCPM-V 4.7 lays its tiles on one 2D canvas, so its M-RoPE positions
     // come from `canvas_positions` instead of the anyres grid builder.
@@ -2020,47 +2028,15 @@ pub(super) fn run_multimodal_with_video_ref(
                 "--mtp-draft needs a checkpoint with an MTP draft head (Qwen3.5 dense)".into(),
             );
         }
-        if prompt_rows != prompt_tokens.len() {
-            return Err(
-                "--mtp-draft needs a text-only prompt: the vision path expands the prompt \
-                 into projected embedding rows"
-                    .into(),
-            );
-        }
         if temperature > 0.0 {
             return Err("--mtp-draft needs greedy decoding (--temp 0)".into());
         }
     }
-    if dspark_drafts > 0 {
-        // The sidecar embeds the prompt tokens itself (through the target's
-        // embedding table), so it needs the token ids like the MTP head
-        // does: the vision path, whose prompt rows are projected embeddings,
-        // cannot use it.
-        if prompt_rows != prompt_tokens.len() {
-            return Err(
-                "--dspark-model needs a text-only prompt: the vision path expands the prompt \
-                 into projected embedding rows"
-                    .into(),
-            );
-        }
-        if temperature > 0.0 {
-            return Err("--dspark-model needs greedy decoding (--temp 0)".into());
-        }
+    if dspark_drafts > 0 && temperature > 0.0 {
+        return Err("--dspark-model needs greedy decoding (--temp 0)".into());
     }
-    if ngram_drafts > 0 {
-        // Same rule as the sidecar: the lookup runs on token ids, so a
-        // vision prompt (whose rows are projected embeddings) has no history
-        // to look up, and the verification is batched greedy.
-        if prompt_rows != prompt_tokens.len() {
-            return Err(
-                "--ngram-draft needs a text-only prompt: the vision path expands the prompt \
-                 into projected embedding rows"
-                    .into(),
-            );
-        }
-        if temperature > 0.0 {
-            return Err("--ngram-draft needs greedy decoding (--temp 0)".into());
-        }
+    if ngram_drafts > 0 && temperature > 0.0 {
+        return Err("--ngram-draft needs greedy decoding (--temp 0)".into());
     }
 
     let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
@@ -2409,21 +2385,22 @@ pub(super) fn run_multimodal_with_video_ref(
 mod tests {
     use super::*;
 
+    struct MetadataOnly(crate::core::tensor::MetaValue);
+    impl TensorSource for MetadataOnly {
+        fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            (key == "general.architecture").then_some(&self.0)
+        }
+        fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            panic!("unsupported media must be rejected before loading tensors")
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            panic!("unsupported media must be rejected before loading tensors")
+        }
+    }
+
     #[test]
     fn sensenova_video_is_rejected_before_loading_media() {
-        struct Source(crate::core::tensor::MetaValue);
-        impl TensorSource for Source {
-            fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
-                (key == "general.architecture").then_some(&self.0)
-            }
-            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
-                panic!("unsupported video must be rejected before loading tensors")
-            }
-            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
-                panic!("unsupported video must be rejected before loading tensors")
-            }
-        }
-        let source = Source(crate::core::tensor::MetaValue::String(
+        let source = MetadataOnly(crate::core::tensor::MetaValue::String(
             "sensenova_loop".into(),
         ));
         let error = run_multimodal_with_video_ref(
@@ -2452,6 +2429,37 @@ mod tests {
         assert_eq!(
             error,
             "SenseNova Loop multimodal generation does not support --video"
+        );
+    }
+
+    #[test]
+    fn mtp_cannot_prefill_from_image_pad_ids() {
+        let source = MetadataOnly(crate::core::tensor::MetaValue::String("qwen35".into()));
+        let result = run_multimodal_with_video_ref(
+            &source,
+            Path::new("model.gguf"),
+            None,
+            Some(Path::new("image.png")),
+            None,
+            None,
+            "describe",
+            4,
+            0.0,
+            1,
+            4,
+            64,
+            1.0,
+            Some(false),
+            None,
+            2,
+            None,
+            0,
+            crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
+            &crate::prompt::jinja::Options::default(),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "speculative decoding requires a text-only prompt"
         );
     }
 }

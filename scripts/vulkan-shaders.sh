@@ -40,6 +40,7 @@ shader_names=(
     attention_values
     attention_values_f32
     timestral
+    bonsai_hadamard
     qwen35_dense_prepare
     qwen35_attention
     qwen35_recurrent_conv

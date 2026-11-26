@@ -1060,7 +1060,7 @@ fn main() {
             ));
             return;
         }
-        app::run_or_exit(app::run_multimodal_with_video(
+        app::run_or_exit(app::run_multimodal_with_video_and_mtp(
             Arc::clone(&source),
             model_path,
             explicit_mmproj,
@@ -1074,6 +1074,11 @@ fn main() {
             prefill_batch_size,
             options.effective_max_context(),
             options.effective_repetition_penalty(),
+            options.thinking,
+            options.effective_mtp_draft(),
+            options.dspark_model.as_deref().map(Path::new),
+            options.effective_ngram_draft(),
+            options.effective_ngram_lookup(),
             &jinja_options,
         ));
     } else if options.jev && options.gliner2_decide {

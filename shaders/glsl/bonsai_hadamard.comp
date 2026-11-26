@@ -1,0 +1,30 @@
+#version 450
+
+// One workgroup rotates one 1024-element block of one activation row.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { float data[]; } arena;
+layout(std430, binding = 1) readonly buffer SignedMap { int indices[]; } mapping;
+layout(push_constant) uniform Params { uint input_word; uint output_word; uint width; } p;
+shared float values[1024];
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint start = gl_WorkGroupID.x * 1024u;
+    uint row = gl_WorkGroupID.y * p.width;
+    for (uint i = lane; i < 1024u; i += 64u) {
+        int index = mapping.indices[start + i];
+        float x = arena.data[p.input_word + row + uint(abs(index) - 1)];
+        values[i] = index < 0 ? -x : x;
+    }
+    barrier();
+    for (uint step = 1u; step < 1024u; step *= 2u) {
+        for (uint j = lane; j < 512u; j += 64u) {
+            uint a = (j / step) * (2u * step) + j % step;
+            float x = values[a], y = values[a + step];
+            values[a] = x + y;
+            values[a + step] = x - y;
+        }
+        barrier();
+    }
+    for (uint i = lane; i < 1024u; i += 64u)
+        arena.data[p.output_word + row + start + i] = values[i] * (1.0 / 32.0);
+}

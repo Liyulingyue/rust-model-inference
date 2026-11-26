@@ -57,6 +57,13 @@ pub trait Kernel: Send + Sync {
         None
     }
 
+    /// Signed, one-based gather indices before a normalized 1024-wide Walsh transform.
+    /// Resident projections must apply this map to the input before using weight_bytes().
+    #[cfg(feature = "vulkan")]
+    fn hadamard_input_map(&self) -> Option<&[i32]> {
+        None
+    }
+
     /// Opt in to shared-weight row batching with the canonical scalar Q4_0
     /// arithmetic contract. Raw storage access alone does not imply this.
     fn scalar_q4_0_bytes(&self) -> Option<&[u8]> {

@@ -7620,7 +7620,12 @@ impl<'a> Qwen3Ops<'a> {
         )
     }
 
-    fn f32_word(&self, region: ArenaRegion, count: usize, label: &str) -> Result<u32, VulkanError> {
+    pub(crate) fn f32_word(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+        label: &str,
+    ) -> Result<u32, VulkanError> {
         self.byte_word(region, f32_bytes(count)?, label)
     }
 
