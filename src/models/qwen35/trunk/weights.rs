@@ -12,8 +12,7 @@
 //! inside this module's loading path.
 
 use super::config::Qwen35Config;
-use crate::core::tensor::GGMLType;
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::models::edge0::weights::load_affine;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 #[cfg(feature = "vulkan")]
@@ -243,6 +242,8 @@ impl<'a> Qwen35MoeWeights<'a> {
 /// Qwen3.5 exposes this as `Qwen35Model`; Edge0 composes it with MoE weights.
 pub struct HybridTrunk<'a> {
     pub config: Qwen35Config,
+    /// Interleave the temporal and spatial RoPE frequency pairs for image tokens.
+    pub interleaved_mrope: bool,
     pub tok_embd: Weight<'a>,
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
@@ -730,6 +731,12 @@ impl<'a> HybridTrunk<'a> {
         };
 
         Ok(Self {
+            // The NariQ v1 Qwen3.8 graph uses GGML_ROPE_TYPE_IMROPE. Equal
+            // text positions do not distinguish it from contiguous sections.
+            interleaved_mrope: matches!(
+                source.metadata("trellis.version"),
+                Some(MetaValue::Uint32(1))
+            ),
             config,
             tok_embd,
             output_norm,

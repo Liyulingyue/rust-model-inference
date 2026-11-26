@@ -157,6 +157,12 @@ fn nariq_image_logits_match_oracle() {
         .unwrap();
     let mode = policy();
     let _scope = mode.configure_cli().unwrap();
+    #[cfg(feature = "vulkan")]
+    let gpu = (mode != ComputePolicy::Cpu)
+        .then(rust_model_inference::ops::get_vulkan_context)
+        .flatten();
+    #[cfg(feature = "vulkan")]
+    let before = gpu.map_or(0, |context| context.submission_count());
     let result = rust_model_inference::app::run_qwen35_family_multimodal_logits(
         &model,
         &projector,
@@ -172,6 +178,14 @@ fn nariq_image_logits_match_oracle() {
     );
     fs::remove_file(image).unwrap();
     let (logits, _) = result.unwrap();
+    #[cfg(feature = "vulkan")]
+    {
+        let submissions = gpu.map_or(0, |context| context.submission_count() - before);
+        eprintln!("image submissions={submissions}");
+        if mode == ComputePolicy::Vulkan {
+            assert!(submissions > 0);
+        }
+    }
     let Comparison {
         top,
         kl,

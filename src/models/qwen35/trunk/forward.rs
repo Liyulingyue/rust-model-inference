@@ -355,7 +355,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         pool,
                         mrope_positions,
                         base_position,
-                        false,
+                        self.interleaved_mrope,
                         trace_layer(il),
                     )
                 }
@@ -371,7 +371,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         pool,
                         mrope_positions,
                         base_position,
-                        false,
+                        self.interleaved_mrope,
                     )
                 }
             };

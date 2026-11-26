@@ -170,6 +170,7 @@ fn tiny_dense_model(k_weight: [f32; 4], v_weight: [f32; 4]) -> Qwen35Model<'stat
         moe: None,
     };
     Qwen35Model {
+        interleaved_mrope: false,
         config,
         tok_embd: f32_test_weight(Vec::new(), 0, 0),
         output_norm: vec![1.0; 2],
@@ -1127,6 +1128,7 @@ fn tiny_dense_session_model_with_embedding(
         moe: None,
     };
     Qwen35Model {
+        interleaved_mrope: false,
         config,
         tok_embd,
         output_norm: vec![1.0; n_embd],
@@ -1227,6 +1229,7 @@ fn tiny_q8_session_model() -> Qwen35Model<'static> {
         moe: None,
     };
     Qwen35Model {
+        interleaved_mrope: false,
         config,
         tok_embd: f32_test_weight(
             (0..32 * 256)

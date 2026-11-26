@@ -906,6 +906,7 @@ pub(crate) struct Qwen35VulkanSession {
     layers: Vec<LayerBindings>,
     plan: Vec<usize>,
     mhc: Option<MhcBindings>,
+    interleaved_mrope: bool,
     /// The draft head's weights, when the checkpoint has a head.
     mtp: Option<MtpBindings>,
     output_norm: OperatorBindings,
@@ -1339,6 +1340,7 @@ impl Qwen35VulkanSession {
             _buffers: buffers,
             layers,
             plan,
+            interleaved_mrope: model.interleaved_mrope || mhc.is_some(),
             mhc,
             mtp,
             output_norm,
@@ -1925,7 +1927,7 @@ impl Qwen35VulkanSession {
                 position,
                 config.rope_dimension_sections,
                 config.rope_freq_base,
-                self.mhc.is_some(),
+                self.interleaved_mrope,
             )
             .map_err(VulkanError::UnsupportedShape)?;
         }
@@ -2568,7 +2570,7 @@ impl Qwen35VulkanSession {
                 [position, position, position, 0],
                 config.rope_dimension_sections,
                 config.rope_freq_base,
-                self.mhc.is_some(),
+                self.interleaved_mrope,
             )
             .map_err(VulkanError::UnsupportedShape)?;
         }
