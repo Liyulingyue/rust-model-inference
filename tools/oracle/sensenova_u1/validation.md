@@ -143,6 +143,21 @@ f32 rows just moves the same rounding one call deeper. `prepare_f32` is therefor
 a no-op for quantised weights (it stays useful for F32/F16 weights, where it is
 bit-exact against the quantised path).
 
+**RESOLVED (verified): weight-side dequant works; the earlier "bit-identical"
+reading was a stale binary.** With `RMI_DEQUANT_WEIGHTS=1` and the diagnostics
+on, all seven layer-0 projections are expanded to f32, and:
+
+| checkpoint | quantised | **dequantised weights** | Python reference |
+| --- | --- | --- | --- |
+| `prefix_l0_q` rel | 1.96e-3 | **6.48e-05** | 6.47e-05 |
+| `prefix_l0_k` rel | 9.43e-4 | **3.27e-05** | — |
+| `prefix_l0_v` rel | 1.12e-3 | **2.43e-05** | — |
+
+30x better, and it lands exactly on the independently computed Python number.
+`prefix_embed` and `prefix_l0_normed` stay bit-exact throughout. So the whole
+~1e-2 per-layer gap was activation quantisation, and materialising the weights as
+f32 removes it.
+
 **Second correction (verified): weight-side dequant also came out bit-identical.**
 `RMI_DEQUANT_WEIGHTS=1` expands the ggml Q8_0 blocks to f32 at load and runs an
 owned F32 kernel (`QTensorOwned::F32`). Result: `prefix_l0_q` rel `1.958e-3`,

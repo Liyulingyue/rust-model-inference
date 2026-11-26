@@ -685,18 +685,36 @@ fn load_weight_dispatch<'a>(source: &'a dyn TensorSource, name: &str) -> Option<
             if info.ggml_type == GGMLType::Q8_0 {
                 let n_in = *info.dims.first()? as usize;
                 let n_out = info.dims.get(1).copied().unwrap_or(1) as usize;
-                if let Some(data) = dequant_q8_0(bytes, n_in, n_out) {
-                    return Some(Weight {
-                        kernel: Box::new(QTensorOwned::F32 {
-                            data,
-                            n_cols: n_in,
-                            n_rows: n_out,
-                        }),
-                        ggml_type: GGMLType::F32,
-                        n_in,
-                        n_out,
-                    });
+                match dequant_q8_0(bytes, n_in, n_out) {
+                    Some(data) => {
+                        if std::env::var_os("RMI_DEQUANT_VERBOSE").is_some() {
+                            eprintln!(
+                                "[dequant] {name} Q8_0 {n_in}x{n_out} -> f32 ({} values)",
+                                data.len()
+                            );
+                        }
+                        return Some(Weight {
+                            kernel: Box::new(QTensorOwned::F32 {
+                                data,
+                                n_cols: n_in,
+                                n_rows: n_out,
+                            }),
+                            ggml_type: GGMLType::F32,
+                            n_in,
+                            n_out,
+                        });
+                    }
+                    None => {
+                        if std::env::var_os("RMI_DEQUANT_VERBOSE").is_some() {
+                            eprintln!("[dequant] {name}: dequant FAILED, falling back");
+                        }
+                    }
                 }
+            } else if std::env::var_os("RMI_DEQUANT_VERBOSE").is_some() {
+                eprintln!(
+                    "[dequant] {name}: type {:?} not Q8_0, skipping",
+                    info.ggml_type
+                );
             }
         }
     }
