@@ -1268,6 +1268,7 @@ fn build_backend(
             source.as_ref(),
             options.compute_policy(),
             resolve_thread_count(options.threads, available),
+            None,
         )?;
         return Ok(Arc::new(Backend::Ocria(Arc::new(model))));
     }

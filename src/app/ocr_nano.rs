@@ -17,7 +17,7 @@
 
 use crate::app::CliOptions;
 use crate::format::ggufrs::{open_model_source, ComponentRole};
-use crate::models::ocria::Model;
+use crate::models::ocria::{Model, OptionsOverride};
 
 /// Reads the page `--image` names and writes the lines as JSON.
 pub fn run_cli(options: &CliOptions, threads: usize) -> Result<(), String> {
@@ -33,9 +33,21 @@ pub fn run_cli(options: &CliOptions, threads: usize) -> Result<(), String> {
         .map_err(|e| format!("Decode page {}: {e}", path.display()))?;
     let rgb = decoded.to_rgb8();
     let (width, height) = (rgb.width(), rgb.height());
+    let overrides = match options.ocr_options.as_deref() {
+        Some(json) => Some(
+            serde_json::from_str::<OptionsOverride>(json)
+                .map_err(|e| format!("Invalid --ocr-options: {e}"))?,
+        ),
+        None => None,
+    };
     let source = open_model_source(&options.model, ComponentRole::Llm)
         .map_err(|e| format!("Open {}: {e}", options.model.display()))?;
-    let model = Model::from_source(source.as_ref(), options.compute_policy(), threads)?;
+    let model = Model::from_source(
+        source.as_ref(),
+        options.compute_policy(),
+        threads,
+        overrides.as_ref(),
+    )?;
     let page = model
         .run(rgb.as_raw(), width, height)
         .map_err(|e| e.to_string())?;

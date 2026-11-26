@@ -21,6 +21,9 @@ python3 -m venv /tmp/ocria-venv
 cargo build --locked --profile release-fast --bin rust-model-inference --bin rust-model-server
 target/release-fast/rust-model-inference --model models/OCRia-nano-1/ocria-f32.gguf \
   --image page.png --out lines.json --threads 4 --compute cpu
+# any pipeline parameter can be overridden per call:
+target/release-fast/rust-model-inference --model models/OCRia-nano-1/ocria-f32.gguf \
+  --image page.png --ocr-options '{"long_side":800,"faint_threshold":0}' --out lines.json
 ```
 
 The CLI writes the page as JSON: `width`, `height` and one entry per line with

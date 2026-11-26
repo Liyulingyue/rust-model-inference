@@ -37,12 +37,18 @@ use std::sync::Arc;
 
 use super::api::base64_decode;
 use super::{AppState, Backend};
+use crate::models::ocria::OptionsOverride;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OcrRequest {
     /// A `data:<mime>;base64,<data>` URL or bare base64.
     pub image: String,
+    /// Optional pipeline overrides for this page; absent fields keep the
+    /// server's defaults (which come from the model's contract and the
+    /// `--ocr-options` the server was started with).
+    #[serde(default)]
+    pub options: Option<OptionsOverride>,
 }
 
 #[derive(Serialize)]
@@ -116,6 +122,19 @@ pub async fn ocr(
                 .into_response();
         }
     };
+    let options = match request.options.as_ref() {
+        Some(overrides) => match overrides.apply(model.options()) {
+            Ok(options) => options,
+            Err(error) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(OcrError { error }),
+                )
+                    .into_response();
+            }
+        },
+        None => model.options(),
+    };
     let rgb = decoded.to_rgb8();
     let (width, height) = (rgb.width(), rgb.height());
     // `ComputePool::compute` publishes one closure into a single shared slot,
@@ -134,7 +153,7 @@ pub async fn ocr(
     let page = Arc::clone(model);
     let result = match super::compute_task(state.compute, move || {
         let _permit = permit;
-        page.run(rgb.as_raw(), width, height)
+        page.run_with(options, rgb.as_raw(), width, height)
     })
     .await
     {

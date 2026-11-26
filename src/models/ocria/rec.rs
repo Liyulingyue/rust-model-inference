@@ -661,3 +661,40 @@ fn visual_to_logical(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The recognizer emits an RTL line in *visual* order (left to right as it
+    /// appears on the page) and the pipeline turns it back into logical order.
+    /// A pure Hebrew run therefore comes back reversed, and a line that mixes a
+    /// number keeps the number's own digits in order while the run around it
+    /// reverses -- which is exactly what `python-bidi`'s `get_display(s,
+    /// base_dir="R")` does, and what the reference runtime calls.
+    #[test]
+    fn visual_order_rtl_text_is_reordered_to_logical_order() {
+        // "שלום" read off the page left to right is "םולש".
+        assert_eq!(visual_to_logical("םולש"), "שלום");
+        // Arabic: "مرحبا" appears as "ابحرم".
+        assert_eq!(visual_to_logical("ابحرم"), "مرحبا");
+        // A number inside the run keeps its digits left to right.
+        assert_eq!(visual_to_logical("2024 םולש"), "שלום 2024");
+        // Latin text is untouched: the paragraph level only decides the
+        // direction of the runs that are already RTL.
+        assert_eq!(visual_to_logical("Invoice 42"), "Invoice 42");
+        assert_eq!(visual_to_logical(""), "");
+    }
+
+    /// `is_rtl_char` is the gate the reorder runs behind, so it has to cover
+    /// the Hebrew/Arabic blocks and their presentation forms and nothing else.
+    #[test]
+    fn rtl_characters_are_the_hebrew_and_arabic_blocks() {
+        for ch in ['ש', 'ם', 'م', 'ا', '\u{0590}', '\u{08ff}', '\u{fb1d}'] {
+            assert!(is_rtl_char(ch), "{ch:?}");
+        }
+        for ch in ['A', 'z', '0', '中', 'Ω', '\u{058f}', '\u{0900}'] {
+            assert!(!is_rtl_char(ch), "{ch:?}");
+        }
+    }
+}

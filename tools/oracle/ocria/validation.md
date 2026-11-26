@@ -244,10 +244,12 @@ hundredths, while the page mean stays within 2.0e-3).
 **Q8_0 export, same pages** (`page_read_q8_0_keeps_the_text`): text and line count are
 identical on all three pages; worst line confidence delta 6.96e-2, page means 0.986791 /
 0.986888 / 0.985523. The quantized file's per-graph drift against the F32 file is measured
-by the same fixture test: detector `prob` max abs 1.9e-2, router logits 6.1e-2, recognizer
-`ids` 22/1064 timesteps (2.1 %). That is why the F32 fixture gates above are not applied to
-the Q8_0 file: for the quantized format the contract is the page, and the page keeps its
-text.
+by `q8_0_weights_stay_within_the_measured_quantization_bounds`, which asserts the drift the
+committed fixtures measure: detector `prob` max abs 1.85e-2 (gate 3e-2), router logits
+6.08e-2 (gate 1e-1), recognizer `ids` 16/1064 timesteps = 1.5 % (gate 5 %) and a per-timestep
+`conf` delta of 2.08e-1 (gate 3e-1, a sanity bound: a timestep's softmax maximum moves a lot
+when two classes are nearly tied, while `ids` is what reaches the text). The F32 fixture gates
+above are not applied to the Q8_0 file.
 
 **Performance, same host** (`--threads 4`, wall clock including process start and GGUF
 load): 3.40 s for `receipt.png`, 4.84 s for `two_column.png`, 3.07 s for `sideways.png`

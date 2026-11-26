@@ -131,6 +131,95 @@ pub struct Options {
     pub faint_max: usize,
 }
 
+/// Caller-supplied overrides on top of the model's own defaults.
+///
+/// Every field is optional: an absent one keeps what the GGUF contract says
+/// (the detector's threshold and merge distance) or [`Options::default`] (the
+/// pipeline switches). The CLI takes this as JSON with `--ocr-options`, and the
+/// HTTP route takes it as the request's `options` object.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptionsOverride {
+    /// Long side the page is resized to before detection, in pixels.
+    pub long_side: Option<usize>,
+    /// Detector probability threshold.
+    pub threshold: Option<f32>,
+    /// Collinear box merge distance, in line heights (0 = off).
+    pub merge: Option<f32>,
+    pub gutter: Option<bool>,
+    pub orient: Option<bool>,
+    pub rescue: Option<bool>,
+    pub junk: Option<bool>,
+    /// Confidence a faint short token is kept at (0 = off).
+    pub faint_threshold: Option<f32>,
+    /// Most faint candidates per page.
+    pub faint_max: Option<usize>,
+}
+
+impl OptionsOverride {
+    /// Applies the overrides to `base`, rejecting a value the pipeline cannot
+    /// run with.
+    pub fn apply(&self, base: Options) -> Result<Options, String> {
+        let mut options = base;
+        if let Some(long_side) = self.long_side {
+            if !(32..=8192).contains(&long_side) {
+                return Err(format!(
+                    "The OCRia long side must be between 32 and 8192 pixels, got {long_side}"
+                ));
+            }
+            options.det_long_side = long_side;
+        }
+        if let Some(threshold) = self.threshold {
+            if !(threshold > 0.0 && threshold < 1.0) {
+                return Err(format!(
+                    "The OCRia detector threshold must be in (0, 1), got {threshold}"
+                ));
+            }
+            options.det_thresh = threshold;
+        }
+        if let Some(merge) = self.merge {
+            if !(merge.is_finite() && merge >= 0.0) {
+                return Err(format!(
+                    "The OCRia merge distance must be finite and non-negative, got {merge}"
+                ));
+            }
+            options.det_merge = merge;
+        }
+        if let Some(gutter) = self.gutter {
+            options.gutter = gutter;
+        }
+        if let Some(orient) = self.orient {
+            options.orient = orient;
+        }
+        if let Some(rescue) = self.rescue {
+            options.rescue = rescue;
+        }
+        if let Some(junk) = self.junk {
+            options.junk = junk;
+        }
+        if let Some(faint) = self.faint_threshold {
+            if !(0.0..=1.0).contains(&faint) {
+                return Err(format!(
+                    "The OCRia faint threshold must be in [0, 1], got {faint}"
+                ));
+            }
+            options.faint_thresh = faint;
+        }
+        if let Some(max) = self.faint_max {
+            if max > 4096 {
+                return Err(format!(
+                    "The OCRia faint budget must be at most 4096 candidates, got {max}"
+                ));
+            }
+            options.faint_max = max;
+        }
+        if options.faint_thresh > 0.0 && options.faint_max == 0 {
+            return Err("The OCRia faint pass needs a non-zero candidate budget".into());
+        }
+        Ok(options)
+    }
+}
+
 /// A faint candidate is kept only at this confidence. Rule fragments and
 /// specks read as "|", "l" or a letter pair at 0.5-0.7.
 const FAINT_CONF: f32 = 0.9;
@@ -312,6 +401,7 @@ impl Model {
         source: &dyn TensorSource,
         compute: ComputePolicy,
         threads: usize,
+        overrides: Option<&OptionsOverride>,
     ) -> Result<Self, String> {
         let meta = |key: &str| metadata_string(source, key);
         if meta("general.architecture").as_deref() != Some(ARCHITECTURE) {
@@ -346,12 +436,15 @@ impl Model {
             serde_json::from_str(&raw).map_err(|e| format!("Invalid {key}: {e}"))
         };
         let pool = Arc::new(ComputePool::new(threads.max(1)));
-        let options = Options {
+        let mut options = Options {
             det_long_side: expected.det.long_side,
             det_thresh: expected.det.thresh,
             det_merge: expected.det.merge,
             ..Options::default()
         };
+        if let Some(overrides) = overrides {
+            options = overrides.apply(options)?;
+        }
         let faint =
             (options.faint_thresh > 0.0).then_some((options.faint_thresh, options.faint_max));
         let det = det::Detector::new(
@@ -391,8 +484,20 @@ impl Model {
         self.options
     }
 
-    /// OCR one page image: RGB (or grey) bytes, row-major.
+    /// OCR one page image: RGB (or grey) bytes, row-major, with the options the
+    /// model was loaded with.
     pub fn run(&self, data: &[u8], width: u32, height: u32) -> Result<Page, OcrError> {
+        self.run_with(self.options, data, width, height)
+    }
+
+    /// [`Model::run`] with this page's own options.
+    pub fn run_with(
+        &self,
+        options: Options,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Page, OcrError> {
         let (w, h) = (width as usize, height as usize);
         if w == 0 || h == 0 {
             return Err(OcrError::Invalid("The page is empty".into()));
@@ -405,7 +510,9 @@ impl Model {
                 data.len()
             )));
         }
-        let page = self.run_page(data, w, h).map_err(OcrError::Numerical)?;
+        let page = self
+            .run_page(&options, data, w, h)
+            .map_err(OcrError::Numerical)?;
         self.policy.trace("ocria", UsedBackend::Cpu, w * h);
         Ok(Page {
             width,
@@ -414,7 +521,13 @@ impl Model {
         })
     }
 
-    fn run_page(&self, data: &[u8], width: usize, height: usize) -> Result<Vec<Line>, String> {
+    fn run_page(
+        &self,
+        options: &Options,
+        data: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Result<Vec<Line>, String> {
         let mut img0 = img::Img {
             w: width,
             h: height,
@@ -429,7 +542,7 @@ impl Model {
         let mut sideways = false;
         let turned;
         let mut img = &img0;
-        if self.options.orient && page::looks_sideways(&boxes) {
+        if options.orient && page::looks_sideways(&boxes) {
             // maybe a page scanned on its side: detect again a quarter turn
             // counter-clockwise and keep that when it finds far more lines
             turned = img0.rot90(1);
@@ -441,13 +554,13 @@ impl Model {
                 sideways = true;
             }
         }
-        if self.options.gutter {
+        if options.gutter {
             boxes = page::split_gutters(img, &boxes);
         }
         let (mut reads, flip, dom) = if boxes.is_empty() {
             (Vec::new(), false, 0)
         } else {
-            self.read(img, &boxes)?
+            self.read(options, img, &boxes)?
         };
         let n_lines = boxes.len();
         if !faint.is_empty() && !flip {
@@ -465,10 +578,10 @@ impl Model {
         }
         let mut out = Vec::new();
         for (k, (quad, (text, conf))) in boxes.iter().zip(reads).enumerate() {
-            if text.trim().is_empty() || (self.options.junk && page::is_junk(&text, conf)) {
+            if text.trim().is_empty() || (options.junk && page::is_junk(&text, conf)) {
                 continue;
             }
-            let pts = if self.options.orient {
+            let pts = if options.orient {
                 page::reading_frame(quad, flip, sideways, img0.w)
             } else {
                 *quad
@@ -505,6 +618,7 @@ impl Model {
     /// script group.
     fn read(
         &self,
+        options: &Options,
         img: &img::Img,
         boxes: &[Quad],
     ) -> Result<(Vec<(String, f32)>, bool, usize), String> {
@@ -529,7 +643,7 @@ impl Model {
         // a routed reading this confident is a real reading, not the 0.5-0.7
         // junk of the wrong recognizer
         const KEEP_CONF: f32 = 0.75;
-        if self.options.rescue && dom == 0 {
+        if options.rescue && dom == 0 {
             // a whole page of another script sent to the Latin recognizer reads
             // as confident-looking junk at 0.5-0.7; the right recognizer then
             // scores 0.83-0.90

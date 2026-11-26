@@ -643,6 +643,15 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                         .map_err(|_| "--speed must be a number between 0.5 and 2.0")?,
                 );
             }
+            "--ocr-options" => {
+                // Syntax and field names are checked here so a typo fails
+                // before a model is loaded; the value ranges need the model's
+                // own defaults as a base and are checked when it is applied.
+                let value = required_string_value(args, &mut i, "--ocr-options")?;
+                serde_json::from_str::<crate::models::ocria::OptionsOverride>(&value)
+                    .map_err(|e| format!("Invalid --ocr-options: {e}"))?;
+                options.ocr_options = Some(value)
+            }
             "--pronunciations" => {
                 options.pronunciations =
                     Some(required_string_value(args, &mut i, "--pronunciations")?)

@@ -33,10 +33,22 @@ CLI（模型按 `general.architecture=ocria` 自动选中）：
 
 ```bash
 rust-model-inference --model ocria-f32.gguf --image page.png --out lines.json \
-  [--threads N] [--compute cpu|auto] [--overwrite]
+  [--threads N] [--compute cpu|auto] [--overwrite] [--ocr-options '<json>']
 ```
 
 `--out` 省略时 JSON 写到 stdout。`--mmproj` 会被明确拒绝（一个 GGUF 自带全部组件）。
+
+`--ocr-options` 覆盖页面管线参数，缺省字段保留 GGUF 契约里的值（检测阈值/合并距离）或参考默认
+（各开关）：
+
+```json
+{"long_side":1600,"threshold":0.55,"merge":0.6,"gutter":true,
+ "orient":true,"rescue":true,"junk":true,"faint_threshold":0.1,"faint_max":24}
+```
+
+JSON 语法与字段名在参数解析阶段就校验（拼错不会等到加载模型），取值范围在套用到模型默认值时
+校验（`threshold` ∈ (0,1)、`long_side` ∈ [32,8192]、`merge` ≥ 0、`faint_threshold` ∈ [0,1] 等）。
+`--ocr-options` 用在非 `ocria` 模型上会明确报错，不会被静默忽略。
 
 HTTP：
 
@@ -46,9 +58,10 @@ curl -f http://127.0.0.1:8080/v1/ocr -H 'Content-Type: application/json' \
   -d "{\"image\":\"data:image/png;base64,$(base64 -i page.png)\"}"
 ```
 
-`image` 接受 `data:` URL 或裸 base64，远端 URL 明确拒绝（400）。CLI 与 HTTP 返回同一份
+`image` 接受 `data:` URL 或裸 base64，远端 URL 明确拒绝（400）。请求可带一个 `options` 对象，
+字段与 `--ocr-options` 相同，用于覆盖这一页的参数（非法取值返回 400）。CLI 与 HTTP 返回同一份
 JSON（`width`/`height`/`lines[text,bbox,confidence,polygon,faint]`），`page_read_matches_liteparse`
-对同一页图像分别验证两者共用的 `Model::run`。
+对同一页图像验证两者共用的 `Model::run`，`tests/ocria_cli.rs` 另外验证 CLI 的参数校验与真实出图。
 
 JEV 不适用：这是行检测 + CTC 识别的几何输出流水线，没有候选标签上的概率/评分语义。
 
@@ -60,7 +73,7 @@ JEV 不适用：这是行检测 + CTC 识别的几何输出流水线，没有候
 | 同上 | `ocria-nano-1-q8_0-v1`（257 F32 + 85 Q8_0） | F32 计算（加载时反量化） | `--compute cpu` / `auto` | 同上，三页文本逐行一致 | 同上 | 同上；量化后 det `prob` max abs 1.9e-2、router logits 6.1e-2、rec `ids` 22/1064 差、行置信度差 ≤7.0e-2，**三页文本仍逐行一致** | 已实现 / 通过（文本一致；概率图与置信度按量化误差评估） |
 | 严格设备模式 | 任一 | — | `--compute vulkan` | 启动即明确报错 | 启动即明确报错 | 无设备算子：发布方是 CPU 流水线，仓库 Vulkan 内核只覆盖线性投影，本模型的 dw/pw 卷积没有设备实现 | 不适用（契约依据见下）/ 未运行 |
 | 组件缺失/不匹配 | 任一 | — | 任一 | 缺张量、形状不符、charset 与 head 类数不符、`ocria.config` 与契约不符都在加载期指名报错 | 同上 | `contract.json` 342 个名字+形状双向校验；转换器与加载器共用同一 Q8_0 行宽规则 | 已实现 / 通过 |
-| 页面管线开关（faint / gutter / orient / rescue / junk） | 任一 | — | 任一 | 三页 fixture 分别覆盖单列、双列栏缝切分、四分之一转重试 | 同一 `Model::run` | `sideways.png` 17 行、`two_column.png` 25 行与参考一致 | 已实现 / 通过 |
+| 页面管线开关（faint / gutter / orient / rescue / junk） | 任一 | — | 任一 | 三页 fixture 分别覆盖单列、双列栏缝切分、四分之一转重试；`--ocr-options` 可覆盖 | 请求级 `options` 对象（非法值 400） | `sideways.png` 17 行、`two_column.png` 25 行与参考一致；`tests/ocria_cli.rs` 用 `faint_threshold:0` 验证开关生效 | 已实现 / 通过 |
 | LayoutNet（表格 + 版面块） | — | — | — | — | — | 未实现：`tools/oracle/ocria/layout-plan.md` 给出契约、可达性与工作量（≈2 800–3 600 行 Rust + 转换器），并指出 OCR 页路径硬依赖 LiteParse 的 projection 信号 | 未实现 / 未运行（第二层） |
 | PDF 输入 | — | — | — | — | — | 仓库无 PDF 渲染器；本模型只接受页面图像 | 不适用 / 未运行 |
 

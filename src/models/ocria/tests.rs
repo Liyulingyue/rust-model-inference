@@ -124,6 +124,62 @@ fn a_non_ocria_file_is_not_claimed() {
     assert!(!matches_model(Path::new("/nonexistent/ocria.gguf")));
 }
 
+#[test]
+fn option_overrides_replace_only_what_they_name() {
+    let base = Options {
+        det_long_side: 1600,
+        det_thresh: 0.55,
+        det_merge: 0.6,
+        ..Options::default()
+    };
+    let overrides: OptionsOverride = serde_json::from_str(
+        r#"{"long_side":800,"threshold":0.4,"orient":false,"faint_threshold":0.0}"#,
+    )
+    .unwrap();
+    let options = overrides.apply(base).unwrap();
+    assert_eq!(options.det_long_side, 800);
+    assert_eq!(options.det_thresh, 0.4);
+    assert!(!options.orient);
+    assert_eq!(options.faint_thresh, 0.0);
+    // untouched fields keep the base
+    assert_eq!(options.det_merge, 0.6);
+    assert!(options.gutter && options.rescue && options.junk);
+    // an empty object is the identity
+    let identity: OptionsOverride = serde_json::from_str("{}").unwrap();
+    assert_eq!(identity.apply(base).unwrap().det_long_side, 1600);
+}
+
+#[test]
+fn option_overrides_reject_values_the_pipeline_cannot_run_with() {
+    let base = Options::default();
+    for (json, needle) in [
+        (r#"{"threshold":0}"#, "threshold"),
+        (r#"{"threshold":1}"#, "threshold"),
+        (r#"{"threshold":-0.5}"#, "threshold"),
+        (r#"{"long_side":0}"#, "long side"),
+        (r#"{"long_side":99999}"#, "long side"),
+        (r#"{"merge":-1}"#, "merge distance"),
+        (r#"{"faint_threshold":1.5}"#, "faint threshold"),
+        (
+            r#"{"faint_threshold":0.5,"faint_max":0}"#,
+            "candidate budget",
+        ),
+        (r#"{"unknown":1}"#, "unknown field"),
+    ] {
+        let overrides: Result<OptionsOverride, _> = serde_json::from_str(json);
+        let rejected = match overrides {
+            Ok(overrides) => overrides.apply(base).is_err(),
+            Err(_) => true,
+        };
+        assert!(rejected, "{json} should be rejected");
+        let message = match serde_json::from_str::<OptionsOverride>(json) {
+            Ok(overrides) => overrides.apply(base).unwrap_err(),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains(needle), "{json}: {message}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parity against the ONNX Runtime oracle
 // ---------------------------------------------------------------------------
@@ -139,7 +195,7 @@ fn packed_model() -> Option<(Model, PathBuf)> {
     let source =
         crate::format::ggufrs::open_model_source(&path, crate::format::ggufrs::ComponentRole::Llm)
             .expect("open the packed OCRia GGUF");
-    let model = Model::from_source(source.as_ref(), ComputePolicy::Cpu, 2)
+    let model = Model::from_source(source.as_ref(), ComputePolicy::Cpu, 2, None)
         .expect("load the packed OCRia GGUF");
     Some((model, path))
 }
@@ -447,6 +503,99 @@ fn page_read_matches_liteparse() {
             page.lines.len()
         );
     }
+}
+
+/// The Q8_0 export against the same ONNX Runtime fixtures.
+///
+/// The F32 gates above are not applied here: 85 of the 342 tensors are stored
+/// in 8-bit blocks, so the numbers move. The gates below are the drift measured
+/// on the committed fixtures plus headroom (see `tools/oracle/ocria/validation.md`):
+/// detector 1.85e-2, router logits 6.08e-2, 16 of 1064 recognizer timesteps
+/// (1.5 %) and a 0.208 per-timestep confidence delta. The confidence gate is a
+/// sanity bound rather than a precision claim -- a timestep's softmax maximum
+/// moves a lot when two classes are nearly tied -- while `ids` is the decision
+/// that reaches the text. They are here so a change to the quantization rule or
+/// the loader shows up as a failure rather than as a silent drift.
+#[test]
+#[ignore = "requires OCRIA_GGUF (q8_0) and the ONNX Runtime fixtures"]
+fn q8_0_weights_stay_within_the_measured_quantization_bounds() {
+    let Some((model, path)) = packed_model() else {
+        panic!("set OCRIA_GGUF");
+    };
+    assert_eq!(model.format, WeightFormat::Q8_0, "{}", path.display());
+    let (manifest, dir) = manifest().expect("fixtures manifest.json");
+
+    let mut worst_det = 0.0f32;
+    for case in manifest["det"].as_array().unwrap() {
+        let (h, w) = (
+            case["height"].as_u64().unwrap() as usize,
+            case["width"].as_u64().unwrap() as usize,
+        );
+        let input = read_f32(&dir, case["input"].as_str().unwrap(), 3 * h * w);
+        let expected = read_f32(&dir, case["prob"].as_str().unwrap(), (h / 2) * (w / 2));
+        let (prob, _, _) = model.det.forward_prob(&input, h, w).unwrap();
+        worst_det = worst_det.max(max_abs(&prob, &expected));
+    }
+
+    let mut worst_router = 0.0f32;
+    for case in manifest["router"].as_array().unwrap() {
+        let count = case["count"].as_u64().unwrap() as usize;
+        let input = read_f32(&dir, case["input"].as_str().unwrap(), count * 32 * 512);
+        let group = read_f32(&dir, case["group_logits"].as_str().unwrap(), count * 4);
+        let flip = read_f32(&dir, case["flip_logits"].as_str().unwrap(), count * 2);
+        let (got_group, got_flip) = model.router.forward_logits(&input, count).unwrap();
+        worst_router = worst_router.max(max_abs(&got_group, &group).max(max_abs(&got_flip, &flip)));
+    }
+
+    let (mut differing, mut total, mut worst_conf) = (0usize, 0usize, 0.0f32);
+    for (index, group) in rec::GROUPS.iter().enumerate() {
+        for case in manifest["rec"][group].as_array().unwrap() {
+            let count = case["count"].as_u64().unwrap() as usize;
+            let width = case["width"].as_u64().unwrap() as usize;
+            let input = read_f32(&dir, case["input"].as_str().unwrap(), count * 32 * width);
+            let (logits, steps) = model.recs[index]
+                .forward_logits(&input, count, width)
+                .unwrap();
+            let classes = logits.len() / (count * steps);
+            let ids = read_i64(&dir, case["ids"].as_str().unwrap(), count * steps);
+            let conf = read_f32(&dir, case["conf"].as_str().unwrap(), count * steps);
+            for step in 0..count * steps {
+                let row: Vec<f32> = (0..classes).map(|c| logits[c * steps + step]).collect();
+                let mut best = 0usize;
+                for (k, &value) in row.iter().enumerate().skip(1) {
+                    if value > row[best] {
+                        best = k;
+                    }
+                }
+                let peak = row[best];
+                let sum: f32 = row.iter().map(|v| (v - peak).exp()).sum();
+                if ids[step] != best as i64 {
+                    differing += 1;
+                }
+                worst_conf = worst_conf.max((1.0 / sum - conf[step]).abs());
+            }
+            total += count * steps;
+        }
+    }
+    println!(
+        "q8_0: det {worst_det:.3e}, router {worst_router:.3e}, ids {differing}/{total}, conf {worst_conf:.3e}"
+    );
+    assert!(
+        worst_det <= 3e-2,
+        "q8_0 detector drift {worst_det:.3e} > 3e-2"
+    );
+    assert!(
+        worst_router <= 1e-1,
+        "q8_0 router drift {worst_router:.3e} > 1e-1"
+    );
+    assert!(
+        differing * 20 <= total,
+        "q8_0 recognizer ids differ on {differing}/{total} timesteps (> 5 %)"
+    );
+    assert!(
+        worst_conf <= 3e-1,
+        "q8_0 recognizer conf drift {worst_conf:.3e} > 3e-1"
+    );
 }
 
 /// End to end on the quantized export.

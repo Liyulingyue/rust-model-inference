@@ -156,6 +156,8 @@ pub struct CliOptions {
     pub voice: Option<String>,
     pub speed: Option<f32>,
     pub pronunciations: Option<String>,
+    /// `--ocr-options`: JSON overrides for the OCRia page pipeline.
+    pub ocr_options: Option<String>,
     pub edit: bool,
     pub source_audio: Option<PathBuf>,
     pub source_text: Option<String>,
