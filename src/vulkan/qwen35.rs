@@ -2992,14 +2992,14 @@ fn upload_weight(
 ) -> Result<(GpuBuffer, GpuMatmulSpec), VulkanError> {
     let format = GpuMatmulSpec::prepared(weight)?;
     let bytes = validated_weight_bytes(weight, label)?;
-    Ok((buffers.upload(bytes)?, format))
+    Ok((buffers.upload(&bytes)?, format))
 }
 
 fn validated_weight_bytes<'a>(
     weight: &'a Weight<'_>,
     label: &str,
-) -> Result<&'a [u8], VulkanError> {
-    let bytes = weight.kernel.weight_bytes().ok_or_else(|| {
+) -> Result<std::borrow::Cow<'a, [u8]>, VulkanError> {
+    let bytes = weight.kernel.device_weight_bytes().ok_or_else(|| {
         VulkanError::UnsupportedShape(format!(
             "{label} does not expose {:?} storage bytes",
             weight.ggml_type
@@ -3066,7 +3066,7 @@ fn bind_weight_group<const N: usize>(
     {
         let gpu_buffers = weights
             .into_iter()
-            .map(|(w, label)| buffers.upload(validated_weight_bytes(w, label)?))
+            .map(|(w, label)| buffers.upload(&validated_weight_bytes(w, label)?))
             .collect::<Result<Vec<_>, _>>()?;
         let binding = ops.bind_weight_buffers_mode(
             &gpu_buffers,

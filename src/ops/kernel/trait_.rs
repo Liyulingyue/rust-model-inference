@@ -51,14 +51,20 @@ pub trait Kernel: Send + Sync {
         None
     }
 
-    /// Bytes in the weight's runtime GGML format that can be uploaded
-    /// directly. A folded weight also supplies its activation transform.
+    /// Borrow the stable bytes of weights already stored in their runtime GGML format.
     fn weight_bytes(&self) -> Option<&[u8]> {
         None
     }
 
+    /// Bytes for one resident upload. Packed weights may return a temporary
+    /// conversion that can be released as soon as the device has copied it.
+    #[cfg(feature = "vulkan")]
+    fn device_weight_bytes(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
+        self.weight_bytes().map(std::borrow::Cow::Borrowed)
+    }
+
     /// Signed, one-based gather indices before a normalized 1024-wide Walsh transform.
-    /// Resident projections must apply this map to the input before using weight_bytes().
+    /// Resident projections must apply this map before multiplying by the uploaded weight.
     #[cfg(feature = "vulkan")]
     fn hadamard_input_map(&self) -> Option<&[i32]> {
         None

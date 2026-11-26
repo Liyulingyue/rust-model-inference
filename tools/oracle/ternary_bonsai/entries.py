@@ -81,6 +81,17 @@ def main():
                     time.sleep(1)
             else:
                 raise TimeoutError("server did not start")
+            if args.jev:
+                for kind in prompts:
+                    payload = {"context": "Red", "questions": [{"text": "Color?", "options": ["red", "blue"]}]}
+                    if kind == "image":
+                        payload["image_url"] = uri
+                    route = "jev/image" if kind == "image" else "jev/score"
+                    score = json.loads(request(route, payload))["results"][0]
+                    record("http_jev_" + kind, score)
+                    other = result["cli_jev_" + kind]
+                    assert score["choice"] == other["choice"]
+                    assert max(abs(p - other["probabilities"][k]) for k, p in score["probabilities"].items()) < 0.01
             for kind, prompt in prompts.items():
                 content = prompt if kind == "text" else [
                     {"type": "image_url", "image_url": {"url": uri}}, {"type": "text", "text": prompt}]
@@ -96,16 +107,7 @@ def main():
                 streamed = "".join(c[0]["delta"].get("content", "") or "" for c in chunks if c).strip()
                 record("sse_" + kind, streamed)
                 assert streamed == answer == result["cli_" + kind], result
-                if args.jev:
-                    payload = {"context": "Red", "questions": [{"text": "Color?", "options": ["red", "blue"]}]}
-                    if kind == "image":
-                        payload["image_url"] = uri
-                    route = "jev/image" if kind == "image" else "jev/score"
-                    score = json.loads(request(route, payload))["results"][0]
-                    record("http_jev_" + kind, score)
-                    other = result["cli_jev_" + kind]
-                    assert score["choice"] == other["choice"]
-                    assert max(abs(p - other["probabilities"][k]) for k, p in score["probabilities"].items()) < 0.01
+
         finally:
             server.terminate()
             try:

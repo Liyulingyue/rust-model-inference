@@ -5,10 +5,10 @@ use super::Qwen35Config;
 use crate::core::tensor::{GGMLType, MetaValue, TensorSource};
 use crate::ops::kernel::{q4_0::Q4_0Kernel, Kernel, Weight};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod packing;
-use packing::repack;
+use packing::PackedRows;
 #[cfg(test)]
 mod tests;
 
@@ -58,16 +58,25 @@ fn signed_map(signs: &[i32], heads: Option<(usize, usize)>) -> Result<Arc<[i32]>
         .collect())
 }
 
-struct FoldedMatrix {
-    q4: Vec<u8>,
+struct FoldedMatrix<'a> {
+    packed: PackedRows<'a>,
+    cpu_q4: OnceLock<Vec<u8>>,
     map: Arc<[i32]>,
-    // PQ2_0's CPU reference uses one Q8_K activation scale per 256 elements.
-    q8k: bool,
 }
 
-impl Kernel for FoldedMatrix {
-    fn weight_bytes(&self) -> Option<&[u8]> {
-        Some(&self.q4)
+impl FoldedMatrix<'_> {
+    fn cpu_bytes(&self) -> &[u8] {
+        self.cpu_q4.get_or_init(|| self.packed.repack())
+    }
+}
+
+impl Kernel for FoldedMatrix<'_> {
+    #[cfg(feature = "vulkan")]
+    fn device_weight_bytes(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
+        Some(match self.cpu_q4.get() {
+            Some(bytes) => std::borrow::Cow::Borrowed(bytes.as_slice()),
+            None => std::borrow::Cow::Owned(self.packed.repack()),
+        })
     }
     #[cfg(feature = "vulkan")]
     fn hadamard_input_map(&self) -> Option<&[i32]> {
@@ -101,7 +110,8 @@ impl Kernel for FoldedMatrix {
         hadamard(&mut rotated);
         let mut q8 = vec![0; n_in];
         let mut scales = vec![0.0; n_in / 32];
-        if self.q8k {
+        // PQ2_0 uses one Q8_K activation scale per 256 elements on the CPU.
+        if self.packed.ty == GGMLType::PQ2_0 {
             let blocks = crate::ops::quant::quantize_row_q8_k(&rotated);
             for ((block, dst), ds) in blocks
                 .iter()
@@ -114,7 +124,7 @@ impl Kernel for FoldedMatrix {
         } else {
             crate::ops::quantize_q8_0_into(&rotated, n_in, &mut q8, &mut scales);
         }
-        Q4_0Kernel::new(&self.q4, n_in, n_out)
+        Q4_0Kernel::new(self.cpu_bytes(), n_in, n_out)
             .forward_prequantized(&q8, &scales, output, n_in, n_out, ith, nth);
     }
 
@@ -138,7 +148,8 @@ impl Kernel for FoldedMatrix {
 
     fn embedding_lookup(&self, token: u32, width: usize, out: &mut [f32]) {
         let row = &mut out[..width];
-        Q4_0Kernel::new(&self.q4, width, 0).embedding_lookup(token, width, row);
+        let packed_row = self.packed.repack_row(token as usize, width);
+        Q4_0Kernel::new(&packed_row, width, 1).embedding_lookup(0, width, row);
         // Embeddings use the inverse basis D·H, without the GDN permutation.
         hadamard(row);
         for (value, &idx) in row.iter_mut().zip(self.map.iter()) {
@@ -183,11 +194,11 @@ fn has_folded_layout(source: &dyn TensorSource) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Validate the whole folded tensor list before allocating the Q4_0 matrices.
-pub(crate) fn load(
-    source: &dyn TensorSource,
+/// Borrow the validated ternary matrices. Only CPU projections retain Q4_0 copies.
+pub(crate) fn load<'a>(
+    source: &'a dyn TensorSource,
     cfg: &Qwen35Config,
-) -> Result<HashMap<String, Weight<'static>>, String> {
+) -> Result<HashMap<String, Weight<'a>>, String> {
     if !has_folded_layout(source)? {
         return Ok(HashMap::new());
     }
@@ -312,7 +323,7 @@ pub(crate) fn load(
     if let Some(extra) = names.into_iter().next() {
         return Err(format!("unsupported prism.hadamard weight: {extra}"));
     }
-    let mut validated = Vec::with_capacity(matrices.len());
+    let mut weights = HashMap::with_capacity(matrices.len());
     for (name, n_in, n_out, permute) in matrices {
         let ty = crate::core::tensor::require_tensor_type(
             source,
@@ -327,14 +338,10 @@ pub(crate) fn load(
             .get(&n_in)
             .ok_or_else(|| format!("missing sign vector of width {n_in} for {name}"))?;
         let map = Arc::clone(if permute { recurrent } else { plain });
-        validated.push((name, n_in, n_out, ty, data, map));
-    }
-    let mut weights = HashMap::with_capacity(validated.len());
-    for (name, n_in, n_out, ty, data, map) in validated {
         let kernel = FoldedMatrix {
-            q4: repack(ty, data)?,
+            packed: PackedRows::new(ty, data)?,
+            cpu_q4: OnceLock::new(),
             map,
-            q8k: ty == GGMLType::PQ2_0,
         };
         weights.insert(
             name,

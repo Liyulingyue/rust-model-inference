@@ -68,23 +68,31 @@ fn signed_gdn_map_transposes_heads_and_preserves_channels() {
 fn inverse_embedding_and_forward_projection_use_the_same_signed_basis() {
     // A single coefficient picks one known column of the Walsh matrix.
     let coefficient: usize = 173;
-    let mut row = vec![0x88u8; BLOCK / 32 * 18];
-    for block in row.chunks_exact_mut(18) {
-        block[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
-    }
-    let byte = 18 * (coefficient / 32) + 2 + coefficient % 16;
-    row[byte] |= 1 << (4 * ((coefficient % 32) / 16));
     let signs: Vec<_> = (0..BLOCK)
         .map(|i| if i % 3 == 0 { -1 } else { 1 })
         .collect();
-    for q8k in [false, true] {
+    for ty in [GGMLType::Q2_0, GGMLType::PQ2_0] {
+        let (elements, bytes) = ty.type_traits();
+        let row_bytes = BLOCK / elements * bytes;
+        let mut rows = vec![0x55; 2 * row_bytes];
+        for block in rows.chunks_exact_mut(bytes) {
+            block[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        }
+        let byte = row_bytes + coefficient / elements * bytes + 2 + coefficient % elements / 4;
+        rows[byte] ^= 3 << (2 * (coefficient % 4));
         let kernel = FoldedMatrix {
-            q4: row.clone(),
+            packed: PackedRows::new(ty, &rows).unwrap(),
+            cpu_q4: OnceLock::new(),
             map: signed_map(&signs, None).unwrap(),
-            q8k,
         };
         let mut embedding = vec![0.0; BLOCK];
-        kernel.embedding_lookup(0, BLOCK, &mut embedding);
+        kernel.embedding_lookup(1, BLOCK, &mut embedding);
+        #[cfg(feature = "vulkan")]
+        assert!(matches!(
+            kernel.device_weight_bytes(),
+            Some(std::borrow::Cow::Owned(_))
+        ));
+        assert!(kernel.cpu_q4.get().is_none());
         for i in [0usize, 17, 53, 1023] {
             let parity = if (i & coefficient).count_ones() % 2 == 0 {
                 1.0
@@ -94,12 +102,18 @@ fn inverse_embedding_and_forward_projection_use_the_same_signed_basis() {
             let expected = parity * signs[i] as f32 / 32.0;
             let mut input = vec![0.0; BLOCK];
             input[i] = 1.0;
-            let mut output = [0.0];
-            kernel.forward(&input, &mut output, BLOCK, 1);
+            let mut output = [0.0; 2];
+            kernel.forward(&input, &mut output, BLOCK, 2);
             assert!((embedding[i] - expected).abs() < 1e-6);
             // One Q8 code at this scale spans ~0.00025 after rotation.
-            assert!((output[0] - expected).abs() < 0.0003);
+            assert_eq!(output[0], 0.0);
+            assert!((output[1] - expected).abs() < 0.0003);
         }
+        #[cfg(feature = "vulkan")]
+        assert!(matches!(
+            kernel.device_weight_bytes(),
+            Some(std::borrow::Cow::Borrowed(_))
+        ));
     }
 }
 
@@ -136,7 +150,7 @@ fn packed_codes_and_scale_survive_repacking() {
                     .map(|q| q[0] | q[1] << 2 | q[2] << 4 | q[3] << 6),
             );
         }
-        let packed = repack(ty, &input).unwrap();
+        let packed = PackedRows::new(ty, &input).unwrap().repack();
         for (block, values) in packed.chunks_exact(18).zip(values.chunks_exact(32)) {
             assert_eq!(&block[..2], &scale);
             for i in 0..16 {
