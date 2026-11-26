@@ -90,13 +90,15 @@ The counting prompt contains 24 tokens. The ledger contains 128 records, with `o
 | 2.5 | Red → blue | 1 | 3.492e-06 | 3.536e-06 | 3.536e-06 |
 | 2.5 | Blue → red | 1 | 1.732e-06 | 1.731e-06 | 1.731e-06 |
 | 3.0 | Counting | 32 | 7.9e-08 | — | 8.3e-08 |
-| 3.0 | 128-record ledger | 8 | — | — | 8.03e-07 |
+| 3.0 | 128-record ledger | 8 | 7.93e-07 | — | 8.03e-07 |
 | 3.0 | Left | 1 | 6.46e-06 | — | 6.774e-06 |
 | 3.0 | Top | 1 | 0.000186183 | 0.000185076 | 0.000185076 |
 | 3.0 | Red → blue | 1 | 1.5887e-05 | 1.5926e-05 | 1.5926e-05 |
 | 3.0 | Blue → red | 1 | 1.554e-05 | 1.548e-05 | 1.548e-05 |
 
-All 41 recorded comparisons passed across 279 prediction positions. Each number is the largest KL across the prediction positions for one input and backend. A dash indicates an unmeasured combination. Across all rows the largest relative L2 was 0.00483355 and the largest absolute logit difference was 0.097906. On the device, counting recorded 2,618 submissions, the ledger 14,399, the spatial images 1,855 and the clips 2,009. CPU comparisons recorded zero. The first eight ledger predictions contain `orchid` at 2.0 and 2.5 bpw. The 3.0 bpw reference starts a longer answer and has yet to emit the label at position eight.
+All 42 recorded comparisons passed across 287 prediction positions. Each number is the largest KL across the prediction positions for one input and backend. A dash indicates an unmeasured combination. Across all rows the largest relative L2 was 0.00483355 and the largest absolute logit difference was 0.097906. On the device, counting recorded 2,618 submissions, the ledger 14,399, the spatial images 1,855 and the clips 2,009. CPU comparisons recorded zero. The first eight ledger predictions contain `orchid` at 2.0 and 2.5 bpw. The 3.0 bpw reference starts a longer answer and has yet to emit the label at position eight.
+
+At 3.0 bpw, the 1,434-token prefill took 12,320.3 s on Rust CPU, 649.6 s on strict Vulkan and 307.6 s on the reference CPU. Both Rust backends reproduced the eight reference token IDs `[271, 27775, 383, 279, 45366, 3766, 11, 279]`. The reference also saved every prompt logit row. These are single wall-time observations on a shared host.
 
 ## Public CLI
 
@@ -115,4 +117,4 @@ With 3.0 bpw, strict Vulkan answered the two spatial questions with `red` and `b
 
 Before the repair, the video CLI reported 28 text tokens and zero visual placeholders. Both CPU and strict Vulkan answered `Black` for both clips. The repaired CLI's prompt IDs matched the reference chunks in order, with 48 positions for each spatial image and 62 for each clip. Each clip included 18 visual placeholders. At 3.0 bpw, CPU and strict Vulkan returned `blue` for red → blue and `red` for blue → red. The shipped Jinja template gave the same two answers on strict Vulkan with `--jinja --no-thinking`. The CLI samples at 2 fps with a 32-frame cap. These clips use four frames. HTTP chat returned 400 for `video_url`. The CLI rejected video JEV during argument validation.
 
-The text and spatial grid began on the original NariQ runtime. The video comparisons use the corrected input preparation. Commit `69a54229e` reproduced both clip logits, both Jinja answers and the portrait logits on strict Vulkan. Commit `8080544b0` changed diagnostic output routing. Its JEV CLI parsed as one JSON document for every tested input, preserving both candidate probabilities from HTTP. [Entry-point regression](validation.md)
+The text and spatial grid began on the original NariQ runtime. The video comparisons use the corrected input preparation. Commit `69a54229e` reproduced both clip logits, both Jinja answers and the portrait logits on strict Vulkan, plus the red → blue clip logits on CPU. Commit `8080544b0` changed diagnostic output routing. Its JEV CLI parsed as one JSON document for every tested input, preserving both candidate probabilities from HTTP. [Entry-point regression](validation.md)
