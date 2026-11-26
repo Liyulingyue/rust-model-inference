@@ -110,20 +110,6 @@ fn timestep_embedding(t: f32) -> Vec<f32> {
 ///                -> PixelShuffle(8) -> [3, 32*th, 32*tw]
 /// ```
 
-thread_local! {
-    /// Which CFG branch the next decoder stage dumps belong to.
-    static TRACE_SUFFIX: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-
-/// Tag subsequent [`ConvDecoder`] stage dumps with the CFG branch name.
-pub(crate) fn set_trace_suffix(suffix: &str) {
-    TRACE_SUFFIX.with(|cell| *cell.borrow_mut() = suffix.to_string());
-}
-
-fn trace_suffix() -> String {
-    TRACE_SUFFIX.with(|cell| cell.borrow().clone())
-}
-
 pub(crate) struct ConvDecoder {
     conv1: Conv2dLayer,
     conv2: Conv2dLayer,
@@ -175,30 +161,48 @@ impl ConvDecoder {
 
         let (shuffled, shape) = pixel_shuffle(input, HIDDEN, token_h, token_w, 2)?;
         if super::sampler::tracing() {
-            super::sampler::trace_dump(&format!("{}_{}", "dec_ps1", trace_suffix()), &shuffled);
+            super::sampler::trace_dump(
+                &format!("{}_{}", "dec_ps1", super::sampler::trace_suffix()),
+                &shuffled,
+            );
         }
         let (mut hidden, shape) = self.conv1.forward(pool, &shuffled, shape)?;
         if super::sampler::tracing() {
-            super::sampler::trace_dump(&format!("{}_{}", "dec_conv1", trace_suffix()), &hidden);
+            super::sampler::trace_dump(
+                &format!("{}_{}", "dec_conv1", super::sampler::trace_suffix()),
+                &hidden,
+            );
         }
         // `nn.GELU()` is the exact erf form; `gelu_inplace` is the tanh
         // approximation and would drift ~1e-3.
         gelu_erf_inplace(&mut hidden);
         if super::sampler::tracing() {
-            super::sampler::trace_dump(&format!("{}_{}", "dec_gelu", trace_suffix()), &hidden);
+            super::sampler::trace_dump(
+                &format!("{}_{}", "dec_gelu", super::sampler::trace_suffix()),
+                &hidden,
+            );
         }
 
         let (shuffled, shape) = pixel_shuffle(&hidden, shape[0], shape[1], shape[2], 2)?;
         if super::sampler::tracing() {
-            super::sampler::trace_dump(&format!("{}_{}", "dec_ps2", trace_suffix()), &shuffled);
+            super::sampler::trace_dump(
+                &format!("{}_{}", "dec_ps2", super::sampler::trace_suffix()),
+                &shuffled,
+            );
         }
         let (hidden, shape) = self.conv2.forward(pool, &shuffled, shape)?;
         if super::sampler::tracing() {
-            super::sampler::trace_dump(&format!("{}_{}", "dec_conv2", trace_suffix()), &hidden);
+            super::sampler::trace_dump(
+                &format!("{}_{}", "dec_conv2", super::sampler::trace_suffix()),
+                &hidden,
+            );
         }
         let (output, shape) = pixel_shuffle(&hidden, shape[0], shape[1], shape[2], 8)?;
         if super::sampler::tracing() {
-            super::sampler::trace_dump(&format!("{}_{}", "dec_ps3", trace_suffix()), &output);
+            super::sampler::trace_dump(
+                &format!("{}_{}", "dec_ps3", super::sampler::trace_suffix()),
+                &output,
+            );
         }
 
         debug_assert_eq!(shape, [3, token_h * TOKEN_SIDE, token_w * TOKEN_SIDE]);

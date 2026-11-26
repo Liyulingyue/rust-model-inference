@@ -58,44 +58,62 @@ That is a real remaining gap, not "not applicable".
 `Q6_K` / `Q4_0` were downloaded on an earlier instance of the box but that
 instance was reclaimed before they could be exercised; only `Q8_0` was run.
 
-## 4. Open divergence (the blocker)
+## 4. Open divergence (the blocker) — localised to a ~1e-2 error from layer 0
 
-`step0_v_pred_cond` differs from the oracle by rel `1.4e-1` (`rmse 0.32`), and the
-final PNG is `psnr 7.8 dB` against the oracle's — a structured but wrong image
-(horizontal banding with a repeating 3×3 motif) rather than noise.
+The generated image is structured but wrong (`psnr 7.83 dB`, `pixels_differing
+99.5 %`). This session bisected it with per-layer captures on both sides
+(`probe_trunk.py` hooks the oracle's decoder layers; the Rust side dumps
+`denoise_layer{NN}_{cond,uncond}` under `RMI_SENSENOVA_TRACE`).
 
-Localisation so far, by first divergence in pipeline order:
+**Everything downstream of the trunk is correct.** Feeding the *same* input to
+the Rust ConvDecoder and a torch rebuild from the GGUF gives `corr 1.00000000`
+at every stage. Feeding the oracle's own `norm_mot_gen`-normalised hidden to
+torch reproduces the oracle's `x_pred` to `corr 1.00000000` (so recovering
+`x_pred = v_pred * denom + z` is valid). And the decoder is *not* hypersensitive:
+torch on the Rust `decoder_in` vs torch on the oracle `decoder_in` is
+`corr 0.99995799` (`max_abs 0.0099`).
 
-```
-noise_init                 ok   (rel 4.6e-07)
-timesteps                  ok   (bit-identical)
-step0_z                    ok   (rel 4.6e-07)
-step0_image_embeds         ok   (rel 1.4e-06)   <- vision tower + embedders correct
-prefix_last_hidden_state   ok   (corr 0.99965)
-prefix_kv (layers 0/1/21/41) ok (corr >= 0.9996)
-ConvDecoder (same input)   ok   (corr 1.00000000, max_abs 2.2e-05)
-step0_v_pred_cond          FAIL (rel 1.4e-01)   <- generation-branch forward
-```
+**The trunk carries a small systematic error, present from layer 0:**
 
-Because the decoder is exact and the prefix (understanding branch: same
-attention / RoPE / RMSNorm / MLP code) is correct, the defect is confined to the
-**generation branch** of `Trunk::denoise` — i.e. the `*_mot_gen` projection set,
-the bidirectional prefix+block attention, or the h/w M-RoPE positions used only
-on that path. The trunk's own `tiny_trunk_matches_a_naive_reference` test passes,
-so the naive transcription and the optimised path agree; the divergence is
-between that transcription and the real oracle, which means the contract itself
-is wrong somewhere on this path, not that the kernel is buggy.
+| checkpoint | corr | rel (max_abs / max) |
+| --- | --- | --- |
+| `image_embeds` (trunk input) | — | 1.4e-6 |
+| `denoise_layer00_cond` | 0.99997370 | 1.27e-2 |
+| `denoise_layer01_cond` | 0.99998171 | 1.07e-2 |
+| `denoise_layer02_cond` | 0.99998522 | 9.87e-3 |
+| `denoise_layer21_cond` | 0.99999170 | 7.32e-3 |
+| `denoise_layer41_cond` | 0.99998487 | 1.59e-2 |
+| post-`norm_mot_gen` hidden | 0.99999854 | 5.35e-3 |
 
-Next steps, in order:
-1. Dump the oracle's generation-branch hidden states (`_t2i_predict_v` return
-   value) by adding one capture point to `make_reference.py`, and diff against
-   `step0_hidden_cond` (already emitted by `RMI_SENSENOVA_TRACE`).
-2. With that, split the remaining error into "attention over prefix+block" vs
-   "`*_mot_gen` MLP/norm", which is a one-layer experiment.
-3. Re-check `attention_value_reduce`'s two-call accumulation in `attend`
-   (`src/models/diffusion/sensenova_u1/trunk.rs`, the `prefix_len != 0` branch) —
-   this branch is *only* reachable from `denoise`, so the prefix pass cannot
-   catch a defect in it.
+The relative error is **already ~1e-2 at layer 0 and does not grow with depth** —
+so this is not accumulation, it is a small algorithmic difference in the first
+layer's forward (the same signature appears on the understanding branch: layer-0
+prefix K/V is `rel 3.7e-3`, and the final prefix hidden is `rel 1.7e-2`).
+
+It then **compounds across denoise steps**, which is what wrecks the image:
+
+| step | `z_next` corr | rel |
+| --- | --- | --- |
+| 1 | 0.99521690 | 5.9e-2 |
+| 2 | 0.96898049 | 2.05e-1 |
+| 3 | 0.11303292 | 1.86 |
+
+CFG with `cfg_scale = 4.0` multiplies the branch difference by 4 every step, so
+a 1e-2 seed error collapses by step 3.
+
+**Ruled out this session:** precision/SIMD. `RMI_SCALAR=1` (which forces the
+scalar `expf` softmax instead of the x86 `exp_approx_avx2` path) gives
+`psnr 7.83 dB` again — identical to 2 decimals. So the gap is not the
+approximate exponential, not reduction order, and not f32 rounding.
+
+**Next step (narrowed):** the first layer's *understanding* branch is the
+cheapest place to bisect further, because it is the same code with a causal mask
+and no prefix. Compare, at layer 0 of the prefix forward: `input_layernorm`
+output, `q/k/v` after projection, `q_norm`/`q_norm_hw` output, post-RoPE
+`q/k`, and the attention output before `o_proj`. The candidate list is short —
+RMSNorm epsilon, the 64-wide `q_norm_hw` applied *before* the h/w split, or the
+RoPE segment theta — and each is a one-line experiment against a
+`prefix_layer00_*` capture added to `probe_trunk.py`.
 
 ## 5. How to reproduce
 

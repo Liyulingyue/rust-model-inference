@@ -170,6 +170,20 @@ pub(crate) fn unpatchify(tokens: &[f32], width: usize, height: usize, patch: usi
     out
 }
 
+thread_local! {
+    /// Which CFG branch the next decoder stage dumps belong to.
+    static TRACE_SUFFIX: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Tag subsequent [`ConvDecoder`] stage dumps with the CFG branch name.
+pub(crate) fn set_trace_suffix(suffix: &str) {
+    TRACE_SUFFIX.with(|cell| *cell.borrow_mut() = suffix.to_string());
+}
+
+pub(crate) fn trace_suffix() -> String {
+    TRACE_SUFFIX.with(|cell| cell.borrow().clone())
+}
+
 /// Whether checkpoint tracing is on.
 ///
 /// Callers guard their `format!` with this so the default (untraced) path never
@@ -336,6 +350,9 @@ pub(crate) fn denoise(
                            out: &mut Vec<f32>,
                            branch: &str|
          -> Result<(), String> {
+            if tracing() {
+                set_trace_suffix(branch);
+            }
             let hidden =
                 sampler
                     .trunk
@@ -358,7 +375,6 @@ pub(crate) fn denoise(
                 // right input: the per-call `dec_*` files below are overwritten
                 // by the CFG-unconditional pass, so they can only be compared
                 // against `..._uncond`.
-                super::fm::set_trace_suffix(branch);
             }
             let decoded = sampler
                 .decoder
@@ -405,17 +421,8 @@ pub(crate) fn denoise(
         // "pure noise output" failure mode this port hit first.
         let denominator = (1.0 - t).max(config::DEFAULT_T_EPS);
         let scale = options.cfg_scale;
-        for index in 0..tokens * config::TOKEN_DIM {
-            let cond = (buffers.v_cond[index] - buffers.z[index]) / denominator;
-            let velocity = if needs_cfg {
-                let uncond = (buffers.v_uncond[index] - buffers.z[index]) / denominator;
-                uncond + scale * (cond - uncond)
-            } else {
-                cond
-            };
-            buffers.z[index] += (t_next - t) * velocity;
-        }
-
+        // NOTE: trace before the Euler update below -- `z` must still be the
+        // pre-step latent or these velocities are not the oracle's.
         if step == 0 {
             // Trace the post-division velocities so they pair with the
             // oracle's `step*_v_pred_cond` / `step*_v_pred` dumps.
@@ -438,6 +445,16 @@ pub(crate) fn denoise(
             }
             trace_dump("step0_v_pred", &combined);
             trace_dump("step0_x_pred_cond", &buffers.v_cond);
+        }
+        for index in 0..tokens * config::TOKEN_DIM {
+            let cond = (buffers.v_cond[index] - buffers.z[index]) / denominator;
+            let velocity = if needs_cfg {
+                let uncond = (buffers.v_uncond[index] - buffers.z[index]) / denominator;
+                uncond + scale * (cond - uncond)
+            } else {
+                cond
+            };
+            buffers.z[index] += (t_next - t) * velocity;
         }
 
         buffers.image = unpatchify(&buffers.z, width, height, config::TOKEN_SIDE);

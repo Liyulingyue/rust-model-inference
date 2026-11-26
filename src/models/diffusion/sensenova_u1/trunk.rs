@@ -254,6 +254,12 @@ impl Trunk {
                 causal: false,
             };
             self.run_layer(source, layer, &run, &mut scratch, pool)?;
+            if super::sampler::tracing() && matches!(layer, 0 | 1 | 2 | 21 | 41) {
+                super::sampler::trace_dump(
+                    &format!("denoise_layer{layer:02}_{}", super::sampler::trace_suffix()),
+                    &scratch.x,
+                );
+            }
         }
 
         let norm = self.load_norm(source, "language_model.model.norm_mot_gen.weight")?;
