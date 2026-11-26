@@ -59,7 +59,11 @@ loopback. Each completed result is written before the next request.
 
 Packed-code round trips cover all three block layouts, including PTQ1_0's
 final two high-trit bytes. Separate tests check the signed GDN head gather
-and the normalized Walsh transform against a dense float64 matrix.
+and the normalized Walsh transform against a dense float64 matrix. A
+single-coefficient matrix checks the inverse embedding and both forward
+activation quantizers against the expected signed Walsh column. A header
+fixture rejects a missing transform and a tied v1 output before reading
+any tensor. The loader shares the recurrent gather across all 48 GDN layers.
 An image speculative-prefill test rejects token-only input before reading
 the projector or decoder. Shader validation uses Vulkan 1.1.
 
@@ -71,3 +75,11 @@ same shader initialization failure on both revisions. The full Mac shader
 rebuild also hit the same pre-existing binary difference in
 `nemotron_moe_route.spv`; the new shader rebuilt byte-for-byte and passed
 `spirv-val`. No 27B weight files were downloaded to the Mac.
+
+The non-folded BF16 decoder SHA-256 was
+`cedf89af31c9041b601fa58303285bc46d99c51baee1b13f5e919626ca526ee5`.
+With explicit `--no-thinking --jinja`, the CLI, HTTP and SSE returned
+`Paris` for the short-answer text prompt and `Red` for the red image.
+CLI and HTTP JEV returned A with probabilities 0.85150671 (text) and
+0.97095829 (image). With an unavailable Vulkan ICD the Auto text result
+matched CPU. These are shared-entry regression checks on the 0.8B decoder.

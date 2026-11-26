@@ -51,8 +51,8 @@ pub trait Kernel: Send + Sync {
         None
     }
 
-    /// Returns the original GGUF storage bytes when the kernel keeps a
-    /// borrowed weight representation that can be uploaded unchanged.
+    /// Bytes in the weight's runtime GGML format that can be uploaded
+    /// directly. A folded weight also supplies its activation transform.
     fn weight_bytes(&self) -> Option<&[u8]> {
         None
     }

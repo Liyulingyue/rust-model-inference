@@ -7620,7 +7620,7 @@ impl<'a> Qwen3Ops<'a> {
         )
     }
 
-    pub(crate) fn f32_word(
+    pub(super) fn f32_word(
         &self,
         region: ArenaRegion,
         count: usize,

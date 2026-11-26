@@ -93,6 +93,22 @@ fn validate_audio_temperature(route: AudioRoute, temperature: Option<f32>) -> Re
     Ok(())
 }
 
+// Text generation can enter through either the prompt branch or a supplied projector.
+fn validate_speculative_arch(arch: &str, options: &app::CliOptions) -> Result<(), String> {
+    if options.effective_mtp_draft() > 0
+        && !matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop")
+    {
+        return Err(format!("--mtp-draft needs the hybrid trunk; architecture {arch} has no speculative decode path"));
+    }
+    if options.dspark_model.is_some() && arch != "qwen35" {
+        return Err(format!("--dspark-model needs the qwen35 trunk target; architecture {arch} has no DSpark verify path"));
+    }
+    if options.effective_ngram_draft() > 0 && arch != "qwen35" {
+        return Err(format!("--ngram-draft needs the qwen35 trunk target; architecture {arch} has no speculative verify path"));
+    }
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -1060,6 +1076,7 @@ fn main() {
             ));
             return;
         }
+        app::run_or_exit(validate_speculative_arch(arch, &options));
         app::run_or_exit(app::run_multimodal_with_video_and_mtp(
             Arc::clone(&source),
             model_path,
@@ -1266,35 +1283,7 @@ fn main() {
         ));
         return;
     } else if !prompt.is_empty() {
-        // The speculative-decode flags exist only on the qwen35 trunk path;
-        // an arch that never receives them would silently drop the flag, so
-        // they are gated here with the same rule the runtime applies. The
-        // MTP head is a checkpoint property (the hybrid archs' session
-        // errors when it is missing); the DSpark sidecar and the n-gram
-        // lookup need the qwen35 trunk's verify/rollback machinery.
-        if options.effective_mtp_draft() > 0
-            && !matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop")
-        {
-            app::run_or_exit(Err(format!(
-                "--mtp-draft needs the hybrid trunk; architecture {arch} has no \
-                 speculative decode path"
-            )));
-            return;
-        }
-        if options.dspark_model.is_some() && arch != "qwen35" {
-            app::run_or_exit(Err(format!(
-                "--dspark-model needs the qwen35 trunk target; architecture {arch} has no \
-                 DSpark verify path"
-            )));
-            return;
-        }
-        if options.effective_ngram_draft() > 0 && arch != "qwen35" {
-            app::run_or_exit(Err(format!(
-                "--ngram-draft needs the qwen35 trunk target; architecture {arch} has no \
-                 speculative verify path"
-            )));
-            return;
-        }
+        app::run_or_exit(validate_speculative_arch(arch, &options));
         if matches!(arch, "qwen35" | "qwen35moe" | "edge0" | "sensenova_loop") {
             // `--mtp-draft` turns the decode into a speculative one: the
             // MTP draft head proposes tokens and the target verifies them.

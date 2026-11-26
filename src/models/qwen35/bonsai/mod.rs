@@ -149,12 +149,7 @@ impl Kernel for FoldedMatrix {
     }
 }
 
-/// Bind only the publisher's v1 dense layout. Validate the entire tensor list
-/// before repacking so a misspelled or missing name cannot skip a rotation.
-pub(crate) fn load(
-    source: &dyn TensorSource,
-    cfg: &Qwen35Config,
-) -> Result<HashMap<String, Weight<'static>>, String> {
+fn has_folded_layout(source: &dyn TensorSource) -> Result<bool, String> {
     let meta = |key: &str| source.metadata(&format!("prism.hadamard.{key}"));
     if meta("version").is_none() {
         if source.tensor_info("token_embd.weight").is_some_and(|t| {
@@ -165,7 +160,7 @@ pub(crate) fn load(
         }) {
             return Err("ternary Qwen3.5 embedding requires prism.hadamard.version".into());
         }
-        return Ok(HashMap::new());
+        return Ok(false);
     }
     if !matches!(meta("version"), Some(MetaValue::Uint32(1)))
         || !matches!(meta("block_size"), Some(MetaValue::Uint32(n)) if *n as usize == BLOCK)
@@ -185,9 +180,26 @@ pub(crate) fn load(
     if !matches!(meta("tied_output"), None | Some(MetaValue::Bool(false))) {
         return Err("prism.hadamard version 1 requires an untied output.weight".into());
     }
+    Ok(true)
+}
+
+/// Validate the whole folded tensor list before allocating the Q4_0 matrices.
+pub(crate) fn load(
+    source: &dyn TensorSource,
+    cfg: &Qwen35Config,
+) -> Result<HashMap<String, Weight<'static>>, String> {
+    if !has_folded_layout(source)? {
+        return Ok(HashMap::new());
+    }
     if cfg.key_length != cfg.value_length {
         return Err("Bonsai attention requires equal key and value head widths".into());
     }
+    let meta = |key: &str| source.metadata(&format!("prism.hadamard.{key}"));
+    let grouped = match meta("gdn_v_grouped") {
+        Some(MetaValue::Bool(v)) => *v,
+        None => false,
+        _ => return Err("invalid prism.hadamard.gdn_v_grouped".into()),
+    };
     let array = |key: &str| {
         meta(key)
             .and_then(MetaValue::to_arr)
@@ -212,7 +224,12 @@ pub(crate) fn load(
             })
             .collect::<Result<_, _>>()?;
         let plain = signed_map(&signs, None)?;
-        if maps.insert(width, (plain, signs)).is_some() {
+        let recurrent = if grouped && width == cfg.ssm_d_inner {
+            signed_map(&signs, Some((cfg.ssm_n_group, cfg.ssm_dt_rank)))?
+        } else {
+            Arc::clone(&plain)
+        };
+        if maps.insert(width, (plain, recurrent)).is_some() {
             return Err("duplicate prism.hadamard sign width".into());
         }
     }
@@ -234,11 +251,6 @@ pub(crate) fn load(
         return Err("expected folded output.weight and inverse token_embd.weight".into());
     }
 
-    let grouped = match meta("gdn_v_grouped") {
-        Some(MetaValue::Bool(v)) => *v,
-        None => false,
-        _ => return Err("invalid prism.hadamard.gdn_v_grouped".into()),
-    };
     let k_dim = cfg
         .ssm_d_state
         .checked_mul(cfg.ssm_n_group)
@@ -273,7 +285,7 @@ pub(crate) fn load(
         if cfg.is_recurrent[i] {
             add("attn_qkv", cfg.n_embd, qkv_dim, false)?;
             add("attn_gate", cfg.n_embd, cfg.ssm_d_inner, false)?;
-            add("ssm_out", cfg.ssm_d_inner, cfg.n_embd, grouped)?;
+            add("ssm_out", cfg.ssm_d_inner, cfg.n_embd, true)?;
         } else {
             let q = cfg
                 .n_head
@@ -311,14 +323,10 @@ pub(crate) fn load(
         let data = source
             .tensor_slice(&name)
             .ok_or_else(|| format!("invalid ternary tensor payload: {name}"))?;
-        let (plain, signs) = maps
+        let (plain, recurrent) = maps
             .get(&n_in)
             .ok_or_else(|| format!("missing sign vector of width {n_in} for {name}"))?;
-        let map = if permute {
-            signed_map(signs, Some((cfg.ssm_n_group, cfg.ssm_dt_rank)))?
-        } else {
-            Arc::clone(plain)
-        };
+        let map = Arc::clone(if permute { recurrent } else { plain });
         validated.push((name, n_in, n_out, ty, data, map));
     }
     let mut weights = HashMap::with_capacity(validated.len());
