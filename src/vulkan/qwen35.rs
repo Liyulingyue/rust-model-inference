@@ -1,6 +1,7 @@
 use super::ops::{
-    required_activation_contracts, ArenaRegion, ExpertSelection, GpuMatmulSpec, GpuWeightFormat,
-    MhcRegions, MhcShape, OperatorBindings, Qwen3Ops, TokenCommands,
+    require_qwen35_attention, required_activation_contracts, ArenaRegion, ExpertSelection,
+    GpuMatmulSpec, GpuWeightFormat, MhcRegions, MhcShape, OperatorBindings, Qwen3Ops,
+    TokenCommands,
 };
 use super::qwen3::UploadedBuffers;
 use super::{GpuBuffer, VulkanContext, VulkanError};
@@ -313,6 +314,7 @@ struct Qwen35ArenaLayout {
     q4_1_input_sums: ArenaRegion,
     q8k: ArenaRegion,
     q8k_scales: ArenaRegion,
+    dense_layers: usize,
     kv_k: ArenaRegion,
     kv_v: ArenaRegion,
     kv_delta_k: ArenaRegion,
@@ -359,6 +361,7 @@ impl Qwen35ArenaLayout {
         // The draft head has a KV cache of its own: it attends over the
         // committed and the drafted positions, not over the target's keys.
         let head_layers = usize::from(config.n_nextn > 0);
+        let dense_layers = config.is_recurrent.len() - recurrent_layers;
         let value_heads = config.ssm_dt_rank;
         let ffn_width = config
             .moe
@@ -419,8 +422,10 @@ impl Qwen35ArenaLayout {
                 0
             })
             .max(head_ffn);
-        let kv_cache =
-            qwen35_product("KV cache", &[layer_count + head_layers, capacity, dense_kv])?;
+        let kv_cache = qwen35_product(
+            "KV cache",
+            &[dense_layers + head_layers, capacity, dense_kv],
+        )?;
         let kv_delta = qwen35_product("KV delta", &[layer_count + head_layers, rows, dense_kv])?;
         let conv_state = qwen35_product(
             "convolution state",
@@ -633,6 +638,7 @@ impl Qwen35ArenaLayout {
             q4_1_input_sums,
             q8k,
             q8k_scales,
+            dense_layers,
             kv_k,
             kv_v,
             kv_delta_k,
@@ -755,25 +761,40 @@ fn fill_mrope_layout(
 }
 
 #[derive(Clone, Copy)]
+struct Projection {
+    weights: OperatorBindings,
+    input_map: Option<OperatorBindings>,
+}
+
+impl From<OperatorBindings> for Projection {
+    fn from(weights: OperatorBindings) -> Self {
+        Self {
+            weights,
+            input_map: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum WeightBindings<const N: usize> {
-    Grouped(OperatorBindings),
-    Split([OperatorBindings; N]),
+    Grouped(Projection),
+    Split([Projection; N]),
 }
 
 #[derive(Clone, Copy)]
 struct DenseBindings {
     qkv: WeightBindings<3>,
     prepare: OperatorBindings,
-    output: OperatorBindings,
+    output: Projection,
 }
 
 #[derive(Clone, Copy)]
 struct RecurrentBindings {
     qkv_gate_beta: WeightBindings<3>,
-    alpha: OperatorBindings,
+    alpha: Projection,
     convolution: OperatorBindings,
     ssm: OperatorBindings,
-    output: OperatorBindings,
+    output: Projection,
 }
 
 /// Where a recurrent layer's projections land.
@@ -798,15 +819,15 @@ struct RecurrentProjection {
 #[derive(Clone, Copy)]
 struct MtpBindings {
     /// `nextn.eh_proj`: the projection of the two normalized halves.
-    eh_proj: OperatorBindings,
+    eh_proj: Projection,
     /// The head block's own attention: the queries, the keys and the values,
     /// their norms, and the output projection.
     qkv: WeightBindings<3>,
     prepare: OperatorBindings,
-    output: OperatorBindings,
+    output: Projection,
     /// The head block's feed-forward.
     ffn_gate_up: WeightBindings<2>,
-    ffn_down: OperatorBindings,
+    ffn_down: Projection,
     /// The norms: the embedding, the hidden state, the attention input, the
     /// feed-forward input and the head's own.
     enorm: OperatorBindings,
@@ -816,7 +837,7 @@ struct MtpBindings {
     head_norm: OperatorBindings,
     /// The head's own vocabulary projection. `None` means the main model's
     /// output weight is used, exactly as upstream does.
-    head: Option<OperatorBindings>,
+    head: Option<Projection>,
     /// The width of the head's feed-forward. A checkpoint may give the head
     /// a feed-forward of its own width.
     ffn_width: usize,
@@ -830,14 +851,14 @@ enum AttentionBindings {
 
 #[derive(Clone, Copy)]
 struct SharedExpertBindings {
-    gate: OperatorBindings,
+    gate: Projection,
     gate_up: WeightBindings<2>,
-    down: OperatorBindings,
+    down: Projection,
 }
 
 #[derive(Clone, Copy)]
 struct MoeBindings {
-    router: OperatorBindings,
+    router: Projection,
     gate_up: OperatorBindings,
     down: OperatorBindings,
     shared: Option<SharedExpertBindings>,
@@ -846,7 +867,7 @@ struct MoeBindings {
 enum FfnBindings {
     Dense {
         gate_up: WeightBindings<2>,
-        down: OperatorBindings,
+        down: Projection,
     },
     Moe(MoeBindings),
     MoeHostRouted(moe::MoeBindings),
@@ -861,7 +882,7 @@ struct LayerBindings {
 
 #[derive(Clone, Copy)]
 struct MhcRouterBindings {
-    projection: OperatorBindings,
+    projection: Projection,
     bias: OperatorBindings,
 }
 
@@ -906,8 +927,9 @@ pub(crate) struct Qwen35VulkanSession {
     /// The draft head's weights, when the checkpoint has a head.
     mtp: Option<MtpBindings>,
     output_norm: OperatorBindings,
-    output: OperatorBindings,
+    output: Projection,
     layout: Qwen35ArenaLayout,
+    hadamard: Option<(usize, ArenaRegion)>,
     config: Qwen35Config,
     pub(crate) capacity: usize,
     max_rows: usize,
@@ -973,7 +995,10 @@ impl Qwen35VulkanSession {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
         }
-        if let Err(reason) = validate_executor_shape(&model.config, capacity) {
+        if let Err(reason) = validate_executor_shape(&model.config, capacity).and_then(|_| {
+            require_qwen35_attention(context, capacity, model.config.n_embd_head())
+                .map_err(|err| err.to_string())
+        }) {
             eprintln!("[GPU] Qwen3.5 Vulkan unavailable: {reason}. Falling back to CPU.");
             return Ok(None);
         }
@@ -1036,11 +1061,40 @@ impl Qwen35VulkanSession {
             .iter()
             .filter_map(|layer| layer.moe.as_ref())
             .any(|weights| device_moe_format(weights).is_none());
-        let mut ops = if host_routed {
-            Qwen3Ops::new_with_size(context, layout.total_size(), descriptor_capacity)?
+        let folded = model.output_weight.kernel.hadamard_input_map().is_some();
+        let mut arena_size = layout.total_size();
+        let rotation = if folded {
+            let width = config.n_embd.max(config.n_ff).max(config.ssm_d_inner).max(
+                config
+                    .n_head
+                    .checked_mul(config.key_length)
+                    .ok_or(VulkanError::OutOfMemory)?,
+            );
+            Some(qwen35_f32_region(
+                &mut arena_size,
+                qwen35_product("Hadamard rows", &[max_rows, width])?,
+            )?)
         } else {
-            Qwen3Ops::new_device_local_with_size(context, layout.total_size(), descriptor_capacity)?
+            None
         };
+        let descriptor_capacity = if folded {
+            descriptor_capacity
+                .checked_add(8 * layer_count + 1)
+                .ok_or(VulkanError::OutOfMemory)?
+        } else {
+            descriptor_capacity
+        };
+        let mut ops = if host_routed {
+            Qwen3Ops::new_with_size(context, arena_size, descriptor_capacity)?
+        } else {
+            Qwen3Ops::new_device_local_with_size(context, arena_size, descriptor_capacity)?
+        };
+        let hadamard = rotation
+            .map(|region| {
+                ops.add_shader(include_bytes!("../../shaders/bin/bonsai_hadamard.spv"))
+                    .map(|pipeline| (pipeline, region))
+            })
+            .transpose()?;
         let mut buffers = UploadedBuffers::new(context);
         let mut layers = Vec::with_capacity(model.layers.len());
 
@@ -1332,6 +1386,7 @@ impl Qwen35VulkanSession {
             output_norm,
             output,
             layout,
+            hadamard,
             config,
             capacity,
             max_rows,
@@ -1407,7 +1462,7 @@ impl Qwen35VulkanSession {
     fn record_weights(
         &self,
         commands: &TokenCommands<'_>,
-        bindings: OperatorBindings,
+        bindings: Projection,
         input: ArenaRegion,
         outputs: &[(ArenaRegion, usize)],
         n_in: usize,
@@ -1423,9 +1478,34 @@ impl Qwen35VulkanSession {
                 ))
             })
             .collect::<Result<Vec<_>, VulkanError>>()?;
+        let input = if let Some(map) = bindings.input_map {
+            let (pipeline, target) = self
+                .hadamard
+                .ok_or_else(|| VulkanError::UnsupportedShape("missing Hadamard pipeline".into()))?;
+            let count = qwen35_product("Hadamard input", &[rows, n_in])?;
+            let push = [
+                self.ops.f32_word(input, count, "Hadamard input")?,
+                self.ops.f32_word(target, count, "Hadamard output")?,
+                n_in as u32,
+            ];
+            self.ops.record_custom(
+                commands,
+                pipeline,
+                Some(map),
+                &push,
+                [
+                    (n_in / crate::models::qwen35::bonsai::BLOCK) as u32,
+                    rows as u32,
+                    1,
+                ],
+            )?;
+            target
+        } else {
+            input
+        };
         self.ops.record_weight_matmul_rows(
             commands,
-            bindings,
+            bindings.weights,
             input,
             self.layout.q8,
             self.layout.q8_scales,
@@ -1848,6 +1928,67 @@ impl Qwen35VulkanSession {
         )
     }
 
+    /// The device KV cache has one slot per dense visit and a final slot for
+    /// the draft head. Deltas keep their logical layer indices for the CPU shadow.
+    fn record_gated_attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        prepare: OperatorBindings,
+        cache_slot: usize,
+        logical_layer: usize,
+        position: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let c = &self.config;
+        let dim = c.n_embd_head();
+        let kv_row_bytes = qwen35_product("KV row bytes", &[c.n_head_kv, dim, 4])?;
+        let cache_offset =
+            qwen35_product("KV slot offset", &[cache_slot, self.capacity, kv_row_bytes])?;
+        let delta_offset = qwen35_product("KV delta offset", &[logical_layer, rows, kv_row_bytes])?;
+        let k = self.layout.kv_k.shifted(cache_offset);
+        let v = self.layout.kv_v.shifted(cache_offset);
+        self.ops.record_qwen35_dense_prepare(
+            commands,
+            prepare,
+            self.layout.raw_qkv,
+            self.layout.raw_k,
+            self.layout.v,
+            self.layout.q,
+            self.layout.z,
+            k,
+            v,
+            self.layout.kv_delta_k.shifted(delta_offset),
+            self.layout.kv_delta_v.shifted(delta_offset),
+            self.layout.rope,
+            0,
+            1,
+            position,
+            self.capacity,
+            c.n_head,
+            c.n_head_kv,
+            dim,
+            c.rope_dimension_count,
+            c.norm_eps,
+            rows,
+        )?;
+        self.ops.record_qwen35_attention(
+            commands,
+            self.layout.q,
+            self.layout.z,
+            k,
+            v,
+            self.layout.attn,
+            0,
+            1,
+            position,
+            self.capacity,
+            c.n_head,
+            c.n_head_kv,
+            dim,
+            rows,
+        )
+    }
+
     fn forward_chunk_inner(
         &mut self,
         input: &[f32],
@@ -1942,6 +2083,7 @@ impl Qwen35VulkanSession {
         // The recurrent layers in the order they run: the capture has one
         // slot for each of them.
         let mut recurrent_index = 0usize;
+        let mut dense_index = 0usize;
         for (layer_index, &physical) in self.plan.iter().enumerate() {
             let bindings = &self.layers[physical];
             let routed = self
@@ -1990,46 +2132,15 @@ impl Qwen35VulkanSession {
                         config.n_embd,
                         rows,
                     )?;
-                    self.ops.record_qwen35_dense_prepare(
+                    self.record_gated_attention(
                         &commands,
                         dense.prepare,
-                        self.layout.raw_qkv,
-                        self.layout.raw_k,
-                        self.layout.v,
-                        self.layout.q,
-                        self.layout.z,
-                        self.layout.kv_k,
-                        self.layout.kv_v,
-                        self.layout.kv_delta_k,
-                        self.layout.kv_delta_v,
-                        self.layout.rope,
+                        dense_index,
                         layer_index,
-                        layer_count,
                         cache_position,
-                        self.capacity,
-                        config.n_head,
-                        config.n_head_kv,
-                        head_dim,
-                        config.rope_dimension_count,
-                        config.norm_eps,
                         rows,
                     )?;
-                    self.ops.record_qwen35_attention(
-                        &commands,
-                        self.layout.q,
-                        self.layout.z,
-                        self.layout.kv_k,
-                        self.layout.kv_v,
-                        self.layout.attn,
-                        layer_index,
-                        layer_count,
-                        cache_position,
-                        self.capacity,
-                        config.n_head,
-                        config.n_head_kv,
-                        head_dim,
-                        rows,
-                    )?;
+                    dense_index += 1;
                     self.record_weights(
                         &commands,
                         dense.output,
@@ -2229,13 +2340,15 @@ impl Qwen35VulkanSession {
             if self.mhc.is_some() {
                 let name = format!("loop.visit.{layer_index}");
                 if crate::parity_trace::enabled(&name) {
-                    commands = commands.flush()?;
+                    // A staged readback records a transfer under the same submission guard.
+                    commands.submit_and_wait()?;
                     let (region, width) = routed
                         .filter(|m| physical + 1 != m.end)
                         .map_or((self.layout.x, config.n_embd), |m| {
                             (self.layout.mhc_residual, config.n_embd * m.shape.streams)
                         });
                     self.trace_rows(&name, None, region, rows, width)?;
+                    commands = TokenCommands::begin(self.context)?;
                 }
             }
             #[cfg(feature = "parity-trace")]
@@ -2246,8 +2359,9 @@ impl Qwen35VulkanSession {
                     ));
                 }
                 commands.submit_and_wait()?;
+                let name = format!("l_out-{layer_index}");
                 self.trace_region(
-                    &format!("l_out-{layer_index}"),
+                    &name,
                     Some(layer_index),
                     cache_position,
                     self.layout.x,
@@ -2291,15 +2405,10 @@ impl Qwen35VulkanSession {
                         )?;
                     }
                 }
-                commands = TokenCommands::begin(self.context)?;
-            }
-            #[cfg(feature = "parity-trace")]
-            {
-                let name = format!("l_out-{layer_index}");
-                if self.mhc.is_none() && crate::parity_trace::enabled(&name) {
-                    commands = commands.flush()?;
+                if crate::parity_trace::enabled(&name) {
                     self.trace_rows(&name, Some(layer_index), self.layout.x, rows, config.n_embd)?;
                 }
+                commands = TokenCommands::begin(self.context)?;
             }
         }
 
@@ -2540,12 +2649,6 @@ impl Qwen35VulkanSession {
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
         let dense_raw_q = dense_q.checked_mul(2).ok_or(VulkanError::OutOfMemory)?;
-        let layer_count = config.n_layer_impl();
-        // The head has a KV cache of its own: it attends over the committed
-        // and the drafted positions, not over the target's keys. Its cache
-        // is the layer slot after the main stack.
-        let head_layer = layer_count;
-        let head_layer_count = layer_count + 1;
         let rope_dim = config.rope_dimension_count;
 
         self.ops.write_f32(self.layout.mtp_embed_in, embeddings)?;
@@ -2627,44 +2730,12 @@ impl Qwen35VulkanSession {
             n_embd,
             rows,
         )?;
-        self.ops.record_qwen35_dense_prepare(
+        self.record_gated_attention(
             &commands,
             mtp.prepare,
-            self.layout.raw_qkv,
-            self.layout.raw_k,
-            self.layout.v,
-            self.layout.q,
-            self.layout.z,
-            self.layout.kv_k,
-            self.layout.kv_v,
-            self.layout.kv_delta_k,
-            self.layout.kv_delta_v,
-            self.layout.rope,
-            head_layer,
-            head_layer_count,
+            self.layout.dense_layers,
+            config.n_layer_impl(),
             base_position,
-            self.capacity,
-            config.n_head,
-            config.n_head_kv,
-            head_dim,
-            rope_dim,
-            config.norm_eps,
-            rows,
-        )?;
-        self.ops.record_qwen35_attention(
-            &commands,
-            self.layout.q,
-            self.layout.z,
-            self.layout.kv_k,
-            self.layout.kv_v,
-            self.layout.attn,
-            head_layer,
-            head_layer_count,
-            base_position,
-            self.capacity,
-            config.n_head,
-            config.n_head_kv,
-            head_dim,
             rows,
         )?;
         self.record_weights(
@@ -2921,14 +2992,14 @@ fn upload_weight(
 ) -> Result<(GpuBuffer, GpuMatmulSpec), VulkanError> {
     let format = GpuMatmulSpec::prepared(weight)?;
     let bytes = validated_weight_bytes(weight, label)?;
-    Ok((buffers.upload(bytes)?, format))
+    Ok((buffers.upload(&bytes)?, format))
 }
 
 fn validated_weight_bytes<'a>(
     weight: &'a Weight<'_>,
     label: &str,
-) -> Result<&'a [u8], VulkanError> {
-    let bytes = weight.kernel.weight_bytes().ok_or_else(|| {
+) -> Result<std::borrow::Cow<'a, [u8]>, VulkanError> {
+    let bytes = weight.kernel.device_weight_bytes().ok_or_else(|| {
         VulkanError::UnsupportedShape(format!(
             "{label} does not expose {:?} storage bytes",
             weight.ggml_type
@@ -2953,18 +3024,29 @@ fn validated_weight_bytes<'a>(
     Ok(bytes)
 }
 
+fn bind_projection(
+    ops: &mut Qwen3Ops<'_>,
+    buffers: &mut UploadedBuffers,
+    weights: OperatorBindings,
+    map: Option<&[i32]>,
+) -> Result<Projection, VulkanError> {
+    let input_map = if let Some(map) = map {
+        Some(ops.bind_buffers(&[buffers.upload(bytemuck::cast_slice(map))?])?)
+    } else {
+        None
+    };
+    Ok(Projection { weights, input_map })
+}
+
 fn bind_weight(
     ops: &mut Qwen3Ops<'_>,
     buffers: &mut UploadedBuffers,
     weight: &Weight<'_>,
     label: &str,
-) -> Result<OperatorBindings, VulkanError> {
+) -> Result<Projection, VulkanError> {
     let (buffer, format) = upload_weight(buffers, weight, label)?;
-    ops.bind_weight_buffers_mode(
-        std::slice::from_ref(&buffer),
-        std::slice::from_ref(&format.format),
-        format.mode,
-    )
+    let binding = ops.bind_weight_buffers_mode(&[buffer], &[format.format], format.mode)?;
+    bind_projection(ops, buffers, binding, weight.kernel.hadamard_input_map())
 }
 
 fn bind_weight_group<const N: usize>(
@@ -2972,33 +3054,30 @@ fn bind_weight_group<const N: usize>(
     buffers: &mut UploadedBuffers,
     weights: [(&Weight<'_>, &str); N],
 ) -> Result<WeightBindings<N>, VulkanError> {
-    let mut gpu_buffers = Vec::with_capacity(N);
-    let mut formats = Vec::with_capacity(N);
-    for (weight, label) in weights {
-        let (buffer, format) = upload_weight(buffers, weight, label)?;
-        gpu_buffers.push(buffer);
-        formats.push(format);
-    }
-    if formats.iter().all(|format| *format == formats[0]) {
-        return ops
-            .bind_weight_buffers_mode(
-                &gpu_buffers,
-                &formats.iter().map(|spec| spec.format).collect::<Vec<_>>(),
-                formats[0].mode,
-            )
-            .map(WeightBindings::Grouped);
-    }
-
-    let split = gpu_buffers
+    let formats = weights
         .iter()
-        .zip(&formats)
-        .map(|(buffer, format)| {
-            ops.bind_weight_buffers_mode(
-                std::slice::from_ref(buffer),
-                std::slice::from_ref(&format.format),
-                format.mode,
-            )
-        })
+        .map(|(w, _)| GpuMatmulSpec::prepared(w))
+        .collect::<Result<Vec<_>, _>>()?;
+    let map = weights[0].0.kernel.hadamard_input_map();
+    if formats.iter().all(|f| *f == formats[0])
+        && weights
+            .iter()
+            .all(|(w, _)| w.kernel.hadamard_input_map() == map)
+    {
+        let gpu_buffers = weights
+            .into_iter()
+            .map(|(w, label)| buffers.upload(&validated_weight_bytes(w, label)?))
+            .collect::<Result<Vec<_>, _>>()?;
+        let binding = ops.bind_weight_buffers_mode(
+            &gpu_buffers,
+            &formats.iter().map(|spec| spec.format).collect::<Vec<_>>(),
+            formats[0].mode,
+        )?;
+        return bind_projection(ops, buffers, binding, map).map(WeightBindings::Grouped);
+    }
+    let split = weights
+        .into_iter()
+        .map(|(w, label)| bind_weight(ops, buffers, w, label))
         .collect::<Result<Vec<_>, _>>()?
         .try_into()
         .map_err(|_| VulkanError::OutOfMemory)?;
@@ -3306,11 +3385,6 @@ fn validate_executor_shape(config: &Qwen35Config, capacity: usize) -> Result<(),
         return Err(format!(
             "session capacity {capacity} must be within 1..={}",
             config.n_ctx
-        ));
-    }
-    if capacity > 4096 {
-        return Err(format!(
-            "capacity {capacity} exceeds attention shader limit 4096"
         ));
     }
     if layer_count == 0
@@ -4368,10 +4442,12 @@ mod tests {
         let capacity = 7;
         let layout = Qwen35ArenaLayout::new(&config, capacity).unwrap();
 
-        // The draft head has a KV cache of its own: the layer slot after the
-        // main stack.
-        assert_eq!(layout.kv_k.size, 3 * capacity * 4 * 4);
-        assert_eq!(layout.kv_v.size, 3 * capacity * 4 * 4);
+        // One dense target visit plus the draft head. Deltas retain all
+        // three logical positions expected by the host shadow.
+        assert_eq!(layout.dense_layers, 1);
+        assert_eq!(layout.kv_k.size, 2 * capacity * 4 * 4);
+        assert_eq!(layout.kv_v.size, layout.kv_k.size);
+        assert_eq!(layout.kv_delta_k.size, 3 * 4 * 4);
         assert_eq!(layout.conv_state.size, 2 * 2 * 16 * 4);
         assert_eq!(layout.ssm_state.size, 2 * 2 * 4 * 4 * 4);
         // The quantized activation buffer holds the widest row of the

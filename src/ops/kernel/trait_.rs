@@ -21,6 +21,11 @@ pub trait Kernel: Send + Sync {
     fn rounds_bf16_input(&self) -> bool {
         false
     }
+    /// A repacked Q4_0 projection may retain the source format's Q8_K activations.
+    #[cfg(feature = "vulkan")]
+    fn q4_0_uses_q8_k_input(&self) -> bool {
+        false
+    }
     /// Capability query before a strict group can modify any output.
     fn supports_f16_strict(&self) -> bool {
         false
@@ -51,9 +56,22 @@ pub trait Kernel: Send + Sync {
         None
     }
 
-    /// Returns the original GGUF storage bytes when the kernel keeps a
-    /// borrowed weight representation that can be uploaded unchanged.
+    /// Borrow the stable bytes of weights already stored in their runtime GGML format.
     fn weight_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// Bytes for one resident upload. Packed weights may return a temporary
+    /// conversion that can be released as soon as the device has copied it.
+    #[cfg(feature = "vulkan")]
+    fn device_weight_bytes(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
+        self.weight_bytes().map(std::borrow::Cow::Borrowed)
+    }
+
+    /// Signed, one-based gather indices before a normalized 1024-wide Walsh transform.
+    /// Resident projections must apply this map before multiplying by the uploaded weight.
+    #[cfg(feature = "vulkan")]
+    fn hadamard_input_map(&self) -> Option<&[i32]> {
         None
     }
 

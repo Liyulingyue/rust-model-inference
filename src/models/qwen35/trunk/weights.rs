@@ -537,7 +537,11 @@ impl<'a> HybridTrunk<'a> {
                 token_info.ggml_type
             ));
         }
-        let tok_embd = load_weight(source, "token_embd.weight").ok_or_else(|| {
+        let mut folded = crate::models::qwen35::bonsai::load(source, &config)?;
+        let mut matrix = |name: &str| -> Option<Weight<'a>> {
+            folded.remove(name).or_else(|| load_weight(source, name))
+        };
+        let tok_embd = matrix("token_embd.weight").ok_or_else(|| {
             format!(
                 "Unsupported token_embd.weight dtype: {:?}",
                 token_info.ggml_type
@@ -553,7 +557,7 @@ impl<'a> HybridTrunk<'a> {
             } else {
                 "token_embd.weight"
             };
-            load_weight(source, name).ok_or("Missing output weight")?
+            matrix(name).ok_or("Missing output weight")?
         };
         if edge0
             && !expanded
@@ -602,10 +606,10 @@ impl<'a> HybridTrunk<'a> {
 
             let (wq, wk, wv, wo, attn_q_norm, attn_k_norm) = if !is_recr {
                 (
-                    load_weight(source, &format!("blk.{}.attn_q.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_k.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_v.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_output.weight", i)),
+                    matrix(&format!("blk.{}.attn_q.weight", i)),
+                    matrix(&format!("blk.{}.attn_k.weight", i)),
+                    matrix(&format!("blk.{}.attn_v.weight", i)),
+                    matrix(&format!("blk.{}.attn_output.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.attn_q_norm.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.attn_k_norm.weight", i)),
                 )
@@ -625,15 +629,15 @@ impl<'a> HybridTrunk<'a> {
                 ssm_out,
             ) = if is_recr {
                 (
-                    load_weight(source, &format!("blk.{}.attn_qkv.weight", i)),
-                    load_weight(source, &format!("blk.{}.attn_gate.weight", i)),
+                    matrix(&format!("blk.{}.attn_qkv.weight", i)),
+                    matrix(&format!("blk.{}.attn_gate.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.ssm_conv1d.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.ssm_dt.bias", i)),
                     load_weight_f32(source, &format!("blk.{}.ssm_a", i)),
                     load_weight(source, &format!("blk.{}.ssm_beta.weight", i)),
                     load_weight(source, &format!("blk.{}.ssm_alpha.weight", i)),
                     load_weight_f32(source, &format!("blk.{}.ssm_norm.weight", i)),
-                    load_weight(source, &format!("blk.{}.ssm_out.weight", i)),
+                    matrix(&format!("blk.{}.ssm_out.weight", i)),
                 )
             } else {
                 (None, None, None, None, None, None, None, None, None)
@@ -651,14 +655,14 @@ impl<'a> HybridTrunk<'a> {
                 None => None,
                 Some(moe) => Some(load_moe_weights(source, i, moe, config.n_embd)?),
             };
-            let dense = |name: &str| -> Result<Option<Weight<'a>>, String> {
+            let mut dense = |name: &str| -> Result<Option<Weight<'a>>, String> {
                 if config.moe.is_some() {
                     // qwen35moe carries no dense FFN; the per-expert tensors
                     // stand in for it. Absent rather than mis-bound, so the
                     // dispatch cannot silently run a dense block on a MoE model.
                     return Ok(None);
                 }
-                load_weight(source, name)
+                matrix(name)
                     .map(Some)
                     .ok_or_else(|| format!("Missing {name}"))
             };

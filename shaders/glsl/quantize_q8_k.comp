@@ -13,6 +13,7 @@ layout(push_constant) uniform PC {
     uint scales_stride;
     uint token_rows;
     uint signed_scale;
+    uint scale_copies;
 } pc;
 
 float value_at(uint index) {
@@ -31,6 +32,11 @@ int round_away(float value) {
 }
 
 #include "f32_divide.glsl"
+
+void store_scale(uint row, uint block, float scale) {
+    uint base = pc.scales_word + row * pc.scales_stride + block * pc.scale_copies;
+    for (uint i = 0u; i < pc.scale_copies; ++i) arena.data[base + i] = floatBitsToUint(scale);
+}
 
 void main() {
     if (gl_LocalInvocationID.x != 0u) return;
@@ -52,7 +58,7 @@ void main() {
         for (uint index = 0u; index < 64u; ++index) {
             arena.data[pc.output_word + row * pc.output_stride + block * 64u + index] = 0u;
         }
-        arena.data[pc.scales_word + row * pc.scales_stride + block] = 0u;
+        store_scale(row, block, 0.0);
         return;
     }
     precise float scale = pc.signed_scale != 0u
@@ -72,5 +78,5 @@ void main() {
         arena.data[pc.output_word + row * pc.output_stride + block * 64u + index] = packed;
     }
     if (pc.signed_scale != 0u) scale = divide_finite_normal(1.0, iscale);
-    arena.data[pc.scales_word + row * pc.scales_stride + block] = floatBitsToUint(scale);
+    store_scale(row, block, scale);
 }

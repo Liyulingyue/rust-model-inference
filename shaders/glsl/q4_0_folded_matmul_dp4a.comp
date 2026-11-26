@@ -1,0 +1,7 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_spirv_intrinsics : require
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018, 6019], id = 4450)
+int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
+#define PACKED_DOT
+#include "q4_0_folded_matmul.glsl"

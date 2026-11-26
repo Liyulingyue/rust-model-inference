@@ -5,7 +5,7 @@
 
 layout(local_size_x = 64) in;
 
-layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 0) coherent buffer Arena { uint data[]; } arena;
 layout(std430, binding = 1) readonly buffer QNorm { uint data[]; } q_norm;
 layout(std430, binding = 2) readonly buffer KNorm { uint data[]; } k_norm;
 layout(push_constant) uniform PC {
@@ -75,6 +75,8 @@ void main() {
                 arena.data[raw_base + head_dim + index];
         }
     }
+    // The two halves of a rotary pair can be normalized by different subgroups.
+    memoryBarrierBuffer();
     barrier();
 
     uint half_rope = rope_dim / 2u;
@@ -95,6 +97,8 @@ void main() {
         arena.data[output_base + index] = floatBitsToUint(rotated_first);
         arena.data[output_base + half_rope + index] = floatBitsToUint(rotated_second);
     }
+    // The lane copying a key to the cache may differ from the one rotating it.
+    memoryBarrierBuffer();
     barrier();
 
     if (kind == 1u) {

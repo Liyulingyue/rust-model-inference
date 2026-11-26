@@ -1723,6 +1723,7 @@ pub async fn jev_score(
         .into_response();
     }
 
+    let (jinja, max_context) = jev_prompt_options(&state);
     let results = match crate::app::run_jev_decision_data(
         source,
         &req.context,
@@ -1730,12 +1731,8 @@ pub async fn jev_score(
         positive,
         threads,
         prefill_batch_size,
-        // Template-mandatory architectures resolve their checkpoint template in the scorer.
-        crate::prompt::jinja::Options::default(),
-        state
-            .model
-            .text_backend()
-            .map_or(usize::MAX, |text| text.context_length),
+        jinja,
+        max_context,
     ) {
         Ok(r) => r,
         Err(e) => return jev_scoring_error(e),
@@ -1800,6 +1797,7 @@ async fn jev_grouped(
     let threads = jev_threads(&state);
     let prefill_batch_size = jev_prefill_batch_size(&state);
 
+    let (jinja, max_context) = jev_prompt_options(&state);
     let results = match crate::app::run_jev_grouped_decision_data(
         source,
         &req.context,
@@ -1807,11 +1805,8 @@ async fn jev_grouped(
         mode,
         threads,
         prefill_batch_size,
-        crate::prompt::jinja::Options::default(),
-        state
-            .model
-            .text_backend()
-            .map_or(usize::MAX, |text| text.context_length),
+        jinja,
+        max_context,
     ) {
         Ok(r) => r,
         Err(e) => return jev_scoring_error(e),
@@ -1844,6 +1839,13 @@ fn text_source(state: &AppState) -> Result<Arc<dyn crate::core::tensor::TensorSo
 
 fn backend_label(b: &Backend) -> &'static str {
     b.label()
+}
+
+fn jev_prompt_options(state: &AppState) -> (crate::prompt::jinja::Options, usize) {
+    match state.model.text_backend() {
+        Some(text) => (text.chat_template.as_ref().clone(), text.context_length),
+        None => (crate::prompt::jinja::Options::default(), usize::MAX),
+    }
 }
 
 fn jev_threads(state: &AppState) -> usize {
@@ -2482,10 +2484,8 @@ async fn run_multimodal_text_only(
         // projector and the same `run_qwen35_family_multimodal_logits` helper as
         // `qwen35`; only the arch string differs.
         "qwen35" | "qwen35moe" | "sensenova_loop" => {
-            let max_context = match state_for_max_ctx(&state) {
-                Ok(v) => v,
-                Err(e) => return Err(e),
-            };
+            let (options, _) = jev_prompt_options(&state);
+            let template = options.resolve(&|key| source.metadata(key).cloned())?;
             crate::app::run_qwen35_family_multimodal_logits(
                 source.as_ref(),
                 mmproj_path.as_path(),
@@ -2497,8 +2497,7 @@ async fn run_multimodal_text_only(
                 prefill_batch_size,
                 max_context,
                 Some(system_prompt.as_str()),
-                // This endpoint has no chat-template switch, so no template.
-                None,
+                template.as_ref(),
             )
         }
         other => Err(format!(

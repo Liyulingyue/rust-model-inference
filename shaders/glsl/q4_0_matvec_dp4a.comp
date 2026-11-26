@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_spirv_intrinsics : require
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018, 6019], id = 4450)
+int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform Params {
+    uint q8_word, scales_word, n_in, blocks_per_row;
+    uint output0_word, rows0, output0_stride;
+    uint output1_word, rows1, output1_stride;
+    uint output2_word, rows2, output2_stride;
+} p;
+
+const uint lanes_per_row = 16u;
+shared float terms[64];
+
+uint weight_word(uint slot, uint i) {
+    if (slot == 0u) return w0.data[i];
+    if (slot == 1u) return w1.data[i];
+    return w2.data[i];
+}
+
+// Bias each 4-bit code by -8 within its own byte. The addition cannot
+// carry into the next byte because every input nibble is at most 15.
+int signed_bytes(uint nibbles) {
+    return int((nibbles + 0x78787878u) ^ 0x80808080u);
+}
+
+float block_product(uint slot, uint row, uint block) {
+    // Q4_0 occupies nine halfwords. The scale and the four following
+    // packed words alternate between the two halfword alignments.
+    uint halfword = (row * p.blocks_per_row + block) * 9u;
+    uint word = halfword / 2u;
+    uint previous = weight_word(slot, word);
+    bool lower = (halfword & 1u) == 0u;
+    uint scale_bits = lower ? previous & 0xffffu : previous >> 16u;
+    float weight_scale = (scale_bits & 0x7c00u) == 0x7c00u ? 0.0 : unpackHalf2x16(scale_bits).x;
+    uint input_word = p.q8_word + block * 8u;
+    int dot = 0;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint next = weight_word(slot, word + i + 1u);
+        uint packed = lower ? (previous >> 16u) | (next << 16u) : next;
+        dot += dotPacked4x8EXT(signed_bytes(packed & 0x0f0f0f0fu), int(arena.data[input_word + i]), 0u);
+        dot += dotPacked4x8EXT(signed_bytes((packed >> 4u) & 0x0f0f0f0fu), int(arena.data[input_word + 4u + i]), 0u);
+        previous = next;
+    }
+    precise float scaled = float(dot) * weight_scale;
+    return scaled * uintBitsToFloat(arena.data[p.scales_word + block]);
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint slot = gl_WorkGroupID.z;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = group * (64u / lanes_per_row) + lane / lanes_per_row;
+    uint rows = slot == 0u ? p.rows0 : (slot == 1u ? p.rows1 : p.rows2);
+    uint base_lane = lane & ~(lanes_per_row - 1u);
+    precise float sum = 0.0;
+    for (uint first = 0u; first < p.blocks_per_row; first += lanes_per_row) {
+        uint block = first + lane - base_lane;
+        if (row < rows && block < p.blocks_per_row)
+            terms[lane] = block_product(slot, row, block);
+        barrier();
+        if (lane == base_lane && row < rows) {
+            uint count = min(lanes_per_row, p.blocks_per_row - first);
+            for (uint i = 0u; i < count; ++i)
+                sum += terms[base_lane + i];
+        }
+        barrier();
+    }
+    if (lane == base_lane && row < rows) {
+        uint output_word = slot == 0u ? p.output0_word : (slot == 1u ? p.output1_word : p.output2_word);
+        arena.data[output_word + row] = floatBitsToUint(sum);
+    }
+}

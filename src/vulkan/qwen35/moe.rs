@@ -5,14 +5,14 @@ use crate::models::qwen35::trunk::{config::Qwen35Moe, weights::Qwen35MoeWeights}
 
 struct ExpertBindings {
     gate_up: WeightBindings<2>,
-    down: OperatorBindings,
+    down: Projection,
     width: usize,
 }
 
 pub(super) struct MoeBindings {
-    router: OperatorBindings,
+    router: Projection,
     experts: Vec<ExpertBindings>,
-    shared: Option<(OperatorBindings, ExpertBindings)>,
+    shared: Option<(Projection, ExpertBindings)>,
     config: Qwen35Moe,
 }
 
@@ -35,19 +35,26 @@ impl MoeBindings {
         for expert in 0..weights.n_expert {
             let view = |buffer, stride: usize| (buffer, (expert * stride) as u64, stride as u64);
             let gate_up = if gate_format == up_format {
-                WeightBindings::Grouped(ops.bind_weight_ranges(
-                    &[view(gate, weights.stride_gate), view(up, weights.stride_up)],
-                    &[gate_format, up_format],
-                )?)
+                WeightBindings::Grouped(
+                    ops.bind_weight_ranges(
+                        &[view(gate, weights.stride_gate), view(up, weights.stride_up)],
+                        &[gate_format, up_format],
+                    )?
+                    .into(),
+                )
             } else {
                 WeightBindings::Split([
-                    ops.bind_weight_ranges(&[view(gate, weights.stride_gate)], &[gate_format])?,
-                    ops.bind_weight_ranges(&[view(up, weights.stride_up)], &[up_format])?,
+                    ops.bind_weight_ranges(&[view(gate, weights.stride_gate)], &[gate_format])?
+                        .into(),
+                    ops.bind_weight_ranges(&[view(up, weights.stride_up)], &[up_format])?
+                        .into(),
                 ])
             };
             experts.push(ExpertBindings {
                 gate_up,
-                down: ops.bind_weight_ranges(&[view(down, weights.stride_down)], &[down_format])?,
+                down: ops
+                    .bind_weight_ranges(&[view(down, weights.stride_down)], &[down_format])?
+                    .into(),
                 width: config.n_ff_exp,
             });
         }

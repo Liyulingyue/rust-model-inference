@@ -750,17 +750,69 @@ pub fn run_jev_grouped_decision(
     jinja: crate::prompt::jinja::Options,
     max_context: usize,
 ) -> Result<(), String> {
-    let t0 = Instant::now();
-    let results = run_jev_grouped_decision_data(
-        source.clone(),
+    run_jev_grouped_decision_with_image(
+        source,
         context,
         questions,
         mode,
         n_threads_arg,
         prefill_batch_size,
+        output_json,
+        None,
+        None,
         jinja,
         max_context,
-    )?;
+    )
+}
+
+pub fn run_jev_grouped_decision_with_image(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[JevGroupedQuestionInput],
+    mode: JevMode,
+    n_threads: usize,
+    prefill_batch_size: usize,
+    output_json: bool,
+    mmproj: Option<&std::path::Path>,
+    image: Option<&std::path::Path>,
+    jinja: crate::prompt::jinja::Options,
+    max_context: usize,
+) -> Result<(), String> {
+    let t0 = Instant::now();
+    let results = if let Some(image) = image {
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(|v| v.to_string_val());
+        if arch != Some("qwen35") {
+            return Err(format!(
+                "grouped image JEV is unsupported for architecture {arch:?}"
+            ));
+        }
+        let mmproj = mmproj.ok_or("--jev --image requires --mmproj")?;
+        let prepared = prepare_jev_grouped_questions(questions, mode)?;
+        qwen35::score_image_groups(
+            source,
+            context,
+            &prepared,
+            n_threads,
+            prefill_batch_size,
+            max_context,
+            mmproj,
+            image,
+            &jinja,
+        )?
+    } else {
+        run_jev_grouped_decision_data(
+            source,
+            context,
+            questions,
+            mode,
+            n_threads,
+            prefill_batch_size,
+            jinja,
+            max_context,
+        )?
+    };
 
     if output_json {
         for r in &results {

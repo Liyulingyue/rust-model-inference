@@ -66,6 +66,10 @@ const PIVO_SILU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_silu.spv"
 const ATTENTION_SCORES_TILED_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
+const Q4_0_MATVEC_DP4A_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matvec_dp4a.spv");
+const Q4_0_FOLDED_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_folded_matmul.spv");
+const Q4_0_FOLDED_MATMUL_DP4A_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q4_0_folded_matmul_dp4a.spv");
 /// Register-tiled Q4_0 matmul: the weight is read once per (output column,
 /// k-block) and reused across a tile of tokens.
 const Q4_0_MATMUL_TILED_SHADER: &[u8] =
@@ -115,6 +119,10 @@ const MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/moe_reduce.sp
 const QWEN35_DENSE_PREPARE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_dense_prepare.spv");
 const QWEN35_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_attention.spv");
+const QWEN35_ATTENTION_ONLINE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qwen35_attention_online.spv");
+// Number of scores held in workgroup memory by qwen35_attention.comp.
+const QWEN35_SHARED_SCORES: usize = 4096;
 const QWEN35_RECURRENT_CONV_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_conv.spv");
 const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
@@ -300,6 +308,9 @@ const IQ1_M_MATMUL: usize = 82;
 /// indices stay valid.
 const Q2_K_MATMUL: usize = 83;
 const Q3_K_MATMUL: usize = 84;
+const Q4_0_MATVEC_DP4A: usize = 85;
+const QWEN35_ATTENTION_ONLINE: usize = 86;
+const Q4_0_FOLDED_MATMUL: usize = 87;
 
 fn silu_exp_mode(approximate: bool) -> u32 {
     if !approximate {
@@ -345,6 +356,22 @@ fn require_online_attention(context: &VulkanContext) -> Result<(), VulkanError> 
         ));
     }
     Ok(())
+}
+
+pub(super) fn require_qwen35_attention(
+    context: &VulkanContext,
+    length: usize,
+    head_dim: usize,
+) -> Result<(), VulkanError> {
+    if length <= QWEN35_SHARED_SCORES {
+        return Ok(());
+    }
+    if head_dim > 1024 {
+        return Err(VulkanError::UnsupportedShape(format!(
+            "Qwen3.5 online attention supports head dimensions up to 1024, got {head_dim}"
+        )));
+    }
+    require_online_attention(context)
 }
 
 /// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
@@ -464,6 +491,9 @@ const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
     "iq1_m_matmul",
     "q2_k_matmul",
     "q3_k_matmul",
+    "q4_0_matvec_dp4a",
+    "qwen35_attention_online",
+    "q4_0_folded_matmul",
 ];
 
 /// True when the ordered dispatch log is being collected.
@@ -589,7 +619,7 @@ pub fn dump_dispatch_trace() {
     }
 }
 
-const OPERATOR_SHADERS: [&[u8]; 85] = [
+const OPERATOR_SHADERS: [&[u8]; 88] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -675,6 +705,9 @@ const OPERATOR_SHADERS: [&[u8]; 85] = [
     IQ1_M_MATMUL_SHADER,
     Q2_K_MATMUL_SHADER,
     Q3_K_MATMUL_SHADER,
+    Q4_0_MATVEC_DP4A_SHADER,
+    QWEN35_ATTENTION_ONLINE_SHADER,
+    Q4_0_FOLDED_MATMUL_SHADER,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -782,12 +815,22 @@ impl GpuWeightFormat {
 pub(crate) enum GpuMatmulMode {
     #[default]
     Prepared,
+    /// Repacked folded Q4_0 weights with per-32 Q8_0 activations.
+    FoldedQ8_0,
+    /// Q4_0 storage with one signed Q8_K activation scale per 256 values.
+    Q8KInput,
     /// Round F16 activations, then accumulate in F32 (diffusion contract).
     RoundedInputF32,
     /// Round BF16 activations; F32 products use a compensated wide sum.
     RoundedBf16,
     /// Match dot_f16_f16_bytes / dot_bf16_f32 reduction.
     Dot,
+}
+
+impl GpuMatmulMode {
+    fn folded_q4(self) -> bool {
+        matches!(self, Self::FoldedQ8_0 | Self::Q8KInput)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -807,6 +850,10 @@ impl GpuMatmulSpec {
         let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
         Ok(format.with_mode(if weight.kernel.rounds_bf16_input() {
             GpuMatmulMode::RoundedBf16
+        } else if weight.kernel.q4_0_uses_q8_k_input() {
+            GpuMatmulMode::Q8KInput
+        } else if format == GpuWeightFormat::Q4_0 && weight.kernel.hadamard_input_map().is_some() {
+            GpuMatmulMode::FoldedQ8_0
         } else {
             GpuMatmulMode::Prepared
         }))
@@ -814,6 +861,7 @@ impl GpuMatmulSpec {
     fn validate(self) -> Result<(), VulkanError> {
         match (self.format, self.mode) {
             (_, GpuMatmulMode::Prepared)
+            | (GpuWeightFormat::Q4_0, GpuMatmulMode::Q8KInput | GpuMatmulMode::FoldedQ8_0)
             | (GpuWeightFormat::F16, GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot)
             | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16) => Ok(()),
             _ => Err(VulkanError::UnsupportedShape(
@@ -2834,6 +2882,12 @@ impl PivoRuntime {
         context: &'static VulkanContext,
         capacity: PivoCapacity,
     ) -> Result<Self, VulkanError> {
+        // The acoustic attention shader accumulates softmax probabilities in F64.
+        if !context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo attention requires shaderFloat64".into(),
+            ));
+        }
         if capacity.activation == 0
             || capacity.rope_table == 0
             || capacity.weight == 0
@@ -3246,7 +3300,11 @@ mod video_gpu_tests {
         let mut context = Box::new(VulkanContext::new().unwrap());
         context.limits.max_compute_shared_memory_size = 27 * 1024;
         assert!(require_online_attention(&context).is_ok());
+        assert!(require_qwen35_attention(&context, 8192, 256).is_ok());
+        assert!(require_qwen35_attention(&context, 8192, 1025).is_err());
         context.limits.max_compute_shared_memory_size = 16 * 1024 + 256;
+        assert!(require_qwen35_attention(&context, 4096, 256).is_ok());
+        assert!(require_qwen35_attention(&context, 4097, 256).is_err());
         let context = Box::leak(context);
         assert!(matches!(
             AttentionRuntime::new(context, (128, 128)),
@@ -3842,12 +3900,19 @@ pub(crate) fn build_operator_pipelines(
         .map(|(index, shader)| {
             if index == Q8_MATMUL_GROUPED && force_dp4a {
                 Q8_MATMUL_GROUPED_DP4A_SHADER
+            } else if index == Q4_0_FOLDED_MATMUL
+                && force_dp4a
+                && context.supports_integer_dot_product()
+            {
+                Q4_0_FOLDED_MATMUL_DP4A_SHADER
             } else if matches!(
                 index,
                 Q8_MATMUL_GROUPED_TILED
                     | Q8_MATMUL_COOPERATIVE
                     | Q8_MATMUL_GROUPED_TILED_WIDE
                     | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
+                    | Q4_0_MATMUL_TILED
+                    | Q4_0_MATVEC_DP4A
             ) && !q8_tiled
             {
                 // The tiled kernel needs `dotPacked4x8EXT`, so on a device
@@ -3856,19 +3921,20 @@ pub(crate) fn build_operator_pipelines(
                 // dispatching this placeholder with a tiled grid.
                 Q8_MATMUL_GROUPED_SHADER
             } else if (index == ATTENTION_SCORES_TILED && require_tiled_attention(context).is_err())
-                || (matches!(index, ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE)
-                    && require_online_attention(context).is_err())
+                || (matches!(
+                    index,
+                    ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE | QWEN35_ATTENTION_ONLINE
+                ) && require_online_attention(context).is_err())
             {
-                // Keep ordinary Qwen operators available on baseline
-                // devices; DiT rejects this slot before recording it.
+                // Callers check the device limits before recording these slots.
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
-                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE | PIVO_ATTENTION
             ) && !context.shader_float64
             {
-                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
-                // Their recorders reject unsupported devices before this placeholder is used.
+                // Optional FP64 kernels must not prevent ordinary projections from loading.
+                // Their runtimes reject unsupported devices before this placeholder is used.
                 ATTENTION_SCORES_SHADER
             } else {
                 *shader
@@ -4347,6 +4413,49 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn block_q8_quantization(
+        &self,
+        mode: GpuMatmulMode,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        scales: ArenaRegion,
+        sums: ArenaRegion,
+        width: usize,
+        rows: usize,
+        input_stride: usize,
+    ) -> Result<(usize, [u32; 11], [u32; 3]), VulkanError> {
+        let (pipeline, block) = if mode == GpuMatmulMode::Q8KInput {
+            (QUANTIZE_K, 256)
+        } else {
+            (QUANTIZE, 32)
+        };
+        let mut push = quantize_rows_push(
+            self.arena.size as usize,
+            input,
+            q8,
+            scales,
+            Some(sums),
+            width,
+            rows,
+            input_stride,
+            block,
+        )?;
+        if mode == GpuMatmulMode::Q8KInput {
+            // The scalar, cooperative and tiled Q4_0 kernels all read one scale
+            // per 32 values. Repeat each Q8_K scale in that existing layout.
+            let scale_count = product("Q4_0 activation scales", &[rows, width / 32])?;
+            push[2] = self.f32_word(scales, scale_count, "Q4_0 activation scales")?;
+            push[6] = as_u32(width / 32, "Q4_0 activation scale stride")?;
+            push[9] = 8;
+        }
+        Ok((
+            pipeline,
+            push,
+            row_dispatch(width / block, rows, &self.context.limits)?,
+        ))
+    }
+
     pub(crate) fn record_quantize_q8_k(
         &self,
         commands: &TokenCommands<'_>,
@@ -4432,6 +4541,25 @@ impl<'a> Qwen3Ops<'a> {
                     };
                     dispatch = grid;
                 }
+            }
+        }
+        // Sixteen lanes load consecutive Q4_0 blocks for each of four
+        // output rows. The shader adds their products in block order.
+        if pipeline == Q4_0_MATMUL
+            && self.q8_tiled
+            && tiled_matmul_enabled()
+            && push.len() == 26
+            && push[21] == 1
+        {
+            let columns = push[5].max(push[8]).max(push[11]) as usize;
+            if let Ok(grid) = matmul_dispatch(
+                columns.div_ceil(4),
+                1,
+                push[13] as usize,
+                &self.context.limits,
+            ) {
+                pipeline = Q4_0_MATVEC_DP4A;
+                dispatch = grid;
             }
         }
         if pipeline == Q8_MATMUL_GROUPED
@@ -4626,10 +4754,9 @@ impl<'a> Qwen3Ops<'a> {
         // per-row kernel reads it once per row.
         //
         // The Q4_0 kernel is tiled the same way. Its per-row kernel reads
-        // the weight once per row and multiplies the four-bit values one at
-        // a time; the tiled one reads it once per (column, k-block) and
-        // uses the packed dot product. A single row is still the per-row
-        // kernel's: the tile's staging is then pure overhead.
+        // the weight once per row; the tiled one shares it across tokens.
+        // For a single token, record_linear_dispatch selects the Q4_0
+        // matvec so that lanes can cooperate on the input blocks instead.
         let tiled = match format {
             GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0 => token_rows > 1,
             _ => false,
@@ -4752,19 +4879,17 @@ impl<'a> Qwen3Ops<'a> {
                 (q8k, q8k_scales, Some((QUANTIZE_K, push, dispatch)))
             }
             _ => {
-                let push = quantize_rows_push(
-                    self.arena.size as usize,
+                let quantize = self.block_q8_quantization(
+                    bindings.weight_mode,
                     input,
                     q8,
                     q8_scales,
-                    Some(q4_1_input_sums),
+                    q4_1_input_sums,
                     n_in,
                     token_rows,
                     input_stride,
-                    32,
                 )?;
-                let dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
-                (q8, q8_scales, Some((QUANTIZE, push, dispatch)))
+                (q8, q8_scales, Some(quantize))
             }
         };
         let (mut push, dispatch) = matmul_rows_push(
@@ -4825,7 +4950,9 @@ impl<'a> Qwen3Ops<'a> {
         }
         // The transposed kernel reads the transposed layout, so the layout
         // of the binding -- not a global flag -- decides which kernel runs.
-        let pipeline = if format == GpuWeightFormat::Q8_0
+        let pipeline = if bindings.weight_mode.folded_q4() {
+            Q4_0_FOLDED_MATMUL
+        } else if format == GpuWeightFormat::Q8_0
             && bindings.weight_layout == GpuWeightLayout::Transposed
         {
             Q8_MATMUL_TRANSPOSED
@@ -4982,7 +5109,10 @@ impl<'a> Qwen3Ops<'a> {
             self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
             return Ok(());
         }
-        if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0) || !self.q8_tiled {
+        if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0)
+            || !self.q8_tiled
+            || bindings.weight_mode.folded_q4()
+        {
             return self.record_weight_matmul_ordinary_rows(
                 commands,
                 bindings,
@@ -4998,18 +5128,16 @@ impl<'a> Qwen3Ops<'a> {
                 input_stride,
             );
         }
-        let quantize_push = quantize_rows_push(
-            self.arena.size as usize,
+        let (quantize_pipeline, quantize_push, quantize_dispatch) = self.block_q8_quantization(
+            bindings.weight_mode,
             activation,
             q8,
             q8_scales,
-            Some(q4_1_input_sums),
+            q4_1_input_sums,
             n_in,
             token_rows,
             input_stride,
-            32,
         )?;
-        let quantize_dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
         let (push, _) = matmul_rows_push(
             self.arena.size as usize,
             &self.context.limits,
@@ -5055,7 +5183,7 @@ impl<'a> Qwen3Ops<'a> {
         // Validation is complete before the first command is recorded.
         self.record_linear_dispatch(
             commands,
-            QUANTIZE,
+            quantize_pipeline,
             self.arena_bindings,
             &quantize_push,
             quantize_dispatch,
@@ -6760,11 +6888,6 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
         )?;
-        if capacity > 4096 {
-            return Err(VulkanError::UnsupportedShape(format!(
-                "Qwen3.5 Vulkan capacity {capacity} exceeds attention shader limit 4096"
-            )));
-        }
         let q_count = q_heads
             .checked_mul(head_dim)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -6775,24 +6898,54 @@ impl<'a> Qwen3Ops<'a> {
             .checked_mul(capacity)
             .and_then(|count| count.checked_mul(kv_count))
             .ok_or(VulkanError::OutOfMemory)?;
+        let elements = q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?;
+        let q_word = self.f32_word(q, elements, "Qwen3.5 attention Q")?;
+        let gate_word = self.f32_word(gate, elements, "Qwen3.5 attention gate")?;
+        let k_word = self.f32_word(cache_k, cache_count, "Qwen3.5 attention K cache")?;
+        let v_word = self.f32_word(cache_v, cache_count, "Qwen3.5 attention V cache")?;
+        let out_word = self.f32_word(output, elements, "Qwen3.5 attention output")?;
+        if sequence_length > QWEN35_SHARED_SCORES {
+            require_qwen35_attention(self.context, sequence_length, head_dim)?;
+            let layer_offset = as_u32(
+                product("Qwen3.5 KV layer offset", &[layer, capacity, kv_count])?,
+                "Qwen3.5 KV layer offset",
+            )?;
+            let push = [
+                q_word,
+                k_word
+                    .checked_add(layer_offset)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                v_word
+                    .checked_add(layer_offset)
+                    .ok_or(VulkanError::OutOfMemory)?,
+                out_word,
+                as_u32(rows, "Qwen3.5 attention queries")?,
+                as_u32(sequence_length, "Qwen3.5 attention keys")?,
+                as_u32(q_heads, "Qwen3.5 attention Q heads")?,
+                as_u32(kv_heads, "Qwen3.5 attention KV heads")?,
+                as_u32(head_dim, "Qwen3.5 attention dimension")?,
+                (1.0 / (head_dim as f32).sqrt()).to_bits(),
+                1, // causal
+                0, // full attention window
+                1, // unused spatial grid width
+                gate_word,
+            ];
+            let grid = row_dispatch(rows.div_ceil(8), q_heads, &self.context.limits)?;
+            self.record_linear_dispatch(
+                commands,
+                QWEN35_ATTENTION_ONLINE,
+                self.arena_bindings,
+                &push,
+                grid,
+            );
+            return Ok(());
+        }
         let push = [
-            self.f32_word(
-                q,
-                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
-                "Qwen3.5 attention Q",
-            )?,
-            self.f32_word(
-                gate,
-                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
-                "Qwen3.5 attention gate",
-            )?,
-            self.f32_word(cache_k, cache_count, "Qwen3.5 attention K cache")?,
-            self.f32_word(cache_v, cache_count, "Qwen3.5 attention V cache")?,
-            self.f32_word(
-                output,
-                q_count.checked_mul(rows).ok_or(VulkanError::OutOfMemory)?,
-                "Qwen3.5 attention output",
-            )?,
+            q_word,
+            gate_word,
+            k_word,
+            v_word,
+            out_word,
             as_u32(layer, "Qwen3.5 attention layer")?,
             as_u32(base_position, "Qwen3.5 attention base position")?,
             as_u32(capacity, "Qwen3.5 attention capacity")?,
@@ -7620,7 +7773,12 @@ impl<'a> Qwen3Ops<'a> {
         )
     }
 
-    fn f32_word(&self, region: ArenaRegion, count: usize, label: &str) -> Result<u32, VulkanError> {
+    pub(super) fn f32_word(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+        label: &str,
+    ) -> Result<u32, VulkanError> {
         self.byte_word(region, f32_bytes(count)?, label)
     }
 
@@ -8012,7 +8170,7 @@ fn quantize_rows_push(
             blocks,
             rows_u32,
             1, // All CPU Q8_K paths use a signed scale and ties-to-even.
-            0,
+            1, // Copies of each scale in the output buffer.
             0,
         ])
     }
@@ -8254,7 +8412,9 @@ fn matmul_rows_push(
         max_output_rows = max_output_rows.max(n_out);
     }
     // BF16 dot streams occupy 4/8 lanes; use the rest for independent outputs.
-    let output_groups = if format == GpuWeightFormat::F32 {
+    let output_groups = if bindings.weight_mode.folded_q4() {
+        max_output_rows.div_ceil(8)
+    } else if format == GpuWeightFormat::F32 {
         max_output_rows.div_ceil(if push[1] == 16 { 4 } else { 64 })
     } else if format == GpuWeightFormat::BF16 && push[1] != 0 {
         max_output_rows.div_ceil(64 / push[1] as usize)
@@ -8289,7 +8449,9 @@ fn matmul_rows_push(
         max_output_rows
     };
     // Four tokens share each weight load; incomplete batches stay masked in shader.
-    let token_groups = if format == GpuWeightFormat::BF16 && push[1] > 1 && token_rows >= 4 {
+    let token_groups = if bindings.weight_mode.folded_q4() {
+        token_rows.div_ceil(32)
+    } else if format == GpuWeightFormat::BF16 && push[1] > 1 && token_rows >= 4 {
         token_rows.div_ceil(4)
     } else {
         token_rows
@@ -11407,6 +11569,21 @@ mod tests {
             (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
             (Q2_K_MATMUL, "q2_k_matmul", Q2_K_MATMUL_SHADER),
             (Q3_K_MATMUL, "q3_k_matmul", Q3_K_MATMUL_SHADER),
+            (
+                Q4_0_MATVEC_DP4A,
+                "q4_0_matvec_dp4a",
+                Q4_0_MATVEC_DP4A_SHADER,
+            ),
+            (
+                QWEN35_ATTENTION_ONLINE,
+                "qwen35_attention_online",
+                QWEN35_ATTENTION_ONLINE_SHADER,
+            ),
+            (
+                Q4_0_FOLDED_MATMUL,
+                "q4_0_folded_matmul",
+                Q4_0_FOLDED_MATMUL_SHADER,
+            ),
         ];
         for (index, name, shader) in operators {
             assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
@@ -11974,86 +12151,197 @@ mod tests {
         super::check_quantize_tie_even(&context).unwrap();
     }
 
-    /// The tiled Q4_0 kernel has to be the per-row kernel's, bit for bit.
-    ///
-    /// The per-row kernel reads the weight once per (output column, token
-    /// row) pair and multiplies the four-bit values one at a time; the
-    /// tiled one reads it once per (output column, k-block) and uses the
-    /// packed dot product. The arithmetic is the same, so the results have
-    /// to be the same: the integer sum of the 32 products is exact, and
-    /// the float part keeps the per-row kernel's order, (sum * weight
-    /// scale) * activation scale, added per block.
+    #[test]
+    #[ignore = "requires a Vulkan device with online attention support"]
+    fn qwen35_online_attention_respects_cache_layer_causal_rows_and_gate() {
+        use super::*;
+
+        const DIM: usize = 256;
+        const HEADS: usize = 4;
+        const KV_HEADS: usize = 2;
+        const PREFIX: usize = 4096;
+        const ROWS: usize = 3;
+        const CAPACITY: usize = PREFIX + 16;
+        const Q_LEN: usize = ROWS * HEADS * DIM;
+        const CACHE_LEN: usize = 2 * CAPACITY * KV_HEADS * DIM;
+        let mut cursor = 0;
+        let q = f32_region(&mut cursor, Q_LEN).unwrap();
+        let gate = f32_region(&mut cursor, Q_LEN).unwrap();
+        let k = f32_region(&mut cursor, CACHE_LEN).unwrap();
+        let v = f32_region(&mut cursor, CACHE_LEN).unwrap();
+        let output = f32_region(&mut cursor, Q_LEN).unwrap();
+        let context = VulkanContext::new().unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        let mut queries = vec![0.0; Q_LEN];
+        for head in queries.chunks_exact_mut(DIM) {
+            head[0] = (DIM as f32).sqrt();
+        }
+        let gates: Vec<f32> = (0..Q_LEN).map(|i| (i % 3) as f32 - 1.0).collect();
+        let mut keys = vec![0.0; CACHE_LEN];
+        let mut values = vec![-123.0; CACHE_LEN];
+        // Layer one has a constant prefix and two high-scoring suffix tokens.
+        // Each new query can see one more token. The common score of 1000
+        // also checks that the tile normalizer subtracts its running maximum.
+        for token in 0..PREFIX + 2 {
+            let (extra_score, extra_value) = match token {
+                PREFIX => (8.0, 8.0),
+                t if t == PREFIX + 1 => (9.0, -3.0),
+                _ => (0.0, 0.0),
+            };
+            for head in 0..KV_HEADS {
+                let base = ((CAPACITY + token) * KV_HEADS + head) * DIM;
+                keys[base] = 1000.0 + extra_score;
+                for (i, value) in values[base..base + DIM].iter_mut().enumerate() {
+                    *value = head as f32 + (i % 11) as f32 / 16.0 + extra_value;
+                }
+            }
+        }
+        for (region, data) in [(q, &queries), (gate, &gates), (k, &keys), (v, &values)] {
+            ops.write_f32(region, data).unwrap();
+        }
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_qwen35_attention(
+            &commands,
+            q,
+            gate,
+            k,
+            v,
+            output,
+            1,
+            2,
+            PREFIX - 1,
+            CAPACITY,
+            HEADS,
+            KV_HEADS,
+            DIM,
+            ROWS,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        let mut actual = vec![0.0; Q_LEN];
+        ops.read_f32_into(output, &mut actual).unwrap();
+        for (i, &value) in actual.iter().enumerate() {
+            let row = i / (HEADS * DIM);
+            let kv_head = (i / DIM % HEADS) / (HEADS / KV_HEADS);
+            let w1 = if row >= 1 { 8f64.exp() } else { 0.0 };
+            let w2 = if row >= 2 { 9f64.exp() } else { 0.0 };
+            let mean = kv_head as f64
+                + ((i % DIM) % 11) as f64 / 16.0
+                + (8.0 * w1 - 3.0 * w2) / (PREFIX as f64 + w1 + w2);
+            let expected = mean / (1.0 + (-f64::from(gates[i])).exp());
+            assert!(
+                (f64::from(value) - expected).abs() < 2e-4,
+                "output {i}: {value}, expected {expected}"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
-    fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
+    fn vulkan_q4_0_matvec_and_tiled_prefill_match_the_scalar_shader() {
         use super::*;
-        const WIDTH: usize = 256;
+        // An odd block count alternates the halfword alignment between rows.
+        // The seventeenth block also exercises the matvec's final partial tile.
         const OUTPUTS: usize = 129;
-        for rows in [1usize, 2, 3, 5] {
+        let context = VulkanContext::new().unwrap();
+        let ordinary = [1usize, 2, 3, 5].map(|r| (r, 17 * 32, GpuMatmulMode::Prepared));
+        let repacked = [
+            (1, 17 * 32, GpuMatmulMode::FoldedQ8_0),
+            (33, 17 * 32, GpuMatmulMode::FoldedQ8_0),
+            (1, 512, GpuMatmulMode::Q8KInput),
+            (3, 512, GpuMatmulMode::Q8KInput),
+        ];
+        for (rows, width, mode) in ordinary.into_iter().chain(repacked) {
             let mut cursor = 0;
-            let input = f32_region(&mut cursor, rows * WIDTH * 4).unwrap();
-            let q8 = region(&mut cursor, rows * WIDTH).unwrap();
-            let scales = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
-            let sums = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
-            let output = f32_region(&mut cursor, rows * OUTPUTS * 4).unwrap();
-            let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
-            let mut ops = Qwen3Ops::new_with_size(context, cursor, 2).unwrap();
-            let weight = synthetic_weight(GpuWeightFormat::Q4_0, WIDTH, OUTPUTS);
+            let input = f32_region(&mut cursor, rows * width).unwrap();
+            let q8 = region(&mut cursor, rows * width).unwrap();
+            let scales = f32_region(&mut cursor, rows * width / 32).unwrap();
+            let sums = f32_region(&mut cursor, rows * width / 32).unwrap();
+            let output = f32_region(&mut cursor, rows * OUTPUTS).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let weight = synthetic_weight(GpuWeightFormat::Q4_0, width, OUTPUTS);
             let buffer = unsafe { ops.context.upload_static(&weight) }.unwrap();
             let bindings = ops
-                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q4_0])
+                .bind_weight_buffers_mode(&[buffer], &[GpuWeightFormat::Q4_0], mode)
                 .unwrap();
-            let values: Vec<f32> = (0..rows * WIDTH)
-                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            let values: Vec<f32> = (0..rows * width)
+                .map(|i| ((i * 29 % 249) as f32 - 111.0) * (i / 256) as f32 / 97.0)
                 .collect();
 
+            let supports_tiling = ops.q8_tiled;
             let mut ordinary = vec![0.0f32; rows * OUTPUTS];
-            let mut tiled = vec![0.0f32; rows * OUTPUTS];
-            for (target, tiled_kernel) in [(&mut ordinary, false), (&mut tiled, true)] {
+            let mut optimized = vec![0.0f32; rows * OUTPUTS];
+            for (target, enable_tiling) in [(&mut ordinary, false), (&mut optimized, true)] {
+                ops.q8_tiled = supports_tiling && enable_tiling;
                 ops.write_f32(input, &values).unwrap();
                 ops.write_f32(output, &vec![f32::NAN; rows * OUTPUTS])
                     .unwrap();
                 let commands = TokenCommands::begin(ops.context).unwrap();
-                let recorded = if tiled_kernel {
-                    ops.record_weight_matmul_tiled_rows(
-                        &commands,
-                        bindings,
-                        input,
-                        q8,
-                        scales,
-                        sums,
-                        q8,
-                        scales,
-                        &[(output, OUTPUTS, OUTPUTS * 4)],
-                        WIDTH,
-                        rows,
-                        WIDTH,
-                    )
-                } else {
-                    ops.record_weight_matmul_ordinary_rows(
-                        &commands,
-                        bindings,
-                        input,
-                        q8,
-                        scales,
-                        sums,
-                        q8,
-                        scales,
-                        &[(output, OUTPUTS, OUTPUTS * 4)],
-                        WIDTH,
-                        rows,
-                        WIDTH,
-                    )
-                };
-                recorded.unwrap();
+                ops.record_weight_matmul_rows(
+                    &commands,
+                    bindings,
+                    input,
+                    q8,
+                    scales,
+                    sums,
+                    q8,
+                    scales,
+                    &[(output, OUTPUTS, OUTPUTS * 4)],
+                    width,
+                    rows,
+                    width,
+                )
+                .unwrap();
                 commands.submit_and_wait().unwrap();
                 ops.read_f32_into(output, target).unwrap();
+                if mode == GpuMatmulMode::Q8KInput {
+                    let stored = ops.read_f32(scales, rows * width / 32).unwrap();
+                    for (index, (block, copies)) in crate::ops::quant::quantize_row_q8_k(&values)
+                        .iter()
+                        .zip(stored.chunks_exact(8))
+                        .enumerate()
+                    {
+                        assert!(
+                            copies.iter().all(|&scale| (scale - block.d).abs() < 1e-7),
+                            "Q8_K block {index}: expected {}, got {copies:?}",
+                            block.d
+                        );
+                    }
+                }
             }
-            for (index, (ordinary, tiled)) in ordinary.iter().zip(&tiled).enumerate() {
-                assert_eq!(
-                    ordinary.to_bits(),
-                    tiled.to_bits(),
-                    "rows={rows} value {index}"
+            if mode.folded_q4() {
+                let codes = ops.read_bytes(q8, rows * width).unwrap();
+                let ds = ops.read_f32(scales, rows * width / 32).unwrap();
+                for ((x, scales), y) in codes
+                    .chunks_exact(width)
+                    .zip(ds.chunks_exact(width / 32))
+                    .zip(ordinary.chunks_exact_mut(OUTPUTS))
+                {
+                    for (row, expected) in weight.chunks_exact(width / 32 * 18).zip(y) {
+                        let mut sums = [0.0f32; 8];
+                        for ((w, x), &d) in row.chunks_exact(18).zip(x.chunks_exact(32)).zip(scales)
+                        {
+                            let scale =
+                                crate::ops::f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * d;
+                            for (lane, sum) in sums.iter_mut().enumerate() {
+                                let mut dot = 0i32;
+                                for i in 4 * lane..4 * lane + 4 {
+                                    let code = (w[2 + i % 16] >> (4 * (i / 16))) & 15;
+                                    dot += (i32::from(code) - 8) * i32::from(x[i] as i8);
+                                }
+                                *sum = (dot as f32).mul_add(scale, *sum);
+                            }
+                        }
+                        let [a, b, c, d, e, f, g, h] = sums;
+                        *expected = ((a + e) + (b + f)) + ((c + g) + (d + h));
+                    }
+                }
+            }
+            for (index, (reference, actual)) in ordinary.iter().zip(&optimized).enumerate() {
+                let tolerance = 1e-5 * (1.0 + reference.abs());
+                assert!(
+                    reference.is_finite() && (reference - actual).abs() <= tolerance,
+                    "rows={rows} value {index}: expected {reference}, got {actual}"
                 );
             }
             unsafe { ops.context.destroy_completed_buffers(&[buffer]) }.unwrap();
@@ -15131,7 +15419,7 @@ mod tests {
     fn pivo_operators_match_the_host_kernels() {
         use super::*;
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
-        let mut runtime = PivoRuntime::new(
+        let runtime = PivoRuntime::new(
             context,
             PivoCapacity {
                 activation: 16 * 1024,
@@ -15139,8 +15427,14 @@ mod tests {
                 weight: 16 * 1024,
                 bias: 64,
             },
-        )
-        .unwrap();
+        );
+        if !context.shader_float64 {
+            assert!(
+                matches!(runtime, Err(VulkanError::UnsupportedShape(msg)) if msg.contains("shaderFloat64"))
+            );
+            return;
+        }
+        let mut runtime = runtime.unwrap();
         let mut state = 0x1234_5678u32;
         let mut next = move || {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);

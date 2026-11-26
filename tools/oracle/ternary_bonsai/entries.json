@@ -1,0 +1,650 @@
+{
+  "template": "embedded Jinja with thinking disabled",
+  "max_output_tokens": 6,
+  "text_prompt": "Name the capital of France. Answer with one word.",
+  "image_prompt": "What color is the image? Answer with one word.",
+  "jev": {
+    "context": "Red",
+    "question": "Color?",
+    "options": ["red", "blue"],
+    "max_probability_difference": 0.01
+  },
+  "plain_mmproj": "BF16",
+  "mtp_mmproj": "Q8_0",
+  "results": {
+    "PTQ1_0": {
+      "vulkan": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988294, 0.99988294, 0.0],
+        "jev_image": [0.99980468, 0.99980468, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99193126,
+              "B": 0.00806872
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93351936,
+              "D": 0.06648066
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.9965837,
+              "B": 0.0034163
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93579638,
+              "D": 0.06420361
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      },
+      "auto": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988294, 0.99988294, 0.0],
+        "jev_image": [0.99980468, 0.99980468, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99193126,
+              "B": 0.00806872
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93351936,
+              "D": 0.06648066
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.9965837,
+              "B": 0.0034163
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93579638,
+              "D": 0.06420361
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      },
+      "cpu": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988544, 0.99988544, 0.0],
+        "jev_image": [0.99980432, 0.99980432, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99169934,
+              "B": 0.00830064
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.92875087,
+              "D": 0.07124916
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99679273,
+              "B": 0.00320725
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93938524,
+              "D": 0.06061469
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      }
+    },
+    "Q2_0-mtp": {
+      "cpu": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      },
+      "auto": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      },
+      "vulkan": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      }
+    },
+    "PQ2_0-mtp": {
+      "auto": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      },
+      "vulkan": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      },
+      "cpu": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      }
+    },
+    "PTQ1_0-mtp": {
+      "auto": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      },
+      "vulkan": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      },
+      "cpu": {
+        "text": "Paris",
+        "image": "Red",
+        "mtp_rounds_accepted_drafted": [3, 3, 6]
+      }
+    },
+    "Q2_0": {
+      "auto": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988294, 0.99988294, 0.0],
+        "jev_image": [0.99980468, 0.99980468, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99193126,
+              "B": 0.00806872
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93351936,
+              "D": 0.06648066
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.9965837,
+              "B": 0.0034163
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93579638,
+              "D": 0.06420361
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      },
+      "vulkan": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988294, 0.99988294, 0.0],
+        "jev_image": [0.99980468, 0.99980468, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99193126,
+              "B": 0.00806872
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93351936,
+              "D": 0.06648066
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.9965837,
+              "B": 0.0034163
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93579638,
+              "D": 0.06420361
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      },
+      "cpu": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988544, 0.99988544, 0.0],
+        "jev_image": [0.99980432, 0.99980432, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99169934,
+              "B": 0.00830064
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.92875087,
+              "D": 0.07124916
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99679273,
+              "B": 0.00320725
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93938524,
+              "D": 0.06061469
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      }
+    },
+    "PQ2_0": {
+      "auto": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988294, 0.99988294, 0.0],
+        "jev_image": [0.99980468, 0.99980468, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99193126,
+              "B": 0.00806872
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93351936,
+              "D": 0.06648066
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.9965837,
+              "B": 0.0034163
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93579638,
+              "D": 0.06420361
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      },
+      "vulkan": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988294, 0.99988294, 0.0],
+        "jev_image": [0.99980468, 0.99980468, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99193126,
+              "B": 0.00806872
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93351936,
+              "D": 0.06648066
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.9965837,
+              "B": 0.0034163
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93579638,
+              "D": 0.06420361
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      },
+      "cpu": {
+        "text": "Paris",
+        "image": "Red",
+        "jev_text": [0.99988866, 0.99988866, 0.0],
+        "jev_image": [0.99981624, 0.99981624, 0.0],
+        "grouped_text": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99177223,
+              "B": 0.00822777
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93132746,
+              "D": 0.0686726
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ],
+        "grouped_image": [
+          {
+            "group": "Hue",
+            "choice": "A",
+            "probabilities": {
+              "A": 0.99682885,
+              "B": 0.00317112
+            },
+            "max_cli_http_abs": 0.0
+          },
+          {
+            "group": "Brightness",
+            "choice": "C",
+            "probabilities": {
+              "C": 0.93926346,
+              "D": 0.06073656
+            },
+            "max_cli_http_abs": 0.0
+          }
+        ]
+      }
+    }
+  },
+  "fields": {
+    "text_and_image": "common CLI, HTTP JSON and SSE content; [DONE] observed",
+    "jev_text_and_image": "[CLI P(A), HTTP P(A), largest absolute probability difference across A and B]",
+    "mtp_rounds_accepted_drafted": "[rounds, accepted proposals, all proposals]"
+  },
+  "runtime_commits": {
+    "generation": "9cb45549e6d625f51f733215c272c09538169b14",
+    "single_and_grouped_scores": "303794926b5f9c8c490f5896f946a0f488a802c2"
+  },
+  "mtp_sequence_cpu": {
+    "PTQ1_0": {
+      "prompt": "List the integers from 1 to 20 in order, separated by commas. Start directly with 1.",
+      "plain_and_speculative_output": "1, 2, 3,",
+      "output_tokens": 8,
+      "rounds_accepted_drafted": [3, 6, 6]
+    },
+    "PQ2_0": {
+      "prompt": "List the integers from 1 to 20 in order, separated by commas. Start directly with 1.",
+      "plain_and_speculative_output": "1, 2, 3,",
+      "output_tokens": 8,
+      "rounds_accepted_drafted": [3, 6, 6]
+    },
+    "Q2_0": {
+      "prompt": "List the integers from 1 to 20 in order, separated by commas. Start directly with 1.",
+      "plain_and_speculative_output": "1, 2, 3,",
+      "output_tokens": 8,
+      "rounds_accepted_drafted": [3, 6, 6]
+    }
+  },
+  "grouped_jev": {
+    "mode": "block_choice",
+    "context": "Bright red.",
+    "question": "Choose a hue and a brightness.",
+    "groups": {
+      "Hue": ["red", "blue"],
+      "Brightness": ["bright", "dark"]
+    }
+  },
+  "dense_qwen35_0_8b_bf16": {
+    "backend": "cpu",
+    "results": {
+      "single_text": [
+        "A",
+        {
+          "A": 0.854384183883667,
+          "B": 0.145615816116333
+        },
+        0.0
+      ],
+      "grouped_text": [
+        [
+          "Hue",
+          "A",
+          {
+            "A": 0.6489140391349792,
+            "B": 0.35108596086502075
+          },
+          0.0
+        ],
+        [
+          "Brightness",
+          "C",
+          {
+            "C": 0.8253952264785767,
+            "D": 0.17460481822490692
+          },
+          0.0
+        ]
+      ],
+      "single_image": [
+        "A",
+        {
+          "A": 0.9729436039924622,
+          "B": 0.02705633081495762
+        },
+        0.0
+      ],
+      "grouped_image": [
+        [
+          "Hue",
+          "A",
+          {
+            "A": 0.7700594067573547,
+            "B": 0.22994057834148407
+          },
+          0.0
+        ],
+        [
+          "Brightness",
+          "C",
+          {
+            "C": 0.782065212726593,
+            "D": 0.2179347574710846
+          },
+          0.0
+        ]
+      ],
+      "generated": ["Paris", "Red"]
+    }
+  },
+  "template_override": {
+    "format": "PTQ1_0",
+    "backend": "cpu",
+    "template_prefix": "{{ 'Template check.\\n' }}",
+    "results": {
+      "single_text": [
+        "A",
+        {
+          "A": 0.9997697472572327,
+          "B": 0.0002302402863278985
+        },
+        0.0
+      ],
+      "grouped_text": [
+        [
+          "Hue",
+          "A",
+          {
+            "A": 0.9922243356704712,
+            "B": 0.007775686681270599
+          },
+          0.0
+        ],
+        [
+          "Brightness",
+          "C",
+          {
+            "C": 0.9469717144966125,
+            "D": 0.053028304129838943
+          },
+          0.0
+        ]
+      ],
+      "single_image": [
+        "A",
+        {
+          "A": 0.9997569918632507,
+          "B": 0.0002429753221804276
+        },
+        0.0
+      ],
+      "grouped_image": [
+        [
+          "Hue",
+          "A",
+          {
+            "A": 0.9954277276992798,
+            "B": 0.004572245292365551
+          },
+          0.0
+        ],
+        [
+          "Brightness",
+          "C",
+          {
+            "C": 0.9589180946350098,
+            "D": 0.04108189791440964
+          },
+          0.0
+        ]
+      ]
+    }
+  }
+}

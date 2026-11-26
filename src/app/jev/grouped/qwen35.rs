@@ -12,7 +12,48 @@ use crate::app::cli::{resolve_thread_count, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::tokenizer::BPETokenizer;
 use crate::models::qwen35::run_forward_logits_qwen35_with_batch;
+use std::path::Path;
 use std::sync::Arc;
+
+pub(super) fn score_image_groups(
+    source: Arc<dyn TensorSource>,
+    context: &str,
+    questions: &[PreparedGroupedQuestion],
+    n_threads: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    mmproj: &Path,
+    image: &Path,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<Vec<JevGroupedResult>, String> {
+    let scorer = Qwen35JevGroupedScorer::new(source, n_threads, prefill_batch_size, jinja)?;
+    questions
+        .iter()
+        .map(|question| {
+            let payload = build_grouped_payload(context, question)?;
+            let (logits, duration) = crate::app::run_qwen35_family_multimodal_logits(
+                scorer.source.as_ref(),
+                mmproj,
+                Some(image),
+                None,
+                None,
+                &payload,
+                n_threads,
+                prefill_batch_size,
+                max_context,
+                Some(build_grouped_system()),
+                scorer.jinja.as_ref(),
+            )?;
+            Ok(super::compute_grouped_jev_result(
+                question,
+                &scorer.tokenizer,
+                &allocate_group_labels(question),
+                &logits,
+                duration.as_millis(),
+            ))
+        })
+        .collect()
+}
 
 pub(crate) fn run_jev_grouped_qwen35(
     source: Arc<dyn TensorSource>,

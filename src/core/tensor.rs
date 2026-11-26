@@ -69,6 +69,9 @@ pub enum GGMLType {
     /// cannot forward through the existing engine trunk yet.
     I2_S = 36,
     Q1_0 = 41,
+    Q2_0 = 42,
+    PQ2_0 = 142,
+    PTQ1_0 = 143,
 }
 
 impl GGMLType {
@@ -105,6 +108,9 @@ impl GGMLType {
             30 => Some(Self::BF16),
             36 => Some(Self::I2_S),
             41 => Some(Self::Q1_0),
+            42 => Some(Self::Q2_0),
+            142 => Some(Self::PQ2_0),
+            143 => Some(Self::PTQ1_0),
             _ => None,
         }
     }
@@ -142,6 +148,9 @@ impl GGMLType {
             Self::BF16 => (1, 2),
             Self::I2_S => (128, 32),
             Self::Q1_0 => (128, 18),
+            Self::Q2_0 => (64, 18),
+            Self::PQ2_0 => (128, 34),
+            Self::PTQ1_0 => (128, 28),
         }
     }
 

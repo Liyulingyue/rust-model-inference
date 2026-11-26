@@ -10,6 +10,7 @@
 //! [`Qwen35LayerWeights`], [`Qwen35Scratchpad`], [`build_qwen35_positions`]
 //! at `models::qwen35::*`.
 
+pub(crate) mod bonsai;
 pub mod trunk;
 pub mod vision;
 
