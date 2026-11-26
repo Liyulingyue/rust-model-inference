@@ -158,6 +158,28 @@ inside `run_layer`, so every forward re-dequantises all 42 layers. A 1-step,
 cfg-1 prefix had not finished after 30 minutes. Any real parity mode needs the
 dequantised weights cached at load, not rebuilt per layer per call.
 
+**Answered (verified): the tensor contract is correct, the Rust kernel path is not.**
+Computed `q_proj` in Python from the oracle's own bit-exact `prefix_l0_normed`
+and the GGUF Q8_0 weights dequantised in Python (`probe_qproj.py`):
+
+| accumulator | corr | max_abs | rel |
+| --- | --- | --- | --- |
+| f32 | **1.00000000** | 7.55e-05 | **6.47e-05** |
+| f64 | 1.00000000 | 7.57e-05 | 6.48e-05 |
+
+So name, orientation and Q8_0 block layout are all read correctly, and a plain
+f32 matmul over dequantised weights lands within 6.5e-5 of the oracle. The Rust
+port is at **1.96e-3 — 30x worse**, which is exactly the magnitude of rounding
+the *activation* to Q8_0 (~1/256).
+
+That closes the question the earlier attempts left open: the remaining error is
+purely in the Rust kernel path, and the dequantised-weight mode is the right fix
+-- it simply did not take effect in the run that measured it (three
+configurations agreeing to the last bit is the tell). Next concrete step is to
+find why `load_weight_dispatch` is not reached (or returns `None` and falls back
+to `load_weight`), and to cache the dequantised weights at load so the mode is
+not 30-min-per-step.
+
 **Cheaper next probe before writing more code:** compute `q_proj` in Python from
 the oracle's own bit-exact `prefix_l0_normed` and the GGUF Q8_0 weights
 dequantised in Python, then compare against the oracle's `prefix_l0_q`. If that
