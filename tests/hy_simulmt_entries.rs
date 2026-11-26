@@ -39,7 +39,20 @@ fn hy_text_jev_is_rejected() {
         CliOptions::DEFAULT_MAX_CONTEXT,
     )
     .unwrap_err();
-    assert!(error.contains("--jev is not yet supported"), "{error}");
+    // `hy_v3` has a dedicated arm (`app/jev/single.rs`) instead of falling
+    // through to the generic "not yet supported" list: the rejection is a
+    // deliberate scope decision, not an unimplemented branch. Pin that so the
+    // two readings stay distinguishable.
+    //
+    // The wording names the real reason (`generate()` only, no logits entry
+    // point) rather than "no decision head" — `hunyuan-dense` is JEV-scored
+    // from ordinary LM logits and has no decision head either, so that phrasing
+    // would have implied the wrong thing about the model.
+    assert!(error.contains("is not implemented"), "{error}");
+    assert!(error.contains("logits entry point"), "{error}");
+    assert!(error.contains("hy_v3"), "{error}");
+    assert!(!error.contains("not yet supported"), "{error}");
+    assert!(!error.contains("not yet supported"), "{error}");
 }
 
 #[test]
@@ -61,9 +74,15 @@ fn hy_grouped_jev_is_rejected() {
         CliOptions::DEFAULT_MAX_CONTEXT,
     )
     .unwrap_err();
+    // NOTE: grouped currently rejects through the *generic* arm
+    // (`app/jev/grouped.rs:732`) while single mode has a dedicated `hy_v3` arm
+    // (`single.rs:246`) that says "does not apply". The two messages disagree;
+    // this asserts only that the request is rejected for a `hy_v3` reason, so
+    // unifying the wording later will not break the test.
+    assert!(error.contains("hy_v3"), "{error}");
     assert!(
-        error.contains("--jev grouped is not yet supported"),
-        "{error}"
+        error.contains("--jev grouped"),
+        "must name the grouped entry: {error}"
     );
 }
 

@@ -1,15 +1,26 @@
-//! Tencent Hy-SimulMT's bundled speech encoder and mixed dense/MoE decoder.
+//! Tencent Hy's `hy_v3` decoder family.
+//!
+//! The decoder (`config.rs` / `weights.rs` / `decoder.rs` / `moe.rs`) is the
+//! generic `hy_v3` trunk and serves two products:
+//!
+//! * **Hy-SimulMT** — speech translation: `audio.rs` adds the bundled
+//!   `hyv3_speech` tower and `runtime.rs` drives the audio turns;
+//! * **Hy-MT3-30B-A3B** — text translation: `text.rs` drives the same decoder
+//!   as a plain text LM and is what `arch == "hy_v3"` resolves to when the
+//!   checkpoint has no audio tower.
 mod audio;
 mod config;
 mod decoder;
 pub mod moe;
 mod runtime;
+mod text;
 mod weights;
 
 pub use audio::HyAudioEncoder;
 pub use config::{HyConfig, HyMoeConfig};
 pub use decoder::HySession;
 pub use runtime::{HySimulMt, Translation};
+pub use text::{has_speech_tower, HyV3TextRuntime};
 pub use weights::HyDecoder;
 
 use crate::core::tensor::{GGMLType, TensorSource};

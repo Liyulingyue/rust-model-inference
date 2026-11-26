@@ -54,6 +54,13 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // the server a different prompt than the CLI. See
         // `build_nemotron_chat_prompt`.
         "nemotron_h" | "nemotron_h_moe" => Ok(false),
+        // `hy_v3` (Hy-MT3-30B-A3B) has no tool-call grammar and no vision
+        // path; it is plain text. It reaches this function twice: once from
+        // `build_prompt` and once from `OutputParser::new`, which parses the
+        // generated text. Rejecting it here made every chat completion fail
+        // *after* a successful generation, which looked like a prompt problem
+        // and was not.
+        "hy_v3" => Ok(false),
         "qwen35" | "qwen35moe" | "sensenova_loop" => Ok(true),
         // Llama-family archs go through the CLI prompt builder
         // (`llama::trunk::build_prompt_tokens`) and don't support tool
@@ -1242,6 +1249,22 @@ mod tests {
             missing, disabled,
             "an explicit false must still be able to turn the reasoning block off"
         );
+    }
+
+    /// `hy_v3` reaches the whitelist twice per request: once from
+    /// `build_prompt` and once from `OutputParser::new`. Only the second one
+    /// ran after generation, so rejecting the arch there made a successful
+    /// completion answer 500 with a message that pointed at the *prompt*
+    /// ("Tool/chat template is unsupported"), which is what the HTTP smoke
+    /// test hit on a real 30B checkpoint.
+    #[test]
+    fn hy_v3_plain_text_stream_is_accepted() {
+        let mut parser = OutputParser::new("hy_v3", &[], &ToolChoice::Auto);
+        parser.push("Machine learning is ").unwrap();
+        parser.push("a branch of AI.").unwrap();
+        parser.finish().unwrap();
+        assert_eq!(parser.text(), "Machine learning is a branch of AI.");
+        assert!(parser.calls().is_empty());
     }
 
     #[test]
