@@ -8,7 +8,7 @@ The text prompt `The capital of France is` produced `[760, 6511, 314, 9338, 369]
 
 ## Full-vocabulary comparisons
 
-Each text cell covers the last prefill position and two teacher-forced decode positions, 248320 logits per position. Each image cell compares the first prediction on the fixed 64×64 red image, resized to 96×96 and represented by nine visual tokens. The gates require finite logits, exact greedy IDs and KL(reference ‖ Rust) ≤ 0.001. Relative L2 and maximum absolute error are diagnostics. The three slash-separated KL values are **CPU / Auto / strict Vulkan**. Error columns give the worst completed observation across policies and, for text, positions.
+Each text cell covers the last prefill position and two teacher-forced decode positions, 248320 logits per position. Each image cell compares the first prediction on the fixed 64×64 red image, resized to 96×96 and represented by nine visual tokens. The gates require finite logits, exact greedy IDs and KL(reference ‖ Rust) ≤ 0.001. Relative L2 and maximum absolute error are diagnostics. The three slash-separated KL values are **CPU / Auto / strict Vulkan**. Error columns give the worst observation across policies and, for text, positions.
 
 | Weight | Input | Reference token IDs | Maximum KL by policy | Worst relative L2 | Worst absolute error |
 | --- | --- | --- | --- | ---: | ---: |
@@ -29,21 +29,21 @@ With contiguous RoPE sections, the 3.0 bpw image prediction kept the expected to
 
 ## CLI, HTTP, SSE and JEV
 
-The raw chat probes used greedy generation, a two-token limit, `Hi` for text, and a 32×32 red PNG with `Color?` for images. Each SSE check reconstructs content and requires the terminal `[DONE]`. The JEV request supplies context `Red`, question `Color?` and candidates A = Red, B = Blue. The table counts CLI and HTTP separately. Probabilities are for A from the matching image CLI / HTTP probes on the corrected layout.
+All 90 entry checks passed across the three weights and three policies. Each chat cell shows the same two-token response from the CLI, ordinary HTTP and reconstructed SSE stream. Every stream ended with `[DONE]`. The text prompt was `Hi`. The image prompt was `Color?` with a 32×32 red PNG. The JEV probes used context `Red`, question `Color?` and candidates A = Red, B = Blue. Every probe chose A. Each probability pair reports CLI / HTTP for the same input. Across both labels, the largest absolute probability difference between CLI and HTTP was 0 (limit 1e-5).
 
-| Weight | Policy | Text CLI / HTTP / SSE | Image CLI / HTTP / SSE | JEV text CLI / HTTP | JEV image CLI / HTTP | P(A), image CLI / HTTP |
-| --- | --- | --- | --- | --- | --- | --- |
-| 2.0 bpw | cpu | pending / pass / pending | pending / pending / pending | pending / pending | pending / pending | — / — |
-| 2.0 bpw | auto | pass / pass / pass | pass / pass / pass | pass / pass | pass / pass | 0.9999219 / 0.9999219 |
-| 2.0 bpw | vulkan | pass / pass / pass | pass / pass / pass | pass / pass | pass / pass | 0.9999219 / 0.9999219 |
-| 2.5 bpw | cpu | pending / pending / pending | pending / pending / pending | pending / pending | pending / pending | — / — |
-| 2.5 bpw | auto | pass / pass / pass | pass / pass / pass | pass / pass | pass / pass | 0.9999686 / 0.9999686 |
-| 2.5 bpw | vulkan | pass / pass / pass | pass / pass / pass | pass / pass | pass / pass | 0.9999686 / 0.9999686 |
-| 3.0 bpw | cpu | pass / pass / pass | pass / pass / pending | pending / pass | pending / pending | — / — |
-| 3.0 bpw | auto | pass / pass / pass | pass / pass / pass | pass / pass | pass / pass | 0.9999878 / 0.9999878 |
-| 3.0 bpw | vulkan | pass / pass / pass | pass / pass / pass | pass / pass | pass / pass | 0.9999878 / 0.9999878 |
+| Weight | Policy | Text chat | Image chat | Text JEV P(A), CLI / HTTP | Image JEV P(A), CLI / HTTP |
+| --- | --- | --- | --- | --- | --- |
+| 2.0 bpw | cpu | `Hello!` | `**Red` | 0.9992410 / 0.9992410 | 0.9999219 / 0.9999219 |
+| 2.0 bpw | auto | `Hello!` | `**Red` | 0.9992410 / 0.9992410 | 0.9999219 / 0.9999219 |
+| 2.0 bpw | vulkan | `Hello!` | `**Red` | 0.9992410 / 0.9992410 | 0.9999219 / 0.9999219 |
+| 2.5 bpw | cpu | `Hello!` | `The color` | 0.9994544 / 0.9994544 | 0.9999686 / 0.9999686 |
+| 2.5 bpw | auto | `Hello!` | `The color` | 0.9994544 / 0.9994544 | 0.9999686 / 0.9999686 |
+| 2.5 bpw | vulkan | `Hello!` | `The color` | 0.9994544 / 0.9994544 | 0.9999686 / 0.9999686 |
+| 3.0 bpw | cpu | `Hello!` | `The color` | 0.9995383 / 0.9995383 | 0.9999878 / 0.9999878 |
+| 3.0 bpw | auto | `Hello!` | `The color` | 0.9995383 / 0.9995383 | 0.9999878 / 0.9999878 |
+| 3.0 bpw | vulkan | `Hello!` | `The color` | 0.9995383 / 0.9995383 | 0.9999878 / 0.9999878 |
 
-Text-only entry captures include runs before the rotary-layout correction. Those text positions use equal temporal and spatial coordinates. Image entries above require a process started with the corrected binary. The two-token chat probes exercise transport and routing. The full-vocabulary image comparison above measures numerical accuracy. The published release is tagged image-text-to-text. Video and long-context benchmark scores were not evaluated.
+Text-only entry captures include runs before the rotary-layout correction. Those text positions use equal temporal and spatial coordinates. All image entry checks used the corrected binary. The two-token chat probes exercise transport and routing. The full-vocabulary image comparison above measures numerical accuracy. The published release is tagged image-text-to-text. Video and long-context benchmark scores were not evaluated.
 
 ## Operator and regression checks
 

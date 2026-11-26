@@ -58,10 +58,14 @@ done
 
 ## Entry points
 
+Set `NARIQ_MODEL` to the desired bpw file and `NARIQ_MMPROJ` to the BF16 projector. The image examples use a local PNG named `red.png`.
+
 ```sh
 cargo build --locked --profile release-fast --features vulkan --bins
 target/release-fast/rust-model-inference --model "$NARIQ_MODEL" --compute cpu \
   --prompt Hi --temp 0 --max-tokens 2 --max-context 256
+target/release-fast/rust-model-inference --model "$NARIQ_MODEL" --mmproj "$NARIQ_MMPROJ" \
+  --compute auto --image red.png --prompt 'Color?' --temp 0 --max-tokens 2 --max-context 256
 target/release-fast/rust-model-server --model "$NARIQ_MODEL" --mmproj "$NARIQ_MMPROJ" \
   --compute vulkan --host 127.0.0.1 --port 8080 --max-context 256
 ```
@@ -79,4 +83,4 @@ curl -fsS http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json'
   -d '{"context":"Red","questions":[{"text":"Color?","options":["Red","Blue"]}],"positive":"A"}'
 ```
 
-The validation record includes the logits, observed placement and public entry results for each released file. [Measured coverage](validation.md)
+The validation record reports full-vocabulary error metrics, observed backends and public entry results for each released file. [Measured coverage](validation.md)
