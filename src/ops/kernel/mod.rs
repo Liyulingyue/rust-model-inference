@@ -46,6 +46,14 @@ mod trait_;
 #[cfg(feature = "vulkan")]
 pub(crate) mod vulkan;
 
+/// Whether `RMI_F32_ACTIVATIONS` asks for f32 (unquantised) activations.
+///
+/// Read once per process, like [`crate::ops::scalar_mode`].
+fn f32_activations() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("RMI_F32_ACTIVATIONS").is_some())
+}
+
 pub(crate) struct PreparedRows {
     max_rows: usize,
     max_n_in: usize,
@@ -53,6 +61,15 @@ pub(crate) struct PreparedRows {
     n_in: usize,
     need_q8: bool,
     need_q8k: bool,
+    /// Skip activation quantisation and run the kernel on f32 rows.
+    ///
+    /// The quantised fast paths lose ~1e-3 relative accuracy per projection
+    /// because the *activation* is rounded to Q8_0/Q8_K. That is the right
+    /// default for throughput, but a parity harness comparing against a
+    /// reference implementation that multiplies f32 activations by dequantised
+    /// weights needs the unquantised form. Off unless [`Self::prepare_f32`] is
+    /// used, so every existing caller keeps its current arithmetic.
+    dequant: bool,
     q8: Vec<u8>,
     scales: Vec<f32>,
     q8k: Vec<crate::ops::quant::BlockQ8K>,
@@ -67,6 +84,7 @@ impl PreparedRows {
             n_in: 0,
             need_q8: false,
             need_q8k: false,
+            dequant: false,
             q8: Vec::new(),
             scales: Vec::new(),
             q8k: Vec::new(),
@@ -103,6 +121,21 @@ impl PreparedRows {
                 "prepared rows input length mismatch: expected {input_len}, got {}",
                 input.len()
             ));
+        }
+        // `RMI_F32_ACTIVATIONS=1` keeps activations in f32 and runs the kernels
+        // on dequantised weights instead of rounding the activations to Q8_0 /
+        // Q8_K. Opt-in, read once per process, same shape as `RMI_SCALAR`: the
+        // default quantised path is unchanged. Used to compare against reference
+        // implementations that multiply f32 activations (a quantised activation
+        // is ~1e-3 relative away from that, which is invisible for a chat model
+        // but not for a 4-step flow model).
+        if f32_activations() {
+            self.rows = rows;
+            self.n_in = n_in;
+            self.need_q8 = false;
+            self.need_q8k = false;
+            self.dequant = true;
+            return Ok(());
         }
         if need_q8k && !n_in.is_multiple_of(crate::ops::quant::QK_K) {
             return Err(format!(
@@ -152,6 +185,44 @@ impl PreparedRows {
         self.n_in = n_in;
         self.need_q8 = need_q8;
         self.need_q8k = need_q8k;
+        self.dequant = false;
+        Ok(())
+    }
+
+    /// Record the row geometry without quantising the activations.
+    ///
+    /// Use with [`Self::matmul_group`]; each row is handed to the kernel as
+    /// f32, so the result matches a reference that dequantises the weights and
+    /// keeps the activations in f32.
+    pub(crate) fn prepare_f32(
+        &mut self,
+        input: &[f32],
+        rows: usize,
+        n_in: usize,
+    ) -> Result<(), String> {
+        if rows == 0 || n_in == 0 {
+            return Err("prepared rows require non-zero rows and width".into());
+        }
+        if rows > self.max_rows || n_in > self.max_n_in {
+            return Err(format!(
+                "prepared rows shape {rows}x{n_in} exceeds maximum {}x{}",
+                self.max_rows, self.max_n_in
+            ));
+        }
+        let input_len = rows
+            .checked_mul(n_in)
+            .ok_or("prepared rows input shape overflow")?;
+        if input.len() != input_len {
+            return Err(format!(
+                "prepared rows input length mismatch: expected {input_len}, got {}",
+                input.len()
+            ));
+        }
+        self.rows = rows;
+        self.n_in = n_in;
+        self.need_q8 = false;
+        self.need_q8k = false;
+        self.dequant = true;
         Ok(())
     }
 
@@ -168,7 +239,7 @@ impl PreparedRows {
     pub(crate) fn matmul_group<const N: usize>(
         &self,
         input: &[f32],
-        projections: [(&Weight<'_>, &mut [f32]); N],
+        mut projections: [(&Weight<'_>, &mut [f32]); N],
         pool: &crate::core::thread_pool::ComputePool,
     ) -> Result<(), String> {
         let input_len = self
@@ -182,8 +253,9 @@ impl PreparedRows {
             if weight.n_in != self.n_in {
                 return Err("prepared rows do not match weight input width".into());
             }
-            if (weight.needs_q8_0_activation() && !self.need_q8)
-                || (weight.uses_q8_k() && !self.need_q8k)
+            if !self.dequant
+                && ((weight.needs_q8_0_activation() && !self.need_q8)
+                    || (weight.uses_q8_k() && !self.need_q8k))
             {
                 return Err("prepared activation format does not match weight".into());
             }
@@ -194,6 +266,25 @@ impl PreparedRows {
             if output.len() != output_len {
                 return Err("prepared matmul output shape mismatch".into());
             }
+        }
+
+        if self.dequant {
+            // f32 activations, weights dequantised inside the kernel: the
+            // reference-arithmetic path. Sequential on purpose -- this exists
+            // for parity harnesses, not throughput, and avoiding the raw-pointer
+            // worker pattern keeps it obviously free of aliasing hazards.
+            let n_in = self.n_in;
+            for row in 0..self.rows {
+                let input_row = &input[row * n_in..(row + 1) * n_in];
+                for index in 0..N {
+                    let weight = projections[index].0;
+                    let n_out = weight.n_out;
+                    let out = weight.matmul(input_row);
+                    let output = &mut projections[index].1;
+                    output[row * n_out..(row + 1) * n_out].copy_from_slice(&out);
+                }
+            }
+            return Ok(());
         }
 
         let blocks = self.n_in.div_ceil(32);
@@ -617,3 +708,67 @@ impl<'a> Weight<'a> {
 pub use qtensor_owned::QTensorOwned;
 pub use quantized_tensor::{F16Weight, QuantizedTensor};
 pub use trait_::Kernel;
+
+#[cfg(test)]
+mod prepared_rows_dequant_tests {
+    use super::*;
+    use crate::core::tensor::GGMLType;
+    use crate::core::thread_pool::ComputePool;
+
+    fn f32_weight(data: &[f32], n_in: usize, n_out: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(data.len() * 4);
+        for value in data {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn run(
+        weight: &Weight<'_>,
+        input: &[f32],
+        rows: usize,
+        n_in: usize,
+        n_out: usize,
+        f32_act: bool,
+    ) -> Vec<f32> {
+        let pool = ComputePool::new(1);
+        let mut prepared = PreparedRows::new(rows, n_in);
+        if f32_act {
+            prepared
+                .prepare_f32(input, rows, n_in)
+                .expect("prepare_f32");
+        } else {
+            let need_q8 = weight.needs_q8_0_activation();
+            let need_q8k = weight.uses_q8_k();
+            prepared
+                .prepare(input, rows, n_in, need_q8, need_q8k)
+                .expect("prepare");
+        }
+        let mut output = vec![0.0f32; rows * n_out];
+        prepared
+            .matmul_group(input, [(weight, &mut output)], &pool)
+            .expect("matmul");
+        output
+    }
+
+    /// With an F32 weight nothing is quantised either way, so both activation
+    /// modes must agree bit for bit -- that is what proves `prepare_f32` wires
+    /// the same kernel with the same layout.
+    #[test]
+    fn f32_weight_agrees_between_activation_modes() {
+        let (n_in, n_out, rows) = (64usize, 3usize, 2usize);
+        let data: Vec<f32> = (0..n_in * n_out)
+            .map(|i| (i as f32 * 0.017).sin())
+            .collect();
+        let bytes = f32_weight(&data, n_in, n_out);
+        let weight = Weight::from_f32_bytes(&bytes, n_in, n_out).expect("f32 weight");
+        let input: Vec<f32> = (0..rows * n_in).map(|i| (i as f32 * 0.011).cos()).collect();
+
+        let quantised = run(&weight, &input, rows, n_in, n_out, false);
+        let f32_act = run(&weight, &input, rows, n_in, n_out, true);
+        assert_eq!(
+            quantised, f32_act,
+            "F32 weights must not depend on the activation mode"
+        );
+    }
+}

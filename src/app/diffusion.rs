@@ -1397,6 +1397,163 @@ pub fn run_qwen_image_2_1(
     Ok(())
 }
 
+/// SenseNova-U1.6 text-to-image.
+///
+/// Unlike every other pipeline in this module the checkpoint is a *single*
+/// unified GGUF (text backbone + both vision embedding towers + pixel head)
+/// with no VAE, so there is no `--text-encoder` / `--vae` pair. The tokenizer
+/// files that ship beside the weights (`vocab.json`, `merges.txt`) arrive via
+/// `--components`, because the GGUF itself carries no tokenizer metadata.
+pub fn run_sensenova_u1_cli(
+    source: Arc<dyn TensorSource>,
+    options: &crate::app::CliOptions,
+    n_threads: usize,
+) -> Result<(), String> {
+    use crate::models::diffusion::sensenova_u1::{
+        Options as SensenovaOptions, SensenovaU1Pipeline,
+    };
+
+    for (present, flag) in [
+        (options.embedding, "--embedding"),
+        (options.rerank, "--rerank"),
+        (options.jev, "--jev"),
+        (options.tts, "--tts"),
+        (options.yue2, "--yue2"),
+        (options.dreamx, "--dreamx"),
+        (options.astronex, "--astronex"),
+        (options.audio.is_some(), "--audio"),
+        (options.video.is_some(), "--video"),
+        (
+            options.ref_audio.is_some() || options.ref_text.is_some(),
+            "--ref-audio/--ref-text",
+        ),
+        (options.max_tokens.is_some(), "--max-tokens"),
+        (options.temperature.is_some(), "--temp/--temperature"),
+        (
+            options.top_k.is_some() || options.top_p.is_some(),
+            "--top-k/--top-p",
+        ),
+        (options.dump_logits, "--dump-logits"),
+        (options.bench, "--bench"),
+        (options.thinking.is_some(), "--thinking"),
+        (options.language.is_some(), "--language"),
+        (options.lyrics.is_some(), "--lyrics"),
+    ] {
+        if present {
+            return Err(format!("SenseNova-U1.6 does not support {flag}"));
+        }
+    }
+
+    // The unified checkpoint already contains the decoder head, so a separate
+    // VAE or text encoder means the caller pointed us at the wrong model.
+    if options.vae.is_some() {
+        return Err("SenseNova-U1.6 is a single-GGUF model and takes no --vae".into());
+    }
+    if options.text_encoder.is_some() {
+        return Err("SenseNova-U1.6 is a single-GGUF model and takes no --text-encoder".into());
+    }
+    if options.mmproj.is_some() {
+        return Err(
+            "SenseNova-U1.6 takes no --mmproj (the vision towers are inside the GGUF)".into(),
+        );
+    }
+    if options.image.is_some() || !options.references.is_empty() {
+        return Err(
+            "SenseNova-U1.6 image editing (--image/--reference) is not implemented yet; \
+             only text-to-image is wired"
+                .into(),
+        );
+    }
+    if options.negative_prompt.is_some() {
+        return Err(
+            "SenseNova-U1.6 CFG uses a fixed empty-string negative branch; \
+             --negative-prompt is not supported"
+                .into(),
+        );
+    }
+
+    // The tokenizer files ship next to the weights in the ModelScope repo, so
+    // the directory holding `--model` is the tokenizer directory. (`--components`
+    // is LongCat's discriminator and must stay unused here.)
+    if options.components.is_some() {
+        return Err(
+            "SenseNova-U1.6 takes its tokenizer from the directory holding --model; \
+             --components belongs to LongCat"
+                .into(),
+        );
+    }
+    let components = options
+        .model
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or(
+            "SenseNova-U1.6 needs --model to live in a directory with vocab.json + merges.txt",
+        )?;
+    let prompt = options
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .ok_or("SenseNova-U1.6 requires a non-empty --prompt")?;
+    let out = options
+        .out
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or("SenseNova-U1.6 requires --out")?;
+    if out.exists() && !options.overwrite {
+        return Err(format!(
+            "Output already exists: {} (pass --overwrite)",
+            out.display()
+        ));
+    }
+    if options.seed.is_some_and(|seed| seed < 0) {
+        return Err("SenseNova-U1.6 requires a non-negative --seed".into());
+    }
+
+    let width = options.width.unwrap_or(1024);
+    let height = options.height.unwrap_or(1024);
+    let steps = options.steps.unwrap_or(50);
+    let cfg_scale = options.cfg.unwrap_or(4.0);
+    if !cfg_scale.is_finite() || cfg_scale < 1.0 {
+        return Err("SenseNova-U1.6 requires a finite --cfg >= 1".into());
+    }
+    if steps == 0 || steps > 1000 {
+        return Err("SenseNova-U1.6 requires --steps in 1..=1000".into());
+    }
+
+    crate::app::init_rayon_global_pool(n_threads);
+    // Device dispatch rides on the shared `Weight` kernels: with the `vulkan`
+    // feature on, `Weight::from_quantized` wraps every linear in a
+    // `VulkanKernel`, so `auto` offloads the projections and falls back to the
+    // CPU for the rest. `cpu` keeps everything on the host, `vulkan` is strict.
+    let _compute_scope = options.compute_policy().enter_legacy_scope();
+    let pipeline = SensenovaU1Pipeline::load(source, components, n_threads)?;
+    let image_options = SensenovaOptions {
+        width,
+        height,
+        steps,
+        cfg_scale,
+        timestep_shift: 3.0,
+        seed: options.seed.unwrap_or(42) as u64,
+    };
+    let started = Instant::now();
+    let bytes = pipeline.generate_rgb(prompt, &image_options)?;
+    let rgb = ZImageRgb {
+        width: u32::try_from(width).map_err(|_| "width exceeds u32")?,
+        height: u32::try_from(height).map_err(|_| "height exceeds u32")?,
+        bytes,
+    };
+    write_png_atomically(out, &rgb, options.overwrite)?;
+    eprintln!(
+        "[sensenova_u1] {width}x{height} steps={steps} cfg={cfg_scale} \
+         seed={} -> {} in {:.1}s",
+        image_options.seed,
+        out.display(),
+        started.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
 pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb, overwrite: bool) -> Result<(), String> {
     let expected = usize::try_from(rgb.width)
         .ok()
