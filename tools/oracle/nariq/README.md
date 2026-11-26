@@ -83,4 +83,11 @@ curl -fsS http://127.0.0.1:8080/v1/jev/score -H 'Content-Type: application/json'
   -d '{"context":"Red","questions":[{"text":"Color?","options":["Red","Blue"]}],"positive":"A"}'
 ```
 
-The validation record reports full-vocabulary error metrics, observed backends and public entry results for each released file. [Measured coverage](validation.md)
+To check the strict Vulkan CLI JSON contract on a weight host, run the parser regression with `NARIQ_MODEL` set. It parses the entire stdout, including the first call that initializes the device.
+
+```sh
+cargo test --locked --profile release-fast --features vulkan --test nariq_reference \
+  nariq_vulkan_jev_stdout_is_json -- --ignored --exact
+```
+
+See the per-tier measurements for the text/image CLI, HTTP, SSE and JEV matrix. The extended probes cover longer prompts, 32 greedy predictions, spatial images and reversed short clips. [Entry and parity matrix](validation.md) · [Extended fixtures and measurements](extended.md)

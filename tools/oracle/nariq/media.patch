@@ -1,0 +1,53 @@
+--- image.cpp
++++ media.cpp
+@@ -1,3 +1,3 @@
+-// Fixed CPU mtmd probe: 64x64 red image, non-thinking ChatML, first-token logits.
++// CPU mtmd probe for image or video, non-thinking ChatML, first-token logits.
+ #include "llama.h"
+ #include "mtmd.h"
+@@ -12,5 +12,5 @@
+ int main(int argc, char ** argv) {
+     try {
+-        if (argc != 4) throw std::runtime_error("usage: image MODEL MMPROJ LOGITS_F32");
++        if (argc != 6) throw std::runtime_error("usage: image MODEL MMPROJ LOGITS_F32 MEDIA QUESTION");
+         llama_backend_init();
+         auto mp = llama_model_default_params();
+@@ -19,5 +19,5 @@
+         if (!model) throw std::runtime_error("model load failed");
+         auto cp = llama_context_default_params();
+-        cp.n_ctx = 128;
++        cp.n_ctx = 512;
+         cp.n_batch = cp.n_ubatch = 64;
+         cp.n_threads = cp.n_threads_batch = 8;
+@@ -33,15 +33,16 @@
+         auto * vision = mtmd_init_from_file(argv[2], model, vp);
+         if (!vision) throw std::runtime_error("projector load failed");
+-        std::vector<unsigned char> pixels(64 * 64 * 3, 0);
+-        for (size_t i = 0; i < pixels.size(); i += 3) pixels[i] = 255;
+-        auto * owned_bitmap = mtmd_bitmap_init(64, 64, pixels.data());
++        auto options = mtmd_helper_init_opt_default();
++        auto media = mtmd_helper_bitmap_init_from_file(vision, argv[4], false, options);
++        if (!media.bitmap) throw std::runtime_error("failed to decode media");
++        auto * owned_bitmap = media.bitmap;
+         const auto * bitmap = owned_bitmap;
+         const std::string prompt = std::string("<|im_start|>user\n") + mtmd_default_marker()
+-            + "What color is the image? Answer with one word.<|im_end|>\n"
++            + argv[5] + "<|im_end|>\n"
+               "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+         const mtmd_input_text text{prompt.c_str(), prompt.size(), false, true};
+         auto * chunks = mtmd_input_chunks_init();
+         if (mtmd_tokenize(vision, chunks, &text, &bitmap, 1)) throw std::runtime_error("tokenize failed");
+-        std::cout << "{\"oracle_pin\":\"b96806d96061049a5b574269b049bf6241d63d46\",\"chunks\":[";
++        std::cout << "{\"oracle_pin\":\"2644f7de461c27675eef373faa1776f20b393004\",\"chunks\":[";
+         llama_pos position = 0;
+         for (size_t i = 0; i < mtmd_input_chunks_size(chunks); ++i) {
+@@ -80,7 +81,8 @@
+         out.write(reinterpret_cast<const char *>(logits), n * sizeof(float));
+         if (!out) throw std::runtime_error("cannot save logits");
+-        std::cout << "],\"end_pos\":" << end << ",\"top1\":" << top << "}\n";
++        std::cout << "],\"n_ctx\":" << cp.n_ctx << ",\"end_pos\":" << end << ",\"top1\":" << top << "}\n";
+         mtmd_input_chunks_free(chunks);
+         mtmd_bitmap_free(owned_bitmap);
++        if (media.video_ctx) mtmd_helper_video_free(media.video_ctx);
+         mtmd_free(vision);
+         llama_free(ctx);
