@@ -7,7 +7,8 @@ investigation notes; the top half carries the at-a-glance priority list.
 
 CPU SIMD capability assumed throughout: see [SIMD extension inventory](#simd-extension-inventory)
 at the bottom of this file (AVX2 + FMA + F16C + AVX-VNNI on Intel Core Ultra 5 125H;
-NEON on aarch64; no AVX-512).
+NEON on aarch64; dev box 无 AVX-512，但 F32/BF16/F16 的 zmm matmul 已按运行时 gate
+接线并在 Xeon Silver 4410Y（Sapphire Rapids）实测——见 TODO-005 2026-11-23 补充).
 
 ---
 
@@ -53,16 +54,15 @@ NEON on aarch64; no AVX-512).
       `iq_avx2_matches_llama_cpp_oracle_bitwise` 的 ARM 版 oracle harness）；仓库当前
       无 aarch64 CI 作业（见下方"aarch64 CI"条目），接入前先补交叉编译或 CI 门禁，
       不盲接 dispatch。
-- [ ] **BF16 / F32 的 NEON token-tiled batched（TODO-019 的 aarch64 侧）** —
-      token 分块的 x86 AVX2 版已落地（见 TODO-019），但 aarch64 上
-      `supports_token_tiled_batching` 对 BF16 / F32 返回 false——TODO-019 的痛点
-      机（20 核 aarch64，文本编码 11% 峰值）恰恰拿不到这个收益，仍是逐 token
-      重流整个权重矩阵。F16 不缺：其 tiled 实现是可移植的标量嵌套循环
-      （`dot_f16_f16_bytes` 自带 NEON dispatch），在 aarch64 上已生效。
-      **待做**：为 `bf16/avx2.rs`（BF16）与 `f32/avx2.rs`（F32）写 NEON tiled
+- [~] **BF16 / F32 的 NEON token-tiled batched（TODO-019 的 aarch64 侧）** —
+      BF16 的 aarch64 NEON tiled 路径已接入并完成逐位回归。F32 仍待做。token
+      分块的 x86 AVX2 版已落地（见 TODO-019），aarch64 的 BF16 现已复用同一
+      `supports_token_tiled_batching` / `forward_batched_rows` 入口。F16 不缺：其
+      tiled 实现是可移植的标量嵌套循环（`dot_f16_f16_bytes` 自带 NEON dispatch），
+      在 aarch64 上已生效。
+      **待做**：为 `f32/avx2.rs`（F32）写 NEON tiled
       kernel（2D (row-tile × token-tile) blocking，x86 宏
-      `avx2_matmul_packed_tiled!` 可作结构模板；BF16 unpack 用 NEON 的
-      u16→f32 高半移位，F32 用 `vld1q_f32`），把
+      `avx2_matmul_packed_tiled!` 可作结构模板，F32 用 `vld1q_f32`），把
       `supports_token_tiled_batching` / `forward_batched_rows` 的 aarch64 分支
       接上。**前置**：与所有 NEON kernel 相同——必须在 aarch64 机器上开发并跑
       `tiled_batched_matches_per_token_loop_bits` 的 ARM 版（位级一致性测试本身
@@ -106,22 +106,31 @@ NEON on aarch64; no AVX-512).
       即可闭环,无需 `amd-cloud-gpu-test`。已知边界：IQ4_XS 模型的**整模型 GPU 常驻
       解码**还需文件内其它格式（如 Q6_K token_embd）也有 GPU kernel——Qwen3-0.6B-IQ4_XS
       的 `--compute auto --kv-cache f16` 目前按设计落回 CPU（单投影 GPU 路径已通）。
-- [ ] **Q2_K / Q3_K 的 GPU matmul shader（IQ 模型整模型常驻的最后一缺口）** —
+- [x] **Q2_K / Q3_K 的 GPU matmul shader（IQ 模型整模型常驻的最后一缺口）** —
       IQ 单投影验证已 7/7 闭环（上一条），但 UD 混合量化文件里挡住"整模型
       GPU 常驻解码"的是混布的 k-quant 张量。以 UD-IQ1_S 为例（GGUF 头部实测）：
       `blk.8-25.attn_v.weight` 是 **Q2_K ×18**，`token_embd.weight` 是 Q5_K（已有
       `q5_k_matmul.comp`）；UD-IQ3_XXS / UD-Q3_K_XL 同理含 Q3_K 张量。Q4_K / Q5_K /
       Q6_K 的 shader 都在，**唯独 Q2_K / Q3_K 没写**，这两个格式的投影按设计逐 op
       落回 CPU，整模型常驻建不起来。
-      **待做**：按 `q4_k_matmul.comp` 模板补 `q2_k_matmul.comp` / `q3_k_matmul.comp`
-      （块布局见 `tensor.rs`：Q2K = 84B/256（d+dmin+scales[16]+qs[64]），
-      Q3K = 110B/256（d+hmask[32]+qs[64]+scales[12]），对齐本仓 CPU kernel 的
-      8-lane 结构），
-      `GpuWeightFormat` 注册 + kernel hook + `matmul_iq` 同款 per-format runtime。
-      验证：`q2_k` / `q3_k` 权重的 GPU vs CPU 位级对拍（照抄
-      `iq_gpu_matches_cpu_avx2_bitwise_on_real_weights` 的按 `ggml_type` 选张量模板，
-      UD-IQ1_S 的 blk.8.attn_v 即真 Q2_K 张量）+ UD-IQ1_S `--compute auto` 全链路。
-      无新硬件需求，本机 iGPU 可闭环。
+      **已交付**（L20 实测，UD-Q2_K_XL 真实权重对拍）：`q2_k_matmul.comp` /
+      `q3_k_matmul.comp`（Q2K 块 84B：scales 低 nibble=scale 高=min、每块先
+      `fma(dmin, prod[k])` 后 `fma(d, sumi[k])`；Q3K 块 110B：hmask 符号位取
+      `hm[t]` 的 bit `4j+s`、12B scale 位手术 −32；最终归约按 `hsum256_ps` 树
+      `((v0+v4)+(v2+v6))+((v1+v5)+(v3+v7))`），`GpuWeightFormat` 注册
+      （`Q2_K_MATMUL=83` / `Q3_K_MATMUL=84`）+ kernel hook + `matmul_iq` 位级
+      harness。验证：两格式各 1024 行 GPU vs CPU AVX2 **bit-identical**；UD-Q2_K_XL
+      的 72×Q2K + 69×Q3K 全覆盖；`vk_ops_check --formats q2_k,q3_k`（batched
+      exact_bits、matvec max_abs=0、quantize_q8_k bytes_exact）；`wide_quantized_
+      matvec_runs_on_vulkan`（17408 宽）max_abs=0。
+      **eligibility 门更新**：Q4/5/6_K scalar-kernel 黑名单改为只查每层 dense
+      投影，豁免 output head（tied token_embd Q5_K/Q6_K 每 token 只跑一次，
+      scalar shader 不主导；`EligibilityFacts` 拆出 `output_weight_format` 字段）。
+      UD-IQ1_S `--compute auto --kv-cache f16` 全链路常驻已通（无回退日志；
+      0.6B 上 resident 12.7 t/s vs CPU 49 t/s——与既有 Q8_0 eligible 模型同取舍，
+      L20 per-token 提交开销主导，非本格式问题；IQ1_S 输出本身为乱码级，两路径同
+      质）。边界：UD-Q2_K_XL / UD-Q3_K_XL 仍按设计落回 CPU（dense 层含 Q4K/Q5K/
+      Q6K，黑名单正确拦截），待 Q4/5/6_K 向量化 kernel（另一 TODO）后解锁。
 - [ ] **AVX2 的 `exp_approx` clamp 与 shader 的 ±80、与上游的无 clamp 结构三者不一致** —
       x86 CPU 路径用 clamp（`src/ops/math/exp.rs` 的 `FAST_EXP_CLAMP`，现为 ±88.0），
       ARM NEON 路径用的是上游 llama.cpp 的结构（`|n| > 126` 走慢路径，**没有 clamp**），
@@ -516,17 +525,10 @@ ggml-org/llama.cpp 的一部分**——它们是 `microsoft/BitNet` 私有 fork 
 "已下载并验证的 GGUF" 提示兼容性受限。**没有自动对齐上游的工作；等上游 merge 或社区分流后再调整。**
 
 
-- [ ] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** —
-      `src/app/cli/parse.rs` 的主循环统一解析所有 flag（`--gpu` 在第 389 行），
-      但每个模式在解析之后另有一段手写白名单，声明该模式接受哪些 flag，并对带值
-      参数补一次取值校验。`--enhance`、`--system-one-request`、`--decision-request`
-      各有一段，`--gpu` 已经是第 3 个模式接受共享 compute flag —— Vela3 混合投影
-      放开 `--system-one-request` 的 GPU 支持时，就得手改系统模式的白名单，那行
-      `| "--gpu"` 看着像特例，实际是共享 flag 列表的又一份副本。
-      方向：把「模式 → 允许的 flag 集」集中成一份声明，或反过来给 flag 标注归属
-      模式；两者都是**纯重构**，不改行为。`parse.rs` 是所有模型的入口，要**独立成
-      PR**，别混进模型适配。
-      详见 [TODO-064](#todo-064-模式互斥白名单手写枚举每加一个共享-flag-都要改多处)。
+- [x] **模式互斥白名单是手写枚举，每加一个共享 flag 都要改多处** — ✅ 已完成：
+      白名单收进 `src/app/cli/parse.rs` 的一张表（`FLAG_RULES`），每个 flag 只写
+      一次，共享 flag 写一次就够；`app/decision.rs` 里藏着的第四份副本也一起收了。
+      纯重构，接受 / 拒绝的集合逐项不变。详见 **TODO-064**（PR #267 已合入）。
 - [ ] **Vela3 的 F32 权重路径每次投影都整份拷贝** — `models/vela3/tensor.rs` 的
       `linear()` 用 `QuantizedTensor::from_bytes` 交权重：F16/BF16 借用 mmap 字节切片，
       **F32 会把整份权重 `collect()` 成 `Vec<f32>`**（`ops/kernel/quantized_tensor.rs`）。
@@ -610,11 +612,12 @@ AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体�
 
 ---
 
-### TODO-003: 统一 5 个 `load_weight` / `load_weight_any` 到单一 `core::load_weight_any`
+### TODO-003: 统一 5 个 `load_weight` / `load_weight_any` 到单一 `core::load_weight_any` — ✅ 已完成（2026-11-22）
 
-#### 现状
+**做完了**：五个 loader 全部改为调用 `core::tensor::load_weight_any`，各模型的
+**公开签名不变**（调用方一处没动）。
 
-仓库目前每个模型自维护一份 GGML weight loader，签名 / 白名单 / dims 拆解 / 错误返回都不一致：
+#### 当时的五份实现
 
 | 实现 | 签名 | 接受类型 | dims 校验 | 错误返回 |
 |---|---|---|---|---|
@@ -624,45 +627,103 @@ AVX2+F16C SIMD 版本原型写过又回退了，注释详细记录在函数体�
 | `gemma4/trunk/weights.rs::load_weight` | `(source, name, dims, ggml_type)` | 单一类型 | 严格 dims+type | `Result<_, String>` |
 | `gemma4/trunk/weights.rs::load_weight_any` | `(source, name, dims, &[GGMLType])` | 白名单 | 严格 dims+白名单 | `Result<_, String>` |
 
-`qwen3` 干脆没有 `load_weight` —— 直接展开 `Weight::from_quantized(QuantizedTensor::from_bytes(...))`，
-天然支持 `QuantizedTensor::from_bytes` 接受的全部 20+ 类型。
+`qwen3` 干脆没有 `load_weight` —— 直接展开
+`Weight::from_quantized(QuantizedTensor::from_bytes(...))`，天然支持全部 20+ 类型。
 
-**核心公共部分**（≈ 5 行）：
+#### 现在的形态
 
-```rust
-let info = source.tensor_info(name)?;
-let bytes = source.tensor_slice(name)?;
-let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-    bytes, info.ggml_type, n_in, n_out,
-));
-```
+`core::tensor::load_weight_any(source, name, n_in, n_out, allowed)` —— 一个入口负责
+**格式来自头部**、**白名单**、**字节长度校验**、**F32 零拷贝**、**矩阵形状写回**；
+`allowed = None` 表示「`QuantizedTensor` 能装的都收」。五个 loader 变成薄包装：
+形状怎么拆、dims 怎么校、各自的特殊情况，都留在模型侧。
 
-#### 影响
+**签名和条目里提议的不一样，是有原因的**：条目设想的是
+`(source, name, dims: &[u64], allowed)`，即由 core 统一拆 dims。实际做不到 ——
+仓库里**两套 dims 约定都是对的**：
 
-- **未来加 IQ2/IQ4/Q6_K/Q5_K 等新量化类型**——每个 `load_weight` 都要扩白名单。
-- **dims 拆解不一致**：`dims.last()` vs `dims[0]/dims[1]` vs `dims[..-1]` 累乘
-- **白名单粒度不一**：写死 vs 参数化 vs 无
-- **错误返回风格不一**：`Result<_, String>` vs `Option<Weight>`
+- **GGUF 自己的**：第一个维度是行长度（块量化的块轴就在这里），其余维度的乘积是行数。
+  qwen35 / gemma4 用这套。
+- **dots 声码器的**：**除了最后一个维度，其余全是输入宽度**。它的卷积权重按
+  `[kernel, in_ch, out_ch]` 存（`[5, 128, 1536]` → 一个 640×1536 的矩阵），按 GGUF
+  那套拆会得到 n_in=5、n_out=128×1536 ✗。
 
-#### 选项
+强行统一成一套，就是把 dots 的卷积权重悄悄reshape错。所以**形状由调用方给出**
+（`n_in` / `n_out` 两个数），core 只管「把这份字节变成一个 Weight」。真正被统一的
+是那份**到处复制的核心**：格式判定、字节长度算术、F32 的零拷贝路径、以及
+「F32 变体不携带矩阵形状」导致的那次 `n_in`/`n_out` 补写。
 
-1. **最小**：扩 `dots::load_weight` 接受 Q4_0/Q4_1。维持命名遗留。
-2. **中度**：breeze 摆脱 dots 命名，改直接展开 `Weight::from_quantized(...)`（学 qwen3）。
-3. **完整**：5 个 `load_weight` 全部迁到 `crate::core::tensor::load_weight_any`：
-   - 签名：`(source, name, dims: &[u64], allowed: Option<&[GGMLType]>) -> Result<Weight, String>`
-   - `dims` 校验可选；`allowed=None` 表示 `QuantizedTensor::from_bytes` 接受全部类型
-   - 所有模型调用方改 import；`qwen35::load_weight_f32` 与 `core::load_f32_tensor` 合并去重
-   - 工作量：~200 行；彻底统一
+#### 顺带修好的三件事
 
-#### 推荐
+1. **F32 权重不再整份拷贝**。原来的 F32 路径走
+   `QuantizedTensor::from_bytes` → `collect()` 成一份 `Vec<f32>`（而且丢掉矩阵形状，
+   所以每个 loader 都要补写 `n_in`/`n_out`）。统一入口对 F32 走
+   `Weight::from_f32_bytes`，**借字节、不拷贝、形状还在**。这与 roadmap 里
+   「F32 内核改成永远借字节」那条同向。
+2. **qwen35 的 norm / bias 读取不再把短向量补零**。原来的 `load_weight_f32` 在数据
+   不足时**默默补 0.0**（一个坏文件被当成好文件）。现在走
+   `core::tensor::optional_f32_values`：长度不符就是一条 WARNING。
+3. **`qwen35::trunk::util` 里的 `f16_at` / `f16_bits_to_f32` 变成死代码**（只有旧的
+   `load_weight_f32` 用），随本次改动删除。
 
-**方案 3**。`load_weight` 不是 dots 私有的，它是项目 GGML weight loader 的事实标准入口——
-`qwen3` 已经证明**不抽象也活得很好**，所以抽象必须带来明显收益。
+#### 两处行为变化（不是修复，是口径变了）
 
-#### 关联文件
+1. **qwen35 的 `n_out` 从 `dims[1]` 变成 `dims[1..]` 的乘积**。二维张量完全一样；
+   三维及以上的**矩阵**张量形状会变。旧口径把三维张量读成 `dims[0] × dims[1]`，
+   **丢掉了剩下的行** —— 那是错的，不是另一种约定，所以统一入口按 GGUF 的口径
+   （第一维是行长，其余维度的乘积是行数）读。
+   现在的 qwen35 家族没有受影响的张量：本仓库所有 `arch=qwen35` 的模型
+   （OvisOCR3 / Intern-Decision-0.8B / LensVLM-9B / MiniCPM-V-4.7-1B /
+   ZDTaichu5.0-9B）矩阵都是二维的；`arch=qwen35moe`（Occamy-1.0 /
+   MiniCPM-V-4.7-35B-A3B）确实有三维张量，但那是 MoE 专家权重，走的是另一个函数
+   `load_moe_weights`（读原始字节，不经过 `load_weight`）。
+2. **qwen35 新增了字节长度校验**。旧的 `load_weight` 不看载荷长度，一个截断或
+   格式不符的 GGUF 张量以前能加载（然后在内核里读越界），现在被拒（WARNING +
+   `None`）。这是修复，但确实改变了「哪些文件能加载」。
 
-- `src/models/dots/weights.rs:5-67`、`qwen35/trunk/weights.rs:80-124`、`gemma4/trunk/weights.rs:226-309`
-- `src/core/tensor.rs:288-330` — `load_f32_tensor`
+#### 保留在模型侧的东西（各自有理由）
+
+- **qwen35 的 BF16 激活契约**：qwen35 要 llama.cpp 的 BF16 输入与累加契约
+  （`BF16Kernel::with_bf16_input`），默认 kernel 不是 —— 统一入口不碰它，qwen35
+  在拿到 Weight 之后自己换 kernel。
+- **qwen35 的 I32 分支**：仿射张量不是矩阵，走 `load_affine` 自己的布局。
+- **gemma4 的 `'static` 生命周期**：它的 model 持有 source 的 Arc，所以权重是
+  `'static` 的；统一入口返回借用生命周期的 Weight，gemma4 在包装层做原来那个
+  transmute（ SAFETY 注释照旧）。
+- **各模型的 dims 校验严格度**：dots 允许 Q8_0 的行被摊平（`[.., n_in, n_out]`），
+  gemma4 要求 dims 完全一致，qwen35 不校 —— 这些差异是模型自己的契约。
+
+#### 验证
+
+- **core 单测**（8 条，`cargo test --locked --lib core::tensor::tests::` 在 CI 里跑）：
+  `load_weight_any` 按声明格式解码（BF16 不会被当 F16）、**F32 权重确实借的是
+  原始字节**（指针相等）、白名单外的格式被拒、字节长度不符被拒、块对齐的行被拒、
+  **没有内核的格式被拒而不是 panic**（I8/I16/I32/I64/F64/Q8_1/Q8K）、
+  **`QuantizedTensor::supports` 与内核构造器的可接受集合逐条一致**（防止两个
+  列表脱节后又走回 panic）。
+- **差分测试** `tests/todo003_loader_diff.rs` 分两层：
+  - **合成层**（不需要任何权重，**CI 里跑**）：五个 loader 各自的旧实现被逐行
+    抄在测试文件里（抄自 `fd6f1b7d`），在一个测试自己造的 `TensorSource` 上
+    逐张量对比 —— 格式、形状、内核看到的字节、算出来的数。覆盖 qwen35 的九种
+    格式、dots 的 `[.., n_in, n_out]` 形状约定、gemma4 的单类型与白名单两个入口、
+    以及 norm/bias 的 F32/F16/BF16 读取。F16 解码器换了实现，所以**全部 65536 个
+    F16 位型逐个比过**（真实数字 0 差异，只有 NaN 载荷不同）。
+  - **真实权重层**（`#[ignore]`，用 `--ignored` 跑）：`OvisOCR3.Q8_0.gguf` 与
+    `OvisOCR3-BF16.gguf`（qwen35 家族，**187 个矩阵张量 / 187 次 matmul**）、
+    `dots-tts-base`（**946 个矩阵张量 / 925 次 matmul**，含 631 个三维与 12 个
+    四维张量）、`gemma-4-12b-it-Q8_0.gguf`（**329 个矩阵张量 / 273 次 matmul**）。
+    三档都是**逐字节相同**。
+- **真实模型**：`OvisOCR3.Q8_0.gguf`（qwen35 家族，Q8_0）与
+  `OvisOCR3-BF16.gguf`（BF16）各跑一次贪心生成，**输出与改动前逐字相同**
+  （"The ocean is a vast and mysterious place that holds the secrets of the
+  world."）—— 覆盖了 qwen35 loader 的 Q8_0 与 BF16 两条路径。
+- `cargo test --profile release-fast --lib` 失败集合与改动前逐条相同（本机预存失败
+  39 条），新增测试全过。
+
+**关联**：`src/core/tensor.rs`（`load_weight_any`）、
+`src/ops/kernel/quantized_tensor.rs`（`QuantizedTensor::supports`）、
+`src/models/dots/weights.rs`、`src/models/qwen35/trunk/weights.rs`、
+`src/models/gemma4/trunk/weights.rs`、`src/models/qwen35/trunk/util.rs`、
+`tests/todo003_loader_diff.rs`。
 
 ---
 
@@ -696,13 +757,44 @@ hidden-attn / mlp 主矩阵走 Q4_0 或 Q4_K。长期再评估 Q4_K / Q6_K 全�
 
 ---
 
-### TODO-005: F32 x86_64 matmul 缺 SIMD kernel — ✅ 已完成
+### TODO-005: F32 / F16 / BF16 的 SIMD 收敛计划
 
-`src/ops/kernel/f32/avx2.rs` 实现完成，F32 / F16 NEON kernel 完成，AVX2 matmul macro 共享代码。
-BF16 / F16 / F32 三档精度 matmul 共享 `avx2_matmul_packed!` 宏。
+**状态**：x86_64 部分 ✅ 已完成；下面三条仍开放（代码里有 7 处指向这里）。
 
-实测：Breeze `--quant f32` scalar 234s → AVX2 54s (4.3×)，`--quant f16` 47s → 31s (1.5×)。
-F32 与 BF16 md5 bit-exact (a7c5e3f5...)，三档精度 md5 都已记录 baseline。
+**已完成**（2026-10）：`src/ops/kernel/f32/avx2.rs` 实现完成，F32 / F16 的 NEON
+kernel 完成，AVX2 matmul macro 共享代码；BF16 / F16 / F32 三档精度的 matmul 共享
+`avx2_matmul_packed!` 宏。实测：Breeze `--quant f32` scalar 234s → AVX2 54s（4.3×），
+`--quant f16` 47s → 31s（1.5×）；F32 与 BF16 md5 bit-exact（a7c5e3f5...），三档精度
+md5 都已记录 baseline。
+
+**仍开放的三条**：
+
+1. **三档精度共用一个 kernel**。BF16 / F16 / F32 各自的 matmul 仍是一份宏实例化，
+   计划收敛到单个 `matmul_f32_vs_f32_simd` 核心（`ops/kernel/simd_avx2.rs`、
+   `f16/mod.rs`、`f32/mod.rs`）。
+2. **aarch64 的标量参考校验**。F16 / F32 的 NEON kernel 没有在 aarch64 上与
+   `super::scalar` 对拍过 —— 仓库没有 aarch64 CI runner；见 **TODO-028**。
+3. **rope 的 aarch64 NEON 变体**。`ops/rope/neox.rs` 的 aarch64 分支仍回落到标量。
+
+**2026-11-23 补充：AVX-512（zmm）接线（Sapphire Rapids 实测）**。新增
+`src/ops/kernel/simd_avx512.rs`（`avx512_matmul_packed!` / `avx512_matmul_packed_tiled!`
+宏，与 AVX2 宏同构的 16-lane 骨架）+ `f32/avx512.rs`、`bf16/avx512.rs`（+tiled）、
+`f16/avx512.rs`（仅 per-token；F16 tiled 的可移植 F16×F16 契约不变，见 TODO-019）。
+Dispatch：`n_in % 16 == 0 && has_avx512_fma()` 时优先 zmm，否则回落 AVX2（`n_in % 8`）；
+BF16 追加 `avx512bw`（`vpmovzxwd` zmm），F16 走 F16C ymm ×2 + `vinsertf64x4` 合并
+（不依赖 AVX512-FP16，Zen4 也可用）。门禁在 `src/ops/float.rs`（`has_avx512_fma` /
+`has_avx512bw`，`RMI_SCALAR=1` 同样能压掉）。
+测试：每档 vs scalar 容差对拍（small/large/tail 3x40）、zmm tiled 与 per-token
+位级一致（n_in=192 跨 32 行/32 token tile 边界）；顺带修复了共享 AVX2 宏的
+**潜在尾部 bug**（scalar 尾乘进 lane 累加器会被 hsum 按 lane 数重复计数；
+4-wide 尾 `_mm256_loadu_ps` 超 4 元素越界读——两者都在 `n_in % 8 != 0` 的直连调用才可达，
+dispatch 的 `n_in % 8 == 0` 门使生产路径从未走过，已加 n_in=42/44 回归测试锁住）。
+实测（Xeon Silver 4410Y，单线程，`--release` fat LTO，`avx512_vs_avx2_perf_probe`）：
+GEMV per-token **1.01×**（8MB 权重带宽 bound，符合预期）、tiled x64 1.11×、
+**L2 常驻 tiled x64 1.33×**（25.1 → 33.6 GFLOPS）；release-fast 下三者
+0.99×/1.05×/1.01×（见 fast-profile-iteration 的 profile 门槛说明）。
+结论：解码 GEMV 无收益，prefill/batched 有 1.1-1.33×；接线为 AVX-512 级机器
+（Granite Rapids / Zen 5）铺路，未测机器无回归（dispatch 按检测位回退）。
 
 ---
 
@@ -712,16 +804,6 @@ F32 与 BF16 md5 bit-exact (a7c5e3f5...)，三档精度 md5 都已记录 baselin
 Q8_0 没有 ground truth（量化本身有损），后续每次 SIMD 改动会再次漂移——只要 ≤ 1 ULP 就接受，记录新 baseline。
 
 详见 `tools/converter/README.md:40` Q8_0 行。
-
----
-
-### TODO-007: Breeze `rope()` SIMD 路径精度破坏 — ✅ 已修复
-
-`src/ops/rope/neox.rs::rope_neox_inplace_with_table` 新增，BF16 round-trip 严格按 scalar op 顺序
-（mul → round → mul → round → add → round），AVX2 内核在每个乘加后立即 bf16 round。
-`src/models/breeze/transformer.rs::rope` 一行调用。Breeze 三档精度 (BF16/F16/F32/Q8_0) bit-exact。
-
-剩余：NEON 版本（aarch64）暂未实现，不阻塞 Breeze 路径。
 
 ---
 
@@ -1184,6 +1266,11 @@ for token in 0..n_tokens {
 任何数学，因此**不触碰任何逐位对齐契约**——与本分支已建立的"重结合可以、近似不行"
 原则相容。
 
+**阶段性实现（2026-11-22）**：aarch64 NEON 的 BF16 `forward_batched` 已接入四
+token 分块，单行算术顺序保持不变，并增加了 batched 与逐行路径的逐位回归。F16 已
+由通用 token-tiled 路径覆盖。Apple M3 Max 上直接 kernel microbenchmark
+（32×2048×2048，10 次中位数）测得 BF16 **3.48×**，输出逐位相同。
+
 实施注意：
 - `project_tokens` 当前按 token 分区，改成按行分区后 dispatch 次数会变多
   （QKV 从 1 次变 3 次）。需要权衡 dispatch 开销与流量节省，NR=4 时预计净收益为正。
@@ -1308,7 +1395,7 @@ This project targets the following SIMD instruction sets:
 | Architecture | Extensions used | Detection | Files |
 |---|---|---|---|
 | **x86_64** (Intel Core Ultra 5 125H, AMD Zen 4, etc.) | SSE2 / SSE4.2 / AVX / **AVX2** / **FMA** / **F16C** / **BMI2** | `is_x86_feature_detected!` | `src/ops/simd_avx2.rs`, `src/ops/kernel/*/avx2*.rs` |
-| x86_64 (Skylake-X, Ice Lake, Sapphire Rapids, Zen 5) | + **AVX-512F** / **AVX-512BW** / **AVX-512VNNI** | runtime gate | (not yet wired) |
+| x86_64 (Skylake-X, Ice Lake, Sapphire Rapids, Zen 5) | + **AVX-512F** / **AVX-512BW** / **AVX-512VNNI** | runtime gate | `src/ops/kernel/simd_avx512.rs`（F32/BF16/F16 zmm matmul 已接线，见 TODO-005 2026-11-23 补充；VNNI 仍开放） |
 | x86_64 (Intel Alder Lake+, Zen 5) | + **AVX-VNNI** (`vpdpbusd`/`vpdpwssd`) | CPUID `avx_vnni` | `src/ops/kernel/q8_0/avxvnni.rs`（仅参考实现，实测更慢，dispatch 未接线——见 TODO-AVX-VNNI） |
 | x86_64 (Arrow Lake, Lunar Lake, Granite Rapids, Zen 5) | + **AVX-VNNI-INT8** (`vpdpbssd`) | CPUID `avxvnniint8` | (not yet wired — see TODO-AVX-VNNI below) |
 | **aarch64** | NEON / NEON-F16 / NEON-F32 | `is_aarch64_feature_detected!` | `src/ops/kernel/*/neon*.rs` |
@@ -1594,45 +1681,6 @@ SILU_ONLY=1 ./target/release/examples/vk_ops_check   # 只跑这一项
 - `docs/usage/z-image.md` — 「FFN 合批的 `-inf`：已定位」记录排查全过程
 
 ---
-
-### TODO-021: Z-Image FFN 合批 `record_ffn` — 已合入，依赖 TODO-020
-
-一次 command buffer 录 w1 → w3 → SiLU → w2，取代原来「3 次 submit + 2 次 readback +
-host 侧 3700 万次 exp」。denoise 52.7 s → 42.5 s，端到端 59.9 s → 49.7 s
-（512×512，8 步，seed 42，aarch64 Vulkan 主机）。
-
-**与 TODO-020 是同一件事的两端**：旧 clamp + 合批必然 `-inf`，两者必须一起看。
-
-排查时已排除（别重复）：barrier 覆盖范围、提交粒度、Q8 暂存别名（w3 已加独立
-`q8_up`）、region 重叠（bump allocator 不重叠）、validation layer（零警告，代码合规）。
-真正的根因在 silu 的数值，不在调度。
-
-`FFN_BATCH_MAX=<n>` 可限制合批生效的层数（默认全部），用于二分定位。
-
-**遗留**：合批后与 CPU 基线 PSNR 31.61 dB（改动前 33.34 dB），差异来自 TODO-020
-风险 1 的 silu 饱和。quantize reciprocal 的 1-ulp 修复（见
-[VULKAN.md](VULKAN.md)「已知问题与调试开关」）已把该值从 31.52 拉回
-32.21 dB（mean|Δ| 3.44 → 3.01），剩余差距仍主要来自 silu 饱和边界。
-
-### TODO-024: attention 相关自检的容差是照 x86 标定的 — ✅ 由 TODO-025 一并解决
-
-**根因**：`cpu_attention_scores` / `cpu_attention_values` /
-`check_attention_scores_match_cpu_reduction` 拿 `dot_f16` 当 oracle，而
-
-| 架构 | `dot_f16` | 累加 |
-|---|---|---|
-| x86_64 | `_mm256_cvtph_ps` + `_mm256_fmadd_ps` | **f32** |
-| aarch64 | `fmla .8h` | **f16** |
-
-容差是照 **x86 的 f32 参考**标定的（`attention_scores` 用 3e-5），在 ARM 上参考自带
-`sqrt(head_dim) * eps_f16` 误差（head_dim=128 时约 5e-3），与实测 6.6e-3 吻合——
-**原理上过不了**。
-
-**解法不在放宽容差，在换 oracle**：统一改用 `reference_dot_f16`（f64 精确求和）。
-oracle 是精确算术后，容差自然回到 3e-5 并且真的成立。详见 TODO-025。
-
-**教训**：一个有损的参考值，会让「校验 GPU」这件事悄悄变成「比较两个有损实现」。
-前者能发现 bug，后者只能发现巧合——而且它同时把容差推大到连真正的 GPU 回归都测不出来。
 
 ### TODO-025: `dot_f16` 在 aarch64 上用 f16 累加 — ✅ 已改，`ggml-f16-dot-parity` 保留旧行为
 
@@ -2188,7 +2236,7 @@ dense 路径强。
 - **8B-Q8_0 的 GPU 运行峰值 RSS 约 18.7 GB**，超过 15 GiB 预算；
   一次性 CLI 同时持有 mmap 权重和显存副本是原因之一。
 
-### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍
+### TODO-032: Q4_K/Q5_K/Q6_K 在 GPU 上没有 DP4A kernel，8B Q4_K_M 比 CPU 慢 17.6 倍 — ✅ 已完成（2026-11-23）
 
 接着 TODO-031 往下挖，发现 Q4_K 家族在 dense Vulkan 路径上缺少向量化 kernel，
 这是 Q4_K_M 特别慢的**结构性**原因。
@@ -2225,7 +2273,24 @@ DP4A，得写一个自己的「块缩放 + int32 提升」的 int8 dot kernel，
 Q4_K 家族完全不能用（慢 17.6 倍）。** 在补出 Q4_K 的向量化 kernel 之前，
 Q4_K 模型应该明确走 CPU，而不是靠一条经验阈值去猜。
 
-### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率
+**完成记录（2026-11-23）**：五个 shader（`q4_k_matmul.comp`、
+`q4_k_matmul_cooperative.comp`、`q5_k_matmul.comp`、
+`q5_k_matmul_cooperative.comp`、`q6_k_matmul.comp`）的权重读取全部重写为
+u32 word 级向量化（寄存器内 nibble/字节提取，没有用 buffer 声明，SSBO
+对齐风险为零），q5_k row 从每块 512 次字节载降到 44 个 word。AVX2
+oracle 位级公式逐 lane 派生并保留（含 Q6_K 的 correction 错位复刻、
+`hsum_ps` 树、浮点表达式顺序）。验证：`matmul_iq` 12-case 位级一致
+（真实权重，含 151936 行 token_embd）、`q4_k_cooperative_matches_row_kernel`
+两种 reduction 位级一致、`vk_ops_check --formats q4_k,q5_k,q6_k`
+`max_abs=0`、全量 lib 测试与基线一致（1814/25 预存）。E2E（0.6B
+UD-Q3_K_XL）：GPU 常驻生成 54.8 t/s vs CPU 62.3 t/s（17.6x 病理消除）；
+`qwen3.rs` eligibility 黑名单删除，UD-Q3_K_XL / UD-Q2_K_XL（5×Q4K
+attn_v）首次全常驻。已知边界：长 prompt（Q3_K_XL 约 >380 token）+ f16
+KV 时 admission contract 会保守回退 CPU——这是预存的 GPU f16-KV
+attention 数值发散（UD-IQ1_S 在 1400 token 同样触发，与本次 kernel 无关），
+f32 KV 或短 prompt 全通过。
+
+### TODO-033: Q4_K split-K GEMV 试过，行度不够；真正的瓶颈是单字节权重访问效率 — ✅ 已完成（2026-11-23，并入 TODO-032）
 
 接着 TODO-032，真的去写了一个 rows==1 的 split-K GEMV（`q4_k_matmul.comp`
 里新增分支：rows==1 时不让 64 个 lane 各领一个输出行，而是让 64 个 lane
@@ -2262,6 +2327,13 @@ Q4_K rows=1:  2.06 MB 权重，实测 2.11 ms  →  0.98 GB/s
   scale 提取外提提速 2.3~2.6 倍（位精确）；
 - rows=1 的 Q4_K（MoE decode、单 token）仍然只有 0.98 GB/s，
   继续走 `7750eeb` 的 CPU 门控。
+
+**完成记录（2026-11-23）**：按本条诊断的方向（weight 读取向量化）与
+TODO-032 合并实施——所有 Q4_K/Q5_K/Q6_K kernel 的 `weight_byte()`
+逐字节提取已消灭，改为 u32 word 载 + 寄存器级提取（Q6_K 用两词滑窗
+处理 210B 块的 mod4 错位）。单发 matvec 的 wall 现在被提交延迟主导
+（~0.35ms），不再是 2.11ms 的字节级访问病理；0.98 GB/s 指标对应的
+kernel 已不存在。位级对齐见 TODO-032 的完成记录。
 
 ### TODO-034: Z-Image GPU 路径罕见地不可复现（同 seed 约 1/20 次输出不同）
 
@@ -2481,14 +2553,6 @@ CPU 直接吃 LPDDR），8B 以上在设备空闲时才可能赢——这两个�
 
 下一步：在**独占设备**上重测（这台 aarch64 机器有另一个租户占着 65 GB 和 79–92% 利用率），
 确认是驱动/内存压力导致的偶发，还是我们自己的同步缺口。
-
-### TODO-041: Astronex 视频输出依赖系统 `ffmpeg`
-
-`src/models/diffusion/dreamx/media.rs` 直接 spawn `ffmpeg`，没有它
-`--astronex` 跑完采样和 VAE 解码后在写视频时失败（`Start ffmpeg for DreamX
-video: No such file or directory`）。这台机器没有系统 ffmpeg，验证时用的是
-`imageio-ffmpeg` 装进仓库 venv 的静态构建（7.0.2，含 libx264）。
-要么在 USAGE 里写明这个运行期依赖，要么在 `--out` 不支持时给出更早、更明确的报错。
 
 ### TODO-042: Astronex 权重契约的 pinned commit 不公开
 
@@ -2895,65 +2959,6 @@ token prompt 下差异更大（CPU 出英文、Vulkan 出韩文），说明**偏
 [TODO-045](#todo-045-lfm3-的-gpu-路径只搬了-matmul剩余算子占-cpu-时间-18集显上-auto-比-cpu-慢-84925)、
 `docs/develop/UNIFIED_COMPUTE_VALIDATION.md`（远程 AMD 上 qwen3 token 0 门禁失败）、
 `docs/develop/UNLIMITED_OCR_2_REVIEW.md` §7.5。
-
-### TODO-047: WeVisOne 的「是否本模型」判定散在 6 处，且 `enable_thinking` 被静默覆盖 — ✅ 已完成（2026-11-22）
-
-**做完了**：判定收敛到 1 处（`src/models/qwen3/mod.rs`），静默覆盖改成显式告警 +
-文档说明，并加了一条扫描式守卫测试防止它重新散开。
-
-#### 问题一（判定重复）——已收敛到 1 处
-
-先修一个前提：条目写的「6 处」是旧分支的数字，main 上实际是 **12 处**同样的
-写法 `source.metadata("wevisone_vl.source_revision").is_some()`。除了原先记的 6 处，
-main 还多出：`src/main.rs`（qwen3vl decoder 模式豁免）、`src/app/server/prediction.rs`
-（WeVisOne 组件校验）、`src/models/qwen3/trunk/prefill.rs`（Auto 投影下沉）、
-`src/models/qwen3/trunk/session.rs`（F32 KV 的 `[GPU]` 提示）、
-`src/models/wevisone_vl/mod.rs`（读 revision 的**值**而不是判定）、以及
-`src/app/server/api/tools.rs` 里的测试替身。**散得比记的多，是这条条目最该
-记下来的事实**——漏改一处就是静默的行为分叉。
-
-现在的形态：
-
-- `src/models/qwen3/mod.rs` 定义 `WEVISONE_SOURCE_REVISION_KEY` 与
-  `is_wevisone(source)`；**key 字面量在全仓只出现在这一个文件里**。
-- 12 处调用点全部改为调用 `is_wevisone`（`wevisone_vl/mod.rs` 需要 revision 的
-  值，改用 `WEVISONE_SOURCE_REVISION_KEY` 常量）。
-- 放在 `models::qwen3` 而不是 `models::wevisone_vl`：`wevisone_vl` 本来就依赖
-  `qwen3`，反过来会让基座家族依赖变体家族。
-
-守卫测试 `models::qwen3::tests::wevisone_marker_is_read_in_one_place` 扫 `src/`
-下所有 `.rs`，除 `models/qwen3/mod.rs` 外任何文件再写出这个 key 字面量就红。
-这是「哪些路径必须按 WeVisOne 处理」唯一能真正锁住的形态——单测一个
-`is_wevisone` 的布尔值锁不住「调用点有没有漏改」。
-
-**行为零变化**：强制 thinking 这件事本身是对的（WeVisOne 自带的
-`chat_template.jinja` 里完全没有 thinking 机制，没有 `enable_thinking` 变量、
-没有 `<think>` 标记，助手轮就是字面 `assistant\n`；官方实现走
-`AutoProcessor.apply_chat_template`，所以官方 prompt 永远不含空 think 块）。
-不强制的话 HTTP/CLI 都会插入 `<think>\n\n`，prompt 与官方不一致。
-
-#### 问题二（对外可见的静默覆盖）——已改成显式告警 + 文档说明
-
-`src/app/server/api/protocol.rs` 的 `enable_thinking` 是**客户端字段**（顶层
-`"enable_thinking": false` 或嵌套 `chat_template_kwargs`）。原来的
-`enable_thinking.unwrap_or(false) || is_wevisone` 会把客户端**显式传的 false 也
-覆盖成 true**。功能上无害（WeVisOne 本来就不 think），但 API 语义上是「显式请求
-被静默忽略」。
-
-两个修法都做了（条目说「二选一」，这里取的是叠加而非替代）：
-
-- `src/app/server/api/tools.rs` 在覆盖发生时打一条
-  `log::warn!("enable_thinking=false is ignored for WeVisOne: its chat template
-  has no thinking mode")`——沿用仓库既有的「字段被忽略」告警样式
-  （`protocol.rs` 里同类 `log::warn!`）。
-- `protocol.rs` 的字段注释写明 WeVisOne 是例外：模板没有 thinking 机制，该字段
-  对它无效，答案一律不带推理块。
-
-**验证**：`cargo test --profile release-fast --lib` 基线 1619 passed / 39 failed，
-本分支 1621 passed / 39 failed —— 失败集合逐条相同（均为预存失败：本机 Windows
-临时目录权限 + oracle 依赖类），新增的 2 个通过项就是本条新增的两条测试。
-
-**关联**：`tools/oracle/wevisone_vl/README.md`、`tools/oracle/wevisone_vl/validation.md`。
 
 ### TODO-048: `--mmproj` + 纯文本仍会把 qwen2vl / qwen3vlmoe 送进 hybrid 分支报错
 
@@ -3963,52 +3968,6 @@ Nemotron 的 `attach_gpu` 只有 `src/models/nemotron_h/trunk/runtime.rs`
 `run_forward_logits_*`、`src/models/nemotron_h/trunk/runtime.rs`、
 `docs/develop/jev.md`、TODO-053（30B 适配）。
 
-### TODO-064: 模式互斥白名单手写枚举，每加一个共享 flag 都要改多处
-
-**状态**：⚠️ 已知缺口，未排期。
-
-**现象**：`src/app/cli/parse.rs` 的主解析循环统一处理所有 flag
-（`--gpu` 在第 389 行就是 `"--gpu" => options.gpu = true`），但每个
-「模式」在解析之后另有一段**手写白名单**，用来声明该模式允许哪些
-flag、并对带值参数补一次取值校验：
-
-- `options.enhance` → `--enhance | --compute | --gpu | --overwrite | --serve`
-- `options.system_one_request` → `--adapter | --system-one-request | --compute | --gpu`
-- `options.decision_request` → 自带一段匹配
-
-白名单里出现一个 flag，就等于「这个模式接受它」；其余任何 flag 都会得到
-「`<模式>` cannot be combined with `<flag>`」。
-
-**为什么它是缺口**：白名单是**手写枚举**，每有一个新模式接受共享 flag，
-就要在三处白名单里各加一次。Vela3 混合 Vulkan 投影
-（`codex/vela3-gpu`，`828c8e8a`）把 `--system-one-request` 从「只允许
-CPU」放开到可带 `--gpu`，就必须手改 `parse.rs` 的系统模式白名单 ——
-那行 `| "--gpu"` 看起来像特例，实际是「共享 flag 列表」的第四份副本。
-下次 `--enhance`（RE-USE）也支持 compute 时，已经改过一次了。
-
-**实测**（aarch64，`review/vela3-gpu`）：`--system-one-request --gpu` 走
-`parse_cli_options` → `validate_cli_options` 均通过，`compute_policy()`
-为 `Auto`；`--gpu` 与 `--compute` 同用仍被拒。
-
-**方向**（未定）：
-
-1. 把「模式 → 允许的 flag 集」集中成一份声明（例如每个模式一个
-   `const ALLOWED: &[&str]`），解析后统一查表，取代三处内联白名单。
-   这是**纯重构**，不改任何 flag 的接受或拒绝行为。
-2. 或者反过来：给 flag 声明它属于哪些模式（`--gpu` 属于 text / enhance /
-   decision / system-one / …），模式检查按声明求交集。后者更不容易
-   漏，但要求给每个共享 flag 标注归属，改动面更大。
-3. 两种方案都要带一条「重构前后行为逐项相同」的回归：把现有
-   `src/app/cli/tests.rs` 与 `tests/system_one_cli.rs` 里的模式冲突用例
-   扩充成「每个模式 × 每个共享 flag」的矩阵。
-
-**影响面**：`src/app/cli/parse.rs` 是**所有模型**的入口（Qwen3、GLM-4、
-llama、Vela3、Idol 等全走它），重构会动到全仓 CLI 解析路径，因此应当
-**独立成 PR**，不要混进模型适配的 PR。
-
-**关联**：`src/app/cli/parse.rs`、`src/app/cli/types.rs`、
-`src/app/cli/validate.rs`、`tests/system_one_cli.rs`。
-
 ### TODO-065: Vela3 的 F32 权重路径每次投影都整份拷贝
 
 **状态**：⚠️ 已知缺口，未排期。
@@ -4673,67 +4632,7 @@ kernel（TODO-032 ✓✓），要么这类模型就该留在 CPU ✓✓。
 **关联**：`src/models/diffusion/ernie_image/{gpu.rs,dit.rs,mod.rs}`、
 `src/models/diffusion/ernie_image/text.rs`（文本编码器留在 CPU ✓✓）、
 `src/ops/kernel/q4_k.rs`、`src/ops/kernel/q8_0/parallel.rs`、
-[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍)。
-
-### TODO-074: qwen3 视觉塔按字节长度猜权重格式 —— BF16 会被当成 F16 读 — ✅ 已完成（2026-11-22）
-
-**做完了**：qwen3 视觉塔的每一个张量现在都按 GGUF 头里声明的格式读，不再有任何一处
-靠字节长度猜。
-
-**当时的缺陷比条目记的更宽**：条目只点了 `decode_linear_weight`（按字节长度猜），
-实际同一族里还有两处同源的硬编码：
-
-| 位置 | 当时的假设 | 后果 |
-| --- | --- | --- |
-| `decode_linear_weight`（2-D 矩阵） | 4 字节→F32，2 字节→**F16**，34 字节/32→Q8_0 | BF16 被当 F16 读（1.0 → 1.875） |
-| `decode_f32_slice`（1-D 向量：ln1/ln2/deepstack norm/post_ln/position_embd） | **恒为 F32** | F16/BF16 的 norm 向量按 4 字节一组读 → 数值全错 |
-| `matmul_f16_f32_single`（未 precompute 的那条路） | **恒为 Q8_0 块布局**（函数名有误导） | 任何非 Q8_0 的塔被当 Q8_0 解 → 数值全错 |
-
-三处都是「格式不由张量声明」，所以一起修。
-
-**改法**：
-
-1. `src/core/tensor.rs` 新增 `decode_f32_matrix(ggml_type, bytes, n_in, n_out)` —— 按
-   声明格式解码已借到的字节（F32 / F16 / BF16 / Q8_0）；`load_f32_matrix` 改为转调它，
-   core 里只有一份解码实现。（`load_f32_matrix` 是 `4c77690f` 为这一类加的，但**至今
-   没有调用方**；视觉塔拿到的是字节不是张量名，需要的是这个 bytes 级入口。）
-2. `src/models/qwen3/vision/mod.rs` 新增 `VisionMatrix<'a>`：**借到的字节 + 头部声明的
-   `ggml_type`**。`VisionLayer` / `DeepstackWeights` / `VisionEncoder` 的 2-D 权重字段
-   全部换成它，`decode_linear_weight`（按长度猜的那个）删除。
-3. 1-D 向量改走 `core::tensor::optional_f32_values` —— 它本来就按声明格式解
-   （F32 / BF16 / F16）。顺带副作用：**非 precompute 路径每层每帧都在重新解码
-   ln1/ln2 的老代码没有了**（现在加载期解一次）。
-4. 未 precompute 的那条路按声明格式分派：Q8_0 走原来的块路径，F32 / F16 / BF16 走
-   共享的 SIMD dot（`dot_f32` / `dot_f16_f32` / `dot_bf16_f32`），零拷贝借用映射来的
-   字节，不复制。
-5. 头部声明了不支持的格式（如 Q4_0）→ **加载期报错** `Unsupported vision matrix
-   {name}: {type:?}`，不再等到运行时读出一堆错值。
-
-**对现有模型零行为变化**：F32 / F16 / Q8_0 矩阵的解码与从前**逐位相同**（同一套字节
-布局：`dequant_q80_weight` 与被删掉的 `dequant_q8_0_tensor` 是同一个算法），F32 的
-1-D 向量也逐位相同。变的只有「头部声明 BF16 / F16 时读对了」和「1-D 向量按声明格式
-读」。
-
-**顺带查清的一件事**：未 precompute 的那条路（`matmul_f16_f32_single`）对 qwen3 塔
-**已经没有活调用方** —— qwen3 塔的三个使用方（`models/diffusion/mage_flow/text.rs`、
-`models/wevisone_vl/mod.rs`、`app/diffusion.rs` 的 qwen3vl 分支）都调了
-`precompute` / `precompute_lossless` / `precompute_ggml_f16`；而 vela3-d3、qwen_drive、
-thx02、longcat 用的都是 **qwen35** 塔（那条塔本来就 dtype-aware）。所以这条 Q8_0
-专用路径是一颗哑雷：谁把它复活配上 F16 塔，就是静默的错值。现在它按声明格式分派，
-哑雷拆了。
-
-**验收**：`a_bf16_vision_tower_decodes_to_the_values_the_header_declares` —— 造一个
-**混合格式**的合成塔（矩阵 BF16、norm F32），加载 + `precompute_lossless`，把解出来的
-权重与 `decode_f32_matrix(BF16, …)` 逐位对比，并断言首元素是 `1.0` 而不是 F16 读法
-的 `1.875`。另有 4 条 core 测试（`decode_f32_matrix` 的格式/长度/不支持分支、
-`optional_f32_values` 的 BF16 分支）+ 4 条视觉塔测试。
-
-**未覆盖**：本机没有 qwen3 塔的 mmproj（本地模型是 qwen35 塔 / 纯文本 / 扩散），
-端到端只有合成塔这一条证据；等有真实 BF16 的 qwen3vl mmproj 时应再跑一次实机。
-
-**关联**：`src/models/qwen3/vision/mod.rs`（`VisionMatrix`）、
-`src/models/qwen35/vision/mod.rs`（`load_source_weight`，dtype-aware 的参考 ✓✓）、
-`src/core/tensor.rs`（`decode_f32_matrix` ✓✓、`load_f32_matrix` ✓✓）。
+[TODO-032](#todo-032-q4_kq5_kq6_k-在-gpu-上没有-dp4a-kernel8b-q4_k_m-比-cpu-慢-176-倍---已完成2026-11-23)。
 
 ### TODO-075: Qwen-Image-2.1 的基础版设备路径 —— 现在能跑了，但与 CPU 的差异和那个偶发的首轮差异都还没定位
 

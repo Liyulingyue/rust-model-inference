@@ -9,6 +9,7 @@ mod image_generation;
 mod prediction;
 mod rerank;
 mod speech;
+mod video_generation;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -83,11 +84,11 @@ fn hy_transcription_task<T: Send + 'static>(
 enum Backend {
     Text(TextBackend),
     Pjit(image_generation::PjitBackend),
+    Video(video_generation::VideoBackend),
     /// The text-to-image diffusion models: Z-Image and ERNIE-Image. They
     /// share the image-generation route with P-JiT and differ only in the
     /// pipeline behind it.
     Diffusion(diffusion::DiffusionBackend),
-
     /// A WeVisOne text model: a Qwen3-VL release with a coordinate
     /// vocabulary and a separate pixel decoder. It serves the ordinary
     /// text routes and adds the image prediction route.
@@ -132,6 +133,7 @@ impl Backend {
             Self::ArkTts(_) => "arktts",
             Self::Auk(_) => "auk",
             Self::Pjit(_) => "pjit",
+            Self::Video(_) => "video-generation",
             Self::Diffusion(backend) => backend.label(),
             Self::Rerank(_) => "rerank",
             Self::Clm(_) => "clm",
@@ -1190,6 +1192,15 @@ fn build_backend(
             )?,
         )));
     }
+    if let Ok(source) = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+    {
+        if crate::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
+            return Ok(Arc::new(Backend::Video(video_generation::build(
+                options,
+                Arc::from(source),
+            )?)));
+        }
+    }
     let decision_source =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
@@ -2176,6 +2187,10 @@ pub fn run_server() {
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
             .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    let video_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|s| crate::models::diffusion::fastframes_l::matches_model(s.as_ref()));
     // The text-to-image diffusion models are recognized by their weights.
     // Their CLI validator wants --out and --prompt, both of which the
     // server takes from the request instead.
@@ -2183,7 +2198,12 @@ pub fn run_server() {
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
             .is_some_and(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
-    if pjit_invocation {
+    if video_invocation {
+        if let Err(error) = crate::app::video_generation::options(&options, true) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if pjit_invocation {
         if let Err(error) = crate::app::diffusion::pjit_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
@@ -2268,6 +2288,14 @@ pub fn run_server() {
         .route("/v1/models", get(list_models));
     router = match state.model.as_ref() {
         Backend::Text(_) => router.merge(api::routes()),
+        Backend::Video(_) => router.route(
+            // 256 KiB covers the documented 65,536-byte prompt limit even in
+            // its worst JSON encoding (a prompt of all 4-byte characters
+            // escapes to ~12 bytes per character, ~196 KiB); 128 KiB would
+            // have rejected such prompts with 413 before validation ran.
+            "/v1/videos/generations",
+            post(video_generation::generate).layer(DefaultBodyLimit::max(256 * 1024)),
+        ),
         Backend::Pjit(_) | Backend::Diffusion(_) => {
             router.route("/v1/images/generations", post(image_generation::generate))
         }

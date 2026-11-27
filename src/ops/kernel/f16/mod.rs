@@ -20,6 +20,8 @@ use super::Kernel;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 #[cfg(target_arch = "aarch64")]
@@ -346,6 +348,16 @@ pub(crate) fn forward_f16_dispatch(
 ) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
+        if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_f16c() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                unsafe {
+                    avx512::matmul_f16_vs_f32_avx512(weight, input, my_out, n_in, start, end);
+                }
+                return true;
+            }
+        }
         if n_in % 8 == 0 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
             let (start, end) = scalar::row_range(n_out, ith, nth);
             if end > start {

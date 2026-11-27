@@ -12,6 +12,7 @@ pub mod server;
 pub mod system_one;
 pub mod text;
 pub(crate) mod tts;
+pub mod video_generation;
 pub mod wevisone_vl;
 pub(crate) mod yue2;
 

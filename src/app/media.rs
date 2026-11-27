@@ -498,9 +498,9 @@ mod tests {
 
     /// A stereo upload is refused with a message that names the reason.
     #[test]
-    fn stereo_uploads_are_refused() {
+    fn pure_rust_stereo_uploads_are_refused() {
         let wav = pcm16_wav(&[0; 16], 2);
-        let error = decode_audio_bytes(&wav).expect_err("stereo must be refused");
+        let error = decode_audio_bytes_pure_rust(&wav).expect_err("stereo must be refused");
         assert!(error.contains("mono"), "{error}");
     }
 

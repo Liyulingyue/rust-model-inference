@@ -172,3 +172,20 @@ JEV 把既有 typed question/options 映射到同一个 `models::thx02::Engine`�
 不经过 causal generation；全部问题/readout 在一次 native 请求内联合编码。
 HTTP 图片先经过既有解码和远程访问校验，再以 data URL 交给模型；本地文件
 只允许 CLI 访问。用法及验证范围见 [THX-02](../usage/thx02.md)。
+
+## FastFrames-L video backend
+
+`general.architecture=fastframes_l`（显式 arch，附带 contract/tokenizer 哈希
+校验）在 `build_backend()` 的 pjit/diffusion 探测之前选择 `Video`。CLI 侧的
+`--prompt/--out/--noise/--overwrite` 是输入接口而非服务器参数，服务端启动时
+用同一套 `options(&cli, server=true)` 校验并拒绝它们；几何与 seed 由请求体
+提供。`--model` 是单 GGUF 包（umT5 + DiT + KV refiner + pixel decoder），
+判别信息全在权重里，不需要 flag。
+
+该 backend 只挂载 `/v1/videos/generations`，返回 `video/mp4`；同一进程一次
+只跑一个生成任务（忙时 429），客户端断开后计算结束前仍占用任务槽。推理在
+`models/diffusion/fastframes_l/` 内闭环，路由层只做请求校验与编码。验证范围
+（54 transport、F16/量化失败保留）见
+[FASTFRAMES_L](FASTFRAMES_L.md) 与
+[oracle 记录](../../tools/oracle/fastframes_l/validation.md)。
+

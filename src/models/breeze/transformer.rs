@@ -27,6 +27,12 @@ pub(super) fn matrix<'a>(
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if info.dims != [input as u64, output as u64] {
+        return Err(format!(
+            "Invalid tensor shape for {name}: {:?}; expected [{input}, {output}]",
+            info.dims
+        ));
+    }
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;
@@ -514,8 +520,8 @@ fn rope(x: &mut [f32], hd: usize, pos: usize, freq: &[f32]) {
     // Pre-compute a bf-quantised cos/sin table once per call (matches
     // the upstream `bf(angle.cos())` / `bf(angle.sin())` round-trips)
     // and delegate the per-head rotation to the SIMD-capable
-    // `rope_neox_inplace_with_table` helper.  See TODO-007 for the
-    // derivation history: the previous hand-written AVX2 SIMD path
+    // `rope_neox_inplace_with_table` helper.  The derivation history: the
+    // previous hand-written AVX2 SIMD path
     // gated behind `cfg(any())` produced 7-frame garbage output
     // because the per-lane bf-round emulation diverged from scalar;
     // the new wrapper fixes that by matching the scalar op order

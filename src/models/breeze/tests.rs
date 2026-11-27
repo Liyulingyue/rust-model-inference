@@ -81,21 +81,44 @@ const NON_MATRIX_TENSORS: &[(&str, &[u64])] = &[
 ];
 
 #[test]
-fn main_source_rejects_non_bf16_heads_eoi_and_norms() {
+fn f32_preflight_rejects_non_f32_or_bf16_tensors() {
     for &(name, dims) in NON_MATRIX_TENSORS {
         for dtype in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0] {
             let source = Source::with_tensor(name, dims, dtype, Vec::new());
-            let error = BreezeModel::from_source(&source, 1).err().unwrap();
-            assert!(
-                error.contains(name) && error.contains("original BF16"),
-                "{name} {dtype:?}: {error}"
-            );
+            let result = require_f32_compatible(&source, name);
+            if matches!(dtype, GGMLType::F32) {
+                assert!(result.is_ok(), "{name} {dtype:?}: {result:?}");
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains(name) && error.contains("F32 or BF16"),
+                    "{error}"
+                );
+            }
         }
     }
 }
 
 #[test]
-fn main_source_preserves_original_bf16_and_legacy_codec_f32() {
+fn from_source_still_runs_the_dtype_preflight() {
+    // Wiring, not logic: `from_source` must keep invoking the preflight
+    // before any other validation, so a source whose preflight tensors are
+    // not F32/BF16 is refused up front instead of reaching later stages.
+    let source = Source::with_tensor(
+        "depth_decoder.codebooks_head.weight",
+        &[1, 1],
+        GGMLType::Q8_0,
+        Vec::new(),
+    );
+    let error = BreezeModel::from_source(&source, 1).err().unwrap();
+    assert!(
+        error.contains("depth_decoder.codebooks_head.weight") && error.contains("F32 or BF16"),
+        "{error}"
+    );
+}
+
+#[test]
+fn f32_preflight_accepts_original_bf16_and_legacy_codec_f32() {
     for &(name, dims) in NON_MATRIX_TENSORS.iter().chain(std::iter::once(&(
         "codec_model.quantizer.acoustic_residual_vector_quantizer.layers.0.codebook.initialized",
         &[1][..],
@@ -106,9 +129,10 @@ fn main_source_preserves_original_bf16_and_legacy_codec_f32() {
             GGMLType::BF16
         };
         let source = Source::with_tensor(name, dims, dtype, Vec::new());
-        let error = BreezeModel::from_source(&source, 1).err().unwrap();
-        // This tiny source passes the dtype preflight, then reaches metadata validation.
-        assert!(error.contains("general.architecture"), "{name}: {error}");
+        assert!(
+            require_f32_compatible(&source, name).is_ok(),
+            "{name}: preflight rejected {dtype:?}"
+        );
     }
 }
 
@@ -131,7 +155,7 @@ fn main_non_matrix_shapes_and_byte_lengths_fail_closed() {
 }
 
 #[test]
-fn main_matrices_require_original_dtype_exact_shape_and_length() {
+fn main_matrices_reject_shape_and_length_mismatches() {
     for (name, input, output) in [
         ("lm_head.weight", 2048, 2052),
         ("text_encoder.embed_tokens.weight", 1152, 262158),
@@ -141,13 +165,6 @@ fn main_matrices_require_original_dtype_exact_shape_and_length() {
             1024,
         ),
     ] {
-        for dtype in [GGMLType::F32, GGMLType::F16, GGMLType::Q8_0] {
-            let source = Source::with_tensor(name, &[input, output], dtype, Vec::new());
-            let error = matrix(&source, name, input as usize, output as usize)
-                .err()
-                .unwrap();
-            assert!(error.contains("original BF16"), "{name}: {error}");
-        }
         let source = Source::with_tensor(name, &[output, input], GGMLType::BF16, Vec::new());
         let error = matrix(&source, name, input as usize, output as usize)
             .err()

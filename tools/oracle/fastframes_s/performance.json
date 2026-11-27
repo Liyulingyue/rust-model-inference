@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-23",
+  "status": "同机诊断采样完成",
+  "reason": "All cases ran one warmup and three measured fresh processes on the shared host (20-thread cgroup, NVIDIA GPU shared with other work). 16x16 / 5 frames is a diagnostic size: matrices are tiny, so per-call upload/transfer overhead dominates the device path and these numbers are not a large-resolution performance claim.",
+  "host": {
+    "logical_cpus": 20,
+    "ram_gib_approx": 121,
+    "gpu": "NVIDIA GPU (Vulkan)",
+    "note": "aarch64; cgroup thread quota shared with other tasks"
+  },
+  "model": "models/FastFrames-S-bf16.gguf",
+  "command_shape": "release-fast bin, --threads 16, seed 17, 'A red ball rolls on a table.'",
+  "cases": [
+    {"compute": "cpu", "seconds": [4.06, 4.08, 4.10], "median": 4.08},
+    {"compute": "vulkan", "seconds": [27.90, 26.83, 27.40], "median": 27.40}
+  ],
+  "observations": [
+    "CPU is faster than strict Vulkan at this diagnostic size; the device path pays per-projection upload/download on tiny matrices (see target/fastframes/s-vulkan-proof.log counters).",
+    "Strict Vulkan is numerically aligned (worst relative RMSE 6.67e-06); auto records 128 Vulkan and 1,562 CPU projection events in target/fastframes/s-auto-proof.log.",
+    "Larger resolutions remain unmeasured; no isolated or full-size benchmark is claimed."
+  ]
+}

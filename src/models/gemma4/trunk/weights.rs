@@ -462,29 +462,13 @@ pub(super) fn load_weight(
             info.dims, info.ggml_type, dims, ggml_type
         ));
     }
-    let expected = info
-        .checked_nbytes()
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
     let n_in = usize::try_from(dims[0]).map_err(|_| format!("{name} input width overflow"))?;
     let n_out = usize::try_from(dims[1]).map_err(|_| format!("{name} output width overflow"))?;
+    let weight =
+        crate::core::tensor::load_weight_any(source, name, n_in, n_out, Some(&[ggml_type]))?;
     // SAFETY: Gemma4Model retains the immutable TensorSource Arc for at least as
     // long as these weights, matching the repository's existing model loaders.
-    let bytes = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
-    let mut weight =
-        Weight::from_quantized(QuantizedTensor::from_bytes(bytes, ggml_type, n_in, n_out));
-    weight.n_in = n_in;
-    weight.n_out = n_out;
-    Ok(weight)
+    Ok(unsafe { std::mem::transmute::<Weight<'_>, Weight<'static>>(weight) })
 }
 
 pub(super) fn load_weight_any(
@@ -502,30 +486,13 @@ pub(super) fn load_weight_any(
             info.dims, info.ggml_type, dims
         ));
     }
-    let expected = info
-        .checked_nbytes()
-        .and_then(|bytes| usize::try_from(bytes).ok())
-        .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
     let n_in = usize::try_from(dims[0]).map_err(|_| format!("{name} input width overflow"))?;
     let n_out = usize::try_from(dims[1]).map_err(|_| format!("{name} output width overflow"))?;
-    let ggml_type = info.ggml_type;
+    let weight =
+        crate::core::tensor::load_weight_any(source, name, n_in, n_out, Some(allowed_types))?;
     // SAFETY: Gemma4Model retains the immutable TensorSource Arc for at least as
     // long as these weights, matching the repository's existing model loaders.
-    let bytes = unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) };
-    let mut weight =
-        Weight::from_quantized(QuantizedTensor::from_bytes(bytes, ggml_type, n_in, n_out));
-    weight.n_in = n_in;
-    weight.n_out = n_out;
-    Ok(weight)
+    Ok(unsafe { std::mem::transmute::<Weight<'_>, Weight<'static>>(weight) })
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<Vec<f32>, String> {

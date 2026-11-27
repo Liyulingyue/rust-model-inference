@@ -1,0 +1,31 @@
+{
+  "commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+  "sha256": {
+    "LICENSE": "b7efb90fd4e5037659937da8cd6a931b5a7c07a83098e417651bbfffb8a139fa",
+    "evaluation/latency/decoders.py": "e1e25192ea027e7a4c353b873a077d216656592083dee10e3de41add020a0207",
+    "evaluation/latency/dit.py": "7ba050c89d0f3616edc6ceea74e51100a845a151cdb71f4b7ec9b7d7292a6e7c",
+    "evaluation/latency/kv_refine.py": "00df8775014c1025f36e4f92e7f5f05c566c7614a5b6ad4370df60bf8bbee743",
+    "evaluation/latency/models.py": "1acfae36b39f435341a404621a45db21589cef00527be92d822ae99706822bab",
+    "fastframes/__init__.py": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+    "fastframes/checkpoints.py": "9f13081763d46c648e9849bd8eede392b7ab77c0ffd6e2dbbc74e04ea0a5e90c",
+    "fastframes/models/__init__.py": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+    "fastframes/models/kv_refinement.py": "ba1f2160da4fb5148c4a981397d947103a9e1c2053b6096c2c885b96a0cb5529",
+    "fastframes/models/pixel_decoder.py": "63fb4340a0e817bf1e8b27491ee6c44d97f1d1bd7e71b51d03638d1af4a7bd8e",
+    "fastframes/pipeline.py": "34431441ae52b45006daed3b356703de99b4f920fb787ccfa05961bece699ed8",
+    "fastframes/wan/__init__.py": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+    "fastframes/wan/attention.py": "7d6a6674adf035146c61eb7e958a9fd2dd4db6ad60e33190b338419a5db64de5",
+    "fastframes/wan/causal_model.py": "19f223c04b78ee48084a693cf4ddd896fc753a7a835b5ffdff42f511cd4ee6c3",
+    "fastframes/wan/model.py": "6e5c630c4bc6015ba1619a87331e5124f882882c8bbdf7619716e38dc4aaebde",
+    "fastframes/wan/scheduler.py": "3190ede0cd592ef5ad577deedd94f44257ab9aba8dc8f648ae47f8c393ea3ccc",
+    "fastframes/wan/t5.py": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+    "fastframes/wan/text_encoder.py": "050e69fa654ef3c3cb9f578cc63e12ed137984c28abd8e935578beb61e753702",
+    "fastframes/wan/tokenizers.py": "cf5b189c1ae017326efadab2fc6380ba223fa7a59d0be6464bd264db53c76934",
+    "scripts/generate.py": "27389975c2c8fb60e8a16e1f69c6a488cbe0eda5d70735875282a0e7629ef85e"
+  },
+  "tokenizer_sha256": {
+    "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+    "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+    "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+    "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+  }
+}
