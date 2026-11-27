@@ -369,6 +369,48 @@ impl Qwen3Session<'_> {
             crate::compute::ComputePolicy::Cpu,
         )?;
         cpu.prefill(input, batch_size, true)?;
+        if std::env::var("RMI_CONTRACT_DEBUG").is_ok() {
+            if let (KvCache::F16(gpu), KvCache::F16(cpu)) =
+                (&self.kv_state.cache, &cpu.kv_state.cache)
+            {
+                let arch = &self.kv_state.arch;
+                let stride = arch.n_head_kv * arch.n_embd_head_k.max(arch.n_embd_head_v);
+                let written = self.kv_state.seq_len * stride;
+                for layer in 0..arch.n_layer {
+                    let base = layer * self.kv_state.capacity * stride;
+                    let k_flips = gpu.k[base..base + written]
+                        .iter()
+                        .zip(&cpu.k[base..base + written])
+                        .filter(|(g, c)| g != c)
+                        .count();
+                    let v_flips = gpu.v[base..base + written]
+                        .iter()
+                        .zip(&cpu.v[base..base + written])
+                        .filter(|(g, c)| g != c)
+                        .count();
+                    if k_flips > 0 || v_flips > 0 {
+                        eprintln!("[contract] layer {layer}: k_flips={k_flips} v_flips={v_flips}");
+                    }
+                }
+                if let Ok(kv_dir) = std::env::var("RMI_DUMP_KV_DIR") {
+                    for (name, cache) in [("k", &cpu.k), ("v", &cpu.v)] {
+                        let path =
+                            std::path::Path::new(&kv_dir).join(format!("cpu_kv_{name}_all.u16"));
+                        let mut bytes = Vec::with_capacity(cache.len() * 2);
+                        for value in cache.iter() {
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                        if let Err(error) = std::fs::write(&path, &bytes) {
+                            eprintln!("[dump] failed to write {path:?}: {error}");
+                        }
+                    }
+                }
+            }
+            match validate_model_kv(&self.kv_state, &cpu.kv_state) {
+                Ok(()) => eprintln!("[contract] KV bit-exact across all layers"),
+                Err(error) => eprintln!("[contract] KV check: {error}"),
+            }
+        }
         validate_model_logits(&self.scratch.logits, &cpu.scratch.logits)?;
         validate_model_kv(&self.kv_state, &cpu.kv_state)?;
 
@@ -553,7 +595,9 @@ impl Qwen3Session<'_> {
             let weights = &model.layers[layer];
             crate::compute::dense::run_dense_layer(
                 &mut |_: usize, op| -> Result<(), String> {
-                    use crate::compute::dense::{DenseCpu, DenseNorm, DenseOp, DenseTensor};
+                    use crate::compute::dense::{
+                        DenseCpu, DenseMatrix, DenseNorm, DenseOp, DenseTensor,
+                    };
                     let final_residual = op
                         == DenseOp::Add {
                             input: DenseTensor::Down,
@@ -986,6 +1030,44 @@ impl Qwen3Session<'_> {
                         }
                         .execute_with_linear(op, self.hidden_linear.as_mut())?,
                     }
+                    if let Ok(trace_dir) = std::env::var("RMI_CPU_LAYER_TRACE_DIR") {
+                        let snapshot = match op {
+                            DenseOp::QkNormRope => {
+                                Some((&self.prefill_scratch.q[..rows * n_q], "q"))
+                            }
+                            DenseOp::Attention => {
+                                Some((&self.prefill_scratch.attn[..rows * n_attn], "attn"))
+                            }
+                            DenseOp::Linear {
+                                projections: [(DenseMatrix::AttnOut, _)],
+                                ..
+                            } => Some((
+                                &self.prefill_scratch.projection[..rows * config.n_embd],
+                                "proj",
+                            )),
+                            DenseOp::RmsNorm {
+                                weight: DenseNorm::Attn,
+                                ..
+                            } => Some((
+                                &self.prefill_scratch.normed[..rows * config.n_embd],
+                                "normed",
+                            )),
+                            _ => None,
+                        };
+                        if let Some((values, name)) = snapshot {
+                            let path = std::path::Path::new(&trace_dir).join(format!(
+                                "cpu_L{layer}_base{}_rows{rows}_{name}.f32",
+                                range.start
+                            ));
+                            let mut bytes = Vec::with_capacity(values.len() * 4);
+                            for value in values {
+                                bytes.extend_from_slice(&value.to_le_bytes());
+                            }
+                            if let Err(error) = std::fs::write(&path, &bytes) {
+                                eprintln!("[cpu-trace] failed to write {path:?}: {error}");
+                            }
+                        }
+                    }
                     if matches!(
                         op,
                         DenseOp::RmsNorm {
@@ -1004,6 +1086,28 @@ impl Qwen3Session<'_> {
                                     &self.prefill_scratch.normed
                                         [row * config.n_embd..(row + 1) * config.n_embd],
                                 ));
+                            }
+                        }
+                        // Surgical dump for the GPU k-quant matmul harness:
+                        // the QKV projection consumes exactly these rows, so
+                        // replaying them through the isolated recorder turns a
+                        // value-dependent KV flip into a reproducible case.
+                        if let (Ok(dump_layer), Ok(dump_dir)) = (
+                            std::env::var("RMI_DUMP_NORMED_LAYER"),
+                            std::env::var("RMI_DUMP_NORMED_DIR"),
+                        ) {
+                            if dump_layer == layer.to_string() {
+                                let path = std::path::Path::new(&dump_dir).join(format!(
+                                    "normed_L{layer}_base{}_rows{rows}.f32",
+                                    range.start
+                                ));
+                                let mut bytes = Vec::with_capacity(rows * config.n_embd * 4);
+                                for value in &self.prefill_scratch.normed[..rows * config.n_embd] {
+                                    bytes.extend_from_slice(&value.to_le_bytes());
+                                }
+                                if let Err(error) = std::fs::write(&path, &bytes) {
+                                    eprintln!("[dump] failed to write {path:?}: {error}");
+                                }
                             }
                         }
                     }
@@ -1045,6 +1149,17 @@ impl Qwen3Session<'_> {
                                 "injected Qwen3 CPU prefill failure after layer {layer}"
                             )
                             .into());
+                        }
+                        if let Ok(trace_dir) = std::env::var("RMI_CPU_LAYER_TRACE_DIR") {
+                            let path = std::path::Path::new(&trace_dir)
+                                .join(format!("cpu_L{layer}_base{}_rows{rows}_x.f32", range.start));
+                            let mut bytes = Vec::with_capacity(rows * config.n_embd * 4);
+                            for value in &self.prefill_scratch.x[..rows * config.n_embd] {
+                                bytes.extend_from_slice(&value.to_le_bytes());
+                            }
+                            if let Err(error) = std::fs::write(&path, &bytes) {
+                                eprintln!("[cpu-trace] failed to write {path:?}: {error}");
+                            }
                         }
                     }
                     Ok(())

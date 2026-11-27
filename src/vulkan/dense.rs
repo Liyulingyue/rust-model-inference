@@ -87,7 +87,7 @@ pub(crate) fn record_weights(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_dense_layer(
     ops: &Qwen3Ops<'_>,
-    commands: &TokenCommands<'_>,
+    commands: &mut TokenCommands<'_>,
     layout: &ArenaLayout,
     bindings: &LayerBindings,
     config: &DenseShape,
@@ -158,6 +158,29 @@ pub(crate) fn record_dense_layer(
                         width(input),
                         width(output),
                     )?;
+                    // The FFN norm overwrites this arena region later in the
+                    // same layer, so the attention-normed rows -- the exact
+                    // QKV input -- are only observable between the two. The
+                    // flush runs what is recorded so far and re-begins the
+                    // buffer; the layer's remaining ops continue in it.
+                    if let (DenseNorm::Attn, Ok(trace_dir)) =
+                        (weight, std::env::var("RMI_GPU_LAYER_TRACE_DIR"))
+                    {
+                        commands.flush_in_place()?;
+                        let values = ops.read_f32(region(output), rows * width(output))?;
+                        let path = std::path::Path::new(&trace_dir).join(format!(
+                            "gpu_L{layer_index}_base{base_position}_rows{rows}_normed.f32"
+                        ));
+                        let mut bytes = Vec::with_capacity(values.len() * 4);
+                        for value in values {
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                        std::fs::write(&path, &bytes).map_err(|error| {
+                            VulkanError::UnsupportedShape(format!(
+                                "layer trace write {path:?}: {error}"
+                            ))
+                        })?;
+                    }
                 }
                 DenseOp::Linear { input, projections } => {
                     let mut outputs = [(layout.x, 0); 3];
@@ -870,7 +893,7 @@ impl DenseVulkanSession {
             .checked_mul(config.n_embd_head_k)
             .ok_or(VulkanError::OutOfMemory)?;
         // Acquire the shared submission guard before touching mapped arena bytes.
-        let commands = TokenCommands::begin(self.context)?;
+        let mut commands = TokenCommands::begin(self.context)?;
         self.ops.write_f32(self.layout.x, input)?;
         #[cfg(test)]
         let failure = match self.fail_after_row.take() {
@@ -940,7 +963,7 @@ impl DenseVulkanSession {
         for (layer_index, bindings) in self.layers.iter().enumerate() {
             record_dense_layer(
                 &self.ops,
-                &commands,
+                &mut commands,
                 &self.layout,
                 bindings,
                 config,
@@ -950,6 +973,44 @@ impl DenseVulkanSession {
                 rows,
                 extras.deepstack.is_some(),
             )?;
+            // Split the per-chunk command buffer once per layer in debug
+            // mode and snapshot the intermediate arena regions. The KV scan
+            // only sees the QKV projection; the attention -> wo -> residual
+            // chain is invisible until quantization absorbs a sub-ULP drift
+            // into an F16 flip several layers later.
+            if let Ok(trace_dir) = std::env::var("RMI_GPU_LAYER_TRACE_DIR") {
+                commands.submit_and_wait()?;
+                let n_attn = config
+                    .n_head
+                    .checked_mul(config.n_embd_head_v)
+                    .ok_or(VulkanError::OutOfMemory)?;
+                let n_q = config
+                    .n_head
+                    .checked_mul(config.n_embd_head_k)
+                    .ok_or(VulkanError::OutOfMemory)?;
+                let snapshots = [
+                    (self.layout.q, rows * n_q, "q"),
+                    (self.layout.attn, rows * n_attn, "attn"),
+                    (self.layout.projection, rows * config.n_embd, "proj"),
+                    (self.layout.x, rows * config.n_embd, "x"),
+                ];
+                for (region, count, name) in snapshots {
+                    let values = self.ops.read_f32(region, count)?;
+                    let path = std::path::Path::new(&trace_dir).join(format!(
+                        "gpu_L{layer_index}_base{base_position}_rows{rows}_{name}.f32"
+                    ));
+                    let mut bytes = Vec::with_capacity(values.len() * 4);
+                    for value in values {
+                        bytes.extend_from_slice(&value.to_le_bytes());
+                    }
+                    std::fs::write(&path, &bytes).map_err(|error| {
+                        VulkanError::UnsupportedShape(format!(
+                            "layer trace write {path:?}: {error}"
+                        ))
+                    })?;
+                }
+                commands = TokenCommands::begin(self.context)?;
+            }
             #[cfg(test)]
             if let Some(row) = failure {
                 commands.submit_and_wait()?;

@@ -1451,6 +1451,18 @@ impl<'a> TokenCommands<'a> {
             guard: self.guard,
         })
     }
+
+    /// In-place `flush`: submit, wait, and re-begin the command buffer while
+    /// holding the same `TokenCommands`. For callers that hold the commands
+    /// by mutable reference and need to observe intermediate arena state
+    /// mid-recording (the layer-0 trace snapshots read the arena between
+    /// the attention norm and the projection that consumes it).
+    pub(crate) fn flush_in_place(&mut self) -> Result<(), VulkanError> {
+        self.context.submit_commands(&mut self.guard)?;
+        self.context.begin_commands(&mut self.guard)?;
+        self.command = self.context.command_buffer;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3890,11 +3902,20 @@ pub(crate) fn build_operator_pipelines(
                 ATTENTION_SCORES_SHADER
             } else if matches!(
                 index,
-                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+                NEMOTRON_H_SSM_DT
+                    | NEMOTRON_H_SSM_NORM
+                    | NEMOTRON_MOE_ROUTE
+                    | RMS_NORM
+                    | SOFTMAX
+                    | SOFTMAX_F32
             ) && !context.shader_float64
             {
                 // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
+                // The softmax kernels transcribe glibc's `expf` in doubles
+                // for CPU parity, so they follow the same rule; the RMS norm
+                // accumulates its sum of squares in doubles in the CPU
+                // kernel's order, for the same reason.
                 ATTENTION_SCORES_SHADER
             } else {
                 *shader
@@ -4542,6 +4563,11 @@ impl<'a> Qwen3Ops<'a> {
         input_stride: usize,
         output_stride: usize,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "rms_norm requires shaderFloat64 (CPU double accumulator parity)".into(),
+            ));
+        }
         bindings.require(0, f32_bytes(count)?, "RMS norm weight")?;
         let push = [
             self.f32_rows_word(input, rows, input_stride, count, "RMS norm input")?,
@@ -5895,6 +5921,11 @@ impl<'a> Qwen3Ops<'a> {
         rows: usize,
         full_attention: bool,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "softmax requires shaderFloat64 (glibc expf parity)".into(),
+            ));
+        }
         let sequence_length = base_position
             .checked_add(rows)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -5942,6 +5973,11 @@ impl<'a> Qwen3Ops<'a> {
         rows: usize,
         full_attention: bool,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "softmax requires shaderFloat64 (glibc expf parity)".into(),
+            ));
+        }
         let sequence_length = base_position
             .checked_add(rows)
             .ok_or(VulkanError::OutOfMemory)?;
@@ -8896,6 +8932,9 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
     }
     check_rms_norm_exact(context)?;
     check_rope_exact(context)?;
+    check_qk_norm_rope_exact(context)?;
+    check_attention_rows_exact(context)?;
+    check_attention_replay_dumped(context)?;
     for &format in formats {
         check_weight_format(context, format)?;
     }
@@ -10231,6 +10270,639 @@ fn cpu_weight_matvec(
     output
 }
 
+fn check_qk_norm_rope_exact(context: &VulkanContext) -> Result<(), String> {
+    const DIM: usize = 128;
+    const HEADS: usize = 16;
+    const KV_HEADS: usize = 8;
+    const ROWS: usize = 3;
+    const EPS: f32 = 1e-6;
+    const FREQ_BASE: f32 = 1_000_000.0;
+    let layout =
+        ArenaLayout::build_rows(DIM * HEADS, DIM, HEADS, KV_HEADS, DIM, 1, 1, ROWS, ROWS, 0)
+            .map_err(|error| error.to_string())?;
+    let q_input: Vec<_> = (0..ROWS * HEADS * DIM)
+        .map(|index| {
+            let bits = 0x3e80_0000 + ((index as u32).wrapping_mul(1103515245) % 0x0080_0000);
+            f32::from_bits(bits) * if index % 5 == 0 { -1.0 } else { 1.0 }
+        })
+        .collect();
+    let k_input: Vec<_> = (0..ROWS * KV_HEADS * DIM)
+        .map(|index| {
+            let bits = 0x3e00_0000 + ((index as u32).wrapping_mul(2654435761) % 0x0080_0000);
+            f32::from_bits(bits) * if index % 7 == 0 { -1.0 } else { 1.0 }
+        })
+        .collect();
+    let q_norm: Vec<_> = (0..DIM)
+        .map(|index| 0.9 + (index % 13) as f32 / 40.0)
+        .collect();
+    let k_norm: Vec<_> = (0..DIM)
+        .map(|index| 1.05 - (index % 17) as f32 / 60.0)
+        .collect();
+    let mut expected_q = q_input.clone();
+    let mut expected_k = k_input.clone();
+    let mut coefficients = vec![0.0; ROWS * DIM];
+    for row in 0..ROWS {
+        fill_rope_neox(
+            &mut coefficients[row * DIM..(row + 1) * DIM],
+            row,
+            FREQ_BASE,
+        );
+        for head in expected_q[row * HEADS * DIM..(row + 1) * HEADS * DIM].chunks_exact_mut(DIM) {
+            crate::ops::rms_norm_inplace(head, &q_norm, EPS);
+            crate::ops::rope_neox_inplace(head, row, DIM, FREQ_BASE);
+        }
+        for head in
+            expected_k[row * KV_HEADS * DIM..(row + 1) * KV_HEADS * DIM].chunks_exact_mut(DIM)
+        {
+            crate::ops::rms_norm_inplace(head, &k_norm, EPS);
+            crate::ops::rope_neox_inplace(head, row, DIM, FREQ_BASE);
+        }
+    }
+    let uploads: [&[u8]; 2] = [bytemuck::cast_slice(&q_norm), bytemuck::cast_slice(&k_norm)];
+    let mut allocations = Vec::with_capacity(uploads.len());
+    for upload in uploads {
+        match unsafe { context.upload_static(upload) } {
+            Ok(buffer) => allocations.push(buffer),
+            Err(error) => {
+                unsafe {
+                    for buffer in &allocations {
+                        context.destroy_buffer(buffer);
+                    }
+                }
+                return Err(error.to_string());
+            }
+        }
+    }
+    let result = (|| -> Result<(), VulkanError> {
+        let mut ops = Qwen3Ops::new(context, layout, 2)?;
+        let bindings = ops.bind_buffers(&allocations)?;
+        ops.write_f32(layout.q, &q_input)?;
+        ops.write_f32(layout.k, &k_input)?;
+        ops.write_f32(layout.rope, &coefficients)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_qk_norm_rope_rows(
+            &commands,
+            bindings,
+            layout.q,
+            layout.k,
+            HEADS,
+            KV_HEADS,
+            DIM,
+            layout.rope,
+            EPS,
+            true,
+            true,
+            ROWS,
+        )?;
+        commands.submit_and_wait()?;
+        for (region, expected, name) in [(layout.q, &expected_q, "q"), (layout.k, &expected_k, "k")]
+        {
+            let actual = ops.read_f32(region, expected.len())?;
+            if let Some(index) = actual
+                .iter()
+                .zip(expected)
+                .position(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "QK norm rope mismatch at {name} index {index}: \
+                     gpu={:#010x} cpu={:#010x}",
+                    actual[index].to_bits(),
+                    expected[index].to_bits(),
+                )));
+            }
+        }
+        Ok(())
+    })();
+    for buffer in &allocations {
+        unsafe {
+            let _ = context.destroy_completed_buffers(&[*buffer]);
+        }
+    }
+    let result = result.map_err(|error| error.to_string())?;
+    println!("operator=qk_norm_rope_isolated exact_bits=true head_dim={DIM} rows={ROWS}");
+    Ok(())
+}
+
+/// Full F16 attention chain (scores -> softmax -> values) at the Qwen3-0.6B
+/// dense shapes: head_dim 128, GQA 16:8, a 381-token cache, and a final
+/// 4-row chunk whose `n_padded` crosses the 256->512 padding boundary.
+/// The oracle mirrors `prefill.rs`'s CPU attention down to the F16
+/// probability rounding and the padded value gather.
+fn check_attention_rows_exact(context: &VulkanContext) -> Result<(), String> {
+    const Q_HEADS: usize = 16;
+    const KV_HEADS: usize = 8;
+    const HEAD_DIM: usize = 128;
+    const CAPACITY: usize = 512;
+    const CACHE_TOKENS: usize = 381;
+    const ROWS: usize = 4;
+    const Q_COUNT: usize = Q_HEADS * HEAD_DIM;
+    const KV_COUNT: usize = KV_HEADS * HEAD_DIM;
+    let layout = ArenaLayout::build_rows(
+        Q_COUNT,
+        3072,
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        1,
+        1,
+        CAPACITY,
+        CACHE_TOKENS,
+        0,
+    )
+    .map_err(|error| error.to_string())?;
+    let next_value = |lcg: &mut u32| {
+        *lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        ((*lcg >> 8) as f32 / 16_777_216.0) * 3.0 - 1.5
+    };
+    let mut q_lcg = 0x2f6e2b1u32;
+    let q_input: Vec<f32> = (0..ROWS * Q_COUNT)
+        .map(|_| next_value(&mut q_lcg))
+        .collect();
+    let mut kv_lcg = 0x1a2b3c4u32;
+    let k_input: Vec<f32> = (0..CACHE_TOKENS * KV_COUNT)
+        .map(|_| next_value(&mut kv_lcg))
+        .collect();
+    let v_input: Vec<f32> = (0..CACHE_TOKENS * KV_COUNT)
+        .map(|_| next_value(&mut kv_lcg))
+        .collect();
+
+    let result = (|| -> Result<(), VulkanError> {
+        let ops = Qwen3Ops::new(context, layout, 1)?;
+        ops.write_f32(layout.q, &q_input)?;
+        ops.write_f32(layout.k, &k_input)?;
+        ops.write_f32(layout.v, &v_input)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_kv_write_rows(
+            &commands,
+            layout.k,
+            layout.v,
+            layout.kv_k,
+            layout.kv_v,
+            layout.kv_delta_k,
+            layout.kv_delta_v,
+            0,
+            0,
+            1,
+            CAPACITY,
+            KV_COUNT,
+            CACHE_TOKENS,
+            KV_COUNT,
+        )?;
+        ops.record_attention_rows(
+            &commands,
+            layout.q,
+            layout.kv_k,
+            layout.kv_v,
+            layout.scores,
+            layout.attn,
+            0,
+            1,
+            CACHE_TOKENS - ROWS,
+            CAPACITY,
+            Q_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            ROWS,
+            AttentionMode::PreparedF16,
+        )?;
+        commands.submit_and_wait()?;
+
+        let kq_scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+        let k_bits: Vec<u16> = k_input.iter().map(|&v| crate::ops::f32_to_f16(v)).collect();
+        let v_bits: Vec<u16> = v_input.iter().map(|&v| crate::ops::f32_to_f16(v)).collect();
+        let group = Q_HEADS / KV_HEADS;
+        let mut expected_attn = vec![0f32; ROWS * Q_COUNT];
+        let mut expected_probs = vec![0f32; ROWS * Q_HEADS * CACHE_TOKENS];
+        for row in 0..ROWS {
+            let visible = CACHE_TOKENS - ROWS + row + 1;
+            let n_padded = visible.div_ceil(256) * 256;
+            for head in 0..Q_HEADS {
+                let kv_head = head / group;
+                let mut q_bits = vec![0u16; HEAD_DIM];
+                crate::ops::f32_slice_to_f16(
+                    &q_input[row * Q_COUNT + head * HEAD_DIM..][..HEAD_DIM],
+                    &mut q_bits,
+                );
+                let mut scores = vec![f32::NEG_INFINITY; n_padded];
+                for token in 0..visible {
+                    scores[token] = crate::ops::dot_f16(
+                        &q_bits,
+                        &k_bits[token * KV_COUNT + kv_head * HEAD_DIM..][..HEAD_DIM],
+                        HEAD_DIM,
+                    ) * kq_scale;
+                }
+                crate::ops::softmax_inplace(&mut scores);
+                let mut probs_bits = vec![0u16; n_padded];
+                for (prob, score) in probs_bits.iter_mut().zip(&scores) {
+                    *prob = crate::ops::f32_to_f16(*score);
+                }
+                for token in 0..visible {
+                    expected_probs[(row * Q_HEADS + head) * CACHE_TOKENS + token] =
+                        crate::ops::f16_to_f32(probs_bits[token]);
+                }
+                let mut values_bits = vec![0u16; n_padded];
+                for dimension in 0..HEAD_DIM {
+                    for token in 0..visible {
+                        values_bits[token] =
+                            v_bits[token * KV_COUNT + kv_head * HEAD_DIM + dimension];
+                    }
+                    expected_attn[row * Q_COUNT + head * HEAD_DIM + dimension] =
+                        crate::ops::dot_f16(&values_bits, &probs_bits, n_padded);
+                }
+            }
+        }
+        let actual_attn = ops.read_f32(layout.attn, ROWS * Q_COUNT)?;
+        let mut attn_mismatches = 0usize;
+        for (index, (gpu, cpu)) in actual_attn.iter().zip(&expected_attn).enumerate() {
+            if gpu.to_bits() != cpu.to_bits() {
+                attn_mismatches += 1;
+                if attn_mismatches <= 8 {
+                    eprintln!(
+                        "attention chain mismatch at row {} head {} dim {}: \
+                         gpu={gpu} ({:08x}) cpu={cpu} ({:08x})",
+                        index / Q_COUNT,
+                        (index % Q_COUNT) / HEAD_DIM,
+                        index % HEAD_DIM,
+                        gpu.to_bits(),
+                        cpu.to_bits()
+                    );
+                }
+            }
+        }
+        let actual_probs = ops.read_f32(layout.scores, ROWS * Q_HEADS * CACHE_TOKENS)?;
+        let mut prob_mismatches = 0usize;
+        for row in 0..ROWS {
+            let visible = CACHE_TOKENS - ROWS + row + 1;
+            for head in 0..Q_HEADS {
+                let base = (row * Q_HEADS + head) * CACHE_TOKENS;
+                for token in 0..visible {
+                    let index = base + token;
+                    if actual_probs[index].to_bits() != expected_probs[index].to_bits() {
+                        prob_mismatches += 1;
+                        if prob_mismatches <= 8 {
+                            eprintln!(
+                                "probability mismatch at row {row} head {head} token {token}: \
+                                 gpu={:08x} cpu={:08x}",
+                                actual_probs[index].to_bits(),
+                                expected_probs[index].to_bits()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if attn_mismatches > 0 || prob_mismatches > 0 {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "attention chain diverged: attn mismatches {attn_mismatches}/{} \
+                 probability mismatches {prob_mismatches}",
+                ROWS * Q_COUNT
+            )));
+        }
+        Ok(())
+    })();
+    let result = result.map_err(|error| error.to_string())?;
+    println!(
+        "operator=attention_rows_isolated exact_bits=true head_dim={HEAD_DIM} \
+         visible={} rows={ROWS}",
+        CACHE_TOKENS
+    );
+    Ok(result)
+}
+
+/// Replay the exact attention call whose GPU output first diverged from the
+/// CPU reference (`RMI_GPU_LAYER_TRACE_DIR` snapshots pinned it to one
+/// layer/chunk with bit-identical inputs), then bisect the chain stage by
+/// stage: scores, softmax and values each run against a CPU oracle built
+/// from the same dumped real values.
+fn check_attention_replay_dumped(context: &VulkanContext) -> Result<(), String> {
+    let Some(replay_dir) = std::env::var("RMI_ATTENTION_REPLAY_DIR").ok() else {
+        return Ok(());
+    };
+    let layer: usize = std::env::var("RMI_ATTENTION_REPLAY_LAYER")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(22);
+    let base: usize = std::env::var("RMI_ATTENTION_REPLAY_BASE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(128);
+    const Q_HEADS: usize = 16;
+    const KV_HEADS: usize = 8;
+    const HEAD_DIM: usize = 128;
+    const ROWS: usize = 64;
+    const ARENA_CAPACITY: usize = 512;
+    const DUMP_CAPACITY: usize = 8192;
+    const Q_COUNT: usize = Q_HEADS * HEAD_DIM;
+    const KV_COUNT: usize = KV_HEADS * HEAD_DIM;
+    let sequence = base + ROWS;
+    let read_f32_file = |path: String| -> Result<Vec<f32>, String> {
+        let bytes = std::fs::read(&path).map_err(|error| format!("{path}: {error}"))?;
+        if bytes.len() % 4 != 0 {
+            return Err(format!("{path}: trailing bytes"));
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect())
+    };
+    let read_u16_file = |path: String| -> Result<Vec<u16>, String> {
+        let bytes = std::fs::read(&path).map_err(|error| format!("{path}: {error}"))?;
+        if bytes.len() % 2 != 0 {
+            return Err(format!("{path}: trailing bytes"));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|word| u16::from_le_bytes([word[0], word[1]]))
+            .collect())
+    };
+    let q_input = read_f32_file(format!(
+        "{replay_dir}/cpu_L{layer}_base{base}_rows{ROWS}_q.f32"
+    ))?;
+    let cpu_attn = read_f32_file(format!(
+        "{replay_dir}/cpu_L{layer}_base{base}_rows{ROWS}_attn.f32"
+    ))?;
+    if q_input.len() != ROWS * Q_COUNT || cpu_attn.len() != ROWS * Q_COUNT {
+        return Err(format!(
+            "replay dumps have unexpected lengths: q={} attn={}",
+            q_input.len(),
+            cpu_attn.len()
+        ));
+    }
+    let kv_dump = |name: &str| -> Result<Vec<u16>, String> {
+        let all = read_u16_file(format!("{replay_dir}/cpu_kv_{name}_all.u16"))?;
+        let expected = 28 * DUMP_CAPACITY * KV_COUNT;
+        if all.len() != expected {
+            return Err(format!(
+                "cpu_kv_{name}_all.u16 holds {} u16, expected {expected}",
+                all.len()
+            ));
+        }
+        let start = layer * DUMP_CAPACITY * KV_COUNT;
+        Ok(all[start..start + sequence * KV_COUNT].to_vec())
+    };
+    let k_bits = kv_dump("k")?;
+    let v_bits = kv_dump("v")?;
+
+    // CPU oracle for every stage, mirroring `prefill.rs` exactly.
+    let kq_scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
+    let group = Q_HEADS / KV_HEADS;
+    let mut oracle_scores = vec![0f32; ROWS * Q_HEADS * sequence];
+    let mut oracle_probs = vec![0f32; ROWS * Q_HEADS * sequence];
+    let mut oracle_attn = vec![0f32; ROWS * Q_COUNT];
+    for row in 0..ROWS {
+        let visible = base + row + 1;
+        let n_padded = visible.div_ceil(256) * 256;
+        for head in 0..Q_HEADS {
+            let kv_head = head / group;
+            let mut q_bits = vec![0u16; HEAD_DIM];
+            crate::ops::f32_slice_to_f16(
+                &q_input[row * Q_COUNT + head * HEAD_DIM..][..HEAD_DIM],
+                &mut q_bits,
+            );
+            let mut scores = vec![f32::NEG_INFINITY; n_padded];
+            for token in 0..visible {
+                scores[token] = crate::ops::dot_f16(
+                    &q_bits,
+                    &k_bits[token * KV_COUNT + kv_head * HEAD_DIM..][..HEAD_DIM],
+                    HEAD_DIM,
+                ) * kq_scale;
+            }
+            let raw_scores = scores[..visible].to_vec();
+            crate::ops::softmax_inplace(&mut scores);
+            let mut probs_bits = vec![0u16; n_padded];
+            for (prob, score) in probs_bits.iter_mut().zip(&scores) {
+                *prob = crate::ops::f32_to_f16(*score);
+            }
+            for token in 0..visible {
+                oracle_scores[(row * Q_HEADS + head) * sequence + token] = raw_scores[token];
+                oracle_probs[(row * Q_HEADS + head) * sequence + token] =
+                    crate::ops::f16_to_f32(probs_bits[token]);
+            }
+            let mut values_bits = vec![0u16; n_padded];
+            for dimension in 0..HEAD_DIM {
+                for token in 0..visible {
+                    values_bits[token] = v_bits[token * KV_COUNT + kv_head * HEAD_DIM + dimension];
+                }
+                oracle_attn[row * Q_COUNT + head * HEAD_DIM + dimension] =
+                    crate::ops::dot_f16(&values_bits, &probs_bits, n_padded);
+            }
+        }
+    }
+
+    let layout = ArenaLayout::build_rows(
+        Q_COUNT,
+        3072,
+        Q_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        1,
+        1,
+        ARENA_CAPACITY,
+        ROWS,
+        0,
+    )
+    .map_err(|error| error.to_string())?;
+    let _ = std::fs::write(
+        format!("{replay_dir}/replay_oracle_scores.f32"),
+        oracle_scores
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    let _ = std::fs::write(
+        format!("{replay_dir}/replay_oracle_probs.f32"),
+        oracle_probs
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>(),
+    );
+    let result = (|| -> Result<usize, VulkanError> {
+        let ops = Qwen3Ops::new(context, layout, 1)?;
+        ops.write_f32(layout.q, &q_input)?;
+        let k_cache_f32: Vec<f32> = k_bits.iter().map(|&b| crate::ops::f16_to_f32(b)).collect();
+        let v_cache_f32: Vec<f32> = v_bits.iter().map(|&b| crate::ops::f16_to_f32(b)).collect();
+        ops.write_f32(layout.kv_k, &k_cache_f32)?;
+        ops.write_f32(layout.kv_v, &v_cache_f32)?;
+        // Row-major (row*Q_HEADS+head)*sequence + token; oracle is only
+        // defined for token < visible (the GPU may write anything beyond).
+        let compare_scores = |name: &str, actual: &[f32], expected: &[f32]| {
+            let mut mismatches = 0usize;
+            let mut firsts: Vec<String> = Vec::new();
+            for (index, (gpu, cpu)) in actual.iter().zip(expected).enumerate() {
+                let row = index / (Q_HEADS * sequence);
+                let head = (index / sequence) % Q_HEADS;
+                let token = index % sequence;
+                let visible = base + row + 1;
+                if token >= visible || gpu.to_bits() == cpu.to_bits() {
+                    continue;
+                }
+                mismatches += 1;
+                if firsts.len() < 8 {
+                    firsts.push(format!(
+                        "{name} mismatch at row {row} head {head} token {token} \
+                         (kv_head {}): gpu={} ({:08x}) cpu={} ({:08x})",
+                        head / (Q_HEADS / KV_HEADS),
+                        gpu,
+                        gpu.to_bits(),
+                        cpu,
+                        cpu.to_bits()
+                    ));
+                }
+            }
+            for line in &firsts {
+                eprintln!("{line}");
+            }
+            mismatches
+        };
+        let compare = |name: &str,
+                       actual: &[f32],
+                       expected: &[f32],
+                       width: usize,
+                       visible_aware: bool|
+         -> Result<usize, VulkanError> {
+            let mut mismatches = 0usize;
+            for (index, (gpu, cpu)) in actual.iter().zip(expected).enumerate() {
+                if gpu.to_bits() == cpu.to_bits() {
+                    continue;
+                }
+                if visible_aware && index % width >= sequence {
+                    continue;
+                }
+                mismatches += 1;
+                if mismatches <= 8 {
+                    eprintln!(
+                        "{name} mismatch at row {} slot {}: \
+                         gpu={} ({:08x}) cpu={} ({:08x})",
+                        index / width,
+                        index % width,
+                        gpu,
+                        gpu.to_bits(),
+                        cpu,
+                        cpu.to_bits()
+                    );
+                }
+            }
+            Ok(mismatches)
+        };
+
+        // Full chain first: does the replay reproduce the divergence?
+        let commands = TokenCommands::begin(context)?;
+        ops.record_attention_rows(
+            &commands,
+            layout.q,
+            layout.kv_k,
+            layout.kv_v,
+            layout.scores,
+            layout.attn,
+            0,
+            1,
+            base,
+            ARENA_CAPACITY,
+            Q_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            ROWS,
+            AttentionMode::PreparedF16,
+        )?;
+        commands.submit_and_wait()?;
+        let actual_attn = ops.read_f32(layout.attn, ROWS * Q_COUNT)?;
+        let chain_probs = ops.read_f32(layout.scores, ROWS * Q_HEADS * sequence)?;
+        let _ = std::fs::write(
+            format!("{replay_dir}/replay_chain_probs_gpu.f32"),
+            chain_probs
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let chain_mismatches = compare("replay attn", &actual_attn, &oracle_attn, Q_COUNT, false)?;
+        eprintln!(
+            "[replay] full chain: {} / {} attention outputs differ from CPU",
+            chain_mismatches,
+            ROWS * Q_COUNT
+        );
+
+        // Stage 1: scores only.
+        let commands = TokenCommands::begin(context)?;
+        ops.record_attention_scores_rows(
+            &commands,
+            layout.q,
+            layout.kv_k,
+            layout.scores,
+            0,
+            1,
+            base,
+            ARENA_CAPACITY,
+            Q_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            ROWS,
+            AttentionMode::PreparedF16,
+        )?;
+        commands.submit_and_wait()?;
+        let actual_scores = ops.read_f32(layout.scores, ROWS * Q_HEADS * sequence)?;
+        let score_mismatches = compare_scores("replay scores", &actual_scores, &oracle_scores);
+        eprintln!("[replay] scores stage: {score_mismatches} mismatches");
+
+        // Stage 2: softmax over the CPU oracle's scores.
+        ops.write_f32(layout.scores, &oracle_scores)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_softmax_rows(&commands, layout.scores, Q_HEADS, base, ROWS, false)?;
+        commands.submit_and_wait()?;
+        let actual_probs = ops.read_f32(layout.scores, ROWS * Q_HEADS * sequence)?;
+        let _ = std::fs::write(
+            format!("{replay_dir}/replay_softmax_probs_gpu.f32"),
+            actual_probs
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        let prob_mismatches = compare_scores("replay probs", &actual_probs, &oracle_probs);
+        eprintln!("[replay] softmax stage: {prob_mismatches} mismatches");
+
+        // Stage 3: values over the CPU oracle's probabilities.
+        ops.write_f32(layout.scores, &oracle_probs)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_attention_values_rows(
+            &commands,
+            layout.scores,
+            layout.kv_v,
+            layout.attn,
+            0,
+            1,
+            base,
+            ARENA_CAPACITY,
+            Q_HEADS,
+            KV_HEADS,
+            HEAD_DIM,
+            ROWS,
+            AttentionMode::PreparedF16,
+            false,
+        )?;
+        commands.submit_and_wait()?;
+        let actual_values = ops.read_f32(layout.attn, ROWS * Q_COUNT)?;
+        let value_mismatches = compare(
+            "replay values",
+            &actual_values,
+            &oracle_attn,
+            Q_COUNT,
+            false,
+        )?;
+        eprintln!("[replay] values stage: {value_mismatches} mismatches");
+
+        if chain_mismatches == 0 {
+            eprintln!("[replay] full chain reproduced no divergence");
+        }
+        Ok(chain_mismatches)
+    })();
+    let chain_mismatches = result.map_err(|error| error.to_string())?;
+    println!(
+        "operator=attention_replay layer={layer} base={base} rows={ROWS} \
+         chain_differs_from_cpu_dumps={}",
+        chain_mismatches > 0
+    );
+    Ok(())
+}
+
 fn check_rope_exact(context: &VulkanContext) -> Result<(), String> {
     const DIM: usize = 128;
     const HEADS: usize = 16;
@@ -10296,8 +10968,20 @@ fn check_rope_exact(context: &VulkanContext) -> Result<(), String> {
 }
 
 fn check_rms_norm_exact(context: &VulkanContext) -> Result<(), String> {
-    const WIDTH: usize = 1024;
-    const ROWS: usize = 129;
+    // 1024 is the Qwen3-0.6B width; 2560 is the Qwen3-4B width where the
+    // f32 reduction used to drift an ULP against the CPU's double
+    // accumulator often enough to flip q8 quantization bytes.
+    for width in [1024usize, 2560usize] {
+        check_rms_norm_exact_width(context, width, 129)?;
+    }
+    Ok(())
+}
+
+fn check_rms_norm_exact_width(
+    context: &VulkanContext,
+    WIDTH: usize,
+    ROWS: usize,
+) -> Result<(), String> {
     let layout = ArenaLayout::build_rows(WIDTH, WIDTH, 1, 1, 32, 1, 1, 1, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let input: Vec<_> = (0..WIDTH * ROWS)

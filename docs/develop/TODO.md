@@ -2393,6 +2393,9 @@ HOST→COMPUTE barrier 时能否看见写入只取决于速度；旧 kernel 每�
 
 ### TODO-036: Qwen3-4B Q8_0 过不了 model contract，而 0.6B 与 8B 能过
 
+**状态：已修复并验证**（2026-11-23 softmax 的 glibc expf 逐位转录 +
+2026-11-27 rms_norm 的 CPU f64 求和顺序转录，4B/0.6B 全部合同通过）。
+
 `test-unified3`（unified-compute）上用 `--gpu --kv-cache f16` 跑 Qwen3 的三个
 Q8_0 尺寸，model contract（`src/models/qwen3/trunk/session.rs`，
 abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
@@ -2418,6 +2421,114 @@ abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
 
 同时记录：unified 分支的 decoder 路径比 `main` 快 6 倍以上
 （8B Q8_0 generation 5.1 t/s vs 0.8 t/s），这是该分支的目标，回归要盯住这条线。
+
+**2026-11-23 新证据（来自 TODO-032 收尾时的 E2E）**：长 prompt + f16 KV 的
+admission contract 失败是**可稳定复现、与权重量化格式无关**的——0.6B 上
+三档量化（UD-IQ1_S / UD-Q2_K_XL / UD-Q3_K_XL）在长 prompt 下全部触发
+`model logit mismatch`，误差随 prompt 长度近似线性增长：
+
+| 模型（0.6B） | prompt 长度 | KV | contract | rel |
+|---|---|---|---|---|
+| UD-Q3_K_XL | ~700 tok | f16 | 失败 | 2.4e-2 |
+| UD-Q3_K_XL | ~380 tok | f16 | 失败 | 1.2e-2 |
+| UD-Q3_K_XL | ~120 tok | f16 | 通过 | - |
+| UD-Q3_K_XL | ~700 tok | **f32** | **通过** | - |
+| UD-Q2_K_XL | ~1400 tok | f16 | 失败 | 2.5e-2 |
+| UD-IQ1_S（不含 Q4/5/6_K dense） | ~1400 tok | f16 | 失败 | 3.9e-3 |
+
+UD-IQ1_S 在改动前就是全常驻合格模型，其 dense 投影不含 Q4_K/Q5_K/Q6_K，
+**说明发散源不在 k-quant matmul，而在 GPU 的 f16-KV attention 计算路径**。
+疑点落点：GPU 恒走 `AttentionMode::PreparedF16`（`src/vulkan/qwen3.rs:199`），
+CPU 参考会话硬编码 `KvFormat::F16`（`src/models/qwen3/trunk/prefill.rs:367`），
+`attention_dot_mode`（`src/vulkan/ops.rs:8044`）在 x86+AVX2+F16C 走模式 8，
+另有 `ggml-f16-dot-parity` feature 分支——f16 dot 归约的舍入差随序列长度
+复利，是第一假设。TODO-036 的 4B（hidden 2560/36 层）大概率是同一根因
+在另一个形状上的放大。诊断工具已就绪：f32/f16-KV 对照、prompt 长度二分、
+`vk_ops_check` 算子级对拍。
+
+**2026-11-23 根因定位并修复（softmax 的 exp 精度差，不是 f16 dot）**：逐层
+trace + 算子重放（`check_attention_replay_dumped`，`src/vulkan/ops.rs`，
+`RMI_ATTENTION_REPLAY_DIR` 触发）把发散收敛到**单个 softmax 概率位翻转**：
+
+- 层 22、chunk base=128、row 28、head 15、token 41：score−max 后的
+  e^x（Decimal 80 位真值）落在 f32 中点下方 7.7e-5 ULP——正确舍入值是
+  `0x3990aee9`（GPU `exp_accurate` 算的就是它），而 CPU 参考用的 glibc
+  `expf` 有 0.502 ULP 误差、返回 `0x3990aeea`。两者差 1 ULP。
+- 该概率 `exp × scale` 的 f32 积恰好落在 **F16 舍入中点**（`0x39348000`），
+  RTE 下 GPU 翻到 `09a4`、CPU 翻到 `09a5`。这个 1-ULP 概率翻转经后续层
+  复利成全部 123 处 attention 输出差异，直至 logit mismatch。
+- 即：**GPU 的 `exp_accurate` 数学上是对的，但 contract 要求它逐位复现
+  CPU 的 glibc `expf`**。上文「f16 dot 归约舍入差复利」的假设被证伪
+  （scores 阶段 0 差异；f16 dot 逐位一致）。
+
+修复：`shaders/glsl/glibc_expf.glsl`（从 `nemotron_h_ssm_libm.glsl` 提取的
+glibc `e_expf` 精确转录，真 GLSL `double`，Python 对拍 glibc 0/200000 差异），
+`softmax.comp` / `softmax_f32.comp` 的 `exp_accurate` 全部换成 `glibc_expf`；
+`nemotron_h_ssm_libm.glsl` 改为 include 共享同一份转录（SPIR-V 指令流验证
+逐位等价）。两个 softmax record 管线随之需要 `shaderFloat64`，按 Nemotron
+SSM 的既有模式加了 pipeline 占位 + recorder 拒绝（不支持 f64 的设备会走
+contract 失败 → CPU 回退，而不是 pipeline 创建整体失败）。
+
+验证：重放四级全部 0 差异；381-token UD-Q3_K_XL 与 UD-Q2_K_XL 端到端
+contract 通过（`[contract] KV bit-exact across all layers`）；lib 套件
+1815 pass / 25 pre-existing fail（与基线同名集合）。
+
+**2026-11-27 4B 剩余偏差收口（rms_norm 的 f32 归约 vs CPU 的 f64 累加）**：
+softmax 修复后 4B Q8_0 仍失败（rel 0.0058），首发散收敛到 layer 0、row 2 的
+q（qkv 链），行 0-1 逐位一致。两级证据把根因钉死：
+
+- **q8 量化与 matmul 双双无罪**：新增 Q8_0 replay harness
+  （`src/vulkan/matmul_iq.rs`，
+  `q8_0_projection_replays_dumped_activations_bitwise`，
+  `RMI_Q8_REPLAY_DIR`/`RMI_Q8_REPLAY_LAYER` 指向 t4b 的 CPU normed dump，
+  真实 4B `blk.0.attn_q.weight` 权重）：GPU（片上量化 + grouped dp4a mode 8）
+  与 CPU（`quantize_q8_0_into` + AVX2 kernel）在全部 381 行 × 4096 输出
+  **逐位一致**。顺带证伪了 chunk 嫌疑：80 块 = 64+16 分块只是 staging，
+  `acc[8]` 跨 chunk 顺序累加无重结合；avxvnni kernel 本就不在生产链
+  （dispatch 文档：比 AVX2 慢 2.2-2.4×，故意的）。
+- **根因在 rms_norm**：GPU 侧补了 `RmsNorm(Attn)` 后的 normed 快照
+  （`dense.rs` + `TokenCommands::flush_in_place`；FFN norm 会覆盖同一 arena
+  区域，attention-normed 只有两次 norm 之间可观测）：layer 0 normed 有 24% 值
+  差 1 ULP——**GPU 的 64-lane f32 Kahan 树与 CPU `sum_sq_f32_avx2` 的
+  f64 顺序累加是不同的求和**。多数 ULP 差被 q8 量化吸收（所以行 0-1 的 q
+  仍逐位一致），row 2 越过一个量化 tie、翻转一个字节 → 整数点积变化 →
+  rel 6e-4 随 36 层复利成 KV/logit mismatch。宽度 1024（0.6B）时两种求和
+  恰好一致，所以 0.6B 全过——「4B 特有」的真相是宽度 2560 才暴露。
+
+修复：`rms_norm.comp` 归约改为 lane 0 串行复刻 CPU AVX2 kernel 的精确顺序
+（f32 平方 widen 到 double、每 8 元组 `((s0+s2)+(s1+s3))+((s4+s6)+(s5+s7))`、
+组贡献顺序累加进单一 double acc、f64 除法后一次舍入到 f32、再加 eps）；
+`shaderFloat64` gate（pipeline 占位 + recorder 拒绝）与 softmax 同模式；
+`check_rms_norm_exact` 扩到 1024/2560 双宽度（4B 形状此前无覆盖）。
+
+验证：4B Q8_0 `[contract] KV bit-exact across all layers` 且 logits 通过
+（修复前 rel 0.0058）；layer 0 normed/q/x dump 全部 0 差异；0.6B
+Q8_0 / UD-Q3_K_XL / UD-Q2_K_XL 合同保持通过；lib 套件 1829 pass /
+21 pre-existing fail（新增 harness 无 env 时跳过）；`cargo fmt` 干净。
+perf 代价：归约回到 lane 0 串行（64-lane 树曾是 perf 优化但破坏位对齐），
+每行约 320 个 double 加法，相对层内 matmul 可忽略。
+
+遗留更新：原「`q8_matvec` 5.96e-8 真实 kernel 差异」一项被 harness 证伪为
+grouped-vs-scalar-oracle 的重结合差（生产 GPU mode 8 与生产 CPU AVX2 逐位
+一致），从清单移除；另记 lib 测试进程**退出时**段错误（驱动 teardown 竞态，
+约 1/5~2/8 概率）在基线与修复版同样出现（gdb 显示崩溃在驱动内部线程），
+预存问题、与本次无关。其余遗留（attention_values/timestral 的 exp_accurate、
+silu 尾部 exp_reference）不变。
+
+TODO-036 收口前的两条待办（2026-11-27 记）：
+
+1. **aarch64 GPU 盒未验证，且有结构性风险**：`rms_norm.comp` 转录的是
+   x86 AVX2 kernel 的 f64 求和顺序；aarch64 的 CPU 生产归约是
+   `sum_sq_f32_neon`（16 元素批的 f64 FMA 累加，注释声称与标量顺序
+   逐位一致）。若 NEON 顺序 ≠ AVX2 顺序，两架构的 CPU 参考本身就是
+   不同的求和——同宽 2560 的 ULP 漂移会在那台机器（test-unified3，
+   原报告 4B 失败的盒子）重现。需要在其上跑一次 4B Q8_0 合同确认；
+   若失败，修法是把两侧 CPU 归约统一成同一种顺序（或 shader 按
+   架构特化，前者更可取）。
+2. **perf 未复测**：归约换回 lane 0 串行（64-lane 树曾是 perf 优化，
+   但破坏位对齐）。每行约 320 个 double 加法，理论相对层内 matmul
+   可忽略，但 4B 的 generation t/s 前后对比没有实测。顺带可复核
+   0.6B 的数字没回退。
 
 ### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
 
