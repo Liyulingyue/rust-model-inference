@@ -385,6 +385,7 @@ mod tests {
 
     /// Bit-level parity with the reference `torch.nn` forward.
     #[test]
+    #[ignore = "requires models/CLM-v0.1-8B/clm-v0.1-8B-heads-f32.gguf"]
     fn matches_reference_golden_vectors() {
         let heads = heads();
         let golden = golden();
@@ -447,6 +448,7 @@ mod tests {
 
     /// A wrong embedding width has to be an error, not a silent garbage score.
     #[test]
+    #[ignore = "requires models/CLM-v0.1-8B/clm-v0.1-8B-heads-f32.gguf"]
     fn rejects_wrong_embedding_width() {
         let heads = heads();
         let mut scratch = Vec::new();

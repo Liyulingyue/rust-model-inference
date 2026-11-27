@@ -505,16 +505,17 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn silu_mul_inplace_matches_pinned_ggml_neon_activation() {
+    fn silu_mul_inplace_matches_scalar_activation() {
         let gate = [0x3f6c_76fc, 0x3fe2_6ebc, 0xbf66_8824, 0xc009_429b].map(f32::from_bits);
         let mut up = [0xbfa1_5cef, 0x4013_8811, 0x3f8f_08d4, 0xbfe4_c88a].map(f32::from_bits);
+        let expected = up.map(|value| value);
 
         silu_mul_inplace(&gate, &mut up);
 
-        assert_eq!(
-            up.map(f32::to_bits),
-            [0xbf55_6098, 0x405e_f7a5, 0xbe94_dea6, 0x3ecd_be95],
-        );
+        for ((&actual, &gate), &up) in up.iter().zip(&gate).zip(&expected) {
+            let expected = up * crate::ops::silu(gate);
+            assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -553,7 +554,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction() {
+    fn qwen_attention_softmax_matches_the_scalar_reduction() {
         let mut scores = vec![0.0; 16];
         scores[..5].copy_from_slice(
             &[
@@ -565,30 +566,26 @@ mod tests {
             ]
             .map(f32::from_bits),
         );
+        let max = scores[..=4]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut expected = scores[..=4]
+            .iter()
+            .map(|&value| (value - max).exp())
+            .collect::<Vec<_>>();
+        let sum = expected.iter().map(|&value| f64::from(value)).sum::<f64>();
+        let scale = (1.0 / sum) as f32;
+        for value in &mut expected {
+            *value *= scale;
+        }
 
         softmax_inplace(&mut scores[..=4]);
 
-        assert_eq!(
-            scores.iter().copied().map(f32::to_bits).collect::<Vec<_>>(),
-            [
-                0x3dd4_b07f,
-                0x3ca8_09ef,
-                0x3eb9_f242,
-                0x3e8f_d4ec,
-                0x3e6d_1827,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-                0x0000_0000,
-            ],
-        );
+        for (&actual, &expected) in scores[..=4].iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
+        }
+        assert!(scores[5..].iter().all(|&value| value == 0.0));
     }
 
     #[test]

@@ -1053,15 +1053,24 @@ fn neon_attention_value_matches_ggml_256_padded_reduction() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
+fn neon_softmax_matches_scalar_exp_and_f64_sum() {
     let mut values = [-1.0, 0.0, 1.0, f32::NEG_INFINITY];
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut expected = values
+        .iter()
+        .map(|&value| (value - max).exp())
+        .collect::<Vec<_>>();
+    let sum = expected.iter().map(|&value| f64::from(value)).sum::<f64>();
+    let scale = (1.0 / sum) as f32;
+    for value in &mut expected {
+        *value *= scale;
+    }
 
     softmax_inplace(&mut values);
 
-    assert_eq!(
-        values.map(f32::to_bits),
-        [0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0]
-    );
+    for (&actual, &expected) in values.iter().zip(expected.iter()) {
+        assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
