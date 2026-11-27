@@ -2377,6 +2377,9 @@ HOST→COMPUTE barrier 时能否看见写入只取决于速度；旧 kernel 每�
 
 ### TODO-036: Qwen3-4B Q8_0 过不了 model contract，而 0.6B 与 8B 能过
 
+**状态：已修复并验证**（2026-11-23 softmax 的 glibc expf 逐位转录 +
+2026-11-27 rms_norm 的 CPU f64 求和顺序转录，4B/0.6B 全部合同通过）。
+
 `test-unified3`（unified-compute）上用 `--gpu --kv-cache f16` 跑 Qwen3 的三个
 Q8_0 尺寸，model contract（`src/models/qwen3/trunk/session.rs`，
 abs 2e-3 + rel 2e-3）的结果**按尺寸分裂**：
@@ -2454,11 +2457,47 @@ contract 失败 → CPU 回退，而不是 pipeline 创建整体失败）。
 contract 通过（`[contract] KV bit-exact across all layers`）；lib 套件
 1815 pass / 25 pre-existing fail（与基线同名集合）。
 
-遗留（同 exp 类、后续单独处理）：`attention_values.comp` / `timestral.comp`
-仍直接调 `exp_accurate`（当前路径未触发差异，bisect 证明 values kernel 在
-PreparedF16 下逐位一致）；`silu_exp.glsl` 尾部 `exp_reference` 走
-`exp_accurate`（spec constant 默认 false）与 CPU 的 glibc expf 同属潜在
-类；4B 原始 Q8_0 案例另有 `q8_matvec` 5.96e-8 的真实 kernel 差异待收口。
+**2026-11-27 4B 剩余偏差收口（rms_norm 的 f32 归约 vs CPU 的 f64 累加）**：
+softmax 修复后 4B Q8_0 仍失败（rel 0.0058），首发散收敛到 layer 0、row 2 的
+q（qkv 链），行 0-1 逐位一致。两级证据把根因钉死：
+
+- **q8 量化与 matmul 双双无罪**：新增 Q8_0 replay harness
+  （`src/vulkan/matmul_iq.rs`，
+  `q8_0_projection_replays_dumped_activations_bitwise`，
+  `RMI_Q8_REPLAY_DIR`/`RMI_Q8_REPLAY_LAYER` 指向 t4b 的 CPU normed dump，
+  真实 4B `blk.0.attn_q.weight` 权重）：GPU（片上量化 + grouped dp4a mode 8）
+  与 CPU（`quantize_q8_0_into` + AVX2 kernel）在全部 381 行 × 4096 输出
+  **逐位一致**。顺带证伪了 chunk 嫌疑：80 块 = 64+16 分块只是 staging，
+  `acc[8]` 跨 chunk 顺序累加无重结合；avxvnni kernel 本就不在生产链
+  （dispatch 文档：比 AVX2 慢 2.2-2.4×，故意的）。
+- **根因在 rms_norm**：GPU 侧补了 `RmsNorm(Attn)` 后的 normed 快照
+  （`dense.rs` + `TokenCommands::flush_in_place`；FFN norm 会覆盖同一 arena
+  区域，attention-normed 只有两次 norm 之间可观测）：layer 0 normed 有 24% 值
+  差 1 ULP——**GPU 的 64-lane f32 Kahan 树与 CPU `sum_sq_f32_avx2` 的
+  f64 顺序累加是不同的求和**。多数 ULP 差被 q8 量化吸收（所以行 0-1 的 q
+  仍逐位一致），row 2 越过一个量化 tie、翻转一个字节 → 整数点积变化 →
+  rel 6e-4 随 36 层复利成 KV/logit mismatch。宽度 1024（0.6B）时两种求和
+  恰好一致，所以 0.6B 全过——「4B 特有」的真相是宽度 2560 才暴露。
+
+修复：`rms_norm.comp` 归约改为 lane 0 串行复刻 CPU AVX2 kernel 的精确顺序
+（f32 平方 widen 到 double、每 8 元组 `((s0+s2)+(s1+s3))+((s4+s6)+(s5+s7))`、
+组贡献顺序累加进单一 double acc、f64 除法后一次舍入到 f32、再加 eps）；
+`shaderFloat64` gate（pipeline 占位 + recorder 拒绝）与 softmax 同模式；
+`check_rms_norm_exact` 扩到 1024/2560 双宽度（4B 形状此前无覆盖）。
+
+验证：4B Q8_0 `[contract] KV bit-exact across all layers` 且 logits 通过
+（修复前 rel 0.0058）；layer 0 normed/q/x dump 全部 0 差异；0.6B
+Q8_0 / UD-Q3_K_XL / UD-Q2_K_XL 合同保持通过；lib 套件 1829 pass /
+21 pre-existing fail（新增 harness 无 env 时跳过）；`cargo fmt` 干净。
+perf 代价：归约回到 lane 0 串行（64-lane 树曾是 perf 优化但破坏位对齐），
+每行约 320 个 double 加法，相对层内 matmul 可忽略。
+
+遗留更新：原「`q8_matvec` 5.96e-8 真实 kernel 差异」一项被 harness 证伪为
+grouped-vs-scalar-oracle 的重结合差（生产 GPU mode 8 与生产 CPU AVX2 逐位
+一致），从清单移除；另记 lib 测试进程**退出时**段错误（驱动 teardown 竞态，
+约 1/5~2/8 概率）在基线与修复版同样出现（gdb 显示崩溃在驱动内部线程），
+预存问题、与本次无关。其余遗留（attention_values/timestral 的 exp_accurate、
+silu 尾部 exp_reference）不变。
 
 ### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
 

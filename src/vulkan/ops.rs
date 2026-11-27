@@ -1451,6 +1451,18 @@ impl<'a> TokenCommands<'a> {
             guard: self.guard,
         })
     }
+
+    /// In-place `flush`: submit, wait, and re-begin the command buffer while
+    /// holding the same `TokenCommands`. For callers that hold the commands
+    /// by mutable reference and need to observe intermediate arena state
+    /// mid-recording (the layer-0 trace snapshots read the arena between
+    /// the attention norm and the projection that consumes it).
+    pub(crate) fn flush_in_place(&mut self) -> Result<(), VulkanError> {
+        self.context.submit_commands(&mut self.guard)?;
+        self.context.begin_commands(&mut self.guard)?;
+        self.command = self.context.command_buffer;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3867,6 +3879,7 @@ pub(crate) fn build_operator_pipelines(
                 NEMOTRON_H_SSM_DT
                     | NEMOTRON_H_SSM_NORM
                     | NEMOTRON_MOE_ROUTE
+                    | RMS_NORM
                     | SOFTMAX
                     | SOFTMAX_F32
             ) && !context.shader_float64
@@ -3874,7 +3887,9 @@ pub(crate) fn build_operator_pipelines(
                 // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
                 // Their recorders reject unsupported devices before this placeholder is used.
                 // The softmax kernels transcribe glibc's `expf` in doubles
-                // for CPU parity, so they follow the same rule.
+                // for CPU parity, so they follow the same rule; the RMS norm
+                // accumulates its sum of squares in doubles in the CPU
+                // kernel's order, for the same reason.
                 ATTENTION_SCORES_SHADER
             } else {
                 *shader
@@ -4522,6 +4537,11 @@ impl<'a> Qwen3Ops<'a> {
         input_stride: usize,
         output_stride: usize,
     ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "rms_norm requires shaderFloat64 (CPU double accumulator parity)".into(),
+            ));
+        }
         bindings.require(0, f32_bytes(count)?, "RMS norm weight")?;
         let push = [
             self.f32_rows_word(input, rows, input_stride, count, "RMS norm input")?,
@@ -10922,8 +10942,20 @@ fn check_rope_exact(context: &VulkanContext) -> Result<(), String> {
 }
 
 fn check_rms_norm_exact(context: &VulkanContext) -> Result<(), String> {
-    const WIDTH: usize = 1024;
-    const ROWS: usize = 129;
+    // 1024 is the Qwen3-0.6B width; 2560 is the Qwen3-4B width where the
+    // f32 reduction used to drift an ULP against the CPU's double
+    // accumulator often enough to flip q8 quantization bytes.
+    for width in [1024usize, 2560usize] {
+        check_rms_norm_exact_width(context, width, 129)?;
+    }
+    Ok(())
+}
+
+fn check_rms_norm_exact_width(
+    context: &VulkanContext,
+    WIDTH: usize,
+    ROWS: usize,
+) -> Result<(), String> {
     let layout = ArenaLayout::build_rows(WIDTH, WIDTH, 1, 1, 32, 1, 1, 1, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let input: Vec<_> = (0..WIDTH * ROWS)
