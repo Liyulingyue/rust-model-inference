@@ -34,9 +34,18 @@ The primary config and each required tensor's shape/type/finite values are check
 
 ```bash
 cargo build --locked --release --features vulkan
+# The released safetensors directory: the components sit next to it and
+# --components points at their parent.
 # Omit --steps/--cfg/--num-gaussians for the official 50-step/3/262144 defaults.
 target/release/rust-model-inference \
   --image-to-3d --model models/idol --components models \
+  --image object.png --out object.ply \
+  --geometry-mode synthetic --seed 42 --compute vulkan --threads 16
+
+# The self-contained GGUF: one file that carries the six components and the
+# pinned configs. It is a file, not a directory, so --components is refused.
+target/release/rust-model-inference \
+  --image-to-3d --model models/idol-original.gguf \
   --image object.png --out object.ply \
   --geometry-mode synthetic --seed 42 --compute vulkan --threads 16
 
@@ -50,7 +59,7 @@ curl --fail-with-body http://127.0.0.1:18089/v1/3d/generations \
   -o object.ply
 ```
 
-The standalone `rust-model-server` binary accepts the same server flags without `--serve`. `--components` defaults to the model directory's parent. `--geometry-mode real` uses the official 1.7 crop margin; `synthetic` uses 1.2. A nonopaque RGBA image supplies its own alpha; opaque images run native BiRefNet. Output creation is atomic and refuses overwrites without `--overwrite`. CLI prints the camera JSON to stderr; HTTP returns it in `x-camera` and the PLY body as `application/octet-stream`.
+The standalone `rust-model-server` binary accepts the same server flags without `--serve`. `--components` defaults to the model directory's parent and applies to the directory form only — the self-contained GGUF carries its six components and the pinned configs itself, and refuses the flag. `--geometry-mode real` uses the official 1.7 crop margin; `synthetic` uses 1.2. A nonopaque RGBA image supplies its own alpha; opaque images run native BiRefNet. Output creation is atomic and refuses overwrites without `--overwrite`. CLI prints the camera JSON to stderr; HTTP returns it in `x-camera` and the PLY body as `application/octet-stream`.
 
 The device path is partial and the runtime line says so: a projection only reaches the device when it clears the shape gate in `ops::kernel::vulkan`, and the denoiser's `cam`, `time_in`, `time_out` and `ada` are single rows and stay on the CPU. `--compute vulkan` is strict: a device result that stays wrong after the retries is an error rather than a silent CPU fallback. `--compute auto` repairs that one projection or attention on the CPU and leaves the device usable. `RMI_GPU_ATTENTION_OFF=1` takes the attention off the device without changing the rest of the path.
 
