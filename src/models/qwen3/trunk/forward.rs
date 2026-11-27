@@ -16,21 +16,24 @@ use super::config::{Qwen3Config, Qwen3Rope};
 use super::positions::qwen_text_positions;
 use super::session::Qwen3Session;
 use super::util::{
-    check_allocation, checked_product, checked_session_capacity, validate_generation,
-    validate_input_shapes, validate_token_ids,
+    checked_product, checked_session_capacity, validate_generation, validate_token_ids,
 };
 use super::weights::{Qwen3LayerWeights, Qwen3Model};
 use crate::app::cli::resolve_thread_count;
-use crate::core::scratchpad::{ExecutionScratchpad, KvArch, KvFormat, KvLifecycle, KvState};
+use crate::compute::{
+    linear::{LinearBinding, LinearExecutor, LinearMode},
+    ComputePolicy,
+};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
-use crate::ops::kernel::{Kernel, Weight};
+use crate::ops::rope::rope_neox_inplace;
 use crate::ops::*;
 use crate::prompt::{build_qwen_chat_prompt, QwenMessage};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::io::{self, Write};
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -110,6 +113,29 @@ pub(super) fn forward_moe_token(
             *value += probability * *expert_value;
         }
     }
+    let shared_ffn = config.moe.map(|value| value.shared_expert_ffn).unwrap_or(0);
+    if shared_ffn != 0 {
+        let mut shared_gate = vec![0.0; shared_ffn];
+        let mut shared_up = vec![0.0; shared_ffn];
+        layer
+            .w_gate
+            .kernel
+            .forward(input, &mut shared_gate, input.len(), shared_ffn);
+        layer
+            .w_up
+            .kernel
+            .forward(input, &mut shared_up, input.len(), shared_ffn);
+        for (gate_value, up_value) in shared_gate.iter_mut().zip(&shared_up) {
+            *gate_value = silu(*gate_value) * *up_value;
+        }
+        layer
+            .w_down
+            .kernel
+            .forward(&shared_gate, &mut down_buf, shared_ffn, output.len());
+        for (value, shared_value) in output.iter_mut().zip(&down_buf) {
+            *value += *shared_value;
+        }
+    }
     Ok(())
 }
 
@@ -156,15 +182,16 @@ impl Qwen3Model {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
     ) -> Result<Qwen3Generation, String> {
-        self.generate_with_asr_trace(input, options, false)
+        self.generate_with_asr_trace(input, options, false, 1.0)
     }
 
     pub(crate) fn generate_asr(
         &self,
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
+        repetition_penalty: f32,
     ) -> Result<Qwen3Generation, String> {
-        self.generate_with_asr_trace(input, options, true)
+        self.generate_with_asr_trace(input, options, true, repetition_penalty)
     }
 
     fn generate_with_asr_trace(
@@ -172,6 +199,7 @@ impl Qwen3Model {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
         asr_trace: bool,
+        repetition_penalty: f32,
     ) -> Result<Qwen3Generation, String> {
         validate_generation(self, &input, &options)?;
         let capacity = checked_session_capacity(
@@ -179,7 +207,12 @@ impl Qwen3Model {
             options.max_new_tokens,
             self.config.n_ctx,
         )?;
-        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(input, options, asr_trace)
+        Qwen3Session::new(self, capacity)?.generate_with_asr_trace(
+            input,
+            options,
+            asr_trace,
+            repetition_penalty,
+        )
     }
 
     /// Hidden-state extraction entry point. Used by VL/ASR/TTS/Z-Image
@@ -192,12 +225,135 @@ impl Qwen3Model {
     ) -> Result<Vec<f32>, String> {
         text_encode(self, token_ids, positions)
     }
+
+    pub fn text_encode_embeddings(
+        &self,
+        embeddings: Vec<f32>,
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+    ) -> Result<Vec<f32>, String> {
+        if positions.len() != key_mask.len()
+            || embeddings.len() != positions.len().saturating_mul(self.config.n_embd)
+            || key_mask.first() != Some(&true)
+        {
+            return Err("Invalid Qwen text embeddings or attention mask".into());
+        }
+        let n_tokens = positions.len();
+        text_encode_forward(self, &embeddings, n_tokens, positions, Some(key_mask), &[])
+    }
+
+    /// Token-major concatenation of selected pre-output-norm hidden layers.
+    /// Layer numbers follow Transformers' `hidden_states` (embedding is zero).
+    pub(crate) fn text_encode_hidden_layers(
+        &self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+        layers: &[usize],
+    ) -> Result<Vec<f32>, String> {
+        if token_ids.len() != positions.len()
+            || token_ids.len() != key_mask.len()
+            || key_mask.first() != Some(&true)
+            || layers.is_empty()
+            || layers[0] == 0
+            || layers.windows(2).any(|w| w[0] >= w[1])
+            || *layers.last().unwrap() >= self.config.n_layer
+        {
+            return Err("Invalid Qwen hidden-layer extraction request".into());
+        }
+        let embeddings = self.embed_tokens(token_ids)?;
+        text_encode_forward(
+            self,
+            &embeddings,
+            token_ids.len(),
+            positions,
+            Some(key_mask),
+            layers,
+        )
+    }
+
+    /// Token-major concatenation of selected pre-output-norm hidden layers with
+    /// audio embeddings substituted at `<|AUDIO|>` positions.
+    ///
+    /// Layer numbers follow Transformers' `hidden_states` numbering (the
+    /// embedding output is layer 0), so `1..=n_layer` selects every transformer
+    /// layer. Unlike [`Self::text_encode_hidden_layers`] this accepts the last
+    /// layer (`n_layer`), which is what AuK's ELMo-style layer fusion needs.
+    pub(crate) fn text_encode_hidden_layers_with_audio(
+        &self,
+        token_ids: &[u32],
+        positions: &[[usize; 4]],
+        key_mask: &[bool],
+        audio_replacements: &[(usize, &[f32])],
+        layers: &[usize],
+    ) -> Result<Vec<f32>, String> {
+        validate_token_ids(token_ids, self.config.vocab)?;
+        let n_tokens = token_ids.len();
+        if positions.len() != n_tokens
+            || key_mask.len() != n_tokens
+            || key_mask.first() != Some(&true)
+            || layers.is_empty()
+            || layers[0] == 0
+            || layers.windows(2).any(|w| w[0] >= w[1])
+            || *layers.last().unwrap() > self.config.n_layer
+        {
+            return Err("Invalid Qwen hidden-layer extraction request".into());
+        }
+        let n_embd = self.config.n_embd;
+        let mut embeddings = self.embed_tokens(token_ids)?;
+        for (pos, audio_embed) in audio_replacements {
+            if *pos >= n_tokens {
+                return Err(format!(
+                    "audio_replacement position {pos} out of bounds (n_tokens={n_tokens})"
+                ));
+            }
+            if audio_embed.len() != n_embd {
+                return Err(format!(
+                    "audio embedding length {} != n_embd={n_embd}",
+                    audio_embed.len()
+                ));
+            }
+            let off = *pos * n_embd;
+            embeddings[off..off + n_embd].copy_from_slice(audio_embed);
+        }
+        text_encode_forward(
+            self,
+            &embeddings,
+            n_tokens,
+            positions,
+            Some(key_mask),
+            layers,
+        )
+    }
 }
 
 pub fn text_encode(
     model: &Qwen3Model,
     token_ids: &[u32],
     positions: &[[usize; 4]],
+) -> Result<Vec<f32>, String> {
+    let n_tokens = token_ids.len();
+    if n_tokens == 0 {
+        return Ok(Vec::new());
+    }
+    let embeddings = model.embed_tokens(token_ids)?;
+    text_encode_forward(model, &embeddings, n_tokens, positions, None, &[])
+}
+
+/// Qwen2.5-Omni CFMEdit extension: same as [`text_encode`] but with audio
+/// embeddings substituted for specific token positions.
+///
+/// `audio_replacements` is a list of `(position_index, audio_embedding_2048d)`
+/// pairs. For each pair, the embedding at that token position is overwritten
+/// with the corresponding audio tower output (also 2048-dim). The transformer
+/// then runs over the substituted sequence, so text and audio tokens attend
+/// to each other inside the Qwen trunk -- matching audio.cpp's
+/// `conditioning.cpp::build_text_conditioning` behavior.
+pub fn text_encode_with_audio(
+    model: &Qwen3Model,
+    token_ids: &[u32],
+    positions: &[[usize; 4]],
+    audio_replacements: &[(usize, &[f32])],
 ) -> Result<Vec<f32>, String> {
     validate_token_ids(token_ids, model.config.vocab)?;
     let n_tokens = token_ids.len();
@@ -211,15 +367,88 @@ pub fn text_encode(
     if n_tokens == 0 {
         return Ok(Vec::new());
     }
+    let n_embd = model.config.n_embd;
+    let mut embeddings = model.embed_tokens(token_ids)?;
+    for (pos, audio_embed) in audio_replacements {
+        if *pos >= n_tokens {
+            return Err(format!(
+                "audio_replacement position {pos} out of bounds (n_tokens={n_tokens})"
+            ));
+        }
+        if audio_embed.len() != n_embd {
+            return Err(format!(
+                "audio embedding length {} != n_embd={n_embd}",
+                audio_embed.len()
+            ));
+        }
+        let off = *pos * n_embd;
+        embeddings[off..off + n_embd].copy_from_slice(audio_embed);
+    }
+    text_encode_forward(model, &embeddings, n_tokens, positions, None, &[])
+}
 
-    let embeddings = model.embed_tokens(token_ids)?;
+const PROJECTION_ROWS: usize = 128;
+
+/// Keep weight uploads across layers and let the shared executor select the backend.
+fn project_tokens<const N: usize>(
+    executor: &mut LinearExecutor<'_, '_>,
+    input: &[f32],
+    mut projections: [(&crate::ops::kernel::Weight<'_>, &mut [f32], Option<&[f32]>); N],
+) -> Result<(), String> {
+    let n_in = projections[0].0.n_in;
+    let rows = input.len() / n_in;
+    let mut ids = [executor
+        .id_for(projections[0].0)
+        .map_err(|e| e.to_string())?; N];
+    for (id, (weight, _, _)) in ids.iter_mut().zip(&projections) {
+        *id = executor.id_for(weight).map_err(|e| e.to_string())?;
+    }
+    for start in (0..rows).step_by(PROJECTION_ROWS) {
+        let end = (start + PROJECTION_ROWS).min(rows);
+        executor
+            .run_group(
+                ids,
+                &input[start * n_in..end * n_in],
+                end - start,
+                projections.each_mut().map(|(weight, output, _)| {
+                    &mut output[start * weight.n_out..end * weight.n_out]
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    for (weight, output, bias) in projections {
+        if let Some(bias) = bias {
+            for row in output.chunks_exact_mut(weight.n_out) {
+                for (value, bias) in row.iter_mut().zip(bias) {
+                    *value += *bias;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shared forward path for [`text_encode`] and [`text_encode_with_audio`].
+/// Operates on pre-built per-token embeddings of shape `[n_tokens, n_embd]`.
+///
+/// `key_mask` masks out padded keys; causal attention always hides future keys.
+fn text_encode_forward(
+    model: &Qwen3Model,
+    embeddings: &[f32],
+    n_tokens: usize,
+    positions: &[[usize; 4]],
+    key_mask: Option<&[bool]>,
+    layers: &[usize],
+) -> Result<Vec<f32>, String> {
     #[cfg(feature = "vulkan")]
     let mut full_model_gpu_failed = false;
     #[cfg(feature = "vulkan")]
-    if positions
-        .iter()
-        .enumerate()
-        .all(|(index, position)| position[0] == index)
+    if layers.is_empty()
+        && key_mask.is_none()
+        && positions
+            .iter()
+            .enumerate()
+            .all(|(index, position)| position[0] == index)
     {
         if let Some(context) = crate::ops::get_vulkan_context() {
             match text_encode_vulkan(model, &embeddings, n_tokens, context) {
@@ -246,9 +475,36 @@ pub fn text_encode(
     let group_size = cfg.n_head / cfg.n_head_kv;
     let kq_scale = 1.0 / (cfg.n_embd_head_k as f32).sqrt();
 
-    let mut hidden = embeddings;
+    let mut hidden = embeddings.to_vec();
+    let mut collected = if layers.is_empty() {
+        Vec::new()
+    } else {
+        vec![0.0; checked_product("hidden-layer output", hidden.len(), layers.len())?]
+    };
 
-    for layer_idx in 0..cfg.n_layer {
+    let depth = layers.last().copied().unwrap_or(cfg.n_layer);
+    let bindings = model.layers[..depth]
+        .iter()
+        .flat_map(|layer| {
+            let mut weights = vec![&layer.wq, &layer.wk, &layer.wv, &layer.wo];
+            if layer.moe_router.is_none() {
+                weights.extend([&layer.w_gate, &layer.w_up, &layer.w_down]);
+            }
+            weights.into_iter().map(|weight| LinearBinding {
+                weight,
+                mode: LinearMode::Prepared,
+            })
+        })
+        .collect();
+    let mut executor = LinearExecutor::new(
+        ComputePolicy::legacy(),
+        bindings,
+        PROJECTION_ROWS,
+        model.pool(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    for layer_idx in 0..depth {
         let layer = &model.layers[layer_idx];
 
         let mut normed = vec![0.0; n_tokens * cfg.n_embd];
@@ -265,66 +521,15 @@ pub fn text_encode(
         let mut q_all = vec![0.0; n_tokens * n_embd_q];
         let mut k_all = vec![0.0; n_tokens * n_embd_k];
         let mut v_all = vec![0.0; n_tokens * n_embd_v];
-        for tok in 0..n_tokens {
-            let norm_row = &normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-            let q_off = tok * n_embd_q;
-            let k_off = tok * n_embd_k;
-            let v_off = tok * n_embd_v;
-
-            let blocks = (cfg.n_embd + 31) / 32;
-            let mut q8_buf = vec![0u8; cfg.n_embd];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(norm_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-
-            layer.wq.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut q_all[q_off..q_off + n_embd_q],
-                cfg.n_embd,
-                n_embd_q,
-                0,
-                1,
-            );
-            layer.wk.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut k_all[k_off..k_off + n_embd_k],
-                cfg.n_embd,
-                n_embd_k,
-                0,
-                1,
-            );
-            layer.wv.kernel.forward_prepared(
-                norm_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut v_all[v_off..v_off + n_embd_v],
-                cfg.n_embd,
-                n_embd_v,
-                0,
-                1,
-            );
-            if let Some(bias) = layer.q_bias.as_deref() {
-                for (value, bias) in q_all[q_off..q_off + n_embd_q].iter_mut().zip(bias) {
-                    *value += *bias;
-                }
-            }
-            if let Some(bias) = layer.k_bias.as_deref() {
-                for (value, bias) in k_all[k_off..k_off + n_embd_k].iter_mut().zip(bias) {
-                    *value += *bias;
-                }
-            }
-            if let Some(bias) = layer.v_bias.as_deref() {
-                for (value, bias) in v_all[v_off..v_off + n_embd_v].iter_mut().zip(bias) {
-                    *value += *bias;
-                }
-            }
-        }
+        project_tokens(
+            &mut executor,
+            &normed,
+            [
+                (&layer.wq, &mut q_all, layer.q_bias.as_deref()),
+                (&layer.wk, &mut k_all, layer.k_bias.as_deref()),
+                (&layer.wv, &mut v_all, layer.v_bias.as_deref()),
+            ],
+        )?;
 
         if let (Some(q_norm), Some(k_norm)) = (layer.q_norm.as_deref(), layer.k_norm.as_deref()) {
             apply_qk_norms(
@@ -349,6 +554,9 @@ pub fn text_encode(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(q_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(q_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             q_slice,
@@ -368,6 +576,9 @@ pub fn text_encode(
                     Qwen3Rope::Neox => {
                         rope_neox_inplace(k_slice, pos[0], cfg.n_embd_head_k, cfg.freq_base);
                     }
+                    Qwen3Rope::Mrope { sections } => {
+                        rope_mrope(k_slice, pos, sections, cfg.n_embd_head_k, cfg.freq_base);
+                    }
                     Qwen3Rope::Interleaved { sections, n_dims } => {
                         rope_mrope_interleaved(
                             k_slice,
@@ -383,6 +594,7 @@ pub fn text_encode(
         }
 
         let mut attn_out = vec![0.0; n_tokens * n_attn];
+        let scalar_qwen2vl = cfg.architecture == "qwen2vl" && crate::ops::scalar_mode();
         for head in 0..cfg.n_head {
             let kv_head = head / group_size;
             let q_off = head * cfg.n_embd_head_k;
@@ -394,6 +606,9 @@ pub fn text_encode(
                 let mut max_val = f32::NEG_INFINITY;
                 let mut scores = vec![0.0; n_tokens];
                 for j in 0..=i {
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
                     let q_row =
                         &q_all[i * n_embd_q + q_off..i * n_embd_q + q_off + cfg.n_embd_head_k];
                     let k_row =
@@ -404,44 +619,64 @@ pub fn text_encode(
                     }
                 }
                 let mut exp_sum = 0.0f32;
+                let mut exp_sum_exact = 0.0f64;
                 for j in 0..=i {
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
                     scores[j] = (scores[j] - max_val).exp();
-                    exp_sum += scores[j];
+                    if scalar_qwen2vl {
+                        exp_sum_exact += scores[j] as f64;
+                    } else {
+                        exp_sum += scores[j];
+                    }
                 }
+                let inv_sum = if scalar_qwen2vl {
+                    (1.0f64 / exp_sum_exact) as f32
+                } else {
+                    0.0
+                };
                 for j in 0..=i {
-                    scores[j] /= exp_sum;
+                    if key_mask.is_some_and(|mask| !mask[j]) {
+                        continue;
+                    }
+                    if scalar_qwen2vl {
+                        scores[j] *= inv_sum;
+                    } else {
+                        scores[j] /= exp_sum;
+                    }
                 }
                 for dim in 0..cfg.n_embd_head_v {
                     let mut sum = 0.0f32;
+                    let mut sum_exact = 0.0f64;
                     for j in 0..=i {
+                        if key_mask.is_some_and(|mask| !mask[j]) {
+                            continue;
+                        }
                         let v_row =
                             &v_all[j * n_embd_v + v_off..j * n_embd_v + v_off + cfg.n_embd_head_v];
-                        sum += scores[j] * v_row[dim];
+                        let product = scores[j] * v_row[dim];
+                        if scalar_qwen2vl {
+                            sum_exact += product as f64;
+                        } else {
+                            sum += product;
+                        }
                     }
-                    attn_out[i * n_attn + attn_off + dim] = sum;
+                    attn_out[i * n_attn + attn_off + dim] = if scalar_qwen2vl {
+                        sum_exact as f32
+                    } else {
+                        sum
+                    };
                 }
             }
         }
 
         let mut attn_proj_out = vec![0.0; n_tokens * cfg.n_embd];
-        for tok in 0..n_tokens {
-            let attn_row = &attn_out[tok * n_attn..tok * n_attn + n_attn];
-            let blocks = (n_attn + 31) / 32;
-            let mut q8_buf = vec![0u8; n_attn];
-            let mut scale_buf = vec![0.0f32; blocks];
-            quantize_q8_0_into(attn_row, n_attn, &mut q8_buf, &mut scale_buf);
-            layer.wo.kernel.forward_prepared(
-                attn_row,
-                &q8_buf,
-                &scale_buf,
-                None,
-                &mut attn_proj_out[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                n_attn,
-                cfg.n_embd,
-                0,
-                1,
-            );
-        }
+        project_tokens(
+            &mut executor,
+            &attn_out,
+            [(&layer.wo, &mut attn_proj_out, None)],
+        )?;
 
         for tok in 0..n_tokens {
             let off = tok * cfg.n_embd;
@@ -474,35 +709,14 @@ pub fn text_encode(
         } else {
             let mut gate_buf = vec![0.0; n_tokens * cfg.n_ff];
             let mut up_buf = vec![0.0; n_tokens * cfg.n_ff];
-            for tok in 0..n_tokens {
-                let ffn_row = &ffn_normed[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd];
-                let blocks = (cfg.n_embd + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_embd];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(ffn_row, cfg.n_embd, &mut q8_buf, &mut scale_buf);
-                layer.w_gate.kernel.forward_prepared(
-                    ffn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-                layer.w_up.kernel.forward_prepared(
-                    ffn_row,
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut up_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_embd,
-                    cfg.n_ff,
-                    0,
-                    1,
-                );
-            }
+            project_tokens(
+                &mut executor,
+                &ffn_normed,
+                [
+                    (&layer.w_gate, &mut gate_buf, None),
+                    (&layer.w_up, &mut up_buf, None),
+                ],
+            )?;
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_ff;
@@ -511,29 +725,14 @@ pub fn text_encode(
                 }
             }
 
+            // The SwiGLU above wrote the activated product back into
+            // `gate_buf`, so that buffer is the down projection's input.
             let mut down_buf = vec![0.0; n_tokens * cfg.n_embd];
-            for tok in 0..n_tokens {
-                let blocks = (cfg.n_ff + 31) / 32;
-                let mut q8_buf = vec![0u8; cfg.n_ff];
-                let mut scale_buf = vec![0.0f32; blocks];
-                quantize_q8_0_into(
-                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    cfg.n_ff,
-                    &mut q8_buf,
-                    &mut scale_buf,
-                );
-                layer.w_down.kernel.forward_prepared(
-                    &gate_buf[tok * cfg.n_ff..tok * cfg.n_ff + cfg.n_ff],
-                    &q8_buf,
-                    &scale_buf,
-                    None,
-                    &mut down_buf[tok * cfg.n_embd..tok * cfg.n_embd + cfg.n_embd],
-                    cfg.n_ff,
-                    cfg.n_embd,
-                    0,
-                    1,
-                );
-            }
+            project_tokens(
+                &mut executor,
+                &gate_buf,
+                [(&layer.w_down, &mut down_buf, None)],
+            )?;
 
             for tok in 0..n_tokens {
                 let off = tok * cfg.n_embd;
@@ -542,8 +741,18 @@ pub fn text_encode(
                 }
             }
         }
+        if let Ok(index) = layers.binary_search(&(layer_idx + 1)) {
+            for tok in 0..n_tokens {
+                let dst = (tok * layers.len() + index) * cfg.n_embd;
+                collected[dst..dst + cfg.n_embd]
+                    .copy_from_slice(&hidden[tok * cfg.n_embd..(tok + 1) * cfg.n_embd]);
+            }
+        }
     }
 
+    if !layers.is_empty() {
+        return Ok(collected);
+    }
     let mut output = vec![0.0; n_tokens * cfg.n_embd];
     for tok in 0..n_tokens {
         let off = tok * cfg.n_embd;
@@ -623,6 +832,7 @@ pub fn run_shared_inference(
         n_threads_arg,
         available_threads,
     )));
+    let thinking = thinking || crate::models::qwen3::is_wevisone(source.as_ref());
     let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
     let input_tokens = build_qwen_chat_prompt(
         &tokenizer,
@@ -676,6 +886,8 @@ pub fn run_shared_inference(
         elapsed_ms,
         tokens_per_second,
     );
+    #[cfg(feature = "vulkan")]
+    crate::vulkan::dump_submit_trace();
     Ok(())
 }
 

@@ -2,6 +2,7 @@ use crate::core::tensor::TensorInfo;
 
 pub mod fuse;
 pub mod iq_tables;
+#[cfg(target_arch = "aarch64")]
 pub mod neon_k;
 pub mod q8_0;
 
@@ -58,26 +59,26 @@ fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
     }
 }
 
-#[derive(Clone)]
-pub struct BlockQ8K {
-    pub d: f32,
-    pub qs: [i8; 256],
-    pub bsums: [i16; 16],
-}
+pub use crate::core::tensor::BlockQ8K;
 
 pub fn quantize_row_q8_k(x: &[f32]) -> Vec<BlockQ8K> {
+    // AVX2 path requires n % QK_K == 0 (uses 256-wide SIMD lanes); fall back
+    // to scalar for non-block-aligned inputs (GLM-4 ffn_down is 13696 =
+    // 53*256 + 128, ffn_gate/up are aligned but ffn_down is not). The
+    // scalar path zero-pads the partial tail per commit bb81dd1.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         return unsafe { quantize_row_q8_k_avx2(x) };
     }
     quantize_row_q8_k_scalar(x)
 }
 
 pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     debug_assert!(buf.len() >= nb);
+    // Same dispatch: AVX2 requires block-aligned lengths.
     #[cfg(target_arch = "x86_64")]
-    if crate::ops::has_avx2_fma() {
+    if crate::ops::has_avx2_fma() && x.len() % QK_K == 0 {
         unsafe { quantize_row_q8_k_avx2_into(x, buf) };
         return;
     }
@@ -85,7 +86,7 @@ pub fn quantize_row_q8_k_into(x: &[f32], buf: &mut [BlockQ8K]) {
 }
 
 fn quantize_row_q8_k_scalar(x: &[f32]) -> Vec<BlockQ8K> {
-    let nb = x.len() / QK_K;
+    let nb = x.len().div_ceil(QK_K);
     let mut result = vec![
         BlockQ8K {
             d: 0.0,
@@ -105,53 +106,96 @@ fn nearest_int(value: f32) -> i32 {
     ((bits & 0x007f_ffff) as i32) - 0x0040_0000
 }
 
-fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
-    let n = x.len();
-    assert!(n % QK_K == 0);
-    let nb = n / QK_K;
-
-    for i in 0..nb {
-        let block = &x[i * QK_K..(i + 1) * QK_K];
-        let mut amax = 0.0f32;
-        let mut max_val = 0.0f32;
-        for j in 0..QK_K {
-            let ax = block[j].abs();
-            if ax > amax {
-                amax = ax;
-                max_val = block[j];
+/// GGML's signed Q8_K activation scale and ties-to-even rounding.
+/// Keep the existing unsigned activation contract for its other callers.
+pub(crate) fn quantize_row_q8_k_ggml_into(input: &[f32], output: &mut [BlockQ8K]) {
+    assert_eq!(input.len() % QK_K, 0);
+    assert_eq!(output.len(), input.len() / QK_K);
+    for (values, block) in input.chunks_exact(QK_K).zip(output) {
+        let mut max = 0f32;
+        for &x in values {
+            if x.abs() > max.abs() {
+                max = x;
             }
         }
-
-        if amax == 0.0 {
-            buf[i] = BlockQ8K {
-                d: 0.0,
-                qs: [0i8; 256],
-                bsums: [0i16; 16],
-            };
+        if max == 0. {
+            block.d = 0.;
+            block.qs.fill(0);
+            block.bsums.fill(0);
             continue;
         }
-
-        let iscale = -127.0f32 / max_val;
-        let mut qs = [0i8; 256];
-        for j in 0..QK_K {
-            let v = nearest_int(iscale * block[j]);
-            qs[j] = v.min(127) as i8;
+        let scale = -127. / max;
+        for (q, &x) in block.qs.iter_mut().zip(values) {
+            *q = nearest_int(scale * x).min(127) as i8;
         }
+        for (sum, values) in block.bsums.iter_mut().zip(block.qs.chunks_exact(16)) {
+            *sum = values.iter().map(|&x| x as i16).sum();
+        }
+        block.d = 1. / scale;
+    }
+}
 
-        let mut bsums = [0i16; 16];
-        for j in 0..16 {
-            let mut sum = 0i32;
-            for ii in 0..16 {
-                sum += qs[j * 16 + ii] as i32;
+fn quantize_row_q8_k_scalar_into(x: &[f32], buf: &mut [BlockQ8K]) {
+    let n = x.len();
+    // K-quants require `QK_K`-aligned input. Models whose n_embd /
+    // n_ff / vocab are not multiples of 256 (e.g. GLM-4 n_ff=13696
+    // leaves a 128-wide tail) need padding. Rather than panicking,
+    // round up the block count; the caller must size `buf` for the
+    // rounded count. We zero-pad the trailing partial block on the
+    // fly.
+    let nb = n.div_ceil(QK_K);
+    assert!(
+        buf.len() >= nb,
+        "quantize_row_q8_k_scalar_into: buf too small: have {}, need {}",
+        buf.len(),
+        nb
+    );
+    let mut padded = [0.0f32; QK_K];
+    for i in 0..nb {
+        let block_start = i * QK_K;
+        let block_end = (block_start + QK_K).min(n);
+        let len = block_end - block_start;
+        padded[..len].copy_from_slice(&x[block_start..block_end]);
+        // The tail `padded[len..]` may still carry data from a previous,
+        // longer block. Zero it so the partial-block padding is actually
+        // zero — otherwise the stale values get quantized into `qs` and
+        // corrupt the round-trip.
+        padded[len..].fill(0.0);
+        // ggml's `quantize_row_q8_K_ref` keeps the *signed* element with the
+        // largest magnitude and scales by the negative reciprocal of it, so a
+        // negative-dominant block comes out sign-flipped. A symmetric
+        // `amax / 127` quantizer produces the same magnitudes but the opposite
+        // signs, which shifts every Q6_K dot product.
+        let mut amax = 0.0f32;
+        let mut max = 0.0f32;
+        for &value in &padded[..len] {
+            let ax = value.abs();
+            if ax > amax {
+                amax = ax;
+                max = value;
             }
-            bsums[j] = sum as i16;
         }
-
-        buf[i] = BlockQ8K {
-            d: 1.0 / iscale,
-            qs,
-            bsums,
-        };
+        let block = &mut buf[i];
+        if amax == 0.0 {
+            block.d = 0.0;
+            block.qs = [0; QK_K];
+            block.bsums.fill(0);
+            continue;
+        }
+        let iscale = -127.0f32 / max;
+        for j in 0..QK_K {
+            let v = nearest_int(iscale * padded[j]);
+            block.qs[j] = v.min(127) as i8;
+        }
+        block.d = 1.0f32 / iscale;
+        block.bsums.fill(0);
+        for j in (0..QK_K).step_by(16) {
+            let mut acc = 0i32;
+            for k in 0..16 {
+                acc += block.qs[j + k] as i32;
+            }
+            block.bsums[j / 16] = acc as i16;
+        }
     }
 }
 
@@ -248,6 +292,10 @@ pub fn vec_dot_q4k_q8k(q4k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if crate::ops::has_avx2_fma() {
         return unsafe { vec_dot_q4k_q8k_avx2(q4k_data, q8k) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
+        return unsafe { neon_k::vec_dot_q4k_q8k_neon(q4k_data, q8k) };
     }
     vec_dot_q4k_q8k_scalar(q4k_data, q8k)
 }
@@ -358,6 +406,10 @@ pub fn vec_dot_q5k_q8k(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if crate::ops::has_avx2_fma() {
         return unsafe { vec_dot_q5k_q8k_avx2(q5k_data, q8k) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
+        return unsafe { neon_k::vec_dot_q5k_q8k_neon(q5k_data, q8k) };
     }
     vec_dot_q5k_q8k_scalar(q5k_data, q8k)
 }
@@ -520,7 +572,13 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
             let scales_off = boff + 4;
             let qs_off = boff + 4 + K_SCALE_SIZE;
 
-            let mut j = 0usize;
+            // ``q`` walks the 128-byte nibble payload four bytes-at-a-time in
+            // 32-byte groups, while each group also advances the output by 64
+            // values (32 from the low nibbles plus 32 from the high ones).
+            // Advancing both by 32 re-read the previous group and left
+            // sub-blocks 5..8 undecoded.
+            let mut q_off = 0usize;
+            let mut out_off = 0usize;
             let mut is = 0usize;
             while is < 8 {
                 let (sc1, m1) = get_scale_min_k4(is, &data[scales_off..scales_off + K_SCALE_SIZE]);
@@ -534,12 +592,13 @@ pub fn dequant_weight_q4k(data: &[u8], ti: &TensorInfo) -> Option<Vec<f32>> {
 
                 let block_out = out_base + bi * QK_K;
                 for l in 0..32 {
-                    let ql = data[qs_off + j + l];
-                    out[block_out + j + l] = d1 * (ql & 0xF) as f32 - m1_eff;
-                    out[block_out + j + l + 32] = d2 * (ql >> 4) as f32 - m2_eff;
+                    let ql = data[qs_off + q_off + l];
+                    out[block_out + out_off + l] = d1 * (ql & 0xF) as f32 - m1_eff;
+                    out[block_out + out_off + l + 32] = d2 * (ql >> 4) as f32 - m2_eff;
                 }
 
-                j += 32;
+                q_off += 32;
+                out_off += 64;
                 is += 2;
             }
         }
@@ -735,7 +794,7 @@ pub fn dequantize_row_q3_k(block_bytes: &[u8], output: &mut [f32]) {
         let mut q_off = 0usize;
         let mut out_idx = 0usize;
         for _n in 0..(QK_K / 128) {
-            for j in 0..4 {
+            for _j in 0..4 {
                 let scale_a = (scales_signed[is] as i32) - 32;
                 is += 1;
                 let dl_a = d_all * scale_a as f32;
@@ -951,7 +1010,7 @@ pub fn vec_dot_iq4_nl_q8k(iq4nl_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         return unsafe { self::avx2_k::vec_dot_iq4_nl_q8k_avx2(iq4nl_data, q8k) };
     }
     #[cfg(target_arch = "aarch64")]
-    if crate::ops::has_neon() {
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
         return unsafe { self::neon_k::vec_dot_iq4_nl_q8k_neon(iq4nl_data, q8k) };
     }
     vec_dot_iq4_nl_q8k_scalar(iq4nl_data, q8k)
@@ -1014,9 +1073,13 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         for ib32 in 0..8usize {
             let ls1: i64 = 2 * ((sc[ib32] & 0x0f) as i64) + 1;
             let ls2: i64 = 2 * ((sc[ib32] >> 4) as i64) + 1;
-            for inner in 0..2usize {
-                let q = u16::from_le_bytes([qs_bytes[qs_idx], qs_bytes[qs_idx + 1]]);
-                qs_idx += 2;
+            // Each 32-value group holds FOUR u16 lanes (4 grid rows); the
+            // lo/hi nibbles of `sc[ib32]` scale rows 0-1 / 2-3 respectively.
+            let mut sumi1: i64 = 0;
+            let mut sumi2: i64 = 0;
+            for l in 0..4usize {
+                let q =
+                    u16::from_le_bytes([qs_bytes[qs_idx + 2 * l], qs_bytes[qs_idx + 2 * l + 1]]);
                 let grid_idx = (q & 0x1ff) as usize;
                 let signs_idx = (q >> 9) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
@@ -1027,8 +1090,14 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
                     sumi += (grid_bytes[j] as i8 as i64) * (q8[q8_idx + j] as i64) * sign;
                 }
                 q8_idx += 8;
-                bsum += sumi * if inner == 0 { ls1 } else { ls2 };
+                if l < 2 {
+                    sumi1 += sumi;
+                } else {
+                    sumi2 += sumi;
+                }
             }
+            qs_idx += 8;
+            bsum += sumi1 * ls1 + sumi2 * ls2;
         }
         sumf += (d as f64) * (bsum as f64);
     }
@@ -1036,6 +1105,10 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq2_xs_q8k(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(iq2xs_data, q8k) };
+    }
     vec_dot_iq2_xs_q8k_scalar(iq2xs_data, q8k)
 }
 
@@ -1143,6 +1216,10 @@ pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq3_s_q8k(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(iq3s_data, q8k) };
+    }
     vec_dot_iq3_s_q8k_scalar(iq3s_data, q8k)
 }
 
@@ -1234,14 +1311,26 @@ pub fn vec_dot_iq4_xs_q8k(iq4xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq2_xxs_q8k(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(iq2xxs_data, q8k) };
+    }
     vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data, q8k)
 }
 
 pub fn vec_dot_iq2_s_q8k(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(iq2s_data, q8k) };
+    }
     vec_dot_iq2_s_q8k_scalar(iq2s_data, q8k)
 }
 
 pub fn vec_dot_iq3_xxs_q8k(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(iq3xxs_data, q8k) };
+    }
     vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data, q8k)
 }
 
@@ -1528,10 +1617,10 @@ pub fn dequantize_row_iq1_m(block_bytes: &[u8], output: &mut [f32]) {
             u16::from_le_bytes([sc_bytes[4], sc_bytes[5]]),
             u16::from_le_bytes([sc_bytes[6], sc_bytes[7]]),
         ];
-        let scale_u16 = ((sc_u16[0] >> 12)
+        let scale_u16 = (sc_u16[0] >> 12)
             | ((sc_u16[1] >> 8) & 0x00f0)
             | ((sc_u16[2] >> 4) & 0x0f00)
-            | (sc_u16[3] & 0xf000));
+            | (sc_u16[3] & 0xf000);
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0);
         let qs = &block_bytes[boff..boff + 32];
         let qh = &block_bytes[boff + 32..boff + 48];
@@ -1601,10 +1690,10 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
             u16::from_le_bytes([sc_bytes[4], sc_bytes[5]]),
             u16::from_le_bytes([sc_bytes[6], sc_bytes[7]]),
         ];
-        let scale_u16 = ((sc_u16[0] >> 12)
+        let scale_u16 = (sc_u16[0] >> 12)
             | ((sc_u16[1] >> 8) & 0x00f0)
             | ((sc_u16[2] >> 4) & 0x0f00)
-            | (sc_u16[3] & 0xf000));
+            | (sc_u16[3] & 0xf000);
         let d = f16_from_bytes(&scale_u16.to_le_bytes(), 0) * q8k[i].d;
         let qs = &iq1m_data[boff..boff + 32];
         let qh = &iq1m_data[boff + 32..boff + 48];
@@ -1677,6 +1766,10 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq1_m_q8k(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(iq1m_data, q8k) };
+    }
     vec_dot_iq1_m_q8k_scalar(iq1m_data, q8k)
 }
 
@@ -1754,6 +1847,10 @@ pub fn vec_dot_iq1_s_q8k_scalar(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq1_s_q8k(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(iq1s_data, q8k) };
+    }
     vec_dot_iq1_s_q8k_scalar(iq1s_data, q8k)
 }
 
@@ -1837,6 +1934,89 @@ pub fn dequant_q80_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32>
     out
 }
 
+/// Q5_1 row dequantization — a transcription of ggml's
+/// `dequantize_row_q5_1` (`src/ggml-quants.c`).
+///
+/// A Q5_1 block is 24 bytes and holds 32 elements:
+/// - 2-byte F16 scale (`d`)
+/// - 2-byte F16 minimum (`m`)
+/// - 4-byte high-bit table (`qh`, the 5-th bit of each element)
+/// - 16-byte nibble table (`qs`, the low four bits of each element)
+///
+/// The value of an element is `level * d + m`, where `level` is the
+/// unsigned 5-bit value (0..31). Note that Q5_1 has **no** `- 16`
+/// offset (that belongs to Q5_0) and that the 5-th bit of the upper
+/// nibble lives in `qh` bit `j + 16`.
+pub fn dequantize_row_q5_1(block_bytes: &[u8], output: &mut [f32]) {
+    let num_blocks = output.len() / 32;
+    for block_idx in 0..num_blocks {
+        let boff = block_idx * 24;
+        if boff + 24 > block_bytes.len() {
+            break;
+        }
+        let d = f16_from_bytes(block_bytes, boff);
+        let m = f16_from_bytes(block_bytes, boff + 2);
+        let qh = u32::from_le_bytes([
+            block_bytes[boff + 4],
+            block_bytes[boff + 5],
+            block_bytes[boff + 6],
+            block_bytes[boff + 7],
+        ]);
+        let out_base = block_idx * 32;
+        for j in 0..16 {
+            // `xh_0` is the 5-th bit of element `j`; `xh_1` is the 5-th
+            // bit of element `j + 16`, which sits 16 bits further up in
+            // `qh`.
+            let xh_0 = (((qh >> (j + 0)) << 4) & 0x10) as u8;
+            let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+            let x0 = (block_bytes[boff + 8 + j] & 0x0F) | xh_0;
+            let x1 = (block_bytes[boff + 8 + j] >> 4) | xh_1;
+            output[out_base + j] = x0 as f32 * d + m;
+            output[out_base + j + 16] = x1 as f32 * d + m;
+        }
+    }
+}
+
+/// Q5_0 row dequantization — a transcription of ggml's
+/// `dequantize_row_q5_0` (`src/ggml-quants.c`).
+///
+/// A Q5_0 block is 22 bytes and holds 32 elements:
+/// - 2-byte F16 scale (`d`)
+/// - 4-byte high-bit table (`qh`, the 5-th bit of each element)
+/// - 16-byte nibble table (`qs`, the low four bits of each element)
+///
+/// The value of an element is `(level - 16) * d`, where `level` is the
+/// unsigned 5-bit value (0..31). Unlike Q5_1 there is **no** per-block `m`
+/// field, and the `- 16` offset is what makes Q5_0 symmetric around zero.
+pub fn dequantize_row_q5_0(block_bytes: &[u8], output: &mut [f32]) {
+    let num_blocks = output.len() / 32;
+    for block_idx in 0..num_blocks {
+        let boff = block_idx * 22;
+        if boff + 22 > block_bytes.len() {
+            break;
+        }
+        let d = f16_from_bytes(block_bytes, boff);
+        let qh = u32::from_le_bytes([
+            block_bytes[boff + 2],
+            block_bytes[boff + 3],
+            block_bytes[boff + 4],
+            block_bytes[boff + 5],
+        ]);
+        let out_base = block_idx * 32;
+        for j in 0..16 {
+            // Same bit packing as Q5_1: the 5-th bit of element `j` is
+            // `qh` bit `j`, and the 5-th bit of element `j + 16` is `qh`
+            // bit `j + 16`.
+            let xh_0 = (((qh >> (j + 0)) << 4) & 0x10) as u8;
+            let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+            let x0 = ((block_bytes[boff + 6 + j] & 0x0F) | xh_0) as i32 - 16;
+            let x1 = ((block_bytes[boff + 6 + j] >> 4) | xh_1) as i32 - 16;
+            output[out_base + j] = x0 as f32 * d;
+            output[out_base + j + 16] = x1 as f32 * d;
+        }
+    }
+}
+
 pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
     let num_blocks = output.len() / QK_K;
     for block_idx in 0..num_blocks {
@@ -1882,6 +2062,51 @@ pub fn dequantize_row_q6_k(block_bytes: &[u8], output: &mut [f32]) {
             }
         }
     }
+}
+
+/// Whole-tensor Q4_K expansion, shaped like [`dequant_q6k_weight`].
+///
+/// The per-row helper reads from the byte offset onward, so the caller has to
+/// hand it the slice starting at this row rather than the whole buffer; the
+/// extra capacity is harmless because it stops after `QK_K` values.
+pub fn dequant_q4k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; n_rows * n_cols];
+    let blocks_per_row = n_cols / QK_K;
+    for row in 0..n_rows {
+        let byte_offset = row * blocks_per_row * BLOCK_Q4K_SIZE;
+        dequantize_row_q4_k(
+            &data[byte_offset..],
+            &mut out[row * n_cols..row * n_cols + n_cols],
+        );
+    }
+    out
+}
+
+/// Expand a whole block-quantized tensor to F32.
+///
+/// `n_cols` is the GGUF leading dim (the contiguous one the block format
+/// walks) and `n_rows` the product of the rest, which is how every tensor
+/// here is laid out. The caller has already validated the byte count against
+/// `GGMLType::checked_nbytes`, so the block geometry is consistent by the
+/// time this runs.
+pub fn dequantize_tensor(
+    data: &[u8],
+    ggml_type: crate::core::tensor::GGMLType,
+    n_cols: usize,
+    n_rows: usize,
+) -> Result<Vec<f32>, String> {
+    use crate::core::tensor::GGMLType;
+    Ok(match ggml_type {
+        GGMLType::Q8_0 => dequant_q80_weight(data, n_cols, n_rows),
+        GGMLType::Q4K => dequant_q4k_weight(data, n_cols, n_rows),
+        GGMLType::Q6K => dequant_q6k_weight(data, n_cols, n_rows),
+        other => {
+            return Err(format!(
+                "no whole-tensor decoder for {other:?}; the per-row decoders \
+                 cover the rest"
+            ))
+        }
+    })
 }
 
 pub fn dequant_q6k_weight(data: &[u8], n_cols: usize, n_rows: usize) -> Vec<f32> {
@@ -2213,7 +2438,7 @@ unsafe fn vec_dot_q5k_q8k_avx2(q5k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     let kmask3: u32 = 0x03030303;
 
     let m4 = _mm256_set1_epi8(0xF);
-    let mone = _mm256_set1_epi8(1);
+    let _mone = _mm256_set1_epi8(1);
 
     let scale_shuffle: [[u8; 32]; 8] = {
         let mut tbl = [[0u8; 32]; 8];
@@ -2355,6 +2580,19 @@ pub fn vec_dot_q6k_q8k(q6k_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if crate::ops::has_avx2_fma() {
         return unsafe { vec_dot_q6k_q8k_avx2(q6k_data, q8k) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() && std::arch::is_aarch64_feature_detected!("dotprod") {
+        // The dotprod kernel reorganizes the integer grouping for throughput;
+        // it is mathematically equivalent to the scalar reference but not
+        // bit-identical. The Vulkan self-check tolerates the difference.
+        return unsafe { neon_k::vec_dot_q6k_q8k_neon(q6k_data, q8k) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() {
+        // Fallback when dotprod is unavailable: the vmull kernel reproduces
+        // the scalar reduction exactly, at the cost of ~40 % throughput.
+        return unsafe { neon_k::vec_dot_q6k_q8k_neon_bits(q6k_data, q8k) };
     }
     vec_dot_q6k_q8k_scalar(q6k_data, q8k)
 }
@@ -2671,6 +2909,49 @@ mod avx2_parity {
             avx2,
             scalar,
             rel
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn q4k_neon_matches_scalar_multi_block() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        let mut weight = Vec::new();
+        for i in 0..4 {
+            let mut ql = [0u8; 128];
+            let mut qh = [0u8; 64];
+            for j in 0..128 {
+                ql[j] = ((i * 7 + j) % 16) as u8;
+            }
+            for j in 0..64 {
+                qh[j] = ((i + j * 3) % 4) as u8;
+            }
+            let scales: [i8; 16] = std::array::from_fn(|k| ((i * 3 + k) as i8) - 8);
+            weight.extend(make_q4k_block(
+                &ql,
+                &qh,
+                &scales,
+                0.01 + i as f32 * 0.1,
+                0.005,
+            ));
+        }
+        let input: Vec<f32> = (0..1024).map(|i| (i as f32 - 512.0) * 0.01).collect();
+        let q8k = block_q8k(&input);
+
+        let neon = unsafe { neon_k::vec_dot_q4k_q8k_neon(&weight, &q8k) };
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        eprintln!("q4k neon vs scalar: neon={neon} scalar={scalar}");
+        let diff = (neon - scalar).abs();
+        let rel = if scalar.abs() > 1e-3 {
+            diff / scalar.abs()
+        } else {
+            diff
+        };
+        assert!(
+            rel < 1e-3,
+            "q4k NEON diverged: neon={neon} scalar={scalar} rel={rel}"
         );
     }
 
@@ -3076,6 +3357,528 @@ mod avx2_kq_parity {
         let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(block, &q8k) };
         assert!((s - avx2).abs() < 1.0, "scalar={}, avx2={}", s, avx2);
     }
+
+    /// xorshift64* PRNG: deterministic, no external dependency; full-width
+    /// bytes so parity covers every bit pattern, not just hand-picked ones.
+    fn prng_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn q2k_avx2_matches_scalar_random_superblocks() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        // d/dmin kept around 1e-2 so the f32 dot stays in a range where the
+        // scalar (8 addends) and AVX2 (single FMA) reduction orders agree
+        // far inside the 1e-3 relative bound.
+        let weight = prng_bytes(0x2026_1121_0002_2E0_u64 ^ 0x5eed, nb * BLOCK_Q2K_SIZE);
+        let mut blocks = weight;
+        for b in 0..nb {
+            let off = b * BLOCK_Q2K_SIZE;
+            let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * ((b % 7) as f32)).to_le_bytes();
+            blocks[off + 80] = d_bits[0];
+            blocks[off + 81] = d_bits[1];
+            blocks[off + 82] = d_bits[0];
+            blocks[off + 83] = d_bits[1];
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let scalar = vec_dot_q2k_q8k_scalar(&blocks, &q8k);
+        let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(&blocks, &q8k) };
+        let diff = (scalar - avx2).abs();
+        let rel = diff / scalar.abs().max(1.0);
+        eprintln!(
+            "q2k random {} blocks: scalar={} avx2={} abs_diff={} rel={}",
+            nb, scalar, avx2, diff, rel
+        );
+        assert!(rel < 1e-3, "q2k random parity: rel={rel} diff={diff}");
+    }
+
+    #[test]
+    fn q3k_avx2_matches_scalar_random_superblocks() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        let weight = prng_bytes(0x2026_1121_0003_3E0_u64 ^ 0x5eed, nb * BLOCK_Q3K_SIZE);
+        let mut blocks = weight;
+        for b in 0..nb {
+            let off = b * BLOCK_Q3K_SIZE;
+            let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * ((b % 5) as f32)).to_le_bytes();
+            blocks[off + 108] = d_bits[0];
+            blocks[off + 109] = d_bits[1];
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 41 + 7) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let scalar = vec_dot_q3k_q8k_scalar(&blocks, &q8k);
+        let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(&blocks, &q8k) };
+        let diff = (scalar - avx2).abs();
+        let rel = diff / scalar.abs().max(1.0);
+        eprintln!(
+            "q3k random {} blocks: scalar={} avx2={} abs_diff={} rel={}",
+            nb, scalar, avx2, diff, rel
+        );
+        assert!(rel < 1e-3, "q3k random parity: rel={rel} diff={diff}");
+    }
+
+    /// Shared harness for the IQ2/IQ3/IQ1 AVX2 ports: random super-blocks
+    /// (every bit pattern decodes — grid and sign lookups are bounded table
+    /// reads) against the scalar reference. Both paths compute the exact
+    /// integer dot per super-block, so only the float accumulation order
+    /// differs (f64 scalar vs f32 FMA), far inside the 1e-3 relative bound.
+    fn iq_avx2_parity_random(
+        label: &str,
+        block_size: usize,
+        seed: u64,
+        fix_scale: fn(&mut [u8], usize),
+        avx2: unsafe fn(&[u8], &[BlockQ8K]) -> f32,
+        scalar: fn(&[u8], &[BlockQ8K]) -> f32,
+    ) {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        let mut blocks = prng_bytes(seed, nb * block_size);
+        for b in 0..nb {
+            fix_scale(&mut blocks, b * block_size);
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let s = scalar(&blocks, &q8k);
+        let a = unsafe { avx2(&blocks, &q8k) };
+        let diff = (s - a).abs();
+        let rel = diff / s.abs().max(1.0);
+        eprintln!("{label} random {nb} blocks: scalar={s} avx2={a} abs={diff} rel={rel}");
+        assert!(rel < 1e-3, "{label} random parity: rel={rel} diff={diff}");
+    }
+
+    fn set_f16_scale_at(blocks: &mut [u8], off: usize) {
+        let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * (((off / 2) % 7) as f32)).to_le_bytes();
+        blocks[off] = d_bits[0];
+        blocks[off + 1] = d_bits[1];
+    }
+
+    /// IQ1_M has no d field; its super-scale is assembled from 4-bit nibbles
+    /// across `scales` (offset 48), so pin those bytes to f16(1.0) = 0x3C00
+    /// to keep the random payload away from Inf/NaN scales.
+    fn set_iq1m_scale(blocks: &mut [u8], off: usize) {
+        let sc: [u8; 8] = [0x33, 0x33, 0x33, 0x03, 0x33, 0xC3, 0x33, 0x33];
+        blocks[off + 48..off + 56].copy_from_slice(&sc);
+    }
+
+    /// Bit-exact oracle check against the pinned llama.cpp build: the same
+    /// random super-blocks are pushed through llama.cpp's own kernel via the
+    /// `oracle_vecdot_harness` tool (built from the pinned checkout; set
+    /// `RMI_LLAMA_ORACLE` to its path). The AVX2 port must reproduce the
+    /// oracle's f32 bits exactly — same integer dots, same FMA accumulation
+    /// order. The scalar path is allowed a small float-order delta only.
+    #[test]
+    #[ignore = "requires the pinned llama.cpp build; run with RMI_LLAMA_ORACLE=<harness path>"]
+    fn iq_avx2_matches_llama_cpp_oracle_bitwise() {
+        let harness = match std::env::var("RMI_LLAMA_ORACLE") {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let cases: [(
+            &str,
+            u32,
+            usize,
+            fn(&mut [u8], usize),
+            fn(&[u8], &[BlockQ8K]) -> f32,
+            unsafe fn(&[u8], &[BlockQ8K]) -> f32,
+        ); 7] = [
+            (
+                "iq2_xxs",
+                0,
+                BLOCK_IQ2_XXS_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq2_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "iq2_xs",
+                1,
+                BLOCK_IQ2_XS_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq2_xs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(b, q) },
+            ),
+            (
+                "iq2_s",
+                2,
+                BLOCK_IQ2_S_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq2_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(b, q) },
+            ),
+            (
+                "iq3_xxs",
+                3,
+                BLOCK_IQ3_XXS_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq3_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "iq3_s",
+                4,
+                BLOCK_IQ3_S_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq3_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(b, q) },
+            ),
+            (
+                "iq1_s",
+                5,
+                BLOCK_IQ1_S_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq1_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(b, q) },
+            ),
+            (
+                "iq1_m",
+                6,
+                BLOCK_IQ1_M_SIZE,
+                set_iq1m_scale,
+                vec_dot_iq1_m_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(b, q) },
+            ),
+        ];
+        let nb = 64usize;
+        let mut seeds: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for (label, kind, block_size, fix_scale, scalar, avx2) in cases {
+            let seed = 0x2026_1121_10C2_0000 ^ (kind as u64 + 1);
+            seeds.insert(label, seed);
+            let mut blocks = prng_bytes(seed, nb * block_size);
+            for b in 0..nb {
+                fix_scale(&mut blocks, b * block_size);
+            }
+            let input: Vec<f32> = (0..nb * 256)
+                .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+                .collect();
+            let q8k = quantize_row_q8_k(&input);
+
+            let mut payload = Vec::with_capacity(8 + blocks.len() + nb * 292);
+            payload.extend_from_slice(&kind.to_le_bytes());
+            payload.extend_from_slice(&(nb as u32).to_le_bytes());
+            payload.extend_from_slice(&blocks);
+            for block in &q8k {
+                payload.extend_from_slice(&block.d.to_le_bytes());
+                payload.extend_from_slice(&block.qs.iter().map(|v| *v as u8).collect::<Vec<u8>>());
+                for b in &block.bsums {
+                    payload.extend_from_slice(&b.to_le_bytes());
+                }
+            }
+
+            use std::io::Write;
+            let mut child = std::process::Command::new(&harness)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn oracle harness");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&payload)
+                .expect("write payload");
+            let out = child.wait_with_output().expect("wait harness");
+            assert!(out.status.success(), "{label}: harness failed");
+            let oracle_bits_raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let oracle_bits = u32::from_str_radix(&oracle_bits_raw, 16).expect("parse oracle bits");
+            let oracle = f32::from_bits(oracle_bits);
+
+            let a = unsafe { avx2(&blocks, &q8k) };
+            let s = scalar(&blocks, &q8k);
+            eprintln!(
+                "{label}: oracle={} ({:08x}) avx2={} ({:08x}) scalar={} ({:08x})",
+                oracle,
+                oracle_bits,
+                a,
+                a.to_bits(),
+                s,
+                s.to_bits()
+            );
+            assert_eq!(
+                a.to_bits(),
+                oracle_bits,
+                "{label}: AVX2 must match llama.cpp oracle bit-for-bit"
+            );
+            let diff = (s - oracle).abs();
+            let rel = diff / oracle.abs().max(1.0);
+            assert!(rel < 1e-3, "{label}: scalar vs oracle rel={rel}");
+        }
+        let _ = &seeds;
+    }
+
+    #[test]
+    fn iq2_xxs_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq2_xxs",
+            BLOCK_IQ2_XXS_SIZE,
+            0x2026_1121_10C2_0001,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(b, q) },
+            vec_dot_iq2_xxs_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq2_xs_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq2_xs",
+            BLOCK_IQ2_XS_SIZE,
+            0x2026_1121_10C2_0002,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(b, q) },
+            vec_dot_iq2_xs_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq2_s_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq2_s",
+            BLOCK_IQ2_S_SIZE,
+            0x2026_1121_10C2_0003,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(b, q) },
+            vec_dot_iq2_s_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq3_xxs_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq3_xxs",
+            BLOCK_IQ3_XXS_SIZE,
+            0x2026_1121_10C2_0004,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(b, q) },
+            vec_dot_iq3_xxs_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq3_s_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq3_s",
+            BLOCK_IQ3_S_SIZE,
+            0x2026_1121_10C2_0005,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(b, q) },
+            vec_dot_iq3_s_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq1_m_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq1_m",
+            BLOCK_IQ1_M_SIZE,
+            0x2026_1121_10C2_0006,
+            set_iq1m_scale,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(b, q) },
+            vec_dot_iq1_m_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq1_s_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq1_s",
+            BLOCK_IQ1_S_SIZE,
+            0x2026_1121_10C2_0007,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(b, q) },
+            vec_dot_iq1_s_q8k_scalar,
+        );
+    }
+
+    /// Real-model parity: the whole first attention projection row of each
+    /// locally available IQ quant, quantized activation vs both kernels.
+    #[test]
+    fn iq_avx2_matches_scalar_on_real_model_rows() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        use crate::format::ggufrs::open_model_source;
+        use crate::format::ggufrs::ComponentRole;
+
+        let cases: [(
+            &str,
+            usize,
+            fn(&[u8], &[BlockQ8K]) -> f32,
+            unsafe fn(&[u8], &[BlockQ8K]) -> f32,
+        ); 7] = [
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ2_XXS.gguf",
+                BLOCK_IQ2_XXS_SIZE,
+                vec_dot_iq2_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ2_XS.gguf",
+                BLOCK_IQ2_XS_SIZE,
+                vec_dot_iq2_xs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ2_S.gguf",
+                BLOCK_IQ2_S_SIZE,
+                vec_dot_iq2_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ3_XXS.gguf",
+                BLOCK_IQ3_XXS_SIZE,
+                vec_dot_iq3_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ3_S.gguf",
+                BLOCK_IQ3_S_SIZE,
+                vec_dot_iq3_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_M.gguf",
+                BLOCK_IQ1_M_SIZE,
+                vec_dot_iq1_m_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_S.gguf",
+                BLOCK_IQ1_S_SIZE,
+                vec_dot_iq1_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(b, q) },
+            ),
+        ];
+        for (path, block_size, scalar, avx2) in cases {
+            if !std::path::Path::new(path).exists() {
+                eprintln!("skip {path} (not present)");
+                continue;
+            }
+            let loader =
+                open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+            let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
+            let n_in = 1024usize;
+            let blocks_per_row = n_in / 256;
+            let row = &bytes[..blocks_per_row * block_size];
+            let input: Vec<f32> = (0..n_in)
+                .map(|i| (((i * 29 + 5) % 241) as f32 - 120.0) * 0.05)
+                .collect();
+            let q8k = quantize_row_q8_k(&input);
+            let s = scalar(row, &q8k);
+            let a = unsafe { avx2(row, &q8k) };
+            let diff = (s - a).abs();
+            let rel = diff / s.abs().max(1.0);
+            eprintln!("{path} row: scalar={s} avx2={a} abs={diff} rel={rel}");
+            assert!(rel < 1e-3, "{path} real-row parity: rel={rel} diff={diff}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod k_quant_layout_tests {
+    use super::*;
+
+    /// Build a Q5_K super-block whose codes are known, so the decoder's
+    /// layout is pinned: a 2-byte F16 scale, a 2-byte F16 minimum, twelve
+    /// bytes of six-bit sub-scales and sub-minimums, thirty-two bytes of
+    /// fifth bits and 128 bytes of four-bit codes.
+    fn q5_k_block(scale: f32, minimum: f32, codes: &[u8; 256]) -> Vec<u8> {
+        let mut block = vec![0u8; BLOCK_Q5K_SIZE];
+        block[0..2].copy_from_slice(&crate::ops::f32_to_f16(scale).to_le_bytes());
+        block[2..4].copy_from_slice(&crate::ops::f32_to_f16(minimum).to_le_bytes());
+        // Sub-scales 0..7 are one and the sub-minimums are zero. The
+        // `get_scale_min_k4` layout puts scales 0..3 in the low six bits of
+        // bytes 0..3 of the twelve-byte table, minimums 0..3 in bytes 4..7,
+        // and scales 4..7 in the low nibble of bytes 8..11. The table itself
+        // starts at byte 4 of the block, after the two F16 header fields.
+        block[4..8].copy_from_slice(&[1, 1, 1, 1]);
+        block[12..16].copy_from_slice(&[1, 1, 1, 1]);
+        let mut qh = [0u8; 32];
+        let mut qs = [0u8; 128];
+        for group in 0..4 {
+            let m1 = 1u8 << (2 * group);
+            let m2 = 1u8 << (2 * group + 1);
+            for j in 0..32 {
+                let mut low = codes[group * 64 + j];
+                let mut high = codes[group * 64 + j + 32];
+                if low > 15 {
+                    low -= 16;
+                    qh[j] |= m1;
+                }
+                if high > 15 {
+                    high -= 16;
+                    qh[j] |= m2;
+                }
+                qs[group * 32 + j] = low | (high << 4);
+            }
+        }
+        block[16..48].copy_from_slice(&qh);
+        block[48..176].copy_from_slice(&qs);
+        block
+    }
+
+    #[test]
+    fn q5_k_decodes_the_fifth_bit_and_the_sub_scale() {
+        // Every code is 17, so the fifth bit is set everywhere and the
+        // reconstruction is scale * 17.
+        let codes = [17u8; 256];
+        let block = q5_k_block(0.5, 1.0, &codes);
+        let mut output = vec![0.0f32; 256];
+        dequantize_row_q5_k(&block, &mut output);
+        for (index, value) in output.iter().enumerate() {
+            assert!((value - 0.5 * 17.0).abs() < 1e-3, "value {index} = {value}");
+        }
+    }
+
+    #[test]
+    fn q5_k_decodes_the_low_and_high_nibbles_in_order() {
+        // The first 32 codes are 3, the next 32 are 5, and the rest are 0.
+        let mut codes = [0u8; 256];
+        for code in codes.iter_mut().take(32) {
+            *code = 3;
+        }
+        for code in codes.iter_mut().skip(32).take(32) {
+            *code = 5;
+        }
+        let block = q5_k_block(1.0, 0.0, &codes);
+        let mut output = vec![0.0f32; 256];
+        dequantize_row_q5_k(&block, &mut output);
+        for (index, value) in output.iter().enumerate() {
+            let want = match index {
+                0..32 => 3.0,
+                32..64 => 5.0,
+                _ => 0.0,
+            };
+            assert!((value - want).abs() < 1e-3, "value {index} = {value}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3090,6 +3893,43 @@ mod i_quant_tests {
         assert_eq!(
             KVALUES_IQ4NL,
             [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113]
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn iq4_nl_neon_matches_scalar() {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+
+        let mut data = vec![0u8; 8 * 18];
+        for subblock in 0..8 {
+            let offset = subblock * 18;
+            let scale = crate::ops::f32_to_f16(if subblock % 2 == 0 { 0.5 } else { -0.25 });
+            data[offset..offset + 2].copy_from_slice(&scale.to_le_bytes());
+            for j in 0..16 {
+                let lo = ((j * 3 + subblock) & 0x0f) as u8;
+                let hi = ((j * 5 + subblock * 2) & 0x0f) as u8;
+                data[offset + 2 + j] = lo | (hi << 4);
+            }
+        }
+
+        let mut qs = [0i8; 256];
+        for (index, value) in qs.iter_mut().enumerate() {
+            *value = ((index * 37 % 255) as i16 - 127) as i8;
+        }
+        let q8k = [BlockQ8K {
+            d: 0.75,
+            qs,
+            bsums: [0; 16],
+        }];
+        let scalar = vec_dot_iq4_nl_q8k_scalar(&data, &q8k);
+        let neon = unsafe { super::neon_k::vec_dot_iq4_nl_q8k_neon(&data, &q8k) };
+        assert_eq!(
+            scalar.to_bits(),
+            neon.to_bits(),
+            "scalar={scalar}, neon={neon}"
         );
     }
 
@@ -3272,5 +4112,349 @@ mod i_quant_tests {
         let dot = vec_dot_iq3_xxs_q8k_scalar(first_block, &q8k);
         eprintln!("iq3_xxs first model block dot = {}", dot);
         assert!(dot.is_finite());
+    }
+}
+
+#[cfg(test)]
+mod q8k_padding_tests {
+    use super::*;
+
+    /// Dequantise one `BlockQ8K` back to f32. Mirrors the standard
+    /// `d * q` inverse so a round-trip test can measure absolute error.
+    fn dequant_block(block: &BlockQ8K, len: usize) -> Vec<f32> {
+        block.qs[..len]
+            .iter()
+            .map(|&q| block.d * q as f32)
+            .collect()
+    }
+
+    /// GLM-4 n_ff=13696 = 52 * 256 + 128. The trailing partial block is
+    /// 128 wide and MUST round-trip to zero (zero-padding) — otherwise
+    /// the dequantised values would carry stale data from the previous
+    /// full-width block.
+    #[test]
+    fn partial_block_tail_roundtrips_to_zero() {
+        let n_ff: usize = 13_696;
+        let input: Vec<f32> = (0..n_ff).map(|i| (i as f32 * 0.001).sin()).collect();
+        let nb = n_ff.div_ceil(QK_K);
+        assert_eq!(nb, 54, "GLM-4 shape");
+        let tail_len = n_ff - (nb - 1) * QK_K;
+        assert_eq!(tail_len, 128, "partial block width");
+
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0i8; QK_K],
+                bsums: [0i16; 16]
+            };
+            nb
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        // Tail of the partial block must dequantise to zero.
+        let tail = dequant_block(&buf[nb - 1], QK_K);
+        for (i, &v) in tail.iter().enumerate().skip(tail_len) {
+            assert_eq!(v, 0.0, "tail byte {i} should quantise to zero, got {v}");
+        }
+    }
+
+    /// Round-trip error on the raw input must stay within the Q8_K
+    /// quantisation bound (|d/2| = one half-quantum-step). Catches any
+    /// regression in the zero-padding logic that corrupts valid values.
+    #[test]
+    fn partial_block_valid_values_roundtrip_within_quantum() {
+        let n_ff: usize = 13_696;
+        let input: Vec<f32> = (0..n_ff).map(|i| (i as f32 * 0.037).cos() * 0.5).collect();
+        let nb = n_ff.div_ceil(QK_K);
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0i8; QK_K],
+                bsums: [0i16; 16]
+            };
+            nb
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        for block_idx in 0..nb {
+            let start = block_idx * QK_K;
+            let len = (n_ff - start).min(QK_K);
+            let round_tripped = dequant_block(&buf[block_idx], len);
+            for (i, &rt) in round_tripped.iter().enumerate() {
+                let original = input[start + i];
+                let err = (rt - original).abs();
+                // ggml's `quantize_row_q8_K_ref` scales by the *signed*
+                // element of largest magnitude, so `d` is negative whenever the
+                // block's extreme value is negative and the quantised codes
+                // flip sign with it. The step size is `|d| / 2`, not `d / 2`.
+                let bound = buf[block_idx].d.abs() / 2.0 + 1e-6;
+                assert!(
+                    err <= bound,
+                    "block {block_idx} byte {i}: err {err} > bound {bound}"
+                );
+            }
+        }
+    }
+
+    /// The bug that motivated this test: a caller reusing a scratch
+    /// buffer would previously see stale quantised values in the tail
+    /// of a partial block. Directly asserts the fix.
+    #[test]
+    fn partial_block_tail_is_independent_of_previous_block() {
+        // One full block of non-zero values followed by a partial block.
+        // The partial block must NOT inherit the full block's values.
+        let mut input = vec![1.0f32; QK_K];
+        input.extend((0..128).map(|i| (i as f32) * -0.01));
+        let n: usize = input.len();
+
+        let nb = n.div_ceil(QK_K);
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0i8; QK_K],
+                bsums: [0i16; 16]
+            };
+            nb
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        // Bytes [128..256] of the last block must be zero (the previous
+        // block quantized 1.0 to ±127 — anything non-zero here is stale).
+        for j in 128..QK_K {
+            assert_eq!(
+                buf[nb - 1].qs[j],
+                0,
+                "tail byte {j} should be zero, got {} (stale from block {})",
+                buf[nb - 1].qs[j],
+                nb - 2
+            );
+        }
+    }
+
+    /// The scalar Q8_K quantiser must reproduce ggml's
+    /// `quantize_row_q8_K_ref` byte for byte: the block is scaled by
+    /// `-127 / (signed max|x|)` and the codes are clamped with `min(127, v)` —
+    /// *not* the symmetric `amax / 127` form. A K-quant matmul that disagrees
+    /// here is off by ~2 ULP everywhere, which is what the lfm2moe bit-parity
+    /// harness caught on the Q6_K LM head (see `tools/oracle/lfm2moe/README.md`).
+    #[test]
+    fn scalar_quantizer_matches_the_signed_ggml_contract() {
+        // ggml picks the *signed* element of largest magnitude as `max`, then
+        // `iscale = -127 / max` and `d = 1 / iscale = -max / 127`. So `d`
+        // carries the opposite sign of `max`, and the extreme element itself
+        // always maps to -127 (the clamp is `min(127, v)`, an upper bound only).
+        let mut input = vec![0.0f32; QK_K];
+        input[0] = -3.0;
+        input[1] = 1.0;
+        input[2] = -0.5;
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0; QK_K],
+                bsums: [0; 16]
+            };
+            1
+        ];
+        super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+
+        assert!(
+            buf[0].d > 0.0,
+            "max|x| = -3.0 must give d > 0, got {}",
+            buf[0].d
+        );
+        assert_eq!(buf[0].qs[0], -127, "the extreme element maps to -127");
+        assert_eq!(buf[0].qs[1], 42, "+1.0 keeps the max's sign");
+        assert_eq!(buf[0].qs[2], -21, "-0.5 flips sign");
+        // bsums are the per-16 element code sums, same grouping as ggml.
+        let expected: i16 = buf[0].qs[0..16].iter().map(|&q| q as i16).sum();
+        assert_eq!(buf[0].bsums[0], expected);
+
+        // A positive-dominant block flips d the other way.
+        let mut positive = vec![0.0f32; QK_K];
+        positive[0] = 2.0;
+        positive[1] = -1.0;
+        super::quantize_row_q8_k_scalar_into(&positive, &mut buf);
+        assert!(
+            buf[0].d < 0.0,
+            "max|x| = +2.0 must give d < 0, got {}",
+            buf[0].d
+        );
+        assert_eq!(buf[0].qs[0], -127);
+        // iscale = -63.5 and x = -1.0 give exactly -1.0 * -63.5 = 63.5; ggml's
+        // `nearest_int` (the 12582912.0 magic-add trick) rounds halves to even,
+        // so this is 64, not 63. `f32::round` would have given 64 too, but
+        // `-63.5` in the other direction is where the two disagree, which is
+        // why the helper is shared with `quantize_row_q8_k_ggml_into`.
+        assert_eq!(buf[0].qs[1], 64);
+    }
+
+    /// The SIMD and scalar Q8_K quantisers encode the same ggml signed
+    /// contract (`iscale = -127 / max_signed`, ties-to-even, `d = 1/iscale`),
+    /// but they are two separate hand-written implementations. They have
+    /// already drifted once: the scalar path used a symmetric
+    /// `amax / 127` + `f32::round` form while the SIMD path was correct,
+    /// so every Q6_K dot on a non-AVX2 build was ~2 ULP off ggml. This test
+    /// is the guard that keeps them from diverging again.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn avx2_quantizer_matches_scalar_bitwise() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        // Deterministic LCG so a failure is reproducible without a dependency.
+        let mut state: u64 = 0x243f_6a88_85a3_08d3;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+
+        for case in 0..64 {
+            let nb = 1 + case;
+            let len = nb * QK_K;
+            let input: Vec<f32> = (0..len).map(|_| next()).collect();
+
+            let mut scalar = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0; QK_K],
+                    bsums: [0; 16]
+                };
+                nb
+            ];
+            super::quantize_row_q8_k_scalar_into(&input, &mut scalar);
+
+            let mut simd = vec![
+                BlockQ8K {
+                    d: 0.0,
+                    qs: [0; QK_K],
+                    bsums: [0; 16]
+                };
+                nb
+            ];
+            unsafe { super::quantize_row_q8_k_avx2_into(&input, &mut simd) };
+
+            for (index, (lhs, rhs)) in scalar.iter().zip(simd.iter()).enumerate() {
+                assert_eq!(
+                    lhs.d.to_bits(),
+                    rhs.d.to_bits(),
+                    "case {case} block {index}: d differs (scalar {} vs simd {})",
+                    lhs.d,
+                    rhs.d
+                );
+                assert_eq!(lhs.qs, rhs.qs, "case {case} block {index}: qs differ");
+                assert_eq!(
+                    lhs.bsums, rhs.bsums,
+                    "case {case} block {index}: bsums differ"
+                );
+            }
+        }
+    }
+
+    /// `quantize_row_q8_k` is the public allocating entry point, but it sized
+    /// its buffer with a truncating `len / QK_K` while the writer it delegates
+    /// to needs `len.div_ceil(QK_K)`. Any non-256-multiple length (GLM-4's
+    /// n_ff = 13696 is the canonical case) therefore panicked with "buf too
+    /// small" instead of zero-padding the tail the way `_into` does.
+    #[test]
+    fn allocating_entry_point_handles_partial_tail() {
+        for len in [QK_K - 1, 128, 13_696] {
+            let input: Vec<f32> = (0..len).map(|i| (i as f32 * 0.01).sin()).collect();
+            let blocks = super::quantize_row_q8_k(&input);
+            assert_eq!(
+                blocks.len(),
+                len.div_ceil(QK_K),
+                "len = {len} should produce one block per 256-element group"
+            );
+            let tail = len % QK_K;
+            if tail != 0 {
+                let last = blocks.last().unwrap();
+                assert!(
+                    last.qs[tail..].iter().all(|&q| q == 0),
+                    "len = {len}: the {tail}-wide padded tail must quantize to zero"
+                );
+            }
+        }
+    }
+
+    /// The buffer-size contract: `buf.len() >= nb` where `nb = len.div_ceil(QK_K)`.
+    #[test]
+    fn undersized_buffer_panics() {
+        let input = vec![0.5f32; 13696];
+        let mut buf = vec![
+            BlockQ8K {
+                d: 0.0,
+                qs: [0; QK_K],
+                bsums: [0; 16]
+            };
+            1
+        ];
+        let result = std::panic::catch_unwind(move || {
+            super::quantize_row_q8_k_scalar_into(&input, &mut buf);
+        });
+        assert!(
+            result.is_err(),
+            "undersized buf must panic rather than write out of bounds"
+        );
+    }
+
+    /// Regression test for the aarch64 scalar-mode dispatch. Before the fix,
+    /// `vec_dot_q4k_q8k` and `vec_dot_iq4_nl_q8k` ran the NEON kernel even
+    /// when `RMI_SCALAR=1` was set, because their gate was the bare
+    /// `is_aarch64_feature_detected!("dotprod")` probe. That broke the audio8
+    /// and any other parity-trace flow on aarch64 the same way the audio8 dot
+    /// fix broke it for `dot_bf16_f32`. The fix wraps the inner probe with
+    /// `crate::ops::has_neon()` (which is `!scalar_mode()`), so scalar mode
+    /// falls through to the scalar implementation regardless of CPU features.
+    ///
+    /// Only meaningful on aarch64; x86 already gates on `has_avx2_fma()` and
+    /// the inner probe is inside the aarch64 cfg arm.
+    #[cfg(all(target_arch = "aarch64", feature = "parity-trace"))]
+    #[test]
+    fn q4k_q8k_dispatch_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let weight: Vec<u8> = (0usize..144)
+            .map(|index| index.wrapping_mul(29).wrapping_add(7) as u8)
+            .collect();
+        let input: Vec<f32> = (0..256)
+            .map(|index| ((index as i32 % 23) - 11) as f32 / 7.0)
+            .collect();
+        let q8k = crate::ops::quant::quantize_row_q8_k(&input);
+        let scalar = vec_dot_q4k_q8k_scalar(&weight, &q8k);
+        let dispatched = vec_dot_q4k_q8k(&weight, &q8k);
+        assert_eq!(
+            dispatched.to_bits(),
+            scalar.to_bits(),
+            "vec_dot_q4k_q8k must fall through to scalar under RMI_SCALAR=1"
+        );
+    }
+
+    #[cfg(all(target_arch = "aarch64", feature = "parity-trace"))]
+    #[test]
+    fn iq4_nl_q8k_dispatch_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        // IQ4_NL block: 2 bytes scales + 128 packed nibbles. Use a
+        // deterministic buffer; scalar-mode result is the reference.
+        let mut weight: Vec<u8> = (0usize..256)
+            .map(|index| index.wrapping_mul(13).wrapping_add(5) as u8)
+            .collect();
+        weight[0] = 0x3c; // d = 1.0 as half-float in the IQ4_NL scale slot
+        weight[1] = 0x00;
+        let input: Vec<f32> = (0..256)
+            .map(|index| ((index as i32 % 19) - 9) as f32 / 5.0)
+            .collect();
+        let q8k = crate::ops::quant::quantize_row_q8_k(&input);
+        let scalar = vec_dot_iq4_nl_q8k_scalar(&weight, &q8k);
+        let dispatched = vec_dot_iq4_nl_q8k(&weight, &q8k);
+        assert_eq!(
+            dispatched.to_bits(),
+            scalar.to_bits(),
+            "vec_dot_iq4_nl_q8k must fall through to scalar under RMI_SCALAR=1"
+        );
     }
 }

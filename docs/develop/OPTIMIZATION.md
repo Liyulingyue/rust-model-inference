@@ -3,10 +3,10 @@
 > **文档用途：** 本文是项目的优化档案。包含：SIMD/数值正确性的工程教训、量化 kernel 矩阵、固定机器基线、已验证无效方向、未达成门禁与下一批目标。
 >
 > 文档分两类章节：
-> - **经验性**（长期有效，不随代码迭代失效）：§1 SIMD 浮点舍入、§2 已验证无效方向、§3 paritty test 配方
+> - **经验性**（长期有效，不随代码迭代失效）：§1 浮点舍入与算子自检规模、§2 已验证无效方向、§3 paritty test 配方
 > - **状态性**（随代码迭代需刷新）：§4 量化 kernel 矩阵、§5 固定机器基线、§6 多模型适配、§7 异构后端基线、§8 未达成门禁
 >
-> 最近一次刷新：2026-09-18（与 ARCHITECTURE.md 同步）。下一次刷新门槛：任何量化 kernel 状态变更、任何 Vulkan/NEON 后端新模型支持、新一轮固定机器对比。
+> 最近一次刷新：2026-10-12（新增 §1.2 Vulkan SiLU 次正规数缺陷与「小 fixture 掩盖生产规模」的方法论）。下一次刷新门槛：任何量化 kernel 状态变更、任何 Vulkan/NEON 后端新模型支持、新一轮固定机器对比。
 
 ---
 
@@ -51,10 +51,56 @@ assert!(diff_bits == 0, "AVX2 diverged by {} ULP", diff_bits);
 
 K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i)`（Rust 每 block 乘），f32 累加顺序不同。已用 f64 block accumulator 修复大部分情况（IQ3_XXS 完全恢复），IQ2_XXS 仍残留偏差——可能与 2-bit 量化精度边界有关，待查。
 
-### 1.2 已知未完全修复
+### 1.2 小 fixture 会掩盖生产规模的算子缺陷（2026-10-12，Vulkan SiLU）
+
+**问题**：`record_silu_mul` 一直有 GPU 实现，但只在 `check_operator_chain` 里用
+`N_FF = 96` 覆盖过。Z-Image 把它接进 FFN 合批后，整幅渲染产出全 `-inf`
+（`nan=65536`），而同样的算子**分开提交时完全正确**。
+
+**根因**：不是调度问题，是算术问题。`silu_mul.comp` 的 `exp_approx` 把 exp 输入
+clamp 在 `±88.376`（exp 的 f32 溢出点），但 silu 用了补偿算法：
+
+```glsl
+res = fma(-den, act, gate);     // 两项几乎完全抵消，只剩舍入残差
+act = fma(res, 1/den, act);     // 需要 1/den 是【正规数】
+```
+
+clamp=88.376 时 `1/den = 4.157e-39`，**低于 f32 正规数下限 1.175e-38**，落进
+次正规数区间，修正项退化 → NaN。实测 FFN 真实规模（3840×9728 = 37 324 800 个激活）
+下 **43% 非有限**。
+
+**为什么小 fixture 抓不到**：
+
+| | 小 fixture | 生产规模 |
+|---|---|---|
+| 元素数 | 96 | 37 324 800（**38.9 万倍**）|
+| 输入范围 | 合成，集中在 [-3, 3] | 实测 amax 962、min -197 |
+| `1/den` | 始终正规数 | 大量落入次正规数 |
+
+三条独立的小 fixture 维度（规模、输入分布、dispatch 网格）**同时掩盖了同一个缺陷**。
+
+**两条可迁移的结论**：
+
+1. **算子自检必须跑生产形状**，至少覆盖三个维度：元素数量级、输入数值分布
+   （含极值）、dispatch 是否跨设备上限（`dispatch_grid` 会把超大 grid 拆到 x/y，
+   小 fixture 走不到那条路）。
+2. **"合批/融合后才出错"是算子缺陷的典型信号，不是调度缺陷的信号**。分开提交
+   正常、合批出错时，先怀疑被合批的那个算子的**数值边界**，而不是 barrier /
+   descriptor set / 提交粒度。详见 [`TODO.md`](TODO.md) TODO-020/021 记录的
+   完整排查路径——barrier access mask、提交粒度、暂存区别名、region 重叠、
+   validation layer（零警告）全部排除后，根因才落在算术上。
+
+**新增守护**：`silu_ffn_scale_probe`（`src/vulkan/ops.rs`）用 FFN 真实规模跑并断言
+零非有限，已挂进 `run_qwen3_operator_check`。改任何 saturate/clamp 前必须先过它：
+
+```bash
+SILU_ONLY=1 ./target/release/examples/vk_ops_check
+```
+
+### 1.3 已知未完全修复
 
 - **Q6_K AVX2** 仍有 1-2 ULP drift（commit `acb0a2b` 调查根因）：scalar `sumf += sums[l]` 是线性累加，AVX2 `hsum_ps` 是树形 reduction；f32 加法不满足结合律。尝试过多种缓解（FMA→mul+add 拆解、scalar 改 `mul_add`），均无改善——属于 IEEE 754 不可避免现象。生产验证：Q6_K / Q4_K_M / Q8_0 均输出 "The capital of France is **Paris**"（scalar 与 AVX2 一致）。
-  - 2026-09-18 复现：`Q6_KKernel::forward_prepared` → `vec_dot_q6k_q8k_avx2` 与 `vec_dot_q6k_q8k_scalar` 在 `tests/quantized_inference.rs::q6_k_prepared_path_matches_existing_scalar_dot_bits` 差 1 ULP。**当前无生产影响**：Q6_K fused path 未接入任何模型，实际 Qwen3-0.6B-Q6_K 文本推理走 `forward_prequantized` → `matmul_q6_k_scalar_range` 全 scalar 路径（实测 55.3 t/s，产出 "Paris"）。`embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致。详见 [`TODO.md`](TODO.md) high-priority 第一条（已划 ✅）。
+  - 2026-09-18 复现：`Q6_KKernel::forward_prepared` → `vec_dot_q6k_q8k_avx2` 与 `vec_dot_q6k_q8k_scalar` 在 `tests/quantized_inference.rs::q6_k_prepared_path_matches_existing_scalar_dot_bits` 差 1 ULP。**当前无生产影响**：Q6_K fused path 未接入任何模型，实际 Qwen3-0.6B-Q6_K 文本推理走 `forward_prequantized` → `matmul_q6_k_scalar_range` 全 scalar 路径（实测 55.3 t/s，产出 "Paris"）。`embedding_lookup_q6_k` 与 `dequantize_row_q6_k` bit-exact 一致。详见 [`TODO.md`](TODO.md) 的「AVX2 kernel 与 ggml 参考实现不逐位一致」条目。
 - **Q8_0 AVX2 "diff=255"** 是测试 bug（scalar 函数调用时 `(n_in, n_out, 0)` 把 `n_out` 错位传到 `row_start`，导致 scalar 没跑任何行返回 0）。修复后实测 `max_diff=0.000366 rel=1.6e-7`，AVX2 算法 bit-exact 正确。
 
 ---
@@ -72,6 +118,7 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 - **结果**：输出乱码 + 变慢（9.6→6.6 tok/s）。
 - **原因**：silu activation 需要在 gate/up matmul 完成后才能执行，合并改变了数据流。
 - **结论**：需更仔细的依赖分析；当前 §Quant Kernel 补全的 `QTensorOwned::fuse_vstack` 是约束更窄的"vstack 合并"，结果正确。
+- **2026-10-12 补充**：Vulkan 侧的同类操作（`DitGpuSession::record_ffn` 把 w1→w3→silu→w2 合进一个 command buffer）**是成功的**，denoise 52.7→42.5 s。区别在于它保留了 silu 作为设备侧的独立 dispatch、没有改变数据流顺序——即"合并提交"可行，"合并计算"不可行。参见 §1.2：合批后暴露出的 `-inf` 是 SiLU 算子自身的次正规数缺陷，与合批无关。
 
 ### 2.3 Persistent Workers 架构 ⚠️ 已废弃（2025-07-31）
 - **做法**：重写 `ComputePool`，让 worker 线程永不退出，在 `worker_loop` 中遍历所有 ops。用 `work_ready` flag + exit_barrier + reenter_barrier 三阶段同步。
@@ -116,9 +163,9 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 | **Q5_K_S** | 416 | 36.9 | ✅ | Q5K × Q8K scalar（原 placeholder） |
 | **Q4_K_S** | 366 | 41.1 | ✅ | Q4K × Q8K scalar（原 0 output） |
 | **BF16** | 1143 | **27.5** | ✅ | BF16 × F32 AVX2+FMA（`src/ops/kernel/bf16/avx2.rs`，含 `avx2_q8.rs`） |
-| Q3_K_M | 331 | 9.2 | ✅ | Q3K × Q8K scalar（`q3_k.rs`，format bug 修复） |
-| Q3_K_S | 308 | 6.0 | ✅ | Q3K × Q8K scalar（format bug 修复；Lyon noise） |
-| Q2_K | 283 | 4.9 | ✅ | Q2K × Q8K AVX2（`avx2_k.rs`，3 个 bug 修复：qs_base / scale_b / hsum256_ps） |
+| Q3_K_M | 331 | **58.7** | ✅ | Q3K × Q8K AVX2 重写（`avx2_k.rs`，llama.cpp 结构：maddubs + scale-shuffle + i32 累积；2026-11-21） |
+| Q3_K_S | 308 | **45.4** | ✅ | Q3K × Q8K AVX2 重写（同上；"Lyonne" 为该格式历史输出） |
+| Q2_K | 283 | **64.7** | ✅ | Q2K × Q8K AVX2 重写（同上；2026-11-21，旧实现与 scalar 持平已修） |
 | IQ4_XS | 351 | 4.8 | ✅ | IQ4_XS × Q8K AVX2（共享 `src/ops/quant/avx2_k.rs`，bit-exact，commit `b8d6b7c`） |
 | **IQ4_NL** | 381 | **16.1** | ✅ | **IQ4_NL × Q8K AVX2 + NEON**（`vec_dot_iq4_nl_q8k_avx2` + `vec_dot_iq4_nl_q8k_neon` 共享 `avx2_k.rs` / 新增 `neon_k.rs`，≤ 1 ULP drift，2026-09-18） |
 | IQ3_XXS (UD) | ~280 | 4.3 | ✅ | IQ3_XXS × Q8K scalar（f64 block acc；"The capital of France is Paris."） |
@@ -134,8 +181,15 @@ K-quant/I-quant 走 `0.25 * sum(d_i*b_i)`（C 末尾乘）vs `sum(0.25 * d_i*b_i
 - IQ4_XS：was panic → AVX2 4.8 t/s（修复 + 打开 dispatch）
 - **IQ4_NL**：scalar 8.6 t/s → AVX2 **16.1 t/s**（1.87×，`vec_dot_iq4_nl_q8k_avx2` 在 `src/ops/quant/avx2_k.rs`；同步新增 `vec_dot_iq4_nl_q8k_neon` 在 `src/ops/quant/neon_k.rs` 走 aarch64 路径；测试 `iq4_nl_prepared_path_avx2_matches_scalar_dot_within_one_ulp`；端到端 Qwen3-0.6B-IQ4_NL.gguf 5 批中位 16.1 t/s gen，产出 "Paris"）
 - IQ3_XXS (UD)：was panic → scalar 4.3 t/s（修复 + f64 acc → 给出 "The capital of France is Paris."）
-- Q2_K：was 乱码（scalar 4.9 t/s）→ AVX2 4.9 t/s（启用 dispatch，3 bugs 修复）
-- Q3_K / Q3_K_M / Q3_K_S：scalar 5-9 t/s → AVX2 4.7-7.3 t/s（重写：修 `scale_shuffles` + `hsum256ps` 双 shuffle imm；scalar 改用 `_mm_extract` + `_mm_add_epi16`；Q3_K_M 现在输出 "The capital of France is **Paris**" 与 IQ4_XS 完全一致）
+- Q2_K：was 乱码（scalar 4.9 t/s）→ AVX2 4.9 t/s（启用 dispatch，3 bugs 修复）→ **AVX2 重写 64.7 t/s**
+- Q3_K / Q3_K_M / Q3_K_S：scalar 5-9 t/s → AVX2 4.7-7.3 t/s（重写：修 `scale_shuffles` + `hsum256ps` 双 shuffle imm；scalar 改用 `_mm_extract` + `_mm_add_epi16`）→ **AVX2 重写 Q3_K_M 58.7 t/s / Q3_K_S 45.4 t/s**
+- **Q2_K / Q3_K AVX2 重写（2026-11-21）**：按 pinned llama.cpp `ggml_vec_dot_q2_K_q8_K` /
+  `ggml_vec_dot_q3_K_q8_K` AVX2 分支重写 `avx2_k.rs`：全 SIMD 2-bit 解包 + `maddubs` +
+  scale shuffle 内嵌 `madd` + 每 super-block 单 i32 累加器（消除旧实现 Q2_K 的标量解包循环
+  与两者的每 16 元素窄水平归约）。kernel 级（`examples/bench_kquant_dot.rs`，512 行 × 4096 列）
+  Q2_K **7.5×**、Q3_K **2.75×** vs scalar；端到端 5 批中位 Q2_K prefill 59→111 / gen 42→65 t/s，
+  Q3_K_M prefill 74→103 / gen 50→59 t/s；输出与历史一致（Q2_K/Q2_K_L/Q3_K_M "Paris"、Q3_K_S "Lyonne"）。
+  parity：随机 64 super-block scalar↔AVX2 相对差 ≤ 2.1e-6，新增 random-superblocks 测试。
 
 **Kernel 路径索引**：
 
@@ -162,7 +216,8 @@ src/ops/quant/
 ### 4.1 已知未实现
 
 - **IQ2_XXS / IQ2_XS / IQ3_XXS / IQ1_S / IQ3_S / IQ2_S / IQ1_M kernel**：仅在 `GGMLType` enum 注册（`src/core/tensor.rs:32-45`），其中 IQ3_XXS / IQ2_XXS / IQ1_M / IQ1_S 已有 scalar kernel（精度受损），其余仍 panic。
-- **Q2_K / Q3_K 全 SIMD 覆盖**：当前仅 K-quant 路径共享 `avx2_k.rs`；scalar Q2_K 4.9 t/s 与 AVX2 持平，原因是 K-quant block 结构复杂、SIMD 利用率受限。
+- **Q2_K / Q3_K 全 SIMD 覆盖**：✅ 2026-11-21 完成。`avx2_k.rs` 的 Q2_K / Q3_K kernel 已按 llama.cpp
+  结构重写（全 SIMD 解包 + maddubs + 单 i32 累加器），不再有标量循环与窄水平归约；NEON 路径仍为 scalar。
 
 ---
 
@@ -322,7 +377,8 @@ PR / commit：
 
 **Q5_K 当前状态**：只完成合成 kernel parity，未纳入端到端模型支持矩阵。
 
-详见 [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md)。
+详见 [`VULKAN.md`](VULKAN.md)（含设计取舍与历史硬件矩阵；2026-09 的
+`VULKAN_INFERENCE_{DESIGN,PLAN}.md` 已被其吸收并删除）。
 
 ### 7.2 wgpu（`--features wgpu`，实验性）
 
@@ -344,7 +400,7 @@ PR / commit：
 | **Vulkan Q5_K 端到端** | ❌ 仅合成 parity | `src/ops/quant/avx2_k.rs` AVX2 实现已就绪；Vulkan shader 未对齐 |
 | **Logits 输出投影优化**（V·151936，~23% decode 时间） | ❌ 未实现 | memory-bound；候选：分块、fuse to 采样 |
 | **FFN 整体融合**（gate+up+silu+quant+down） | ⚠️ 部分（`fuse_vstack`） | 进一步融合需要 persistent workers（§2.3 已废弃） |
-| **Q2_K / Q3_K 全 SIMD 加速**（4.9 t/s → 30+ t/s） | ❌ AVX2 实现已存在但与 scalar 持平 | K-quant block 结构复杂；需重写 algorithm |
+| **Q2_K / Q3_K 全 SIMD 加速**（4.9 t/s → 30+ t/s） | ✅ 2026-11-21 完成：AVX2 按 llama.cpp 结构重写，Q2_K gen 65 t/s、Q3_K_M 59 t/s（kernel 级 7.5× / 2.75× vs scalar） | 剩余：aarch64 NEON 路径仍 scalar |
 | **chunked prefill 推广到所有 trunk** | ⚠️ Qwen3 / Qwen3.5 / Gemma4 已支持（`#68`） | llama / lfm2 / lfm25 / lfm2moe / spark / breeze / nemotron_h 未适配 |
 | **dotprod/i8mm 内核**（ARM64） | ❌ 仅 NEON baseline | 需要 ASM 手写或 `std::arch::aarch64::*` 内建 |
 | **权重重排**（whisper.cpp-style repack） | ❌ 未实现 | 对 Q4_K / Q6_K 大权重 matmul 提升明显 |
@@ -356,7 +412,7 @@ PR / commit：
 3. **Vulkan Q5_K 端到端**：参照现有 Q4_K / Q6_K shader 改写，runtime parity test 接入 `parity_trace.rs`。
 4. **ARM64 dotprod / i8mm 内核**：Q4_0/Q8_0/Q4_K 全部走 i8mm 路径，预期 NEON 性能再提升 30-50%。
 5. **chunked prefill 跨模型推广**：先 lfm2（shortconv），再 llama / spark。
-6. **dreamx CUDA oracle**：当前 DreamX-Creator 仅 CPU，已通过 `tools/dreamx/dreamx_oracle_trace.py` 拿到上游 trace（commit `215d4cd7fbed7e161ab508ae1f85a8fee0536f62`），需要 GPU parity。
+6. **dreamx CUDA oracle**：当前 DreamX-Creator 仅 CPU，已通过 `tools/oracle/dreamx/dreamx_oracle_trace.py` 拿到上游 trace（commit `215d4cd7fbed7e161ab508ae1f85a8fee0536f62`），需要 GPU parity。
 
 ### 8.3 不建议重做的方向
 
@@ -373,7 +429,7 @@ PR / commit：
 | `parity_trace` feature | `src/parity_trace.rs` | SIMD/GPU vs scalar 运行时对照 |
 | `tests/quantized_inference.rs` | `tests/quantized_inference.rs` | 量化 dtype E2E 推理门禁 |
 | `tests/{qwen35,gemma4,nemotron_h,z_image,qwen_drive_vlm,...}_reference.rs` | `tests/` | 跨模型 Oracle 对齐 |
-| `tools/qwen_drive/` / `tools/neohorse/` / `tools/dreamx/` | `tools/` | 各模型上游 Oracle trace 工具 |
+| `tools/oracle/qwen_drive/` / `tools/converter/neohorse/` / `tools/oracle/dreamx/` | `tools/` | 各模型上游 Oracle trace 工具 |
 | `cargo build --release --features vulkan` | — | Vulkan 后端编译 |
 | `LD_LIBRARY_PATH=references/llama.cpp/build/bin/Release references/llama.cpp/build/bin/Release/llama-cli.exe` | Windows pinned | llama.cpp Oracle 验证 |
 
@@ -387,7 +443,7 @@ PR / commit：
 - [`SUPPORTED_MODELS.md`](SUPPORTED_MODELS.md) — 每个具体型号的"已验证格式 + Oracle + 限制"
 - [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md) — trunk + sibling 目录约定与依赖方向
 - [`KV_CACHE_DESIGN.md`](KV_CACHE_DESIGN.md) — KV cache 共享条件 + 三种生命周期
-- [`VULKAN.md`](VULKAN.md) / [`VULKAN_INFERENCE_DESIGN.md`](VULKAN_INFERENCE_DESIGN.md) / [`VULKAN_INFERENCE_PLAN.md`](VULKAN_INFERENCE_PLAN.md) — Vulkan 后端
+- [`VULKAN.md`](VULKAN.md) — Vulkan 后端（含设计取舍；旧 DESIGN/PLAN 两文档已吸收删除）
 - [`PARALLEL_MATMUL_SAFETY.md`](PARALLEL_MATMUL_SAFETY.md) — Issue 4（`compute_unchecked` 形式别名违规）
 - [`HETEROGENEOUS_COMPUTE.md`](HETEROGENEOUS_COMPUTE.md) — "标量为底 + 后端注册表"
 - [`LFM25_OPTIMIZATION.md`](LFM25_OPTIMIZATION.md) / [`LFM25_MOE_OPTIMIZATION.md`](LFM25_MOE_OPTIMIZATION.md) / [`ZIMAGE_OPTIMIZATION.md`](ZIMAGE_OPTIMIZATION.md) — 子模型/子方向专项

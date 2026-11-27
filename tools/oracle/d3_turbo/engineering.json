@@ -1,0 +1,565 @@
+{
+  "baseline-comparison.json": {
+    "baseline": {
+      "passed": 1644,
+      "failed": 34,
+      "ignored": 230,
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::gpu_adaln_modulate_matches_the_cpu_branch",
+        "models::diffusion::z_image::dit::tests::gpu_batched_down_projection_reproduces_the_cpu_scale",
+        "models::diffusion::z_image::dit::tests::gpu_batched_qkv_matches_the_per_row_cpu_projection",
+        "models::diffusion::z_image::dit::tests::gpu_fused_norm_and_modulate_match_the_per_row_cpu_chain",
+        "models::diffusion::z_image::dit::tests::gpu_interleaved_qk_norm_rope_matches_the_host_chain",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::dit_gpu::tests::batched_ffn_chain_matches_incremental_submission",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_gpu_prefill_decode_visit_state_fallback_and_reset",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_shader_prefill_decode_cache_and_reset_allows_software_icd",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_dt_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_norm_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits",
+        "vulkan::ops::tests::pivo_operators_match_the_host_kernels",
+        "vulkan::ops::tests::recurrent_ssm_gpu_repeat_interleave_preserves_default_head_layout",
+        "vulkan::ops::tests::sensenova_mhc_gpu_matches_independent_cpu_for_all_modes_and_rows"
+      ]
+    },
+    "current": {
+      "passed": 1654,
+      "failed": 34,
+      "ignored": 232,
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::dit::tests::attention_matches_the_ggml_neon_softmax_and_value_reduction",
+        "models::diffusion::z_image::dit::tests::gpu_adaln_modulate_matches_the_cpu_branch",
+        "models::diffusion::z_image::dit::tests::gpu_batched_down_projection_reproduces_the_cpu_scale",
+        "models::diffusion::z_image::dit::tests::gpu_batched_qkv_matches_the_per_row_cpu_projection",
+        "models::diffusion::z_image::dit::tests::gpu_fused_norm_and_modulate_match_the_per_row_cpu_chain",
+        "models::diffusion::z_image::dit::tests::gpu_interleaved_qk_norm_rope_matches_the_host_chain",
+        "models::diffusion::z_image::dit::tests::torch_mt19937_recomputes_the_final_sixteen_values",
+        "models::diffusion::z_image::dit_gpu::tests::batched_ffn_chain_matches_incremental_submission",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::gemma4_trace_rows_match_batch_one_raw_bits",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen35::trunk::tests::later_gpu_failure_recomputes_from_committed_cpu_shadow_and_stays_session_local",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_gpu_prefill_decode_visit_state_fallback_and_reset",
+        "models::sensenova_loop::tests::gpu_tests::full_graph_shader_prefill_decode_cache_and_reset_allows_software_icd",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits",
+        "vulkan::nemotron_h::tests::ssm_conv_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_dt_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_gate_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_norm_matches_cpu_bits",
+        "vulkan::nemotron_h::tests::ssm_scan_matches_cpu_bits",
+        "vulkan::ops::tests::pivo_operators_match_the_host_kernels",
+        "vulkan::ops::tests::recurrent_ssm_gpu_repeat_interleave_preserves_default_head_layout",
+        "vulkan::ops::tests::sensenova_mhc_gpu_matches_independent_cpu_for_all_modes_and_rows"
+      ]
+    },
+    "new_failures": [],
+    "resolved_failures": [],
+    "current_log": "lib-final13.log"
+  },
+  "bin-targets.json": {
+    "baseline": [
+      {
+        "name": "codec_test",
+        "path": "src/bin/codec_test.rs"
+      },
+      {
+        "name": "dump_dims",
+        "path": "src/bin/dump_dims.rs"
+      },
+      {
+        "name": "dump_emb",
+        "path": "src/bin/dump_emb.rs"
+      },
+      {
+        "name": "dump_meta",
+        "path": "src/bin/dump_meta.rs"
+      },
+      {
+        "name": "dump_tensors",
+        "path": "src/bin/dump_tensors.rs"
+      },
+      {
+        "name": "ggufrs",
+        "path": "src/bin/ggufrs.rs"
+      },
+      {
+        "name": "micro-bench",
+        "path": "src/bin/micro_bench.rs"
+      },
+      {
+        "name": "rust-model-inference",
+        "path": "src/main.rs"
+      },
+      {
+        "name": "rust-model-server",
+        "path": "src/bin/server.rs"
+      }
+    ],
+    "current": [
+      {
+        "name": "codec_test",
+        "path": "src/bin/codec_test.rs"
+      },
+      {
+        "name": "dump_dims",
+        "path": "src/bin/dump_dims.rs"
+      },
+      {
+        "name": "dump_emb",
+        "path": "src/bin/dump_emb.rs"
+      },
+      {
+        "name": "dump_meta",
+        "path": "src/bin/dump_meta.rs"
+      },
+      {
+        "name": "dump_tensors",
+        "path": "src/bin/dump_tensors.rs"
+      },
+      {
+        "name": "ggufrs",
+        "path": "src/bin/ggufrs.rs"
+      },
+      {
+        "name": "micro-bench",
+        "path": "src/bin/micro_bench.rs"
+      },
+      {
+        "name": "rust-model-inference",
+        "path": "src/main.rs"
+      },
+      {
+        "name": "rust-model-server",
+        "path": "src/bin/server.rs"
+      }
+    ],
+    "equal": true
+  },
+  "clippy-final.json": {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--lib",
+      "--bin",
+      "rust-model-inference",
+      "--bin",
+      "rust-model-server"
+    ],
+    "exit": 101,
+    "seconds": 18.440813757944852
+  },
+  "cli-final.json": {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--test",
+      "d3_turbo_cli"
+    ],
+    "exit": 0
+  },
+  "video_decoder": {
+    "command": "PATH=target/ffmpeg:$PATH RMI_D3_VIDEO_FIXTURE=target/d3-turbo/media/moving-box.mkv target/release-fast/deps/rust_model_inference-89d19ecf4f180428 decodes_sampled_frames_with_current_ffmpeg --ignored --nocapture --test-threads=1",
+    "output": "\nrunning 1 test\ntest models::d3_turbo::video::tests::decodes_sampled_frames_with_current_ffmpeg ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1918 filtered out; finished in 0.23s\n\n"
+  },
+  "python_tests": {
+    "command": "target/oracle-cpu/bin/python -m unittest tools.converter.d3_turbo.test_convert tools.oracle.d3_turbo.test_compare",
+    "passed": 7,
+    "failed": 0,
+    "regressions": [
+      "late output publication refuses to overwrite another result",
+      "late partial reservation is preserved"
+    ],
+    "old_converter_regression_failed_as_expected": true
+  },
+  "clippy-comparison.json": {
+    "base": "237a67bba3d8255f459e493701b4435c29e3cb11",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--lib",
+      "--bin",
+      "rust-model-inference",
+      "--bin",
+      "rust-model-server"
+    ],
+    "baseline_exit": 101,
+    "seconds": 111.13658640510403,
+    "baseline_errors": [
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 197,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 550,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: this operation will always return zero. This is likely not the intended outcome",
+        "path": "src/models/diffusion/pig.rs",
+        "line": 393,
+        "lint": "erasing_op"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/encoder.rs",
+        "line": 358,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/vad.rs",
+        "line": 92,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen3/vision/mod.rs",
+        "line": 1487,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 193,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 1839,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: approximate value of `f32::consts::LOG2_E` found",
+        "path": "src/models/yue2/nar.rs",
+        "line": 750,
+        "lint": "approx_constant"
+      },
+      {
+        "message": "error: approximate value of `f{32, 64}::consts::LOG2_E` found",
+        "path": "src/ops/math/torch28.rs",
+        "line": 17,
+        "lint": "approx_constant"
+      }
+    ],
+    "current_errors": [
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 197,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: any number modulo 1 will be 0",
+        "path": "src/models/diffusion/ernie_image/dit.rs",
+        "line": 550,
+        "lint": "modulo_one"
+      },
+      {
+        "message": "error: this operation will always return zero. This is likely not the intended outcome",
+        "path": "src/models/diffusion/pig.rs",
+        "line": 393,
+        "lint": "erasing_op"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/encoder.rs",
+        "line": 358,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/funasr/vad.rs",
+        "line": 92,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen3/vision/mod.rs",
+        "line": 1487,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 193,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: mutable borrow from immutable input(s)",
+        "path": "src/models/qwen35/vision/mod.rs",
+        "line": 1864,
+        "lint": "mut_from_ref"
+      },
+      {
+        "message": "error: approximate value of `f32::consts::LOG2_E` found",
+        "path": "src/models/yue2/nar.rs",
+        "line": 750,
+        "lint": "approx_constant"
+      },
+      {
+        "message": "error: approximate value of `f{32, 64}::consts::LOG2_E` found",
+        "path": "src/ops/math/torch28.rs",
+        "line": 17,
+        "lint": "approx_constant"
+      }
+    ],
+    "new_errors": [],
+    "note": "Line offsets may differ in shared files; compare error message, file and lint. No lint level was disabled.",
+    "current_run": {
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib",
+        "--bin",
+        "rust-model-inference",
+        "--bin",
+        "rust-model-server"
+      ],
+      "exit": 101,
+      "seconds": 18.440813757944852
+    }
+  },
+  "source_sync": {
+    "verified_utc": "2026-11-13T21:18:07.407954+00:00",
+    "base": "237a67bba3d8255f459e493701b4435c29e3cb11",
+    "all_equal": true,
+    "files": [
+      {
+        "path": "src/app/decision.rs",
+        "sha256": "844e370601adf2738f26cc3252dd7045f6f086f87606926db2b9e076acac811c",
+        "remote_sha256": "844e370601adf2738f26cc3252dd7045f6f086f87606926db2b9e076acac811c"
+      },
+      {
+        "path": "src/app/decision/jev.rs",
+        "sha256": "225a1b0ce2ecfab8c028f822b8704565277e1660faa4df8e38380d826a208244",
+        "remote_sha256": "225a1b0ce2ecfab8c028f822b8704565277e1660faa4df8e38380d826a208244"
+      },
+      {
+        "path": "src/app/server/decision.rs",
+        "sha256": "8a2865479485c0f0226843e55e1d950329f063763b65455e425d630e0585be2d",
+        "remote_sha256": "8a2865479485c0f0226843e55e1d950329f063763b65455e425d630e0585be2d"
+      },
+      {
+        "path": "src/app/server/mod.rs",
+        "sha256": "a28071d7c03a8a0ffc08dc8af897d270577af61886b451901514ee03eb463321",
+        "remote_sha256": "a28071d7c03a8a0ffc08dc8af897d270577af61886b451901514ee03eb463321"
+      },
+      {
+        "path": "src/app/system_one.rs",
+        "sha256": "b7b4e48531b6067717854f0794c517c74643f544c6379ffe745e79c7f50ced84",
+        "remote_sha256": "b7b4e48531b6067717854f0794c517c74643f544c6379ffe745e79c7f50ced84"
+      },
+      {
+        "path": "src/main.rs",
+        "sha256": "e99bb7d8f9c2c5e3a7ad0cba72fb413a926761d316ca7500da0294de861328c5",
+        "remote_sha256": "e99bb7d8f9c2c5e3a7ad0cba72fb413a926761d316ca7500da0294de861328c5"
+      },
+      {
+        "path": "src/models/d3_turbo/compose.rs",
+        "sha256": "86b247c8981c39477ced8a8fdddb880c0fb3204200290c928b8ef8b2b8343944",
+        "remote_sha256": "86b247c8981c39477ced8a8fdddb880c0fb3204200290c928b8ef8b2b8343944"
+      },
+      {
+        "path": "src/models/d3_turbo/mod.rs",
+        "sha256": "f1479da9addf3e0ea4ba02aa02e848087845cbf6c5b6925bf77fbff3c9abbea5",
+        "remote_sha256": "f1479da9addf3e0ea4ba02aa02e848087845cbf6c5b6925bf77fbff3c9abbea5"
+      },
+      {
+        "path": "src/models/d3_turbo/video.rs",
+        "sha256": "26d18ae0c5594da42c1852f89083596fdfe6fa4596e5b33ffe9932dc355d2ec3",
+        "remote_sha256": "26d18ae0c5594da42c1852f89083596fdfe6fa4596e5b33ffe9932dc355d2ec3"
+      },
+      {
+        "path": "src/models/decision.rs",
+        "sha256": "263cc14c8dd37c5b7f2ea5c6c6cc80107af67c7af35b854255d9edf2a6f039b6",
+        "remote_sha256": "263cc14c8dd37c5b7f2ea5c6c6cc80107af67c7af35b854255d9edf2a6f039b6"
+      },
+      {
+        "path": "src/models/mod.rs",
+        "sha256": "1d94130f4c9b08a75d4478f58e7f750399ce5d6a6e28b7046cbb8f034057827f",
+        "remote_sha256": "1d94130f4c9b08a75d4478f58e7f750399ce5d6a6e28b7046cbb8f034057827f"
+      },
+      {
+        "path": "src/models/qwen35/vision/mod.rs",
+        "sha256": "600cfd3d5bc2cca2adc4d36b232b10337db54f00dff503de45d8caa40a5fb8f0",
+        "remote_sha256": "600cfd3d5bc2cca2adc4d36b232b10337db54f00dff503de45d8caa40a5fb8f0"
+      },
+      {
+        "path": "src/models/vela3/d3.rs",
+        "sha256": "51e5743b78c9313d6f1a9edc8315651429b0ab875cbbe985401aaf513bb4f270",
+        "remote_sha256": "51e5743b78c9313d6f1a9edc8315651429b0ab875cbbe985401aaf513bb4f270"
+      },
+      {
+        "path": "src/models/vela3/d3/vision.rs",
+        "sha256": "146ca4eeaeb0ed312304fddcbed06e32e3516988cd480099eef2db211751f923",
+        "remote_sha256": "146ca4eeaeb0ed312304fddcbed06e32e3516988cd480099eef2db211751f923"
+      },
+      {
+        "path": "src/models/vela3/decoder.rs",
+        "sha256": "9d215379112c03e82f1ba695c3b56283c566d274f1d93e2eb8d8a780eb1898e0",
+        "remote_sha256": "9d215379112c03e82f1ba695c3b56283c566d274f1d93e2eb8d8a780eb1898e0"
+      },
+      {
+        "path": "src/models/vela3/tensor.rs",
+        "sha256": "0e14cf890c4d253d7867581723ad80ad2a4fa66a4dbbc1d98fb0626db5598a25",
+        "remote_sha256": "0e14cf890c4d253d7867581723ad80ad2a4fa66a4dbbc1d98fb0626db5598a25"
+      },
+      {
+        "path": "src/models/vela3/text.rs",
+        "sha256": "6b8643375e9e51561a69bf93f9bc7b3b00a7bab7be03b969c63366849aef1847",
+        "remote_sha256": "6b8643375e9e51561a69bf93f9bc7b3b00a7bab7be03b969c63366849aef1847"
+      },
+      {
+        "path": "tests/d3_turbo_cli.rs",
+        "sha256": "a7e292284511f13cad27044eb1a1741a72f18b94b1b84512ff8a7130624d602c",
+        "remote_sha256": "a7e292284511f13cad27044eb1a1741a72f18b94b1b84512ff8a7130624d602c"
+      },
+      {
+        "path": "tools/converter/d3_turbo/convert.py",
+        "sha256": "e473936b861b4096861d3b1d36baa892767124662894bb0a06a1d4ee206a95a5",
+        "remote_sha256": "e473936b861b4096861d3b1d36baa892767124662894bb0a06a1d4ee206a95a5"
+      },
+      {
+        "path": "tools/converter/d3_turbo/test_convert.py",
+        "sha256": "772f039552f21006fe345476bcd0c25ecb5cfe640ffffa54d601411e377a1686",
+        "remote_sha256": "772f039552f21006fe345476bcd0c25ecb5cfe640ffffa54d601411e377a1686"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/entries.py",
+        "sha256": "b9ccd545cb972dd2ae05636e71d3941182b9efb3d990dd9144ee1c200a7a5a98",
+        "remote_sha256": "b9ccd545cb972dd2ae05636e71d3941182b9efb3d990dd9144ee1c200a7a5a98"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/trace.py",
+        "sha256": "f2fc5ef98c095fd92318fad3703406d84b0412f4d10c85d3f85d82ad06f3081d",
+        "remote_sha256": "f2fc5ef98c095fd92318fad3703406d84b0412f4d10c85d3f85d82ad06f3081d"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/gguf_weights.py",
+        "sha256": "f2a67d5f6a3272b43a92b82bdfbd23501b4dc775422cd3980e164ae68852cd5d",
+        "remote_sha256": "f2a67d5f6a3272b43a92b82bdfbd23501b4dc775422cd3980e164ae68852cd5d"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/compare.py",
+        "sha256": "8b230359ec6e647d4cb9716c336f2eb4f96659d1ce6f07662bdd27441ecbf5f7",
+        "remote_sha256": "8b230359ec6e647d4cb9716c336f2eb4f96659d1ce6f07662bdd27441ecbf5f7"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/projection.py",
+        "sha256": "273a96189e3d630dc04f4ba47d62af71e4d34eddbc690aff15791b6075328855",
+        "remote_sha256": "273a96189e3d630dc04f4ba47d62af71e4d34eddbc690aff15791b6075328855"
+      },
+      {
+        "path": "tools/oracle/d3_turbo/test_compare.py",
+        "sha256": "6172c6314bc67aad75774382d6c2603d166ebf780e83ab4498b366084a022d44",
+        "remote_sha256": "6172c6314bc67aad75774382d6c2603d166ebf780e83ab4498b366084a022d44"
+      }
+    ]
+  },
+  "engineering-final13.json": [
+    {
+      "name": "build12",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--bin",
+        "rust-model-inference",
+        "--bin",
+        "rust-model-server"
+      ],
+      "exit": 0,
+      "seconds": 328.13622036599554
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--lib"
+      ],
+      "exit": 101,
+      "log": "lib-final13.log",
+      "name": "lib-final13"
+    },
+    {
+      "name": "cli-final12",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "release-fast",
+        "--features",
+        "vulkan,parity-trace",
+        "--test",
+        "d3_turbo_cli"
+      ],
+      "exit": 0,
+      "seconds": 81.21308393008076
+    }
+  ]
+}

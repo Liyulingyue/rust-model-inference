@@ -218,7 +218,7 @@ fn sample_latent_distribution(
             let mean = distribution[c * frames + t];
             let log_std = distribution[(latent_dim + c) * frames + t];
             sampled[t * latent_dim + c] =
-                mean + noise[c * frames + t] * super::speaker::exp::torch28_exp(log_std);
+                mean + noise[c * frames + t] * crate::ops::math::torch28_exp(log_std);
         }
     }
     Ok(sampled)
@@ -1080,7 +1080,7 @@ pub fn read_dots_wav_for_parity(
     edit: bool,
     samples_per_patch: usize,
 ) -> Result<Vec<f32>, String> {
-    crate::app::dots::read_dots_wav_for_parity(path, edit, samples_per_patch)
+    crate::app::tts::dots::read_dots_wav_for_parity(path, edit, samples_per_patch)
 }
 
 #[cfg(test)]

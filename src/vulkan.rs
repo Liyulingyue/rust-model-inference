@@ -12,22 +12,41 @@
 //! when the heap offers it). On UMA iGPUs (Intel Xe) this is zero-copy system
 //! memory; discrete GPUs later want a staging → DEVICE_LOCAL upload path.
 
+pub(crate) mod dense;
+#[cfg(feature = "vulkan")]
+pub(crate) mod dory;
+pub(crate) mod matmul_iq;
+pub(crate) mod matmul_iq4_xs;
+#[cfg(feature = "vulkan")]
+pub(crate) mod matmul_q4k;
+#[cfg(feature = "vulkan")]
+pub(crate) mod nemotron_h;
 #[cfg(feature = "vulkan")]
 pub(crate) mod ops;
+#[cfg(feature = "vulkan")]
+pub(crate) mod q8_layout;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen3;
 #[cfg(feature = "vulkan")]
 pub(crate) mod qwen35;
 #[cfg(feature = "vulkan")]
+pub(crate) mod timestral;
+#[cfg(feature = "vulkan")]
+pub(crate) mod yue2;
+#[cfg(feature = "vulkan")]
+mod zimage_probe;
+#[cfg(feature = "vulkan")]
 #[doc(hidden)]
-pub use ops::{run_batched_matmul_check, run_qwen3_operator_check};
+pub use ops::{
+    dump_dispatch_trace, run_batched_matmul_check, run_qwen3_operator_check, silu_ffn_scale_probe,
+};
 
 #[cfg(feature = "vulkan")]
 use ash::vk;
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "vulkan")]
 const SHADER: &[u8] = include_bytes!("../shaders/bin/q8_matmul.spv");
@@ -41,6 +60,63 @@ const Q8_SHARED_BYTES: u32 = (4096 + 64) * 4;
 #[cfg(feature = "vulkan")]
 static GPU_BROKEN: AtomicBool = AtomicBool::new(false);
 
+/// Cumulative submission-phase timings in microseconds, dumped on demand by
+/// `dump_submit_trace`. Only accumulated when `RUST_GPU_SUBMIT_TRACE` is set so
+/// the hot path stays branch-free for normal runs.
+#[cfg(feature = "vulkan")]
+struct SubmitTrace {
+    count: AtomicU64,
+    record: AtomicU64,
+    submit: AtomicU64,
+    wait: AtomicU64,
+    reset: AtomicU64,
+}
+
+#[cfg(feature = "vulkan")]
+static SUBMIT_TRACE: SubmitTrace = SubmitTrace {
+    count: AtomicU64::new(0),
+    record: AtomicU64::new(0),
+    submit: AtomicU64::new(0),
+    wait: AtomicU64::new(0),
+    reset: AtomicU64::new(0),
+};
+
+#[cfg(feature = "vulkan")]
+static SUBMIT_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Report where submission wall-clock goes: `end/reset_fences/queue_submit`,
+/// `wait_for_fences` (the GPU actually executing), `end+record` around it, and
+/// `reset/begin_command_buffer`. Printed to stderr from `get_vulkan_context`.
+#[cfg(feature = "vulkan")]
+pub fn dump_submit_trace() {
+    if !SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let count = SUBMIT_TRACE.count.load(Ordering::Relaxed);
+    let micros = |name: &str, value: u64| {
+        let ms = value as f64 / 1000.0;
+        let per = if count > 0 { ms / count as f64 } else { 0.0 };
+        eprintln!("[GPU-TRACE] {name}: {ms:.1}ms total, {per:.3}ms/submission");
+    };
+    eprintln!("[GPU-TRACE] submissions={count}");
+    micros(
+        "record   (end+reset_fences+submit+wait)",
+        SUBMIT_TRACE.record.load(Ordering::Relaxed),
+    );
+    micros(
+        "  queue_submit",
+        SUBMIT_TRACE.submit.load(Ordering::Relaxed),
+    );
+    micros(
+        "  wait_for_fences (GPU executes)",
+        SUBMIT_TRACE.wait.load(Ordering::Relaxed),
+    );
+    micros(
+        "reset+begin_command_buffer",
+        SUBMIT_TRACE.reset.load(Ordering::Relaxed),
+    );
+}
+
 #[cfg(feature = "vulkan")]
 pub fn gpu_broken() -> bool {
     GPU_BROKEN.load(Ordering::Relaxed)
@@ -51,6 +127,37 @@ pub fn mark_gpu_broken(reason: &str) {
     if !GPU_BROKEN.swap(true, Ordering::Relaxed) {
         eprintln!("[GPU] Vulkan disabled after error: {reason}. Falling back to CPU.");
     }
+}
+
+/// The validation layer reports through this callback; without it the layer
+/// keeps quiet and the hazards we are hunting stay invisible.
+#[cfg(feature = "vulkan")]
+unsafe extern "system" fn validation_log(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    types: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT,
+    _user_data: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    if data.is_null() {
+        return vk::FALSE;
+    }
+    let callback = &*data;
+    let message = if callback.p_message.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(callback.p_message)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let id = if callback.p_message_id_name.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(callback.p_message_id_name)
+            .to_string_lossy()
+            .into_owned()
+    };
+    eprintln!("[GPU-VALIDATION] severity={severity:?} type={types:?} id={id}: {message}");
+    vk::FALSE
 }
 
 #[cfg(feature = "vulkan")]
@@ -72,6 +179,10 @@ pub struct VulkanContext {
     /// Weights keyed by (data_ptr, byte_len); mmap slices are stable, so the
     /// first matmul over a tensor uploads it and every later call is a hit.
     weight_cache: Mutex<HashMap<(usize, usize), GpuBuffer>>,
+    /// Operator pipelines, compiled once per device and shared by every
+    /// arena. Building a fresh set per arena compiled every shader again for
+    /// each projection, which cost far more than the dispatch itself.
+    operator_pipelines: Mutex<Option<Vec<vk::Pipeline>>>,
     /// Persistent I/O buffers, grown on demand.
     io_state: Mutex<IoState>,
     mutex: Mutex<CommandSubmission>,
@@ -85,12 +196,33 @@ pub struct VulkanContext {
     idle_waits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     device_name: String,
     shader_float16: bool,
+    shader_float64: bool,
+    /// Device reports `VK_KHR_shader_integer_dot_product`, so the packed 4x int8
+    /// matmul variant can use `dotPacked4x8EXT` instead of four scalar multiplies.
+    integer_dot_product: bool,
     limits: vk::PhysicalDeviceLimits,
+    /// True when the chosen physical device is a software ICD
+    /// (`VK_PHYSICAL_DEVICE_TYPE_CPU` — Mesa `llvmpipe`, Google's
+    /// `swiftshader`, etc.). Software ICDs run the compute shaders on
+    /// the host CPU, which is almost always slower than the hand-tuned
+    /// AVX2/FMA kernels we already have; `gpu_matmul_active()` checks
+    /// this and refuses to dispatch, so `--gpu` becomes a no-op on
+    /// such devices and the engine stays on the CPU path.
+    is_software_icd: bool,
     submission_count: std::sync::atomic::AtomicU64,
+    counters: ComputeCounters,
     /// Completed-matmul generation. Thread 0 bumps it after the fence wait;
     /// other pool threads block on it before touching the matmul output
     /// (their post-matmul work — silu, residual — must see the GPU result).
     completed_gen: std::sync::atomic::AtomicU64,
+    /// Cached Qwen3 operator contracts. The common attention boundary is
+    /// independent of weight storage; activation quantizers are checked only
+    /// when a model actually dispatches through that path.
+    qwen3_core_contract: OnceLock<Result<(), String>>,
+    q8_0_activation_contract: OnceLock<Result<(), String>>,
+    q8_k_activation_contract: OnceLock<Result<(), String>>,
+    /// The validation messenger, alive as long as the instance is.
+    debug_messenger: Option<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)>,
 }
 
 /// Persistent activation staging buffers. Capacities grow to the largest
@@ -106,7 +238,9 @@ struct IoState {
 #[cfg(feature = "vulkan")]
 #[derive(Default)]
 struct CommandSubmission {
+    shutdown: bool,
     uncertain: bool,
+    retired_weights: Vec<GpuBuffer>,
 }
 
 #[cfg(feature = "vulkan")]
@@ -144,15 +278,64 @@ impl Default for IoState {
     }
 }
 
+/// Device-wide counters. Host bytes include mapped UMA copies; allocation peaks
+/// count Vulkan buffers, not process RSS or total driver memory.
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ComputeStats {
+    pub submissions: u64,
+    pub static_uploads: u64,
+    pub static_upload_bytes: u64,
+    pub host_write_bytes: u64,
+    pub host_read_bytes: u64,
+    pub transfer_submissions: u64,
+    pub live_allocation_bytes: u64,
+    pub peak_allocation_bytes: u64,
+}
+#[cfg(feature = "vulkan")]
+impl ComputeStats {
+    pub fn since(self, before: Self) -> Self {
+        Self {
+            submissions: self.submissions.saturating_sub(before.submissions),
+            static_uploads: self.static_uploads.saturating_sub(before.static_uploads),
+            static_upload_bytes: self
+                .static_upload_bytes
+                .saturating_sub(before.static_upload_bytes),
+            host_write_bytes: self
+                .host_write_bytes
+                .saturating_sub(before.host_write_bytes),
+            host_read_bytes: self.host_read_bytes.saturating_sub(before.host_read_bytes),
+            transfer_submissions: self
+                .transfer_submissions
+                .saturating_sub(before.transfer_submissions),
+            live_allocation_bytes: self.live_allocation_bytes,
+            peak_allocation_bytes: self.peak_allocation_bytes,
+        }
+    }
+}
+#[cfg(feature = "vulkan")]
+#[derive(Default)]
+struct ComputeCounters {
+    static_uploads: AtomicU64,
+    static_upload_bytes: AtomicU64,
+    host_write_bytes: AtomicU64,
+    host_read_bytes: AtomicU64,
+    transfer_submissions: AtomicU64,
+    live_allocation_bytes: AtomicU64,
+    peak_allocation_bytes: AtomicU64,
+}
+
 #[cfg(feature = "vulkan")]
 pub(crate) struct GpuBuffer {
     pub(crate) buffer: vk::Buffer,
     pub(crate) memory: vk::DeviceMemory,
     pub(crate) size: u64,
+    allocation_bytes: u64,
     pub(crate) mapped: *mut u8,
 }
 
 #[cfg(feature = "vulkan")]
+#[derive(Clone)]
 struct DeviceCandidate {
     physical_device: vk::PhysicalDevice,
     queue_family: u32,
@@ -163,6 +346,7 @@ struct DeviceCandidate {
     portability_subset: bool,
     integer_dot_product: bool,
     shader_float16: bool,
+    shader_float64: bool,
 }
 
 #[cfg(feature = "vulkan")]
@@ -200,9 +384,13 @@ struct DeviceResources {
 #[cfg(feature = "vulkan")]
 impl VulkanContext {
     pub fn new() -> Result<Self, VulkanError> {
+        SUBMIT_TRACE_ENABLED.store(
+            std::env::var("RUST_GPU_SUBMIT_TRACE").is_ok(),
+            Ordering::Relaxed,
+        );
         unsafe {
             let entry = load_entry()?;
-            let (instance, instance_api_version, properties2_extension) =
+            let (instance, instance_api_version, properties2_extension, debug_messenger) =
                 Self::create_instance(&entry)?;
             let candidates = match Self::device_candidates(
                 &entry,
@@ -212,6 +400,9 @@ impl VulkanContext {
             ) {
                 Ok(candidates) => candidates,
                 Err(error) => {
+                    if let Some((utils, messenger)) = &debug_messenger {
+                        utils.destroy_debug_utils_messenger(*messenger, None);
+                    }
                     instance.destroy_instance(None);
                     return Err(error);
                 }
@@ -224,10 +415,23 @@ impl VulkanContext {
                 }
             }
 
-            for candidate in rank_supported(candidates) {
+            for candidate in select_device(rank_supported(candidates)) {
                 match Self::create_candidate_resources(&instance, &candidate) {
                     Ok(resources) => {
-                        eprintln!("[GPU] Vulkan device: {}", candidate.name);
+                        eprintln!(
+                            "[GPU] Vulkan device: {} (int8 dot product: {}, shader f16: {})",
+                            candidate.name,
+                            if candidate.integer_dot_product {
+                                "supported"
+                            } else {
+                                "unavailable"
+                            },
+                            if candidate.shader_float16 {
+                                "supported"
+                            } else {
+                                "unavailable"
+                            },
+                        );
                         return Ok(Self {
                             entry: std::mem::ManuallyDrop::new(entry),
                             instance,
@@ -244,6 +448,7 @@ impl VulkanContext {
                             command_buffer: resources.command_buffer,
                             fence: resources.fence,
                             weight_cache: Mutex::new(HashMap::new()),
+                            operator_pipelines: Mutex::new(None),
                             io_state: Mutex::new(IoState::default()),
                             mutex: Mutex::new(CommandSubmission::default()),
                             #[cfg(test)]
@@ -256,15 +461,26 @@ impl VulkanContext {
                             idle_waits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                             device_name: candidate.name,
                             shader_float16: candidate.shader_float16,
+                            shader_float64: candidate.shader_float64,
+                            integer_dot_product: candidate.integer_dot_product,
                             limits: candidate.limits,
+                            is_software_icd: candidate.device_type == vk::PhysicalDeviceType::CPU,
                             submission_count: std::sync::atomic::AtomicU64::new(0),
+                            counters: ComputeCounters::default(),
                             completed_gen: std::sync::atomic::AtomicU64::new(0),
+                            qwen3_core_contract: OnceLock::new(),
+                            q8_0_activation_contract: OnceLock::new(),
+                            q8_k_activation_contract: OnceLock::new(),
+                            debug_messenger,
                         });
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.name)),
                 }
             }
 
+            if let Some((utils, messenger)) = &debug_messenger {
+                utils.destroy_debug_utils_messenger(*messenger, None);
+            }
             instance.destroy_instance(None);
             if failures.is_empty() {
                 Err(VulkanError::NoComputeDevice)
@@ -278,15 +494,117 @@ impl VulkanContext {
         &self.device_name
     }
 
+    /// True when the loader picked a software ICD (Mesa `llvmpipe`,
+    /// Google's `swiftshader`, …). Such devices run the compute shaders
+    /// on the host CPU; on a 4-core machine the hand-tuned AVX2/FMA
+    /// kernels already saturate every core, so a software-Vulkan path
+    /// only adds dispatch overhead. `gpu_matmul_active()` short-circuits
+    /// when this is true, leaving the engine on the CPU path even
+    /// though the user passed `--gpu`.
+    pub fn is_software_icd(&self) -> bool {
+        self.is_software_icd
+    }
+
     pub(crate) fn supports_shader_float16(&self) -> bool {
         self.shader_float16
+    }
+
+    pub(crate) fn validate_qwen3_core_contract(&self) -> Result<(), String> {
+        self.qwen3_core_contract
+            .get_or_init(|| ops::check_qwen3_core_contract(self))
+            .clone()
+    }
+
+    pub(crate) fn validate_q8_0_activation_contract(&self) -> Result<(), String> {
+        self.q8_0_activation_contract
+            .get_or_init(|| ops::check_q8_0_activation_contract(self))
+            .clone()
+            .map_err(|error| format!("Q8_0 activation path: {error}"))
+    }
+
+    pub(crate) fn validate_q8_k_activation_contract(&self) -> Result<(), String> {
+        self.q8_k_activation_contract
+            .get_or_init(|| ops::check_q8_k_activation_contract(self))
+            .clone()
+            .map_err(|error| format!("Q8_K activation path: {error}"))
+    }
+
+    /// Human-readable memory heaps for diagnosing allocation performance.
+    pub fn memory_type_report(&self) -> String {
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self._physical_device)
+        };
+        let mut lines = Vec::new();
+        for (index, ty) in properties.memory_types.iter().enumerate() {
+            let heap = properties.memory_heaps[ty.heap_index as usize];
+            let mut flags = Vec::new();
+            for (set, name) in [
+                (vk::MemoryPropertyFlags::DEVICE_LOCAL, "DEVICE_LOCAL"),
+                (vk::MemoryPropertyFlags::HOST_VISIBLE, "HOST_VISIBLE"),
+                (vk::MemoryPropertyFlags::HOST_CACHED, "HOST_CACHED"),
+                (vk::MemoryPropertyFlags::HOST_COHERENT, "HOST_COHERENT"),
+            ] {
+                if ty.property_flags.contains(set) {
+                    flags.push(name);
+                }
+            }
+            lines.push(format!(
+                "  type {index}: heap {} ({:.1} GiB) [{}]",
+                ty.heap_index,
+                heap.size as f64 / (1024.0 * 1024.0 * 1024.0),
+                flags.join("|")
+            ));
+        }
+        lines.join("\n")
+    }
+
+    pub(crate) fn supports_integer_dot_product(&self) -> bool {
+        self.integer_dot_product
     }
 
     pub fn submission_count(&self) -> u64 {
         self.submission_count.load(Ordering::Relaxed)
     }
 
+    pub fn compute_stats(&self) -> ComputeStats {
+        ComputeStats {
+            submissions: self.submission_count(),
+            static_uploads: self.counters.static_uploads.load(Ordering::Relaxed),
+            static_upload_bytes: self.counters.static_upload_bytes.load(Ordering::Relaxed),
+            host_write_bytes: self.counters.host_write_bytes.load(Ordering::Relaxed),
+            host_read_bytes: self.counters.host_read_bytes.load(Ordering::Relaxed),
+            transfer_submissions: self.counters.transfer_submissions.load(Ordering::Relaxed),
+            live_allocation_bytes: self.counters.live_allocation_bytes.load(Ordering::Relaxed),
+            peak_allocation_bytes: self.counters.peak_allocation_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn submit_transfer_commands(
+        &self,
+        submission: &mut CommandSubmission,
+    ) -> Result<(), VulkanError> {
+        let before = self.submission_count();
+        let result = self.submit_commands(submission);
+        self.counters
+            .transfer_submissions
+            .fetch_add(self.submission_count() - before, Ordering::Relaxed);
+        result
+    }
+
+    fn count_upload(&self, bytes: usize) {
+        self.counters.static_uploads.fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .static_upload_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
     fn recover_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
+        if submission.shutdown {
+            return Err(VulkanError::InitFailed(
+                "Vulkan context is shut down".into(),
+            ));
+        }
         submission.confirm_idle(|| {
             #[cfg(test)]
             {
@@ -297,12 +615,17 @@ impl VulkanContext {
             }
             unsafe { self.device.device_wait_idle() }
                 .map_err(|error| VulkanError::InitFailed(error.to_string()))
-        })
+        })?;
+        for buffer in submission.retired_weights.drain(..) {
+            unsafe { self.destroy_buffer(&buffer) };
+        }
+        Ok(())
     }
 
-    /// Caller holds mutex, from recovery through recording and submission.
+    /// Caller holds mutex, from recovery through submission.
     fn begin_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
         self.recover_commands(submission)?;
+        let t = std::time::Instant::now();
         unsafe {
             self.device
                 .reset_command_buffer(
@@ -319,39 +642,83 @@ impl VulkanContext {
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
                 .map_err(|error| VulkanError::InitFailed(error.to_string()))
+        }?;
+        // Host writes must become visible before the dispatches that consume
+        // them, including writes made while this command buffer is recording.
+        unsafe { self.host_write_barrier(self.command_buffer) };
+        if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+            SUBMIT_TRACE
+                .reset
+                .fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
+        Ok(())
     }
 
     fn submit_commands(&self, submission: &mut CommandSubmission) -> Result<(), VulkanError> {
-        unsafe {
-            self.device
-                .end_command_buffer(self.command_buffer)
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            self.device
-                .reset_fences(std::slice::from_ref(&self.fence))
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-            let submit = vk::SubmitInfo::builder()
-                .command_buffers(std::slice::from_ref(&self.command_buffer))
-                .build();
-            // queue_submit can fail without proving no work was accepted.
-            submission.submit(|| {
-                self.device
-                    .queue_submit(self.queue, &[submit], self.fence)
-                    .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
-                self.submission_count.fetch_add(1, Ordering::Relaxed);
-                // Allow driver JIT, preserving the existing 60-second timeout.
-                self.device
-                    .wait_for_fences(std::slice::from_ref(&self.fence), true, 60_000_000_000)
-                    .map_err(|_| VulkanError::Timeout)?;
-                // Inject ambiguity after real completion so RED tests can safely
-                // demonstrate a missing recovery/reset guard without hanging GPU work.
-                #[cfg(test)]
-                if self.fail_fence_wait.swap(false, Ordering::Relaxed) {
-                    return Err(VulkanError::Timeout);
-                }
-                Ok(())
-            })
+        #[cfg(feature = "vulkan")]
+        if ops::dispatch_log_enabled() {
+            ops::dispatch_log_new_epoch();
         }
+        let t0 = std::time::Instant::now();
+        let result = (|| -> Result<(), VulkanError> {
+            unsafe {
+                self.device
+                    .end_command_buffer(self.command_buffer)
+                    .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                self.device
+                    .reset_fences(std::slice::from_ref(&self.fence))
+                    .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                let submit = vk::SubmitInfo::builder()
+                    .command_buffers(std::slice::from_ref(&self.command_buffer))
+                    .build();
+                // queue_submit can fail without proving no work was accepted.
+                submission.submit(|| {
+                    let t1 = std::time::Instant::now();
+                    unsafe {
+                        self.device
+                            .queue_submit(self.queue, &[submit], self.fence)
+                            .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                    }
+                    self.submission_count.fetch_add(1, Ordering::Relaxed);
+                    let t2 = std::time::Instant::now();
+                    if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+                        SUBMIT_TRACE
+                            .submit
+                            .fetch_add(t2.duration_since(t1).as_micros() as u64, Ordering::Relaxed);
+                    }
+                    // Allow driver JIT, preserving the existing 60-second timeout.
+                    unsafe {
+                        self.device
+                            .wait_for_fences(
+                                std::slice::from_ref(&self.fence),
+                                true,
+                                60_000_000_000,
+                            )
+                            .map_err(|_| VulkanError::Timeout)?;
+                    }
+                    let t3 = std::time::Instant::now();
+                    if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+                        SUBMIT_TRACE
+                            .wait
+                            .fetch_add(t3.duration_since(t2).as_micros() as u64, Ordering::Relaxed);
+                    }
+                    // Inject ambiguity after real completion so RED tests can safely
+                    // demonstrate a missing recovery/reset guard without hanging GPU work.
+                    #[cfg(test)]
+                    if self.fail_fence_wait.swap(false, Ordering::Relaxed) {
+                        return Err(VulkanError::Timeout);
+                    }
+                    Ok(())
+                })
+            }
+        })();
+        if SUBMIT_TRACE_ENABLED.load(Ordering::Relaxed) {
+            SUBMIT_TRACE.count.fetch_add(1, Ordering::Relaxed);
+            SUBMIT_TRACE
+                .record
+                .fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+        result
     }
 
     /// Run one tiny matmul and wait for it. The driver JITs the compute
@@ -361,11 +728,13 @@ impl VulkanContext {
     pub fn warmup(&self) -> Result<(), VulkanError> {
         let n_in = 32usize;
         let n_out = 32usize;
-        let mut weight = vec![0u8; n_out * (n_in / 32) * 34];
+        let weight = vec![0u8; n_out * (n_in / 32) * 34];
         let input = vec![0u8; n_in];
         let scales = vec![0.0f32; n_in / 32];
         let mut out = vec![0.0f32; n_out];
-        unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) }
+        let result = unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) };
+        self.release_cached_weight(&weight);
+        result
     }
 
     /// Snapshot of the completed-matmul generation; pair with [`Self::wait_for_gen`].
@@ -408,14 +777,6 @@ impl VulkanContext {
             .lock()
             .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
         let blocks_per_row = n_in / 32;
-        if blocks_per_row > 512 {
-            // shader stages the input row in 4096 shared words (16 KiB);
-            // UnsupportedShape lets the caller fall back to CPU for this
-            // matmul while keeping the GPU alive for the rest.
-            return Err(VulkanError::UnsupportedShape(format!(
-                "n_in {n_in} exceeds shader shared-memory capacity"
-            )));
-        }
         debug_assert_eq!(weight.len(), n_out * blocks_per_row * 34);
         debug_assert_eq!(input_q8.len(), n_in);
         debug_assert_eq!(input_scales.len(), blocks_per_row);
@@ -436,6 +797,10 @@ impl VulkanContext {
         std::ptr::copy_nonoverlapping(input_q8.as_ptr(), in_map, input_q8.len());
         let scale_map = scale_buffer.mapped as *mut f32;
         std::ptr::copy_nonoverlapping(input_scales.as_ptr(), scale_map, input_scales.len());
+        self.counters.host_write_bytes.fetch_add(
+            (input_q8.len() + input_scales.len() * 4) as u64,
+            Ordering::Relaxed,
+        );
 
         // 4. Bind and dispatch.
         self.update_descriptor_sets(
@@ -459,10 +824,10 @@ impl VulkanContext {
             &[],
         );
 
-        // dims = [n_in, n_out, blocks_per_row, row_stride_bytes]; the shader
+        // dims = [reduction_mode, n_out, blocks_per_row, row_stride_bytes]; the shader
         // addresses `weight` with byte offsets extracted from u32 words.
         let push_constants: [u32; 4] = [
-            n_in as u32,
+            ops::q8_dot_mode(),
             n_out as u32,
             blocks_per_row as u32,
             (blocks_per_row * 34) as u32,
@@ -474,7 +839,7 @@ impl VulkanContext {
             0,
             bytemuck::cast_slice(&push_constants),
         );
-        let (groups_x, groups_y) = dispatch_grid(n_out, &self.limits)?;
+        let (groups_x, groups_y) = dispatch_grid(n_out.div_ceil(64), &self.limits)?;
         self.device
             .cmd_dispatch(self.command_buffer, groups_x, groups_y, 1);
 
@@ -485,6 +850,9 @@ impl VulkanContext {
         // 5. Read results out of the persistently mapped output buffer.
         let out_map = output_buffer.mapped as *const f32;
         std::ptr::copy_nonoverlapping(out_map, output.as_mut_ptr(), n_out);
+        self.counters
+            .host_read_bytes
+            .fetch_add((n_out * 4) as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -511,6 +879,19 @@ impl VulkanContext {
         Ok(*slot.as_ref().unwrap())
     }
 
+    pub(crate) fn release_cached_weight(&self, weight: &[u8]) {
+        // A later model may reuse this address for different weights.
+        if let Ok(mut submission) = self.mutex.lock() {
+            if let Ok(mut cache) = self.weight_cache.lock() {
+                if let Some(buffer) = cache.remove(&(weight.as_ptr() as usize, weight.len())) {
+                    submission.retired_weights.push(buffer);
+                }
+            }
+            // Evict the expired host key even if GPU completion cannot be confirmed.
+            let _ = self.recover_commands(&mut submission);
+        }
+    }
+
     unsafe fn weight_for(&self, weight: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let key = (weight.as_ptr() as usize, weight.len());
         if let Some(buf) = self.weight_cache.lock().unwrap().get(&key) {
@@ -518,13 +899,53 @@ impl VulkanContext {
         }
         // +16 bytes of zero padding: the shader's speculative second-word load
         // for the last block of the last row can read one word past the tensor.
-        let buf = self.alloc_persistently_mapped(weight.len() as u64 + 16)?;
+        let size = weight
+            .len()
+            .checked_add(19)
+            .ok_or(VulkanError::OutOfMemory)?
+            & !3;
+        // Legacy matvec already holds the command mutex and has begun recording.
+        // Use a mapped VRAM upload here rather than submitting nested transfers.
+        // The CPU only writes these immutable weights; it never reads them back.
+        let buf = if self.is_discrete() {
+            match self.alloc_buffer(
+                size as u64,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::empty(),
+                true,
+            ) {
+                Ok(buffer) => buffer,
+                Err(VulkanError::OutOfMemory) => self.alloc_persistently_mapped(size as u64)?,
+                Err(error) => return Err(error),
+            }
+        } else {
+            self.alloc_persistently_mapped(size as u64)?
+        };
         std::ptr::copy_nonoverlapping(weight.as_ptr(), buf.mapped, weight.len());
+        std::ptr::write_bytes(buf.mapped.add(weight.len()), 0, size - weight.len());
+        self.count_upload(weight.len());
         self.weight_cache.lock().unwrap().insert(key, buf);
         Ok(*self.weight_cache.lock().unwrap().get(&key).unwrap())
     }
 
     unsafe fn alloc_persistently_mapped(&self, size: u64) -> Result<GpuBuffer, VulkanError> {
+        self.alloc_buffer(
+            size,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_CACHED,
+            true,
+        )
+    }
+
+    unsafe fn alloc_buffer(
+        &self,
+        size: u64,
+        required: vk::MemoryPropertyFlags,
+        preferred: vk::MemoryPropertyFlags,
+        map: bool,
+    ) -> Result<GpuBuffer, VulkanError> {
         let buffer = self
             .device
             .create_buffer(
@@ -533,7 +954,9 @@ impl VulkanContext {
                     p_next: std::ptr::null(),
                     flags: Default::default(),
                     size,
-                    usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST,
                     sharing_mode: vk::SharingMode::EXCLUSIVE,
                     queue_family_index_count: 0,
                     p_queue_family_indices: std::ptr::null(),
@@ -543,57 +966,83 @@ impl VulkanContext {
             .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
 
         let mem_reqs = self.device.get_buffer_memory_requirements(buffer);
-        // iGPU/UMA note: prefer plain HOST_VISIBLE|HOST_COHERENT (cached
-        // system RAM). The DEVICE_LOCAL heap on Intel iGPUs is the small
-        // stolen-memory carve-out — uncached and easily exhausted by
-        // model-scale buffers (observed driver hangs when weights landed
-        // there). For discrete GPUs revisit with a staging upload path.
-        let mem_type = self
-            .find_memory_type(
-                mem_reqs.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .ok_or(VulkanError::OutOfMemory)?;
+        let Some(mem_type) = self
+            .find_memory_type(mem_reqs.memory_type_bits, required | preferred)
+            .or_else(|| self.find_memory_type(mem_reqs.memory_type_bits, required))
+        else {
+            self.device.destroy_buffer(buffer, None);
+            return Err(VulkanError::OutOfMemory);
+        };
 
-        let memory = self
-            .device
-            .allocate_memory(
-                &vk::MemoryAllocateInfo {
-                    s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-                    p_next: std::ptr::null(),
-                    allocation_size: mem_reqs.size,
-                    memory_type_index: mem_type,
-                },
-                None,
-            )
-            .map_err(|e| VulkanError::OutOfMemory)?;
+        let memory = match self.device.allocate_memory(
+            &vk::MemoryAllocateInfo {
+                s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+                p_next: std::ptr::null(),
+                allocation_size: mem_reqs.size,
+                memory_type_index: mem_type,
+            },
+            None,
+        ) {
+            Ok(memory) => memory,
+            Err(_) => {
+                self.device.destroy_buffer(buffer, None);
+                return Err(VulkanError::OutOfMemory);
+            }
+        };
 
-        self.device
-            .bind_buffer_memory(buffer, memory, 0)
-            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
+        if let Err(error) = self.device.bind_buffer_memory(buffer, memory, 0) {
+            self.device.destroy_buffer(buffer, None);
+            self.device.free_memory(memory, None);
+            return Err(VulkanError::InitFailed(error.to_string()));
+        }
 
-        let mapped = self
-            .device
-            .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
-            .map_err(|e| VulkanError::OutOfMemory)? as *mut u8;
+        let mapped = if map {
+            match self
+                .device
+                .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
+            {
+                Ok(mapped) => mapped as *mut u8,
+                Err(_) => {
+                    self.device.destroy_buffer(buffer, None);
+                    self.device.free_memory(memory, None);
+                    return Err(VulkanError::OutOfMemory);
+                }
+            }
+        } else {
+            std::ptr::null_mut()
+        };
 
+        let live = self
+            .counters
+            .live_allocation_bytes
+            .fetch_add(mem_reqs.size, Ordering::Relaxed)
+            + mem_reqs.size;
+        self.counters
+            .peak_allocation_bytes
+            .fetch_max(live, Ordering::Relaxed);
         Ok(GpuBuffer {
             buffer,
             memory,
             size,
+            allocation_bytes: mem_reqs.size,
             mapped,
         })
     }
 
     pub(crate) unsafe fn destroy_buffer(&self, buf: &GpuBuffer) {
-        self.device.unmap_memory(buf.memory);
+        self.counters
+            .live_allocation_bytes
+            .fetch_sub(buf.allocation_bytes, Ordering::Relaxed);
+        if !buf.mapped.is_null() {
+            self.device.unmap_memory(buf.memory);
+        }
         self.device.destroy_buffer(buf.buffer, None);
         self.device.free_memory(buf.memory, None);
     }
 
     /// On error the caller must retain/leak these owned handles, never destroy
     /// them while commands may still refer to them. Caller must not hold mutex.
-    unsafe fn destroy_completed_buffers<'a>(
+    pub(crate) unsafe fn destroy_completed_buffers<'a>(
         &self,
         buffers: impl IntoIterator<Item = &'a GpuBuffer>,
     ) -> Result<(), VulkanError> {
@@ -608,15 +1057,299 @@ impl VulkanContext {
         Ok(())
     }
 
+    /// The operator pipelines, compiled once for this device.
+    ///
+    /// Sharing them removes the per-arena cost of compiling every shader
+    /// again, which the denoiser paid for each of its hundred odd
+    /// projections per step.
+    pub(crate) fn operator_pipelines(&self) -> Result<Vec<vk::Pipeline>, VulkanError> {
+        let mut cached = self
+            .operator_pipelines
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan pipeline cache poisoned".into()))?;
+        if let Some(pipelines) = cached.as_ref() {
+            return Ok(pipelines.clone());
+        }
+        let pipelines = crate::vulkan::ops::build_operator_pipelines(self)?;
+        *cached = Some(pipelines.clone());
+        Ok(pipelines)
+    }
+
+    /// Force the host side cache of a mapped range out to the device.
+    ///
+    /// The arena and the weight uploads are plain copies into mapped memory.
+    /// The memory is host coherent, so a barrier alone is supposed to order
+    /// them, and the barrier in begin_commands does. A tiled kernel reads
+    /// those regions within microseconds of the copy though, so the copy is
+    /// flushed as well rather than relying on that barrier alone.
+    pub(crate) unsafe fn flush_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .flush_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
+    /// Drop the host side cache of a mapped range so the device writes it
+    /// holds become visible to the host.
+    ///
+    /// The result region is read straight out of the mapping. The memory is
+    /// host coherent, so the fence wait is supposed to be enough, but the
+    /// range is invalidated as well so the read does not depend on that.
+    pub(crate) unsafe fn invalidate_mapped(
+        &self,
+        buffer: GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+        let range = vk::MappedMemoryRange::builder()
+            .memory(buffer.memory)
+            .offset(offset)
+            .size(size)
+            .build();
+        self.device
+            .invalidate_mapped_memory_ranges(&[range])
+            .map_err(|error| VulkanError::InitFailed(error.to_string()))
+    }
+
     pub(crate) unsafe fn upload_static(&self, data: &[u8]) -> Result<GpuBuffer, VulkanError> {
         let size = data
             .len()
-            .checked_add(16)
-            .and_then(|size| u64::try_from(size).ok())
+            .checked_add(19)
+            .and_then(|size| u64::try_from(size & !3).ok())
             .ok_or(VulkanError::OutOfMemory)?;
         let buffer = self.alloc_persistently_mapped(size)?;
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer.mapped, data.len());
+        std::ptr::write_bytes(buffer.mapped.add(data.len()), 0, size as usize - data.len());
+        self.flush_mapped(buffer, 0, data.len() as u64)?;
+        self.count_upload(data.len());
         Ok(buffer)
+    }
+
+    /// Upload bytes that are produced in place.
+    ///
+    /// A caller that has to rewrite the bytes anyway -- the transposed Q8_0
+    /// layout -- can write them straight into the device buffer instead of
+    /// staging them in a second buffer and copying that over.
+    pub(crate) unsafe fn upload_static_filled(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
+        let padded = size
+            .checked_add(19)
+            .and_then(|size| u64::try_from(size & !3).ok())
+            .ok_or(VulkanError::OutOfMemory)?;
+        let buffer = self.alloc_persistently_mapped(padded)?;
+        let mapped = buffer.mapped;
+        // SAFETY: the mapping covers `padded` bytes and the buffer is not
+        // in use yet.
+        fill(std::slice::from_raw_parts_mut(mapped, size));
+        std::ptr::write_bytes(mapped.add(size), 0, padded as usize - size);
+        self.flush_mapped(buffer, 0, size as u64)?;
+        self.count_upload(size);
+        Ok(buffer)
+    }
+
+    /// Keep discrete GPU weights in VRAM; mutable host buffers still use
+    /// upload_static. Caller must not hold the command mutex.
+    pub(crate) unsafe fn upload_device_static(
+        &self,
+        data: &[u8],
+    ) -> Result<GpuBuffer, VulkanError> {
+        self.upload_device_static_filled(data.len(), |bytes| bytes.copy_from_slice(data))
+    }
+
+    /// Same as [`upload_device_static`] for bytes that are produced in place.
+    ///
+    /// The transposed Q8_0 layout is written straight into the staging
+    /// buffer instead of a second host copy.
+    pub(crate) unsafe fn upload_device_static_filled(
+        &self,
+        size: usize,
+        fill: impl FnOnce(&mut [u8]),
+    ) -> Result<GpuBuffer, VulkanError> {
+        if !self.is_discrete() {
+            let padded = size.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+            let buffer = self.alloc_persistently_mapped(padded as u64)?;
+            fill(std::slice::from_raw_parts_mut(buffer.mapped, size));
+            std::ptr::write_bytes(buffer.mapped.add(size), 0, padded - size);
+            self.flush_mapped(buffer, 0, size as u64)?;
+            self.count_upload(size);
+            return Ok(buffer);
+        }
+        let padded = size.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+        let staging = self.allocate_session_buffer(padded)?;
+        fill(std::slice::from_raw_parts_mut(staging.mapped, size));
+        std::ptr::write_bytes(staging.mapped.add(size), 0, padded - size);
+        let buffer = match self.alloc_device_buffer(padded) {
+            Ok(buffer) => buffer,
+            Err(VulkanError::OutOfMemory) => {
+                // A full VRAM heap must preserve the shared-memory fallback.
+                self.count_upload(size);
+                return Ok(staging);
+            }
+            Err(error) => {
+                self.destroy_buffer(&staging);
+                return Err(error);
+            }
+        };
+        let result = (|| {
+            let mut submission = self
+                .mutex
+                .lock()
+                .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
+            self.begin_commands(&mut submission)?;
+            self.record_buffer_copy(self.command_buffer, staging, buffer, 0, 0, padded as u64);
+            self.submit_transfer_commands(&mut submission)
+        })();
+        if let Err(error) = result {
+            // A failed fence wait does not prove these buffers are idle.
+            let _ = self.destroy_completed_buffers([&staging, &buffer]);
+            return Err(error);
+        }
+        self.destroy_buffer(&staging);
+        self.count_upload(size);
+        Ok(buffer)
+    }
+
+    pub(crate) fn is_discrete(&self) -> bool {
+        unsafe {
+            self.instance
+                .get_physical_device_properties(self._physical_device)
+        }
+        .device_type
+            == vk::PhysicalDeviceType::DISCRETE_GPU
+    }
+
+    pub(crate) fn moe_experts_per_submission(&self) -> usize {
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_properties(self._physical_device)
+        };
+        // shortcut: nine-expert batches are validated on M3 Max/RADV NAVI31; keep other vendors at two until tested.
+        match properties.vendor_id {
+            0x1002 | 0x106b => 9,
+            _ => 2,
+        }
+    }
+
+    unsafe fn alloc_device_buffer(&self, size: usize) -> Result<GpuBuffer, VulkanError> {
+        self.alloc_buffer(
+            u64::try_from(size).map_err(|_| VulkanError::OutOfMemory)?,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::empty(),
+            false,
+        )
+    }
+
+    /// Allocate and initialise an operator arena. UMA keeps host-visible
+    /// memory: forcing Intel's small stolen-memory heap can exhaust it.
+    pub(crate) unsafe fn allocate_operator_arena(
+        &self,
+        size: usize,
+        device_local: bool,
+    ) -> Result<(GpuBuffer, Option<GpuBuffer>), VulkanError> {
+        let host = self.allocate_session_buffer(size)?;
+        std::ptr::write_bytes(host.mapped, 0, size);
+        if !device_local || !self.is_discrete() {
+            return Ok((host, None));
+        }
+        let arena = match self.alloc_device_buffer(size) {
+            Ok(arena) => arena,
+            Err(VulkanError::OutOfMemory) => {
+                eprintln!("[GPU] Device arena unavailable; using host memory");
+                return Ok((host, None));
+            }
+            Err(error) => {
+                self.destroy_buffer(&host);
+                return Err(error);
+            }
+        };
+        let result = (|| {
+            let mut submission = self
+                .mutex
+                .lock()
+                .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
+            self.begin_commands(&mut submission)?;
+            self.record_buffer_copy(self.command_buffer, host, arena, 0, 0, size as u64);
+            self.submit_transfer_commands(&mut submission)
+        })();
+        if let Err(error) = result {
+            let _ = self.destroy_completed_buffers([&host, &arena]);
+            return Err(error);
+        }
+        Ok((arena, Some(host)))
+    }
+
+    /// Caller holds the command mutex; ranges are aligned and in bounds.
+    pub(crate) unsafe fn record_buffer_copy(
+        &self,
+        command: vk::CommandBuffer,
+        source: GpuBuffer,
+        target: GpuBuffer,
+        source_offset: u64,
+        target_offset: u64,
+        size: u64,
+    ) {
+        let before = vk::MemoryBarrier::builder()
+            .src_access_mask(
+                vk::AccessFlags::HOST_WRITE
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_WRITE,
+            )
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE);
+        self.device.cmd_pipeline_barrier(
+            command,
+            vk::PipelineStageFlags::HOST
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            std::slice::from_ref(&before),
+            &[],
+            &[],
+        );
+        self.device.cmd_copy_buffer(
+            command,
+            source.buffer,
+            target.buffer,
+            &[vk::BufferCopy {
+                src_offset: source_offset,
+                dst_offset: target_offset,
+                size,
+            }],
+        );
+        let after = vk::MemoryBarrier::builder()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::HOST_READ
+                    | vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::SHADER_WRITE,
+            );
+        self.device.cmd_pipeline_barrier(
+            command,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::HOST | vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            std::slice::from_ref(&after),
+            &[],
+            &[],
+        );
     }
 
     pub(crate) unsafe fn allocate_session_buffer(
@@ -635,6 +1368,33 @@ impl VulkanContext {
         Self::create_pipeline_for_device(&self.device, pipeline_layout, shader)
     }
 
+    /// Order this submission's host writes against the device reads them.
+    ///
+    /// The arena is mapped host memory that the CPU writes directly
+    /// (`write_f32`) and the shaders read from the same allocation, so every
+    /// submission that follows a host write needs a HOST -> COMPUTE barrier
+    /// rather than a shader-only one. Without it the two are only ordered by
+    /// luck: the one-token-per-weight kernel took ~700 ms per dispatch, which
+    /// gave the write time to become visible, while the register-tiled kernel
+    /// finished in ~64 ms and read the activation region while the host store
+    /// was still not visible. That showed up as the same seed producing
+    /// different images, and only at sizes where the arena no longer fits in
+    /// cache -- 256x256 reproduced exactly, 512x512 did not.
+    pub(crate) unsafe fn host_write_barrier(&self, command: vk::CommandBuffer) {
+        let barrier = vk::MemoryBarrier::builder()
+            .src_access_mask(vk::AccessFlags::HOST_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+        self.device.cmd_pipeline_barrier(
+            command,
+            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            std::slice::from_ref(&barrier),
+            &[],
+            &[],
+        );
+    }
+
     pub(crate) unsafe fn compute_barrier(&self, command: vk::CommandBuffer) {
         let barrier = vk::MemoryBarrier::builder()
             .src_access_mask(vk::AccessFlags::SHADER_WRITE)
@@ -650,7 +1410,17 @@ impl VulkanContext {
         );
     }
 
-    fn create_instance(entry: &ash::Entry) -> Result<(ash::Instance, u32, bool), VulkanError> {
+    fn create_instance(
+        entry: &ash::Entry,
+    ) -> Result<
+        (
+            ash::Instance,
+            u32,
+            bool,
+            Option<(ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT)>,
+        ),
+        VulkanError,
+    > {
         let loader_version = entry
             .try_enumerate_instance_version()
             .map_err(|error| VulkanError::InitFailed(error.to_string()))?
@@ -682,7 +1452,48 @@ impl VulkanContext {
         if properties2_extension {
             extension_names.push(properties2_name.as_ptr());
         }
-        let create_info = vk::InstanceCreateInfo {
+        // The validation layer reports the exact hazard when a submission
+        // reads memory a host write has not reached yet, so it is worth
+        // turning on while looking for one.
+        let validation_layer = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+        let validation_requested = std::env::var_os("RMI_VULKAN_VALIDATION").is_some();
+        // `c_char` is `i8` on x86_64 but `u8` on aarch64, so spell it out
+        // instead of hardcoding `i8` or this fails to build on ARM.
+        let layer_names: Vec<*const std::ffi::c_char> = if validation_requested {
+            vec![validation_layer.as_ptr()]
+        } else {
+            Vec::new()
+        };
+        // Without a messenger the layer stays quiet, and synchronization
+        // validation (the check that actually catches a read-before-write
+        // hazard) is off by default, so ask for both.
+        let debug_utils_name = vk::ExtDebugUtilsFn::name();
+        let debug_utils_available =
+            extension_available(&available_extensions, debug_utils_name) && validation_requested;
+        if debug_utils_available {
+            extension_names.push(debug_utils_name.as_ptr());
+        }
+        // Both arrays must outlive create_instance, which reads their pointers.
+        let features = [
+            vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION,
+            vk::ValidationFeatureEnableEXT::BEST_PRACTICES,
+        ];
+        // ash 0.37 does not name this one, but the spec gives it the value 8.
+        let disabled = [vk::ValidationFeatureDisableEXT::from_raw(8)];
+        let validation_features = if debug_utils_available {
+            // Keep GPU-assisted validation off; CPU-side checks suffice here.
+            Some(vk::ValidationFeaturesEXT {
+                s_type: vk::StructureType::VALIDATION_FEATURES_EXT,
+                p_next: std::ptr::null(),
+                enabled_validation_feature_count: features.len() as u32,
+                p_enabled_validation_features: features.as_ptr(),
+                disabled_validation_feature_count: disabled.len() as u32,
+                p_disabled_validation_features: disabled.as_ptr(),
+            })
+        } else {
+            None
+        };
+        let mut create_info = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: std::ptr::null(),
             p_application_info: &app_info,
@@ -691,18 +1502,49 @@ impl VulkanContext {
             } else {
                 vk::InstanceCreateFlags::empty()
             },
-            enabled_layer_count: 0,
-            pp_enabled_layer_names: std::ptr::null(),
+            enabled_layer_count: layer_names.len() as u32,
+            pp_enabled_layer_names: layer_names.as_ptr(),
             enabled_extension_count: extension_names.len() as u32,
             pp_enabled_extension_names: extension_names.as_ptr(),
         };
+        if let Some(features) = validation_features.as_ref() {
+            create_info.p_next = features as *const _ as *const std::ffi::c_void;
+        }
 
-        unsafe {
+        let instance = unsafe {
             entry
                 .create_instance(&create_info, None)
-                .map(|instance| (instance, api_version, properties2_extension))
-                .map_err(|error| VulkanError::InitFailed(error.to_string()))
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?
+        };
+        let mut debug_messenger = None;
+        if debug_utils_available {
+            let debug_utils = ash::extensions::ext::DebugUtils::new(&entry, &instance);
+            let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT {
+                s_type: vk::StructureType::DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+                p_next: std::ptr::null(),
+                flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
+                message_severity: vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+                message_type: vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                pfn_user_callback: Some(validation_log),
+                p_user_data: std::ptr::null_mut(),
+            };
+            let messenger =
+                unsafe { debug_utils.create_debug_utils_messenger(&messenger_info, None) };
+            if let Ok(handle) = messenger {
+                // The messenger has to outlive the instance, so it is owned by
+                // the context and dropped with it.
+                debug_messenger = Some((debug_utils, handle));
+            }
         }
+        Ok((
+            instance,
+            api_version,
+            properties2_extension,
+            debug_messenger,
+        ))
     }
 
     fn device_candidates(
@@ -777,6 +1619,8 @@ impl VulkanContext {
                     portability_subset,
                     integer_dot_product,
                     shader_float16,
+                    shader_float64: instance.get_physical_device_features(device).shader_float64
+                        != 0,
                 });
             }
             Ok(candidates)
@@ -922,7 +1766,10 @@ impl VulkanContext {
             p_queue_priorities: queue_priorities.as_ptr(),
         };
 
-        let features = vk::PhysicalDeviceFeatures::default();
+        let features = vk::PhysicalDeviceFeatures {
+            shader_float64: candidate.shader_float64.into(),
+            ..Default::default()
+        };
         let mut integer_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures {
             shader_integer_dot_product: candidate.integer_dot_product.into(),
             ..Default::default()
@@ -943,7 +1790,11 @@ impl VulkanContext {
         if candidate.portability_subset {
             extension_names.push(vk::KhrPortabilitySubsetFn::name().as_ptr());
         }
-        if candidate.integer_dot_product && candidate.api_version < vk::API_VERSION_1_3 {
+        // `VK_KHR_shader_integer_dot_product` is never promoted to core in any
+        // Vulkan version, so the extension name must be requested whenever the
+        // feature is. Gating it on the API version left the feature silently
+        // ignored: the pipeline still built, but `OpSDot` returned zeros.
+        if candidate.integer_dot_product {
             extension_names.push(vk::KhrShaderIntegerDotProductFn::name().as_ptr());
         }
         if candidate.shader_float16 && candidate.api_version < vk::API_VERSION_1_2 {
@@ -1102,6 +1953,9 @@ impl VulkanContext {
         pipeline_layout: vk::PipelineLayout,
         shader: &[u8],
     ) -> Result<vk::Pipeline, VulkanError> {
+        // include_bytes! only guarantees byte alignment; Vulkan requires u32 words.
+        let words = ash::util::read_spv(&mut std::io::Cursor::new(shader))
+            .map_err(|error| VulkanError::ShaderCompileFailed(error.to_string()))?;
         let shader_module = unsafe {
             device
                 .create_shader_module(
@@ -1110,13 +1964,23 @@ impl VulkanContext {
                         p_next: std::ptr::null(),
                         flags: Default::default(),
                         code_size: shader.len(),
-                        p_code: shader.as_ptr() as *const u32,
+                        p_code: words.as_ptr(),
                     },
                     None,
                 )
                 .map_err(|e| VulkanError::ShaderCompileFailed(e.to_string()))?
         };
 
+        // Keep scalar Qwen math consistent with this host's libm before Q8 rounding.
+        let host_glibc = u32::from(cfg!(all(target_arch = "x86_64", target_env = "gnu")));
+        let entries = [vk::SpecializationMapEntry {
+            constant_id: 0,
+            offset: 0,
+            size: 4,
+        }];
+        let specialization = vk::SpecializationInfo::builder()
+            .map_entries(&entries)
+            .data(bytemuck::bytes_of(&host_glibc));
         let stage = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_next: std::ptr::null(),
@@ -1124,14 +1988,18 @@ impl VulkanContext {
             stage: vk::ShaderStageFlags::COMPUTE,
             module: shader_module,
             p_name: CStr::from_bytes_with_nul(b"main\0").unwrap().as_ptr(),
-            p_specialization_info: std::ptr::null(),
+            p_specialization_info: &*specialization,
         };
 
         let pipeline = unsafe {
             let create_info = vk::ComputePipelineCreateInfo {
                 s_type: vk::StructureType::COMPUTE_PIPELINE_CREATE_INFO,
                 p_next: std::ptr::null(),
-                flags: Default::default(),
+                flags: if std::env::var_os("RMI_VK_NO_OPT").is_some() {
+                    vk::PipelineCreateFlags::DISABLE_OPTIMIZATION
+                } else {
+                    vk::PipelineCreateFlags::empty()
+                },
                 stage,
                 layout: pipeline_layout,
                 base_pipeline_handle: vk::Pipeline::null(),
@@ -1281,33 +2149,47 @@ impl Clone for GpuBuffer {
 impl Copy for GpuBuffer {}
 
 #[cfg(feature = "vulkan")]
-impl Drop for VulkanContext {
-    fn drop(&mut self) {
-        let Ok(mut submission) = self.mutex.lock() else {
-            return;
-        };
-        if self.recover_commands(&mut submission).is_err() {
-            // Keep device/instance/loader and all owned GPU resources alive if
-            // their completion cannot be confirmed.
-            return;
+impl VulkanContext {
+    pub(crate) fn shutdown(&self) -> Result<(), VulkanError> {
+        let mut submission = self
+            .mutex
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan command mutex poisoned".into()))?;
+        if submission.shutdown {
+            return Ok(());
         }
+        // A fence covers submitted commands; final teardown also drains the device.
+        submission.uncertain = true;
+        self.recover_commands(&mut submission)?;
+        let mut weights = self
+            .weight_cache
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan weight cache poisoned".into()))?;
+        let mut io = self
+            .io_state
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan IO cache poisoned".into()))?;
+        let mut pipelines = self
+            .operator_pipelines
+            .lock()
+            .map_err(|_| VulkanError::InitFailed("Vulkan pipeline cache poisoned".into()))?;
         unsafe {
-            for (_, buf) in self.weight_cache.lock().unwrap().drain() {
+            for (_, buf) in weights.drain() {
                 self.destroy_buffer(&buf);
             }
             let IoState {
                 input_q8,
                 scales,
                 output,
-            } = {
-                let mut io = self.io_state.lock().unwrap();
-                std::mem::take(&mut *io)
-            };
+            } = std::mem::take(&mut *io);
             for buf in [input_q8, scales, output].into_iter().flatten() {
                 self.destroy_buffer(&buf);
             }
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
+            for pipeline in pipelines.take().into_iter().flatten() {
+                self.device.destroy_pipeline(pipeline, None);
+            }
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
@@ -1316,8 +2198,21 @@ impl Drop for VulkanContext {
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_device(None);
+            if let Some((debug_utils, messenger)) = &self.debug_messenger {
+                debug_utils.destroy_debug_utils_messenger(*messenger, None);
+            }
             self.instance.destroy_instance(None);
-            std::mem::ManuallyDrop::drop(&mut self.entry);
+        }
+        submission.shutdown = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl Drop for VulkanContext {
+    fn drop(&mut self) {
+        if self.shutdown().is_ok() {
+            unsafe { std::mem::ManuallyDrop::drop(&mut self.entry) };
         }
     }
 }
@@ -1369,6 +2264,41 @@ fn rank_supported(mut candidates: Vec<DeviceCandidate>) -> Vec<DeviceCandidate> 
         _ => 4,
     });
     candidates
+}
+
+/// Pin the Vulkan device when the host has more than one.
+///
+/// The loader and the NVIDIA ICD both ignore `CUDA_VISIBLE_DEVICES`, and the
+/// loader's own `VK_LOADER_DEVICE_SELECT` cannot tell two identical cards
+/// apart, so a shared host has no way to keep a run off a busy GPU. The
+/// selector is either an index into the ranked list or a substring of the
+/// device name; an unknown selector keeps every candidate.
+#[cfg(feature = "vulkan")]
+fn select_device(candidates: Vec<DeviceCandidate>) -> Vec<DeviceCandidate> {
+    let Ok(selector) = std::env::var("RMI_VK_DEVICE") else {
+        return candidates;
+    };
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return candidates;
+    }
+    let selected: Vec<DeviceCandidate> = match selector.parse::<usize>() {
+        Ok(index) => candidates
+            .get(index)
+            .cloned()
+            .map(|candidate| vec![candidate])
+            .unwrap_or_default(),
+        Err(_) => candidates
+            .iter()
+            .filter(|candidate| candidate.name.contains(selector))
+            .cloned()
+            .collect(),
+    };
+    if selected.is_empty() {
+        eprintln!("[GPU] RMI_VK_DEVICE={selector} matched no Vulkan device");
+        return candidates;
+    }
+    selected
 }
 
 #[cfg(feature = "vulkan")]
@@ -1437,6 +2367,14 @@ impl std::fmt::Display for VulkanError {
     }
 }
 
+/// The device errors carry their own message, so a caller that reports a
+/// failure as a string does not have to spell the conversion out.
+impl From<VulkanError> for String {
+    fn from(error: VulkanError) -> Self {
+        error.to_string()
+    }
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod tests {
     use super::{
@@ -1445,6 +2383,122 @@ mod tests {
     };
     use ash::vk;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn legacy_cached_weight_cleanup_waits_for_idle_and_invalidates_host_key() {
+        let context = VulkanContext::new().unwrap();
+        let mut weight = vec![1u8; 34];
+        weight[..2].copy_from_slice(&crate::ops::f32_to_f16(1.0).to_le_bytes());
+        let key = (weight.as_ptr() as usize, weight.len());
+        context.fail_fence_wait.store(true, Ordering::Relaxed);
+        assert!(
+            unsafe { context.matmul_q8_0(&weight, &[1; 32], &[1.0], &mut [0.0], 32, 1) }.is_err()
+        );
+        let live = context.compute_stats().live_allocation_bytes;
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        context.release_cached_weight(&weight);
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+        assert!(!context.weight_cache.lock().unwrap().contains_key(&key));
+        assert!(context.mutex.lock().unwrap().uncertain);
+
+        context.fail_wait_idle.store(false, Ordering::Relaxed);
+        weight[2..].fill(2);
+        let mut output = [0.0];
+        unsafe {
+            context
+                .matmul_q8_0(&weight, &[1; 32], &[1.0], &mut output, 32, 1)
+                .unwrap();
+        }
+        assert_eq!(output, [64.0]);
+        assert!(!context.mutex.lock().unwrap().uncertain);
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+        context.release_cached_weight(&weight);
+        assert!(context.compute_stats().live_allocation_bytes < live);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn warmup_releases_temporary_cached_weights() {
+        let context = VulkanContext::new().unwrap();
+        context.warmup().unwrap();
+        assert!(context.weight_cache.lock().unwrap().is_empty());
+        let live = context.compute_stats().live_allocation_bytes;
+        context.warmup().unwrap();
+        assert!(context.weight_cache.lock().unwrap().is_empty());
+        assert_eq!(context.compute_stats().live_allocation_bytes, live);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn vulkan_shutdown_drains_device_and_rejects_later_submissions() {
+        let context = VulkanContext::new().unwrap();
+        context.warmup().unwrap();
+        context.operator_pipelines().unwrap();
+        context.shutdown().unwrap();
+        assert_eq!(context.compute_stats().live_allocation_bytes, 0);
+        assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
+        assert!(context.warmup().is_err());
+        context.shutdown().unwrap();
+        assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
+        // Drop must not destroy the already-released Vulkan handles a second time.
+        drop(context);
+    }
+
+    #[test]
+    fn shader_module_receives_aligned_spirv_words() {
+        unsafe extern "system" fn create_shader_module(
+            _: vk::Device,
+            info: *const vk::ShaderModuleCreateInfo,
+            _: *const vk::AllocationCallbacks,
+            _: *mut vk::ShaderModule,
+        ) -> vk::Result {
+            let info = &*info;
+            if info.p_code.align_offset(std::mem::align_of::<u32>()) != 0 {
+                return vk::Result::ERROR_UNKNOWN;
+            }
+            let bytes = std::slice::from_raw_parts(info.p_code.cast::<u8>(), info.code_size);
+            if bytes != super::SHADER {
+                return vk::Result::ERROR_INVALID_SHADER_NV;
+            }
+            // Stop at the driver boundary after checking alignment and every byte.
+            vk::Result::ERROR_INITIALIZATION_FAILED
+        }
+
+        unsafe extern "system" fn get_device_proc_addr(
+            _: vk::Device,
+            name: *const std::ffi::c_char,
+        ) -> vk::PFN_vkVoidFunction {
+            if std::ffi::CStr::from_ptr(name).to_bytes() == b"vkCreateShaderModule" {
+                Some(std::mem::transmute(
+                    create_shader_module as vk::PFN_vkCreateShaderModule,
+                ))
+            } else {
+                None
+            }
+        }
+
+        let instance_fn = vk::InstanceFnV1_0::load(|name| {
+            if name.to_bytes() == b"vkGetDeviceProcAddr" {
+                get_device_proc_addr as *const () as *const std::ffi::c_void
+            } else {
+                std::ptr::null()
+            }
+        });
+        let device = unsafe { ash::Device::load(&instance_fn, vk::Device::null()) };
+        let mut storage = vec![0u8; super::SHADER.len() + 4];
+        let offset = (5 - (storage.as_ptr() as usize % 4)) % 4;
+        let shader = &mut storage[offset..offset + super::SHADER.len()];
+        shader.copy_from_slice(super::SHADER);
+        assert_eq!(shader.as_ptr() as usize % 4, 1);
+        let error =
+            VulkanContext::create_pipeline_for_device(&device, vk::PipelineLayout::null(), shader)
+                .unwrap_err();
+        assert!(
+            matches!(error, super::VulkanError::ShaderCompileFailed(ref message)
+            if message == &vk::Result::ERROR_INITIALIZATION_FAILED.to_string())
+        );
+    }
 
     #[test]
     #[ignore = "requires a Vulkan device"]
@@ -1510,6 +2564,7 @@ mod tests {
             portability_subset: false,
             integer_dot_product,
             shader_float16: false,
+            shader_float64: false,
         }
     }
 
@@ -1591,5 +2646,117 @@ mod tests {
 
         let context = VulkanContext::new().expect("Homebrew MoltenVK should initialize");
         assert!(!context.device_name().is_empty());
+    }
+
+    /// What the device can actually do, so kernel work is aimed at real ceilings.
+    ///
+    /// The Q8_0 tiled matmul tops out around 4.0 TOP/s, which is already below the
+    /// 5.9 TOP/s a PyTorch reference sustains, so no amount of Q8 tuning closes the
+    /// gap. F16 tensor cores are the only route past it, and whether they are
+    /// reachable at all is a property of the device, not of the shader: an 8-wide
+    /// subgroup dot is what the hardware turns into a matrix instruction. This
+    /// prints the subgroup geometry and the feature bits that decide it, so the
+    /// next kernel is written against a measured bound rather than a hope.
+    #[test]
+    #[ignore = "prints device capabilities"]
+    fn print_subgroup_and_f16_capabilities() {
+        use std::ffi::c_void;
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let instance = &context.instance;
+        let physical = context._physical_device;
+
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default();
+        properties.p_next = &mut subgroup as *mut _ as *mut c_void;
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default();
+        features.p_next = &mut features12 as *mut _ as *mut c_void;
+        unsafe { instance.get_physical_device_features2(physical, &mut features) };
+
+        let ops = subgroup.supported_operations;
+        let named = [
+            (vk::SubgroupFeatureFlags::BASIC, "BASIC"),
+            (vk::SubgroupFeatureFlags::VOTE, "VOTE"),
+            (vk::SubgroupFeatureFlags::ARITHMETIC, "ARITHMETIC"),
+            (vk::SubgroupFeatureFlags::BALLOT, "BALLOT"),
+            (vk::SubgroupFeatureFlags::SHUFFLE, "SHUFFLE"),
+            (
+                vk::SubgroupFeatureFlags::SHUFFLE_RELATIVE,
+                "SHUFFLE_RELATIVE",
+            ),
+            (vk::SubgroupFeatureFlags::CLUSTERED, "CLUSTERED"),
+            (vk::SubgroupFeatureFlags::QUAD, "QUAD"),
+        ];
+        eprintln!("device: {}", context.device_name);
+        eprintln!("  subgroup_size: {}", subgroup.subgroup_size);
+        eprintln!(
+            "  shared_memory: {} bytes  workgroup_invocations: {}",
+            properties.properties.limits.max_compute_shared_memory_size,
+            properties
+                .properties
+                .limits
+                .max_compute_work_group_invocations
+        );
+        eprintln!("  shaderFloat16: {}", features12.shader_float16 == vk::TRUE);
+        let available: Vec<&str> = named
+            .iter()
+            .filter(|(flag, _)| ops.contains(*flag))
+            .map(|(_, name)| *name)
+            .collect();
+        eprintln!("  subgroup ops: {}", available.join(", "));
+        eprintln!(
+            "  8-wide float dot usable: {}",
+            ops.contains(vk::SubgroupFeatureFlags::ARITHMETIC) && subgroup.subgroup_size >= 8
+        );
+        // Core subgroup ops stop at ARITHMETIC: there is no DOT, so the portable route
+        // to a matrix instruction is closed. Cooperative matrix is the only way left,
+        // and the device does advertise it.
+        //
+        // It is still not reachable from here. The shader build is GLSL through
+        // glslang, and glslang 16.0.0 does not implement GL_KHR_cooperative_matrix:
+        // `layout(cooperative_matrix)` is an unrecognised layout qualifier and there
+        // is no cooperative_matrix type, so a shader here cannot be written in it.
+        // Getting there means hand-assembling OpCooperativeMatrixMulAddKHR with its
+        // type and scope decorations, and teaching the build to accept SPIR-V that
+        // no .comp produced.
+        //
+        // That is the ceiling for F16 on this machine. The Q8_0 kernel gets 4 to 8 MACs
+        // per instruction from dotPacked4x8EXT while scalar FFMA gets one, so F16 is
+        // instruction-bound rather than bandwidth-bound, and the wins left for it are
+        // the ones that delete instructions -- native unpackHalf2x16, packed shared
+        // staging -- not ones that add tensor cores.
+        let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }
+            .map(|list| {
+                list.iter()
+                    .map(|e| {
+                        // ash hands back a fixed-size NUL-padded array, so the name
+                        // has to be trimmed before it compares equal to anything.
+                        let raw = &e.extension_name;
+                        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                        let bytes: Vec<u8> = raw[..end].iter().map(|&byte| byte as u8).collect();
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for wanted in [
+            "VK_NV_cooperative_matrix",
+            "VK_KHR_cooperative_matrix",
+            "VK_EXT_shader_subgroup_matrix_multiply",
+            "VK_NV_shader_subgroup_partitioned",
+        ] {
+            eprintln!("  {wanted}: {}", extensions.iter().any(|n| n == wanted));
+        }
+        let matrix_ish: Vec<&String> = extensions
+            .iter()
+            .filter(|n| n.contains("matrix") || n.contains("tensor"))
+            .collect();
+        eprintln!("  matrix/tensor extensions: {matrix_ish:?}");
     }
 }

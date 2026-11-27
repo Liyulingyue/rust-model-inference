@@ -1,0 +1,919 @@
+{
+  "date": "2026-10-23",
+  "source": {
+    "base_commit": "0d4d7e2c68d376cfcb61fda43977bf3c8adee392",
+    "source_file": "src/vulkan/qwen35.rs",
+    "source_sha256": "5e2c86017c743f00d6d37a42010fb579cca18d8c7bd31ea6eaf711581338e5b1",
+    "code_commit": "abc3a2b4fb155fcda5b36b3ae09a035eb27355a4"
+  },
+  "binary_sha256": {
+    "before": "61906e75b31064e832727b5324114c5305a069eaf876259696dd58dccd186f4a",
+    "after": "86d38e01fb0f35ede6b97d92502c7eeee0ff34cd0877bd0959c88eb895b5fa97"
+  },
+  "model": {
+    "repository": "InternScience/Sage-A1.5-Q8_0-GGUF",
+    "file": "Sage-A1.5-Q8_0.gguf",
+    "bytes": 37802150112,
+    "sha256": "f7247f6faef3f6c616b953595e1fc7c3fbf257d02d9915af5fdf15e808ea8ee4"
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9334 32-Core Processor",
+    "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+    "gfx": "gfx1100",
+    "pci": "0000:c3:00.0",
+    "vram_total_bytes": 51522830336,
+    "exposed_device": "card7/renderD134"
+  },
+  "change": {
+    "files": [
+      "src/vulkan/qwen35.rs"
+    ],
+    "description": "Use the existing device-local operator arena for Qwen3.5 activations, KV and recurrent state. Upload inputs before recording; download through owned staging copies and release the command guard before trace reads. Keep CPU shadow synchronization, finite validation, arithmetic and shaders unchanged.",
+    "fallback": "The existing allocator retains mapped memory on UMA or device allocation OOM."
+  },
+  "build": {
+    "profile": "release",
+    "features": [
+      "vulkan"
+    ],
+    "command": "cargo --config target/offline.toml build --offline --locked --release --features vulkan --bin rust-model-inference"
+  },
+  "method": "Three rounds per backend, reversing old/new GPU order in round 2, followed by CPU each round. Same 44 input rows, fixed cap of 64 generated tokens and 63 timed decode evaluations. Every run is a new process. Require three consecutive idle GPU samples before each case; old/new GPU answers must be identical.",
+  "parameters": {
+    "threads": 8,
+    "prefill_batch_size": 64,
+    "temperature": 0,
+    "max_tokens": 64,
+    "jinja": true,
+    "thinking": false
+  },
+  "container_cpu_max": "1600000 100000",
+  "cpu_affinity_count": 128,
+  "summaries": {
+    "before": {
+      "session_init_seconds": {
+        "median": 20.388701,
+        "min": 19.694326,
+        "max": 21.436432
+      },
+      "prefill_seconds": {
+        "median": 1.208725,
+        "min": 1.200808,
+        "max": 1.377675
+      },
+      "decode_evaluations_per_second": {
+        "median": 4.978927676491724,
+        "min": 4.921534337545073,
+        "max": 4.989162825605239
+      },
+      "process_seconds": {
+        "median": 36.52378837019205,
+        "min": 35.96341181918979,
+        "max": 37.93956301175058
+      },
+      "first_text_seconds": {
+        "median": 21.85461983270943,
+        "min": 21.162223663181067,
+        "max": 23.13925740867853
+      }
+    },
+    "after": {
+      "session_init_seconds": {
+        "median": 21.096769,
+        "min": 19.424907,
+        "max": 38.727518
+      },
+      "prefill_seconds": {
+        "median": 1.155294,
+        "min": 1.133856,
+        "max": 1.16333
+      },
+      "decode_evaluations_per_second": {
+        "median": 5.676037714838027,
+        "min": 5.302592437442666,
+        "max": 5.682723276452581
+      },
+      "process_seconds": {
+        "median": 35.769559191539884,
+        "min": 34.98109365813434,
+        "max": 53.1487896759063
+      },
+      "first_text_seconds": {
+        "median": 22.522093692794442,
+        "min": 21.018919305875897,
+        "max": 40.1974011734128
+      }
+    },
+    "cpu": {
+      "session_init_seconds": {
+        "median": 0.004696,
+        "min": 0.004515,
+        "max": 0.00476
+      },
+      "prefill_seconds": {
+        "median": 2.633005,
+        "min": 2.311129,
+        "max": 2.871081
+      },
+      "decode_evaluations_per_second": {
+        "median": 12.159636338088845,
+        "min": 12.129088152479966,
+        "max": 12.68169292951334
+      },
+      "process_seconds": {
+        "median": 8.91822456009686,
+        "min": 8.819558277726173,
+        "max": 9.403470154851675
+      },
+      "first_text_seconds": {
+        "median": 2.9083079155534506,
+        "min": 2.590304745361209,
+        "max": 3.1485415399074554
+      }
+    }
+  },
+  "ratios": {
+    "after_over_before_decode": 1.140012083653624,
+    "before_over_after_prefill_time": 1.0462488336302274,
+    "before_over_after_process_time": 1.0210857834342715,
+    "after_over_cpu_decode": 0.46679337745146265
+  },
+  "runs": [
+    {
+      "name": "before-64-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集",
+      "ready_seconds": 21.761421971023083,
+      "first_text_seconds": 23.13925740867853,
+      "ttft_after_ready_seconds": 1.377835437655449,
+      "generation_end_seconds": 35.80965952761471,
+      "process_seconds": 37.93956301175058,
+      "metrics": {
+        "session_init": 21.436432,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 1.377675,
+        "decode": 12.653327,
+        "generation_total": 14.048321
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          41.796875,
+          40.48583984375,
+          40.0126953125
+        ],
+        "loadavg_after": [
+          43.615234375,
+          41.0830078125,
+          40.23046875
+        ],
+        "child_cpu_seconds": 273.596757,
+        "container_throttled_usec_delta": 0
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 36576649216,
+        "drm-resident-gtt": 425132032
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 36576649216,
+        "drm-resident-gtt": 139915264
+      }
+    },
+    {
+      "name": "after-64-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集",
+      "ready_seconds": 39.041755797341466,
+      "first_text_seconds": 40.1974011734128,
+      "ttft_after_ready_seconds": 1.1556453760713339,
+      "generation_end_seconds": 51.312275521457195,
+      "process_seconds": 53.1487896759063,
+      "metrics": {
+        "session_init": 38.727518,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 1.155294,
+        "decode": 11.099292,
+        "generation_total": 12.271814
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          43.615234375,
+          41.0830078125,
+          40.23046875
+        ],
+        "loadavg_after": [
+          50.21533203125,
+          43.32958984375,
+          41.04736328125
+        ],
+        "child_cpu_seconds": 391.55661299999997,
+        "container_throttled_usec_delta": 233
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 36711313408,
+        "drm-resident-gtt": 425132032
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 36711313408,
+        "drm-resident-gtt": 139915264
+      }
+    },
+    {
+      "name": "cpu-64-1",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于并非所有参数都在每次推理中激活，这种稀疏激活机制大幅降低了实际运行时的计算量。然而，这种架构的主要代价是通信开销显著增加，因为需要",
+      "ready_seconds": 0.27889982238411903,
+      "first_text_seconds": 2.590304745361209,
+      "ttft_after_ready_seconds": 2.31140492297709,
+      "generation_end_seconds": 7.798458930104971,
+      "process_seconds": 8.819558277726173,
+      "metrics": {
+        "session_init": 0.004696,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 2.311129,
+        "decode": 5.194125,
+        "generation_total": 7.519566
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          50.21533203125,
+          43.32958984375,
+          41.04736328125
+        ],
+        "loadavg_after": [
+          50.30078125,
+          43.56787109375,
+          41.1494140625
+        ],
+        "child_cpu_seconds": 61.53874300000008,
+        "container_throttled_usec_delta": 3413
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 0,
+        "drm-resident-gtt": 0
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 0,
+        "drm-resident-gtt": 0
+      }
+    },
+    {
+      "name": "after-64-2",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集",
+      "ready_seconds": 19.855424609035254,
+      "first_text_seconds": 21.018919305875897,
+      "ttft_after_ready_seconds": 1.1634946968406439,
+      "generation_end_seconds": 32.919810431078076,
+      "process_seconds": 34.98109365813434,
+      "metrics": {
+        "session_init": 19.424907,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 1.16333,
+        "decode": 11.880981,
+        "generation_total": 13.064481
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          50.30078125,
+          43.56787109375,
+          41.1494140625
+        ],
+        "loadavg_after": [
+          50.451171875,
+          44.47900390625,
+          41.56103515625
+        ],
+        "child_cpu_seconds": 250.586722,
+        "container_throttled_usec_delta": 3647
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 36711313408,
+        "drm-resident-gtt": 425132032
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 36711313408,
+        "drm-resident-gtt": 139915264
+      }
+    },
+    {
+      "name": "before-64-2",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集",
+      "ready_seconds": 19.953278347849846,
+      "first_text_seconds": 21.162223663181067,
+      "ttft_after_ready_seconds": 1.2089453153312206,
+      "generation_end_seconds": 33.80794517695904,
+      "process_seconds": 35.96341181918979,
+      "metrics": {
+        "session_init": 19.694326,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 1.208725,
+        "decode": 12.627369,
+        "generation_total": 13.854774
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          50.451171875,
+          44.47900390625,
+          41.56103515625
+        ],
+        "loadavg_after": [
+          52.0400390625,
+          45.521484375,
+          42.017578125
+        ],
+        "child_cpu_seconds": 258.24662799999993,
+        "container_throttled_usec_delta": 2663
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 36576649216,
+        "drm-resident-gtt": 425132032
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 36576649216,
+        "drm-resident-gtt": 139915264
+      }
+    },
+    {
+      "name": "cpu-64-2",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于并非所有参数都在每次推理中激活，这种稀疏激活机制大幅降低了实际运行时的计算量。然而，这种架构的主要代价是通信开销显著增加，因为需要",
+      "ready_seconds": 0.27719200775027275,
+      "first_text_seconds": 3.1485415399074554,
+      "ttft_after_ready_seconds": 2.8713495321571827,
+      "generation_end_seconds": 8.343977440148592,
+      "process_seconds": 9.403470154851675,
+      "metrics": {
+        "session_init": 0.004515,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 2.871081,
+        "decode": 5.181076,
+        "generation_total": 8.066786
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          52.0400390625,
+          45.521484375,
+          42.017578125
+        ],
+        "loadavg_after": [
+          52.88330078125,
+          45.91650390625,
+          42.18359375
+        ],
+        "child_cpu_seconds": 65.94237300000009,
+        "container_throttled_usec_delta": 8703
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 0,
+        "drm-resident-gtt": 0
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 0,
+        "drm-resident-gtt": 0
+      }
+    },
+    {
+      "name": "before-64-3",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/acceleration/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集",
+      "ready_seconds": 20.653636388480663,
+      "first_text_seconds": 21.85461983270943,
+      "ttft_after_ready_seconds": 1.2009834442287683,
+      "generation_end_seconds": 34.67161354236305,
+      "process_seconds": 36.52378837019205,
+      "metrics": {
+        "session_init": 20.388701,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 1.200808,
+        "decode": 12.800886,
+        "generation_total": 14.018047
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          52.88330078125,
+          45.91650390625,
+          42.18359375
+        ],
+        "loadavg_after": [
+          54.05615234375,
+          47.12646484375,
+          42.7509765625
+        ],
+        "child_cpu_seconds": 262.127901,
+        "container_throttled_usec_delta": 3061620
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 36576649216,
+        "drm-resident-gtt": 425132032
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 36576649216,
+        "drm-resident-gtt": 139915264
+      }
+    },
+    {
+      "name": "after-64-3",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集",
+      "ready_seconds": 21.388663962483406,
+      "first_text_seconds": 22.522093692794442,
+      "ttft_after_ready_seconds": 1.133429730311036,
+      "generation_end_seconds": 33.62507261894643,
+      "process_seconds": 35.769559191539884,
+      "metrics": {
+        "session_init": 21.096769,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 1.133856,
+        "decode": 11.086234,
+        "generation_total": 12.23714
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          54.05615234375,
+          47.12646484375,
+          42.7509765625
+        ],
+        "loadavg_after": [
+          55.44775390625,
+          48.2490234375,
+          43.2900390625
+        ],
+        "child_cpu_seconds": 257.863091,
+        "container_throttled_usec_delta": 2516
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 36711313408,
+        "drm-resident-gtt": 680263680
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 36711313408,
+        "drm-resident-gtt": 139915264
+      }
+    },
+    {
+      "name": "cpu-64-3",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "cpu",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "64",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，路由器只会挑选最相关的少数几位专家来共同工作。由于并非所有参数都在每次推理中激活，这种稀疏激活机制大幅降低了实际运行时的计算量。然而，这种架构的主要代价是通信开销显著增加，因为需要",
+      "ready_seconds": 0.2758286911994219,
+      "first_text_seconds": 2.9083079155534506,
+      "ttft_after_ready_seconds": 2.6324792243540287,
+      "generation_end_seconds": 7.890261672437191,
+      "process_seconds": 8.91822456009686,
+      "metrics": {
+        "session_init": 0.00476,
+        "prompt_rows": 44,
+        "generated_tokens": 64,
+        "decode_evals": 63,
+        "prefill": 2.633005,
+        "decode": 4.967791,
+        "generation_total": 7.615238
+      },
+      "resources": {
+        "gpu_busy_percent_before": [
+          0,
+          0,
+          0
+        ],
+        "gpu_vram_before_bytes": 28004352,
+        "loadavg_before": [
+          55.44775390625,
+          48.2490234375,
+          43.2900390625
+        ],
+        "loadavg_after": [
+          54.8564453125,
+          48.357421875,
+          43.37841796875
+        ],
+        "child_cpu_seconds": 62.28267599999998,
+        "container_throttled_usec_delta": 7643
+      },
+      "peak_process_resident_bytes": {
+        "drm-resident-vram": 0,
+        "drm-resident-gtt": 0
+      },
+      "decode_process_resident_bytes": {
+        "drm-resident-vram": 0,
+        "drm-resident-gtt": 0
+      }
+    }
+  ],
+  "full_generation": [
+    {
+      "name": "after-full-text",
+      "returncode": 0,
+      "scalar": false,
+      "image": false,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--compute",
+        "vulkan",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "请用三句话向初学者解释混合专家（MoE）模型：它如何选择专家、为什么能减少计算，以及一个主要代价。不要列标题。"
+      ],
+      "answer": "混合专家模型像是一个拥有多位专业顾问的团队，每次处理任务时，一个轻量级的门控网络会根据输入内容智能地挑选出最相关的少数几位专家来共同工作。\n\n由于每次只需激活总参数中很小的一部分，模型在推理时能大幅节省计算资源，从而实现比同等规模的密集模型更快的速度或更低的能耗。\n\n然而，这种架构的主要代价是训练过程变得更加复杂且难以并行化，因为需要精心设计路由机制来确保不同专家之间的负载均衡和有效协作。",
+      "ready_seconds": 21.00664651952684,
+      "first_text_seconds": 22.114691067487,
+      "ttft_after_ready_seconds": 1.1080445479601622,
+      "generation_end_seconds": 41.36964526027441,
+      "process_seconds": 43.19701219536364,
+      "metrics": {
+        "session_init": 20.720846,
+        "prompt_rows": 44,
+        "generated_tokens": 104,
+        "decode_evals": 104,
+        "prefill": 1.107902,
+        "decode": 19.226814,
+        "generation_total": 20.363092
+      }
+    },
+    {
+      "name": "after-full-image",
+      "returncode": 0,
+      "scalar": false,
+      "image": true,
+      "command": [
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/after",
+        "--model",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-Q8_0.gguf",
+        "--gpu",
+        "--jinja",
+        "--no-thinking",
+        "--temp",
+        "0",
+        "--threads",
+        "8",
+        "--prefill-batch-size",
+        "64",
+        "--max-tokens",
+        "192",
+        "--prompt",
+        "按从左到右的顺序，描述图中三个图形的颜色和形状，用一句话回答。",
+        "--mmproj",
+        "/workspace/rmi-sage-a15-f165/models/Sage-A1.5-Q8_0-GGUF/Sage-A1.5-mmproj.gguf",
+        "--image",
+        "/workspace/rmi-sage-a15-f165/target/sage-gpu/device-arena/shapes.png"
+      ],
+      "answer": "图中从左到右依次是红色圆形、蓝色正方形和绿色三角形。",
+      "ready_seconds": 25.233425496146083,
+      "first_text_seconds": 27.71888511441648,
+      "ttft_after_ready_seconds": 2.485459618270397,
+      "generation_end_seconds": 30.40897041372955,
+      "process_seconds": 32.237371042370796,
+      "metrics": {
+        "image_total": 4.053,
+        "preprocess": 0.001,
+        "vision_encode": 3.995,
+        "session_init": 20.779435,
+        "prompt_rows": 104,
+        "generated_tokens": 15,
+        "decode_evals": 15,
+        "prefill": 2.485292,
+        "decode": 2.686239,
+        "generation_total": 5.175609
+      }
+    }
+  ],
+  "verification": {
+    "remote": {
+      "adapter": {
+        "exit_code": 0,
+        "seconds": 29.757625214755535
+      },
+      "rollback": {
+        "exit_code": 0,
+        "seconds": 0.11401145160198212
+      },
+      "mrope": {
+        "exit_code": 0,
+        "seconds": 0.11404808983206749
+      },
+      "batched": {
+        "exit_code": 0,
+        "seconds": 24.00101199746132
+      },
+      "raw": {
+        "exit_code": 0,
+        "seconds": 37.47254431992769,
+        "checkpoints": 220,
+        "generated": [
+          11,
+          353,
+          1044,
+          4313
+        ],
+        "max_relative_l2": 0,
+        "min_cosine": 1,
+        "max_abs": 0
+      },
+      "chat": {
+        "exit_code": 0,
+        "seconds": 60.67165960371494,
+        "checkpoints": 880,
+        "generated": [
+          109266,
+          6115,
+          98691,
+          101009
+        ],
+        "max_relative_l2": 0,
+        "min_cosine": 1,
+        "max_abs": 0
+      }
+    },
+    "local_vulkan": {
+      "passed": 46,
+      "ignored": 45
+    },
+    "local_qwen35_trunk": {
+      "passed": 43,
+      "failed": 1,
+      "ignored": 9,
+      "failure": "qwen35_trace_metadata_is_independent_of_prefill_batch_size",
+      "scope": "CPU-only trace comparison also fails in the earlier cached test binary rust_model_inference-e6913d73f9b5d360; the same baseline was already recorded before this optimization."
+    },
+    "checks": [
+      "Fixed-Oracle raw/chat checkpoints total 1100; observed relative L2 and max absolute error 0, cosine 1.",
+      "Lossless token/embedding/expert ID checks and all existing lossy numerical thresholds are unchanged.",
+      "21 physical Qwen3.5 adapter tests, 2 injected GPU rollback tests, 1 four-axis mRoPE test, and real-model batched prefill/four-step decode passed.",
+      "All six fixed-length GPU answers are identical; complete GPU text matches the earlier 104-token answer.",
+      "Default optimized text and CPU-vision/Vulkan-decoder image generation completed on the physical GPU.",
+      "Rustfmt and git diff --check passed. No shader source or binary changes."
+    ]
+  },
+  "limits": [
+    "Shared AMD host; no GPU or CPU reservation and no cache flush. Idle starts do not guarantee isolation throughout execution.",
+    "The third old-GPU run had a 3.061620-second increase in the shared container throttled_usec counter; other cases were at most 0.008703 seconds. This counter is not attributable to this inference process alone.",
+    "Eight requested CPU threads, not full-core CPU performance. Short prompt/output, no long-context or concurrency measurement.",
+    "Default optimized CPU and Vulkan answers differ; these speed tests do not establish optimized graph numerical alignment or equal answer quality.",
+    "Fixed scalar Oracle inputs show zero observed error; lossy functions retain bounded comparisons, not a general bitwise arithmetic guarantee.",
+    "CPU shadow state is still downloaded each chunk. Repeated weight uploads/pipeline creation, per-expert dispatches and submission chunking have not been optimized.",
+    "UMA and forced allocation OOM, persistent-session timing, GPU vision and numerical vision alignment were not tested."
+  ]
+}

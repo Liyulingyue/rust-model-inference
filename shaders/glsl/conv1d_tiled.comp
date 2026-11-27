@@ -1,0 +1,96 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+
+// Dense 1D convolution for the AuK VAE decoder.
+//
+// Layout: input `[in_channels][width]`, weight, bias `[out_channels]`, output
+// `[out_channels][out_width]`.
+//
+// Two weight layouts are supported, selected by `weight_layout`:
+//   0: `[kernel][in_channels][out_channels]` -- the output channel is the
+//      innermost axis, so the 64 lanes of a workgroup read consecutive
+//      weights and the load is coalesced.
+//   1: `[out_channels][kernel][in_channels]` -- the layout the polyphase
+//      upsample keeps, where the reduction axis is innermost.
+//
+// A workgroup covers 64 output channels and 32 output frames. The staged
+// activations let one weight load feed 32 fused multiply-adds, and the
+// kernel tap is the outer axis of the reduction so the index arithmetic
+// needs no division.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint weight_word; uint bias_word; uint output_word;
+    uint in_channels; uint out_channels;
+    uint width; uint out_width;
+    uint kernel; uint stride; uint dilation; uint pad_left;
+    uint weight_layout;
+} pc;
+
+const uint TOKENS = 32u;
+// The reduction runs over the input channel in chunks of this size. The
+// value is not free: with 16 the driver miscompiles the kernel (the staged
+// activations come back wrong for some tiles, and the result changes from
+// run to run), so the chunk stays at 32 or above.
+const uint CHUNK = 32u;
+
+shared float stage[CHUNK * TOKENS];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint column_base = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u;
+    uint column = min(column_base + lane, pc.out_channels - 1u);
+    uint token_base = gl_WorkGroupID.z * TOKENS;
+    uint live = min(TOKENS, pc.out_width - token_base);
+
+    float acc[TOKENS];
+    for (uint t = 0u; t < TOKENS; t++) acc[t] = 0.0;
+
+    for (uint tap = 0u; tap < pc.kernel; tap++) {
+        int shift = int(tap) * int(pc.dilation) - int(pc.pad_left);
+        for (uint base = 0u; base < pc.in_channels; base += CHUNK) {
+            uint count = min(CHUNK, pc.in_channels - base);
+            // Stage the input window of every frame of the tile. The window
+            // start only depends on the kernel tap, so the tap is hoisted out
+            // of the token loop and the reads of one row stay contiguous.
+            for (uint i = 0u; i < CHUNK; i++) {
+                float value = 0.0;
+                if (i < count && lane < live) {
+                    int x = int(token_base + lane) * int(pc.stride) + shift;
+                    if (x >= 0 && x < int(pc.width)) {
+                        value = uintBitsToFloat(
+                            arena.data[pc.input_word + (base + i) * pc.width + uint(x)]);
+                    }
+                }
+                stage[i * TOKENS + lane] = value;
+            }
+            barrier();
+            uint weight_base = pc.weight_layout == 0u
+                ? (tap * pc.in_channels + base) * pc.out_channels + column
+                : column * (pc.kernel * pc.in_channels) + tap * pc.in_channels + base;
+            uint weight_step = pc.weight_layout == 0u ? pc.out_channels : 1u;
+            for (uint i = 0u; i < count; i++) {
+                float w = uintBitsToFloat(
+                    arena.data[pc.weight_word + weight_base + i * weight_step]);
+                [[unroll]] for (uint t = 0u; t < TOKENS; t++) {
+                    acc[t] = fma(w, stage[i * TOKENS + t], acc[t]);
+                }
+            }
+            barrier();
+        }
+    }
+
+    // The output is written straight from the accumulators: the transpose
+    // through the shared tile would need a 64 by TOKENS buffer, and the
+    // output traffic is small enough that the scattered writes do not matter.
+    if (column_base + lane < pc.out_channels) {
+        float bias = uintBitsToFloat(arena.data[pc.bias_word + column]);
+        for (uint t = 0u; t < live; t++) {
+            arena.data[pc.output_word + (column_base + lane) * pc.out_width + token_base + t] =
+                floatBitsToUint(acc[t] + bias);
+        }
+    }
+}

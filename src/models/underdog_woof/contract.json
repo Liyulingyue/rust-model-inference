@@ -1,0 +1,1784 @@
+{
+  "architecture": "underdog_woof",
+  "source": {
+    "repository": "ConwayResearch/Underdog-Woof",
+    "url": "https://modelscope.cn/models/ConwayResearch/Underdog-Woof",
+    "revision": "bfdcdcbb002ce26fd86ca07c13845a78130aaec4",
+    "hashes": {
+      "LICENSE": "784c4a353d15f370ff387f74bde64f50a2041df9c6f2338c3d8a2f781b944de5",
+      "NOTICE": "0849de251c109869d24f8a0b520260afa10594334ae3d0c06b75e68be1e2c623",
+      "underdog_woof/__init__.py": "aaacf02b28eabce10280a60c2699d4e40d4ca5aa22170d169b64943fee7849f7",
+      "underdog_woof/__main__.py": "737f9823169c5337f49dbc27ab51f0ceab5d5d0302e6c0f3aad051ad13562a3b",
+      "underdog_woof/normalize.py": "f6d7c39ec8a58bb6ab1d36ee6ee0eae3c543aac8dddaa29f4065e72706c7c044",
+      "underdog_woof/respell.py": "6bf6bd4760474b991230a523d3f17b423012646737000b8974bd257875308a71",
+      "underdog_woof/respell.tsv": "4c700d4015390bb6e34c1f7362f87ea75acfb45144d2fbc45cf00d5739b66abc",
+      "underdog_woof/runtime.py": "e22d1e2a92f4d28c3784abbb889d77609dcecd1856bf6e65f03432b803a8d220",
+      "underdog_woof/textsplit.py": "f46ae52b24fae666ebe1dc55ebf644da757f238f1bb0408a3cc2dadb39eaf6e8",
+      "woof_int8.npz": "d895fbbe84b8f4f461e3e94ab48b1164353b1988ce8d365f5aa8263d0de1203e"
+    },
+    "weight_size": 40595426,
+    "weight_semantics": "Effective F32 values recovered exactly from source int8/grouped-int8 and FP16 arrays; original prequantization weights are unavailable."
+  },
+  "config": {
+    "speech": {
+      "L": 8,
+      "d": 448,
+      "H": 7,
+      "ff": 1216,
+      "hw": 320,
+      "depth": 4,
+      "latent": 32,
+      "rope_base": 10000.0
+    },
+    "decoder": {
+      "heads": 8,
+      "head_dim": 64,
+      "window": 250,
+      "eps": 1e-05,
+      "layers": 2
+    },
+    "max_frames": 750,
+    "fps": 25.0,
+    "sample_rate": 24000,
+    "max_context": 1100,
+    "decoder_chunk": 8,
+    "decoder_split": 6
+  },
+  "seanet": [
+    {
+      "kind": "conv",
+      "in_channels": 512,
+      "out_channels": 768,
+      "kernel_size": 7
+    },
+    {
+      "kind": "elu"
+    },
+    {
+      "kind": "convt",
+      "in_channels": 768,
+      "out_channels": 384,
+      "kernel_size": 16,
+      "stride": 8
+    },
+    {
+      "kind": "res",
+      "layers": [
+        {
+          "in_channels": 384,
+          "out_channels": 192,
+          "kernel_size": 3
+        },
+        {
+          "in_channels": 192,
+          "out_channels": 384,
+          "kernel_size": 1
+        }
+      ]
+    },
+    {
+      "kind": "elu"
+    },
+    {
+      "kind": "convt",
+      "in_channels": 384,
+      "out_channels": 192,
+      "kernel_size": 12,
+      "stride": 6
+    },
+    {
+      "kind": "res",
+      "layers": [
+        {
+          "in_channels": 192,
+          "out_channels": 96,
+          "kernel_size": 3
+        },
+        {
+          "in_channels": 96,
+          "out_channels": 192,
+          "kernel_size": 1
+        }
+      ]
+    },
+    {
+      "kind": "elu"
+    },
+    {
+      "kind": "convt",
+      "in_channels": 192,
+      "out_channels": 96,
+      "kernel_size": 10,
+      "stride": 5
+    },
+    {
+      "kind": "res",
+      "layers": [
+        {
+          "in_channels": 96,
+          "out_channels": 48,
+          "kernel_size": 3
+        },
+        {
+          "in_channels": 48,
+          "out_channels": 96,
+          "kernel_size": 1
+        }
+      ]
+    },
+    {
+      "kind": "elu"
+    },
+    {
+      "kind": "convt",
+      "in_channels": 96,
+      "out_channels": 48,
+      "kernel_size": 8,
+      "stride": 4
+    },
+    {
+      "kind": "res",
+      "layers": [
+        {
+          "in_channels": 48,
+          "out_channels": 24,
+          "kernel_size": 3
+        },
+        {
+          "in_channels": 24,
+          "out_channels": 48,
+          "kernel_size": 1
+        }
+      ]
+    },
+    {
+      "kind": "elu"
+    },
+    {
+      "kind": "conv",
+      "in_channels": 48,
+      "out_channels": 1,
+      "kernel_size": 3
+    }
+  ],
+  "voices": [
+    "juno",
+    "mira"
+  ],
+  "characters": " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?;:'\"-()&/%$\u20ac\u00a3@#+=*_<>[]\u2026\u2014",
+  "tensors": {
+    "decoder.inp.bias": [
+      512
+    ],
+    "decoder.inp.weight": [
+      512,
+      32
+    ],
+    "decoder.inv_freq": [
+      32
+    ],
+    "decoder.seanet.0.bias": [
+      768
+    ],
+    "decoder.seanet.0.tap.0.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.0.tap.1.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.0.tap.2.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.0.tap.3.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.0.tap.4.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.0.tap.5.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.0.tap.6.weight": [
+      768,
+      512
+    ],
+    "decoder.seanet.11.bias": [
+      48
+    ],
+    "decoder.seanet.11.weight": [
+      384,
+      96
+    ],
+    "decoder.seanet.12.0.bias": [
+      24
+    ],
+    "decoder.seanet.12.0.tap.0.weight": [
+      24,
+      48
+    ],
+    "decoder.seanet.12.0.tap.1.weight": [
+      24,
+      48
+    ],
+    "decoder.seanet.12.0.tap.2.weight": [
+      24,
+      48
+    ],
+    "decoder.seanet.12.1.bias": [
+      48
+    ],
+    "decoder.seanet.12.1.tap.0.weight": [
+      48,
+      24
+    ],
+    "decoder.seanet.14.bias": [
+      1
+    ],
+    "decoder.seanet.14.tap.0.weight": [
+      1,
+      48
+    ],
+    "decoder.seanet.14.tap.1.weight": [
+      1,
+      48
+    ],
+    "decoder.seanet.14.tap.2.weight": [
+      1,
+      48
+    ],
+    "decoder.seanet.2.bias": [
+      384
+    ],
+    "decoder.seanet.2.weight": [
+      6144,
+      768
+    ],
+    "decoder.seanet.3.0.bias": [
+      192
+    ],
+    "decoder.seanet.3.0.tap.0.weight": [
+      192,
+      384
+    ],
+    "decoder.seanet.3.0.tap.1.weight": [
+      192,
+      384
+    ],
+    "decoder.seanet.3.0.tap.2.weight": [
+      192,
+      384
+    ],
+    "decoder.seanet.3.1.bias": [
+      384
+    ],
+    "decoder.seanet.3.1.tap.0.weight": [
+      384,
+      192
+    ],
+    "decoder.seanet.5.bias": [
+      192
+    ],
+    "decoder.seanet.5.weight": [
+      2304,
+      384
+    ],
+    "decoder.seanet.6.0.bias": [
+      96
+    ],
+    "decoder.seanet.6.0.tap.0.weight": [
+      96,
+      192
+    ],
+    "decoder.seanet.6.0.tap.1.weight": [
+      96,
+      192
+    ],
+    "decoder.seanet.6.0.tap.2.weight": [
+      96,
+      192
+    ],
+    "decoder.seanet.6.1.bias": [
+      192
+    ],
+    "decoder.seanet.6.1.tap.0.weight": [
+      192,
+      96
+    ],
+    "decoder.seanet.8.bias": [
+      96
+    ],
+    "decoder.seanet.8.weight": [
+      960,
+      192
+    ],
+    "decoder.seanet.9.0.bias": [
+      48
+    ],
+    "decoder.seanet.9.0.tap.0.weight": [
+      48,
+      96
+    ],
+    "decoder.seanet.9.0.tap.1.weight": [
+      48,
+      96
+    ],
+    "decoder.seanet.9.0.tap.2.weight": [
+      48,
+      96
+    ],
+    "decoder.seanet.9.1.bias": [
+      96
+    ],
+    "decoder.seanet.9.1.tap.0.weight": [
+      96,
+      48
+    ],
+    "decoder.tf.0.fc1.weight": [
+      2048,
+      512
+    ],
+    "decoder.tf.0.fc2.weight": [
+      512,
+      2048
+    ],
+    "decoder.tf.0.ln1.bias": [
+      512
+    ],
+    "decoder.tf.0.ln1.weight": [
+      512
+    ],
+    "decoder.tf.0.ln2.bias": [
+      512
+    ],
+    "decoder.tf.0.ln2.weight": [
+      512
+    ],
+    "decoder.tf.0.o.weight": [
+      512,
+      512
+    ],
+    "decoder.tf.0.qkv.weight": [
+      1536,
+      512
+    ],
+    "decoder.tf.1.fc1.weight": [
+      2048,
+      512
+    ],
+    "decoder.tf.1.fc2.weight": [
+      512,
+      2048
+    ],
+    "decoder.tf.1.ln1.bias": [
+      512
+    ],
+    "decoder.tf.1.ln1.weight": [
+      512
+    ],
+    "decoder.tf.1.ln2.bias": [
+      512
+    ],
+    "decoder.tf.1.ln2.weight": [
+      512
+    ],
+    "decoder.tf.1.o.weight": [
+      512,
+      512
+    ],
+    "decoder.tf.1.qkv.weight": [
+      1536,
+      512
+    ],
+    "latent.mean": [
+      32
+    ],
+    "latent.std": [
+      32
+    ],
+    "speech.ada.bias": [
+      4480
+    ],
+    "speech.ada.weight": [
+      4480,
+      320
+    ],
+    "speech.bos": [
+      448
+    ],
+    "speech.ce.bias": [
+      321
+    ],
+    "speech.ce.weight": [
+      321,
+      448
+    ],
+    "speech.h_inp.bias": [
+      320
+    ],
+    "speech.h_inp.weight": [
+      320,
+      32
+    ],
+    "speech.h_out.bias": [
+      32
+    ],
+    "speech.h_out.weight": [
+      32,
+      320
+    ],
+    "speech.hblocks.0.fc1.bias": [
+      640
+    ],
+    "speech.hblocks.0.fc1.weight": [
+      640,
+      320
+    ],
+    "speech.hblocks.0.fc2.bias": [
+      320
+    ],
+    "speech.hblocks.0.fc2.weight": [
+      320,
+      640
+    ],
+    "speech.hblocks.1.fc1.bias": [
+      640
+    ],
+    "speech.hblocks.1.fc1.weight": [
+      640,
+      320
+    ],
+    "speech.hblocks.1.fc2.bias": [
+      320
+    ],
+    "speech.hblocks.1.fc2.weight": [
+      320,
+      640
+    ],
+    "speech.hblocks.2.fc1.bias": [
+      640
+    ],
+    "speech.hblocks.2.fc1.weight": [
+      640,
+      320
+    ],
+    "speech.hblocks.2.fc2.bias": [
+      320
+    ],
+    "speech.hblocks.2.fc2.weight": [
+      320,
+      640
+    ],
+    "speech.hblocks.3.fc1.bias": [
+      640
+    ],
+    "speech.hblocks.3.fc1.weight": [
+      640,
+      320
+    ],
+    "speech.hblocks.3.fc2.bias": [
+      320
+    ],
+    "speech.hblocks.3.fc2.weight": [
+      320,
+      640
+    ],
+    "speech.lat_in.bias": [
+      448
+    ],
+    "speech.lat_in.weight": [
+      448,
+      32
+    ],
+    "speech.layers.0.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.0.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.0.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.0.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.1.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.1.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.1.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.1.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.2.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.2.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.2.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.2.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.3.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.3.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.3.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.3.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.4.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.4.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.4.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.4.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.5.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.5.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.5.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.5.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.6.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.6.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.6.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.6.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.layers.7.fc1.weight": [
+      2432,
+      448
+    ],
+    "speech.layers.7.fc2.weight": [
+      448,
+      1216
+    ],
+    "speech.layers.7.o.weight": [
+      448,
+      448
+    ],
+    "speech.layers.7.qkv.weight": [
+      1344,
+      448
+    ],
+    "speech.text_emb.weight": [
+      95,
+      448
+    ],
+    "voices.juno": [
+      16,
+      448
+    ],
+    "voices.mira": [
+      16,
+      448
+    ]
+  },
+  "source_tensors": {
+    "decoder.inp.0": {
+      "shape": [
+        512,
+        32
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.inp.1": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.inv_freq": {
+      "shape": [
+        32
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.0.1.b": {
+      "shape": [
+        768
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.0.1.w.q8": {
+      "shape": [
+        768,
+        3584
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.0.1.w.s": {
+      "shape": [
+        768,
+        112
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.11.1.b": {
+      "shape": [
+        48
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.11.1.w.q8": {
+      "shape": [
+        48,
+        768
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.11.1.w.s": {
+      "shape": [
+        48,
+        24
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.12.1.0.b": {
+      "shape": [
+        24
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.12.1.0.w.q8": {
+      "shape": [
+        24,
+        144
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.12.1.0.w.s": {
+      "shape": [
+        24,
+        5
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.12.1.1.b": {
+      "shape": [
+        48
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.12.1.1.w.q8": {
+      "shape": [
+        48,
+        24
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.12.1.1.w.s": {
+      "shape": [
+        48,
+        1
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.14.1.b": {
+      "shape": [
+        1
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.14.1.w.q8": {
+      "shape": [
+        1,
+        144
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.14.1.w.s": {
+      "shape": [
+        1,
+        5
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.2.1.b": {
+      "shape": [
+        384
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.2.1.w.q8": {
+      "shape": [
+        384,
+        12288
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.2.1.w.s": {
+      "shape": [
+        384,
+        384
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.3.1.0.b": {
+      "shape": [
+        192
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.3.1.0.w.q8": {
+      "shape": [
+        192,
+        1152
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.3.1.0.w.s": {
+      "shape": [
+        192,
+        36
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.3.1.1.b": {
+      "shape": [
+        384
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.3.1.1.w.q8": {
+      "shape": [
+        384,
+        192
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.3.1.1.w.s": {
+      "shape": [
+        384,
+        6
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.5.1.b": {
+      "shape": [
+        192
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.5.1.w.q8": {
+      "shape": [
+        192,
+        4608
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.5.1.w.s": {
+      "shape": [
+        192,
+        144
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.6.1.0.b": {
+      "shape": [
+        96
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.6.1.0.w.q8": {
+      "shape": [
+        96,
+        576
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.6.1.0.w.s": {
+      "shape": [
+        96,
+        18
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.6.1.1.b": {
+      "shape": [
+        192
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.6.1.1.w.q8": {
+      "shape": [
+        192,
+        96
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.6.1.1.w.s": {
+      "shape": [
+        192,
+        3
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.8.1.b": {
+      "shape": [
+        96
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.8.1.w.q8": {
+      "shape": [
+        96,
+        1920
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.8.1.w.s": {
+      "shape": [
+        96,
+        60
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.9.1.0.b": {
+      "shape": [
+        48
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.9.1.0.w.q8": {
+      "shape": [
+        48,
+        288
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.9.1.0.w.s": {
+      "shape": [
+        48,
+        9
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.seanet.9.1.1.b": {
+      "shape": [
+        96
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.seanet.9.1.1.w.q8": {
+      "shape": [
+        96,
+        48
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.seanet.9.1.1.w.s": {
+      "shape": [
+        96,
+        2
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.0.fc1.q8": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.0.fc1.s": {
+      "shape": [
+        2048,
+        16
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.0.fc2.q8": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.0.fc2.s": {
+      "shape": [
+        512,
+        64
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.0.ln1.0": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.0.ln1.1": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.0.ln2.0": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.0.ln2.1": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.0.o.q8": {
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.0.o.s": {
+      "shape": [
+        512,
+        16
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.0.qkv.q8": {
+      "shape": [
+        1536,
+        512
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.0.qkv.s": {
+      "shape": [
+        1536,
+        16
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.1.fc1.q8": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.1.fc1.s": {
+      "shape": [
+        2048,
+        16
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.1.fc2.q8": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.1.fc2.s": {
+      "shape": [
+        512,
+        64
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.1.ln1.0": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.1.ln1.1": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.1.ln2.0": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.1.ln2.1": {
+      "shape": [
+        512
+      ],
+      "dtype": "<f2"
+    },
+    "decoder.tf.1.o.q8": {
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.1.o.s": {
+      "shape": [
+        512,
+        16
+      ],
+      "dtype": "<f4"
+    },
+    "decoder.tf.1.qkv.q8": {
+      "shape": [
+        1536,
+        512
+      ],
+      "dtype": "|i1"
+    },
+    "decoder.tf.1.qkv.s": {
+      "shape": [
+        1536,
+        16
+      ],
+      "dtype": "<f4"
+    },
+    "mean": {
+      "shape": [
+        32
+      ],
+      "dtype": "<f4"
+    },
+    "speech.ada.b": {
+      "shape": [
+        4480
+      ],
+      "dtype": "<f4"
+    },
+    "speech.ada.q": {
+      "shape": [
+        4480,
+        320
+      ],
+      "dtype": "|i1"
+    },
+    "speech.ada.s": {
+      "shape": [
+        4480
+      ],
+      "dtype": "<f4"
+    },
+    "speech.bos": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.ce.b": {
+      "shape": [
+        321
+      ],
+      "dtype": "<f4"
+    },
+    "speech.ce.q": {
+      "shape": [
+        321,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.ce.s": {
+      "shape": [
+        321
+      ],
+      "dtype": "<f4"
+    },
+    "speech.h_inp.b": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.h_inp.w": {
+      "shape": [
+        320,
+        32
+      ],
+      "dtype": "<f4"
+    },
+    "speech.h_out.b": {
+      "shape": [
+        32
+      ],
+      "dtype": "<f4"
+    },
+    "speech.h_out.w": {
+      "shape": [
+        32,
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.0.0.b": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.0.0.q": {
+      "shape": [
+        640,
+        320
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.0.0.s": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.0.1.b": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.0.1.q": {
+      "shape": [
+        320,
+        640
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.0.1.s": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.1.0.b": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.1.0.q": {
+      "shape": [
+        640,
+        320
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.1.0.s": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.1.1.b": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.1.1.q": {
+      "shape": [
+        320,
+        640
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.1.1.s": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.2.0.b": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.2.0.q": {
+      "shape": [
+        640,
+        320
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.2.0.s": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.2.1.b": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.2.1.q": {
+      "shape": [
+        320,
+        640
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.2.1.s": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.3.0.b": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.3.0.q": {
+      "shape": [
+        640,
+        320
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.3.0.s": {
+      "shape": [
+        640
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.3.1.b": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.hblocks.3.1.q": {
+      "shape": [
+        320,
+        640
+      ],
+      "dtype": "|i1"
+    },
+    "speech.hblocks.3.1.s": {
+      "shape": [
+        320
+      ],
+      "dtype": "<f4"
+    },
+    "speech.lat_in.b": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.lat_in.w": {
+      "shape": [
+        448,
+        32
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.0.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.0.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.0.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.0.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.0.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.0.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.0.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.0.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.1.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.1.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.1.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.1.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.1.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.1.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.1.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.1.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.2.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.2.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.2.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.2.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.2.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.2.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.2.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.2.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.3.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.3.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.3.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.3.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.3.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.3.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.3.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.3.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.4.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.4.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.4.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.4.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.4.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.4.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.4.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.4.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.5.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.5.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.5.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.5.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.5.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.5.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.5.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.5.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.6.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.6.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.6.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.6.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.6.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.6.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.6.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.6.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.7.0.q": {
+      "shape": [
+        1344,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.7.0.s": {
+      "shape": [
+        1344
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.7.1.q": {
+      "shape": [
+        448,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.7.1.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.7.2.q": {
+      "shape": [
+        2432,
+        448
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.7.2.s": {
+      "shape": [
+        2432
+      ],
+      "dtype": "<f4"
+    },
+    "speech.layers.7.3.q": {
+      "shape": [
+        448,
+        1216
+      ],
+      "dtype": "|i1"
+    },
+    "speech.layers.7.3.s": {
+      "shape": [
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "speech.text_emb": {
+      "shape": [
+        95,
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "std": {
+      "shape": [
+        32
+      ],
+      "dtype": "<f4"
+    },
+    "voices.juno": {
+      "shape": [
+        16,
+        448
+      ],
+      "dtype": "<f4"
+    },
+    "voices.mira": {
+      "shape": [
+        16,
+        448
+      ],
+      "dtype": "<f4"
+    }
+  }
+}

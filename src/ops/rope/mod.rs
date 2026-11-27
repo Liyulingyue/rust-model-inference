@@ -14,11 +14,6 @@
 //!   match libsystem_sleef.dylib bit-for-bit on macOS.
 //! - `sleef_rope` — Public Neox RoPE entry points built on `sleef_math`.
 
-#[cfg(target_os = "macos")]
-extern "C" {
-    fn __sincosf(value: f32, sin: *mut f32, cos: *mut f32);
-}
-
 mod mrope;
 pub mod neox;
 mod norm;
@@ -26,9 +21,14 @@ mod partial;
 mod sleef_math;
 mod sleef_rope;
 
+pub(crate) use mrope::sin_cos as ggml_sin_cos;
 pub use mrope::{rope_mrope, rope_mrope_interleaved, rope_vision};
-pub use neox::{rope_neox_inplace, rope_neox_inplace_with_table, rope_sin_cos};
-pub use norm::rope_norm;
+pub use neox::{
+    rope_neox_inplace, rope_neox_inplace_precise, rope_neox_inplace_with_factor,
+    rope_neox_inplace_with_freqs, rope_neox_inplace_with_freqs_precise,
+    rope_neox_inplace_with_table, rope_sin_cos,
+};
+pub use norm::{rope_norm, rope_norm_nrot};
 pub use partial::rope_neox_partial;
 
 pub(crate) use sleef_math::rope_sin_cos_sleef;

@@ -1,13 +1,16 @@
-#[cfg(target_arch = "x86_64")]
-use std::sync::atomic::{AtomicBool, Ordering};
-
 pub mod activation;
+pub mod argmax;
+pub mod attention_value;
+pub mod audio;
 pub mod dot;
 pub mod embedding;
 pub mod float;
+pub mod generation_runtime;
 pub mod kernel;
+pub mod linear;
 pub mod math;
 pub mod matmul;
+pub mod nn;
 pub mod norm;
 pub mod quant;
 pub mod rope;
@@ -15,9 +18,12 @@ pub mod sampling;
 pub mod softmax;
 pub mod ssm;
 pub use activation::*;
+pub use argmax::*;
+pub use attention_value::*;
 pub use dot::*;
 pub use embedding::*;
 pub use float::*;
+pub use generation_runtime::*;
 pub use math::*;
 pub use matmul::*;
 pub use norm::*;

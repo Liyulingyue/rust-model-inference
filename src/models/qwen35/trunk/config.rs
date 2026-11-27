@@ -1,6 +1,6 @@
 //! Qwen35Config — hyperparameters for the Qwen3.5 hybrid LLM trunk.
 
-use crate::core::tensor::{MetaValue, MetaValueType, TensorSource};
+use crate::core::tensor::{MetaValue, TensorSource};
 
 #[derive(Debug, Clone)]
 pub struct Qwen35Config {
@@ -27,9 +27,37 @@ pub struct Qwen35Config {
     pub is_recurrent: Vec<bool>,
     pub key_length: usize,
     pub value_length: usize,
+    /// MoE block, present only for `qwen35moe`.
+    ///
+    /// MiniCPM-V 4.7 35B-A3B pairs 256 routed experts (top-8, softmax gating,
+    /// selected weights re-normalised) with a **shared** expert whose output is
+    /// sigmoid-gated. See `docs/develop/QWEN35MOE.md`.
+    pub moe: Option<Qwen35Moe>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen35Moe {
+    /// `{prefix}.expert_count`.
+    pub n_expert: usize,
+    /// `{prefix}.expert_used_count`.
+    pub n_expert_used: usize,
+    /// `{prefix}.expert_feed_forward_length`.
+    pub n_ff_exp: usize,
+    /// `{prefix}.expert_shared_feed_forward_length`, falling back to `n_ff`
+    /// when absent or zero, as in llama.cpp's qwen35moe tensor loader.
+    pub n_ff_shexp: usize,
+    /// `{prefix}.expert_weights_scale` — llama.cpp applies it to the routed
+    /// expert weights; defaults to 1.0.
+    pub weights_scale: f32,
 }
 
 impl Qwen35Config {
+    pub(crate) fn reference_arithmetic(&self) -> bool {
+        static REFERENCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        self.moe.is_some()
+            && *REFERENCE.get_or_init(|| std::env::var("RMI_QWEN35_MOE_SIMD").as_deref() != Ok("1"))
+    }
+
     /// Layers actually executed by the trunk: the main stack without the
     /// appended MTP (nextn) predict blocks.
     pub fn n_layer_impl(&self) -> usize {
@@ -103,58 +131,74 @@ fn recurrent_layer_mask(
 impl Qwen35Config {
     /// Build a `Qwen35Config` from a GGUF tensor source.
     pub fn from_source<S: TensorSource + ?Sized>(source: &S) -> Result<Self, String> {
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val);
+        match arch {
+            Some(prefix @ ("qwen35" | "qwen35moe")) => Self::from_source_for_arch(source, prefix),
+            _ => Err(format!(
+                "Qwen35Config requires general.architecture=qwen35 or qwen35moe, got {arch:?}"
+            )),
+        }
+    }
+
+    pub(crate) fn from_source_for_arch<S: TensorSource + ?Sized>(
+        source: &S,
+        prefix: &str,
+    ) -> Result<Self, String> {
         let base = crate::core::loader::model_config_from_source(source)?;
 
         let get_u32 = |key: &str| -> Result<u32, String> {
             source
-                .metadata(key)
+                .metadata(&format!("{prefix}.{key}"))
                 .and_then(|v| v.to_u64())
                 .map(|v| v as u32)
-                .ok_or_else(|| format!("Missing qwen35 metadata: {}", key))
+                .ok_or_else(|| format!("Missing {prefix} metadata: {key}"))
         };
 
         let key_length = source
-            .metadata("qwen35.attention.key_length")
+            .metadata(&format!("{prefix}.attention.key_length"))
             .and_then(|v| v.to_u64())
             .unwrap_or(base.n_embd_head as u64) as usize;
         let value_length = source
-            .metadata("qwen35.attention.value_length")
+            .metadata(&format!("{prefix}.attention.value_length"))
             .and_then(|v| v.to_u64())
             .unwrap_or(base.n_embd_head as u64) as usize;
 
         let rope_dimension_count = source
-            .metadata("qwen35.rope.dimension_count")
+            .metadata(&format!("{prefix}.rope.dimension_count"))
             .and_then(|v| v.to_u64())
             .unwrap_or(64) as usize;
 
-        let rope_dimension_sections = match source.metadata("qwen35.rope.dimension_sections") {
-            Some(MetaValue::Array(_, vals)) => {
-                let s: Vec<i32> = vals
-                    .iter()
-                    .filter_map(|v| v.to_u64().map(|x| x as i32))
-                    .collect();
-                [
-                    s.first().copied().unwrap_or(16),
-                    s.get(1).copied().unwrap_or(16),
-                    s.get(2).copied().unwrap_or(16),
-                    s.get(3).copied().unwrap_or(16),
-                ]
-            }
-            _ => {
-                let sec = rope_dimension_count as i32 / 4;
-                [sec, sec, sec, sec]
-            }
-        };
+        let rope_dimension_sections =
+            match source.metadata(&format!("{prefix}.rope.dimension_sections")) {
+                Some(MetaValue::Array(_, vals)) => {
+                    let s: Vec<i32> = vals
+                        .iter()
+                        .filter_map(|v| v.to_u64().map(|x| x as i32))
+                        .collect();
+                    [
+                        s.first().copied().unwrap_or(16),
+                        s.get(1).copied().unwrap_or(16),
+                        s.get(2).copied().unwrap_or(16),
+                        s.get(3).copied().unwrap_or(16),
+                    ]
+                }
+                _ => {
+                    let sec = rope_dimension_count as i32 / 4;
+                    [sec, sec, sec, sec]
+                }
+            };
 
-        let ssm_d_conv = get_u32("qwen35.ssm.conv_kernel")? as usize;
-        let ssm_d_state = get_u32("qwen35.ssm.state_size")? as usize;
-        let ssm_n_group = get_u32("qwen35.ssm.group_count")? as usize;
-        let ssm_dt_rank = get_u32("qwen35.ssm.time_step_rank")? as usize;
-        let ssm_d_inner = get_u32("qwen35.ssm.inner_size")? as usize;
+        let ssm_d_conv = get_u32("ssm.conv_kernel")? as usize;
+        let ssm_d_state = get_u32("ssm.state_size")? as usize;
+        let ssm_n_group = get_u32("ssm.group_count")? as usize;
+        let ssm_dt_rank = get_u32("ssm.time_step_rank")? as usize;
+        let ssm_d_inner = get_u32("ssm.inner_size")? as usize;
         let full_attention_interval_raw =
-            full_attention_interval(source.metadata("qwen35.full_attention_interval"))?;
+            full_attention_interval(source.metadata(&format!("{prefix}.full_attention_interval")))?;
         let n_nextn = source
-            .metadata("qwen35.nextn_predict_layers")
+            .metadata(&format!("{prefix}.nextn_predict_layers"))
             .and_then(unsigned_u64)
             .unwrap_or(0) as usize;
         let n_layer_impl = base
@@ -178,6 +222,7 @@ impl Qwen35Config {
             || ssm_dt_rank == 0
             || ssm_d_inner == 0
             || ssm_d_inner % ssm_dt_rank != 0
+            || ssm_dt_rank % ssm_n_group != 0
         {
             return Err(format!(
                 "Invalid qwen35 SSM inner/rank dimensions: conv={ssm_d_conv}, state={ssm_d_state}, groups={ssm_n_group}, inner_size={ssm_d_inner}, time_step_rank={ssm_dt_rank}"
@@ -186,12 +231,51 @@ impl Qwen35Config {
         let mut is_recurrent = recurrent_layer_mask(
             base.n_layer,
             n_nextn,
-            source.metadata("qwen35.attention.recurrent_layers"),
+            source.metadata(&format!("{prefix}.attention.recurrent_layers")),
             full_attention_interval_raw,
         )?;
         is_recurrent.truncate(n_layer_impl);
         let full_attention_interval = usize::try_from(full_attention_interval_raw.unwrap_or(4))
             .map_err(|_| "qwen35.full_attention_interval does not fit usize")?;
+
+        // Only `qwen35moe` carries the expert keys; a dense qwen35 has none, and
+        // inferring MoE from the presence of `ffn_gate_inp` alone would let a
+        // truncated or mislabelled GGUF half-load.
+        let moe = match source
+            .metadata(&format!("{prefix}.expert_count"))
+            .and_then(|v| v.to_u64())
+        {
+            None => None,
+            Some(n_expert) => {
+                let n_expert = n_expert as usize;
+                let n_expert_used = source
+                    .metadata(&format!("{prefix}.expert_used_count"))
+                    .and_then(|v| v.to_u64())
+                    .unwrap_or(0) as usize;
+                if n_expert == 0 || n_expert_used == 0 || n_expert_used > n_expert {
+                    return Err(format!(
+                        "Invalid {prefix} expert counts: total={n_expert}, used={n_expert_used}"
+                    ));
+                }
+                let n_ff_exp = get_u32("expert_feed_forward_length")? as usize;
+                let n_ff_shexp = source
+                    .metadata(&format!("{prefix}.expert_shared_feed_forward_length"))
+                    .and_then(|v| v.to_u64())
+                    .filter(|&width| width > 0)
+                    .unwrap_or(base.n_ff as u64) as usize;
+                let weights_scale = source
+                    .metadata(&format!("{prefix}.expert_weights_scale"))
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(1.0) as f32;
+                Some(Qwen35Moe {
+                    n_expert,
+                    n_expert_used,
+                    n_ff_exp,
+                    n_ff_shexp,
+                    weights_scale,
+                })
+            }
+        };
 
         Ok(Self {
             n_embd: base.n_embd,
@@ -215,6 +299,7 @@ impl Qwen35Config {
             is_recurrent,
             key_length,
             value_length,
+            moe,
         })
     }
 
@@ -366,6 +451,33 @@ mod tests {
     }
 
     #[test]
+    fn qwen35moe_missing_shared_width_uses_ffn_width() {
+        let mut source = qwen38_config_source();
+        source.metadata = source
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (key.replace("qwen35.", "qwen35moe."), value))
+            .collect();
+        source.metadata.insert(
+            "general.architecture".into(),
+            MetaValue::String("qwen35moe".into()),
+        );
+        source.metadata.remove("qwen35moe.feed_forward_length");
+        for (key, value) in [
+            ("expert_count", 256),
+            ("expert_used_count", 8),
+            ("expert_feed_forward_length", 512),
+        ] {
+            source
+                .metadata
+                .insert(format!("qwen35moe.{key}"), MetaValue::Uint32(value));
+        }
+        let config = Qwen35Config::from_source_for_arch(&source, "qwen35moe").unwrap();
+        assert_eq!(config.n_ff, 512);
+        assert_eq!(config.moe.unwrap().n_ff_shexp, 512);
+    }
+
+    #[test]
     fn qwen35_config_accepts_qwen38_dimensions() {
         let config = Qwen35Config::from_source(&qwen38_config_source()).unwrap();
 
@@ -388,10 +500,116 @@ mod tests {
         assert_eq!(config.rope_dimension_sections, [11, 11, 10, 0]);
     }
 
+    fn sage_config_source() -> ConfigSource {
+        let mut source = qwen38_config_source();
+        source.metadata = source
+            .metadata
+            .into_iter()
+            .map(|(key, value)| (key.replace("qwen35.", "qwen35moe."), value))
+            .collect();
+        source.metadata.insert(
+            "general.architecture".into(),
+            MetaValue::String("qwen35moe".into()),
+        );
+        for (key, value) in [
+            ("embedding_length", 2048),
+            ("block_count", 41),
+            ("attention.head_count", 16),
+            ("attention.head_count_kv", 2),
+            ("ssm.time_step_rank", 32),
+            ("ssm.inner_size", 4096),
+            ("expert_count", 256),
+            ("expert_used_count", 8),
+            ("expert_feed_forward_length", 512),
+            ("expert_shared_feed_forward_length", 512),
+        ] {
+            source
+                .metadata
+                .insert(format!("qwen35moe.{key}"), MetaValue::Uint32(value));
+        }
+        source.metadata.remove("qwen35moe.feed_forward_length");
+        source
+    }
+
+    #[test]
+    fn sage_moe_config_excludes_the_mtp_block() {
+        let config = Qwen35Config::from_source(&sage_config_source()).unwrap();
+        assert_eq!(
+            (config.n_layer, config.n_layer_impl(), config.n_nextn),
+            (41, 40, 1)
+        );
+        assert_eq!((config.n_embd, config.vocab_size), (2048, 248320));
+        assert_eq!((config.n_embd_head(), config.n_embd_gqa()), (256, 512));
+        assert_eq!((config.key_dim(), config.value_dim()), (2048, 4096));
+        assert_eq!(config.is_recurrent.len(), 40);
+        for (layer, &recurrent) in config.is_recurrent.iter().enumerate() {
+            assert_eq!(recurrent, (layer + 1) % 4 != 0);
+        }
+        let moe = config.moe.unwrap();
+        assert_eq!((moe.n_expert, moe.n_expert_used), (256, 8));
+        assert_eq!((moe.n_ff_exp, moe.n_ff_shexp), (512, 512));
+    }
+
+    #[test]
+    fn moe_simd_opt_in_preserves_reference_default_and_scalar_override() {
+        const CHILD: &str = "RMI_QWEN35_NUMERICS_TEST_CHILD";
+        if let Ok(expected) = std::env::var(CHILD) {
+            let config = Qwen35Config::from_source(&sage_config_source()).unwrap();
+            let _scope = crate::ops::ScalarDispatchScope::new(config.reference_arithmetic());
+            assert_eq!(crate::ops::scalar_mode(), expected == "reference");
+            return;
+        }
+        for (simd, scalar, expected) in [
+            (None, false, "reference"),
+            (Some("0"), false, "reference"),
+            (Some("1"), false, "simd"),
+            (Some("1"), true, "reference"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "models::qwen35::trunk::config::tests::moe_simd_opt_in_preserves_reference_default_and_scalar_override",
+                "--nocapture",
+            ]);
+            child
+                .env(CHILD, expected)
+                .env_remove("RMI_SCALAR")
+                .env_remove("RMI_QWEN35_MOE_SIMD");
+            if let Some(value) = simd {
+                child.env("RMI_QWEN35_MOE_SIMD", value);
+            }
+            if scalar {
+                child.env("RMI_SCALAR", "1");
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        let dense = Qwen35Config::from_source(&qwen38_config_source()).unwrap();
+        assert!(!dense.reference_arithmetic());
+    }
+
+    #[test]
+    fn sage_moe_config_rejects_invalid_experts_and_mtp_split() {
+        for (key, value) in [("expert_used_count", 257), ("nextn_predict_layers", 41)] {
+            let mut source = sage_config_source();
+            source
+                .metadata
+                .insert(format!("qwen35moe.{key}"), MetaValue::Uint32(value));
+            assert!(Qwen35Config::from_source(&source).is_err(), "{key}");
+        }
+    }
+
     #[test]
     fn qwen35_config_rejects_invalid_tensor_dimensions() {
+        // key_length = 0 is caught by the shared loader (src/core/loader.rs)
+        // before the qwen35 head-length pair check runs, so it reports the
+        // single dimension it rejected rather than the pair message.
         for (key, value, expected) in [
-            ("qwen35.attention.key_length", 0, "head lengths"),
+            ("qwen35.attention.key_length", 0, "attention.key_length"),
             ("qwen35.attention.value_length", 0, "head lengths"),
             ("qwen35.attention.value_length", 128, "head lengths"),
             ("qwen35.ssm.time_step_rank", 0, "inner/rank"),

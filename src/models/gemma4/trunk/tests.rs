@@ -1,14 +1,16 @@
-use super::config::CONTEXT;
+use super::config::{CONTEXT, EPS};
+use super::forward::prefill_matmul_rows;
+use super::session::Gemma4PrefillLinear;
+use super::weights::load_weight_any;
 use super::{
     assemble_input_rows, attend, kv_source_layer, load_weight, matmul, require_f32_kv, softcap,
-    Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, FULL_HEAD_DIM, HEADS, PER_LAYER,
-    SWA_HEAD_DIM, VOCAB,
+    Gemma4InputRow, Gemma4Layer, Gemma4Model, KvLayer, PER_LAYER, VOCAB,
 };
 use crate::core::scratchpad::KvFormat;
 use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::models::gemma4::Gemma4Config;
-use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::kernel::{Kernel, PreparedRows, QuantizedTensor, Weight};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -38,6 +40,41 @@ impl TensorSource for EmptySource {
 
     fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
         None
+    }
+}
+
+/// A source that holds exactly one tensor, so the loader's own contract
+/// checks (type, payload length) can be exercised directly.
+struct SingleTensorSource {
+    info: TensorInfo,
+    bytes: Vec<u8>,
+}
+
+impl SingleTensorSource {
+    fn new(name: &str, dims: Vec<u64>, ggml_type: GGMLType, bytes: Vec<u8>) -> Self {
+        Self {
+            info: TensorInfo {
+                name: name.to_string(),
+                dims,
+                ggml_type,
+                offset: 0,
+            },
+            bytes,
+        }
+    }
+}
+
+impl TensorSource for SingleTensorSource {
+    fn metadata(&self, _key: &str) -> Option<&crate::core::tensor::MetaValue> {
+        None
+    }
+
+    fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+        (name == self.info.name).then_some(&self.info)
+    }
+
+    fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+        (name == self.info.name).then_some(self.bytes.as_slice())
     }
 }
 
@@ -190,44 +227,56 @@ fn counting_output_weight(
 fn test_config() -> Gemma4Config {
     Gemma4Config {
         layers: TEST_LAYERS,
+        n_expert: 0,
+        n_expert_used: 0,
+        n_ff_exp: 0,
         embd: TEST_EMBD,
-        heads: HEADS,
-        kv_heads: 1,
+        n_heads: 8,
+        kv_heads_per_layer: vec![1; TEST_LAYERS],
         vocab: VOCAB,
-        full_head_dim: FULL_HEAD_DIM,
-        swa_head_dim: SWA_HEAD_DIM,
+        full_head_dim: 512,
+        swa_head_dim: 256,
         shared_kv_layers: 20,
         per_layer_width: PER_LAYER,
         sliding_window: 512,
         logit_softcap: 30.0,
         ffn_per_layer: TEST_FFN_PER_LAYER.to_vec(),
         swa_pattern: TEST_SWA_PATTERN.to_vec(),
+        n_ctx: CONTEXT,
+        rope_freq_base: 1_000_000.0,
+        rope_freq_base_swa: 10_000.0,
     }
 }
 
 fn zero_layer(layer: usize, cfg: &Gemma4Config) -> Gemma4Layer {
     let dim = cfg.head_dim(layer);
+    let q_heads = cfg.n_heads;
+    let kv_heads = cfg.kv_heads(layer);
     let ffn = cfg.ffn_per_layer[layer];
     let embd = cfg.embd;
     Gemma4Layer {
+        q_heads,
+        kv_heads,
         head_dim: dim,
+        kv_shared_with_k: false,
         attn_norm: vec![1.0; embd],
-        attn_q: zero_q8_weight(embd, HEADS * dim),
-        attn_k: zero_q8_weight(embd, dim),
-        attn_v: zero_q8_weight(embd, dim),
-        attn_output: zero_q8_weight(HEADS * dim, embd),
+        attn_q: zero_q8_weight(embd, q_heads * dim),
+        attn_k: Some(zero_q8_weight(embd, kv_heads * dim)),
+        attn_v: Some(zero_q8_weight(embd, kv_heads * dim)),
+        attn_output: zero_q8_weight(q_heads * dim, embd),
         attn_q_norm: vec![1.0; dim],
-        attn_k_norm: vec![1.0; dim],
+        attn_k_norm: Some(vec![1.0; dim]),
         post_attention_norm: vec![1.0; embd],
         ffn_norm: vec![1.0; embd],
         ffn_gate: zero_q8_weight(embd, ffn),
         ffn_up: zero_q8_weight(embd, ffn),
         ffn_down: zero_q8_weight(ffn, embd),
         post_ffw_norm: vec![1.0; embd],
-        inp_gate: zero_weight(embd, PER_LAYER),
-        proj: zero_weight(PER_LAYER, embd),
-        post_norm: vec![1.0; embd],
+        inp_gate: Some(zero_weight(embd, PER_LAYER)),
+        proj: Some(zero_weight(PER_LAYER, embd)),
+        post_norm: Some(vec![1.0; embd]),
         output_scale: 1.0,
+        moe: None,
     }
 }
 
@@ -239,16 +288,17 @@ fn post_kv_failure_model() -> Gemma4Model {
     layers[0].attn_output.n_in += 1;
     let embd = cfg.embd;
     let per_layer_all = cfg.per_layer_all();
+    let head_dim_half = cfg.full_head_dim / 2;
     Gemma4Model {
         _source: Arc::new(EmptySource),
         config: cfg,
         pool: Arc::new(ComputePool::new(1)),
         token_embedding: zero_weight(embd, VOCAB),
-        per_layer_token_embedding: zero_weight(per_layer_all, VOCAB),
-        per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
-        per_layer_proj_norm: vec![1.0; PER_LAYER],
+        per_layer_token_embedding: Some(zero_weight(per_layer_all, VOCAB)),
+        per_layer_model_proj: Some(zero_bf16_weight(embd, per_layer_all)),
+        per_layer_proj_norm: Some(vec![1.0; PER_LAYER]),
         output_norm: vec![1.0; embd],
-        rope_freqs: vec![1.0; FULL_HEAD_DIM / 2],
+        rope_freqs: vec![1.0; head_dim_half],
         layers,
     }
 }
@@ -256,18 +306,24 @@ fn post_kv_failure_model() -> Gemma4Model {
 fn deterministic_config() -> Gemma4Config {
     Gemma4Config {
         layers: 3,
+        n_expert: 0,
+        n_expert_used: 0,
+        n_ff_exp: 0,
         embd: 32,
-        heads: HEADS,
-        kv_heads: 1,
+        n_heads: 8,
+        kv_heads_per_layer: vec![1; 3],
         vocab: VOCAB,
-        full_head_dim: FULL_HEAD_DIM,
-        swa_head_dim: SWA_HEAD_DIM,
+        full_head_dim: 512,
+        swa_head_dim: 256,
         shared_kv_layers: 1,
         per_layer_width: PER_LAYER,
         sliding_window: 512,
         logit_softcap: 30.0,
         ffn_per_layer: vec![64; 3],
         swa_pattern: vec![true, false, true],
+        n_ctx: CONTEXT,
+        rope_freq_base: 1_000_000.0,
+        rope_freq_base_swa: 10_000.0,
     }
 }
 
@@ -282,41 +338,56 @@ fn deterministic_model_with_config(
     let layers: Vec<Gemma4Layer> = (0..cfg.layers)
         .map(|layer| {
             let dim = cfg.head_dim(layer);
+            let q_heads = cfg.n_heads;
+            let kv_heads = cfg.kv_heads(layer);
             let ffn = cfg.ffn_per_layer[layer];
             Gemma4Layer {
+                q_heads,
+                kv_heads,
                 head_dim: dim,
+                kv_shared_with_k: false,
                 attn_norm: vec![1.0; cfg.embd],
-                attn_q: deterministic_weight(cfg.embd, HEADS * dim, layer * 11 + 1),
-                attn_k: deterministic_weight(cfg.embd, cfg.kv_heads * dim, layer * 11 + 2),
-                attn_v: deterministic_weight(cfg.embd, cfg.kv_heads * dim, layer * 11 + 3),
-                attn_output: deterministic_weight(HEADS * dim, cfg.embd, layer * 11 + 4),
+                attn_q: deterministic_weight(cfg.embd, q_heads * dim, layer * 11 + 1),
+                attn_k: Some(deterministic_weight(
+                    cfg.embd,
+                    kv_heads * dim,
+                    layer * 11 + 2,
+                )),
+                attn_v: Some(deterministic_weight(
+                    cfg.embd,
+                    kv_heads * dim,
+                    layer * 11 + 3,
+                )),
+                attn_output: deterministic_weight(q_heads * dim, cfg.embd, layer * 11 + 4),
                 attn_q_norm: vec![1.0; dim],
-                attn_k_norm: vec![1.0; dim],
+                attn_k_norm: Some(vec![1.0; dim]),
                 post_attention_norm: vec![1.0; cfg.embd],
                 ffn_norm: vec![1.0; cfg.embd],
                 ffn_gate: deterministic_weight(cfg.embd, ffn, layer * 11 + 5),
                 ffn_up: deterministic_weight(cfg.embd, ffn, layer * 11 + 6),
                 ffn_down: deterministic_weight(ffn, cfg.embd, layer * 11 + 7),
                 post_ffw_norm: vec![1.0; cfg.embd],
-                inp_gate: deterministic_weight(cfg.embd, PER_LAYER, layer * 11 + 8),
-                proj: deterministic_weight(PER_LAYER, cfg.embd, layer * 11 + 9),
-                post_norm: vec![1.0; cfg.embd],
+                inp_gate: Some(deterministic_weight(cfg.embd, PER_LAYER, layer * 11 + 8)),
+                proj: Some(deterministic_weight(PER_LAYER, cfg.embd, layer * 11 + 9)),
+                post_norm: Some(vec![1.0; cfg.embd]),
                 output_scale: 0.75 + layer as f32 / 16.0,
+                moe: None,
             }
         })
         .collect();
     let embd = cfg.embd;
     let per_layer_all = cfg.per_layer_all();
+    let head_dim_half = layers[1].head_dim / 2;
     Gemma4Model {
         _source: Arc::new(EmptySource),
         config: cfg,
         pool: Arc::new(ComputePool::new(1)),
         token_embedding: counting_output_weight(embd, VOCAB, output_projection_calls),
-        per_layer_token_embedding: deterministic_weight(per_layer_all, VOCAB, 41),
-        per_layer_model_proj: zero_bf16_weight(embd, per_layer_all),
-        per_layer_proj_norm: vec![1.0; PER_LAYER],
+        per_layer_token_embedding: Some(deterministic_weight(per_layer_all, VOCAB, 41)),
+        per_layer_model_proj: Some(zero_bf16_weight(embd, per_layer_all)),
+        per_layer_proj_norm: Some(vec![1.0; PER_LAYER]),
         output_norm: vec![1.0; embd],
-        rope_freqs: vec![1.0; layers[1].head_dim / 2],
+        rope_freqs: vec![1.0; head_dim_half],
         layers,
     }
 }
@@ -601,29 +672,35 @@ fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
     let mut model = deterministic_model(Arc::new(AtomicUsize::new(0)));
     install(
         "per_layer_model_proj.weight".into(),
-        &mut model.per_layer_model_proj,
+        model
+            .per_layer_model_proj
+            .as_mut()
+            .expect("fixture proj present"),
         GGMLType::BF16,
     );
     for (index, layer) in model.layers.iter_mut().enumerate() {
         for (name, weight) in [
-            ("attn_q", &mut layer.attn_q),
-            ("attn_k", &mut layer.attn_k),
-            ("attn_v", &mut layer.attn_v),
-            ("attn_output", &mut layer.attn_output),
-            ("ffn_gate", &mut layer.ffn_gate),
-            ("ffn_up", &mut layer.ffn_up),
-            ("ffn_down", &mut layer.ffn_down),
+            ("attn_q", Some(&mut layer.attn_q)),
+            ("attn_k", layer.attn_k.as_mut()),
+            ("attn_v", layer.attn_v.as_mut()),
+            ("attn_output", Some(&mut layer.attn_output)),
+            ("ffn_gate", Some(&mut layer.ffn_gate)),
+            ("ffn_up", Some(&mut layer.ffn_up)),
+            ("ffn_down", Some(&mut layer.ffn_down)),
         ] {
+            // `attn_k`/`attn_v` are `Option` because 12B's MQA layers share V
+            // with K; this fixture is not one of those, so both are present.
+            let weight = weight.expect("fixture installs a shared-K weight");
             install(format!("blk.{index}.{name}.weight"), weight, GGMLType::Q8_0);
         }
         install(
             format!("blk.{index}.inp_gate.weight"),
-            &mut layer.inp_gate,
+            layer.inp_gate.as_mut().expect("fixture gate present"),
             GGMLType::F32,
         );
         install(
             format!("blk.{index}.proj.weight"),
-            &mut layer.proj,
+            layer.proj.as_mut().expect("fixture projection present"),
             GGMLType::F32,
         );
     }
@@ -641,7 +718,7 @@ fn gemma4_vulkan_linear_device_rows_match_and_decode_stays_cpu() {
         let logits = session.forward_rows(&fixture_rows(3)).unwrap();
         assert_eq!(
             context.submission_count() - before,
-            if batch == 1 { 78 } else { 26 }
+            ((26 - 2 * model.config.layers) * if batch == 1 { 3 } else { 1 }) as u64
         );
         let state = snapshot_gemma4_state(&session);
         let before_decode = context.submission_count();
@@ -748,6 +825,52 @@ fn gemma4_trace_child() {
 #[cfg(feature = "parity-trace")]
 #[test]
 fn gemma4_trace_rows_match_batch_one_raw_bits() {
+    const FILTER: &str = concat!(
+        "gemma4.input,",
+        "gemma4.layer.0.attn_norm,",
+        "gemma4.layer.0.q,",
+        "gemma4.layer.0.q_norm,",
+        "gemma4.layer.0.q_rope,",
+        "gemma4.layer.0.k,",
+        "gemma4.layer.0.k_norm,",
+        "gemma4.layer.0.k_rope,",
+        "gemma4.layer.0.v,",
+        "gemma4.layer.0.v_norm,",
+        "gemma4.layer.0.attention,",
+        "gemma4.layer.0.attention_projected,",
+        "gemma4.layer.0.attn_out,",
+        "gemma4.layer.0.ffn_norm,",
+        "gemma4.layer.0.ffn_gate,",
+        "gemma4.layer.0.ffn_up,",
+        "gemma4.layer.0.ffn_activated,",
+        "gemma4.layer.0.ffn_down,",
+        "gemma4.layer.0.ffn_out,",
+        "gemma4.layer.0.layer_output,",
+        "gemma4.logits",
+    );
+    const REQUIRED: &[&str] = &[
+        "gemma4.input",
+        "gemma4.layer.0.attn_norm",
+        "gemma4.layer.0.q",
+        "gemma4.layer.0.q_norm",
+        "gemma4.layer.0.q_rope",
+        "gemma4.layer.0.k",
+        "gemma4.layer.0.k_norm",
+        "gemma4.layer.0.k_rope",
+        "gemma4.layer.0.v",
+        "gemma4.layer.0.v_norm",
+        "gemma4.layer.0.attention",
+        "gemma4.layer.0.attention_projected",
+        "gemma4.layer.0.attn_out",
+        "gemma4.layer.0.ffn_norm",
+        "gemma4.layer.0.ffn_gate",
+        "gemma4.layer.0.ffn_up",
+        "gemma4.layer.0.ffn_activated",
+        "gemma4.layer.0.ffn_down",
+        "gemma4.layer.0.ffn_out",
+        "gemma4.layer.0.layer_output",
+        "gemma4.logits",
+    ];
     let mut baseline = None;
     for batch in [1, 64] {
         let trace = std::env::temp_dir().join(format!(
@@ -761,6 +884,7 @@ fn gemma4_trace_rows_match_batch_one_raw_bits() {
                 "models::gemma4::trunk::tests::gemma4_trace_child",
             ])
             .env("RMI_PARITY_TRACE", &trace)
+            .env("RMI_PARITY_FILTER", FILTER)
             .env("RMI_TEST_TRACE_BATCH_SIZE", batch.to_string())
             .output()
             .unwrap();
@@ -792,6 +916,12 @@ fn gemma4_trace_rows_match_batch_one_raw_bits() {
                 .count(),
             2
         );
+        for name in REQUIRED {
+            assert!(
+                records.iter().any(|record| record["name"] == *name),
+                "missing trace checkpoint {name} for batch {batch}"
+            );
+        }
         if let Some(expected) = &baseline {
             assert_eq!(&actual, expected);
         } else {
@@ -857,7 +987,7 @@ fn softcap_matches_pinned_reciprocal_scale_bits() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn layer_12_attention_uses_stable_scalar_softmax() {
+fn layer_12_attention_uses_llama_neon_softmax() {
     let keys = [
         0x40b4_85b2,
         0x3ffc_c0c2,
@@ -872,18 +1002,19 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
     let cache = KvLayer {
         head_dim: 1,
         row_width: 1,
-        group_size: HEADS,
+        group_size: 8,
         keys: keys.to_vec(),
         values: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0].to_vec(),
     };
-    let mut output = [0.0; HEADS];
+    let mut output = [0.0; 8];
 
     attend(
         12,
         7,
-        &[1.0; HEADS],
+        &[1.0; 8],
         &cache,
         true,
+        512,
         &mut output,
         &mut Vec::new(),
         &mut Vec::new(),
@@ -891,7 +1022,7 @@ fn layer_12_attention_uses_stable_scalar_softmax() {
     )
     .unwrap();
 
-    assert_eq!(output.map(f32::to_bits), [0x3f15_89fd; HEADS]);
+    assert_eq!(output.map(f32::to_bits), [0x3f15_89fe; 8]);
 }
 
 #[test]
@@ -901,11 +1032,71 @@ fn ggml_geglu_rounds_gate_and_gelu_through_f16() {
     gate[0] = f32::from_bits(0x3f12_598e);
     up[0] = f32::from_bits(0xbed7_8765);
     gate[1] = f32::from_bits(0xbfff_e000);
+    gate[2] = f32::from_bits(0xbfff_e88e);
+    up[2] = f32::from_bits(0x3ffd_a160);
+    gate[3] = f32::from_bits(0xbfff_e110);
+    up[3] = f32::from_bits(0x3f9d_669c);
+    gate[4] = f32::from_bits(0xc1b1_365d);
+    up[4] = f32::from_bits(0xc1cc_314e);
 
     super::ggml_geglu_fp16_inplace(&mut gate, &up);
 
     assert_eq!(gate[0].to_bits(), 0xbe30_7c3e);
     assert_eq!(gate[1].to_bits(), 0xbd3a_6000);
+    assert_eq!(gate[2].to_bits(), 0xbdb8_a65c);
+    assert_eq!(gate[3].to_bits(), 0xbd65_2f28);
+    assert_eq!(gate[4].to_bits(), 0x0000_0000);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn ggml_attention_dot_matches_pinned_avx_fma_reduction_order() {
+    if !std::is_x86_feature_detected!("fma") {
+        eprintln!("skipped: pinned attention dot bits require FMA");
+        return;
+    }
+    let fixture = |mut state: u32| {
+        std::array::from_fn::<_, 256, _>(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f32::from_bits((state & 0x8000_0000) | 0x3f00_0000 | (state & 0x007f_ffff))
+        })
+    };
+    let left = fixture(1);
+    let right = fixture(2);
+
+    assert_eq!(
+        super::forward::ggml_attention_dot(&left, &right, 256).to_bits(),
+        0xc02f_54b9
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn layer_0_attention_uses_pinned_sse3_softmax() {
+    let cache = KvLayer {
+        head_dim: 1,
+        row_width: 1,
+        group_size: 1,
+        keys: [0x40d0_5422, 0x400c_0934].map(f32::from_bits).to_vec(),
+        values: [0xbee2_a638, 0xbf08_d6c7].map(f32::from_bits).to_vec(),
+    };
+    let mut output = [0.0];
+
+    attend(
+        0,
+        1,
+        &[1.0],
+        &cache,
+        false,
+        0,
+        &mut output,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &ComputePool::new(1),
+    )
+    .unwrap();
+
+    assert_eq!(output[0].to_bits(), 0xbee3_43e6);
 }
 
 #[test]
@@ -1059,19 +1250,38 @@ fn per_layer_f32_projection_matches_pinned_neon_long_rows() {
 
     // Independent literals from pinned llama.cpp ggml_vec_dot_f32.
     assert_eq!(
-        output.map(f32::to_bits),
+        output
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
         [0xbe74_d6c6, 0x3df2_a865, 0x3ed8_e80e]
     );
 }
 
 #[test]
-fn per_layer_bf16_projection_matches_pinned_scalar_dot_bits() {
-    // Pinned llama.cpp 3173a56471c, Gemma4 text projection, first 16
-    // operands from real rows 0, 1, 2, 3, and 5. Its arm64 BF16 dot rounds
-    // the activation to BF16, forms F32 products, accumulates them in
-    // ggml_float (F64), then casts once. The pinned row-3 and row-5 F32
-    // accumulator words are respectively 0x3daed280 and 0xbdef03c0, so
-    // those rows make an F32-accumulation mutation observable.
+fn per_layer_bf16_projection_uses_the_repository_bf16_kernel() {
+    // The projection runs the repository's own BF16 kernel: the F32
+    // activation stays in F32 and the products accumulate in F32.
+    //
+    // llama.cpp 3173a56471c instead rounds the activation to BF16 and
+    // accumulates the products in ggml_float (F64). That is ggml's
+    // implementation detail rather than a precision optimum, so the
+    // repository deliberately does not copy it (see the
+    // operator-internal-dispatch skill: "do not copy ggml's accumulation
+    // structure just because the reference implementation does it"). The
+    // two differ by about 1e-3 of the summands, which shows up as a large
+    // *relative* difference wherever the sum nearly cancels.
+    //
+    // The fixture is the one llama.cpp's numbers were pinned with (the
+    // first 16 operands of real rows 0, 1, 2, 3 and 5), so the gap stays
+    // checkable: llama.cpp's row-1 result is 0x3be97100 (0.00712406635)
+    // against our 0x3bf2f9a0 (0.00741501153), a 4% relative gap on a sum
+    // that cancels to almost nothing. Row 4 is 0xbdeea163 here against
+    // llama.cpp's 0xbdef03c1, the two bits an F32 accumulator would move.
+    //
+    // An independent F32 dot over the same operands reproduces these
+    // values to about 1e-7 relative, so the projection is exactly the
+    // repository's BF16 kernel over an F32 activation.
     let input = [
         0xbfd0_8482,
         0xbfc2_eb2b,
@@ -1114,90 +1324,101 @@ fn per_layer_bf16_projection_matches_pinned_scalar_dot_bits() {
         ],
     ];
     let rows = weight_rows.len();
-    let weight = weight_rows
+    let weight_bytes = weight_rows
         .into_iter()
         .flatten()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-        &weight,
+        &weight_bytes,
         GGMLType::BF16,
         input.len(),
         rows,
     ));
-    let mut output = [0.0; 5];
-    let mut q8 = vec![0; input.len() * 2];
-    let mut scales = vec![0.0; input.len().div_ceil(32)];
-
-    matmul(
+    // The production path: the projection goes through the prepared rows,
+    // which keeps the activation in F32 for a BF16 weight.
+    let mut output = vec![0.0f32; weight.n_out];
+    let model = deterministic_model(Arc::new(AtomicUsize::new(0)));
+    let mut linear = Gemma4PrefillLinear::default();
+    let mut prepared = PreparedRows::new(1, input.len());
+    let mut q8 = vec![0u8; input.len() * 2];
+    let mut scales = vec![0.0f32; input.len().div_ceil(32)];
+    prefill_matmul_rows(
         "per_layer_model_proj.weight",
         &weight,
         &input,
         &mut output,
-        &ComputePool::new(3),
+        1,
+        &model,
+        &mut linear,
+        model.pool(),
+        &mut prepared,
         &mut q8,
         &mut scales,
     )
     .unwrap();
 
     assert_eq!(
-        output.map(f32::to_bits),
+        output
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
         [
-            0xbe32_95aa,
-            0x3be9_7100,
-            0xbd1b_8ce0,
-            0x3dae_d27f,
-            0xbdef_03c1
+            0xbe32_7c20,
+            0x3bf2_f9a0,
+            0xbd1b_2bbe,
+            0x3dae_d545,
+            0xbdee_a163
         ]
     );
 }
 
 #[test]
-fn per_layer_projection_rejects_non_bf16_weight() {
-    let weight = zero_weight(2, 1);
-    let mut output = [7.0];
-    let mut input_bf16 = [0; 4];
-    let mut scales = [0.0];
-
-    let error = matmul(
-        "per_layer_model_proj.weight",
-        &weight,
-        &[1.0, 2.0],
-        &mut output,
-        &ComputePool::new(1),
-        &mut input_bf16,
-        &mut scales,
-    )
-    .unwrap_err();
-
-    assert!(error.contains("requires BF16"), "{error}");
-    assert_eq!(output, [7.0]);
+fn per_layer_projection_rejects_a_weight_outside_bf16_and_f16() {
+    // The tensor contract lives in the loader: the projection is a BF16 or
+    // F16 tensor, and a GGUF that declares anything else is rejected before
+    // a byte is read. The matmul itself stays type agnostic.
+    let dims = [2u64, 1u64];
+    for kind in [GGMLType::F32, GGMLType::Q8_0] {
+        let source = SingleTensorSource::new(
+            "per_layer_model_proj.weight",
+            dims.to_vec(),
+            kind,
+            vec![0; 8],
+        );
+        let error = load_weight_any(
+            &source,
+            "per_layer_model_proj.weight",
+            &dims,
+            &[GGMLType::BF16, GGMLType::F16],
+        )
+        .err()
+        .expect("the loader rejects the weight");
+        assert!(error.contains("one of"), "{error}");
+    }
 }
 
 #[test]
-fn per_layer_projection_rejects_wrong_bf16_storage_length() {
-    for byte_len in [6, 2] {
-        let bytes = vec![0; byte_len];
-        let weight =
-            Weight::from_quantized(QuantizedTensor::from_bytes(&bytes, GGMLType::BF16, 2, 1));
-        let mut output = [7.0];
-        let mut input_bf16 = [0; 4];
-        let mut scales = [0.0];
-
-        let error = matmul(
+fn per_layer_projection_rejects_a_mismatched_payload_length() {
+    // A BF16 payload whose length does not match the declared shape would
+    // be read past its end, so the loader measures it against the metadata.
+    let dims = [2u64, 1u64];
+    for byte_len in [6usize, 2] {
+        let source = SingleTensorSource::new(
             "per_layer_model_proj.weight",
-            &weight,
-            &[1.0, 2.0],
-            &mut output,
-            &ComputePool::new(1),
-            &mut input_bf16,
-            &mut scales,
+            dims.to_vec(),
+            GGMLType::BF16,
+            vec![0; byte_len],
+        );
+        let error = load_weight_any(
+            &source,
+            "per_layer_model_proj.weight",
+            &dims,
+            &[GGMLType::BF16, GGMLType::F16],
         )
-        .unwrap_err();
-
-        assert!(error.contains("expected 4 bytes"), "{error}");
-        assert!(error.contains(&format!("got {byte_len}")), "{error}");
-        assert_eq!(output, [7.0]);
+        .err()
+        .expect("the loader rejects the weight");
+        assert!(error.contains("Invalid tensor data length"), "{error}");
     }
 }
 
@@ -1292,7 +1513,7 @@ fn gemma4_prevalidates_later_chunks_before_running_any_projection() {
     let dim = model.config.head_dim(0);
     model.layers[0].attn_q = counting_output_weight(
         model.config.embd,
-        HEADS * dim,
+        model.config.n_heads * dim,
         Arc::clone(&projection_calls),
     );
     let mut session =
@@ -1383,7 +1604,17 @@ fn failed_later_gemma4_chunk_preserves_successful_prefix() {
         session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
     }
     let error = session.forward_rows(&fixture_rows(5)).unwrap_err();
-    assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+    // The kernel poisons its output with NaN on failure. Where that poison
+    // surfaces depends on the build profile: `ensure_finite` names the tensor
+    // in debug builds, while release builds compile that check out and the
+    // NaN travels until the linear executor's input validation rejects it
+    // ("linear input contains non-finite values"). Either way the poisoned
+    // chunk must surface as an error, never as silent output.
+    if cfg!(debug_assertions) {
+        assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+    } else {
+        assert!(error.contains("non-finite"), "{error}");
+    }
     assert_eq!(session.len(), 2);
     assert_eq!(snapshot_base_kv(&session), expected.base_kv);
     #[cfg(feature = "vulkan")]
@@ -1431,13 +1662,14 @@ fn f32_matrix_loader_preserves_declared_shape() {
 fn actual_model_one_token_produces_finite_logits() {
     let path = std::env::var_os("RMI_GEMMA4_MODEL").expect("RMI_GEMMA4_MODEL");
     let source = std::sync::Arc::new(crate::core::loader::GGUFLoader::from_file(path).unwrap());
-    for (layer, expected_ffn) in [(14, 6144), (15, 12_288), (34, 12_288)] {
+    let config = Gemma4Config::from_source(source.as_ref()).unwrap();
+    for layer in [0, config.layers / 2, config.layers - 1] {
         assert_eq!(
             source
                 .tensor_info(&format!("blk.{layer}.ffn_gate.weight"))
                 .unwrap()
                 .dims,
-            [1536, expected_ffn]
+            [config.embd as u64, config.ffn_per_layer[layer] as u64]
         );
     }
     let model = super::Gemma4Model::from_source(source, 4).unwrap();

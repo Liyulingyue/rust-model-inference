@@ -33,7 +33,7 @@ from tools.converter.dreamx.convert_dreamx_creator import (
 
 class DreamXOracleTraceTest(unittest.TestCase):
     def test_cuda_requirement_fails_before_upstream_load(self):
-        from tools.dreamx.dreamx_oracle_trace import require_cuda
+        from tools.oracle.dreamx.dreamx_oracle_trace import require_cuda
 
         torch = SimpleNamespace(
             cuda=SimpleNamespace(is_available=lambda: False),

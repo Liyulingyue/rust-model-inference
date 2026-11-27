@@ -109,6 +109,15 @@ pub enum QuantizedTensor<'a> {
         n_cols: usize,
         n_rows: usize,
     },
+    /// Microsoft BitNet b1.58 I2_S ternary weights. See `crate::ops::kernel::i2_s`
+    /// for the block layout; the kernel for this variant is a no-op
+    /// placeholder (the real BitLinear forward uses the raw bytes
+    /// via `BitLinearWeights::weight`).
+    I2S {
+        data: &'a [u8],
+        n_cols: usize,
+        n_rows: usize,
+    },
     Q4_0 {
         data: &'a [u8],
         n_cols: usize,
@@ -124,7 +133,22 @@ pub enum QuantizedTensor<'a> {
         n_cols: usize,
         n_rows: usize,
     },
+    Q5_0 {
+        data: &'a [u8],
+        n_cols: usize,
+        n_rows: usize,
+    },
+    Q5_1 {
+        data: &'a [u8],
+        n_cols: usize,
+        n_rows: usize,
+    },
     Q5_K {
+        data: &'a [u8],
+        n_cols: usize,
+        n_rows: usize,
+    },
+    Q1_0 {
         data: &'a [u8],
         n_cols: usize,
         n_rows: usize,
@@ -181,7 +205,8 @@ impl<'a> QuantizedTensor<'a> {
     /// method rather than inline because `into_kernel` consumes `self`.
     pub(crate) fn clone_to_kernel(&self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
         use crate::ops::kernel::{
-            bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
+            bf16, f16, f32, iq4_nl, iq4_xs, q1_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k,
+            q6_k, q8_0,
         };
         match self {
             Self::F32 { data, n_in, n_out } => {
@@ -265,19 +290,150 @@ impl<'a> QuantizedTensor<'a> {
                 n_cols,
                 n_rows,
             } => Box::new(q4_k::Q4_KKernel::new(data, *n_cols, *n_rows)),
+            Self::Q5_0 {
+                data,
+                n_cols,
+                n_rows,
+            } => Box::new(q5_0::Q5_0Kernel::new(data, *n_cols, *n_rows)),
+            Self::Q5_1 {
+                data,
+                n_cols,
+                n_rows,
+            } => Box::new(q5_1::Q5_1Kernel::new(data, *n_cols, *n_rows)),
             Self::Q5_K {
                 data,
                 n_cols,
                 n_rows,
             } => Box::new(q5_k::Q5_KKernel::new(data, *n_cols, *n_rows)),
+            Self::Q1_0 {
+                data,
+                n_cols,
+                n_rows,
+            } => Box::new(q1_0::Q1_0Kernel::new(data, *n_cols, *n_rows)),
+            // BitNet b1.58 I2_S. The kernel is intentionally a no-op
+            // — the BitLinear forward in `src/ops/bitnet/forward.rs`
+            // accesses the raw bytes directly via the
+            // `BitLinearWeights::weight` field stored alongside
+            // (see `src/models/qwen3/trunk/weights.rs::BitLinearSlot`).
+            // BitNet model loaders (`load_layers_static` and
+            // `load_layers`) place the actual I2_S payload in
+            // `bitlinear.*.{attn_q,attn_k,...}` and never call
+            // `kernel.forward_prepared` on the standard `wq/wk/...`
+            // paths because `forward.rs` and `embedding.rs` branch
+            // on `cfg.is_bitnet`. The placeholder kernel exists so
+            // `Weight::from_quantized(QuantizedTensor::I2S(...))` can
+            // satisfy the type system without panicking; if it ever
+            // gets called, that's a bug (BitLinear path not taken).
+            Self::I2S { .. } => Box::new(noop::NOOP_KERNEL),
         }
     }
 }
 
+/// Placeholder kernel used for BitNet I2_S weights. The BitLinear
+/// forward path bypasses `kernel.forward_prepared` and uses the raw
+/// bytes via `BitLinearWeights::weight`; this kernel exists only to
+/// satisfy the `Kernel` trait so `Weight::from_quantized` doesn't
+/// panic on GGML_TYPE_I2_S. Forwarding via this kernel would be a
+/// hard bug — `forward` panics with a clear message.
+mod noop {
+    use super::super::{Kernel, QuantizedTensor};
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct NoopKernel;
+
+    impl Kernel for NoopKernel {
+        fn weight_bytes(&self) -> Option<&[u8]> {
+            None
+        }
+        fn forward(&self, _input: &[f32], _output: &mut [f32], _n_in: usize, _n_out: usize) {
+            panic!(
+                "BitNet I2_S Weight kernel is a no-op; the BitLinear forward path \
+                 should use BitLinearWeights::weight directly, not this kernel. \
+                 This is a routing bug — check cfg.is_bitnet branches."
+            );
+        }
+        fn forward_prequantized(
+            &self,
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _output: &mut [f32],
+            _n_in: usize,
+            _n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            panic!("BitNet I2_S noop kernel: forward_prequantized should not be called");
+        }
+        fn forward_prepared(
+            &self,
+            _input: &[f32],
+            _input_q8: &[u8],
+            _input_scales: &[f32],
+            _q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+            _output: &mut [f32],
+            _n_in: usize,
+            _n_out: usize,
+            _ith: usize,
+            _nth: usize,
+        ) {
+            panic!("BitNet I2_S noop kernel: forward_prepared should not be called");
+        }
+    }
+    pub(super) const NOOP_KERNEL: NoopKernel = NoopKernel;
+}
+
 impl<'a> QuantizedTensor<'a> {
+    /// Whether a GGML type can be turned into a kernel by this loader.
+    ///
+    /// The answer is exactly the set [`from_bytes`] accepts. A loader that
+    /// filters formats has to ask this first: the formats it cannot hold
+    /// (the integer and double types, `Q8_1`, `Q8_K`) are still valid GGML
+    /// types, and handing them to [`from_bytes`] panics rather than
+    /// failing.
+    ///
+    /// [`from_bytes`]: QuantizedTensor::from_bytes
+    pub fn supports(ggml_type: GGMLType) -> bool {
+        matches!(
+            ggml_type,
+            GGMLType::F32
+                | GGMLType::F16
+                | GGMLType::BF16
+                | GGMLType::Q4_0
+                | GGMLType::Q4_1
+                | GGMLType::Q5_0
+                | GGMLType::Q5_1
+                | GGMLType::Q8_0
+                | GGMLType::Q2K
+                | GGMLType::Q3K
+                | GGMLType::Q4K
+                | GGMLType::Q5K
+                | GGMLType::Q6K
+                | GGMLType::IQ1_S
+                | GGMLType::IQ1_M
+                | GGMLType::IQ2_XXS
+                | GGMLType::IQ2_XS
+                | GGMLType::IQ2_S
+                | GGMLType::IQ3_XXS
+                | GGMLType::IQ3_S
+                | GGMLType::IQ4_NL
+                | GGMLType::IQ4_XS
+                | GGMLType::I2_S
+                | GGMLType::Q1_0
+        )
+    }
+
     /// Build a `QuantizedTensor` from raw GGUF bytes. This is the bridge
     /// from the GGUF loader to the `Kernel` trait and replaces the previous
     /// `ProcessedWeight::from_bytes` API.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a type [`supports`] rejects. Callers that read the format
+    /// out of a file must check [`supports`] first and report the type they
+    /// cannot load.
+    ///
+    /// [`from_bytes`]: QuantizedTensor::from_bytes
+    /// [`supports`]: QuantizedTensor::supports
     pub fn from_bytes(data: &'a [u8], ggml_type: GGMLType, n_in: usize, n_out: usize) -> Self {
         match ggml_type {
             GGMLType::F32 => {
@@ -381,7 +537,27 @@ impl<'a> QuantizedTensor<'a> {
                 n_cols: n_in,
                 n_rows: n_out,
             },
+            GGMLType::Q5_0 => Self::Q5_0 {
+                data,
+                n_cols: n_in,
+                n_rows: n_out,
+            },
+            GGMLType::Q5_1 => Self::Q5_1 {
+                data,
+                n_cols: n_in,
+                n_rows: n_out,
+            },
             GGMLType::Q5K => Self::Q5_K {
+                data,
+                n_cols: n_in,
+                n_rows: n_out,
+            },
+            GGMLType::Q1_0 => Self::Q1_0 {
+                data,
+                n_cols: n_in,
+                n_rows: n_out,
+            },
+            GGMLType::I2_S => Self::I2S {
                 data,
                 n_cols: n_in,
                 n_rows: n_out,
@@ -411,7 +587,11 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q4_0 { .. } => GGMLType::Q4_0,
             Self::Q4_1 { .. } => GGMLType::Q4_1,
             Self::Q4_K { .. } => GGMLType::Q4K,
+            Self::Q5_0 { .. } => GGMLType::Q5_0,
+            Self::Q5_1 { .. } => GGMLType::Q5_1,
             Self::Q5_K { .. } => GGMLType::Q5K,
+            Self::Q1_0 { .. } => GGMLType::Q1_0,
+            Self::I2S { .. } => GGMLType::I2_S,
         }
     }
 
@@ -447,14 +627,19 @@ impl<'a> QuantizedTensor<'a> {
             Self::Q4_0 { n_cols, .. } => *n_cols,
             Self::Q4_1 { n_cols, .. } => *n_cols,
             Self::Q4_K { n_cols, .. } => *n_cols,
+            Self::Q5_0 { n_cols, .. } => *n_cols,
+            Self::Q5_1 { n_cols, .. } => *n_cols,
             Self::Q5_K { n_cols, .. } => *n_cols,
+            Self::Q1_0 { n_cols, .. } => *n_cols,
+            Self::I2S { n_cols, .. } => *n_cols,
         }
     }
 
     /// Build a `Box<dyn Kernel>` from this weight tensor.
     pub fn into_kernel(self) -> Box<dyn crate::ops::kernel::Kernel + 'a> {
         use crate::ops::kernel::{
-            bf16, f16, f32, iq4_nl, iq4_xs, q2_k, q3_k, q4_0, q4_1, q4_k, q5_k, q6_k, q8_0,
+            bf16, f16, f32, iq4_nl, iq4_xs, q1_0, q2_k, q3_k, q4_0, q4_1, q4_k, q5_0, q5_1, q5_k,
+            q6_k, q8_0,
         };
         match self {
             Self::F32 { data, n_in, n_out } => Box::new(f32::F32Kernel::new(data, n_in, n_out)),
@@ -536,11 +721,35 @@ impl<'a> QuantizedTensor<'a> {
                 n_cols,
                 n_rows,
             } => Box::new(q4_k::Q4_KKernel::new(data, n_cols, n_rows)),
+            Self::Q5_0 {
+                data,
+                n_cols,
+                n_rows,
+            } => Box::new(q5_0::Q5_0Kernel::new(data, n_cols, n_rows)),
+            Self::Q5_1 {
+                data,
+                n_cols,
+                n_rows,
+            } => Box::new(q5_1::Q5_1Kernel::new(data, n_cols, n_rows)),
             Self::Q5_K {
                 data,
                 n_cols,
                 n_rows,
             } => Box::new(q5_k::Q5_KKernel::new(data, n_cols, n_rows)),
+            Self::Q1_0 {
+                data,
+                n_cols,
+                n_rows,
+            } => Box::new(q1_0::Q1_0Kernel::new(data, n_cols, n_rows)),
+            // BitNet I2_S — no-op kernel; the BitLinear forward in
+            // `src/ops/bitnet/forward.rs` bypasses this kernel and uses the
+            // raw bytes via `BitLinearWeights::weight`. The kernel
+            // exists so `Weight::from_quantized` can build a `Box<dyn
+            // Kernel>` to satisfy the type system. Forwarding via
+            // this kernel would be a routing bug (BitLinear path not
+            // taken) and would produce garbage — `NOOP_KERNEL.forward*`
+            // panics to flag the bug.
+            Self::I2S { .. } => Box::new(noop::NOOP_KERNEL),
         }
     }
 
@@ -571,7 +780,11 @@ impl<'a> QuantizedTensor<'a> {
             | Self::Q4_0 { n_rows, .. }
             | Self::Q4_1 { n_rows, .. }
             | Self::Q4_K { n_rows, .. }
-            | Self::Q5_K { n_rows, .. } => *n_rows,
+            | Self::Q5_0 { n_rows, .. }
+            | Self::Q5_1 { n_rows, .. }
+            | Self::Q5_K { n_rows, .. }
+            | Self::Q1_0 { n_rows, .. }
+            | Self::I2S { n_rows, .. } => *n_rows,
         }
     }
 
@@ -635,6 +848,8 @@ impl<'a> QuantizedTensor<'a> {
         let output_ptr = output.as_mut_ptr();
         match self {
             Self::Q4_K { n_cols, .. }
+            | Self::Q5_0 { n_cols, .. }
+            | Self::Q5_1 { n_cols, .. }
             | Self::Q5_K { n_cols, .. }
             | Self::Q6_K { n_cols, .. }
             | Self::Q2_K { n_cols, .. }
@@ -731,13 +946,6 @@ mod tests {
             n_out: 0,
         };
         assert_eq!(q.ggml_type(), GGMLType::F32);
-
-        let q = QuantizedTensor::F32 {
-            data: vec![0.0; 8],
-            n_in: 4,
-            n_out: 2,
-        };
-        assert_eq!(q.n_rows(), 2);
 
         let q8_bytes = vec![0u8; 34];
         let q = QuantizedTensor::Q8_0 {

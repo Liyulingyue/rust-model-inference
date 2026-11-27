@@ -1,30 +1,117 @@
 use super::{GpuBuffer, VulkanContext, VulkanError};
 use crate::models::qwen3::trunk::Qwen3Config;
+use crate::ops::rope::rope_neox_inplace;
 use ash::vk;
 use std::collections::HashMap;
-#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::MutexGuard;
 
 const QUANTIZE_Q8_0_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q8_0.spv");
 const QUANTIZE_Q8_K_SHADER: &[u8] = include_bytes!("../../shaders/bin/quantize_q8_k.spv");
 const Q8_MATMUL_GROUPED_SHADER: &[u8] = include_bytes!("../../shaders/bin/q8_matmul_grouped.spv");
+/// Packed 4x8 int8 dot-product variant of `Q8_MATMUL_GROUPED_SHADER`. Requires
+/// the device to report `shaderIntegerDotProduct`; selected in
+/// [`Qwen3Ops::new_with_size`] and kept at the same pipeline index so every
+/// caller keeps addressing it through `Q8_MATMUL_GROUPED`.
+const Q8_MATMUL_GROUPED_DP4A_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_grouped_dp4a.spv");
+const Q8_MATMUL_GROUPED_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a.spv");
+const Q8_MATMUL_COOPERATIVE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_cooperative_dp4a.spv");
+/// Static 32-token variant for NEON/scalar reductions. The generic tiled
+/// shader also supports the four-token AVX2 reduction, but the runtime token
+/// bound prevents some ARM drivers from unrolling the wide-token loop.
+const Q8_MATMUL_GROUPED_TILED_WIDE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide.spv");
+/// Unfused twin of the wide kernel, for hosts whose CPU reduction does not
+/// contract. Both are the same code with the accumulate folded to a single
+/// operation, because testing `reduction_mode` costs about 40% of the kernel
+/// on the aarch64 box and the mode is known on the host.
+const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_add.spv");
+const F16_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul_tiled.spv");
+const FLOAT_MATMUL_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/float_matmul_tiled.spv");
+const ATTENTION_ONLINE_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_online.spv");
+const ATTENTION_ONLINE_WIDE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_online_wide.spv");
+const CONV3D_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/conv3d_tiled.spv");
+/// Dense 1D convolution for the AuK VAE decoder. The weight layout is
+/// `[out_channels][kernel][in_channels]`, the same one the host kernel uses.
+const CONV1D_TILED_SHADER: &[u8] = include_bytes!("../../shaders/bin/conv1d_tiled.spv");
+/// Depthwise FIR resampling for the AuK VAE anti-aliased activation.
+const AUK_FIR_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_fir.spv");
+/// SnakeBeta activation for the AuK VAE decoder.
+const AUK_SNAKE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_snake.spv");
+/// Polyphase interleave for the AuK VAE upsample convolution.
+const AUK_INTERLEAVE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_interleave.spv");
+/// Elementwise scale for the AuK VAE residual sum.
+const AUK_SCALE_SHADER: &[u8] = include_bytes!("../../shaders/bin/auk_scale.spv");
+
+/// Dense projection for the PiVo acoustic network.
+const PIVO_LINEAR_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_linear.spv");
+/// Split-half rotary embedding for the PiVo attention.
+const PIVO_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_rope.spv");
+/// Grouped-query attention for the PiVo acoustic network.
+const PIVO_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_attention.spv");
+/// RMS normalisation with the weight resident in the arena.
+const PIVO_RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_rms_norm.spv");
+/// Dilated 1D convolution in PiVo's frame major layout.
+const PIVO_CONV1D_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_conv1d.spv");
+/// Gated linear unit for the PiVo feed-forward blocks.
+const PIVO_SWIGLU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_swiglu.spv");
+/// SiLU activation for the PiVo convolution blocks.
+const PIVO_SILU_SHADER: &[u8] = include_bytes!("../../shaders/bin/pivo_silu.spv");
+
+const ATTENTION_SCORES_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_scores_tiled.spv");
 const Q4_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_0_matmul.spv");
+/// Register-tiled Q4_0 matmul: the weight is read once per (output column,
+/// k-block) and reused across a tile of tokens.
+const Q4_0_MATMUL_TILED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q4_0_matmul_tiled_dp4a.spv");
 const Q4_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_1_matmul.spv");
 const Q4_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q4_k_matmul.spv");
+const IQ4_XS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq4_xs_matmul.spv");
+const IQ2_XXS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_xxs_matmul.spv");
+const IQ2_XS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_xs_matmul.spv");
+const IQ2_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq2_s_matmul.spv");
+const IQ3_XXS_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq3_xxs_matmul.spv");
+const IQ3_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq3_s_matmul.spv");
+const IQ1_S_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq1_s_matmul.spv");
+const IQ1_M_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/iq1_m_matmul.spv");
+const Q4_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q4_k_matmul_cooperative.spv");
+/// Q5_0 grouped matmul. The 30B-A3B's attention, SSM and expert
+/// projections are Q5_0, and its shared expert is Q5_1.
+const Q5_0_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_0_matmul.spv");
+const Q5_1_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_1_matmul.spv");
 const Q5_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q5_k_matmul.spv");
+const Q5_K_MATMUL_COOPERATIVE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q5_k_matmul_cooperative.spv");
 const Q6_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q6_k_matmul.spv");
+const Q2_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q2_k_matmul.spv");
+const Q3_K_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/q3_k_matmul.spv");
 const F16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f16_matmul.spv");
 const BF16_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/bf16_matmul.spv");
 const F32_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/f32_matmul.spv");
+const MLX_AFFINE_MATMUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/mlx_affine_matmul.spv");
 const RMS_NORM_SHADER: &[u8] = include_bytes!("../../shaders/bin/rms_norm.spv");
 const QK_NORM_ROPE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qk_norm_rope.spv");
+const QK_NORM_ROPE_INTERLEAVED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/qk_norm_rope_interleaved.spv");
 const KV_WRITE_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write.spv");
 const ATTENTION_SCORES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_scores.spv");
 const SOFTMAX_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax.spv");
 const ATTENTION_VALUES_SHADER: &[u8] = include_bytes!("../../shaders/bin/attention_values.spv");
+/// Reduction mode 0 only. `attention_values.comp` also serves the decoder
+/// reductions that stream into 8, 16 or 32 accumulators, and mode 0 would pay
+/// for that array on every output element.
+const ATTENTION_VALUES_F32_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_values_f32.spv");
 const SILU_MUL_SHADER: &[u8] = include_bytes!("../../shaders/bin/silu_mul.spv");
 const ADD_SHADER: &[u8] = include_bytes!("../../shaders/bin/add.spv");
+const MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/moe_reduce.spv");
 const QWEN35_DENSE_PREPARE_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_dense_prepare.spv");
 const QWEN35_ATTENTION_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_attention.spv");
@@ -32,6 +119,54 @@ const QWEN35_RECURRENT_CONV_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_conv.spv");
 const QWEN35_RECURRENT_SSM_SHADER: &[u8] =
     include_bytes!("../../shaders/bin/qwen35_recurrent_ssm.spv");
+const QWEN35_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_route.spv");
+/// The Nemotron-3 Nano MoE router (sigmoid routing with a selection bias)
+/// and its reducer (the shared expert is ungated).
+const NEMOTRON_MOE_ROUTE_SHADER: &[u8] = include_bytes!("../../shaders/bin/nemotron_moe_route.spv");
+const NEMOTRON_MOE_REDUCE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_moe_reduce.spv");
+const QWEN35_MOE_REDUCE_SHADER: &[u8] = include_bytes!("../../shaders/bin/qwen35_moe_reduce.spv");
+const ADALN_MODULATE_SHADER: &[u8] = include_bytes!("../../shaders/bin/adaln_modulate.spv");
+const SENSENOVA_MHC_SHADER: &[u8] = include_bytes!("../../shaders/bin/sensenova_mhc.spv");
+const Q8_MATMUL_TRANSPOSED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_transposed.spv");
+/// The tiled Q8_0 kernels in the transposed weight layout.
+///
+/// They are the twins of the three native tiled kernels, generated by
+/// `scripts/transposed-tiled-shader.py`: same arithmetic, same order,
+/// only the place the weight bytes live changes.
+const Q8_MATMUL_GROUPED_TILED_TRANSPOSED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_transposed.spv");
+const Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_transposed.spv");
+const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/q8_matmul_tiled_dp4a_wide_add_transposed.spv");
+/// KV cache write that keeps K and V in F32 instead of rounding them to F16.
+/// Used by the Nemotron-3 Nano path, whose reference harness runs with an F32
+/// KV cache.
+const KV_WRITE_F32_SHADER: &[u8] = include_bytes!("../../shaders/bin/kv_write_f32.spv");
+/// Attention scores computed on F32 query and key values.
+const ATTENTION_SCORES_F32_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_scores_f32.spv");
+/// Attention values that consume an F32 KV cache and F32 probabilities.
+const ATTENTION_VALUES_F32_KV_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/attention_values_f32_kv.spv");
+/// Softmax that stores F32 probabilities instead of rounding them to F16.
+const SOFTMAX_F32_SHADER: &[u8] = include_bytes!("../../shaders/bin/softmax_f32.spv");
+/// Nemotron-3 Nano Mamba-2 depthwise causal conv1d fused with its SiLU.
+const NEMOTRON_H_SSM_CONV_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_conv.spv");
+/// Nemotron-3 Nano Mamba-2 softplus time step and per-head decay.
+const NEMOTRON_H_SSM_DT_SHADER: &[u8] = include_bytes!("../../shaders/bin/nemotron_h_ssm_dt.spv");
+/// Nemotron-3 Nano Mamba-2 selective scan.
+const NEMOTRON_H_SSM_SCAN_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_scan.spv");
+/// Nemotron-3 Nano Mamba-2 z gate.
+const NEMOTRON_H_SSM_GATE_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_gate.spv");
+/// Nemotron-3 Nano Mamba-2 group RMSNorm.
+const NEMOTRON_H_SSM_NORM_SHADER: &[u8] =
+    include_bytes!("../../shaders/bin/nemotron_h_ssm_norm.spv");
 
 const QUANTIZE: usize = 0;
 const QUANTIZE_K: usize = 1;
@@ -44,10 +179,33 @@ const F16_MATMUL: usize = 7;
 const BF16_MATMUL: usize = 8;
 const RMS_NORM: usize = 9;
 const QK_NORM_ROPE: usize = 10;
+/// Appended after the cooperative Q8 kernel to preserve existing indices.
+const QK_NORM_ROPE_INTERLEAVED: usize = 29;
+/// The transposed Q8_0 matmul, at its fixed slot in `OPERATOR_SHADERS`.
+///
+/// This index used to be `OPERATOR_SHADERS.len() - 1`, which is only correct
+/// while this shader is the last one in the table. Appending the Nemotron
+/// operators moved it silently: the constant followed the table length and
+/// the "transposed matmul" ended up running the SSM norm shader, so the
+/// transposed layout produced no output at all instead of a wrong one.
+/// `operator_indices_match_shader_modules` now checks every constant
+/// against the module it names, so this cannot drift again.
+const Q8_MATMUL_TRANSPOSED: usize = 50;
 const KV_WRITE: usize = 11;
 const ATTENTION_SCORES: usize = 12;
 const SOFTMAX: usize = 13;
 const ATTENTION_VALUES: usize = 14;
+/// F32 variants used by the Nemotron-3 Nano path. They are appended to
+/// `OPERATOR_SHADERS`, so their indices follow every shared pipeline.
+const KV_WRITE_F32: usize = 51;
+const ATTENTION_SCORES_F32: usize = 52;
+const ATTENTION_VALUES_F32_KV: usize = 53;
+const SOFTMAX_F32: usize = 54;
+const NEMOTRON_H_SSM_CONV: usize = 55;
+const NEMOTRON_H_SSM_DT: usize = 56;
+const NEMOTRON_H_SSM_SCAN: usize = 57;
+const NEMOTRON_H_SSM_GATE: usize = 58;
+const NEMOTRON_H_SSM_NORM: usize = 59;
 const SILU_MUL: usize = 15;
 const ADD: usize = 16;
 const QWEN35_DENSE_PREPARE: usize = 17;
@@ -56,7 +214,382 @@ const QWEN35_RECURRENT_CONV: usize = 19;
 const QWEN35_RECURRENT_SSM: usize = 20;
 const Q5_K_MATMUL: usize = 21;
 const F32_MATMUL: usize = 22;
-const OPERATOR_SHADERS: [&[u8]; 23] = [
+const ADALN_MODULATE: usize = 23;
+const Q8_MATMUL_GROUPED_TILED: usize = 24;
+const F16_MATMUL_TILED: usize = 25;
+const ATTENTION_SCORES_TILED: usize = 26;
+const MLX_AFFINE_MATMUL: usize = 27;
+const Q8_MATMUL_COOPERATIVE: usize = 28;
+const Q8_MATMUL_GROUPED_TILED_WIDE: usize = 30;
+const Q8_MATMUL_GROUPED_TILED_WIDE_ADD: usize = 31;
+const ATTENTION_VALUES_F32: usize = 32;
+// The operator table is a hard-coded index, so these follow the unified
+// operators instead of reusing 29-32: index 29 is the interleaved QK norm and
+// 30-32 are the wide tiled matmuls and the F32 attention values.
+const FLOAT_MATMUL_TILED: usize = 33;
+const ATTENTION_ONLINE: usize = 34;
+const CONV3D_TILED: usize = 35;
+const ATTENTION_ONLINE_WIDE: usize = 36;
+const TIMESTRAL: usize = 37;
+const FLOAT_MATMUL_SMALL: usize = 38;
+const MOE_REDUCE: usize = 39;
+const Q4_K_MATMUL_COOPERATIVE: usize = 40;
+
+const QWEN35_MOE_ROUTE: usize = 41;
+const QWEN35_MOE_REDUCE: usize = 42;
+const Q5_K_MATMUL_COOPERATIVE: usize = 43;
+const SENSENOVA_MHC: usize = 44;
+/// The register-tiled Q4_0 matmul. It follows the operator table's last
+/// entry, so the index has to follow the table length.
+const Q4_0_MATMUL_TILED: usize = 74;
+
+// The AuK VAE decoder operators.
+//
+// They follow the SenseNova MHC operator, which was appended to the table
+// in front of them. Their indices had not been moved with it, so every one
+// of them dispatched the shader before it: `conv1d_tiled` ran the MHC
+// shader and `auk_scale` ran `auk_interleave`. `auk_scale` itself was
+// never dispatched at all.
+const CONV1D_TILED: usize = 45;
+const AUK_FIR: usize = 46;
+const AUK_SNAKE: usize = 47;
+const AUK_INTERLEAVE: usize = 48;
+const AUK_SCALE: usize = 49;
+
+/// The transposed twins of the tiled Q8_0 kernels.
+///
+/// They are appended after every other operator, so the existing
+/// pipeline indices stay valid.
+const Q8_MATMUL_GROUPED_TILED_TRANSPOSED: usize = 60;
+const Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED: usize = 61;
+const Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED: usize = 62;
+
+/// The Q5_0 and Q5_1 grouped matmuls.
+///
+/// They are appended after every other operator, so the existing pipeline
+/// indices stay valid.
+const Q5_0_MATMUL: usize = 63;
+const Q5_1_MATMUL: usize = 64;
+
+/// The Nemotron-3 Nano MoE router and reducer.
+const NEMOTRON_MOE_ROUTE: usize = 65;
+const NEMOTRON_MOE_REDUCE: usize = 66;
+/// The PiVo acoustic network operators.
+///
+/// They are appended after every other operator, so the existing pipeline
+/// indices stay valid.
+const PIVO_LINEAR: usize = 67;
+const PIVO_ROPE: usize = 68;
+const PIVO_ATTENTION: usize = 69;
+const PIVO_RMS_NORM: usize = 70;
+const PIVO_CONV1D: usize = 71;
+const PIVO_SWIGLU: usize = 72;
+const PIVO_SILU: usize = 73;
+const IQ4_XS_MATMUL: usize = 75;
+const IQ2_XXS_MATMUL: usize = 76;
+const IQ2_XS_MATMUL: usize = 77;
+const IQ2_S_MATMUL: usize = 78;
+const IQ3_XXS_MATMUL: usize = 79;
+const IQ3_S_MATMUL: usize = 80;
+const IQ1_S_MATMUL: usize = 81;
+const IQ1_M_MATMUL: usize = 82;
+
+/// The Q2_K / Q3_K matmuls.
+///
+/// They are appended after every other operator, so the existing pipeline
+/// indices stay valid.
+const Q2_K_MATMUL: usize = 83;
+const Q3_K_MATMUL: usize = 84;
+
+fn silu_exp_mode(approximate: bool) -> u32 {
+    if !approximate {
+        2
+    } else if crate::ops::has_neon() {
+        1
+    } else if crate::ops::has_avx2_fma() {
+        0
+    } else {
+        2
+    }
+}
+
+pub(crate) fn tiled_matmul_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_TILED")
+            .map(|value| value != "0")
+            .unwrap_or(true)
+    })
+}
+
+pub(crate) fn require_tiled_attention(context: &VulkanContext) -> Result<(), VulkanError> {
+    let limits = &context.limits;
+    // attention_scores_tiled.comp uses eight groups of 32 lanes. Its 12 KiB
+    // shared memory fits within the existing Q8 baseline requirement.
+    if limits.max_compute_work_group_invocations < 256
+        || limits.max_compute_work_group_size[0] < 256
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "tiled attention requires 256 workgroup invocations and a 256-wide workgroup".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_online_attention(context: &VulkanContext) -> Result<(), VulkanError> {
+    require_tiled_attention(context)?;
+    // Sixteen queries plus 32 staged keys/values and their online softmax state.
+    if context.limits.max_compute_shared_memory_size < 27 * 1024 {
+        return Err(VulkanError::UnsupportedShape(
+            "online attention requires 27 KiB of workgroup memory".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Per-pipeline dispatch counters, populated only while `RUST_GPU_DISPATCH_TRACE`
+/// is set. Indexed by the `OPERATOR_SHADERS` position, so a new pipeline needs
+/// no extra bookkeeping here.
+#[cfg(feature = "vulkan")]
+static DISPATCH_TRACE_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "vulkan")]
+static DISPATCH_TRACE_COUNTS: [std::sync::atomic::AtomicU64; OPERATOR_SHADERS.len()] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; OPERATOR_SHADERS.len()];
+
+/// Per-dispatch trace: what was bound and how big the grid was, in order.
+///
+/// `RUST_GPU_DISPATCH_TRACE=1` only counts, which is enough to attribute time
+/// to a pipeline but not to answer "which dispatch in this sequence went
+/// wrong". `=2` additionally records the ordered call log into a ring buffer
+/// so a failing sequence can be read back dispatch by dispatch.
+#[cfg(feature = "vulkan")]
+const DISPATCH_LOG_CAPACITY: usize = 4096;
+
+#[cfg(feature = "vulkan")]
+static DISPATCH_LOG: [std::sync::atomic::AtomicU64; DISPATCH_LOG_CAPACITY * 6] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; DISPATCH_LOG_CAPACITY * 6];
+
+#[cfg(feature = "vulkan")]
+static DISPATCH_LOG_LEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "vulkan")]
+static DISPATCH_LOG_EPOCH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Shader names indexed by `OPERATOR_SHADERS` position, for the trace dump.
+#[cfg(feature = "vulkan")]
+const OPERATOR_SHADER_NAMES: [&str; OPERATOR_SHADERS.len()] = [
+    "quantize_q8_0",
+    "quantize_q8_k",
+    "q8_matmul_grouped",
+    "q4_0_matmul",
+    "q4_1_matmul",
+    "q4_k_matmul",
+    "q6_k_matmul",
+    "f16_matmul",
+    "bf16_matmul",
+    "rms_norm",
+    "qk_norm_rope",
+    "kv_write",
+    "attention_scores",
+    "softmax",
+    "attention_values",
+    "silu_mul",
+    "add",
+    "qwen35_dense_prepare",
+    "qwen35_attention",
+    "qwen35_recurrent_conv",
+    "qwen35_recurrent_ssm",
+    "q5_k_matmul",
+    "f32_matmul",
+    "adaln_modulate",
+    "q8_matmul_grouped_tiled",
+    "f16_matmul_tiled",
+    "attention_scores_tiled",
+    "mlx_affine_matmul",
+    "q8_matmul_cooperative",
+    "qk_norm_rope_interleaved",
+    "q8_matmul_tiled_dp4a_wide",
+    "q8_matmul_tiled_dp4a_wide_add",
+    "attention_values_f32",
+    "float_matmul_tiled",
+    "attention_online",
+    "conv3d_tiled",
+    "attention_online_wide",
+    "timestral",
+    "float_matmul_small",
+    "moe_reduce",
+    "q4_k_matmul_cooperative",
+    "qwen35_moe_route",
+    "qwen35_moe_reduce",
+    "q5_k_matmul_cooperative",
+    "sensenova_mhc",
+    "conv1d_tiled",
+    "auk_fir",
+    "auk_snake",
+    "auk_interleave",
+    "auk_scale",
+    "q8_matmul_transposed",
+    "kv_write_f32",
+    "attention_scores_f32",
+    "attention_values_f32_kv",
+    "softmax_f32",
+    "nemotron_h_ssm_conv",
+    "nemotron_h_ssm_dt",
+    "nemotron_h_ssm_scan",
+    "nemotron_h_ssm_gate",
+    "nemotron_h_ssm_norm",
+    "q8_matmul_tiled_dp4a_transposed",
+    "q8_matmul_tiled_dp4a_wide_transposed",
+    "q8_matmul_tiled_dp4a_wide_add_transposed",
+    "q5_0_matmul",
+    "q5_1_matmul",
+    "nemotron_moe_route",
+    "nemotron_moe_reduce",
+    "pivo_linear",
+    "pivo_rope",
+    "pivo_attention",
+    "pivo_rms_norm",
+    "pivo_conv1d",
+    "pivo_swiglu",
+    "pivo_silu",
+    "q4_0_matmul_tiled_dp4a",
+    "iq4_xs_matmul",
+    "iq2_xxs_matmul",
+    "iq2_xs_matmul",
+    "iq2_s_matmul",
+    "iq3_xxs_matmul",
+    "iq3_s_matmul",
+    "iq1_s_matmul",
+    "iq1_m_matmul",
+    "q2_k_matmul",
+    "q3_k_matmul",
+];
+
+/// True when the ordered dispatch log is being collected.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dispatch_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RUST_GPU_DISPATCH_TRACE").as_deref() == Ok("2"))
+}
+
+/// Record one bound dispatch. `pipeline` is the `OPERATOR_SHADERS` index.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dispatch_log_push(pipeline: usize, set: u64, grid: [u32; 3]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let index = DISPATCH_LOG_LEN.fetch_add(1, Relaxed) as usize;
+    if index >= DISPATCH_LOG_CAPACITY {
+        // Saturate rather than wrap: a wrapped log would silently reorder
+        // exactly the sequence someone is trying to read.
+        return;
+    }
+    let base = index * 6;
+    DISPATCH_LOG[base].store(pipeline as u64, Relaxed);
+    DISPATCH_LOG[base + 1].store(set, Relaxed);
+    DISPATCH_LOG[base + 2].store(grid[0] as u64, Relaxed);
+    DISPATCH_LOG[base + 3].store(grid[1] as u64, Relaxed);
+    DISPATCH_LOG[base + 4].store(grid[2] as u64, Relaxed);
+    DISPATCH_LOG[base + 5].store(DISPATCH_LOG_EPOCH.load(Relaxed) as u64, Relaxed);
+}
+
+/// Mark a submission boundary in the log, so dispatches can be grouped by the
+/// command buffer they were recorded into.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dispatch_log_new_epoch() {
+    use std::sync::atomic::Ordering::Relaxed;
+    DISPATCH_LOG_EPOCH.fetch_add(1, Relaxed);
+}
+
+/// Accumulated timings for the batched linear device path.
+#[cfg(feature = "vulkan")]
+pub(crate) static LINEAR_PROFILE: std::sync::Mutex<Option<[u64; 3]>> = std::sync::Mutex::new(None);
+
+/// Whether the batched linear device timings are collected.
+#[cfg(feature = "vulkan")]
+pub(crate) fn linear_profile_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("RMI_GPU_LINEAR_PROFILE").is_some())
+}
+
+/// Record the write / record+submit / readback split of one device matmul.
+#[cfg(feature = "vulkan")]
+pub(crate) fn record_linear_profile(write_ns: u64, record_ns: u64, read_ns: u64) {
+    if let Ok(mut guard) = LINEAR_PROFILE.lock() {
+        let entry = guard.get_or_insert([0, 0, 0]);
+        entry[0] += write_ns;
+        entry[1] += record_ns;
+        entry[2] += read_ns;
+    }
+}
+
+/// Print the accumulated batched linear device timings.
+#[cfg(feature = "vulkan")]
+pub(crate) fn dump_linear_profile() {
+    if let Ok(mut guard) = LINEAR_PROFILE.lock() {
+        if let Some(entry) = guard.take() {
+            let ms = |value: u64| value as f64 / 1e6;
+            eprintln!(
+                "[GPU-LINEAR-PROFILE] write {:.1}ms  record+submit {:.1}ms  read {:.1}ms",
+                ms(entry[0]),
+                ms(entry[1]),
+                ms(entry[2]),
+            );
+        }
+    }
+}
+
+/// Forget everything recorded so far.
+#[cfg(feature = "vulkan")]
+pub fn dispatch_log_reset() {
+    use std::sync::atomic::Ordering::Relaxed;
+    DISPATCH_LOG_LEN.store(0, Relaxed);
+    DISPATCH_LOG_EPOCH.store(0, Relaxed);
+    for cell in DISPATCH_LOG.iter() {
+        cell.store(0, Relaxed);
+    }
+}
+
+/// Dump the ordered dispatch log to stderr.
+#[cfg(feature = "vulkan")]
+pub fn dump_dispatch_log() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if !dispatch_log_enabled() {
+        return;
+    }
+    let len = (DISPATCH_LOG_LEN.load(Relaxed) as usize).min(DISPATCH_LOG_CAPACITY);
+    eprintln!("[GPU-DLOG] {len} dispatches recorded");
+    let mut last_epoch = u32::MAX;
+    for index in 0..len {
+        let base = index * 6;
+        let pipeline = DISPATCH_LOG[base].load(Relaxed) as usize;
+        let set = DISPATCH_LOG[base + 1].load(Relaxed);
+        let x = DISPATCH_LOG[base + 2].load(Relaxed);
+        let y = DISPATCH_LOG[base + 3].load(Relaxed);
+        let z = DISPATCH_LOG[base + 4].load(Relaxed);
+        let epoch = DISPATCH_LOG[base + 5].load(Relaxed) as u32;
+        if epoch != last_epoch {
+            eprintln!("  -- submit #{epoch} --");
+            last_epoch = epoch;
+        }
+        let name = OPERATOR_SHADER_NAMES.get(pipeline).copied().unwrap_or("?");
+        eprintln!("  [{index:5}] {name:26} set={set} grid={x}x{y}x{z}");
+    }
+}
+
+#[cfg(feature = "vulkan")]
+pub fn dump_dispatch_trace() {
+    if !DISPATCH_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    for (index, counter) in DISPATCH_TRACE_COUNTS.iter().enumerate() {
+        let count = counter.load(std::sync::atomic::Ordering::Relaxed);
+        if count > 0 {
+            eprintln!("[GPU-DISPATCH] shader[{index}] = {count}");
+        }
+    }
+}
+
+const OPERATOR_SHADERS: [&[u8]; 85] = [
     QUANTIZE_Q8_0_SHADER,
     QUANTIZE_Q8_K_SHADER,
     Q8_MATMUL_GROUPED_SHADER,
@@ -80,22 +613,224 @@ const OPERATOR_SHADERS: [&[u8]; 23] = [
     QWEN35_RECURRENT_SSM_SHADER,
     Q5_K_MATMUL_SHADER,
     F32_MATMUL_SHADER,
+    ADALN_MODULATE_SHADER,
+    Q8_MATMUL_GROUPED_TILED_SHADER,
+    F16_MATMUL_TILED_SHADER,
+    ATTENTION_SCORES_TILED_SHADER,
+    MLX_AFFINE_MATMUL_SHADER,
+    Q8_MATMUL_COOPERATIVE_SHADER,
+    QK_NORM_ROPE_INTERLEAVED_SHADER,
+    Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
+    Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER,
+    ATTENTION_VALUES_F32_SHADER,
+    FLOAT_MATMUL_TILED_SHADER,
+    ATTENTION_ONLINE_SHADER,
+    CONV3D_TILED_SHADER,
+    ATTENTION_ONLINE_WIDE_SHADER,
+    include_bytes!("../../shaders/bin/timestral.spv"),
+    include_bytes!("../../shaders/bin/float_matmul_small.spv"),
+    MOE_REDUCE_SHADER,
+    Q4_K_MATMUL_COOPERATIVE_SHADER,
+    QWEN35_MOE_ROUTE_SHADER,
+    QWEN35_MOE_REDUCE_SHADER,
+    Q5_K_MATMUL_COOPERATIVE_SHADER,
+    SENSENOVA_MHC_SHADER,
+    CONV1D_TILED_SHADER,
+    AUK_FIR_SHADER,
+    AUK_SNAKE_SHADER,
+    AUK_INTERLEAVE_SHADER,
+    AUK_SCALE_SHADER,
+    Q8_MATMUL_TRANSPOSED_SHADER,
+    KV_WRITE_F32_SHADER,
+    ATTENTION_SCORES_F32_SHADER,
+    ATTENTION_VALUES_F32_KV_SHADER,
+    SOFTMAX_F32_SHADER,
+    NEMOTRON_H_SSM_CONV_SHADER,
+    NEMOTRON_H_SSM_DT_SHADER,
+    NEMOTRON_H_SSM_SCAN_SHADER,
+    NEMOTRON_H_SSM_GATE_SHADER,
+    NEMOTRON_H_SSM_NORM_SHADER,
+    Q8_MATMUL_GROUPED_TILED_TRANSPOSED_SHADER,
+    Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED_SHADER,
+    Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED_SHADER,
+    Q5_0_MATMUL_SHADER,
+    Q5_1_MATMUL_SHADER,
+    NEMOTRON_MOE_ROUTE_SHADER,
+    NEMOTRON_MOE_REDUCE_SHADER,
+    PIVO_LINEAR_SHADER,
+    PIVO_ROPE_SHADER,
+    PIVO_ATTENTION_SHADER,
+    PIVO_RMS_NORM_SHADER,
+    PIVO_CONV1D_SHADER,
+    PIVO_SWIGLU_SHADER,
+    PIVO_SILU_SHADER,
+    Q4_0_MATMUL_TILED_SHADER,
+    IQ4_XS_MATMUL_SHADER,
+    IQ2_XXS_MATMUL_SHADER,
+    IQ2_XS_MATMUL_SHADER,
+    IQ2_S_MATMUL_SHADER,
+    IQ3_XXS_MATMUL_SHADER,
+    IQ3_S_MATMUL_SHADER,
+    IQ1_S_MATMUL_SHADER,
+    IQ1_M_MATMUL_SHADER,
+    Q2_K_MATMUL_SHADER,
+    Q3_K_MATMUL_SHADER,
 ];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub(crate) enum GpuWeightFormat {
     Q8_0,
+    IQ4_XS,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ2_S,
+    IQ3_XXS,
+    IQ3_S,
+    IQ1_S,
+    IQ1_M,
     Q4_0,
     Q4_1,
+    Q5_0,
+    Q5_1,
     Q4_K,
     Q5_K,
     Q6_K,
+    Q2_K,
+    Q3_K,
     F16,
     BF16,
     F32,
+    MlxAffine4,
+    MlxAffine8,
+}
+
+/// Whether the Q8_0 device matmul uses the transposed weight layout.
+///
+/// The transposed layout reads the weight the way a GEMV wants to read it:
+/// 2.7x the bandwidth of ggml's own layout on the aarch64 box (163 GB/s
+/// against 60 GB/s) for the same result, bit for bit. Rewriting the
+/// weight costs about 26 ms per 240 MB, once, when the weight is
+/// uploaded.
+///
+/// It is **off by default**. The layout is a second reading of the same
+/// bytes -- the transpose moves them, it does not compute anything, and
+/// the kernel that reads them keeps the native reduction order -- so it
+/// cannot change a result. But a mistake in the addressing would read
+/// past the weight and fault the device, and no Mellum projection runs on
+/// the device yet, so there is nothing to gain by turning it on before
+/// the trunk can hand the device whole projections.
+///
+/// `RMI_GPU_Q8_TRANSPOSED=1` turns it on.
+pub(crate) fn q8_transposed_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RMI_GPU_Q8_TRANSPOSED")
+            .ok()
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// How the weight bytes of a binding are laid out in device memory.
+///
+/// The layout travels with the binding, because the kernel that reads the
+/// weight and the upload that produced it have to agree on it. Picking the
+/// kernel from a global flag instead would hand the transposed kernel a
+/// buffer in ggml's layout -- which is what the MoE expert path does, it
+/// binds a range of a bigger tensor -- and that reads past the weight.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GpuWeightLayout {
+    /// ggml's own layout: one output row after the other.
+    #[default]
+    Native,
+    /// The Q8_0 blocks of a tile of 64 output rows grouped together, so a
+    /// warp reads one contiguous run instead of 32 sectors one row apart.
+    ///
+    /// See [`crate::vulkan::q8_layout`] for the layout and the
+    /// measurements.
+    Transposed,
 }
 
 impl GpuWeightFormat {
+    /// The layout the device kernels should read this weight in.
+    ///
+    /// The transposed Q8_0 layout turns the weight reads into one
+    /// contiguous run per warp, which is 2.5-2.7x the bandwidth of the
+    /// native layout on the aarch64 box. It applies to both Q8_0 matmul
+    /// kernels: the one-row kernel gives every lane one output row, and
+    /// the tiled kernel gives every lane one output column, so both read
+    /// rows that are `blocks_per_row * 34` bytes apart in the native
+    /// layout.
+    ///
+    /// The transposed layout is opt-in; see [`q8_transposed_enabled`].
+    pub(crate) fn device_layout(self, context: &VulkanContext) -> GpuWeightLayout {
+        // The transposed kernels use the integer dot product, so a device
+        // without it keeps the native layout.
+        if self == GpuWeightFormat::Q8_0
+            && q8_transposed_enabled()
+            && context.supports_integer_dot_product()
+        {
+            GpuWeightLayout::Transposed
+        } else {
+            GpuWeightLayout::Native
+        }
+    }
+}
+
+/// Numerical contract, independent of the uploaded storage layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GpuMatmulMode {
+    #[default]
+    Prepared,
+    /// Round F16 activations, then accumulate in F32 (diffusion contract).
+    RoundedInputF32,
+    /// Round BF16 activations; F32 products use a compensated wide sum.
+    RoundedBf16,
+    /// Match dot_f16_f16_bytes / dot_bf16_f32 reduction.
+    Dot,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GpuMatmulSpec {
+    pub format: GpuWeightFormat,
+    pub mode: GpuMatmulMode,
+}
+
+impl From<GpuWeightFormat> for GpuMatmulSpec {
+    fn from(format: GpuWeightFormat) -> Self {
+        format.with_mode(GpuMatmulMode::Prepared)
+    }
+}
+
+impl GpuMatmulSpec {
+    pub(crate) fn prepared(weight: &crate::ops::kernel::Weight<'_>) -> Result<Self, VulkanError> {
+        let format = GpuWeightFormat::from_ggml_type(weight.ggml_type)?;
+        Ok(format.with_mode(if weight.kernel.rounds_bf16_input() {
+            GpuMatmulMode::RoundedBf16
+        } else {
+            GpuMatmulMode::Prepared
+        }))
+    }
+    fn validate(self) -> Result<(), VulkanError> {
+        match (self.format, self.mode) {
+            (_, GpuMatmulMode::Prepared)
+            | (GpuWeightFormat::F16, GpuMatmulMode::RoundedInputF32 | GpuMatmulMode::Dot)
+            | (GpuWeightFormat::BF16, GpuMatmulMode::Dot | GpuMatmulMode::RoundedBf16) => Ok(()),
+            _ => Err(VulkanError::UnsupportedShape(
+                "unsupported weight storage/numerical mode combination".into(),
+            )),
+        }
+    }
+    pub(crate) fn uses_tiled_f16(self) -> bool {
+        self.format == GpuWeightFormat::F16 && self.mode != GpuMatmulMode::Dot
+    }
+}
+
+impl GpuWeightFormat {
+    pub(crate) fn with_mode(self, mode: GpuMatmulMode) -> GpuMatmulSpec {
+        GpuMatmulSpec { format: self, mode }
+    }
+
     pub(crate) fn from_ggml_type(
         value: crate::core::tensor::GGMLType,
     ) -> Result<Self, VulkanError> {
@@ -103,9 +838,21 @@ impl GpuWeightFormat {
             crate::core::tensor::GGMLType::Q8_0 => Ok(Self::Q8_0),
             crate::core::tensor::GGMLType::Q4_0 => Ok(Self::Q4_0),
             crate::core::tensor::GGMLType::Q4_1 => Ok(Self::Q4_1),
+            crate::core::tensor::GGMLType::Q5_0 => Ok(Self::Q5_0),
+            crate::core::tensor::GGMLType::Q5_1 => Ok(Self::Q5_1),
             crate::core::tensor::GGMLType::Q4K => Ok(Self::Q4_K),
             crate::core::tensor::GGMLType::Q5K => Ok(Self::Q5_K),
             crate::core::tensor::GGMLType::Q6K => Ok(Self::Q6_K),
+            crate::core::tensor::GGMLType::Q2K => Ok(Self::Q2_K),
+            crate::core::tensor::GGMLType::Q3K => Ok(Self::Q3_K),
+            crate::core::tensor::GGMLType::IQ4_XS => Ok(Self::IQ4_XS),
+            crate::core::tensor::GGMLType::IQ2_XXS => Ok(Self::IQ2_XXS),
+            crate::core::tensor::GGMLType::IQ2_XS => Ok(Self::IQ2_XS),
+            crate::core::tensor::GGMLType::IQ2_S => Ok(Self::IQ2_S),
+            crate::core::tensor::GGMLType::IQ3_XXS => Ok(Self::IQ3_XXS),
+            crate::core::tensor::GGMLType::IQ3_S => Ok(Self::IQ3_S),
+            crate::core::tensor::GGMLType::IQ1_S => Ok(Self::IQ1_S),
+            crate::core::tensor::GGMLType::IQ1_M => Ok(Self::IQ1_M),
             crate::core::tensor::GGMLType::F16 => Ok(Self::F16),
             crate::core::tensor::GGMLType::BF16 => Ok(Self::BF16),
             crate::core::tensor::GGMLType::F32 => Ok(Self::F32),
@@ -115,32 +862,198 @@ impl GpuWeightFormat {
         }
     }
 
-    fn layout(self) -> (usize, usize, usize) {
+    pub(crate) fn layout(self) -> (usize, usize, usize) {
         match self {
             Self::Q8_0 => (32, 34, Q8_MATMUL_GROUPED),
             Self::Q4_0 => (32, 18, Q4_0_MATMUL),
             Self::Q4_1 => (32, 20, Q4_1_MATMUL),
+            Self::Q5_0 => (32, 22, Q5_0_MATMUL),
+            Self::Q5_1 => (32, 24, Q5_1_MATMUL),
             Self::Q4_K => (256, 144, Q4_K_MATMUL),
             Self::Q5_K => (256, 176, Q5_K_MATMUL),
             Self::Q6_K => (256, 210, Q6_K_MATMUL),
+            Self::Q2_K => (256, 84, Q2_K_MATMUL),
+            Self::Q3_K => (256, 110, Q3_K_MATMUL),
+            Self::IQ4_XS => (256, 136, IQ4_XS_MATMUL),
+            Self::IQ2_XXS => (256, 66, IQ2_XXS_MATMUL),
+            Self::IQ2_XS => (256, 74, IQ2_XS_MATMUL),
+            Self::IQ2_S => (256, 82, IQ2_S_MATMUL),
+            Self::IQ3_XXS => (256, 98, IQ3_XXS_MATMUL),
+            Self::IQ3_S => (256, 110, IQ3_S_MATMUL),
+            Self::IQ1_S => (256, 50, IQ1_S_MATMUL),
+            Self::IQ1_M => (256, 56, IQ1_M_MATMUL),
             Self::F16 => (1, 2, F16_MATMUL),
             Self::BF16 => (1, 2, BF16_MATMUL),
             Self::F32 => (1, 4, F32_MATMUL),
+            Self::MlxAffine4 => (64, 36, MLX_AFFINE_MATMUL),
+            Self::MlxAffine8 => (64, 68, MLX_AFFINE_MATMUL),
         }
+    }
+
+    fn uses_f32_input(self) -> bool {
+        matches!(
+            self,
+            Self::F16 | Self::BF16 | Self::F32 | Self::MlxAffine4 | Self::MlxAffine8
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ActivationContracts {
+    pub(crate) q8_0: bool,
+    pub(crate) q8_k: bool,
+}
+
+pub(crate) fn required_activation_contracts(
+    formats: &[crate::core::tensor::GGMLType],
+) -> Result<ActivationContracts, String> {
+    if formats.is_empty() {
+        return Err("unsupported Vulkan weight format".into());
+    }
+    let mut contracts = ActivationContracts::default();
+    for &format in formats {
+        match GpuWeightFormat::from_ggml_type(format).map_err(|error| error.to_string())? {
+            GpuWeightFormat::Q8_0
+            | GpuWeightFormat::Q4_0
+            | GpuWeightFormat::Q4_1
+            | GpuWeightFormat::Q5_0
+            | GpuWeightFormat::Q5_1 => {
+                contracts.q8_0 = true;
+            }
+            GpuWeightFormat::Q4_K
+            | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q6_K
+            | GpuWeightFormat::Q2_K
+            | GpuWeightFormat::Q3_K
+            | GpuWeightFormat::IQ4_XS
+            | GpuWeightFormat::IQ2_XXS
+            | GpuWeightFormat::IQ2_XS
+            | GpuWeightFormat::IQ2_S
+            | GpuWeightFormat::IQ3_XXS
+            | GpuWeightFormat::IQ3_S
+            | GpuWeightFormat::IQ1_S
+            | GpuWeightFormat::IQ1_M => {
+                contracts.q8_k = true;
+            }
+            GpuWeightFormat::F16
+            | GpuWeightFormat::BF16
+            | GpuWeightFormat::F32
+            | GpuWeightFormat::MlxAffine4
+            | GpuWeightFormat::MlxAffine8 => {}
+        }
+    }
+    Ok(contracts)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RopeLayout {
+    Neox,
+    Interleaved,
+    /// Qwen3-VL's M-RoPE.
+    ///
+    /// The pairing is split-half, exactly like NeoX, so the shader rotates
+    /// the same pairs. It differs in the *rounding*: the CPU's
+    /// `rope_mrope_interleaved` fuses the multiply-add on every
+    /// architecture, while `rope_neox_inplace` deliberately avoids FMA on
+    /// x86 to stay bit-exact with the pinned ggml reference. So this
+    /// variant asks the shader to fuse even where the NeoX path would not.
+    MropeInterleaved,
+}
+
+pub(crate) fn fill_rope_coefficients(
+    coefficients: &mut [f32],
+    position: usize,
+    freq_base: f32,
+    layout: RopeLayout,
+) {
+    if layout != RopeLayout::Interleaved {
+        return fill_rope_neox(coefficients, position, freq_base);
+    }
+    let half = coefficients.len() / 2;
+    let scale = freq_base.powf(-2.0 / coefficients.len() as f32);
+    let mut theta = position as f32;
+    for i in 0..half {
+        let (c, s) = crate::ops::rope_sin_cos(theta);
+        coefficients[i] = c;
+        coefficients[i + half] = s;
+        theta *= scale;
     }
 }
 
 pub(crate) fn fill_rope_neox(coefficients: &mut [f32], position: usize, freq_base: f32) {
     debug_assert!(!coefficients.is_empty() && coefficients.len() % 2 == 0);
     let half = coefficients.len() / 2;
+    // Match the CPU recurrence: independently evaluated powers round differently.
+    let scale = freq_base.powf(-2.0 / coefficients.len() as f32);
+    let mut theta = position as f32;
     for index in 0..half {
-        let inverse_frequency =
-            1.0f32 / freq_base.powf((2 * index) as f32 / coefficients.len() as f32);
-        let theta = position as f32 * inverse_frequency;
         let (cosine, sine) = crate::ops::rope_sin_cos(theta);
         coefficients[index] = cosine;
         coefficients[index + half] = sine;
+        theta *= scale;
     }
+}
+
+/// Host-side M-RoPE coefficient table for Qwen3-VL's `rope_mrope_interleaved`.
+///
+/// The table layout is the NeoX one -- `half` cosines then `half` sines --
+/// because Qwen3-VL's M-RoPE pairs are split-half too: the rotation is
+/// `(head[pair], head[pair + n_rope_dims / 2])`, the same pairing the
+/// `qk_norm_rope` shader already applies in NeoX mode. Only the *axis* each
+/// pair uses differs, and that is what this function computes.
+///
+/// The axis rule and the theta recurrence are copied from
+/// `crate::ops::rope_mrope_interleaved` so the GPU applies the same angles
+/// the CPU does: the `sector % 3` selection with the `3 * sections[k]`
+/// thresholds, and every axis decaying by `theta_scale` after each pair.
+pub(crate) fn fill_rope_mrope_interleaved(
+    coefficients: &mut [f32],
+    positions: [usize; 4],
+    sections: [i32; 4],
+    freq_base: f32,
+    n_rope_dims: usize,
+) {
+    let half = coefficients.len() / 2;
+    let pair_count = n_rope_dims / 2;
+    // Qwen3-VL rotates the whole head, so the table covers every pair the
+    // shader rotates. A narrower `n_rope_dims` would need a shader that
+    // leaves the tail alone, which does not exist.
+    debug_assert_eq!(
+        half, pair_count,
+        "Qwen3-VL M-RoPE must rotate the whole head dimension",
+    );
+    let section_pairs: usize = sections.iter().map(|&value| value as usize).sum();
+    let theta_scale = freq_base.powf(-2.0 / n_rope_dims as f32);
+    let mut theta = positions.map(|value| value as f32);
+    for pair in 0..pair_count {
+        let sector = pair % section_pairs;
+        // The same selection as `crate::ops::rope_mrope_interleaved`: a sector
+        // that falls outside the h and w sections uses axis 0. Keeping it
+        // identical is what makes the device table match the CPU's angles
+        // bit for bit.
+        let axis = if sector % 3 == 1 && sector < 3 * sections[1] as usize {
+            1
+        } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
+            2
+        } else {
+            0
+        };
+        let (cosine, sine) = crate::ops::rope_sin_cos(theta[axis]);
+        coefficients[pair] = cosine;
+        coefficients[pair + half] = sine;
+        for value in &mut theta {
+            *value *= theta_scale;
+        }
+    }
+}
+
+/// GPU-resident top-k IDs; the slot is known while the expert ID stays on device.
+#[derive(Clone, Copy)]
+pub(crate) struct ExpertSelection {
+    pub ids: ArenaRegion,
+    pub count: usize,
+    pub used: usize,
+    pub slot: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -149,7 +1062,35 @@ pub(crate) struct ArenaRegion {
     pub(crate) size: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct MhcShape {
+    pub(crate) width: usize,
+    pub(crate) streams: usize,
+    pub(crate) iterations: usize,
+    pub(crate) fixed_identity: bool,
+    pub(crate) pre_scale: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MhcRegions {
+    pub(crate) branch: ArenaRegion,
+    pub(crate) residual: ArenaRegion,
+    pub(crate) logits: ArenaRegion,
+    pub(crate) post: ArenaRegion,
+    pub(crate) mix: ArenaRegion,
+}
+
 impl ArenaRegion {
+    /// The region starting `bytes` into this one, for a row-interleaved buffer
+    /// holding several tensors per row -- a QKV projection is one region with q,
+    /// k and v side by side in every row.
+    pub(crate) fn shifted(self, bytes: usize) -> Self {
+        Self {
+            offset: self.offset + bytes,
+            size: self.size.saturating_sub(bytes),
+        }
+    }
+
     pub(crate) fn end(self) -> usize {
         self.offset + self.size
     }
@@ -179,6 +1120,10 @@ pub(crate) struct ArenaLayout {
     pub(crate) kv_delta_k: ArenaRegion,
     pub(crate) kv_delta_v: ArenaRegion,
     pub(crate) rope: ArenaRegion,
+    /// Qwen3-VL's DeepStack planes for the current chunk, laid out
+    /// `[layer][row][n_embd]` so one layer's plane is a contiguous block of
+    /// `rows * n_embd` floats.
+    pub(crate) deepstack: ArenaRegion,
     total_size: usize,
 }
 
@@ -214,6 +1159,30 @@ impl ArenaLayout {
             config.n_layer,
             capacity,
             max_rows,
+            config.n_deepstack_layers,
+        )
+    }
+
+    /// Arena for the YuE2 autoregressive decoder. YuE2 is a plain dense
+    /// transformer (no MoE, no SSM, no fused QKV), so the region set is
+    /// exactly the Qwen3 one; only the dimensions differ, including a
+    /// 184704-wide logits row for `lm_head`.
+    pub(crate) fn yue2(
+        config: &crate::models::yue2::YuE2Config,
+        capacity: usize,
+        max_rows: usize,
+    ) -> Result<Self, VulkanError> {
+        Self::build_rows(
+            config.hidden,
+            config.ffn,
+            config.q_heads,
+            config.kv_heads,
+            config.head_dim,
+            config.vocab,
+            config.layers,
+            capacity,
+            max_rows,
+            0,
         )
     }
 
@@ -229,12 +1198,12 @@ impl ArenaLayout {
         capacity: usize,
     ) -> Result<Self, VulkanError> {
         Self::build_rows(
-            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, 1,
+            n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, 1, 0,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_rows(
+    pub(crate) fn build_rows(
         n_embd: usize,
         n_ff: usize,
         n_head: usize,
@@ -244,6 +1213,7 @@ impl ArenaLayout {
         n_layer: usize,
         capacity: usize,
         rows: usize,
+        n_deepstack_layers: usize,
     ) -> Result<Self, VulkanError> {
         if [
             n_embd, n_ff, n_head, n_head_kv, head_dim, vocab, n_layer, capacity, rows,
@@ -294,6 +1264,10 @@ impl ArenaLayout {
         let kv_delta_k = f32_region(&mut cursor, kv_delta_len)?;
         let kv_delta_v = f32_region(&mut cursor, kv_delta_len)?;
         let rope = f32_region(&mut cursor, product("RoPE rows", &[rows, head_dim])?)?;
+        let deepstack = f32_region(
+            &mut cursor,
+            product("deepstack rows", &[n_deepstack_layers, rows, n_embd])?,
+        )?;
 
         Ok(Self {
             x,
@@ -318,11 +1292,12 @@ impl ArenaLayout {
             kv_delta_k,
             kv_delta_v,
             rope,
+            deepstack,
             total_size: cursor,
         })
     }
 
-    pub(crate) fn regions(&self) -> [ArenaRegion; 22] {
+    pub(crate) fn regions(&self) -> [ArenaRegion; 23] {
         [
             self.x,
             self.normed,
@@ -346,6 +1321,7 @@ impl ArenaLayout {
             self.kv_delta_k,
             self.kv_delta_v,
             self.rope,
+            self.deepstack,
         ]
     }
 
@@ -459,6 +1435,22 @@ impl<'a> TokenCommands<'a> {
     pub(crate) fn submit_and_wait(mut self) -> Result<(), VulkanError> {
         self.context.submit_commands(&mut self.guard)
     }
+
+    /// Submit the recorded dispatches, wait for them, and start a fresh
+    /// command buffer while still holding the context submission guard.
+    ///
+    /// Callers chunk long recordings through this: drivers can silently drop
+    /// the trailing dispatches of a very long command buffer, so each chunk
+    /// stays short enough to execute in full.
+    pub(crate) fn flush(mut self) -> Result<Self, VulkanError> {
+        self.context.submit_commands(&mut self.guard)?;
+        self.context.begin_commands(&mut self.guard)?;
+        Ok(Self {
+            context: self.context,
+            command: self.context.command_buffer,
+            guard: self.guard,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -466,9 +1458,22 @@ pub(crate) struct OperatorBindings {
     descriptor_set: vk::DescriptorSet,
     sizes: [u64; 3],
     weight_formats: [Option<GpuWeightFormat>; 3],
+    weight_mode: GpuMatmulMode,
+    weight_layout: GpuWeightLayout,
 }
 
 impl OperatorBindings {
+    /// The raw handle, for the dispatch log. `vk::DescriptorSet` is a
+    /// non-primitive newtype with a private field, so the trace reads it here
+    /// rather than reaching into the type.
+    fn descriptor_set_handle(&self) -> u64 {
+        // `vk::DescriptorSet` is #[repr(transparent)] over a handle, so the
+        // transmute is the only way to get a printable identity out of it.
+        #[allow(clippy::unnecessary_cast)]
+        let handle = self.descriptor_set;
+        unsafe { std::mem::transmute::<vk::DescriptorSet, u64>(handle) }
+    }
+
     fn require(&self, index: usize, bytes: usize, label: &str) -> Result<(), VulkanError> {
         let bytes = u64::try_from(bytes).map_err(|_| VulkanError::OutOfMemory)?;
         if self.sizes[index] < bytes {
@@ -505,6 +1510,8 @@ struct BatchedLinearLayout {
     max_rows: usize,
     max_n_in: usize,
     max_n_out: usize,
+    output_slots: usize,
+    output_stride: usize,
     input: ArenaRegion,
     q8: ArenaRegion,
     scales: ArenaRegion,
@@ -515,7 +1522,16 @@ struct BatchedLinearLayout {
 
 impl BatchedLinearLayout {
     fn new(max_rows: usize, max_n_in: usize, max_n_out: usize) -> Result<Self, VulkanError> {
-        if max_rows == 0 || max_n_in == 0 || max_n_out == 0 {
+        Self::with_output_slots(max_rows, max_n_in, max_n_out, 1)
+    }
+
+    fn with_output_slots(
+        max_rows: usize,
+        max_n_in: usize,
+        max_n_out: usize,
+        output_slots: usize,
+    ) -> Result<Self, VulkanError> {
+        if max_rows == 0 || max_n_in == 0 || max_n_out == 0 || output_slots == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "batched linear maxima must be nonzero".into(),
             ));
@@ -526,6 +1542,10 @@ impl BatchedLinearLayout {
         let outputs = max_rows
             .checked_mul(max_n_out)
             .ok_or(VulkanError::OutOfMemory)?;
+        let output_stride = f32_bytes(outputs)?;
+        let output_storage = output_stride
+            .checked_mul(output_slots)
+            .ok_or(VulkanError::OutOfMemory)?;
         let blocks = max_rows
             .checked_mul(max_n_in.div_ceil(32))
             .ok_or(VulkanError::OutOfMemory)?;
@@ -535,12 +1555,14 @@ impl BatchedLinearLayout {
         let q8 = region(&mut size, inputs)?;
         let scales = f32_region(&mut size, blocks)?;
         let sums = f32_region(&mut size, blocks)?;
-        let output = f32_region(&mut size, outputs)?;
+        let output = region(&mut size, output_storage)?;
         as_u32((size - 1) / 4, "batched linear arena word span")?;
         Ok(Self {
             max_rows,
             max_n_in,
             max_n_out,
+            output_slots,
+            output_stride,
             input,
             q8,
             scales,
@@ -550,18 +1572,49 @@ impl BatchedLinearLayout {
         })
     }
 
+    fn output_slot(&self, slot: usize) -> Result<ArenaRegion, VulkanError> {
+        if slot >= self.output_slots {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear output slot exceeds capacity".into(),
+            ));
+        }
+        let offset = self
+            .output
+            .offset
+            .checked_add(
+                slot.checked_mul(self.output_stride)
+                    .ok_or(VulkanError::OutOfMemory)?,
+            )
+            .ok_or(VulkanError::OutOfMemory)?;
+        Ok(ArenaRegion {
+            offset,
+            size: self.output_stride,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn validate(
         &self,
         limits: &vk::PhysicalDeviceLimits,
         weight_len: usize,
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         input_len: usize,
         rows: usize,
         n_in: usize,
         n_out: usize,
         output_len: usize,
     ) -> Result<usize, VulkanError> {
+        let spec = spec.into();
+        spec.validate()?;
+        let format = spec.format;
+
+        if self.size > limits.max_storage_buffer_range as usize
+            || weight_len > limits.max_storage_buffer_range as usize
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear buffer exceeds max_storage_buffer_range".into(),
+            ));
+        }
         if rows == 0
             || rows > self.max_rows
             || n_in == 0
@@ -581,7 +1634,7 @@ impl BatchedLinearLayout {
             ));
         }
         let (block, _, _) = format.layout();
-        if block != 1 {
+        if !format.uses_f32_input() {
             quantize_rows_push(
                 self.size,
                 self.input,
@@ -604,15 +1657,21 @@ impl BatchedLinearLayout {
                 0,
             ],
             weight_formats: [Some(format), None, None],
+            weight_mode: spec.mode,
+            weight_layout: GpuWeightLayout::Native,
         };
         matmul_rows_push(
             self.size,
             limits,
             bindings,
-            if block == 1 { self.input } else { self.q8 },
+            if format.uses_f32_input() {
+                self.input
+            } else {
+                self.q8
+            },
             self.scales,
             Some(self.sums),
-            &[(self.output, n_out, f32_bytes(n_out)?)],
+            &[(self.output_slot(0)?, n_out, f32_bytes(n_out)?)],
             n_in,
             rows,
             n_in,
@@ -627,13 +1686,57 @@ impl BatchedLinearLayout {
 pub(crate) struct BatchedLinearRuntime {
     ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
     layout: BatchedLinearLayout,
-    weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
+    weights: HashMap<(usize, usize, usize, usize, bool), (GpuBuffer, OperatorBindings)>,
+    grouped_weights: HashMap<Vec<(usize, usize, usize, usize, bool)>, OperatorBindings>,
     weight_capacity: usize,
     #[cfg(test)]
-    begin_commands: fn(&'static VulkanContext) -> Result<TokenCommands<'static>, VulkanError>,
+    pub(crate) begin_commands:
+        fn(&'static VulkanContext) -> Result<TokenCommands<'static>, VulkanError>,
 }
 
 impl BatchedLinearRuntime {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn validate(
+        &self,
+        weight: &[u8],
+        spec: impl Into<GpuMatmulSpec>,
+        input_len: usize,
+        rows: usize,
+        n_in: usize,
+        n_out: usize,
+        output_len: usize,
+    ) -> Result<(), VulkanError> {
+        let spec = spec.into();
+        spec.validate()?;
+        let format = spec.format;
+
+        self.layout.validate(
+            &self.ops.context.limits,
+            weight.len(),
+            spec,
+            input_len,
+            rows,
+            n_in,
+            n_out,
+            output_len,
+        )?;
+        let layout = format.device_layout(self.ops.context);
+        if let Some((_, binding)) = self.weights.get(&(
+            weight.as_ptr() as usize,
+            weight.len(),
+            n_in,
+            n_out,
+            layout == GpuWeightLayout::Transposed,
+        )) {
+            if binding.weight_format(1)? != format || binding.weight_mode != spec.mode {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached batched linear weight storage or numerical mode changed".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         context: &'static VulkanContext,
         max_rows: usize,
@@ -641,34 +1744,197 @@ impl BatchedLinearRuntime {
         max_n_out: usize,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
-        let layout = BatchedLinearLayout::new(max_rows, max_n_in, max_n_out)?;
+        Self::with_output_slots(
+            context,
+            max_rows,
+            max_n_in,
+            max_n_out,
+            descriptor_capacity,
+            1,
+        )
+    }
+
+    pub(crate) fn with_output_slots(
+        context: &'static VulkanContext,
+        max_rows: usize,
+        max_n_in: usize,
+        max_n_out: usize,
+        descriptor_capacity: usize,
+        output_slots: usize,
+    ) -> Result<Self, VulkanError> {
+        let layout =
+            BatchedLinearLayout::with_output_slots(max_rows, max_n_in, max_n_out, output_slots)?;
         matmul_dispatch(max_n_out, max_rows, 1, &context.limits)?;
         let ops = Qwen3Ops::new_with_size(context, layout.size, descriptor_capacity)?;
         Ok(Self {
             ops: std::mem::ManuallyDrop::new(ops),
             layout,
             weights: HashMap::new(),
+            grouped_weights: HashMap::new(),
             weight_capacity: descriptor_capacity.saturating_sub(1),
             #[cfg(test)]
             begin_commands: TokenCommands::begin,
         })
     }
 
+    fn ensure_weight(
+        &mut self,
+        weight_bytes: &[u8],
+        spec: GpuMatmulSpec,
+        n_in: usize,
+        n_out: usize,
+    ) -> Result<((usize, usize, usize, usize, bool), GpuBuffer), VulkanError> {
+        let format = spec.format;
+        let layout = format.device_layout(self.ops.context);
+        // The layout is part of the cache key: the same weight bytes can
+        // be uploaded in the native layout and in the transposed one, and
+        // the kernel that reads them has to match.
+        let key = (
+            weight_bytes.as_ptr() as usize,
+            weight_bytes.len(),
+            n_in,
+            n_out,
+            layout == GpuWeightLayout::Transposed,
+        );
+        if let Some((buffer, bindings)) = self.weights.get(&key) {
+            if bindings.weight_format(1)? != format || bindings.weight_mode != spec.mode {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached batched linear weight storage or numerical mode changed".into(),
+                ));
+            }
+            return Ok((key, *buffer));
+        }
+        self.reserve_descriptor()?;
+        // BF16 and F32 weights are uploaded transposed so the tiled float
+        // kernel can walk the reduction axis with unit stride. Only the
+        // prepared mode uses that kernel: the dot and rounded modes keep
+        // their own reduction, which the tiled float kernel does not
+        // implement.
+        let transposed = if n_in % 2 == 0
+            && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+            && spec.mode == GpuMatmulMode::Prepared
+        {
+            let bytes = if format == GpuWeightFormat::BF16 {
+                2
+            } else {
+                4
+            };
+            let mut packed = vec![0u8; weight_bytes.len()];
+            for r0 in (0..n_out).step_by(32) {
+                for k0 in (0..n_in).step_by(128) {
+                    for r in r0..(r0 + 32).min(n_out) {
+                        for k in k0..(k0 + 128).min(n_in) {
+                            let src = (r * n_in + k) * bytes;
+                            let dst = (k * n_out + r) * bytes;
+                            packed[dst..dst + bytes]
+                                .copy_from_slice(&weight_bytes[src..src + bytes]);
+                        }
+                    }
+                }
+            }
+            Some(packed)
+        } else {
+            None
+        };
+        // The Q8_0 kernel can read the weight in the transposed layout,
+        // which groups the blocks of a tile of output rows together.
+        // The transposed kernel needs the integer dot product, so a
+        // device without it keeps the native layout.
+        //
+        // Only the one-row kernel reads the weight row by row, so only
+        // that shape pays for the layout: the tiled kernel reads a
+        // whole tile of rows as one run either way, and the transpose
+        // would be pure overhead there.
+        let buffer = if layout == GpuWeightLayout::Transposed {
+            // The layout is written straight into the staging buffer: a
+            // 240 MB weight would otherwise be staged in a second
+            // buffer and copied over.
+            let size = crate::vulkan::q8_layout::transposed_size(n_in, n_out);
+            unsafe {
+                self.ops
+                    .context
+                    .upload_device_static_filled(size, |bytes| {
+                        crate::vulkan::q8_layout::transpose_q8_0_weight_into(
+                            bytes,
+                            weight_bytes,
+                            n_in,
+                            n_out,
+                        );
+                    })?
+            }
+        } else {
+            unsafe {
+                self.ops
+                    .context
+                    .upload_device_static(transposed.as_deref().unwrap_or(weight_bytes))?
+            }
+        };
+        let bindings =
+            match self
+                .ops
+                .bind_weight_buffers_mode_layout(&[buffer], &[format], spec.mode, layout)
+            {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.ops.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
+        self.weights.insert(key, (buffer, bindings));
+        Ok((key, buffer))
+    }
+
+    fn reserve_descriptor(&mut self) -> Result<(), VulkanError> {
+        if self.weights.len() + self.grouped_weights.len() >= self.weight_capacity {
+            // Every completed projection has fenced; retain uploads, recycle group sets.
+            let sets: Vec<_> = self
+                .grouped_weights
+                .values()
+                .map(|b| b.descriptor_set)
+                .collect();
+            if !sets.is_empty() {
+                let mut submission =
+                    self.ops.context.mutex.lock().map_err(|_| {
+                        VulkanError::InitFailed("Vulkan command mutex poisoned".into())
+                    })?;
+                self.ops.context.recover_commands(&mut submission)?;
+                unsafe {
+                    self.ops
+                        .context
+                        .device
+                        .free_descriptor_sets(self.ops.descriptor_pool, &sets)
+                }
+                .map_err(|error| VulkanError::InitFailed(error.to_string()))?;
+                self.grouped_weights.clear();
+            }
+        }
+        if self.weights.len() + self.grouped_weights.len() >= self.weight_capacity {
+            return Err(VulkanError::UnsupportedShape(
+                "batched linear descriptor capacity exhausted".into(),
+            ));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn matmul_rows(
         &mut self,
         weight_bytes: &[u8],
-        format: GpuWeightFormat,
+        spec: impl Into<GpuMatmulSpec>,
         input: &[f32],
         rows: usize,
         n_in: usize,
         n_out: usize,
         output: &mut [f32],
     ) -> Result<(), VulkanError> {
+        let spec = spec.into();
+        spec.validate()?;
+        let format = spec.format;
+
         let count = self.layout.validate(
             &self.ops.context.limits,
             weight_bytes.len(),
-            format,
+            spec,
             input.len(),
             rows,
             n_in,
@@ -676,55 +1942,311 @@ impl BatchedLinearRuntime {
             output.len(),
         )?;
         let context = self.ops.context;
+        let (key, _) = self.ensure_weight(weight_bytes, spec, n_in, n_out)?;
+        let bindings = self.weights.get(&key).unwrap().1;
+        // The activation copy has to land before the command buffer starts
+        // recording. The barrier that begin_commands places is the one that
+        // orders host writes against the dispatches that read them, and a
+        // write that lands after it is only ordered by luck: the tiled
+        // kernel reads the activation region within microseconds of the copy.
+        let host_writes_early = self.ops.staging.is_none();
+        if host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
         #[cfg(test)]
         let commands = (self.begin_commands)(context)?;
         #[cfg(not(test))]
         let commands = TokenCommands::begin(context)?;
-        let key = (weight_bytes.as_ptr() as usize, weight_bytes.len());
-        let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
-            if bindings.weight_format(1)? != format {
+        if !host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        let outputs = [(self.layout.output, n_out, f32_bytes(n_out)?)];
+        if n_in % 2 == 0
+            && matches!(format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+            && spec.mode == GpuMatmulMode::Prepared
+        {
+            self.ops.record_transposed_float_matmul_rows(
+                &commands,
+                bindings,
+                self.layout.input,
+                &outputs,
+                n_in,
+                rows,
+                n_in,
+            )?;
+        } else {
+            let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && rows >= 32 {
+                Qwen3Ops::record_weight_matmul_tiled_rows
+            } else {
+                Qwen3Ops::record_weight_matmul_rows
+            };
+            recorder(
+                &self.ops,
+                &commands,
+                bindings,
+                self.layout.input,
+                self.layout.q8,
+                self.layout.scales,
+                self.layout.sums,
+                self.layout.q8,
+                self.layout.scales,
+                &outputs,
+                n_in,
+                rows,
+                n_in,
+            )?;
+        }
+        commands.submit_and_wait()?;
+        output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
+        Ok(())
+    }
+
+    /// Record a projection group in one command buffer and wait only once.
+    ///
+    /// The old scalar entry point submitted and fenced every QKV or gate/up
+    /// projection separately. Keeping the activation and all outputs in the
+    /// arena lets the grouped shader do the same work with one host/device
+    /// round trip.
+    pub(crate) fn matmul_rows_group(
+        &mut self,
+        weights: &[(&[u8], GpuMatmulSpec, usize, usize)],
+        input: &[f32],
+        rows: usize,
+        outputs: &mut [&mut [f32]],
+    ) -> Result<(), VulkanError> {
+        if !(1..=3).contains(&weights.len())
+            || weights.len() > self.layout.output_slots
+            || weights.len() != outputs.len()
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid batched linear group size".into(),
+            ));
+        }
+        let first_spec = weights[0].1;
+        let first_n_in = weights[0].2;
+        if weights.iter().any(|(_, spec, n_in, _)| {
+            *n_in != first_n_in || spec.format != first_spec.format || spec.mode != first_spec.mode
+        }) {
+            return Err(VulkanError::UnsupportedShape(
+                "heterogeneous grouped Vulkan linear projections".into(),
+            ));
+        }
+        let mut keys = Vec::with_capacity(weights.len());
+        let mut buffers = Vec::with_capacity(weights.len());
+        let mut formats = Vec::with_capacity(weights.len());
+        let mut output_regions = Vec::with_capacity(weights.len());
+        for (slot, ((weight, spec, n_in, n_out), output)) in
+            weights.iter().zip(outputs.iter()).enumerate()
+        {
+            if *n_in != first_n_in
+                || output.len() != rows.checked_mul(*n_out).ok_or(VulkanError::OutOfMemory)?
+            {
                 return Err(VulkanError::UnsupportedShape(
-                    "cached batched linear weight format changed".into(),
+                    "grouped Vulkan linear shape mismatch".into(),
+                ));
+            }
+            self.layout.validate(
+                &self.ops.context.limits,
+                weight.len(),
+                *spec,
+                input.len(),
+                rows,
+                *n_in,
+                *n_out,
+                output.len(),
+            )?;
+            let (key, buffer) = self.ensure_weight(weight, *spec, *n_in, *n_out)?;
+            keys.push(key);
+            buffers.push(buffer);
+            formats.push(spec.format);
+            output_regions.push((self.layout.output_slot(slot)?, *n_out, f32_bytes(*n_out)?));
+        }
+        let bindings = if let Some(bindings) = self.grouped_weights.get(&keys) {
+            if bindings.weight_format(weights.len())? != first_spec.format
+                || bindings.weight_mode != first_spec.mode
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "cached grouped Vulkan weight storage or numerical mode changed".into(),
                 ));
             }
             *bindings
         } else {
-            if self.weights.len() >= self.weight_capacity {
-                return Err(VulkanError::UnsupportedShape(
-                    "batched linear descriptor capacity exhausted".into(),
-                ));
-            }
-            let buffer = unsafe { self.ops.context.upload_static(weight_bytes)? };
-            let bindings = match self.ops.bind_weight_buffers(&[buffer], &[format]) {
-                Ok(bindings) => bindings,
-                Err(error) => {
-                    unsafe { self.ops.context.destroy_buffer(&buffer) };
-                    return Err(error);
-                }
-            };
-            // Initialization succeeded. Retain this valid upload on later errors
-            // so every GPU allocation stays owned and can be reused or dropped.
-            self.weights.insert(key, (buffer, bindings));
+            self.reserve_descriptor()?;
+            let bindings =
+                self.ops
+                    .bind_weight_buffers_mode(&buffers, &formats, first_spec.mode)?;
+            self.grouped_weights.insert(keys.clone(), bindings);
             bindings
         };
-        self.ops.write_f32(self.layout.input, input)?;
-        self.ops.record_weight_matmul_rows(
-            &commands,
-            bindings,
-            self.layout.input,
-            self.layout.q8,
-            self.layout.scales,
-            self.layout.sums,
-            self.layout.q8,
-            self.layout.scales,
-            &[(self.layout.output, n_out, f32_bytes(n_out)?)],
-            n_in,
-            rows,
-            n_in,
-        )?;
+
+        let host_writes_early = self.ops.staging.is_none();
+        if host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        let context = self.ops.context;
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
+        let commands = TokenCommands::begin(context)?;
+        if !host_writes_early {
+            self.ops.write_f32(self.layout.input, input)?;
+        }
+        if first_n_in % 2 == 0
+            && matches!(
+                first_spec.format,
+                GpuWeightFormat::BF16 | GpuWeightFormat::F32
+            )
+            && first_spec.mode == GpuMatmulMode::Prepared
+        {
+            self.ops.record_transposed_float_matmul_rows(
+                &commands,
+                bindings,
+                self.layout.input,
+                &output_regions,
+                first_n_in,
+                rows,
+                first_n_in,
+            )?;
+        } else {
+            let recorder = if first_spec.uses_tiled_f16() && first_n_in % 2 == 0 && rows >= 32 {
+                Qwen3Ops::record_weight_matmul_tiled_rows
+            } else {
+                Qwen3Ops::record_weight_matmul_rows
+            };
+            recorder(
+                &self.ops,
+                &commands,
+                bindings,
+                self.layout.input,
+                self.layout.q8,
+                self.layout.scales,
+                self.layout.sums,
+                self.layout.q8,
+                self.layout.scales,
+                &output_regions,
+                first_n_in,
+                rows,
+                first_n_in,
+            )?;
+        }
         commands.submit_and_wait()?;
-        output[..count].copy_from_slice(self.ops.read_f32(self.layout.output, count)?);
+        for (slot, output) in outputs.iter_mut().enumerate() {
+            let count = output.len();
+            output.copy_from_slice(self.ops.read_f32(self.layout.output_slot(slot)?, count)?);
+        }
         Ok(())
+    }
+
+    /// Record N matmuls into a single command buffer and submit once.
+    ///
+    /// Each binding writes to its own output slot so outputs don't collide.
+    /// All matmuls share the same input activation region (the caller must
+    /// ensure they all read the same input data). Returns the per-slot output
+    /// regions for readback.
+    pub(crate) fn record_group_matmul(
+        &mut self,
+        group: &[(&[u8], GpuMatmulSpec, usize, usize)], // (weight_bytes, spec, rows, n_out)
+        n_in: usize,
+    ) -> Result<Vec<ArenaRegion>, VulkanError> {
+        let count = group.len();
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        if count > self.layout.output_slots {
+            return Err(VulkanError::UnsupportedShape(
+                "record_group_matmul: more bindings than output slots".into(),
+            ));
+        }
+        let context = self.ops.context;
+
+        let mut cached_bindings = Vec::with_capacity(count);
+        for (weight, spec, rows, n_out) in group.iter().copied() {
+            self.layout.validate(
+                &context.limits,
+                weight.len(),
+                spec,
+                rows.checked_mul(n_in).ok_or(VulkanError::OutOfMemory)?,
+                rows,
+                n_in,
+                n_out,
+                rows.checked_mul(n_out).ok_or(VulkanError::OutOfMemory)?,
+            )?;
+        }
+        for (weight, spec, _rows, n_out) in group.iter().copied() {
+            let (key, _) = self.ensure_weight(weight, spec, n_in, n_out)?;
+            cached_bindings.push(self.weights.get(&key).unwrap().1);
+        }
+
+        // Begin command buffer once, record all dispatches.
+        #[cfg(test)]
+        let commands = (self.begin_commands)(context)?;
+        #[cfg(not(test))]
+        let commands = TokenCommands::begin(context)?;
+        let mut output_regions = Vec::with_capacity(count);
+        for (slot, (bindings, (_weight_bytes, spec, rows, n_out))) in
+            cached_bindings.iter().zip(group.iter()).enumerate()
+        {
+            let output_region = self.layout.output_slot(slot)?;
+            let outputs = [(output_region, *n_out, f32_bytes(*n_out)?)];
+            if n_in % 2 == 0
+                && matches!(spec.format, GpuWeightFormat::BF16 | GpuWeightFormat::F32)
+                && spec.mode == GpuMatmulMode::Prepared
+            {
+                self.ops.record_transposed_float_matmul_rows(
+                    &commands,
+                    *bindings,
+                    self.layout.input,
+                    &outputs,
+                    n_in,
+                    *rows,
+                    n_in,
+                )?;
+            } else {
+                let recorder = if spec.uses_tiled_f16() && n_in % 2 == 0 && *rows >= 32 {
+                    Qwen3Ops::record_weight_matmul_tiled_rows
+                } else {
+                    Qwen3Ops::record_weight_matmul_rows
+                };
+                recorder(
+                    &self.ops,
+                    &commands,
+                    *bindings,
+                    self.layout.input,
+                    self.layout.q8,
+                    self.layout.scales,
+                    self.layout.sums,
+                    self.layout.q8,
+                    self.layout.scales,
+                    &outputs,
+                    n_in,
+                    *rows,
+                    n_in,
+                )?;
+            }
+            output_regions.push(output_region);
+        }
+        commands.submit_and_wait()?;
+        Ok(output_regions)
+    }
+
+    /// Write the input activation to the shared input region. Must be called
+    /// before `record_group_matmul`.
+    pub(crate) fn write_input(&self, input: &[f32]) -> Result<(), VulkanError> {
+        self.ops.write_f32(self.layout.input, input)
+    }
+
+    /// Read back `count` f32 values from an output region after submit.
+    pub(crate) fn read_output(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+    ) -> Result<&[f32], VulkanError> {
+        self.ops.read_f32(region, count)
+    }
+
+    /// Access the Vulkan context.
+    pub(crate) fn ops_context(&self) -> Option<&'static VulkanContext> {
+        Some(self.ops.context)
     }
 }
 
@@ -744,15 +2266,1657 @@ impl Drop for BatchedLinearRuntime {
     }
 }
 
+/// A shared convolution workspace; weights are refreshed on each call so no
+/// source address outlives its mmap. Direct gather avoids host im2col buffers.
+pub(crate) struct Conv3dRuntime {
+    ops: Qwen3Ops<'static>,
+    regions: [ArenaRegion; 4],
+    pub(crate) capacity: [usize; 4],
+}
+
+impl Conv3dRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: [usize; 4],
+    ) -> Result<Self, VulkanError> {
+        let mut cursor = 0;
+        let regions = [
+            f32_region(&mut cursor, capacity[0])?,
+            f32_region(&mut cursor, capacity[1])?,
+            f32_region(&mut cursor, capacity[2])?,
+            f32_region(&mut cursor, capacity[3])?,
+        ];
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            regions,
+            capacity,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward(
+        &mut self,
+        input: &[f32],
+        weight: &[f32],
+        bias: Option<&[f32]>,
+        output: &mut [f32],
+        input_shape: [usize; 4],
+        weight_shape: [usize; 5],
+        output_shape: [usize; 4],
+        spec: crate::ops::nn::Conv3dSpec,
+    ) -> Result<(), VulkanError> {
+        let [ir, wr, or, br] = self.regions;
+        let mut push = vec![
+            self.ops.f32_word(ir, input.len(), "Conv3D input")?,
+            self.ops.f32_word(wr, weight.len(), "Conv3D weight")?,
+            self.ops.f32_word(br, output_shape[0], "Conv3D bias")?,
+            self.ops.f32_word(or, output.len(), "Conv3D output")?,
+        ];
+        for n in [input_shape[0], output_shape[0]]
+            .into_iter()
+            .chain(input_shape[1..].iter().copied())
+            .chain(output_shape[1..].iter().copied())
+            .chain(weight_shape[2..].iter().copied())
+            .chain(spec.stride)
+            .chain(spec.padding)
+            .chain(spec.dilation)
+        {
+            push.push(as_u32(n, "Conv3D geometry")?);
+        }
+        let spatial = product("Conv3D spatial", &output_shape[1..])?;
+        let dispatch = row_dispatch(
+            output_shape[0].div_ceil(64),
+            spatial.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.write_f32(ir, input)?;
+        self.ops.write_f32(wr, weight)?;
+        if let Some(bias) = bias {
+            self.ops.write_f32(br, bias)?;
+        } else {
+            self.ops.zero_region(br)?;
+        }
+        self.ops.record_linear_dispatch(
+            &commands,
+            CONV3D_TILED,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(or, output.len())?);
+        Ok(())
+    }
+}
+
+/// Geometry of one dense 1D convolution of the AuK VAE decoder.
+///
+/// The weight layout is `[out_channels][kernel][in_channels]`, the same one the
+/// host kernel packs, so both paths read the same bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct AukConv1dSpec {
+    pub(crate) in_channels: usize,
+    pub(crate) out_channels: usize,
+    pub(crate) kernel: usize,
+    pub(crate) stride: usize,
+    pub(crate) dilation: usize,
+    /// Zero padding on the left; the right side is zero padded implicitly.
+    pub(crate) pad_left: usize,
+    pub(crate) frames: usize,
+    pub(crate) out_frames: usize,
+    /// Weight layout: `0` is `[kernel][in_channels][out_channels]`, `1` is
+    /// `[out_channels][kernel][in_channels]`.
+    pub(crate) weight_layout: u32,
+}
+
+/// Geometry of the AuK VAE anti-aliased FIR resampling.
+#[derive(Clone, Copy)]
+pub(crate) struct AukFirSpec {
+    pub(crate) channels: usize,
+    pub(crate) kernel: usize,
+    pub(crate) stride: usize,
+    /// Trim offset of the upsample and the left padding of the downsample.
+    pub(crate) pad_left: usize,
+    /// Replicate padding of the upsample.
+    pub(crate) pad: usize,
+    pub(crate) input_frames: usize,
+    pub(crate) output_frames: usize,
+    /// The `ratio` factor of the upsample; the downsample keeps 1.
+    pub(crate) scale: f32,
+    /// `true` for the trimmed transposed convolution of `UpSample1d`.
+    pub(crate) upsample: bool,
+}
+
+/// Buffer sizes of the AuK VAE decoder arena.
+#[derive(Clone, Copy)]
+pub(crate) struct AukVaeCapacity {
+    /// Elements of one activation buffer (channels * frames).
+    pub(crate) activation: usize,
+    /// Elements of the staging buffer (the activation intermediate and the
+    /// polyphase phase buffers).
+    pub(crate) staging: usize,
+    /// Elements of one convolution weight block.
+    pub(crate) weight: usize,
+    /// Elements of the bias buffer.
+    pub(crate) bias: usize,
+    /// Elements of the per-channel activation parameter buffers.
+    pub(crate) channels: usize,
+    /// Elements of the resampling filter buffer.
+    pub(crate) filter: usize,
+}
+
+/// Device-side operators of the AuK VAE decoder.
+///
+/// The decoder keeps its control flow on the host: every operator reads and
+/// writes the arena, and the host decides which operator runs next. The
+/// activation buffers stay in device memory between the operators, so a
+/// residual block does not round trip through the host.
+pub(crate) struct AukVaeRuntime {
+    ops: Qwen3Ops<'static>,
+    /// Nanoseconds spent uploading weights and parameters.
+    pub(crate) upload_ns: u64,
+    /// Nanoseconds spent recording and submitting the dispatches.
+    pub(crate) dispatch_ns: u64,
+    /// The running residual of a residual block.
+    pub(crate) residual: ArenaRegion,
+    /// The branch the residual block computes.
+    pub(crate) branch: ArenaRegion,
+    /// The scratch buffer of the convolutions.
+    pub(crate) scratch: ArenaRegion,
+    /// The sum of the residual blocks of a stage.
+    pub(crate) accumulator: ArenaRegion,
+    /// The stage input the residual blocks read.
+    pub(crate) stage_input: ArenaRegion,
+    /// The activation intermediate and the polyphase phase buffers.
+    pub(crate) staging: ArenaRegion,
+    weight: ArenaRegion,
+    bias: ArenaRegion,
+    alpha: ArenaRegion,
+    beta: ArenaRegion,
+    filter: ArenaRegion,
+    pub(crate) capacity: AukVaeCapacity,
+}
+
+impl AukVaeRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: AukVaeCapacity,
+    ) -> Result<Self, VulkanError> {
+        if capacity.activation == 0
+            || capacity.staging == 0
+            || capacity.weight == 0
+            || capacity.bias == 0
+            || capacity.channels == 0
+            || capacity.filter == 0
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK VAE arena needs a non-empty region".into(),
+            ));
+        }
+        let mut cursor = 0;
+        let regions = [
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.activation)?,
+            f32_region(&mut cursor, capacity.staging)?,
+            f32_region(&mut cursor, capacity.weight)?,
+            f32_region(&mut cursor, capacity.bias)?,
+            f32_region(&mut cursor, capacity.channels)?,
+            f32_region(&mut cursor, capacity.channels)?,
+            f32_region(&mut cursor, capacity.filter)?,
+        ];
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            upload_ns: 0,
+            dispatch_ns: 0,
+            residual: regions[0],
+            branch: regions[1],
+            scratch: regions[2],
+            accumulator: regions[3],
+            stage_input: regions[4],
+            staging: regions[5],
+            weight: regions[6],
+            bias: regions[7],
+            alpha: regions[8],
+            beta: regions[9],
+            filter: regions[10],
+            capacity,
+        })
+    }
+
+    /// Upload host data into an arena region.
+    pub(crate) fn upload(
+        &mut self,
+        region: ArenaRegion,
+        values: &[f32],
+    ) -> Result<(), VulkanError> {
+        self.ops.write_f32(region, values)
+    }
+
+    /// Read an arena region back to the host.
+    pub(crate) fn download(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+    ) -> Result<Vec<f32>, VulkanError> {
+        Ok(self.ops.read_f32(region, count)?.to_vec())
+    }
+
+    /// Dense 1D convolution. The weight and the bias come from the host, the
+    /// input and the output stay in the arena.
+    pub(crate) fn conv1d(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: &[f32],
+        bias: Option<&[f32]>,
+        spec: &AukConv1dSpec,
+    ) -> Result<(), VulkanError> {
+        let weight_len = spec
+            .out_channels
+            .checked_mul(spec.kernel)
+            .and_then(|value| value.checked_mul(spec.in_channels))
+            .ok_or(VulkanError::OutOfMemory)?;
+        if weight.len() != weight_len {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "AuK Conv1D weight {} != expected {weight_len}",
+                weight.len()
+            )));
+        }
+        let input_len = spec
+            .in_channels
+            .checked_mul(spec.frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let output_len = spec
+            .out_channels
+            .checked_mul(spec.out_frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let upload_start = std::time::Instant::now();
+        self.ops.write_f32(self.weight, weight)?;
+        match bias {
+            Some(bias) => {
+                if bias.len() != spec.out_channels {
+                    return Err(VulkanError::UnsupportedShape(
+                        "AuK Conv1D bias length mismatch".into(),
+                    ));
+                }
+                self.ops.write_f32(self.bias, bias)?;
+            }
+            None => self.ops.zero_region(self.bias)?,
+        }
+        self.upload_ns += upload_start.elapsed().as_nanos() as u64;
+        let push = [
+            self.ops.f32_word(input, input_len, "AuK Conv1D input")?,
+            self.ops
+                .f32_word(self.weight, weight_len, "AuK Conv1D weight")?,
+            self.ops
+                .f32_word(self.bias, spec.out_channels, "AuK Conv1D bias")?,
+            self.ops.f32_word(output, output_len, "AuK Conv1D output")?,
+            as_u32(spec.in_channels, "AuK Conv1D input channels")?,
+            as_u32(spec.out_channels, "AuK Conv1D output channels")?,
+            as_u32(spec.frames, "AuK Conv1D frames")?,
+            as_u32(spec.out_frames, "AuK Conv1D output frames")?,
+            as_u32(spec.kernel, "AuK Conv1D kernel")?,
+            as_u32(spec.stride, "AuK Conv1D stride")?,
+            as_u32(spec.dilation, "AuK Conv1D dilation")?,
+            as_u32(spec.pad_left, "AuK Conv1D padding")?,
+            spec.weight_layout,
+        ];
+        let dispatch = row_dispatch(
+            spec.out_channels.div_ceil(64),
+            spec.out_frames.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            CONV1D_TILED,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        let dispatch_start = std::time::Instant::now();
+        commands.submit_and_wait()?;
+        self.dispatch_ns += dispatch_start.elapsed().as_nanos() as u64;
+        Ok(())
+    }
+
+    /// Depthwise FIR resampling. The filter comes from the host.
+    pub(crate) fn fir(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        filter: &[f32],
+        spec: &AukFirSpec,
+    ) -> Result<(), VulkanError> {
+        if filter.len() != spec.kernel {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK FIR filter length mismatch".into(),
+            ));
+        }
+        let input_len = spec
+            .channels
+            .checked_mul(spec.input_frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let output_len = spec
+            .channels
+            .checked_mul(spec.output_frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.ops.write_f32(self.filter, filter)?;
+        let push = [
+            self.ops.f32_word(input, input_len, "AuK FIR input")?,
+            self.ops
+                .f32_word(self.filter, spec.kernel, "AuK FIR filter")?,
+            self.ops.f32_word(output, output_len, "AuK FIR output")?,
+            as_u32(spec.output_frames, "AuK FIR frames")?,
+            as_u32(spec.channels, "AuK FIR channels")?,
+            as_u32(spec.output_frames, "AuK FIR output stride")?,
+            as_u32(spec.input_frames, "AuK FIR input stride")?,
+            as_u32(spec.kernel, "AuK FIR kernel")?,
+            as_u32(spec.pad_left, "AuK FIR pad left")?,
+            as_u32(spec.pad, "AuK FIR pad")?,
+            as_u32(spec.stride, "AuK FIR stride")?,
+            as_u32(usize::from(spec.upsample), "AuK FIR mode")?,
+            spec.scale.to_bits(),
+        ];
+        let dispatch = row_dispatch(
+            spec.output_frames.div_ceil(64),
+            spec.channels,
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_FIR,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// SnakeBeta activation. `alpha` and `beta` come from the host.
+    pub(crate) fn snake(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        alpha: &[f32],
+        beta: &[f32],
+        channels: usize,
+        frames: usize,
+    ) -> Result<(), VulkanError> {
+        if alpha.len() != channels || beta.len() != channels {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK SnakeBeta parameter length mismatch".into(),
+            ));
+        }
+        let count = channels
+            .checked_mul(frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let alpha_word = self
+            .ops
+            .f32_word(self.alpha, channels, "AuK SnakeBeta alpha")?;
+        let beta_word = self
+            .ops
+            .f32_word(self.beta, channels, "AuK SnakeBeta beta")?;
+        self.ops.write_f32(self.alpha, alpha)?;
+        self.ops.write_f32(self.beta, beta)?;
+        let push = [
+            self.ops.f32_word(input, count, "AuK SnakeBeta input")?,
+            self.ops.f32_word(output, count, "AuK SnakeBeta output")?,
+            alpha_word,
+            beta_word,
+            as_u32(frames, "AuK SnakeBeta frames")?,
+            as_u32(channels, "AuK SnakeBeta channels")?,
+            as_u32(frames, "AuK SnakeBeta row stride")?,
+        ];
+        let dispatch = row_dispatch(frames.div_ceil(64), channels, &self.ops.context.limits)?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_SNAKE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// Fold the polyphase buffers back into the interleaved layout and add the
+    /// bias.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn interleave(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        bias: &[f32],
+        out_channels: usize,
+        frames: usize,
+        rate: usize,
+    ) -> Result<(), VulkanError> {
+        if bias.len() != out_channels {
+            return Err(VulkanError::UnsupportedShape(
+                "AuK interleave bias length mismatch".into(),
+            ));
+        }
+        let count = frames.checked_mul(rate).ok_or(VulkanError::OutOfMemory)?;
+        let phase_stride = out_channels
+            .checked_mul(frames)
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.ops.write_f32(self.bias, bias)?;
+        let push = [
+            self.ops
+                .f32_word(input, phase_stride * rate, "AuK interleave input")?,
+            self.ops
+                .f32_word(self.bias, out_channels, "AuK interleave bias")?,
+            self.ops
+                .f32_word(output, count * out_channels, "AuK interleave output")?,
+            as_u32(count, "AuK interleave frames")?,
+            as_u32(out_channels, "AuK interleave channels")?,
+            as_u32(count, "AuK interleave output stride")?,
+            as_u32(frames, "AuK interleave frame count")?,
+            as_u32(rate, "AuK interleave rate")?,
+            as_u32(phase_stride, "AuK interleave phase stride")?,
+        ];
+        let dispatch = row_dispatch(count.div_ceil(64), out_channels, &self.ops.context.limits)?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_INTERLEAVE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// Multiply a region by a scalar. The input and the output may be the
+    /// same region: every thread touches one element.
+    pub(crate) fn scale(
+        &mut self,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+        scale: f32,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops.f32_word(input, count, "AuK scale input")?,
+            self.ops.f32_word(output, count, "AuK scale output")?,
+            as_u32(count, "AuK scale count")?,
+            scale.to_bits(),
+        ];
+        let dispatch = row_dispatch(count.div_ceil(64), 1, &self.ops.context.limits)?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            AUK_SCALE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()
+    }
+
+    /// Add one region to another, in place on the target.
+    pub(crate) fn add(
+        &mut self,
+        target: ArenaRegion,
+        addition: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.record_add(&commands, target, addition, count)?;
+        commands.submit_and_wait()
+    }
+
+    /// Copy one region into another. The scale of one is exact, so the copy
+    /// kernel doubles as the copier.
+    pub(crate) fn copy(
+        &mut self,
+        source: ArenaRegion,
+        destination: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        self.scale(source, destination, count, 1.0)
+    }
+}
+
+/// The arena capacity of the PiVo acoustic network, in floats.
+pub(crate) struct PivoCapacity {
+    /// Floats per activation buffer.
+    pub(crate) activation: usize,
+    /// Floats in the rotation table of the rotary embedding.
+    pub(crate) rope_table: usize,
+    /// Floats in the resident weight pool.
+    pub(crate) weight: usize,
+    /// Floats in the resident bias pool.
+    pub(crate) bias: usize,
+}
+
+/// The device runtime of the PiVo acoustic network.
+///
+/// The activations stay in the arena between the operators and the weights
+/// are uploaded once and stay resident, so a block runs without touching the
+/// host. PiVo's own layout is used everywhere: the activations are frame
+/// major and the convolution weight is `[out][in][tap]`, so nothing has to
+/// be transposed on the way in or out.
+pub(crate) struct PivoRuntime {
+    ops: Qwen3Ops<'static>,
+    pub(crate) x: ArenaRegion,
+    pub(crate) normed: ArenaRegion,
+    pub(crate) q: ArenaRegion,
+    pub(crate) k: ArenaRegion,
+    pub(crate) v: ArenaRegion,
+    pub(crate) attn: ArenaRegion,
+    pub(crate) projection: ArenaRegion,
+    pub(crate) gate: ArenaRegion,
+    pub(crate) up: ArenaRegion,
+    pub(crate) down: ArenaRegion,
+    pub(crate) conv: ArenaRegion,
+    /// The rotation table of the rotary embedding, filled by the host.
+    pub(crate) rope_table: ArenaRegion,
+    weight: ArenaRegion,
+    bias: ArenaRegion,
+    weight_used: usize,
+    bias_used: usize,
+}
+
+impl PivoRuntime {
+    /// The device context the runtime records into.
+    pub(crate) fn context(&self) -> &'static VulkanContext {
+        self.ops.context
+    }
+
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: PivoCapacity,
+    ) -> Result<Self, VulkanError> {
+        if capacity.activation == 0
+            || capacity.rope_table == 0
+            || capacity.weight == 0
+            || capacity.bias == 0
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "PiVo arena needs a non-empty region".into(),
+            ));
+        }
+        let mut cursor = 0;
+        let mut regions = Vec::with_capacity(14);
+        for _ in 0..11 {
+            regions.push(f32_region(&mut cursor, capacity.activation)?);
+        }
+        regions.push(f32_region(&mut cursor, capacity.rope_table)?);
+        regions.push(f32_region(&mut cursor, capacity.weight)?);
+        regions.push(f32_region(&mut cursor, capacity.bias)?);
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            x: regions[0],
+            normed: regions[1],
+            q: regions[2],
+            k: regions[3],
+            v: regions[4],
+            attn: regions[5],
+            projection: regions[6],
+            gate: regions[7],
+            up: regions[8],
+            down: regions[9],
+            conv: regions[10],
+            rope_table: regions[11],
+            weight: regions[12],
+            bias: regions[13],
+            weight_used: 0,
+            bias_used: 0,
+        })
+    }
+
+    /// Check a work grid against the device limits.
+    ///
+    /// The shared dispatcher does not validate the grid, so the PiVo
+    /// operators check it themselves: an empty group is a no-op that would
+    /// silently skip the operator.
+    fn check_grid(&self, grid: [u32; 3], label: &str) -> Result<(), VulkanError> {
+        for (index, count) in grid.iter().enumerate() {
+            if *count == 0 {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "PiVo {label} dispatch is empty"
+                )));
+            }
+            if *count > self.ops.context.limits.max_compute_work_group_count[index] {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "PiVo {label} dispatch {index}={count} exceeds the device limit {}",
+                    self.ops.context.limits.max_compute_work_group_count[index]
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Upload host data into an arena region.
+    pub(crate) fn upload(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
+        self.ops.write_f32(region, values)
+    }
+
+    /// Read an arena region back to the host.
+    pub(crate) fn download(
+        &self,
+        region: ArenaRegion,
+        count: usize,
+    ) -> Result<Vec<f32>, VulkanError> {
+        Ok(self.ops.read_f32(region, count)?.to_vec())
+    }
+
+    /// Reserve a slice of the resident weight pool and fill it.
+    ///
+    /// The weights stay on the device for the lifetime of the runtime, so a
+    /// block does not re-upload them.
+    pub(crate) fn upload_weight(&mut self, values: &[f32]) -> Result<ArenaRegion, VulkanError> {
+        let bytes = values
+            .len()
+            .checked_mul(4)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if self.weight_used + bytes > self.weight.size {
+            return Err(VulkanError::OutOfMemory);
+        }
+        let region = self.weight.shifted(self.weight_used);
+        self.weight_used += bytes;
+        self.ops.write_f32(region, values)?;
+        Ok(region)
+    }
+
+    /// Reserve a slice of the resident bias pool and fill it.
+    pub(crate) fn upload_bias(&mut self, values: &[f32]) -> Result<ArenaRegion, VulkanError> {
+        let bytes = values
+            .len()
+            .checked_mul(4)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if self.bias_used + bytes > self.bias.size {
+            return Err(VulkanError::OutOfMemory);
+        }
+        let region = self.bias.shifted(self.bias_used);
+        self.bias_used += bytes;
+        self.ops.write_f32(region, values)?;
+        Ok(region)
+    }
+
+    /// `output[row][o] = bias[o] + sum_i input[row][i] * weight[o][i]`.
+    pub(crate) fn linear(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: ArenaRegion,
+        bias: Option<ArenaRegion>,
+        n_in: usize,
+        n_out: usize,
+        rows: usize,
+        input_stride: usize,
+        output_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let weight_stride = n_in;
+        let push = [
+            self.ops
+                .f32_word(input, rows * input_stride, "PiVo linear input")?,
+            self.ops
+                .f32_word(weight, n_out * weight_stride, "PiVo linear weight")?,
+            match bias {
+                Some(bias) => self.ops.f32_word(bias, n_out, "PiVo linear bias")?,
+                None => u32::MAX,
+            },
+            self.ops
+                .f32_word(output, rows * output_stride, "PiVo linear output")?,
+            as_u32(n_in, "PiVo linear input width")?,
+            as_u32(n_out, "PiVo linear output width")?,
+            as_u32(rows, "PiVo linear rows")?,
+            as_u32(input_stride, "PiVo linear input stride")?,
+            as_u32(output_stride, "PiVo linear output stride")?,
+            as_u32(weight_stride, "PiVo linear weight stride")?,
+        ];
+        let dispatch = [n_out.div_ceil(64) as u32, 1, rows as u32];
+        self.check_grid(dispatch, "pivo_linear")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_LINEAR,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// RMS normalisation with the weight resident in the arena.
+    pub(crate) fn rms_norm(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: ArenaRegion,
+        count: usize,
+        eps: f32,
+        rows: usize,
+        input_stride: usize,
+        output_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops
+                .f32_word(input, rows * input_stride, "PiVo norm input")?,
+            self.ops.f32_word(weight, count, "PiVo norm weight")?,
+            self.ops
+                .f32_word(output, rows * output_stride, "PiVo norm output")?,
+            as_u32(count, "PiVo norm width")?,
+            as_u32(rows, "PiVo norm rows")?,
+            eps.to_bits(),
+            as_u32(input_stride, "PiVo norm input stride")?,
+            as_u32(output_stride, "PiVo norm output stride")?,
+        ];
+        let dispatch = super::dispatch_grid(rows, &self.ops.context.limits)?;
+        self.check_grid([dispatch.0, dispatch.1, 1], "pivo_rms_norm")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_RMS_NORM,
+            self.ops.arena_bindings,
+            &push,
+            [dispatch.0, dispatch.1, 1],
+        );
+        Ok(())
+    }
+
+    /// Split-half rotary embedding over `units` heads of 24 elements.
+    ///
+    /// The sine and the cosine come from the table the host filled, so the
+    /// rotation is the host's rotation.
+    pub(crate) fn rope(
+        &self,
+        commands: &TokenCommands<'_>,
+        buffer: ArenaRegion,
+        table: ArenaRegion,
+        rows: usize,
+        width: usize,
+        units: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops
+                .f32_word(buffer, rows * width, "PiVo rope buffer")?,
+            self.ops.f32_word(table, rows * 24, "PiVo rope table")?,
+            as_u32(rows, "PiVo rope rows")?,
+            as_u32(width, "PiVo rope width")?,
+            as_u32(units, "PiVo rope units")?,
+        ];
+        // One lane per rotated pair, so there are twelve lanes per head.
+        let total = rows * units * 12;
+        let dispatch = [total.div_ceil(64) as u32, 1, 1];
+        self.check_grid(dispatch, "pivo_rope")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_ROPE,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// Grouped-query attention over the whole sequence or a causal window.
+    pub(crate) fn attention(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        output: ArenaRegion,
+        rows: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        window: usize,
+        causal: bool,
+    ) -> Result<(), VulkanError> {
+        let q_stride = q_heads * head_dim;
+        let kv_stride = kv_heads * head_dim;
+        let push = [
+            self.ops
+                .f32_word(q, rows * q_stride, "PiVo attention query")?,
+            self.ops
+                .f32_word(k, rows * kv_stride, "PiVo attention key")?,
+            self.ops
+                .f32_word(v, rows * kv_stride, "PiVo attention value")?,
+            self.ops
+                .f32_word(output, rows * q_stride, "PiVo attention output")?,
+            as_u32(rows, "PiVo attention rows")?,
+            as_u32(q_heads, "PiVo attention query heads")?,
+            as_u32(kv_heads, "PiVo attention key heads")?,
+            as_u32(head_dim, "PiVo attention head width")?,
+            as_u32(window, "PiVo attention window")?,
+            u32::from(causal),
+            as_u32(q_stride, "PiVo attention query stride")?,
+            as_u32(kv_stride, "PiVo attention key stride")?,
+            as_u32(q_stride, "PiVo attention output stride")?,
+            // The host divides the score by the square root of the head
+            // width. The square root comes from the host so that both sides
+            // scale the score the same way.
+            (head_dim as f32).sqrt().to_bits(),
+        ];
+        let dispatch = [q_heads as u32, rows as u32, 1];
+        self.check_grid(dispatch, "pivo_attention")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_ATTENTION,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// Dilated 1D convolution in PiVo's frame major layout.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv1d(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weight: ArenaRegion,
+        bias: Option<ArenaRegion>,
+        in_channels: usize,
+        out_channels: usize,
+        frames: usize,
+        out_frames: usize,
+        kernel: usize,
+        dilation: usize,
+        padding: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops
+                .f32_word(input, frames * in_channels, "PiVo conv input")?,
+            self.ops.f32_word(
+                weight,
+                out_channels * kernel * in_channels,
+                "PiVo conv weight",
+            )?,
+            match bias {
+                Some(bias) => self.ops.f32_word(bias, out_channels, "PiVo conv bias")?,
+                None => u32::MAX,
+            },
+            self.ops
+                .f32_word(output, out_frames * out_channels, "PiVo conv output")?,
+            as_u32(in_channels, "PiVo conv input channels")?,
+            as_u32(out_channels, "PiVo conv output channels")?,
+            as_u32(frames, "PiVo conv frames")?,
+            as_u32(out_frames, "PiVo conv output frames")?,
+            as_u32(kernel, "PiVo conv kernel")?,
+            as_u32(dilation, "PiVo conv dilation")?,
+            as_u32(padding, "PiVo conv padding")?,
+        ];
+        let dispatch = [out_channels.div_ceil(64) as u32, out_frames as u32, 1];
+        self.check_grid(dispatch, "pivo_conv1d")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_CONV1D,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// `output[i] = silu(gate[i]) * up[i]`.
+    pub(crate) fn swiglu(
+        &self,
+        commands: &TokenCommands<'_>,
+        gate: ArenaRegion,
+        up: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops.f32_word(gate, count, "PiVo swiglu gate")?,
+            self.ops.f32_word(up, count, "PiVo swiglu multiplier")?,
+            self.ops.f32_word(output, count, "PiVo swiglu output")?,
+            as_u32(count, "PiVo swiglu count")?,
+            1,
+        ];
+        let dispatch = [count.div_ceil(64) as u32, 1, 1];
+        self.check_grid(dispatch, "pivo_swiglu")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_SWIGLU,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// `output[i] = x / (1 + exp(-x))`, in place.
+    pub(crate) fn silu(
+        &self,
+        commands: &TokenCommands<'_>,
+        buffer: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let push = [
+            self.ops.f32_word(buffer, count, "PiVo silu buffer")?,
+            as_u32(count, "PiVo silu count")?,
+            1,
+        ];
+        let dispatch = [count.div_ceil(64) as u32, 1, 1];
+        self.check_grid(dispatch, "pivo_silu")?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            PIVO_SILU,
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        Ok(())
+    }
+
+    /// Add one region to another, in place on the target.
+    pub(crate) fn add(
+        &self,
+        commands: &TokenCommands<'_>,
+        target: ArenaRegion,
+        addition: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        self.ops.record_add(&commands, target, addition, count)?;
+        Ok(())
+    }
+}
+
+pub(crate) struct AttentionRuntime {
+    ops: Qwen3Ops<'static>,
+    q: ArenaRegion,
+    k: ArenaRegion,
+    v: ArenaRegion,
+    output: ArenaRegion,
+    pub(crate) capacity: (usize, usize),
+}
+
+#[cfg(test)]
+mod video_gpu_tests {
+    use super::*;
+    use crate::ops::nn::{attention_scalar_f32, AttentionSpec};
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_online_attention_memory_gate_keeps_baseline_operators_available() {
+        let mut context = Box::new(VulkanContext::new().unwrap());
+        context.limits.max_compute_shared_memory_size = 27 * 1024;
+        assert!(require_online_attention(&context).is_ok());
+        context.limits.max_compute_shared_memory_size = 16 * 1024 + 256;
+        let context = Box::leak(context);
+        assert!(matches!(
+            AttentionRuntime::new(context, (128, 128)),
+            Err(VulkanError::UnsupportedShape(_))
+        ));
+        let ops = Qwen3Ops::new_with_size(context, 1024, 1).unwrap();
+        drop(ops);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_transposed_weight_cache_tracks_geometry_and_rejects_row_major_recorder() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let weight = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let bytes = bytemuck::cast_slice(&weight);
+        let mut runtime = BatchedLinearRuntime::new(context, 1, 4, 4, 3).unwrap();
+        let mut first = [0.0; 4];
+        runtime
+            .matmul_rows(bytes, GpuWeightFormat::F32, &[1.0; 2], 1, 2, 4, &mut first)
+            .unwrap();
+        assert_eq!(first, [3.0, 7.0, 11.0, 15.0]);
+        let mut second = [0.0; 2];
+        runtime
+            .matmul_rows(bytes, GpuWeightFormat::F32, &[1.0; 4], 1, 4, 2, &mut second)
+            .unwrap();
+        assert_eq!(second, [10.0, 26.0]);
+        assert_eq!(runtime.weights.len(), 2);
+        let bindings = runtime.weights[&(bytes.as_ptr() as usize, bytes.len(), 2, 4, false)].1;
+        let commands = TokenCommands::begin(context).unwrap();
+        let layout = &runtime.layout;
+        assert!(runtime
+            .ops
+            .record_weight_matmul_tiled_rows(
+                &commands,
+                bindings,
+                layout.input,
+                layout.q8,
+                layout.scales,
+                layout.sums,
+                layout.q8,
+                layout.scales,
+                &[(layout.output, 4, 16)],
+                2,
+                1,
+                2,
+            )
+            .is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_conv3d_matches_cpu_padding_stride_and_partial_tiles() {
+        use crate::ops::nn::{conv3d_with_options, Conv3dSpec};
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let shape = [2, 3, 4, 9];
+        let pool = crate::core::thread_pool::ComputePool::new(2);
+        for kernel in [[1, 1, 1], [3, 3, 3]] {
+            let wshape = [65, 2, kernel[0], kernel[1], kernel[2]];
+            let input: Vec<f32> = (0..shape.iter().product())
+                .map(|i| (i as f32 * 0.17).sin())
+                .collect();
+            let weight: Vec<f32> = (0..wshape.iter().product())
+                .map(|i| (i as f32 * 0.31).cos())
+                .collect();
+            let bias: Vec<f32> = (0..65).map(|i| i as f32 * 0.01).collect();
+            for (stride, dilation) in [([1, 1, 1], [1, 1, 1]), ([1, 2, 1], [1, 1, 2])] {
+                let spec = Conv3dSpec {
+                    stride,
+                    padding: if kernel[0] == 1 { [0; 3] } else { [1, 1, 2] },
+                    dilation,
+                    groups: 1,
+                };
+                let (expected, out_shape) = {
+                    let _scope =
+                        crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+                    conv3d_with_options(&pool, &input, shape, &weight, wshape, Some(&bias), spec)
+                        .unwrap()
+                };
+                let mut runtime =
+                    Conv3dRuntime::new(context, [input.len(), weight.len(), expected.len(), 65])
+                        .unwrap();
+                let mut actual = vec![0.0; expected.len()];
+                runtime
+                    .forward(
+                        &input,
+                        &weight,
+                        Some(&bias),
+                        &mut actual,
+                        shape,
+                        wshape,
+                        out_shape,
+                        spec,
+                    )
+                    .unwrap();
+                let error = actual
+                    .iter()
+                    .zip(&expected)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                eprintln!("Conv3D kernel={kernel:?} stride={stride:?} dilation={dilation:?} max_abs={error}");
+                assert!(error < 3e-5);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_float_projection_preserves_range_and_partial_tiles() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let (rows, n_in, n_out) = (19, 130, 65);
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| (i as f32 * 0.37).sin() * 100000.0)
+            .collect();
+        let weights: Vec<f32> = (0..n_in * n_out)
+            .map(|i| (i as f32 * 0.17).cos() * 2.0)
+            .collect();
+        for format in [GpuWeightFormat::F32, GpuWeightFormat::BF16] {
+            let bytes: Vec<u8> = if format == GpuWeightFormat::F32 {
+                weights.iter().flat_map(|w| w.to_le_bytes()).collect()
+            } else {
+                weights
+                    .iter()
+                    .flat_map(|&w| crate::ops::f32_to_bf16(w).to_le_bytes())
+                    .collect()
+            };
+            let mut runtime = BatchedLinearRuntime::new(context, rows, n_in, n_out, 2).unwrap();
+            let mut actual = vec![0.0; rows * n_out];
+            runtime
+                .matmul_rows(&bytes, format, &input, rows, n_in, n_out, &mut actual)
+                .unwrap();
+            for row in 0..rows {
+                for c in 0..n_out {
+                    let expected: f64 = (0..n_in)
+                        .map(|i| {
+                            let w = weights[c * n_in + i];
+                            let w = if format == GpuWeightFormat::F32 {
+                                w
+                            } else {
+                                f32::from_bits((crate::ops::f32_to_bf16(w) as u32) << 16)
+                            };
+                            input[row * n_in + i] as f64 * w as f64
+                        })
+                        .sum();
+                    let error = (actual[row * n_out + c] as f64 - expected).abs();
+                    assert!(
+                        error <= 2.0 + expected.abs() * 2e-5,
+                        "{format:?} row {row} column {c}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_online_attention_matches_cpu_with_masks_and_partial_tiles() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        for causal in [false, true] {
+            let spec = AttentionSpec {
+                query_tokens: 9,
+                key_tokens: 67,
+                query_heads: 4,
+                key_value_heads: 2,
+                head_dim: 128,
+                causal,
+                scale: 128.0f32.sqrt().recip(),
+            };
+            let q: Vec<f32> = (0..9 * 4 * 128)
+                .map(|i| (i as f32 * 0.17).sin() * 3.0)
+                .collect();
+            let k: Vec<f32> = (0..67 * 2 * 128)
+                .map(|i| (i as f32 * 0.31).cos() * 3.0)
+                .collect();
+            let v: Vec<f32> = (0..k.len()).map(|i| (i as f32 * 0.13).sin()).collect();
+            let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+            let mut actual = vec![0.0; q.len()];
+            runtime.forward(&q, &k, &v, &mut actual, spec).unwrap();
+            let _scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+            let expected = attention_scalar_f32(&q, &k, &v, spec).unwrap();
+            let error = actual
+                .iter()
+                .zip(&expected)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            eprintln!("online attention causal={causal} max_abs={error}");
+            assert!(error < 3e-5);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn video_gpu_wide_vae_attention_matches_cpu() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let spec = AttentionSpec {
+            query_tokens: 9,
+            key_tokens: 67,
+            query_heads: 1,
+            key_value_heads: 1,
+            head_dim: 1024,
+            causal: false,
+            scale: 1024.0f32.sqrt().recip(),
+        };
+        let q: Vec<f32> = (0..9 * 1024).map(|i| (i as f32 * 0.17).sin()).collect();
+        let k: Vec<f32> = (0..67 * 1024).map(|i| (i as f32 * 0.31).cos()).collect();
+        let v: Vec<f32> = (0..k.len()).map(|i| (i as f32 * 0.13).sin()).collect();
+        let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+        let mut actual = vec![0.0; q.len()];
+        runtime.forward(&q, &k, &v, &mut actual, spec).unwrap();
+        let _scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        let expected = attention_scalar_f32(&q, &k, &v, spec).unwrap();
+        let error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("wide attention max_abs={error}");
+        assert!(error < 3e-5);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; native 720p window timing"]
+    fn video_gpu_720p_window_probe() {
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let spec = AttentionSpec {
+            query_tokens: 8 * 23 * 40,
+            key_tokens: 20 * 23 * 40,
+            query_heads: 24,
+            key_value_heads: 24,
+            head_dim: 128,
+            causal: false,
+            scale: 128.0f32.sqrt().recip(),
+        };
+        let q = vec![0.1; spec.query_tokens * 3072];
+        let k = vec![0.2; spec.key_tokens * 3072];
+        let v = vec![0.3; k.len()];
+        let mut runtime = AttentionRuntime::new(context, (q.len(), k.len())).unwrap();
+        let mut output = vec![0.0; q.len()];
+        runtime.forward(&q, &k, &v, &mut output, spec).unwrap();
+        let start = std::time::Instant::now();
+        runtime.forward(&q, &k, &v, &mut output, spec).unwrap();
+        eprintln!(
+            "720p window {} queries, {} keys: {:.6}s; bounded GPU workspace={} bytes",
+            spec.query_tokens,
+            spec.key_tokens,
+            start.elapsed().as_secs_f64(),
+            (q.len() + k.len()) * 8
+        );
+        assert!(output.iter().all(|&v| (v - 0.3).abs() < 3e-4));
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; native 720p projection timing"]
+    fn video_gpu_720p_projection_probe() {
+        crate::ops::enable_gpu();
+        let rows = 8 * 23 * 40;
+        let input = vec![0.125; rows * 3072];
+        for n_out in [3072, 14336] {
+            let weights: Vec<u8> = (0..3072 * n_out)
+                .flat_map(|_| crate::ops::f32_to_bf16(0.03125).to_le_bytes())
+                .collect();
+            let mut output = vec![0.0; rows * n_out];
+            let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
+            assert!(gpu.try_matmul(
+                &weights,
+                GpuWeightFormat::BF16,
+                &input,
+                &mut output,
+                3072,
+                n_out,
+                rows
+            ));
+            let start = std::time::Instant::now();
+            assert!(gpu.try_matmul(
+                &weights,
+                GpuWeightFormat::BF16,
+                &input,
+                &mut output,
+                3072,
+                n_out,
+                rows
+            ));
+            eprintln!(
+                "720p BF16 projection {rows}x3072 -> {n_out}: {:.6}s",
+                start.elapsed().as_secs_f64()
+            );
+            assert!(output.iter().all(|&v| (v - 12.0).abs() < 1e-4));
+        }
+    }
+}
+
+impl AttentionRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: (usize, usize),
+    ) -> Result<Self, VulkanError> {
+        require_online_attention(context)?;
+        let mut cursor = 0;
+        let q = f32_region(&mut cursor, capacity.0)?;
+        let k = f32_region(&mut cursor, capacity.1)?;
+        let v = f32_region(&mut cursor, capacity.1)?;
+        let output = f32_region(&mut cursor, capacity.0)?;
+        Ok(Self {
+            ops: Qwen3Ops::new_with_size(context, cursor, 1)?,
+            q,
+            k,
+            v,
+            output,
+            capacity,
+        })
+    }
+
+    pub(crate) fn forward(
+        &mut self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output: &mut [f32],
+        spec: crate::ops::nn::AttentionSpec,
+    ) -> Result<(), VulkanError> {
+        self.forward_windowed(q, k, v, output, spec, 0, 0)
+    }
+
+    /// Full attention when `window == 0`. Otherwise query `p` only sees keys in
+    /// the same `window x window` block of a `grid`-wide patch grid, which is
+    /// the block-diagonal mask the vit_merger applies after its window-major
+    /// reorder (`window = 2`, `grid = patches per row`).
+    pub(crate) fn forward_windowed(
+        &mut self,
+        q: &[f32],
+        k: &[f32],
+        v: &[f32],
+        output: &mut [f32],
+        spec: crate::ops::nn::AttentionSpec,
+        window: u32,
+        grid: u32,
+    ) -> Result<(), VulkanError> {
+        if spec.query_tokens == 0
+            || spec.key_tokens == 0
+            || spec.head_dim == 0
+            || spec.head_dim > 1024
+            || spec.query_heads == 0
+            || spec.key_value_heads == 0
+            || spec.query_heads % spec.key_value_heads != 0
+            || q.len()
+                != product(
+                    "attention Q",
+                    &[spec.query_tokens, spec.query_heads, spec.head_dim],
+                )?
+            || k.len()
+                != product(
+                    "attention K",
+                    &[spec.key_tokens, spec.key_value_heads, spec.head_dim],
+                )?
+            || v.len() != k.len()
+            || !spec.scale.is_finite()
+            || (spec.causal && spec.query_tokens > spec.key_tokens)
+            || (window != 0 && (grid == 0 || grid < window))
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid online attention geometry".into(),
+            ));
+        }
+        let push = [
+            self.ops.f32_word(self.q, q.len(), "attention Q")?,
+            self.ops.f32_word(self.k, k.len(), "attention K")?,
+            self.ops.f32_word(self.v, v.len(), "attention V")?,
+            self.ops
+                .f32_word(self.output, q.len(), "attention output")?,
+            as_u32(spec.query_tokens, "attention queries")?,
+            as_u32(spec.key_tokens, "attention keys")?,
+            as_u32(spec.query_heads, "attention heads")?,
+            as_u32(spec.key_value_heads, "attention KV heads")?,
+            as_u32(spec.head_dim, "attention dimension")?,
+            spec.scale.to_bits(),
+            u32::from(spec.causal),
+            window,
+            // The shader divides by the grid only when `window != 0`.
+            if window == 0 { 1 } else { grid },
+        ];
+        let dispatch = row_dispatch(
+            spec.query_tokens
+                .div_ceil(if spec.head_dim <= 128 { 16 } else { 8 }),
+            spec.query_heads,
+            &self.ops.context.limits,
+        )?;
+        let commands = TokenCommands::begin(self.ops.context)?;
+        self.ops.write_f32(self.q, q)?;
+        self.ops.write_f32(self.k, k)?;
+        self.ops.write_f32(self.v, v)?;
+        self.ops.record_linear_dispatch(
+            &commands,
+            if spec.head_dim <= 128 {
+                ATTENTION_ONLINE
+            } else {
+                ATTENTION_ONLINE_WIDE
+            },
+            self.ops.arena_bindings,
+            &push,
+            dispatch,
+        );
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
+        Ok(())
+    }
+}
+
+/// One shared CHW arena for a VAE; immutable weights retain stable source addresses.
+pub(crate) struct Conv2dRuntime {
+    ops: std::mem::ManuallyDrop<Qwen3Ops<'static>>,
+    input: ArenaRegion,
+    output: ArenaRegion,
+    bias: ArenaRegion,
+    pub(crate) capacity: (usize, usize, usize),
+    weights: HashMap<(usize, usize), (GpuBuffer, OperatorBindings)>,
+}
+
+impl Conv2dRuntime {
+    pub(crate) fn new(
+        context: &'static VulkanContext,
+        capacity: (usize, usize, usize),
+    ) -> Result<Self, VulkanError> {
+        if capacity.0 == 0 || capacity.1 == 0 || capacity.2 == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty convolution arena".into(),
+            ));
+        }
+        let mut size = 0;
+        let input = f32_region(&mut size, capacity.0)?;
+        let output = f32_region(&mut size, capacity.1)?;
+        let bias = f32_region(&mut size, capacity.2)?;
+        if size > context.limits.max_storage_buffer_range as usize {
+            return Err(VulkanError::UnsupportedShape(
+                "convolution arena exceeds device storage range".into(),
+            ));
+        }
+        Ok(Self {
+            ops: std::mem::ManuallyDrop::new(Qwen3Ops::new_with_size(context, size, 65)?),
+            input,
+            output,
+            bias,
+            capacity,
+            weights: HashMap::new(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv_f16(
+        &mut self,
+        weights: &[u8],
+        input: &[f32],
+        output: &mut [f32],
+        input_channels: usize,
+        output_channels: usize,
+        side: usize,
+        kernel: usize,
+        bias: Option<&[f32]>,
+    ) -> Result<(), VulkanError> {
+        let spatial = product("convolution pixels", &[side, side])?;
+        let n_in = product("convolution width", &[input_channels, kernel, kernel])?;
+        if side == 0
+            || !matches!(kernel, 1 | 3)
+            || input_channels == 0
+            || output_channels == 0
+            || input.len() != product("convolution input", &[input_channels, spatial])?
+            || output.len() != product("convolution output", &[output_channels, spatial])?
+            || weights.len() != product("convolution weights", &[n_in, output_channels, 2])?
+            || bias.is_some_and(|bias| bias.len() != output_channels)
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid CHW convolution shape".into(),
+            ));
+        }
+        let input_word = self
+            .ops
+            .f32_word(self.input, input.len(), "convolution input")?;
+        let output_word = self
+            .ops
+            .f32_word(self.output, output.len(), "convolution output")?;
+        let bias_word = self
+            .ops
+            .f32_word(self.bias, output_channels, "convolution bias")?;
+        let dispatch = row_dispatch(
+            output_channels.div_ceil(64),
+            spatial.div_ceil(32),
+            &self.ops.context.limits,
+        )?;
+        // The F16 shader's reserved fourth group selects CHW gather/store.
+        let mut push = [0u32; 22];
+        push[0] = input_word;
+        push[1] = bias_word;
+        push[2] = as_u32(n_in, "convolution width")?;
+        push[3] = push[2];
+        push[4] = output_word;
+        push[5] = as_u32(output_channels, "convolution channels")?;
+        push[13] = 4;
+        push[15] = as_u32(side, "convolution side")?;
+        push[16] = as_u32(kernel, "convolution kernel")?;
+        push[21] = as_u32(spatial, "convolution pixels")?;
+        // Recover any incomplete dispatch before overwriting mapped host memory.
+        let commands = TokenCommands::begin(self.ops.context)?;
+        let key = (weights.as_ptr() as usize, weights.len());
+        let bindings = if let Some((_, bindings)) = self.weights.get(&key) {
+            *bindings
+        } else {
+            if self.weights.len() == 64 {
+                return Err(VulkanError::UnsupportedShape(
+                    "convolution weight cache full".into(),
+                ));
+            }
+            let buffer = unsafe { self.ops.context.upload_static(weights)? };
+            let bindings = match self.ops.bind_weight_buffers_mode(
+                &[buffer],
+                &[GpuWeightFormat::F16],
+                GpuMatmulMode::RoundedInputF32,
+            ) {
+                Ok(bindings) => bindings,
+                Err(error) => {
+                    unsafe { self.ops.context.destroy_buffer(&buffer) };
+                    return Err(error);
+                }
+            };
+            self.weights.insert(key, (buffer, bindings));
+            bindings
+        };
+        self.ops.write_f32(self.input, input)?;
+        if let Some(bias) = bias {
+            self.ops.write_f32(self.bias, bias)?;
+        } else {
+            self.ops.write_f32(self.bias, &vec![0.0; output_channels])?;
+        }
+        self.ops
+            .record_linear_dispatch(&commands, F16_MATMUL_TILED, bindings, &push, dispatch);
+        commands.submit_and_wait()?;
+        output.copy_from_slice(self.ops.read_f32(self.output, output.len())?);
+        Ok(())
+    }
+}
+
+impl Drop for Conv2dRuntime {
+    fn drop(&mut self) {
+        let context = self.ops.context;
+        if unsafe {
+            context.destroy_completed_buffers(self.weights.values().map(|(buffer, _)| buffer))
+        }
+        .is_err()
+        {
+            return;
+        }
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.ops) };
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub(crate) enum TimestralOp {
+    Qkv,
+    Attention,
+    Gate,
+    SwiGlu,
+}
+
 pub(crate) struct Qwen3Ops<'a> {
     context: &'a VulkanContext,
     arena: GpuBuffer,
+    staging: Option<GpuBuffer>,
     descriptor_pool: vk::DescriptorPool,
     arena_bindings: OperatorBindings,
-    pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()],
+    pipelines: Vec<vk::Pipeline>,
+    q8_tiled: bool,
+    recorded_dispatches: std::sync::atomic::AtomicUsize,
+}
+
+/// Compile the operator pipelines for this device.
+///
+/// The set belongs to the device: every arena that records dispatches
+/// borrows it instead of building its own, so a shader is compiled once and
+/// the first dispatch always runs a pipeline the driver has executed before.
+pub(crate) fn build_operator_pipelines(
+    context: &VulkanContext,
+) -> Result<Vec<vk::Pipeline>, VulkanError> {
+    // The dot-product variant is a drop-in for the scalar Q8_0 grouped
+    // matmul, so it takes over that pipeline index. `RUST_GPU_DP4A=0`
+    // forces the scalar variant for A/B measurement.
+    let force_dp4a = std::env::var("RUST_GPU_DP4A")
+        .map(|value| value != "0")
+        .unwrap_or(context.supports_integer_dot_product());
+    let q8_tiled = force_dp4a
+        && context.supports_integer_dot_product()
+        && context.limits.max_compute_shared_memory_size >= 18_432;
+    let operators: Vec<&[u8]> = OPERATOR_SHADERS
+        .iter()
+        .enumerate()
+        .map(|(index, shader)| {
+            if index == Q8_MATMUL_GROUPED && force_dp4a {
+                Q8_MATMUL_GROUPED_DP4A_SHADER
+            } else if matches!(
+                index,
+                Q8_MATMUL_GROUPED_TILED
+                    | Q8_MATMUL_COOPERATIVE
+                    | Q8_MATMUL_GROUPED_TILED_WIDE
+                    | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
+            ) && !q8_tiled
+            {
+                // The tiled kernel needs `dotPacked4x8EXT`, so on a device
+                // without it the slot falls back to the plain grouped shader
+                // and the recorder selects ordinary GPU work instead of
+                // dispatching this placeholder with a tiled grid.
+                Q8_MATMUL_GROUPED_SHADER
+            } else if (index == ATTENTION_SCORES_TILED && require_tiled_attention(context).is_err())
+                || (matches!(index, ATTENTION_ONLINE | ATTENTION_ONLINE_WIDE)
+                    && require_online_attention(context).is_err())
+            {
+                // Keep ordinary Qwen operators available on baseline
+                // devices; DiT rejects this slot before recording it.
+                ATTENTION_SCORES_SHADER
+            } else if matches!(
+                index,
+                NEMOTRON_H_SSM_DT | NEMOTRON_H_SSM_NORM | NEMOTRON_MOE_ROUTE
+            ) && !context.shader_float64
+            {
+                // Optional FP64 SSM/router kernels must not prevent ordinary projections from loading.
+                // Their recorders reject unsupported devices before this placeholder is used.
+                ATTENTION_SCORES_SHADER
+            } else {
+                *shader
+            }
+        })
+        .collect();
+    let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
+    for (index, shader) in operators.into_iter().enumerate() {
+        // Diagnostic: a driver whose SPIR-V compiler traps takes the whole
+        // process down inside `create_pipeline`, so name the shader first.
+        if std::env::var_os("RMI_VK_TRACE_COMPILE").is_some() {
+            eprintln!("[compile] #{index} {}", OPERATOR_SHADER_NAMES[index]);
+        }
+        match context.create_pipeline(context.pipeline_layout, shader) {
+            Ok(pipeline) => {
+                if index == Q8_MATMUL_GROUPED {
+                    eprintln!(
+                        "[GPU] Q8_0 matmul: {}",
+                        if force_dp4a {
+                            "packed int8 dot product"
+                        } else {
+                            "scalar int8 multiply"
+                        },
+                    );
+                }
+                pipelines.push(pipeline);
+            }
+            Err(error) => {
+                unsafe {
+                    // These pipelines were built here and are not in the
+                    // device cache yet, so this failure has to release them.
+                    for pipeline in pipelines {
+                        context.device.destroy_pipeline(pipeline, None);
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(pipelines)
 }
 
 impl<'a> Qwen3Ops<'a> {
+    /// Access the Vulkan context.
+    pub(crate) fn context(&self) -> &'a VulkanContext {
+        self.context
+    }
+
     pub(crate) fn new(
         context: &'a VulkanContext,
         layout: ArenaLayout,
@@ -766,9 +3930,41 @@ impl<'a> Qwen3Ops<'a> {
         arena_size: usize,
         descriptor_capacity: usize,
     ) -> Result<Self, VulkanError> {
+        Self::new_with_arena(context, arena_size, descriptor_capacity, false)
+    }
+
+    /// Discrete GPU arena with explicit transfers; mapped memory on UMA.
+    pub(crate) fn new_device_local_with_size(
+        context: &'a VulkanContext,
+        arena_size: usize,
+        descriptor_capacity: usize,
+    ) -> Result<Self, VulkanError> {
+        if arena_size % 4 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "device arena size must be word aligned".into(),
+            ));
+        }
+        Self::new_with_arena(context, arena_size, descriptor_capacity, true)
+    }
+
+    fn new_with_arena(
+        context: &'a VulkanContext,
+        arena_size: usize,
+        descriptor_capacity: usize,
+        device_local: bool,
+    ) -> Result<Self, VulkanError> {
+        DISPATCH_TRACE_ENABLED.store(
+            std::env::var("RUST_GPU_DISPATCH_TRACE").is_ok(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if arena_size == 0 {
             return Err(VulkanError::UnsupportedShape(
                 "Vulkan arena must not be empty".into(),
+            ));
+        }
+        if arena_size > context.limits.max_storage_buffer_range as usize {
+            return Err(VulkanError::UnsupportedShape(
+                "Vulkan arena exceeds max_storage_buffer_range".into(),
             ));
         }
         let descriptor_capacity = descriptor_capacity.max(1);
@@ -777,34 +3973,25 @@ impl<'a> Qwen3Ops<'a> {
             .and_then(|count| u32::try_from(count).ok())
             .ok_or(VulkanError::OutOfMemory)?;
         let max_sets = u32::try_from(descriptor_capacity).map_err(|_| VulkanError::OutOfMemory)?;
-        let mut pipelines = Vec::with_capacity(OPERATOR_SHADERS.len());
-        for shader in OPERATOR_SHADERS {
-            match context.create_pipeline(context.pipeline_layout, shader) {
-                Ok(pipeline) => pipelines.push(pipeline),
+        // The operator pipelines belong to the device, not to one arena, and
+        // every projection used to build a fresh set. That put a freshly
+        // compiled pipeline in front of the very first dispatch, and a
+        // driver may drop that dispatch while the shader is still being
+        // prepared: the output region then keeps its zeroed contents and the
+        // projection silently returns nothing. Sharing one set per device
+        // compiles each shader once and lets the first dispatch use a
+        // pipeline the driver has already run.
+        let pipelines = context.operator_pipelines()?;
+
+        let (arena, staging) =
+            match unsafe { context.allocate_operator_arena(arena_size, device_local) } {
+                Ok(buffers) => buffers,
                 Err(error) => {
-                    unsafe {
-                        for pipeline in pipelines {
-                            context.device.destroy_pipeline(pipeline, None);
-                        }
-                    }
+                    // The operator pipelines belong to the device and are
+                    // shared by every arena, so they survive this failure.
                     return Err(error);
                 }
-            }
-        }
-        let pipelines: [vk::Pipeline; OPERATOR_SHADERS.len()] = pipelines.try_into().unwrap();
-
-        let arena = match unsafe { context.allocate_session_buffer(arena_size) } {
-            Ok(arena) => arena,
-            Err(error) => {
-                unsafe {
-                    for pipeline in pipelines {
-                        context.device.destroy_pipeline(pipeline, None);
-                    }
-                }
-                return Err(error);
-            }
-        };
-        unsafe { std::ptr::write_bytes(arena.mapped, 0, arena_size) };
+            };
 
         let pool_sizes = [vk::DescriptorPoolSize {
             ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -813,6 +4000,7 @@ impl<'a> Qwen3Ops<'a> {
         let descriptor_pool = match unsafe {
             context.device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::builder()
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
                     .max_sets(max_sets)
                     .pool_sizes(&pool_sizes),
                 None,
@@ -822,8 +4010,8 @@ impl<'a> Qwen3Ops<'a> {
             Err(error) => {
                 unsafe {
                     context.destroy_buffer(&arena);
-                    for pipeline in pipelines {
-                        context.device.destroy_pipeline(pipeline, None);
+                    if let Some(staging) = &staging {
+                        context.destroy_buffer(staging);
                     }
                 }
                 return Err(VulkanError::InitFailed(error.to_string()));
@@ -837,9 +4025,11 @@ impl<'a> Qwen3Ops<'a> {
                         .device
                         .destroy_descriptor_pool(descriptor_pool, None);
                     context.destroy_buffer(&arena);
-                    for pipeline in pipelines {
-                        context.device.destroy_pipeline(pipeline, None);
+                    if let Some(staging) = &staging {
+                        context.destroy_buffer(staging);
                     }
+                    // The operator pipelines belong to the device and are
+                    // shared by every arena, so they survive this failure.
                 }
                 return Err(error);
             }
@@ -848,10 +4038,62 @@ impl<'a> Qwen3Ops<'a> {
         Ok(Self {
             context,
             arena,
+            staging,
             descriptor_pool,
             arena_bindings,
             pipelines,
+            q8_tiled: std::env::var("RUST_GPU_DP4A")
+                .map(|value| value != "0")
+                .unwrap_or(context.supports_integer_dot_product())
+                && context.supports_integer_dot_product()
+                && context.limits.max_compute_shared_memory_size >= 18_432,
+            recorded_dispatches: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    // Model-specific pipelines are optional, so their device features need not
+    // be required by the baseline operator set.
+    pub(crate) fn add_shader(&mut self, shader: &[u8]) -> Result<usize, VulkanError> {
+        let pipeline = self
+            .context
+            .create_pipeline(self.context.pipeline_layout, shader)?;
+        self.pipelines.push(pipeline);
+        Ok(self.pipelines.len() - 1)
+    }
+
+    pub(crate) fn record_custom(
+        &self,
+        commands: &TokenCommands<'_>,
+        pipeline: usize,
+        bindings: Option<OperatorBindings>,
+        push: &[u32],
+        dispatch: [u32; 3],
+    ) -> Result<(), VulkanError> {
+        if pipeline < OPERATOR_SHADERS.len()
+            || pipeline >= self.pipelines.len()
+            || push.len() > 32
+            || dispatch
+                .iter()
+                .enumerate()
+                .any(|(i, &n)| n == 0 || n > self.context.limits.max_compute_work_group_count[i])
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid custom operator dispatch".into(),
+            ));
+        }
+        self.recorded_dispatches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            commands.bind(
+                self.pipelines[pipeline],
+                self.context.pipeline_layout,
+                &[bindings.unwrap_or(self.arena_bindings).descriptor_set],
+                std::slice::from_raw_parts(push.as_ptr().cast(), push.len() * 4),
+            );
+            commands.dispatch(dispatch[0], dispatch[1], dispatch[2]);
+            commands.barrier();
+        }
+        Ok(())
     }
 
     pub(crate) fn bind_buffers(
@@ -872,29 +4114,120 @@ impl<'a> Qwen3Ops<'a> {
         buffers: &[GpuBuffer],
         formats: &[GpuWeightFormat],
     ) -> Result<OperatorBindings, VulkanError> {
+        self.bind_weight_buffers_mode(buffers, formats, GpuMatmulMode::Prepared)
+    }
+
+    pub(crate) fn bind_weight_buffers_mode(
+        &mut self,
+        buffers: &[GpuBuffer],
+        formats: &[GpuWeightFormat],
+        mode: GpuMatmulMode,
+    ) -> Result<OperatorBindings, VulkanError> {
+        self.bind_weight_buffers_mode_layout(buffers, formats, mode, GpuWeightLayout::Native)
+    }
+
+    /// Bind weights whose bytes are already in the given layout.
+    ///
+    /// The layout is a property of the upload, so it has to travel with the
+    /// binding: the recorder picks the kernel that reads that layout.
+    /// [`GpuWeightLayout::Native`] is the layout every upload outside the
+    /// transposed Q8_0 path produces.
+    pub(crate) fn bind_weight_buffers_mode_layout(
+        &mut self,
+        buffers: &[GpuBuffer],
+        formats: &[GpuWeightFormat],
+        mode: GpuMatmulMode,
+        layout: GpuWeightLayout,
+    ) -> Result<OperatorBindings, VulkanError> {
+        for &format in formats {
+            format.with_mode(mode).validate()?;
+        }
         if buffers.len() != formats.len() {
             return Err(VulkanError::UnsupportedShape(
                 "Vulkan weight buffers and formats differ in count".into(),
             ));
         }
-        allocate_bindings(
+        let mut bindings = allocate_bindings(
             self.context,
             self.descriptor_pool,
             self.arena,
             buffers,
+            formats,
+        )?;
+        bindings.weight_mode = mode;
+        bindings.weight_layout = layout;
+        Ok(bindings)
+    }
+
+    /// Bind expert views without duplicating the containing tensor's allocation.
+    pub(crate) fn bind_weight_ranges(
+        &mut self,
+        ranges: &[(GpuBuffer, u64, u64)],
+        formats: &[GpuWeightFormat],
+    ) -> Result<OperatorBindings, VulkanError> {
+        if ranges.is_empty() || ranges.len() > 3 || ranges.len() != formats.len() {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid weight range count".into(),
+            ));
+        }
+        allocate_bindings_ranges(
+            self.context,
+            self.descriptor_pool,
+            self.arena,
+            ranges,
             formats,
         )
     }
 
     pub(crate) fn write_f32(&self, region: ArenaRegion, values: &[f32]) -> Result<(), VulkanError> {
         self.f32_word(region, values.len(), "host write")?;
+        if values.is_empty() {
+            return Ok(());
+        }
+        if let Some(staging) = self.staging {
+            // Recover any uncertain submission before touching a staging buffer
+            // that it could still be reading. Call before TokenCommands::begin.
+            let commands = TokenCommands::begin(self.context)?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    values.as_ptr(),
+                    staging.mapped.cast::<f32>(),
+                    values.len(),
+                );
+                self.context.record_buffer_copy(
+                    commands.command,
+                    staging,
+                    self.arena,
+                    0,
+                    region.offset as u64,
+                    f32_bytes(values.len())? as u64,
+                );
+            }
+            let mut commands = commands;
+            self.context.submit_transfer_commands(&mut commands.guard)?;
+            self.context
+                .counters
+                .host_write_bytes
+                .fetch_add((values.len() * 4) as u64, Ordering::Relaxed);
+            return Ok(());
+        }
         unsafe {
             std::ptr::copy_nonoverlapping(
                 values.as_ptr(),
                 self.arena.mapped.add(region.offset).cast::<f32>(),
                 values.len(),
             );
+            // The shader reads the activation region microseconds later.
+            self.context.flush_mapped(
+                self.arena,
+                region.offset as u64,
+                f32_bytes(values.len())? as u64,
+            )?;
         }
+        self.context
+            .counters
+            .host_write_bytes
+            .fetch_add((values.len() * 4) as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -904,9 +4237,71 @@ impl<'a> Qwen3Ops<'a> {
         count: usize,
     ) -> Result<&[f32], VulkanError> {
         self.f32_word(region, count, "host read")?;
+        if self.staging.is_some() {
+            return Err(VulkanError::UnsupportedShape(
+                "device arena requires read_f32_into".into(),
+            ));
+        }
+        // The dispatch that produced these values may have finished only
+        // microseconds ago, so make the device writes visible to the host
+        // before reading them out of the mapping.
+        unsafe {
+            self.context.invalidate_mapped(
+                self.arena,
+                region.offset as u64,
+                f32_bytes(count)? as u64,
+            )?;
+        }
+        self.context
+            .counters
+            .host_read_bytes
+            .fetch_add((count * 4) as u64, Ordering::Relaxed);
         Ok(unsafe {
             std::slice::from_raw_parts(self.arena.mapped.add(region.offset).cast::<f32>(), count)
         })
+    }
+
+    /// Copy into caller-owned memory: staging must never escape as a borrowed
+    /// slice that a later download could overwrite. Call outside a recording.
+    pub(crate) fn read_f32_into(
+        &self,
+        region: ArenaRegion,
+        output: &mut [f32],
+    ) -> Result<(), VulkanError> {
+        self.f32_word(region, output.len(), "host read")?;
+        if output.is_empty() {
+            return Ok(());
+        }
+        if let Some(staging) = self.staging {
+            let mut commands = TokenCommands::begin(self.context)?;
+            unsafe {
+                self.context.record_buffer_copy(
+                    commands.command,
+                    self.arena,
+                    staging,
+                    region.offset as u64,
+                    0,
+                    f32_bytes(output.len())? as u64,
+                );
+            }
+            self.context.submit_transfer_commands(&mut commands.guard)?;
+            self.context
+                .counters
+                .host_read_bytes
+                .fetch_add((output.len() * 4) as u64, Ordering::Relaxed);
+            // Keep the guard through the host copy, so another transfer cannot
+            // reuse staging between the fence and this read.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    staging.mapped.cast::<f32>(),
+                    output.as_mut_ptr(),
+                    output.len(),
+                );
+            }
+        } else {
+            output.copy_from_slice(self.read_f32(region, output.len())?);
+        }
+        Ok(())
     }
 
     pub(crate) fn read_bytes(
@@ -915,6 +4310,15 @@ impl<'a> Qwen3Ops<'a> {
         count: usize,
     ) -> Result<&[u8], VulkanError> {
         self.byte_word(region, count, "host byte read")?;
+        if self.staging.is_some() {
+            return Err(VulkanError::UnsupportedShape(
+                "device arena cannot expose mapped bytes".into(),
+            ));
+        }
+        self.context
+            .counters
+            .host_read_bytes
+            .fetch_add(count as u64, Ordering::Relaxed);
         Ok(unsafe { std::slice::from_raw_parts(self.arena.mapped.add(region.offset), count) })
     }
 
@@ -967,14 +4371,91 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    pub(crate) fn record_quantize_q8_k_ggml(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        scales: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        let mut push = quantize_rows_push(
+            self.arena.size as usize,
+            input,
+            q8,
+            scales,
+            None,
+            count,
+            1,
+            count,
+            256,
+        )?;
+        // Dory's contract is signed GGML Q8_K on every host ISA.
+        push[8] = 1;
+        let dispatch = row_dispatch(count / 256, 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, QUANTIZE_K, self.arena_bindings, &push, dispatch);
+        Ok(())
+    }
+
     fn record_linear_dispatch(
         &self,
         commands: &TokenCommands<'_>,
-        pipeline: usize,
+        mut pipeline: usize,
         bindings: OperatorBindings,
         push: &[u32],
-        dispatch: [u32; 3],
+        mut dispatch: [u32; 3],
     ) {
+        // The k-quant cooperative kernels split the block's reduction across
+        // eight lanes, so a narrow projection stops running one warp per SM.
+        // `push[21]` is the token-row count: the split only pays off for a
+        // single row, where the row kernel would give one lane the whole
+        // output column.
+        //
+        // The Q5_K split has no column limit. A wide projection does not
+        // need more parallelism -- it has plenty of rows -- but it reads the
+        // same bytes per byte, so it pays the same latency for the same
+        // traffic.
+        if matches!(pipeline, Q4_K_MATMUL | Q5_K_MATMUL) && push.len() == 26 && push[21] == 1 {
+            let columns = push[5].max(push[8]).max(push[11]) as usize;
+            let wide_is_fine = pipeline == Q5_K_MATMUL;
+            if columns <= 4096 || wide_is_fine {
+                if let Ok(grid) = matmul_dispatch(
+                    columns.div_ceil(8),
+                    1,
+                    push[13] as usize,
+                    &self.context.limits,
+                ) {
+                    pipeline = if pipeline == Q4_K_MATMUL {
+                        Q4_K_MATMUL_COOPERATIVE
+                    } else {
+                        Q5_K_MATMUL_COOPERATIVE
+                    };
+                    dispatch = grid;
+                }
+            }
+        }
+        if pipeline == Q8_MATMUL_GROUPED
+            && self.q8_tiled
+            && tiled_matmul_enabled()
+            && push.len() == 26
+            && push[22] == 0
+            && push[21] == 1
+            && push[2] >= 256
+        {
+            let columns = push[5].max(push[8]).max(push[11]) as usize;
+            // Small matvecs gain parallel block loads; wide heads retain the row kernel.
+            if columns <= 4096 {
+                if let Ok(grid) = matmul_dispatch(
+                    columns.div_ceil(2),
+                    1,
+                    push[13] as usize,
+                    &self.context.limits,
+                ) {
+                    pipeline = Q8_MATMUL_COOPERATIVE;
+                    dispatch = grid;
+                }
+            }
+        }
         unsafe {
             commands.bind(
                 self.pipelines[pipeline],
@@ -984,7 +4465,28 @@ impl<'a> Qwen3Ops<'a> {
             );
             commands.dispatch(dispatch[0], dispatch[1], dispatch[2]);
             commands.barrier();
+            self.recorded_dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if dispatch_log_enabled() {
+                dispatch_log_push(pipeline, bindings.descriptor_set_handle(), dispatch);
+            }
         }
+        if DISPATCH_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            DISPATCH_TRACE_COUNTS[pipeline].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Number of dispatches recorded since this `Qwen3Ops` was created.
+    ///
+    /// Sessions use it to chunk long recordings into separate submissions
+    /// instead of piling hundreds of dispatches into one command buffer.
+    pub(crate) fn recorded_dispatch_count(&self) -> usize {
+        self.recorded_dispatches
+            .fetch_add(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn supports_tiled_q8(&self) -> bool {
+        self.q8_tiled
     }
 
     pub(crate) fn record_rms_norm(
@@ -1119,11 +4621,122 @@ impl<'a> Qwen3Ops<'a> {
         input_stride: usize,
     ) -> Result<(), VulkanError> {
         let format = bindings.weight_format(outputs.len())?;
+        // The Q8_0 kernel is the tiled one for a multi-row forward: the
+        // tiled kernel shares the weight across the rows of a tile, and the
+        // per-row kernel reads it once per row.
+        //
+        // The Q4_0 kernel is tiled the same way. Its per-row kernel reads
+        // the weight once per row and multiplies the four-bit values one at
+        // a time; the tiled one reads it once per (column, k-block) and
+        // uses the packed dot product. A single row is still the per-row
+        // kernel's: the tile's staging is then pure overhead.
+        let tiled = match format {
+            GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0 => token_rows > 1,
+            _ => false,
+        };
+        if tiled && self.q8_tiled && tiled_matmul_enabled() {
+            return self.record_weight_matmul_tiled_rows(
+                commands,
+                bindings,
+                input,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                outputs,
+                n_in,
+                token_rows,
+                input_stride,
+            );
+        }
+        self.record_weight_matmul_ordinary_rows(
+            commands,
+            bindings,
+            input,
+            q8,
+            q8_scales,
+            q4_1_input_sums,
+            q8k,
+            q8k_scales,
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )
+    }
+
+    /// Explicit ordinary GPU path, also used as the untiled benchmark baseline.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matmul_ordinary_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_selected_weight_matmul_rows(
+            commands,
+            bindings,
+            input,
+            q8,
+            q8_scales,
+            q4_1_input_sums,
+            q8k,
+            q8k_scales,
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_selected_weight_matmul_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+        selection: Option<ExpertSelection>,
+    ) -> Result<(), VulkanError> {
+        let format = bindings.weight_format(outputs.len())?;
         let (activation, scales, quantize) = match format {
-            GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32 => {
-                (input, q8_scales, None)
-            }
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K | GpuWeightFormat::Q6_K => {
+            GpuWeightFormat::F16
+            | GpuWeightFormat::BF16
+            | GpuWeightFormat::F32
+            | GpuWeightFormat::MlxAffine4
+            | GpuWeightFormat::MlxAffine8 => (input, q8_scales, None),
+            GpuWeightFormat::Q4_K
+            | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q6_K
+            | GpuWeightFormat::Q2_K
+            | GpuWeightFormat::Q3_K
+            | GpuWeightFormat::IQ4_XS
+            | GpuWeightFormat::IQ2_XXS
+            | GpuWeightFormat::IQ2_XS
+            | GpuWeightFormat::IQ2_S
+            | GpuWeightFormat::IQ3_XXS
+            | GpuWeightFormat::IQ3_S
+            | GpuWeightFormat::IQ1_S
+            | GpuWeightFormat::IQ1_M => {
                 let push = quantize_rows_push(
                     self.arena.size as usize,
                     input,
@@ -1154,7 +4767,7 @@ impl<'a> Qwen3Ops<'a> {
                 (q8, q8_scales, Some((QUANTIZE, push, dispatch)))
             }
         };
-        let (push, dispatch) = matmul_rows_push(
+        let (mut push, dispatch) = matmul_rows_push(
             self.arena.size as usize,
             &self.context.limits,
             bindings,
@@ -1166,11 +4779,310 @@ impl<'a> Qwen3Ops<'a> {
             token_rows,
             input_stride,
         )?;
+        if let Some(selection) = selection {
+            // The formats whose kernels read the selected expert id from
+            // the arena: the Q8_0 group, the two 5-bit block formats and
+            // the F32 kernel.
+            if !matches!(
+                format,
+                GpuWeightFormat::Q8_0
+                    | GpuWeightFormat::Q5_0
+                    | GpuWeightFormat::Q5_1
+                    | GpuWeightFormat::F32
+            ) || selection.count == 0
+                || selection.used == 0
+                || selection.used > selection.count
+                || selection.slot >= selection.used
+            {
+                return Err(VulkanError::UnsupportedShape(
+                    "unsupported MoE expert format/selection".into(),
+                ));
+            }
+            push[22] = as_u32(selection.count, "expert count")?;
+            push[23] = self.f32_rows_word(
+                selection.ids,
+                token_rows,
+                selection.used,
+                selection.used,
+                "expert IDs",
+            )?;
+            push[24] = as_u32(selection.used, "selected experts")?;
+            push[25] = as_u32(selection.slot, "expert slot")?;
+            let (elements, bytes, _) = format.layout();
+            for (slot, &(_, n_out, _)) in outputs.iter().enumerate() {
+                let span = (n_in / elements)
+                    .checked_mul(bytes)
+                    .and_then(|v| v.checked_mul(n_out))
+                    .and_then(|v| v.checked_mul(selection.count))
+                    .ok_or(VulkanError::OutOfMemory)?;
+                bindings.require(slot, span, "expert weights")?;
+                as_u32(span, "expert weight byte span")?;
+            }
+        }
         // All validation completes before the first command is recorded.
         if let Some((pipeline, push, dispatch)) = quantize {
             self.record_linear_dispatch(commands, pipeline, self.arena_bindings, &push, dispatch);
         }
-        self.record_linear_dispatch(commands, format.layout().2, bindings, &push, dispatch);
+        // The transposed kernel reads the transposed layout, so the layout
+        // of the binding -- not a global flag -- decides which kernel runs.
+        let pipeline = if format == GpuWeightFormat::Q8_0
+            && bindings.weight_layout == GpuWeightLayout::Transposed
+        {
+            Q8_MATMUL_TRANSPOSED
+        } else {
+            format.layout().2
+        };
+        self.record_linear_dispatch(commands, pipeline, bindings, &push, dispatch);
+        Ok(())
+    }
+
+    /// Weights must be uploaded in [input, output] order; activations remain F32.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_transposed_float_matmul_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        activation: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let format = bindings.weight_format(outputs.len())?;
+        if n_in % 2 != 0
+            || !matches!(
+                format,
+                GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
+            )
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "transposed float matmul requires F16/BF16/F32 and even input dimension".into(),
+            ));
+        }
+        let (mut push, _) = matmul_rows_push(
+            self.arena.size as usize,
+            &self.context.limits,
+            bindings,
+            activation,
+            activation,
+            None,
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )?;
+        push[16] = if format == GpuWeightFormat::F32 { 4 } else { 2 };
+        // Each projection keeps the kernel it would use alone, including mixed widths.
+        for small in [false, true] {
+            let mut pass = push;
+            let mut columns = 0;
+            for (slot, &(_, n_out, _)) in outputs.iter().enumerate() {
+                if (format == GpuWeightFormat::F32 && token_rows <= 32 && n_out <= 4096) == small {
+                    columns = columns.max(n_out);
+                } else {
+                    pass[5 + 3 * slot] = 0;
+                }
+            }
+            if columns == 0 {
+                continue;
+            }
+            let (pipeline, column_tile, token_tile) = if format == GpuWeightFormat::F16 {
+                (F16_MATMUL_TILED, 64, 32)
+            } else if small {
+                (FLOAT_MATMUL_SMALL, 2, 4)
+            } else {
+                (FLOAT_MATMUL_TILED, 64, 32)
+            };
+            let dispatch = row_dispatch(
+                columns.div_ceil(column_tile),
+                token_rows.div_ceil(token_tile) * outputs.len(),
+                &self.context.limits,
+            )?;
+            self.record_linear_dispatch(commands, pipeline, bindings, &pass, dispatch);
+        }
+        Ok(())
+    }
+
+    /// Grouped Q8_0 matmul, register-tiled over tokens.
+    ///
+    /// Records the same quantization as the ordinary path. Unavailable Q8
+    /// tiling uses the ordinary GPU kernel. F16 has a separate float kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_weight_matmul_tiled_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        activation: ArenaRegion,
+        q8: ArenaRegion,
+        q8_scales: ArenaRegion,
+        q4_1_input_sums: ArenaRegion,
+        q8k: ArenaRegion,
+        q8k_scales: ArenaRegion,
+        outputs: &[(ArenaRegion, usize, usize)],
+        n_in: usize,
+        token_rows: usize,
+        input_stride: usize,
+    ) -> Result<(), VulkanError> {
+        let format = bindings.weight_format(outputs.len())?;
+        // F16 weights take the float tiled kernel: no quantize dispatch, and the
+        // activation is read from the arena as f32 and rounded in registers.
+        // This is what lets the F16 refiner stacks leave the CPU.
+        if format.uses_f32_input() {
+            if !format.with_mode(bindings.weight_mode).uses_tiled_f16() {
+                return Err(VulkanError::UnsupportedShape(
+                    "tiled float matmul is only implemented for F16 weights".into(),
+                ));
+            }
+            if format == GpuWeightFormat::F16
+                && bindings.weight_mode == GpuMatmulMode::Prepared
+                && crate::ops::f16_uses_neon_accumulators(n_in)
+            {
+                return self.record_weight_matmul_ordinary_rows(
+                    commands,
+                    bindings,
+                    activation,
+                    q8,
+                    q8_scales,
+                    q4_1_input_sums,
+                    q8k,
+                    q8k_scales,
+                    outputs,
+                    n_in,
+                    token_rows,
+                    input_stride,
+                );
+            }
+            if n_in % 2 != 0 {
+                return Err(VulkanError::UnsupportedShape(
+                    "tiled F16 matmul requires even weight row starts".into(),
+                ));
+            }
+            let (push, _) = matmul_rows_push(
+                self.arena.size as usize,
+                &self.context.limits,
+                bindings,
+                activation,
+                q8_scales,
+                None,
+                outputs,
+                n_in,
+                token_rows,
+                input_stride,
+            )?;
+            let columns = outputs.iter().map(|(_, n_out, _)| *n_out).max().ok_or(
+                VulkanError::UnsupportedShape("tiled matmul has no output".into()),
+            )?;
+            const FLOAT_TOKENS: usize = 32;
+            let tiles = token_rows.div_ceil(FLOAT_TOKENS);
+            let dispatch = row_dispatch(
+                columns.div_ceil(64),
+                tiles * outputs.len(),
+                &self.context.limits,
+            )?;
+            self.record_linear_dispatch(commands, F16_MATMUL_TILED, bindings, &push, dispatch);
+            return Ok(());
+        }
+        if !matches!(format, GpuWeightFormat::Q8_0 | GpuWeightFormat::Q4_0) || !self.q8_tiled {
+            return self.record_weight_matmul_ordinary_rows(
+                commands,
+                bindings,
+                activation,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                outputs,
+                n_in,
+                token_rows,
+                input_stride,
+            );
+        }
+        let quantize_push = quantize_rows_push(
+            self.arena.size as usize,
+            activation,
+            q8,
+            q8_scales,
+            Some(q4_1_input_sums),
+            n_in,
+            token_rows,
+            input_stride,
+            32,
+        )?;
+        let quantize_dispatch = row_dispatch(n_in / 32, token_rows, &self.context.limits)?;
+        let (push, _) = matmul_rows_push(
+            self.arena.size as usize,
+            &self.context.limits,
+            bindings,
+            q8,
+            q8_scales,
+            Some(q4_1_input_sums),
+            outputs,
+            n_in,
+            token_rows,
+            input_stride,
+        )?;
+        // One lane per output column, TOKENS tokens per workgroup.
+        let columns = outputs.iter().map(|(_, n_out, _)| *n_out).max().ok_or(
+            VulkanError::UnsupportedShape("tiled matmul has no output".into()),
+        )?;
+        // Must match the token tile in shaders/glsl/q8_matmul_tiled_dp4a.comp: the
+        // shader derives the token tile from the workgroup id, so a mismatch
+        // here would read and write the wrong rows rather than fail.
+        //
+        // Measured on the aarch64 box at Z-Image's W2 shape, streaming eight distinct
+        // weight matrices: 8 -> 64.4 ms, 16 -> 32.0 ms, 32 -> 20.6 ms,
+        // 64 -> 48.9 ms. Sixty-four accumulators per lane is past what the
+        // register file holds, so 32 is where the curve turns.
+        // AVX2 needs eight accumulators per output; four tokens fit the same
+        // 32-register budget as NEON/scalar's 32 tokens.
+        //
+        // The Q4_0 kernel has one tile size: 32 tokens. Its dot product is
+        // a single integer per group, so it has no AVX2 reduction layout.
+        let tokens = if format == GpuWeightFormat::Q4_0 {
+            32
+        } else if push[14] == 8 {
+            4
+        } else {
+            32
+        };
+        let tiles = token_rows.div_ceil(tokens);
+        let dispatch = row_dispatch(
+            columns.div_ceil(64),
+            tiles * outputs.len(),
+            &self.context.limits,
+        )?;
+        // Validation is complete before the first command is recorded.
+        self.record_linear_dispatch(
+            commands,
+            QUANTIZE,
+            self.arena_bindings,
+            &quantize_push,
+            quantize_dispatch,
+        );
+        // Keep the 32-token ARM/scalar path statically bounded. AVX2 uses the
+        // generic shader because it needs its four-token reduction layout.
+        // The two wide shaders differ only in how the partial dot is
+        // accumulated, and `q8_dot_mode()` already decided that on the host,
+        // so neither one tests `reduction_mode` inside the token loop.
+        // The transposed layout has its own twin of every tiled kernel:
+        // the arithmetic is the same, only the weight bytes sit elsewhere.
+        let tiled_pipeline = if format == GpuWeightFormat::Q4_0 {
+            Q4_0_MATMUL_TILED
+        } else {
+            match (
+                q8_dot_mode(),
+                bindings.weight_layout == GpuWeightLayout::Transposed,
+            ) {
+                (8, false) => Q8_MATMUL_GROUPED_TILED,
+                (0, false) => Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                (_, false) => Q8_MATMUL_GROUPED_TILED_WIDE,
+                (8, true) => Q8_MATMUL_GROUPED_TILED_TRANSPOSED,
+                (0, true) => Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED,
+                (_, true) => Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED,
+            }
+        };
+        self.record_linear_dispatch(commands, tiled_pipeline, bindings, &push, dispatch);
         Ok(())
     }
 
@@ -1306,6 +5218,7 @@ impl<'a> Qwen3Ops<'a> {
             capacity,
             kv_count,
             1,
+            kv_count,
         )
     }
 
@@ -1340,6 +5253,7 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             1,
+            AttentionMode::PreparedF16,
         )
     }
 
@@ -1353,7 +5267,7 @@ impl<'a> Qwen3Ops<'a> {
         let base = sequence_length
             .checked_sub(1)
             .ok_or_else(|| VulkanError::UnsupportedShape("empty softmax".into()))?;
-        self.record_softmax_rows(commands, scores, heads, base, 1)
+        self.record_softmax_rows(commands, scores, heads, base, 1, false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1387,6 +5301,8 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             1,
+            AttentionMode::PreparedF16,
+            false,
         )
     }
 
@@ -1425,9 +5341,106 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             1,
+            AttentionMode::PreparedF16,
         )
     }
     #[allow(clippy::too_many_arguments)]
+    /// Q/K norm plus interleaved RoPE, for the Z-Image DiT.
+    ///
+    /// Same kernel as [`Self::record_qk_norm_rope_rows`] except that the
+    /// rotation pairs adjacent elements, matching `rotate_interleaved_inplace`.
+    ///
+    /// Unlike the NeoX entry point this takes explicit `q_row_stride` and
+    /// `k_row_stride`, because the DiT does not store Q and K as two blocks.
+    /// Its QKV projection emits one row of `Q | K | V`, so consecutive tokens
+    /// are `QKV_WIDTH` apart, not `q_heads * head_dim`. Passing the span as the
+    /// stride -- which is what the block layout would lead you to do -- lands
+    /// every row after the first on the wrong span, and since the row length
+    /// divides the span that stays inside the buffer and corrupts V instead of
+    /// faulting. Both regions are the same whole-row region here.
+    ///
+    /// `rope` is the (cos, sin) table, `head_dim` entries per row, shared by
+    /// every head of that row.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qk_norm_rope_interleaved_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        q_heads: usize,
+        k_heads: usize,
+        head_dim: usize,
+        rope: ArenaRegion,
+        q_row_stride: usize,
+        k_row_stride: usize,
+        k_span_offset: usize,
+        eps: f32,
+        normalize_q: bool,
+        normalize_k: bool,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K heads and even head dimension must be nonzero".into(),
+            ));
+        }
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k_count = k_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if q_row_stride < q_count || k_row_stride < k_count {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K row stride must cover the span it steps over".into(),
+            ));
+        }
+        if normalize_q {
+            bindings.require(0, f32_bytes(head_dim)?, "Q norm weight")?;
+        }
+        if normalize_k {
+            bindings.require(1, f32_bytes(head_dim)?, "K norm weight")?;
+        }
+        let push = [
+            self.f32_rows_word(q, rows, q_row_stride, q_count, "Q vector")?,
+            self.f32_rows_word(k, rows, k_row_stride, k_count, "K vector")?,
+            0,
+            0,
+            as_u32(q_heads, "Q head count")?,
+            as_u32(k_heads, "K head count")?,
+            as_u32(head_dim, "Q/K head dimension")?,
+            self.f32_rows_word(rope, rows, head_dim, head_dim, "RoPE coefficients")?,
+            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
+            eps.to_bits(),
+            as_u32(rows, "Q/K rows")?,
+            as_u32(q_row_stride, "Q stride")?,
+            as_u32(k_row_stride, "K stride")?,
+            as_u32(head_dim, "RoPE stride")?,
+            as_u32(k_span_offset, "K span offset")?,
+        ];
+        let z = row_dispatch(1, rows, &self.context.limits)?[2];
+        if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || k_heads > self.context.limits.max_compute_work_group_count[0] as usize
+            || self.context.limits.max_compute_work_group_count[1] < 2
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "Q/K head count exceeds device dispatch limits".into(),
+            ));
+        }
+        unsafe {
+            commands.bind(
+                self.pipelines[QK_NORM_ROPE_INTERLEAVED],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(q_heads.max(k_heads) as u32, 2, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
     pub(crate) fn record_qk_norm_rope_rows(
         &self,
         commands: &TokenCommands<'_>,
@@ -1442,6 +5455,40 @@ impl<'a> Qwen3Ops<'a> {
         normalize_q: bool,
         normalize_k: bool,
         rows: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_qk_norm_rope_layout_rows(
+            commands,
+            bindings,
+            q,
+            k,
+            q_heads,
+            k_heads,
+            head_dim,
+            rope,
+            eps,
+            normalize_q,
+            normalize_k,
+            rows,
+            RopeLayout::Neox,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qk_norm_rope_layout_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        q_heads: usize,
+        k_heads: usize,
+        head_dim: usize,
+        rope: ArenaRegion,
+        eps: f32,
+        normalize_q: bool,
+        normalize_k: bool,
+        rows: usize,
+        layout: RopeLayout,
     ) -> Result<(), VulkanError> {
         if q_heads == 0 || k_heads == 0 || head_dim == 0 || head_dim % 2 != 0 {
             return Err(VulkanError::UnsupportedShape(
@@ -1469,7 +5516,15 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(k_heads, "K head count")?,
             as_u32(head_dim, "Q/K head dimension")?,
             self.f32_rows_word(rope, rows, head_dim, head_dim, "RoPE coefficients")?,
-            u32::from(normalize_q) | (u32::from(normalize_k) << 1),
+            u32::from(normalize_q)
+                | (u32::from(normalize_k) << 1)
+                | (u32::from(layout == RopeLayout::Interleaved) << 2)
+                | (u32::from(match layout {
+                    // The CPU's M-RoPE rotation fuses on every architecture;
+                    // the NeoX path only fuses where the CPU does.
+                    RopeLayout::MropeInterleaved => true,
+                    _ => crate::ops::has_neon(),
+                }) << 3),
             eps.to_bits(),
             as_u32(rows, "Q/K rows")?,
             as_u32(q_count, "Q stride")?,
@@ -1514,6 +5569,89 @@ impl<'a> Qwen3Ops<'a> {
         capacity: usize,
         kv_count: usize,
         rows: usize,
+        source_stride: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_kv_write_rows_with(
+            commands,
+            KV_WRITE,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            delta_k,
+            delta_v,
+            layer,
+            position,
+            layer_count,
+            capacity,
+            kv_count,
+            rows,
+            source_stride,
+        )
+    }
+
+    /// Write K and V into the KV cache without rounding them to F16.
+    ///
+    /// The shared [`Self::record_kv_write_rows`] stores F16, which is what
+    /// llama.cpp's default KV cache type does. Nemotron-3 Nano's reference
+    /// harness keeps an F32 cache, and the F16 rounding is amplified by the
+    /// Mamba-2 layers that follow each attention layer, so that path uses
+    /// this variant instead.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_kv_write_rows_f32(
+        &self,
+        commands: &TokenCommands<'_>,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        delta_k: ArenaRegion,
+        delta_v: ArenaRegion,
+        layer: usize,
+        position: usize,
+        layer_count: usize,
+        capacity: usize,
+        kv_count: usize,
+        rows: usize,
+        source_stride: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_kv_write_rows_with(
+            commands,
+            KV_WRITE_F32,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            delta_k,
+            delta_v,
+            layer,
+            position,
+            layer_count,
+            capacity,
+            kv_count,
+            rows,
+            source_stride,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_kv_write_rows_with(
+        &self,
+        commands: &TokenCommands<'_>,
+        pipeline: usize,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        delta_k: ArenaRegion,
+        delta_v: ArenaRegion,
+        layer: usize,
+        position: usize,
+        layer_count: usize,
+        capacity: usize,
+        kv_count: usize,
+        rows: usize,
+        source_stride: usize,
     ) -> Result<(), VulkanError> {
         if layer >= layer_count
             || rows == 0
@@ -1544,11 +5682,12 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(capacity, "KV capacity")?,
             as_u32(kv_count, "KV width")?,
             as_u32(rows, "KV rows")?,
+            as_u32(source_stride, "KV source stride")?,
         ];
         let [x, y, z] = row_dispatch(kv_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
-                self.pipelines[KV_WRITE],
+                self.pipelines[pipeline],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -1561,6 +5700,90 @@ impl<'a> Qwen3Ops<'a> {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_attention_scores_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        q: ArenaRegion,
+        cache_k: ArenaRegion,
+        scores: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        base_position: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+        mode: AttentionMode,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty attention chunk".into(),
+            ));
+        }
+        validate_attention_shape(
+            layer,
+            layer_count,
+            sequence_length,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+        )?;
+        let q_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let kv_count = kv_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|value| value.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let score_count = q_heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(q, rows, q_count, q_count, "attention query")?,
+            self.f32_rows_word(cache_k, 1, cache_count, cache_count, "attention K cache")?,
+            self.f32_rows_word(scores, rows, score_count, score_count, "attention scores")?,
+            as_u32(layer, "attention layer")?,
+            as_u32(sequence_length, "attention sequence length")?,
+            as_u32(capacity, "attention capacity")?,
+            as_u32(q_heads, "attention Q heads")?,
+            as_u32(kv_heads, "attention KV heads")?,
+            as_u32(head_dim, "attention head dimension")?,
+            (1.0 / (head_dim as f32).sqrt()).to_bits(),
+            as_u32(base_position, "attention base position")?,
+            as_u32(rows, "attention rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
+            mode.reduction(head_dim),
+        ];
+        let [x, y, z] = row_dispatch(score_count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ATTENTION_SCORES],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Attention scores computed on F32 query and key values.
+    ///
+    /// The shared [`Self::record_attention_scores_rows`] rounds the query and
+    /// the key to F16 to match a F16 KV cache. An F32 cache keeps the values
+    /// the CPU path would have used, so the scores have to be computed on
+    /// those values; the F32 kernel also uses the mode-0 compensated sum.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_attention_scores_f32_rows(
         &self,
         commands: &TokenCommands<'_>,
         q: ArenaRegion,
@@ -1618,11 +5841,15 @@ impl<'a> Qwen3Ops<'a> {
             (1.0 / (head_dim as f32).sqrt()).to_bits(),
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
+            // 0 keeps the decoder's causal limit; the DiT path passes 1.
+            0,
+            // The F32 kernel always uses the compensated single accumulator.
+            0,
         ];
         let [x, y, z] = row_dispatch(score_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
-                self.pipelines[ATTENTION_SCORES],
+                self.pipelines[ATTENTION_SCORES_F32],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -1640,6 +5867,7 @@ impl<'a> Qwen3Ops<'a> {
         heads: usize,
         base_position: usize,
         rows: usize,
+        full_attention: bool,
     ) -> Result<(), VulkanError> {
         let sequence_length = base_position
             .checked_add(rows)
@@ -1658,6 +5886,7 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(sequence_length, "softmax sequence length")?,
             as_u32(base_position, "softmax base position")?,
             as_u32(rows, "softmax rows")?,
+            u32::from(full_attention),
         ];
         let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
         unsafe {
@@ -1665,6 +5894,296 @@ impl<'a> Qwen3Ops<'a> {
                 self.pipelines[SOFTMAX],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Softmax that stores F32 probabilities.
+    ///
+    /// [`Self::record_softmax_rows`] rounds each probability to F16 before
+    /// storing it, which only matches a F16 attention pipeline. The Nemotron-3
+    /// Nano path keeps the CPU path's F32 probabilities.
+    pub(crate) fn record_softmax_f32_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        scores: ArenaRegion,
+        heads: usize,
+        base_position: usize,
+        rows: usize,
+        full_attention: bool,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if heads == 0 || rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "softmax heads and sequence length must be nonzero".into(),
+            ));
+        }
+        let count = heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(scores, rows, count, count, "softmax scores")?,
+            as_u32(heads, "softmax heads")?,
+            as_u32(sequence_length, "softmax sequence length")?,
+            as_u32(base_position, "softmax base position")?,
+            as_u32(rows, "softmax rows")?,
+            u32::from(full_attention),
+        ];
+        let [x, y, z] = row_dispatch(heads, rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[SOFTMAX_F32],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 depthwise causal conv1d, fused with the SiLU
+    /// that follows it.
+    ///
+    /// `input` is the contiguous `[x | B | C]` part of the in-projection
+    /// output: the in-projection writes `[z | x | B | C | dt]`, and the
+    /// conv1d sees everything but the `z` half, which is the gate.
+    ///
+    /// `slot` selects the conv history's ring slot for this token. The ring
+    /// holds three tokens, so the slot is the token's position modulo
+    /// three; the CPU path shifts the history instead, and the ring keeps
+    /// the same three values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_h_ssm_conv(
+        &self,
+        commands: &TokenCommands<'_>,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        weights: ArenaRegion,
+        bias: ArenaRegion,
+        history: ArenaRegion,
+        cols: usize,
+        kernel: usize,
+        slot: usize,
+    ) -> Result<(), VulkanError> {
+        if cols == 0 || kernel == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron-H SSM conv1d shape".into(),
+            ));
+        }
+        let push = [
+            self.f32_word(input, cols, "Nemotron-H SSM conv input")?,
+            self.f32_word(output, cols, "Nemotron-H SSM conv output")?,
+            self.f32_word(weights, cols * kernel, "Nemotron-H SSM conv weights")?,
+            self.f32_word(bias, cols, "Nemotron-H SSM conv bias")?,
+            self.f32_word(history, cols * 3, "Nemotron-H SSM conv history")?,
+            as_u32(cols, "Nemotron-H SSM conv columns")?,
+            as_u32(kernel, "Nemotron-H SSM conv kernel")?,
+            as_u32(slot, "Nemotron-H SSM conv history slot")?,
+        ];
+        // Every invocation owns four channels, because ggml's SiLU picks
+        // the exponential's fast or overflow path per group of four lanes.
+        let [x, y, z] = row_dispatch(cols.div_ceil(256), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_CONV],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 softplus time step and per-head decay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_h_ssm_dt(
+        &self,
+        commands: &TokenCommands<'_>,
+        dt: ArenaRegion,
+        dt_bias: ArenaRegion,
+        a_log: ArenaRegion,
+        out_dt: ArenaRegion,
+        out_decay: ArenaRegion,
+        heads: usize,
+    ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM dt requires shaderFloat64".into(),
+            ));
+        }
+        if heads == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM needs at least one head".into(),
+            ));
+        }
+        let push = [
+            self.f32_word(dt, heads, "Nemotron-H SSM dt")?,
+            self.f32_word(dt_bias, heads, "Nemotron-H SSM dt bias")?,
+            self.f32_word(a_log, heads, "Nemotron-H SSM A log")?,
+            self.f32_word(out_dt, heads, "Nemotron-H SSM dt output")?,
+            self.f32_word(out_decay, heads, "Nemotron-H SSM decay output")?,
+            as_u32(heads, "Nemotron-H SSM heads")?,
+        ];
+        let [x, y, z] = row_dispatch(heads.div_ceil(64), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_DT],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 selective scan, with the D skip.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_h_ssm_scan(
+        &self,
+        commands: &TokenCommands<'_>,
+        state: ArenaRegion,
+        x: ArenaRegion,
+        b: ArenaRegion,
+        c: ArenaRegion,
+        dt: ArenaRegion,
+        decay: ArenaRegion,
+        d: ArenaRegion,
+        output: ArenaRegion,
+        inner: usize,
+        heads: usize,
+        headdim: usize,
+        d_state: usize,
+        groups: usize,
+    ) -> Result<(), VulkanError> {
+        if heads == 0 || headdim == 0 || d_state == 0 || groups == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron-H SSM scan shape".into(),
+            ));
+        }
+        let rows = heads * headdim;
+        let push = [
+            self.f32_word(state, rows * d_state, "Nemotron-H SSM state")?,
+            self.f32_word(x, inner, "Nemotron-H SSM scan x")?,
+            self.f32_word(b, groups * d_state, "Nemotron-H SSM scan B")?,
+            self.f32_word(c, groups * d_state, "Nemotron-H SSM scan C")?,
+            self.f32_word(dt, heads, "Nemotron-H SSM scan dt")?,
+            self.f32_word(decay, heads, "Nemotron-H SSM scan decay")?,
+            self.f32_word(d, heads, "Nemotron-H SSM scan D")?,
+            self.f32_word(output, inner, "Nemotron-H SSM scan output")?,
+            as_u32(inner, "Nemotron-H SSM inner size")?,
+            as_u32(heads, "Nemotron-H SSM heads")?,
+            as_u32(headdim, "Nemotron-H SSM head dimension")?,
+            as_u32(d_state, "Nemotron-H SSM state size")?,
+            as_u32(groups, "Nemotron-H SSM groups")?,
+        ];
+        // Sixteen lanes cover one state row and a 64-lane group covers four.
+        let [x, y, z] = row_dispatch(rows.div_ceil(4), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_SCAN],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 z gate: `silu(z) * y`.
+    pub(crate) fn record_nemotron_h_ssm_gate(
+        &self,
+        commands: &TokenCommands<'_>,
+        z: ArenaRegion,
+        y: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+    ) -> Result<(), VulkanError> {
+        if count == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM gate needs a nonzero width".into(),
+            ));
+        }
+        let push = [
+            self.f32_word(z, count, "Nemotron-H SSM gate z")?,
+            self.f32_word(y, count, "Nemotron-H SSM gate y")?,
+            self.f32_word(output, count, "Nemotron-H SSM gate output")?,
+            as_u32(count, "Nemotron-H SSM gate width")?,
+        ];
+        // Every invocation owns four channels, because ggml's SiLU picks
+        // the exponential's fast or overflow path per group of four lanes.
+        let [x, y, z] = row_dispatch(count.div_ceil(256), 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_GATE],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Nemotron-3 Nano Mamba-2 group RMSNorm.
+    ///
+    /// One workgroup per group; `gl_WorkGroupID.x` selects the group. The
+    /// group weights live in the descriptor set rather than in the arena,
+    /// because each group has its own weight slice.
+    pub(crate) fn record_nemotron_h_ssm_norm(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        input: ArenaRegion,
+        output: ArenaRegion,
+        group_len: usize,
+        groups: usize,
+        eps: f32,
+    ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM norm requires shaderFloat64".into(),
+            ));
+        }
+        if group_len == 0 || groups == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron-H SSM norm needs a nonzero group".into(),
+            ));
+        }
+        let total = groups * group_len;
+        // The weight buffer is the descriptor set's second binding; the
+        // first one is the arena.
+        bindings.require(1, f32_bytes(total)?, "SSM norm weight")?;
+        let push = [
+            self.f32_word(input, total, "Nemotron-H SSM norm input")?,
+            0,
+            self.f32_word(output, total, "Nemotron-H SSM norm output")?,
+            as_u32(group_len, "Nemotron-H SSM norm group length")?,
+            as_u32(groups, "Nemotron-H SSM norm groups")?,
+            eps.to_bits(),
+            as_u32(group_len, "Nemotron-H SSM norm input stride")?,
+            as_u32(group_len, "Nemotron-H SSM norm output stride")?,
+        ];
+        let [x, y, z] = row_dispatch(groups, 1, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[NEMOTRON_H_SSM_NORM],
+                self.context.pipeline_layout,
+                &[bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
             );
             commands.dispatch(x, y, z);
@@ -1688,6 +6207,8 @@ impl<'a> Qwen3Ops<'a> {
         kv_heads: usize,
         head_dim: usize,
         rows: usize,
+        mode: AttentionMode,
+        full_attention: bool,
     ) -> Result<(), VulkanError> {
         let sequence_length = base_position
             .checked_add(rows)
@@ -1737,11 +6258,114 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(head_dim, "attention head dimension")?,
             as_u32(base_position, "attention base position")?,
             as_u32(rows, "attention rows")?,
+            u32::from(full_attention),
+            // Decoder values are reduced over zero-padded 256-lane CPU buffers.
+            if full_attention {
+                0
+            } else {
+                mode.reduction(256)
+            },
+        ];
+        // Mode 0 is a plain compensated F32 sum. The other modes stream into
+        // 8, 16 or 32 accumulators, and reading that kernel for a mode that
+        // never touches the array costs the DiT about 15% of its attention.
+        let values_pipeline = if push[12] == 0 {
+            ATTENTION_VALUES_F32
+        } else {
+            ATTENTION_VALUES
+        };
+        let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[values_pipeline],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// Attention values that read an F32 KV cache and F32 probabilities.
+    ///
+    /// [`Self::record_attention_values_rows`] rounds both the probability and
+    /// the cached value to F16 on the way in, which only matches a F16 KV
+    /// cache. This variant keeps both in F32 and uses the same compensated
+    /// F32 accumulation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_attention_values_f32_kv_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        scores: ArenaRegion,
+        cache_v: ArenaRegion,
+        output: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        base_position: usize,
+        capacity: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+        full_attention: bool,
+    ) -> Result<(), VulkanError> {
+        let sequence_length = base_position
+            .checked_add(rows)
+            .ok_or(VulkanError::OutOfMemory)?;
+        if rows == 0 {
+            return Err(VulkanError::UnsupportedShape(
+                "empty attention chunk".into(),
+            ));
+        }
+        validate_attention_shape(
+            layer,
+            layer_count,
+            sequence_length,
+            capacity,
+            q_heads,
+            kv_heads,
+            head_dim,
+        )?;
+        let score_count = q_heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let output_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let kv_count = kv_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let cache_count = layer_count
+            .checked_mul(capacity)
+            .and_then(|value| value.checked_mul(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(
+                scores,
+                rows,
+                score_count,
+                score_count,
+                "attention probabilities",
+            )?,
+            self.f32_rows_word(cache_v, 1, cache_count, cache_count, "attention V cache")?,
+            self.f32_rows_word(output, rows, output_count, output_count, "attention output")?,
+            as_u32(layer, "attention layer")?,
+            as_u32(sequence_length, "attention sequence length")?,
+            as_u32(capacity, "attention capacity")?,
+            as_u32(q_heads, "attention Q heads")?,
+            as_u32(kv_heads, "attention KV heads")?,
+            as_u32(head_dim, "attention head dimension")?,
+            as_u32(base_position, "attention base position")?,
+            as_u32(rows, "attention rows")?,
+            u32::from(full_attention),
+            0,
         ];
         let [x, y, z] = row_dispatch(output_count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
             commands.bind(
-                self.pipelines[ATTENTION_VALUES],
+                self.pipelines[ATTENTION_VALUES_F32_KV],
                 self.context.pipeline_layout,
                 &[self.arena_bindings.descriptor_set],
                 bytemuck::cast_slice(&push),
@@ -1753,6 +6377,169 @@ impl<'a> Qwen3Ops<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Scores for the DiT, which keeps q, k and v interleaved in one
+    /// projection output and needs the cooperative kernel.
+    ///
+    /// `kv_source` is the region holding q | k | v side by side per row and
+    /// `source_stride` is that region's row width; `cache_k` and `cache_v` are
+    /// written from it at layer 0, position 0, capacity `rows`, which is the
+    /// whole "cache" a block needs since DiT has no history.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_diy_attention_scores(
+        &self,
+        commands: &TokenCommands<'_>,
+        kv_source: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        scratch: ArenaRegion,
+        scores: ArenaRegion,
+        source_stride: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        require_tiled_attention(self.context)?;
+        let kv_count = q_heads
+            .checked_mul(head_dim)
+            .ok_or(VulkanError::OutOfMemory)?;
+        let k = kv_source.shifted(q_heads * head_dim * 4);
+        let v = kv_source.shifted(2 * q_heads * head_dim * 4);
+        self.record_kv_write_rows(
+            commands,
+            k,
+            v,
+            cache_k,
+            cache_v,
+            scratch,
+            scratch,
+            0,
+            0,
+            1,
+            rows,
+            kv_count,
+            rows,
+            source_stride,
+        )?;
+        let sequence_length = rows;
+        let score_count = q_heads
+            .checked_mul(sequence_length)
+            .ok_or(VulkanError::OutOfMemory)?;
+        self.f32_rows_word(
+            scores,
+            rows,
+            score_count,
+            score_count,
+            "DiT attention scores",
+        )?;
+        self.f32_rows_word(cache_k, 1, kv_count, kv_count, "DiT K cache")?;
+        // The strided kv source reaches past what the shifted regions validated.
+        let span = (rows - 1)
+            .checked_mul(source_stride)
+            .and_then(|last| last.checked_add(kv_count))
+            .ok_or(VulkanError::OutOfMemory)?;
+        if kv_source
+            .offset
+            .checked_add(span * 4)
+            .is_none_or(|end| end > self.arena.size as usize)
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "DiT KV source needs {span} floats past offset {}",
+                kv_source.offset
+            )));
+        }
+        let push = [
+            as_u32(kv_source.offset / 4, "DiT q offset")?,
+            as_u32(cache_k.offset / 4, "DiT K cache offset")?,
+            as_u32(scores.offset / 4, "DiT scores offset")?,
+            as_u32(sequence_length, "DiT sequence length")?,
+            as_u32(q_heads, "DiT query heads")?,
+            as_u32(head_dim, "DiT head dim")?,
+            (1.0 / (head_dim as f32).sqrt()).to_bits(),
+            0,
+            as_u32(rows, "DiT rows")?,
+            as_u32(source_stride, "DiT q stride")?,
+        ];
+        let _ = kv_heads;
+        // The K cache was just written by the copy above; the scores read it.
+        unsafe { commands.barrier() };
+        // The kernel gives each workgroup QUERY_TILE queries, so it needs one
+        // group per tile rather than one per row. Keep in step with QUERY_TILE in
+        // attention_scores_tiled.comp.
+        const QUERY_TILE: usize = 8;
+        let [x, y, z] = row_dispatch(q_heads, rows.div_ceil(QUERY_TILE), &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ATTENTION_SCORES_TILED],
+                self.context.pipeline_layout,
+                &[self.arena_bindings.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        Ok(())
+    }
+
+    /// The whole DiT attention: scores, softmax and the value reduction.
+    ///
+    /// `kv_source` must already hold the projected QKV with the qk_norm and RoPE
+    /// applied, which is what `run_block` produces before it calls
+    /// `attention_into`. DiT has no KV cache and no mask, so the cache regions
+    /// hold exactly one block at position 0 and both later stages are told the
+    /// sequence is fully visible. The three stages are recorded into one command
+    /// buffer so the K copy, the score write and the probability write are
+    /// ordered by the barriers between them rather than by a submit each.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_diy_attention_full(
+        &self,
+        commands: &TokenCommands<'_>,
+        kv_source: ArenaRegion,
+        cache_k: ArenaRegion,
+        cache_v: ArenaRegion,
+        scratch: ArenaRegion,
+        scores: ArenaRegion,
+        output: ArenaRegion,
+        source_stride: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        self.record_diy_attention_scores(
+            commands,
+            kv_source,
+            cache_k,
+            cache_v,
+            scratch,
+            scores,
+            source_stride,
+            q_heads,
+            kv_heads,
+            head_dim,
+            rows,
+        )?;
+        // base_position 0 with `rows` rows makes the sequence exactly one block,
+        // and full_attention lifts the causal limit the decoder path relies on.
+        self.record_softmax_rows(commands, scores, q_heads, 0, rows, true)?;
+        self.record_attention_values_rows(
+            commands,
+            scores,
+            cache_v,
+            output,
+            0,
+            1,
+            0,
+            rows,
+            q_heads,
+            kv_heads,
+            head_dim,
+            rows,
+            AttentionMode::PreparedF16,
+            true,
+        )
+    }
+
     pub(crate) fn record_attention_rows(
         &self,
         commands: &TokenCommands<'_>,
@@ -1769,6 +6556,7 @@ impl<'a> Qwen3Ops<'a> {
         kv_heads: usize,
         head_dim: usize,
         rows: usize,
+        mode: AttentionMode,
     ) -> Result<(), VulkanError> {
         // Validate the later stages before scores records its first dispatch.
         let output_count = product("attention output", &[q_heads, head_dim])?;
@@ -1793,8 +6581,11 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             rows,
+            mode,
         )?;
-        self.record_softmax_rows(commands, scores, q_heads, base_position, rows)?;
+        if matches!(mode, AttentionMode::PreparedF16) {
+            self.record_softmax_rows(commands, scores, q_heads, base_position, rows, false)?;
+        }
         self.record_attention_values_rows(
             commands,
             scores,
@@ -1808,6 +6599,8 @@ impl<'a> Qwen3Ops<'a> {
             kv_heads,
             head_dim,
             rows,
+            mode,
+            false,
         )
     }
 
@@ -1912,6 +6705,7 @@ impl<'a> Qwen3Ops<'a> {
             pack_u16_pair(q_heads, kv_heads, "Qwen3.5 dense heads")?,
             pack_u16_pair(head_dim, rope_dim, "Qwen3.5 dense dimensions")?,
             eps.to_bits(),
+            u32::from(crate::ops::scalar_mode()),
         ];
         let group_count = q_heads.max(kv_heads);
         if group_count > self.context.limits.max_compute_work_group_count[0] as usize
@@ -2005,6 +6799,22 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(q_heads, "Qwen3.5 attention Q heads")?,
             as_u32(kv_heads, "Qwen3.5 attention KV heads")?,
             as_u32(head_dim, "Qwen3.5 attention head dimension")?,
+            // The CPU trunk reduces scores and values over
+            // `n_attend.div_ceil(256) * 256` lanes with the tail zeroed, so
+            // the SIMD reduction order does not change as the sequence grows.
+            // The shader must use the same width or its prompt logits drift
+            // with the generation limit.
+            as_u32(
+                sequence_length.div_ceil(256) * 256,
+                "Qwen3.5 attention padded length",
+            )?,
+            if crate::ops::has_neon() {
+                16
+            } else if crate::ops::has_avx2_fma() {
+                8
+            } else {
+                0
+            },
         ];
         if q_heads > self.context.limits.max_compute_work_group_count[0] as usize
             || rows > self.context.limits.max_compute_work_group_count[1] as usize
@@ -2115,6 +6925,7 @@ impl<'a> Qwen3Ops<'a> {
             eps.to_bits(),
             0,
             as_u32(rows, "Qwen3.5 convolution rows")?,
+            silu_exp_mode(true),
         ];
         let (x, y) = dispatch_invocations(conv_dim, &self.context.limits)?;
         unsafe {
@@ -2163,12 +6974,57 @@ impl<'a> Qwen3Ops<'a> {
         eps: f32,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        self.record_qwen35_recurrent_ssm_layout(
+            commands,
+            bindings,
+            q,
+            k,
+            v,
+            gate,
+            beta,
+            alpha,
+            output,
+            state,
+            layer,
+            layer_count,
+            k_heads,
+            v_heads,
+            head_dim,
+            eps,
+            rows,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_recurrent_ssm_layout(
+        &self,
+        commands: &TokenCommands<'_>,
+        bindings: OperatorBindings,
+        q: ArenaRegion,
+        k: ArenaRegion,
+        v: ArenaRegion,
+        gate: ArenaRegion,
+        beta: ArenaRegion,
+        alpha: ArenaRegion,
+        output: ArenaRegion,
+        state: ArenaRegion,
+        layer: usize,
+        layer_count: usize,
+        k_heads: usize,
+        v_heads: usize,
+        head_dim: usize,
+        eps: f32,
+        rows: usize,
+        repeat_interleave: bool,
+    ) -> Result<(), VulkanError> {
         if rows == 0
             || layer >= layer_count
             || k_heads == 0
             || v_heads == 0
             || head_dim == 0
             || head_dim > 128
+            || (repeat_interleave && v_heads % k_heads != 0)
         {
             return Err(VulkanError::UnsupportedShape(format!(
                 "invalid Qwen3.5 recurrent SSM layer={layer}/{layer_count} heads={k_heads}/{v_heads} dim={head_dim}"
@@ -2241,6 +7097,15 @@ impl<'a> Qwen3Ops<'a> {
             as_u32(head_dim, "Qwen3.5 SSM head dimension")?,
             eps.to_bits(),
             as_u32(rows, "Qwen3.5 SSM rows")?,
+            if crate::ops::has_neon() {
+                16
+            } else if crate::ops::has_avx2_fma() {
+                8
+            } else {
+                0
+            },
+            silu_exp_mode(true),
+            u32::from(repeat_interleave),
         ];
         let (x, y) = super::dispatch_grid(v_heads, &self.context.limits)?;
         unsafe {
@@ -2253,6 +7118,269 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
+        Ok(())
+    }
+
+    pub(crate) fn record_mhc(
+        &self,
+        commands: &TokenCommands<'_>,
+        bias: OperatorBindings,
+        mode: u32,
+        regions: MhcRegions,
+        shape: MhcShape,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        let push = mhc_push(self.arena.size as usize, bias, mode, regions, shape, rows)?;
+        let dispatch = row_dispatch(1, rows, &self.context.limits)?;
+        self.record_linear_dispatch(commands, SENSENOVA_MHC, bias, &push, dispatch);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_moe_route(
+        &self,
+        commands: &TokenCommands<'_>,
+        logits: ArenaRegion,
+        probs: ArenaRegion,
+        ids: ArenaRegion,
+        weights: ArenaRegion,
+        normalized: ArenaRegion,
+        experts: usize,
+        used: usize,
+        scale: f32,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if experts == 0 || used == 0 || used > experts || !scale.is_finite() {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid MoE routing dimensions/scale".into(),
+            ));
+        }
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        let push = [
+            self.f32_rows_word(logits, rows, experts, experts, "router logits")?,
+            self.f32_rows_word(probs, rows, experts, experts, "router probabilities")?,
+            self.f32_rows_word(ids, rows, used, used, "expert IDs")?,
+            self.f32_rows_word(weights, rows, used, used, "expert weights")?,
+            as_u32(experts, "experts")?,
+            as_u32(used, "selected experts")?,
+            scale.to_bits(),
+            self.f32_rows_word(normalized, rows, used, used, "normalized expert weights")?,
+        ];
+        let grid = row_dispatch(1, rows, &self.context.limits)?;
+        self.record_linear_dispatch(commands, QWEN35_MOE_ROUTE, self.arena_bindings, &push, grid);
+        Ok(())
+    }
+
+    /// Record the Nemotron-3 Nano MoE routing.
+    ///
+    /// The routing differs from Qwen3.5's in three ways, and all three
+    /// live in the shader:
+    ///
+    /// * the gate is a **sigmoid**, not a softmax;
+    /// * the selection bias only takes part in the ranking, so the weight
+    ///   of a chosen expert is its *unbiased* probability;
+    /// * the weights are normalized by `max(sum, 2^-14)` and then scaled.
+    ///
+    /// The chosen ids stay on the device: the expert kernels read them
+    /// from the arena, so a layer does not synchronise with the host.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_moe_route(
+        &self,
+        commands: &TokenCommands<'_>,
+        logits: ArenaRegion,
+        probs: ArenaRegion,
+        selection: ArenaRegion,
+        ids: ArenaRegion,
+        weights: ArenaRegion,
+        bias: ArenaRegion,
+        experts: usize,
+        used: usize,
+        scale: f32,
+        normalize: bool,
+        rows: usize,
+    ) -> Result<(), VulkanError> {
+        if !self.context.shader_float64 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron MoE routing requires shaderFloat64".into(),
+            ));
+        }
+        if experts == 0 || used == 0 || used > experts || !scale.is_finite() {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Nemotron MoE routing dimensions/scale".into(),
+            ));
+        }
+        // ggml uses zero as the metadata sentinel for "no additional
+        // scaling".
+        let scale = if scale == 0.0 { 1.0 } else { scale };
+        if bias.size < experts * 4 {
+            return Err(VulkanError::UnsupportedShape(
+                "Nemotron MoE selection bias region is too small".into(),
+            ));
+        }
+        let push = [
+            self.f32_rows_word(logits, rows, experts, experts, "router logits")?,
+            self.f32_rows_word(probs, rows, experts, experts, "router probabilities")?,
+            self.f32_rows_word(selection, rows, experts, experts, "router selection")?,
+            self.f32_rows_word(ids, rows, used, used, "expert IDs")?,
+            self.f32_rows_word(weights, rows, used, used, "expert weights")?,
+            as_u32(bias.offset / 4, "router selection bias")?,
+            as_u32(experts, "experts")?,
+            as_u32(used, "selected experts")?,
+            scale.to_bits(),
+            u32::from(normalize),
+        ];
+        let grid = row_dispatch(1, rows, &self.context.limits)?;
+        self.record_linear_dispatch(
+            commands,
+            NEMOTRON_MOE_ROUTE,
+            self.arena_bindings,
+            &push,
+            grid,
+        );
+        Ok(())
+    }
+
+    /// Record the Nemotron-3 Nano MoE reduction.
+    ///
+    /// The routed part is the weighted sum of the expert outputs; the
+    /// shared expert is added on top of it **without a gate and without a
+    /// weight**, which is what separates it from Qwen3.5's reducer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_nemotron_moe_reduce(
+        &self,
+        commands: &TokenCommands<'_>,
+        target: ArenaRegion,
+        routed: ArenaRegion,
+        weights: ArenaRegion,
+        shared: ArenaRegion,
+        width: usize,
+        used: usize,
+        rows: usize,
+        has_shared: bool,
+    ) -> Result<(), VulkanError> {
+        let routed_width = width.checked_mul(used).ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(target, rows, width, width, "MoE residual")?,
+            self.f32_rows_word(routed, rows, routed_width, routed_width, "expert output")?,
+            self.f32_rows_word(weights, rows, used, used, "expert weights")?,
+            self.f32_rows_word(shared, rows, width, width, "shared expert")?,
+            as_u32(width, "MoE width")?,
+            as_u32(used, "selected experts")?,
+            u32::from(has_shared),
+        ];
+        let grid = row_dispatch(width.div_ceil(64), rows, &self.context.limits)?;
+        self.record_linear_dispatch(
+            commands,
+            NEMOTRON_MOE_REDUCE,
+            self.arena_bindings,
+            &push,
+            grid,
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qwen35_moe_reduce(
+        &self,
+        commands: &TokenCommands<'_>,
+        target: ArenaRegion,
+        routed: ArenaRegion,
+        weights: ArenaRegion,
+        shared: ArenaRegion,
+        shared_gate: ArenaRegion,
+        width: usize,
+        used: usize,
+        rows: usize,
+        has_shared: bool,
+    ) -> Result<(), VulkanError> {
+        let routed_width = width.checked_mul(used).ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_rows_word(target, rows, width, width, "MoE residual")?,
+            self.f32_rows_word(routed, rows, routed_width, routed_width, "expert output")?,
+            self.f32_rows_word(weights, rows, used, used, "expert weights")?,
+            self.f32_rows_word(shared, rows, width, width, "shared expert")?,
+            self.f32_rows_word(shared_gate, rows, 1, 1, "shared gate")?,
+            as_u32(width, "MoE width")?,
+            as_u32(used, "selected experts")?,
+            u32::from(has_shared),
+        ];
+        let grid = row_dispatch(width.div_ceil(64), rows, &self.context.limits)?;
+        self.record_linear_dispatch(
+            commands,
+            QWEN35_MOE_REDUCE,
+            self.arena_bindings,
+            &push,
+            grid,
+        );
+        Ok(())
+    }
+
+    /// Fixed published Timestral geometry; every arena range is checked before recording.
+    pub(crate) fn record_timestral(
+        &self,
+        commands: &TokenCommands<'_>,
+        op: TimestralOp,
+        regions: [ArenaRegion; 6],
+        geometry: [usize; 6],
+        d_model: usize,
+        mlp_hidden_dim: usize,
+        num_heads: usize,
+        hd: usize,
+    ) -> Result<(), VulkanError> {
+        let [rows, enc, seq, context, covariates, time] = geometry;
+        if rows == 0
+            || enc == 0
+            || enc >= seq
+            || context == 0
+            || context > enc
+            || covariates > 1
+            || time > 1
+        {
+            return Err(VulkanError::UnsupportedShape(
+                "invalid Timestral GPU geometry".into(),
+            ));
+        }
+        let n = product("Timestral tokens", &[rows, seq])?;
+        let d = product("Timestral hidden", &[n, d_model])?;
+        let sizes = match op {
+            TimestralOp::Qkv => [
+                product("QKV", &[d, 3])?,
+                d,
+                d,
+                d,
+                product("RoPE", &[seq, hd / 2])?,
+                0,
+            ],
+            TimestralOp::Attention => [d, d, d, d, product("valid", &[rows, enc])?, rows],
+            TimestralOp::Gate => [d, d, 0, 0, 0, 0],
+            TimestralOp::SwiGlu => [
+                product("FFN", &[n, 2 * mlp_hidden_dim])?,
+                product("FFN", &[n, mlp_hidden_dim])?,
+                0,
+                0,
+                0,
+                0,
+            ],
+        };
+        let mut push = [0u32; 17];
+        push[0] = op as u32;
+        for (i, (region, size)) in regions.into_iter().zip(sizes).enumerate() {
+            push[i + 1] = self.f32_word(region, size, "Timestral arena")?;
+        }
+        for (i, value) in geometry.into_iter().enumerate() {
+            push[i + 7] = as_u32(value, "Timestral geometry")?;
+        }
+        push[13] = as_u32(d_model, "Timestral d_model")?;
+        push[14] = as_u32(num_heads, "Timestral num_heads")?;
+        push[15] = as_u32(hd, "Timestral hd")?;
+        push[16] = as_u32(mlp_hidden_dim, "Timestral mlp_hidden_dim")?;
+        let groups = match op {
+            TimestralOp::Attention => product("attention queries", &[n, num_heads])?,
+            TimestralOp::SwiGlu => product("FFN dispatch", &[n, mlp_hidden_dim])?.div_ceil(64),
+            _ => d.div_ceil(64),
+        };
+        let grid = row_dispatch(groups, 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, TIMESTRAL, self.arena_bindings, &push, grid);
         Ok(())
     }
 
@@ -2274,12 +7402,27 @@ impl<'a> Qwen3Ops<'a> {
         count: usize,
         rows: usize,
     ) -> Result<(), VulkanError> {
+        self.record_silu_mul_rows_into(commands, gate, up, gate, count, rows, true)
+    }
+
+    pub(crate) fn record_silu_mul_rows_into(
+        &self,
+        commands: &TokenCommands<'_>,
+        gate: ArenaRegion,
+        up: ArenaRegion,
+        output: ArenaRegion,
+        count: usize,
+        rows: usize,
+        approximate: bool,
+    ) -> Result<(), VulkanError> {
         let push = [
             self.f32_rows_word(gate, rows, count, count, "SiLU gate")?,
             self.f32_rows_word(up, rows, count, count, "SiLU multiplier")?,
             as_u32(count, "SiLU length")?,
             as_u32(rows, "silu_mul rows")?,
             as_u32(count, "silu_mul row stride")?,
+            self.f32_rows_word(output, rows, count, count, "SiLU output")?,
+            silu_exp_mode(approximate),
         ];
         let [x, y, z] = row_dispatch(count.div_ceil(64), rows, &self.context.limits)?;
         unsafe {
@@ -2290,6 +7433,72 @@ impl<'a> Qwen3Ops<'a> {
                 bytemuck::cast_slice(&push),
             );
             commands.dispatch(x, y, z);
+            commands.barrier();
+        }
+        if dispatch_log_enabled() {
+            dispatch_log_push(
+                SILU_MUL,
+                self.arena_bindings.descriptor_set_handle(),
+                [x, y, z],
+            );
+        }
+        Ok(())
+    }
+
+    /// `target[channel] = target[channel] * scale[channel] + shift[channel]`,
+    /// in place, over `rows` rows of `count` values each.
+    ///
+    /// This is the DiT's AdaLN modulation. The CPU path runs it per row between
+    /// `rms_norm` and the projection, which means the normalised rows have to
+    /// be uploaded and the modulated rows read back before the matmul can use
+    /// them. Recorded here instead, the whole chain stays in the arena.
+    ///
+    /// `scale` and `shift` share one read-only binding: the caller uploads them
+    /// back to back into a single buffer, and the shader reads the first half as
+    /// scale and the second as shift. They are per-channel `[width]` vectors
+    /// indexed by `index % width`, not by the flat element offset, which is why
+    /// they cannot live in the arena at all.
+    pub(crate) fn record_adaln_modulate_rows(
+        &self,
+        commands: &TokenCommands<'_>,
+        scale: OperatorBindings,
+        target: ArenaRegion,
+        count: usize,
+        rows: usize,
+        row_stride: usize,
+    ) -> Result<(), VulkanError> {
+        // The scale is one `[width]` vector broadcast over every row, so it is
+        // sized by `count` and not by `rows * count`. `require` indexes the
+        // bound extras rather than the descriptor binding, and the scale is the
+        // first extra even though it lands on binding 1.
+        scale.require(0, f32_bytes(count)?, "AdaLN scale")?;
+        let push = [
+            self.f32_rows_word(target, rows, count, row_stride, "modulate target")?,
+            as_u32(count, "modulate length")?,
+            as_u32(rows, "modulate rows")?,
+            as_u32(row_stride, "modulate row stride")?,
+            as_u32(count, "modulate width")?,
+        ];
+        let [x, y, z] = row_dispatch(count.div_ceil(64), rows, &self.context.limits)?;
+        unsafe {
+            commands.bind(
+                self.pipelines[ADALN_MODULATE],
+                self.context.pipeline_layout,
+                // The operator layout puts all four bindings in a single
+                // descriptor set, so one set carries the arena at binding 0 and
+                // the scale at binding 1. Binding three sets here would read
+                // `scale` out of set 0, which is the arena.
+                &[scale.descriptor_set],
+                bytemuck::cast_slice(&push),
+            );
+            commands.dispatch(x, y, z);
+            // Every sibling record_* ends with a barrier, and the fused block
+            // depends on it: AdaLN writes the region the QKV matmul then reads,
+            // and without this the two dispatches race. It stayed hidden while
+            // the matmul was the slow one-token-per-weight kernel, whose long
+            // K-walk left the writes time to land, and showed up as a
+            // run-to-run difference of ~11/255 as soon as the tiled kernel made
+            // that dispatch an order of magnitude faster.
             commands.barrier();
         }
         Ok(())
@@ -2334,8 +7543,61 @@ impl<'a> Qwen3Ops<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_moe_reduce(
+        &self,
+        commands: &TokenCommands<'_>,
+        values: ArenaRegion,
+        scores: ArenaRegion,
+        output: ArenaRegion,
+        residual: ArenaRegion,
+        status: ArenaRegion,
+        width: usize,
+        experts: usize,
+    ) -> Result<(), VulkanError> {
+        if width == 0 || experts == 0 {
+            return Err(VulkanError::UnsupportedShape("empty MoE reduction".into()));
+        }
+        let count = width.checked_mul(experts).ok_or(VulkanError::OutOfMemory)?;
+        let push = [
+            self.f32_word(values, count, "MoE expert outputs")?,
+            self.f32_word(scores, experts, "MoE expert scores")?,
+            self.f32_word(output, width, "MoE output")?,
+            self.f32_word(residual, width, "MoE residual")?,
+            self.f32_word(status, 1, "MoE finite status")?,
+            as_u32(width, "MoE width")?,
+            as_u32(experts, "MoE expert count")?,
+        ];
+        let dispatch = row_dispatch(width.div_ceil(64), 1, &self.context.limits)?;
+        self.record_linear_dispatch(commands, MOE_REDUCE, self.arena_bindings, &push, dispatch);
+        Ok(())
+    }
+
     pub(crate) fn zero_region(&self, region: ArenaRegion) -> Result<(), VulkanError> {
         self.byte_word(region, region.size, "zeroed Vulkan arena region")?;
+        if let Some(staging) = self.staging {
+            if region.size % 4 != 0 {
+                return Err(VulkanError::UnsupportedShape(
+                    "device arena fill must be word aligned".into(),
+                ));
+            }
+            if region.size == 0 {
+                return Ok(());
+            }
+            let commands = TokenCommands::begin(self.context)?;
+            unsafe {
+                std::ptr::write_bytes(staging.mapped, 0, region.size);
+                self.context.record_buffer_copy(
+                    commands.command,
+                    staging,
+                    self.arena,
+                    0,
+                    region.offset as u64,
+                    region.size as u64,
+                );
+            }
+            return commands.submit_and_wait();
+        }
         unsafe { std::ptr::write_bytes(self.arena.mapped.add(region.offset), 0, region.size) };
         Ok(())
     }
@@ -2394,12 +7656,54 @@ impl Drop for Qwen3Ops<'_> {
             self.context
                 .device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
-            for pipeline in self.pipelines {
+            // The operator pipelines belong to the device and outlive this
+            // arena, so the baseline set is not destroyed here. The shaders
+            // `add_shader` appended for this model are arena-owned, and
+            // those are.
+            for &pipeline in &self.pipelines[OPERATOR_SHADERS.len()..] {
                 self.context.device.destroy_pipeline(pipeline, None);
             }
             self.context.destroy_buffer(&self.arena);
+            if let Some(staging) = &self.staging {
+                self.context.destroy_buffer(staging);
+            }
         }
     }
+}
+
+#[test]
+fn expert_weight_ranges_reject_misalignment_overflow_and_out_of_bounds() {
+    let mut limits = vk::PhysicalDeviceLimits::default();
+    limits.min_storage_buffer_offset_alignment = 256;
+    limits.max_storage_buffer_range = 4096;
+    assert!(validate_weight_range(8192, 256, 4096, &limits).is_ok());
+    for (offset, size) in [
+        (1, 1024),
+        (0, 0),
+        (0, 4097),
+        (8192, 1),
+        (u64::MAX - 255, 1024),
+    ] {
+        assert!(validate_weight_range(8192, offset, size, &limits).is_err());
+    }
+}
+
+fn validate_weight_range(
+    buffer_size: u64,
+    offset: u64,
+    size: u64,
+    limits: &vk::PhysicalDeviceLimits,
+) -> Result<(), VulkanError> {
+    if size == 0
+        || offset % limits.min_storage_buffer_offset_alignment.max(1) != 0
+        || size > u64::from(limits.max_storage_buffer_range)
+        || offset.checked_add(size).is_none_or(|end| end > buffer_size)
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid Vulkan weight subrange".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn allocate_bindings(
@@ -2409,10 +7713,30 @@ fn allocate_bindings(
     extras: &[GpuBuffer],
     formats: &[GpuWeightFormat],
 ) -> Result<OperatorBindings, VulkanError> {
+    let ranges = extras.iter().map(|&b| (b, 0, b.size)).collect::<Vec<_>>();
+    allocate_bindings_ranges(context, descriptor_pool, arena, &ranges, formats)
+}
+
+fn allocate_bindings_ranges(
+    context: &VulkanContext,
+    descriptor_pool: vk::DescriptorPool,
+    arena: GpuBuffer,
+    extras: &[(GpuBuffer, u64, u64)],
+    formats: &[GpuWeightFormat],
+) -> Result<OperatorBindings, VulkanError> {
+    if extras.len() > 3 {
+        return Err(VulkanError::UnsupportedShape(
+            "Vulkan descriptor set supports at most 3 weight buffers".into(),
+        ));
+    }
     if extras.len() != formats.len() && !formats.is_empty() {
         return Err(VulkanError::UnsupportedShape(
             "Vulkan weight buffer and format counts differ".into(),
         ));
+    }
+    validate_weight_range(arena.size, 0, arena.size, &context.limits)?;
+    for &(buffer, offset, size) in extras {
+        validate_weight_range(buffer.size, offset, size, &context.limits)?;
     }
     let layouts = [context.descriptor_set_layout];
     let descriptor_set = unsafe {
@@ -2425,17 +7749,20 @@ fn allocate_bindings(
             )
             .map_err(|error| VulkanError::InitFailed(error.to_string()))?[0]
     };
-    let mut buffers = [arena; 4];
-    let mut sizes = [arena.size; 3];
-    for (index, &buffer) in extras.iter().enumerate() {
-        buffers[index + 1] = buffer;
-        sizes[index] = buffer.size;
-    }
-    let infos = buffers.map(|buffer| vk::DescriptorBufferInfo {
-        buffer: buffer.buffer,
+    let mut infos = [vk::DescriptorBufferInfo {
+        buffer: arena.buffer,
         offset: 0,
-        range: vk::WHOLE_SIZE,
-    });
+        range: arena.size,
+    }; 4];
+    let mut sizes = [arena.size; 3];
+    for (index, &(buffer, offset, size)) in extras.iter().enumerate() {
+        infos[index + 1] = vk::DescriptorBufferInfo {
+            buffer: buffer.buffer,
+            offset,
+            range: size,
+        };
+        sizes[index] = size;
+    }
     let writes: [vk::WriteDescriptorSet; 4] = std::array::from_fn(|index| {
         vk::WriteDescriptorSet::builder()
             .dst_set(descriptor_set)
@@ -2449,6 +7776,8 @@ fn allocate_bindings(
         descriptor_set,
         sizes,
         weight_formats: std::array::from_fn(|index| formats.get(index).copied()),
+        weight_mode: GpuMatmulMode::Prepared,
+        weight_layout: GpuWeightLayout::Native,
     })
 }
 
@@ -2469,6 +7798,75 @@ fn pack_u16_pair(low: usize, high: usize, label: &str) -> Result<u32, VulkanErro
 
 fn f32_bytes(count: usize) -> Result<usize, VulkanError> {
     count.checked_mul(4).ok_or(VulkanError::OutOfMemory)
+}
+
+fn mhc_push(
+    arena_size: usize,
+    bias: OperatorBindings,
+    mode: u32,
+    regions: MhcRegions,
+    shape: MhcShape,
+    rows: usize,
+) -> Result<[u32; 12], VulkanError> {
+    let MhcShape {
+        width,
+        streams,
+        iterations,
+        fixed_identity,
+        pre_scale,
+    } = shape;
+    if mode > 3
+        || rows == 0
+        || width == 0
+        || !matches!(streams, 2 | 4)
+        || !(1..=1024).contains(&iterations)
+        || !pre_scale.is_finite()
+        || pre_scale <= 0.0
+    {
+        return Err(VulkanError::UnsupportedShape(
+            "invalid SenseNova mHC shape/mode".into(),
+        ));
+    }
+    let residual_width = product("mHC residual", &[streams, width])?;
+    let logits_width = 2 * streams + if fixed_identity { 0 } else { streams * streams };
+    if mode == 1 {
+        bias.require(0, f32_bytes(logits_width)?, "mHC bias")?;
+    }
+    let spans = [
+        (regions.branch, width, "mHC branch"),
+        (regions.residual, residual_width, "mHC residual"),
+        (regions.logits, logits_width, "mHC logits"),
+        (regions.post, streams, "mHC post"),
+        (regions.mix, streams * streams, "mHC mix"),
+    ];
+    let mut words = [0; 5];
+    let mut ends = [0; 5];
+    for (index, &(region, count, label)) in spans.iter().enumerate() {
+        let bytes = f32_bytes(count)?;
+        words[index] = row_word(arena_size, region, rows, bytes, bytes, label)?;
+        ends[index] = region.offset + product(label, &[rows, bytes])?;
+        for previous in 0..index {
+            if region.offset < ends[previous] && spans[previous].0.offset < ends[index] {
+                return Err(VulkanError::UnsupportedShape(
+                    "mHC regions must not overlap".into(),
+                ));
+            }
+        }
+    }
+    Ok([
+        mode,
+        as_u32(width, "mHC width")?,
+        streams as u32,
+        iterations as u32,
+        u32::from(fixed_identity),
+        pre_scale.to_bits(),
+        as_u32(rows, "mHC rows")?,
+        words[0],
+        words[1],
+        words[2],
+        words[3],
+        words[4],
+    ])
 }
 
 fn row_span(rows: usize, stride: usize, width: usize) -> Result<usize, VulkanError> {
@@ -2506,7 +7904,7 @@ fn row_word(
     as_u32(region.offset / 4, label)
 }
 
-fn row_dispatch(
+pub(crate) fn row_dispatch(
     groups: usize,
     rows: usize,
     limits: &vk::PhysicalDeviceLimits,
@@ -2550,7 +7948,7 @@ fn quantize_rows_push(
     rows: usize,
     input_stride: usize,
     block_elements: usize,
-) -> Result<[u32; 10], VulkanError> {
+) -> Result<[u32; 11], VulkanError> {
     if !matches!(block_elements, 32 | 256) || count == 0 || count % block_elements != 0 {
         return Err(VulkanError::UnsupportedShape(
             "invalid Vulkan quantization width".into(),
@@ -2601,6 +7999,7 @@ fn quantize_rows_push(
             blocks,
             blocks,
             rows_u32,
+            q8_dot_mode(),
         ])
     } else {
         Ok([
@@ -2612,9 +8011,58 @@ fn quantize_rows_push(
             count / 4,
             blocks,
             rows_u32,
+            1, // All CPU Q8_K paths use a signed scale and ties-to-even.
             0,
             0,
         ])
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum AttentionMode {
+    PreparedF16,
+    OnlineF32,
+}
+
+impl AttentionMode {
+    fn reduction(self, width: usize) -> u32 {
+        match self {
+            Self::PreparedF16 => attention_dot_mode(width),
+            Self::OnlineF32 => {
+                256 | if crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
+                    8
+                } else if crate::ops::has_neon() {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+    }
+}
+
+fn attention_dot_mode(width: usize) -> u32 {
+    if crate::ops::f16_uses_neon_accumulators(width) {
+        if cfg!(feature = "ggml-f16-dot-parity") {
+            1
+        } else {
+            2
+        }
+    } else if width >= 8 && crate::ops::has_avx2_fma() && crate::ops::has_f16c() {
+        8
+    } else {
+        0
+    }
+}
+
+// Q8's CPU kernel reduces a whole integer block on NEON, but keeps eight AVX2 streams.
+pub(super) fn q8_dot_mode() -> u32 {
+    if crate::ops::has_avx2_fma() {
+        8
+    } else if crate::ops::has_neon() {
+        1
+    } else {
+        0
     }
 }
 
@@ -2630,24 +8078,45 @@ fn matmul_rows_push(
     n_in: usize,
     token_rows: usize,
     input_stride: usize,
-) -> Result<([u32; 22], [u32; 3]), VulkanError> {
+) -> Result<([u32; 26], [u32; 3]), VulkanError> {
     let format = bindings.weight_format(outputs.len())?;
+    format.with_mode(bindings.weight_mode).validate()?;
     let (block_elements, block_bytes, _) = format.layout();
-    if n_in == 0
-        || n_in % block_elements != 0
-        || input_stride < n_in
-        || (format == GpuWeightFormat::Q8_0 && n_in > 16_384)
-    {
+    // The Q8_0 kernels stage the input row into shared memory in chunks of
+    // 64 blocks, so the row width is not bounded by the shared memory any
+    // more. The old 16384 limit came from a kernel that staged the whole
+    // row at once (`shared uint s_input[4096]`, 512 blocks); it outlived
+    // that kernel and kept every model with a projection wider than 16384
+    // -- Qwen3.8-27B has a 17408 wide MLP down projection -- off the
+    // device with "invalid Vulkan matmul input width/stride".
+    if n_in == 0 || n_in % block_elements != 0 || input_stride < n_in {
         return Err(VulkanError::UnsupportedShape(
             "invalid Vulkan matmul input width/stride".into(),
         ));
     }
-    let is_float = matches!(
-        format,
-        GpuWeightFormat::F16 | GpuWeightFormat::BF16 | GpuWeightFormat::F32
-    );
+    let is_float = format.uses_f32_input();
     let blocks = n_in / block_elements;
-    let mut push = [0; 22];
+    let mut push = [0; 26];
+    if format == GpuWeightFormat::F32 {
+        // F32 has no activation scales; scalar Oracle mode sums rounded products widely.
+        push[1] = if n_in.is_multiple_of(8) && crate::ops::has_avx2_fma() {
+            16
+        } else {
+            u32::from(crate::ops::scalar_mode())
+        };
+    }
+    if format == GpuWeightFormat::F16
+        && bindings.weight_mode == GpuMatmulMode::Prepared
+        && crate::ops::f16_uses_neon_accumulators(n_in)
+    {
+        if !n_in.is_multiple_of(32) {
+            return Err(VulkanError::UnsupportedShape(
+                "F16 NEON reduction with an F64 tail is not implemented on Vulkan".into(),
+            ));
+        }
+        // F16 does not use activation scales; this word selects its reduction.
+        push[1] = attention_dot_mode(n_in);
+    }
     push[0] = if is_float {
         row_word(
             arena_size,
@@ -2682,17 +8151,62 @@ fn matmul_rows_push(
         push[19] = push[16];
         push[20] = push[17];
     }
-    if format == GpuWeightFormat::Q4_1 {
-        let sums = sums
-            .ok_or_else(|| VulkanError::UnsupportedShape("Q4_1 input sums are required".into()))?;
+    if format == GpuWeightFormat::F16 && bindings.weight_mode == GpuMatmulMode::Dot {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() || n_in < 16 {
+            return Err(VulkanError::UnsupportedShape(
+                "F16 dot offload requires the CPU AVX2/F16C reduction".into(),
+            ));
+        }
+        push[1] = 8;
+    }
+    if format == GpuWeightFormat::BF16 && bindings.weight_mode != GpuMatmulMode::RoundedBf16 {
+        push[1] = if crate::ops::has_avx2_fma() && n_in >= 8 {
+            8
+        } else if crate::ops::has_neon() && n_in >= 4 {
+            4
+        } else {
+            0
+        };
+    }
+    if format == GpuWeightFormat::BF16 && bindings.weight_mode == GpuMatmulMode::RoundedBf16 {
+        push[1] = 1;
+    }
+    // Raw-F32 affine input does not use Q8 stride; this slot carries code width.
+    match format {
+        GpuWeightFormat::MlxAffine4 => push[16] = 4,
+        GpuWeightFormat::MlxAffine8 => push[16] = 8,
+        _ => {}
+    }
+    #[cfg(target_arch = "aarch64")]
+    if format == GpuWeightFormat::Q4_K
+        && crate::ops::has_neon()
+        && std::arch::is_aarch64_feature_detected!("dotprod")
+    {
+        // This word is unused by K-quants; NEON reduces each integer block first.
+        push[14] = 1;
+    }
+    if format == GpuWeightFormat::Q6_K {
+        // The portable CPU kernel uses modulo-eight integer streams and unfused adds.
+        push[14] = u32::from(!crate::ops::has_avx2_fma());
+    }
+    // The formats with a per-block minimum (`m`) need the sum of the
+    // quantized activations of every block, and the shaders read it from
+    // this word.
+    if matches!(format, GpuWeightFormat::Q4_1 | GpuWeightFormat::Q5_1) {
+        let sums = sums.ok_or_else(|| {
+            VulkanError::UnsupportedShape("min-term input sums are required".into())
+        })?;
         push[14] = row_word(
             arena_size,
             sums,
             token_rows,
             f32_bytes(blocks)?,
             f32_bytes(blocks)?,
-            "Q4_1 input sums",
+            "min-term input sums",
         )?;
+    }
+    if format == GpuWeightFormat::Q8_0 {
+        push[14] = q8_dot_mode();
     }
     push[2] = as_u32(n_in, "matmul width")?;
     push[3] = as_u32(blocks, "matmul blocks")?;
@@ -2710,6 +8224,23 @@ fn matmul_rows_push(
         bindings.require(slot, bytes, "Vulkan weight")?;
         // Quantized shaders form byte offsets in uint before loading words.
         as_u32(bytes, "Vulkan weight byte span")?;
+        if matches!(
+            format,
+            GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
+        ) {
+            // upload_static adds a 16-byte guard and rounds to a uint word.
+            // Shape-only validation uses the unpadded payload length.
+            let padded_bytes = bytes.checked_add(19).ok_or(VulkanError::OutOfMemory)? & !3;
+            if bindings.sizes[slot] != bytes as u64 && bindings.sizes[slot] != padded_bytes as u64 {
+                return Err(VulkanError::UnsupportedShape(
+                    "MLX planes require the exact matrix row count".into(),
+                ));
+            }
+            as_u32(
+                n_out.checked_mul(n_in).ok_or(VulkanError::OutOfMemory)?,
+                "MLX code span",
+            )?;
+        }
         push[4 + slot * 3] = row_word(
             arena_size,
             region,
@@ -2722,7 +8253,48 @@ fn matmul_rows_push(
         push[6 + slot * 3] = as_u32(stride_bytes / 4, "matmul output stride")?;
         max_output_rows = max_output_rows.max(n_out);
     }
-    let dispatch = matmul_dispatch(max_output_rows, token_rows, outputs.len(), limits)?;
+    // BF16 dot streams occupy 4/8 lanes; use the rest for independent outputs.
+    let output_groups = if format == GpuWeightFormat::F32 {
+        max_output_rows.div_ceil(if push[1] == 16 { 4 } else { 64 })
+    } else if format == GpuWeightFormat::BF16 && push[1] != 0 {
+        max_output_rows.div_ceil(64 / push[1] as usize)
+    } else if format == GpuWeightFormat::Q6_K {
+        max_output_rows.div_ceil(8)
+    } else if matches!(
+        format,
+        GpuWeightFormat::Q4_0
+            | GpuWeightFormat::Q4_1
+            | GpuWeightFormat::Q5_0
+            | GpuWeightFormat::Q5_1
+            | GpuWeightFormat::Q4_K
+            | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q2_K
+            | GpuWeightFormat::Q3_K
+            | GpuWeightFormat::Q8_0
+    ) {
+        // Each lane owns an output row, preserving its serial reduction.
+        max_output_rows.div_ceil(64)
+    } else if format == GpuWeightFormat::F16 {
+        // f16_matmul packs output rows into one workgroup so that all 64
+        // threads work. Each row uses as many lanes as its CPU reduction:
+        // 32 for the parity tree, 16 for NEON, 8 for AVX2/F16C, 1 for scalar.
+        let rows_per_group = match push[1] {
+            1 => 2,
+            2 => 4,
+            8 => 8,
+            _ => 64,
+        };
+        max_output_rows.div_ceil(rows_per_group)
+    } else {
+        max_output_rows
+    };
+    // Four tokens share each weight load; incomplete batches stay masked in shader.
+    let token_groups = if format == GpuWeightFormat::BF16 && push[1] > 1 && token_rows >= 4 {
+        token_rows.div_ceil(4)
+    } else {
+        token_rows
+    };
+    let dispatch = matmul_dispatch(output_groups, token_groups, outputs.len(), limits)?;
     Ok((push, dispatch))
 }
 
@@ -2786,39 +8358,243 @@ pub fn run_batched_matmul_check(
             "q8_0" => GpuWeightFormat::Q8_0,
             "q4_0" => GpuWeightFormat::Q4_0,
             "q4_1" => GpuWeightFormat::Q4_1,
+            "q5_0" => GpuWeightFormat::Q5_0,
+            "q5_1" => GpuWeightFormat::Q5_1,
             "q4_k" => GpuWeightFormat::Q4_K,
             "q5_k" => GpuWeightFormat::Q5_K,
             "q6_k" => GpuWeightFormat::Q6_K,
+            "q2_k" => GpuWeightFormat::Q2_K,
+            "q3_k" => GpuWeightFormat::Q3_K,
             "f16" => GpuWeightFormat::F16,
             "bf16" => GpuWeightFormat::BF16,
             "f32" => GpuWeightFormat::F32,
+            "mlx4" => GpuWeightFormat::MlxAffine4,
+            "mlx8" => GpuWeightFormat::MlxAffine8,
             _ => return Err(format!("unsupported Vulkan weight format {name}")),
         };
-        check_weight_matmul_rows(context, format, rows)
+        check_weight_matmul_rows(context, format, rows, 512, 515)
             .map_err(|error| format!("{name}: {error}"))?;
+        // Qwen3.5-0.8B real activation widths: 1024 = n_embd, 3584 = n_ff.
+        // The shader's shared-memory staging and the arena region strides
+        // both change with n_in, so a single fixture shape can hide a bug.
+        for n_in in [CONV_WIDTH, N_EMBD_WIDTH, N_FF_WIDTH] {
+            check_weight_matmul_rows(context, format, rows, n_in, n_in + 3)
+                .map_err(|error| format!("{name} n_in={n_in}: {error}"))?;
+        }
+        // The Qwen3.5 LM head is the only matmul whose n_out exceeds
+        // `max_compute_work_group_count[0]` (vocab 248320 > 65535), so the
+        // shader's 2D row decomposition is exercised here and nowhere else.
+        check_large_output_matmul(context, format)
+            .map_err(|error| format!("{name} large_output: {error}"))?;
     }
+    // Recording every layer of a Qwen3.5 chunk into one command buffer leaves
+    // ~230 dispatches in flight, and the Meteor Lake driver silently dropped
+    // the trailing ones, which zeroed the LM head output. This check pins the
+    // recording chunking that `TokenCommands::flush` provides.
+    check_long_command_buffer(context)?;
     Ok(())
 }
+
+/// Record more dispatches than `MAX_DISPATCHES_PER_CHUNK` into a single command
+/// buffer and verify that the closing matmul still lands. A driver that drops
+/// the tail of a long command buffer leaves the output untouched, so the
+/// pre-written padding in the destination catches it.
+fn check_long_command_buffer(context: &VulkanContext) -> Result<(), String> {
+    const N_IN: usize = 512;
+    const N_OUT: usize = 64;
+    const FILLER: usize = 512;
+    let mut buffers = Vec::new();
+    let result = (|| -> Result<(), VulkanError> {
+        let layout = ArenaLayout::for_dims(N_IN, N_OUT, 1, 1, N_IN)
+            .map_err(|e| VulkanError::InitFailed(e.to_string()))?;
+        let mut ops = Qwen3Ops::new(context, layout, 4)?;
+        // Fill the arena so a dropped write leaves distinguishable garbage
+        // rather than the zeros a freshly mapped buffer already holds.
+        let filler: Vec<f32> = std::iter::repeat(7.5)
+            .take(layout.total_size() / 4)
+            .collect();
+        for region in layout.regions() {
+            if region.size / 4 <= filler.len() {
+                ops.write_f32(region, &filler[..region.size / 4])?;
+            }
+        }
+        let weight = synthetic_q8_weight(N_IN, N_OUT, 5);
+        let buffer = unsafe { context.upload_static(&weight) }?;
+        buffers.push(buffer);
+        let bindings = ops.bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])?;
+        let input: Vec<f32> = (0..N_IN)
+            .map(|index| ((index * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        let mut q8 = vec![0u8; N_IN];
+        let mut scales = vec![0.0f32; N_IN / 32];
+        crate::ops::quantize_q8_0_into(&input, N_IN, &mut q8, &mut scales);
+        let expected = cpu_q8_matvec(&weight, &q8, &scales, N_IN);
+
+        let commands = TokenCommands::begin(context)?;
+        // `add` over a two-element region is the cheapest recorded dispatch.
+        for _ in 0..FILLER {
+            ops.record_add_rows(
+                &commands,
+                ArenaRegion {
+                    offset: layout.x.offset,
+                    size: 8,
+                },
+                ArenaRegion {
+                    offset: layout.x.offset,
+                    size: 8,
+                },
+                2,
+                1,
+            )?;
+        }
+        ops.write_f32(layout.x, &input)?;
+        ops.record_weight_matvec(
+            &commands,
+            bindings,
+            layout.x,
+            layout.q8,
+            layout.q8_scales,
+            layout.q4_1_input_sums,
+            layout.q8k,
+            layout.q8k_scales,
+            layout.projection,
+            N_IN,
+            N_OUT,
+        )?;
+        commands.submit_and_wait()?;
+
+        let actual = ops.read_f32(layout.projection, N_OUT)?;
+        for (index, (&got, want)) in actual.iter().zip(&expected).enumerate() {
+            if (got - want).abs() > 3e-3 {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "long command buffer matmul mismatch at {index}:                      gpu={got} cpu={want} after {FILLER} filler dispatches"
+                )));
+            }
+        }
+        println!("operator=long_command_buffer filler={FILLER} exact=true");
+        Ok(())
+    })();
+    let cleanup = unsafe { context.destroy_completed_buffers(&buffers) };
+    result.map(|_| ()).and(cleanup).map_err(|e| e.to_string())
+}
+
+/// n_out larger than the device's `max_compute_work_group_count[0]` forces
+/// `dispatch_grid` to split output rows across `groups_y`, which the
+/// single-width checks never reach.
+fn check_large_output_matmul(
+    context: &VulkanContext,
+    format: GpuWeightFormat,
+) -> Result<(), VulkanError> {
+    const N_IN: usize = 1024;
+    const N_OUT: usize = 248_320;
+    // The reference below quantizes the activation with `quantize_q8_0_into`,
+    // which only matches what the GPU records for the 32-element block
+    // formats. The K-quants pre-quantize with `Q8_K` instead, so they need a
+    // separate reference.
+    if !matches!(
+        format,
+        GpuWeightFormat::Q8_0
+            | GpuWeightFormat::Q4_0
+            | GpuWeightFormat::Q4_1
+            | GpuWeightFormat::Q5_0
+            | GpuWeightFormat::Q5_1
+    ) {
+        return Ok(());
+    }
+    let (block_elements, _, _) = format.layout();
+    let blocks = N_IN / block_elements;
+    let weight = synthetic_weight(format, N_IN, N_OUT);
+    let mut q8 = vec![0u8; N_IN];
+    let mut scales = vec![0.0f32; blocks];
+    let input: Vec<f32> = (0..N_IN)
+        .map(|index| ((index * 29 % 251) as f32 - 125.0) / 97.0)
+        .collect();
+    crate::ops::quantize_q8_0_into(&input, N_IN, &mut q8, &mut scales);
+    let expected = cpu_weight_matvec(format, &weight, &input, &q8, &scales, N_IN, N_OUT);
+    let buffer = unsafe { context.upload_static(&weight) }?;
+    let mut buffers = Vec::new();
+    let result = (|| -> Result<(), VulkanError> {
+        let layout = ArenaLayout::for_dims(N_OUT, N_OUT, 1, 1, N_IN)
+            .map_err(|error| error.to_string())
+            .map_err(VulkanError::InitFailed)?;
+        let mut ops = Qwen3Ops::new(context, layout, 2)?;
+        let bindings = ops.bind_weight_buffers(&[buffer], &[format])?;
+        ops.write_f32(layout.x, &input)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_weight_matvec(
+            &commands,
+            bindings,
+            layout.x,
+            layout.q8,
+            layout.q8_scales,
+            layout.q4_1_input_sums,
+            layout.q8k,
+            layout.q8k_scales,
+            layout.projection,
+            N_IN,
+            N_OUT,
+        )?;
+        commands.submit_and_wait()?;
+        let actual = ops.read_f32(layout.projection, N_OUT)?;
+        // Both paths sum n_in/block products, so the f32 accumulator grows
+        // with the magnitude of the output row. Compare relative error and
+        // only fall back to an absolute floor near zero.
+        let mut max_abs = 0.0f32;
+        let mut max_rel = 0.0f32;
+        let mut first_bad = None;
+        for (index, (&got, want)) in actual.iter().zip(&expected).enumerate() {
+            let abs = (got - want).abs();
+            let rel = abs / want.abs().max(1e-3);
+            max_abs = max_abs.max(abs);
+            max_rel = max_rel.max(rel);
+            if rel > 1e-4 && abs > 1e-3 && first_bad.is_none() {
+                first_bad = Some((index, got, want));
+            }
+        }
+        if let Some((index, got, want)) = first_bad {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "large_output matmul mismatch at {index}: gpu={got} cpu={want} \
+                 max_abs={max_abs:.3e} max_rel={max_rel:.3e}"
+            )));
+        }
+        println!(
+            "operator=large_output_matmul format={format:?} n_in={N_IN} n_out={N_OUT} \
+             max_abs={max_abs:.3e} max_rel={max_rel:.3e}"
+        );
+        Ok(())
+    })();
+    buffers.push(buffer);
+    let cleanup = unsafe { context.destroy_completed_buffers(&buffers) };
+    result.and(cleanup)
+}
+
+/// Staged input width covering the Qwen3.5 recurrent convolution/SSM
+/// matmuls (n_in = 512 for this model).
+const CONV_WIDTH: usize = 512;
+/// Staged input width covering the Qwen3.5 attention/norm matmuls (n_embd).
+const N_EMBD_WIDTH: usize = 1024;
+/// Staged input width covering the Qwen3.5 feed-forward matmuls (n_ff).
+const N_FF_WIDTH: usize = 3584;
 
 fn check_weight_matmul_rows(
     context: &VulkanContext,
     format: GpuWeightFormat,
     rows: usize,
+    n_in: usize,
+    input_stride: usize,
 ) -> Result<(), String> {
-    const N_IN: usize = 512;
-    const INPUT_STRIDE: usize = 515;
     let mut buffers = Vec::new();
     let result = (|| -> Result<(), VulkanError> {
         matmul_dispatch(65, rows, 3, &context.limits)?;
         let mut cursor = 0;
-        let input = f32_region(&mut cursor, row_span(rows, INPUT_STRIDE, N_IN)?)?;
-        let q8 = region(&mut cursor, row_span(rows, N_IN, N_IN)?)?;
-        let scales = f32_region(&mut cursor, row_span(rows, N_IN / 32, N_IN / 32)?)?;
-        let sums = f32_region(&mut cursor, row_span(rows, N_IN / 32, N_IN / 32)?)?;
-        let q8k = region(&mut cursor, row_span(rows, N_IN, N_IN)?)?;
-        let k_scales = f32_region(&mut cursor, row_span(rows, N_IN / 256, N_IN / 256)?)?;
+        let input = f32_region(&mut cursor, row_span(rows, input_stride, n_in)?)?;
+        let q8 = region(&mut cursor, row_span(rows, n_in, n_in)?)?;
+        let scales = f32_region(&mut cursor, row_span(rows, n_in / 32, n_in / 32)?)?;
+        let sums = f32_region(&mut cursor, row_span(rows, n_in / 32, n_in / 32)?)?;
+        let q8k = region(&mut cursor, row_span(rows, n_in, n_in)?)?;
+        let k_scales = f32_region(&mut cursor, row_span(rows, n_in / 256, n_in / 256)?)?;
         let mut outputs = Vec::new();
-        for (slot, n_out) in [65, 33, 17].into_iter().enumerate() {
+        for (slot, n_out) in [33, 65, 17].into_iter().enumerate() {
             let stride = (n_out + (slot + 1) * 3) * 4;
             outputs.push((
                 region(&mut cursor, row_span(rows, stride, n_out * 4)?)?,
@@ -2826,11 +8602,16 @@ fn check_weight_matmul_rows(
                 stride,
             ));
             let weight = if format == GpuWeightFormat::Q8_0 {
-                synthetic_q8_weight(N_IN, n_out, 3 + slot * 4)
+                synthetic_q8_weight(n_in, n_out, 3 + slot * 4)
+            } else if matches!(
+                format,
+                GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
+            ) {
+                synthetic_weight(format, n_in, n_out)
             } else {
                 let (block, bytes, _) = format.layout();
-                let weight = synthetic_weight(format, N_IN, n_out + slot);
-                weight[slot * (N_IN / block) * bytes..].to_vec()
+                let weight = synthetic_weight(format, n_in, n_out + slot);
+                weight[slot * (n_in / block) * bytes..].to_vec()
             };
             buffers.push(unsafe { context.upload_static(&weight)? });
         }
@@ -2847,8 +8628,8 @@ fn check_weight_matmul_rows(
             97.0
         };
         for row in 0..rows {
-            for index in 0..N_IN {
-                input_values[row * INPUT_STRIDE + index] =
+            for index in 0..n_in {
+                input_values[row * input_stride + index] =
                     ((row * 53 + index * 29) % 251) as f32 / divisor - 125.0 / divisor;
             }
         }
@@ -2868,9 +8649,9 @@ fn check_weight_matmul_rows(
             q8k,
             k_scales,
             &outputs,
-            N_IN,
+            n_in,
             rows,
-            INPUT_STRIDE,
+            input_stride,
         )?;
         commands.submit_and_wait()?;
         let mut actual = Vec::new();
@@ -2887,8 +8668,8 @@ fn check_weight_matmul_rows(
         let commands = TokenCommands::begin(context)?;
         for row in 0..rows {
             let row_input = ArenaRegion {
-                offset: input.offset + row * INPUT_STRIDE * 4,
-                size: N_IN * 4,
+                offset: input.offset + row * input_stride * 4,
+                size: n_in * 4,
             };
             for (slot, &(output, n_out, stride)) in outputs.iter().enumerate() {
                 let row_output = ArenaRegion {
@@ -2905,9 +8686,9 @@ fn check_weight_matmul_rows(
                     q8k,
                     k_scales,
                     &[(row_output, n_out, n_out * 4)],
-                    N_IN,
+                    n_in,
                     1,
-                    N_IN,
+                    n_in,
                 )?;
             }
         }
@@ -2938,24 +8719,174 @@ fn check_weight_matmul_rows(
                 ));
             }
         }
-        println!("operator=batched_matmul format={format:?} rows={rows} groups=3 input_stride={INPUT_STRIDE} padded_outputs=true exact_bits=true");
+        println!("operator=batched_matmul format={format:?} rows={rows} groups=3 input_stride={input_stride} padded_outputs=true exact_bits=true");
         Ok(())
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&buffers) };
     result.and(cleanup).map_err(|error| error.to_string())
 }
 
-pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
-    check_quantize_tie_even(context)?;
+/// SiLU at the size the Z-Image FFN actually uses.
+///
+/// `check_operator_chain` covers this shader with `N_FF = 96`. The DiT FFN
+/// records it with `ffn_len` = rows * FFN_WIDTH, which is 37 324 800 at 512x512
+/// -- six orders of magnitude more, and a dispatch wide enough that
+/// `dispatch_grid` has to split it across x and y. If the shader only works at
+/// the small size, nothing upstream notices until a render comes out `-inf`.
+///
+/// That is exactly what happened: `exp_approx` clamped at the exp overflow
+/// point, where `1/(1 + exp(-gate))` drops below the f32 normal range and the
+/// residual correction turns to NaN. The small fixture never reached a gate
+/// anywhere near the boundary, so it passed while every production render
+/// failed. The values fed here (1e-17, 0.4, 20, 103, 962, -197.4, 0) bracket
+/// the range the DiT actually produces.
+///
+/// Kept as a gate in `run_qwen3_operator_check`: any change to the saturation
+/// clamp in `silu_mul.comp` has to keep this at zero. See TODO.md.
+///
+/// The values above, not the shape, are what make this gate work.
+///
+/// `silu_mul.comp` is elementwise: no shared memory, no barrier, no
+/// lane-to-lane dependency, and each output reads only the same-index gate
+/// and up. So the count is a multiplier and every element gets identical
+/// treatment; `-197.4` is the value that reaches the regime that produced the
+/// NaN, and it is present.
+///
+/// Worth stating because it looks like the opposite is true. A check whose
+/// fidelity depends on matching production exactly is the pattern that let a
+/// 96-element fixture hide a production-scale defect in the first place. Here
+/// the width genuinely does not matter -- both 9728 and 10240 are exact
+/// multiples of the 64-wide dispatch, so neither exercises a ragged tail
+/// either -- and the constant is pinned to the model's so that stays true.
+///
+/// The property is a property of the current kernel. If SiLU is ever
+/// rewritten to share a row across lanes, the count starts to matter and
+/// this stops representing production without saying so.
+///
+/// Returns the number of non-finite outputs, so a caller can assert on it
+/// without treating corruption as an error string.
+/// Width of the Z-Image Turbo FFN activation at 512x512.
+///
+/// The probe below used to hard-code 9728 next to a comment claiming it was the
+/// production shape, when the real width is 10240. Reading it from the model
+/// makes that class of drift impossible. `dit::FFN_WIDTH` is not reachable from
+/// here without pulling the model in, so `silu_probe_uses_the_production_ffn_width`
+/// asserts the two agree.
+#[cfg(feature = "vulkan")]
+const Z_IMAGE_FFN_WIDTH: usize = 10_240;
+
+#[cfg(feature = "vulkan")]
+pub fn silu_ffn_scale_probe(context: &VulkanContext) -> Result<usize, String> {
+    const ROWS: usize = 3840;
+    let count = ROWS * Z_IMAGE_FFN_WIDTH;
+    // `for_dims` sizes the Q8 staging for `n_in`, not for two FFN-wide feature
+    // buffers, so gate and up need their own arena sized for both.
+    let bytes = (count * 4 * 2).next_multiple_of(1 << 20) + (1 << 20);
+    let ops = Qwen3Ops::new_device_local_with_size(context, bytes, 16)
+        .map_err(|error| error.to_string())?;
+    let gate_region = ArenaRegion {
+        offset: 0,
+        size: count * 4,
+    };
+    let up_region = ArenaRegion {
+        offset: count * 4,
+        size: count * 4,
+    };
+
+    // Values spanning the range the DiT produces: small, moderate, and large
+    // enough that silu(gate) * up reaches ~1e5, which is what the fused FFN
+    // sees after w1 and w3.
+    let mut gate = vec![0.0f32; count];
+    let mut up = vec![0.0f32; count];
+    for (index, slot) in gate.iter_mut().enumerate() {
+        let phase = index % 7;
+        let magnitude = match phase {
+            0 => 1e-17,
+            1 => 0.4,
+            2 => 20.0,
+            3 => 103.0,
+            4 => 962.0,
+            5 => -197.4,
+            _ => 0.0,
+        };
+        *slot = if index % 2 == 0 {
+            magnitude
+        } else {
+            -magnitude
+        };
+        up[index] = ((index % 11) as f32 - 5.0) * 0.37;
+    }
+    ops.write_f32(gate_region, &gate)
+        .map_err(|error| error.to_string())?;
+    ops.write_f32(up_region, &up)
+        .map_err(|error| error.to_string())?;
+
+    let commands = TokenCommands::begin(context).map_err(|error| error.to_string())?;
+    ops.record_silu_mul(&commands, gate_region, up_region, count)
+        .map_err(|error| error.to_string())?;
+    commands
+        .submit_and_wait()
+        .map_err(|error| error.to_string())?;
+
+    ops.read_f32_into(gate_region, &mut gate)
+        .map_err(|error| error.to_string())?;
+    let nonfinite = gate.iter().filter(|value| !value.is_finite()).count();
+    Ok(nonfinite)
+}
+
+pub(crate) fn check_qwen3_core_contract(context: &VulkanContext) -> Result<(), String> {
     check_attention_scores_match_cpu_reduction(context)?;
     check_softmax_f16_rounding(context)?;
     check_attention_value_reduction(context)?;
+    Ok(())
+}
+
+/// Validate the activation quantizer used by Q8_0, Q4_0 and Q4_1 matmuls.
+///
+/// This is deliberately separate from [`check_qwen3_core_contract`]: K-quants
+/// use Q8_K activations and must not be rejected because a device rounds the
+/// unrelated Q8_0 scale differently.
+pub(crate) fn check_q8_0_activation_contract(context: &VulkanContext) -> Result<(), String> {
+    check_quantize_tie_even(context)
+}
+
+/// Validate the activation quantizer used by Q4_K, Q5_K and Q6_K matmuls.
+pub(crate) fn check_q8_k_activation_contract(context: &VulkanContext) -> Result<(), String> {
+    check_quantize_q8_k_exact(context)
+}
+
+pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Result<(), String> {
+    check_qwen3_core_contract(context)?;
+    if std::env::var("SILU_SCALE_ONLY").is_err() {
+        match silu_ffn_scale_probe(context) {
+            Ok(0) => println!("operator=silu_mul_ffn_scale rows=3840 width={Z_IMAGE_FFN_WIDTH} finite=true"),
+            Ok(nonfinite) => {
+                return Err(format!(
+                    "silu_mul produced {nonfinite} non-finite values at the Z-Image FFN shape (3840 x {Z_IMAGE_FFN_WIDTH})"
+                ))
+            }
+            Err(error) => return Err(format!("silu_mul FFN-scale check: {error}")),
+        }
+    }
+    check_rms_norm_exact(context)?;
+    check_rope_exact(context)?;
     for &format in formats {
         check_weight_format(context, format)?;
     }
-    if formats.contains(&"q4_k") || formats.contains(&"q5_k") || formats.contains(&"q6_k") {
-        check_quantize_q8_k_exact(context)?;
+    if formats
+        .iter()
+        .any(|format| matches!(*format, "q8_0" | "q4_0" | "q4_1"))
+    {
+        check_q8_0_activation_contract(context)?;
     }
+    if formats
+        .iter()
+        .any(|format| matches!(*format, "q4_k" | "q5_k" | "q6_k" | "q2_k" | "q3_k"))
+    {
+        check_q8_k_activation_contract(context)?;
+    }
+    check_qwen35_conv_exact(context)?;
+    check_qwen35_ssm_reduction(context)?;
 
     const N_EMBD: usize = 64;
     const N_FF: usize = 96;
@@ -3116,11 +9047,8 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
             KV_HEADS,
             HEAD_DIM,
         );
-        let expected_gate: Vec<f32> = gate
-            .iter()
-            .zip(&up)
-            .map(|(&gate, &up)| crate::ops::silu(gate) * up)
-            .collect();
+        let mut expected_gate = up.clone();
+        crate::ops::silu_mul_approx_inplace(&gate, &mut expected_gate);
         let expected_add: Vec<f32> = input
             .iter()
             .zip(&expected_projection)
@@ -3355,14 +9283,21 @@ pub fn run_qwen3_operator_check(context: &VulkanContext, formats: &[&str]) -> Re
             4e-5,
             4e-5,
         )?;
-        check_close(
-            "silu_mul",
-            ops.read_f32(layout.gate, N_FF)
-                .map_err(|error| error.to_string())?,
-            &expected_gate,
-            3e-5,
-            3e-5,
-        )?;
+        let actual_gate = ops
+            .read_f32(layout.gate, N_FF)
+            .map_err(|error| error.to_string())?;
+        if let Some(index) = actual_gate
+            .iter()
+            .zip(&expected_gate)
+            .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+        {
+            return Err(format!(
+                "silu_mul mismatch at {index}: gpu={:#010x} cpu={:#010x}",
+                actual_gate[index].to_bits(),
+                expected_gate[index].to_bits()
+            ));
+        }
+        println!("operator=silu_mul exact_bits=true");
         check_close(
             "residual_add",
             ops.read_f32(layout.x, N_EMBD)
@@ -3383,27 +9318,47 @@ fn check_weight_format(context: &VulkanContext, name: &str) -> Result<(), String
     let format = match name {
         "q4_0" => GpuWeightFormat::Q4_0,
         "q4_1" => GpuWeightFormat::Q4_1,
+        "q5_0" => GpuWeightFormat::Q5_0,
+        "q5_1" => GpuWeightFormat::Q5_1,
         "q4_k" => GpuWeightFormat::Q4_K,
         "q5_k" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::Q5K)
             .map_err(|error| error.to_string())?,
         "q6_k" => GpuWeightFormat::Q6_K,
+        "q2_k" => GpuWeightFormat::Q2_K,
+        "q3_k" => GpuWeightFormat::Q3_K,
         "f16" => GpuWeightFormat::F16,
         "bf16" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::BF16)
             .map_err(|error| error.to_string())?,
         "f32" => GpuWeightFormat::from_ggml_type(crate::core::tensor::GGMLType::F32)
             .map_err(|error| error.to_string())?,
+        "mlx4" => GpuWeightFormat::MlxAffine4,
+        "mlx8" => GpuWeightFormat::MlxAffine8,
+        "q8_0" => GpuWeightFormat::Q8_0,
         _ => return Err(format!("unsupported Vulkan weight format {name}")),
     };
     let n_in = match format {
         GpuWeightFormat::Q4_0 => 1024,
         GpuWeightFormat::Q4_1 => 3072,
+        GpuWeightFormat::Q5_0 => 1024,
+        GpuWeightFormat::Q5_1 => 3072,
         GpuWeightFormat::Q4_K => 1024,
         GpuWeightFormat::Q5_K => 1024,
         GpuWeightFormat::Q6_K => 1024,
+        GpuWeightFormat::Q2_K => 1024,
+        GpuWeightFormat::Q3_K => 1024,
+        GpuWeightFormat::IQ4_XS => 1024,
+        GpuWeightFormat::IQ2_XXS => 1024,
+        GpuWeightFormat::IQ2_XS => 1024,
+        GpuWeightFormat::IQ2_S => 1024,
+        GpuWeightFormat::IQ3_XXS => 1024,
+        GpuWeightFormat::IQ3_S => 1024,
+        GpuWeightFormat::IQ1_S => 1024,
+        GpuWeightFormat::IQ1_M => 1024,
         GpuWeightFormat::F16 => 1024,
         GpuWeightFormat::BF16 => 1024,
         GpuWeightFormat::F32 => 1024,
-        GpuWeightFormat::Q8_0 => unreachable!(),
+        GpuWeightFormat::Q8_0 => 1024,
+        GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => 1024,
     };
     check_weight_matvec(context, name, format, n_in, 65)
 }
@@ -3427,8 +9382,8 @@ fn check_weight_matvec(
             ((index * 29 % 251) as f32 - 125.0) / divisor
         })
         .collect();
-    if format == GpuWeightFormat::Q4_1 {
-        check_q4_1_input_sums(context, &input)?;
+    if matches!(format, GpuWeightFormat::Q4_1 | GpuWeightFormat::Q5_1) {
+        check_min_term_input_sums(context, &input)?;
     }
     let weight = synthetic_weight(format, n_in, n_out);
     if format == GpuWeightFormat::Q4_1 {
@@ -3436,9 +9391,12 @@ fn check_weight_matvec(
     }
     let mut q8 = vec![0; n_in];
     let mut scales = vec![0.0; n_in / 32];
+    let cpu_t = std::time::Instant::now();
     crate::ops::quantize_q8_0_into(&input, n_in, &mut q8, &mut scales);
     let expected = cpu_weight_matvec(format, &weight, &input, &q8, &scales, n_in, n_out);
+    let cpu_elapsed = cpu_t.elapsed().as_secs_f64();
     let buffer = unsafe { context.upload_static(&weight) }.map_err(|error| error.to_string())?;
+    let gpu_t = std::time::Instant::now();
     let result = (|| -> Result<(), String> {
         let mut ops = Qwen3Ops::new(context, layout, 2).map_err(|error| error.to_string())?;
         let bindings = ops
@@ -3464,20 +9422,39 @@ fn check_weight_matvec(
         commands
             .submit_and_wait()
             .map_err(|error| error.to_string())?;
+        let gpu_elapsed = gpu_t.elapsed().as_secs_f64();
         let tolerance = match format {
             GpuWeightFormat::F32 => 0.0,
-            GpuWeightFormat::Q4_K | GpuWeightFormat::Q5_K => 3e-3,
+            // Q6_K used to be 0.0 because the NEON kernel reproduced the scalar
+            // reference bit-for-bit. The production NEON kernel now uses
+            // vdotq_s32 with a different integer grouping, which is
+            // mathematically equivalent but not bit-identical. k-quant formats
+            // carry ~1 % weight quantization noise, so 3e-3 (matching Q4_K/Q5_K)
+            // is the meaningful bound. The bit-exact path is still tested
+            // separately in neon_k::tests::q6k_neon_bits_match_scalar.
+            GpuWeightFormat::Q6_K => 3e-3,
+            GpuWeightFormat::Q4_K
+            | GpuWeightFormat::Q5_K
+            | GpuWeightFormat::Q2_K
+            | GpuWeightFormat::Q3_K => 3e-3,
             GpuWeightFormat::F16 | GpuWeightFormat::BF16 => 2e-4,
             _ => 2e-3,
         };
-        check_close(
-            name,
-            ops.read_f32(layout.projection, n_out)
-                .map_err(|error| error.to_string())?,
-            &expected,
-            tolerance,
-            tolerance,
-        )
+        let got = ops
+            .read_f32(layout.projection, n_out)
+            .map_err(|error| error.to_string())?;
+        // Same matmul on both sides, so the wall-clock ratio is the effective
+        // throughput ratio for this shape.
+        let macs = (n_in * n_out) as f64;
+        println!(
+            "operator={name} matvec gpu={:.3}ms ({:.2} GINTOP/s) cpu={:.3}ms ({:.2} GINTOP/s) ratio={:.1}x",
+            gpu_elapsed * 1e3,
+            macs / gpu_elapsed / 1e9,
+            cpu_elapsed * 1e3,
+            macs / cpu_elapsed / 1e9,
+            cpu_elapsed / gpu_elapsed,
+        );
+        check_close(name, got, &expected, tolerance, tolerance)
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     result.and(cleanup.map_err(|error| error.to_string()))
@@ -3506,7 +9483,13 @@ fn check_q4_1_zero_scale_min_fixture(
     Err("Q4_1 fixture is missing a d=0,m!=0 block".into())
 }
 
-fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), String> {
+/// Check the per-block activation sums the Q4_1 and Q5_1 kernels read.
+///
+/// Both formats carry a per-block minimum `m`, so their dot product needs
+/// the sum of the quantized activations of every block. The device writes
+/// those sums in the Q8 quantization step; this runs that step and
+/// compares the result with the host's own arithmetic.
+fn check_min_term_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), String> {
     let count = input.len();
     let layout =
         ArenaLayout::for_dims(count, count, 1, 1, count).map_err(|error| error.to_string())?;
@@ -3541,7 +9524,7 @@ fn check_q4_1_input_sums(context: &VulkanContext, input: &[f32]) -> Result<(), S
         })
         .collect();
     if expected == stored_scale_terms {
-        return Err("Q4_1 input-sum fixture does not distinguish raw and stored scales".into());
+        return Err("min-term input-sum fixture does not distinguish raw and stored scales".into());
     }
     ops.write_f32(layout.x, input)
         .map_err(|error| error.to_string())?;
@@ -3580,6 +9563,31 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
     let (elements, bytes, _) = format.layout();
     let blocks = n_in / elements;
     let mut data = vec![0; n_out * blocks * bytes];
+    if matches!(
+        format,
+        GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8
+    ) {
+        let packed_len = n_in
+            * n_out
+            * if format == GpuWeightFormat::MlxAffine4 {
+                1
+            } else {
+                2
+            }
+            / 2;
+        for (index, code) in data[..packed_len].iter_mut().enumerate() {
+            *code = ((index * 37 + index / 19 + 3) & 255) as u8;
+        }
+        for index in 0..n_out * blocks {
+            let scale = half::bf16::from_f32(0.003 + (index % 11) as f32 * 0.0005).to_bits();
+            let bias = half::bf16::from_f32(-0.25 + (index % 7) as f32 * 0.03125).to_bits();
+            let offset = packed_len + index * 2;
+            data[offset..offset + 2].copy_from_slice(&scale.to_le_bytes());
+            let offset = offset + n_out * blocks * 2;
+            data[offset..offset + 2].copy_from_slice(&bias.to_le_bytes());
+        }
+        return data;
+    }
     for row in 0..n_out {
         for block in 0..blocks {
             let offset = (row * blocks + block) * bytes;
@@ -3622,6 +9630,60 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         *value = low | (high << 4);
                     }
                 }
+                GpuWeightFormat::Q5_0 => {
+                    // d (f16), qh (u32), qs (16 bytes of nibbles).
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    let mut qh = 0u32;
+                    for bit in 0..32 {
+                        if (row * 3 + block * 5 + bit * 7) % 3 == 0 {
+                            qh |= 1 << bit;
+                        }
+                    }
+                    data[offset + 2..offset + 6].copy_from_slice(&qh.to_le_bytes());
+                    for (index, value) in data[offset + 6..offset + 22].iter_mut().enumerate() {
+                        let low = ((row * 11 + block * 7 + index * 3 + 1) & 15) as u8;
+                        let high = ((row * 5 + block * 13 + index * 9 + 6) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::Q5_1 => {
+                    // d (f16), m (f16), qh (u32), qs (16 bytes of nibbles).
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    data[offset + 2..offset + 4].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            -0.25
+                        } else {
+                            -(block as f32 + 2.0) / 53.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    let mut qh = 0u32;
+                    for bit in 0..32 {
+                        if (row * 3 + block * 5 + bit * 7) % 3 == 0 {
+                            qh |= 1 << bit;
+                        }
+                    }
+                    data[offset + 4..offset + 8].copy_from_slice(&qh.to_le_bytes());
+                    for (index, value) in data[offset + 8..offset + 24].iter_mut().enumerate() {
+                        let low = ((row * 3 + block * 5 + index * 7 + 2) & 15) as u8;
+                        let high = ((row * 13 + block * 11 + index * 2 + 4) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
                 GpuWeightFormat::Q4_K => {
                     data[offset..offset + 2].copy_from_slice(
                         &crate::ops::f32_to_f16(if row == 0 && block == 0 {
@@ -3646,6 +9708,52 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         let low = ((row * 7 + block * 13 + index * 3 + 1) & 15) as u8;
                         let high = ((row * 11 + block * 5 + index * 9 + 6) & 15) as u8;
                         *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::IQ4_XS => {
+                    // d = 0 on the first block so the exact-comparison output
+                    // of the zero-row stays 0; the rest is patterned data
+                    // covering every nibble and scale-bit combination.
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    let scales_h: u16 = (((row * 5 + block * 3 + 1) & 0xff) as u16) << 8
+                        | (((row * 7 + block * 11 + 2) & 0xff) as u16);
+                    data[offset + 2..offset + 4].copy_from_slice(&scales_h.to_le_bytes());
+                    for (index, value) in data[offset + 4..offset + 8].iter_mut().enumerate() {
+                        *value = ((row * 13 + block * 7 + index * 29 + 5) & 255) as u8;
+                    }
+                    for (index, value) in data[offset + 8..offset + 136].iter_mut().enumerate() {
+                        let low = ((row * 17 + block * 3 + index * 7 + 1) & 15) as u8;
+                        let high = ((row * 3 + block * 13 + index * 5 + 8) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                }
+                GpuWeightFormat::IQ2_XXS
+                | GpuWeightFormat::IQ2_XS
+                | GpuWeightFormat::IQ2_S
+                | GpuWeightFormat::IQ3_XXS
+                | GpuWeightFormat::IQ3_S
+                | GpuWeightFormat::IQ1_S
+                | GpuWeightFormat::IQ1_M => {
+                    // d = 0 on the first block (zero-row convention); the rest
+                    // is patterned bytes — every grid/sign/scale bit pattern
+                    // decodes, so the GPU/CPU comparison covers the format.
+                    data[offset..offset + 2].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    for (index, value) in data[offset + 2..offset + bytes].iter_mut().enumerate() {
+                        *value = ((index * 37 + row * 17 + block * 11 + 3) & 255) as u8;
                     }
                 }
                 GpuWeightFormat::Q5_K => {
@@ -3701,6 +9809,59 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                         .to_le_bytes(),
                     );
                 }
+                GpuWeightFormat::Q2_K => {
+                    // 16 bytes of scale/min nibbles (low = sub-block scale,
+                    // high = sub-block min), 64 patterned qs bytes, d/dmin
+                    // f16 pair at 80/82. d = 0 on the first block keeps the
+                    // zero-row convention.
+                    for (index, value) in data[offset..offset + 16].iter_mut().enumerate() {
+                        let low = ((row * 7 + block * 13 + index * 3 + 1) & 15) as u8;
+                        let high = ((row * 11 + block * 5 + index * 9 + 6) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                    for (index, value) in data[offset + 16..offset + 80].iter_mut().enumerate() {
+                        *value = ((row * 31 + block * 17 + index * 37 + 11) & 255) as u8;
+                    }
+                    data[offset + 80..offset + 82].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                    data[offset + 82..offset + 84].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 2.0) / 96.0
+                        })
+                        .to_le_bytes(),
+                    );
+                }
+                GpuWeightFormat::Q3_K => {
+                    // hmask[32], qs[64], 12 packed scale bytes, d (f16) at
+                    // 108; every sign/hmask bit combination decodes.
+                    for (index, value) in data[offset..offset + 32].iter_mut().enumerate() {
+                        *value = ((row * 19 + block * 23 + index * 37 + 5) & 255) as u8;
+                    }
+                    for (index, value) in data[offset + 32..offset + 96].iter_mut().enumerate() {
+                        let low = ((row * 7 + block * 13 + index * 3 + 1) & 15) as u8;
+                        let high = ((row * 11 + block * 5 + index * 9 + 6) & 15) as u8;
+                        *value = low | (high << 4);
+                    }
+                    for (index, value) in data[offset + 96..offset + 108].iter_mut().enumerate() {
+                        *value = ((row * 29 + block * 17 + index * 37 + 3) & 255) as u8;
+                    }
+                    data[offset + 108..offset + 110].copy_from_slice(
+                        &crate::ops::f32_to_f16(if row == 0 && block == 0 {
+                            0.0
+                        } else {
+                            (row as f32 + block as f32 + 1.0) / 64.0
+                        })
+                        .to_le_bytes(),
+                    );
+                }
                 GpuWeightFormat::F16 => {
                     let bits = match block {
                         0 => 0x0000,
@@ -3737,7 +9898,20 @@ fn synthetic_weight(format: GpuWeightFormat, n_in: usize, n_out: usize) -> Vec<u
                     let value = ((row * 17 + block * 31) % 257) as f32 / 63.0 - 2.0;
                     data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
                 }
-                GpuWeightFormat::Q8_0 => unreachable!(),
+                GpuWeightFormat::Q8_0 => {
+                    // GGUF Q8_0 block: [f16 scale][32 x i8] = 34 bytes.
+                    // Scales stay in the range real Q8_0 tensors use
+                    // (~1e-3); deriving them from `row` alone grows them
+                    // quadratically for large n_out and drowns the matmul
+                    // in f32 rounding, hiding structural bugs.
+                    let scale = 0.004 + ((row + block) % 13) as f32 * 0.0003;
+                    data[offset..offset + 2]
+                        .copy_from_slice(&crate::ops::f32_to_f16(scale).to_le_bytes());
+                    for (index, value) in data[offset + 2..offset + 34].iter_mut().enumerate() {
+                        *value = ((row * 11 + block * 7 + index * 3 + 1) & 255) as u8;
+                    }
+                }
+                GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => unreachable!(),
             }
         }
     }
@@ -3755,6 +9929,21 @@ fn cpu_weight_matvec(
 ) -> Vec<f32> {
     let mut output = vec![0.0; n_out];
     match format {
+        GpuWeightFormat::MlxAffine4 | GpuWeightFormat::MlxAffine8 => {
+            let bits = if format == GpuWeightFormat::MlxAffine4 {
+                4
+            } else {
+                8
+            };
+            let packed_len = n_in * n_out * bits / 8;
+            let (packed, metadata) = weight.split_at(packed_len);
+            let (scales, biases) = metadata.split_at(n_in / 64 * n_out * 2);
+            let kernel = crate::ops::kernel::mlx_affine::MlxAffineKernel::new(
+                packed, scales, biases, n_in, n_out, bits, None,
+            )
+            .unwrap();
+            crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+        }
         GpuWeightFormat::Q4_0 => {
             let kernel = crate::ops::kernel::q4_0::Q4_0Kernel::new(weight, n_in, n_out);
             crate::ops::kernel::Kernel::forward_prepared(
@@ -3785,6 +9974,36 @@ fn cpu_weight_matvec(
                 1,
             );
         }
+        GpuWeightFormat::Q5_0 => {
+            let kernel = crate::ops::kernel::q5_0::Q5_0Kernel::new(weight, n_in, n_out);
+            crate::ops::kernel::Kernel::forward_prepared(
+                &kernel,
+                input,
+                q8,
+                scales,
+                None,
+                &mut output,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
+        }
+        GpuWeightFormat::Q5_1 => {
+            let kernel = crate::ops::kernel::q5_1::Q5_1Kernel::new(weight, n_in, n_out);
+            crate::ops::kernel::Kernel::forward_prepared(
+                &kernel,
+                input,
+                q8,
+                scales,
+                None,
+                &mut output,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
+        }
         GpuWeightFormat::Q4_K => {
             let q8k = crate::ops::quant::quantize_row_q8_k(input);
             for (row, output) in output.iter_mut().enumerate() {
@@ -3793,6 +10012,128 @@ fn cpu_weight_matvec(
                     &weight[row * row_bytes..(row + 1) * row_bytes],
                     &q8k,
                 );
+            }
+        }
+        GpuWeightFormat::Q2_K => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q2K_SIZE;
+                *output = crate::ops::quant::vec_dot_q2k_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
+        GpuWeightFormat::Q3_K => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes = n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q3K_SIZE;
+                *output = crate::ops::quant::vec_dot_q3k_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
+        GpuWeightFormat::IQ4_XS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                let row_bytes =
+                    n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ4_XS_SIZE;
+                *output = crate::ops::quant::vec_dot_iq4_xs_q8k(
+                    &weight[row * row_bytes..(row + 1) * row_bytes],
+                    &q8k,
+                );
+            }
+        }
+        GpuWeightFormat::IQ2_XXS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_XXS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_xxs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ2_XS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_XS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_xs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ2_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ2_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq2_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ3_XXS => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ3_XXS_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq3_xxs_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ3_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ3_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq3_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ1_S => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ1_S_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq1_s_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
+            }
+        }
+        GpuWeightFormat::IQ1_M => {
+            let q8k = crate::ops::quant::quantize_row_q8_k(input);
+            for (row, output) in output.iter_mut().enumerate() {
+                {
+                    let row_bytes =
+                        n_in / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_IQ1_M_SIZE;
+                    *output = crate::ops::quant::vec_dot_iq1_m_q8k(
+                        &weight[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k,
+                    );
+                }
             }
         }
         GpuWeightFormat::Q5_K => {
@@ -3817,7 +10158,18 @@ fn cpu_weight_matvec(
         }
         GpuWeightFormat::F16 => {
             let kernel = crate::ops::kernel::f16::F16Kernel::new(weight);
-            crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
+            crate::ops::kernel::Kernel::forward_prepared(
+                &kernel,
+                input,
+                q8,
+                scales,
+                None,
+                &mut output,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
         }
         GpuWeightFormat::BF16 => {
             let kernel = crate::ops::kernel::bf16::BF16Kernel::new(weight);
@@ -3831,9 +10183,360 @@ fn cpu_weight_matvec(
             let kernel = crate::ops::kernel::f32::F32Kernel::new(values, 0, 0);
             crate::ops::kernel::Kernel::forward(&kernel, input, &mut output, n_in, n_out);
         }
-        GpuWeightFormat::Q8_0 => unreachable!(),
+        GpuWeightFormat::Q8_0 => {
+            // The Q8_0 kernel takes pre-quantized activations and derives
+            // n_out from the weight length, matching what the GPU path
+            // computes from `n_in`.
+            let kernel = crate::ops::kernel::q8_0::Q8Kernel::new(weight);
+            crate::ops::kernel::Kernel::forward_prepared(
+                &kernel,
+                input,
+                q8,
+                scales,
+                None,
+                &mut output,
+                n_in,
+                n_out,
+                0,
+                1,
+            );
+        }
     }
     output
+}
+
+fn check_rope_exact(context: &VulkanContext) -> Result<(), String> {
+    const DIM: usize = 128;
+    const HEADS: usize = 16;
+    const ROWS: usize = 17;
+    let layout = ArenaLayout::build_rows(DIM * HEADS, DIM, HEADS, HEADS, DIM, 1, 1, ROWS, ROWS, 0)
+        .map_err(|error| error.to_string())?;
+    let input: Vec<_> = (0..ROWS * HEADS * DIM)
+        .map(|index| ((index * 43 % 191) as f32 - 95.0) / 37.0)
+        .collect();
+    let mut expected = input.clone();
+    let mut coefficients = vec![0.0; ROWS * DIM];
+    for row in 0..ROWS {
+        fill_rope_neox(
+            &mut coefficients[row * DIM..(row + 1) * DIM],
+            row,
+            1_000_000.0,
+        );
+        for head in expected[row * HEADS * DIM..(row + 1) * HEADS * DIM].chunks_exact_mut(DIM) {
+            crate::ops::rope_neox_inplace(head, row, DIM, 1_000_000.0);
+        }
+    }
+    let mut ops = Qwen3Ops::new(context, layout, 2).map_err(|error| error.to_string())?;
+    let binding = ops.bind_buffers(&[]).map_err(|error| error.to_string())?;
+    let run = (|| -> Result<(), VulkanError> {
+        ops.write_f32(layout.q, &input)?;
+        ops.write_f32(layout.k, &input)?;
+        ops.write_f32(layout.rope, &coefficients)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_qk_norm_rope_rows(
+            &commands,
+            binding,
+            layout.q,
+            layout.k,
+            HEADS,
+            HEADS,
+            DIM,
+            layout.rope,
+            1e-6,
+            false,
+            false,
+            ROWS,
+        )?;
+        commands.submit_and_wait()?;
+        for region in [layout.q, layout.k] {
+            let actual = ops.read_f32(region, expected.len())?;
+            if let Some(index) = actual
+                .iter()
+                .zip(&expected)
+                .position(|(a, b)| a.to_bits() != b.to_bits())
+            {
+                return Err(VulkanError::UnsupportedShape(format!(
+                    "RoPE mismatch at {index}: gpu={:#010x} cpu={:#010x}",
+                    actual[index].to_bits(),
+                    expected[index].to_bits()
+                )));
+            }
+        }
+        Ok(())
+    })();
+    run.map_err(|error| error.to_string())?;
+    println!("operator=rope_neox exact_bits=true head_dim={DIM} heads={HEADS} rows={ROWS}");
+    Ok(())
+}
+
+fn check_rms_norm_exact(context: &VulkanContext) -> Result<(), String> {
+    const WIDTH: usize = 1024;
+    const ROWS: usize = 129;
+    let layout = ArenaLayout::build_rows(WIDTH, WIDTH, 1, 1, 32, 1, 1, 1, ROWS, 0)
+        .map_err(|error| error.to_string())?;
+    let input: Vec<_> = (0..WIDTH * ROWS)
+        .map(|index| {
+            let bits = 0x3f00_0000 + ((index as u32).wrapping_mul(2654435761) % 0x0400_0000);
+            f32::from_bits(bits) * if index % 3 == 0 { -1.0 } else { 1.0 }
+        })
+        .collect();
+    let weight: Vec<_> = (0..WIDTH)
+        .map(|index| 0.75 + (index % 31) as f32 / 32.0)
+        .collect();
+    let mut expected = vec![0.0; input.len()];
+    for (row, output) in input
+        .chunks_exact(WIDTH)
+        .zip(expected.chunks_exact_mut(WIDTH))
+    {
+        crate::ops::rms_norm(row, &weight, output, 1e-6);
+    }
+    let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&weight)) }
+        .map_err(|error| error.to_string())?;
+    let result = (|| -> Result<(), VulkanError> {
+        let mut ops = Qwen3Ops::new(context, layout, 2)?;
+        let binding = ops.bind_buffers(&[buffer])?;
+        ops.write_f32(layout.x, &input)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_rms_norm_rows(
+            &commands,
+            binding,
+            layout.x,
+            layout.normed,
+            WIDTH,
+            1e-6,
+            ROWS,
+            WIDTH,
+            WIDTH,
+        )?;
+        commands.submit_and_wait()?;
+        let actual = ops.read_f32(layout.normed, input.len())?;
+        if let Some(index) = actual
+            .iter()
+            .zip(&expected)
+            .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "RMS norm mismatch at {index}: gpu={:#010x} cpu={:#010x}",
+                actual[index].to_bits(),
+                expected[index].to_bits()
+            )));
+        }
+        println!("operator=rms_norm exact_bits=true width={WIDTH} rows={ROWS}");
+        Ok(())
+    })();
+    let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
+    result.and(cleanup).map_err(|error| error.to_string())
+}
+
+fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
+    const DIM: usize = 128;
+    const CONV: usize = 3 * DIM;
+    const ROWS: usize = 6;
+    const TAPS: usize = 4;
+    let input = |count: usize, seed: usize| -> Vec<f32> {
+        (0..count)
+            .map(|index| ((index * seed % 191) as f32 - 95.0) / 37.0)
+            .collect()
+    };
+    let mut qkv = input(ROWS * CONV, 43);
+    for row in qkv.chunks_exact_mut(CONV) {
+        for v in &mut row[..DIM] {
+            *v *= 1e-7;
+        }
+    }
+    let weight = input(CONV * TAPS, 73);
+    let mut initial = input(CONV * TAPS, 101);
+    for tap in initial.chunks_exact_mut(CONV) {
+        for v in &mut tap[..DIM] {
+            *v *= 1e-7;
+        }
+    }
+    let mut state = initial.clone();
+    let mut expected = vec![0.0; ROWS * CONV];
+    for row in 0..ROWS {
+        state.copy_within(CONV.., 0);
+        state[(TAPS - 1) * CONV..].copy_from_slice(&qkv[row * CONV..(row + 1) * CONV]);
+        let values = &mut expected[row * CONV..(row + 1) * CONV];
+        for channel in 0..CONV {
+            for tap in 0..TAPS {
+                values[channel] += weight[channel * TAPS + tap] * state[tap * CONV + channel];
+            }
+        }
+        crate::ops::silu_approx_inplace(values);
+        for offset in [0, DIM] {
+            let head = &mut values[offset..offset + DIM];
+            crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
+        }
+    }
+    let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS, 0)
+        .map_err(|error| error.to_string())?;
+    let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&weight)) }
+        .map_err(|error| error.to_string())?;
+    let run = (|| -> Result<(), VulkanError> {
+        let mut ops = Qwen3Ops::new(context, layout, 2)?;
+        let binding = ops.bind_buffers(&[buffer])?;
+        ops.write_f32(layout.normed, &qkv)?;
+        ops.write_f32(layout.up, &initial)?;
+        let commands = TokenCommands::begin(context)?;
+        ops.record_qwen35_recurrent_conv(
+            &commands,
+            binding,
+            layout.normed,
+            layout.q,
+            layout.k,
+            layout.v,
+            layout.up,
+            0,
+            1,
+            CONV,
+            DIM,
+            DIM,
+            TAPS,
+            1,
+            1,
+            DIM,
+            1e-6,
+            ROWS,
+        )?;
+        commands.submit_and_wait()?;
+        for (region, offset) in [(layout.q, 0), (layout.k, DIM), (layout.v, DIM * 2)] {
+            let actual = ops.read_f32(region, ROWS * DIM)?;
+            for row in 0..ROWS {
+                for column in 0..DIM {
+                    let gpu = actual[row * DIM + column];
+                    let cpu = expected[row * CONV + offset + column];
+                    if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
+                        return Err(VulkanError::UnsupportedShape(format!("conv mismatch offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
+                    }
+                }
+            }
+        }
+        let actual_state = ops.read_f32(layout.up, initial.len())?;
+        assert_eq!(actual_state, state);
+        Ok(())
+    })();
+    let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
+    run.and(cleanup).map_err(|error| error.to_string())?;
+    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
+    Ok(())
+}
+
+fn check_qwen35_ssm_reduction(context: &VulkanContext) -> Result<(), String> {
+    const DIM: usize = 128;
+    const ROWS: usize = 2;
+    let layout = ArenaLayout::build_rows(256, DIM * DIM, 1, 1, DIM, 1, 1, ROWS, ROWS, 0)
+        .map_err(|error| error.to_string())?;
+    let input = |count: usize, seed: usize| -> Vec<f32> {
+        (0..count)
+            .map(|index| ((index * seed % 211) as f32 - 105.0) * 0.01)
+            .collect()
+    };
+    let q = input(ROWS * DIM, 43);
+    let k = input(ROWS * DIM, 73);
+    let v = input(ROWS * DIM, 101);
+    let gate = input(ROWS * DIM, 139);
+    let initial = input(DIM * DIM, 173);
+    let mut expected_state = initial.clone();
+    let mut expected_output = vec![0.0; ROWS * DIM];
+    let norm = vec![1.0f32; DIM];
+    for token in 0..ROWS {
+        let range = token * DIM..(token + 1) * DIM;
+        let mut sk = vec![0.0; DIM];
+        crate::ops::ssm_matvec(&expected_state, &k[range.clone()], DIM, DIM, &mut sk);
+        let delta: Vec<_> = v[range.clone()]
+            .iter()
+            .zip(sk)
+            .map(|(&v, sk)| (v - sk) * 0.5)
+            .collect();
+        crate::ops::ssm_outer_product_update(&mut expected_state, &k[range.clone()], &delta, DIM);
+        let output = &mut expected_output[range.clone()];
+        crate::ops::ssm_matvec_scaled(
+            &expected_state,
+            &q[range.clone()],
+            DIM,
+            DIM,
+            output,
+            1.0 / (DIM as f32).sqrt(),
+        );
+        crate::ops::rms_norm_inplace(output, &norm, 1e-6);
+        crate::ops::silu_mul_approx_inplace(&gate[range], output);
+    }
+    let zero = [0.0f32];
+    let mut buffers = Vec::new();
+    for bytes in [
+        bytemuck::cast_slice(&zero),
+        bytemuck::cast_slice(&zero),
+        bytemuck::cast_slice(&norm),
+    ] {
+        match unsafe { context.upload_static(bytes) } {
+            Ok(buffer) => buffers.push(buffer),
+            Err(error) => {
+                unsafe { context.destroy_completed_buffers(&buffers) }
+                    .map_err(|error| error.to_string())?;
+                return Err(error.to_string());
+            }
+        }
+    }
+    let result = (|| -> Result<(), VulkanError> {
+        let mut ops = Qwen3Ops::new(context, layout, 2)?;
+        let bindings = ops.bind_buffers(&buffers)?;
+        for (region, values) in [
+            (layout.q, q.as_slice()),
+            (layout.k, k.as_slice()),
+            (layout.v, v.as_slice()),
+            (layout.gate, gate.as_slice()),
+            (layout.up, initial.as_slice()),
+            (layout.normed, &[0.0; ROWS]),
+            (layout.projection, &[100.0; ROWS]),
+        ] {
+            ops.write_f32(region, values)?;
+        }
+        let commands = TokenCommands::begin(context)?;
+        ops.record_qwen35_recurrent_ssm(
+            &commands,
+            bindings,
+            layout.q,
+            layout.k,
+            layout.v,
+            layout.gate,
+            layout.normed,
+            layout.projection,
+            layout.attn,
+            layout.up,
+            0,
+            1,
+            1,
+            1,
+            DIM,
+            1e-6,
+            ROWS,
+        )?;
+        commands.submit_and_wait()?;
+        let state = ops.read_f32(layout.up, DIM * DIM)?;
+        if let Some(index) = state
+            .iter()
+            .zip(&expected_state)
+            .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+        {
+            return Err(VulkanError::UnsupportedShape(format!(
+                "SSM state reduction mismatch at {index}: gpu={:#010x} cpu={:#010x}",
+                state[index].to_bits(),
+                expected_state[index].to_bits()
+            )));
+        }
+        check_close(
+            "qwen35_ssm_output",
+            ops.read_f32(layout.attn, ROWS * DIM)?,
+            &expected_output,
+            2e-6,
+            2e-6,
+        )
+        .map_err(VulkanError::UnsupportedShape)?;
+        println!("operator=qwen35_ssm state_exact=true rows={ROWS} nonzero_prefix=true");
+        Ok(())
+    })();
+    let cleanup = unsafe { context.destroy_completed_buffers(&buffers) };
+    result.and(cleanup).map_err(|error| error.to_string())
 }
 
 fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
@@ -3841,7 +10544,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
     let layout =
         ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
-    let input: Vec<f32> = (0..COUNT)
+    let mut input: Vec<f32> = (0..COUNT)
         .map(|index| {
             let block = index / 256;
             let local = index % 256;
@@ -3858,6 +10561,16 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
             }
         })
         .collect();
+    // A scale of one isolates values immediately below, at and above a half.
+    input[..256].fill(0.0);
+    input[0] = 127.0;
+    for (index, bits) in [0x3eff_ffff, 0x3f00_0000, 0x3f00_0001]
+        .into_iter()
+        .enumerate()
+    {
+        input[1 + index * 2] = f32::from_bits(bits);
+        input[2 + index * 2] = -f32::from_bits(bits);
+    }
     let expected = crate::ops::quant::quantize_row_q8_k(&input);
     ops.write_f32(layout.x, &input)
         .map_err(|error| error.to_string())?;
@@ -3914,12 +10627,40 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
     Ok(())
 }
 
+/// Independent F64 accuracy reference, separate from CPU reduction parity.
+/// Changing `ggml-f16-dot-parity` must not change this reference.
+fn reference_dot_f16(a: &[u16], b: &[u16]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| f64::from(crate::ops::f16_to_f32(x)) * f64::from(crate::ops::f16_to_f32(y)))
+        .sum()
+}
+
 fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
-    let layout = ArenaLayout::for_dims(32, 32, 1, 1, 32).map_err(|error| error.to_string())?;
+    const COUNT: usize = 128;
+    let layout =
+        ArenaLayout::for_dims(COUNT, COUNT, 1, 1, COUNT).map_err(|error| error.to_string())?;
     let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
-    let mut input = [0.0f32; 32];
+    let mut input = vec![0.0f32; COUNT];
     input[0] = f32::from_bits(0xbdbf0aec);
     input[1] = f32::from_bits(0x3f13f10a);
+    // AuK CFG input: division gives 0x3d80d001; multiplying a reciprocal
+    // gives 0x3d80d000 and rounds to a different F16 scale.
+    input[32] = f32::from_bits(0x40ff9cc1);
+    // Exact -63.5 on AVX2: a driver may round the reciprocal/multiply just
+    // below the tie, so the shader must recover the CPU ties-even result.
+    input[96] = 0.14697265625;
+    input[97] = -0.073486328125;
+    // Exact ties and their predecessors distinguish scalar rounding from SIMD.
+    input[64..71].copy_from_slice(&[
+        127.0,
+        0.5,
+        -0.5,
+        20.5,
+        -20.5,
+        f32::from_bits(0x3effffff),
+        -f32::from_bits(0x3effffff),
+    ]);
     ops.write_f32(layout.x, &input)
         .map_err(|error| error.to_string())?;
 
@@ -3937,8 +10678,8 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
         .submit_and_wait()
         .map_err(|error| error.to_string())?;
 
-    let mut expected = [0u8; 32];
-    let mut expected_scales = [0.0f32; 1];
+    let mut expected = vec![0u8; COUNT];
+    let mut expected_scales = vec![0.0f32; COUNT / 32];
     crate::ops::quantize_q8_0_into(&input, input.len(), &mut expected, &mut expected_scales);
     let actual = ops
         .read_bytes(layout.q8, input.len())
@@ -3946,15 +10687,33 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
     if actual != expected {
         let index = actual
             .iter()
-            .zip(expected)
-            .position(|(actual, expected)| *actual != expected)
+            .zip(&expected)
+            .position(|(actual, expected)| actual != expected)
             .unwrap();
         return Err(format!(
             "quantize tie-even mismatch at {index}: gpu={} cpu={}",
             actual[index] as i8, expected[index] as i8
         ));
     }
-    println!("operator=quantize_tie_even exact=true");
+    let scales = ops
+        .read_f32(layout.q8_scales, expected_scales.len())
+        .map_err(|error| error.to_string())?;
+    if let Some(index) = scales
+        .iter()
+        .zip(&expected_scales)
+        .position(|(actual, expected)| actual.to_bits() != expected.to_bits())
+    {
+        return Err(format!(
+            "quantize Q8 scale mismatch at {index}: input={} gpu={:#010x} cpu={:#010x}",
+            input[index * 32],
+            scales[index].to_bits(),
+            expected_scales[index].to_bits()
+        ));
+    }
+    println!(
+        "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
+        COUNT / 32
+    );
     Ok(())
 }
 
@@ -4004,16 +10763,28 @@ fn check_attention_scores_match_cpu_reduction(context: &VulkanContext) -> Result
         .iter()
         .map(|&value| crate::ops::f32_to_f16(value))
         .collect::<Vec<_>>();
-    let expected = crate::ops::dot_f16(&query_f16, &key_f16, HEAD_DIM) / (HEAD_DIM as f32).sqrt();
+    let expected =
+        crate::ops::dot_f16(&query_f16, &key_f16, HEAD_DIM) * (1.0 / (HEAD_DIM as f32).sqrt());
     if actual.to_bits() != expected.to_bits() {
         return Err(format!(
             "attention score reduction mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
-            actual.to_bits(),
-            expected.to_bits()
+            actual.to_bits(), expected.to_bits()
         ));
     }
-    println!("operator=attention_score_reduction exact=true");
-    Ok(())
+    let reference = (reference_dot_f16(&query_f16, &key_f16) / (HEAD_DIM as f64).sqrt()) as f32;
+    // The explicit ggml parity build retains its original half-precision error.
+    let tolerance = if cfg!(feature = "ggml-f16-dot-parity") {
+        5e-3
+    } else {
+        3e-5
+    };
+    check_close(
+        "attention_score_reduction",
+        &[actual],
+        &[reference],
+        tolerance,
+        tolerance,
+    )
 }
 
 fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String> {
@@ -4058,15 +10829,14 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
     let actual = ops
         .read_f32(layout.attn, 1)
         .map_err(|error| error.to_string())?[0];
-    let probabilities_f16 = probabilities
-        .iter()
-        .map(|&value| crate::ops::f32_to_f16(value))
-        .collect::<Vec<_>>();
-    let values_f16 = values
-        .iter()
-        .map(|&value| crate::ops::f32_to_f16(value))
-        .collect::<Vec<_>>();
-    let expected = crate::ops::dot_f16(&probabilities_f16, &values_f16, SEQUENCE);
+    let padded = SEQUENCE.div_ceil(256) * 256;
+    let mut probabilities_f16 = vec![0; padded];
+    let mut values_f16 = vec![0; padded];
+    for index in 0..SEQUENCE {
+        probabilities_f16[index] = crate::ops::f32_to_f16(probabilities[index]);
+        values_f16[index] = crate::ops::f32_to_f16(values[index]);
+    }
+    let expected = crate::ops::dot_f16(&probabilities_f16, &values_f16, padded);
     if actual.to_bits() != expected.to_bits() {
         return Err(format!(
             "attention value reduction mismatch: gpu={actual} cpu={expected} gpu_bits={:#010x} cpu_bits={:#010x}",
@@ -4167,7 +10937,55 @@ fn check_softmax_f16_rounding(context: &VulkanContext) -> Result<(), String> {
             expected[index].to_bits()
         ));
     }
-    println!("operator=softmax_f16_rounding exact=true");
+    // Captured at Qwen3 token 106; one F16 probability boundary shifts later layers.
+    let scores = [
+        0x40c440a5, 0x40c34435, 0x3fed211e, 0x402bb10d, 0x4087468e, 0x40b27ea7, 0x405c03e2,
+        0x404a1c6b, 0x409d1f10, 0x40bb0633, 0x40985d6c, 0x40865abc, 0x40c37176, 0x40c9c1e8,
+        0x4078df07, 0x405b7e3d, 0x40a2bb32, 0x40ca4e9f, 0x408a1b57, 0x40a68a4c, 0x40d4f5ef,
+        0x40c46400, 0x401f24aa, 0x407b7ca8, 0x40ca79c1, 0x40b86d85, 0x4023af26, 0x405a95f4,
+        0x40c5b54a, 0x40c19375, 0x4098a58c, 0x40a0b20f, 0x4100619e, 0x40c1750d, 0x4044c0a1,
+        0x406c45ea, 0x40e4a7b6, 0x40c1c220, 0x40891f9c, 0x4082a955, 0x40ccb519, 0x40b36f12,
+        0x40448f22, 0x4073170d, 0x40f16210, 0x40c5de4d, 0x4085dd39, 0x40686c35, 0x40d36178,
+        0x40c97201, 0x408db9a6, 0x40661e7b, 0x40a703eb, 0x40af3c45, 0x4051919b, 0x405aae5a,
+        0x40d91166, 0x40c24469, 0x407f6cfe, 0x4065c6cc, 0x40cdf1e1, 0x40bbeba8, 0x40290aef,
+        0x404d4c6b, 0x40c8f917, 0x40c0d1b6, 0x4046b817, 0x40961b03, 0x40ef0631, 0x40dd1a7c,
+        0x405f9f5d, 0x4098a916, 0x40b19dcb, 0x40ccb957, 0x40867fdb, 0x40a81866, 0x40c9de31,
+        0x40d78621, 0x4081cd12, 0x4092a7d5, 0x40e02cc9, 0x40d5f8bc, 0x409e2b0e, 0x40833e2e,
+        0x40c8413e, 0x40d70c81, 0x40c3136a, 0x40af933e, 0x40fa91e6, 0x40ee34e3, 0x409a2bdf,
+        0x40a0d9a8, 0x40f0a050, 0x40f0b9c5, 0x40b5e684, 0x40ba21ce, 0x40f09500, 0x40ec5df4,
+        0x40c290c7, 0x40c32682, 0x4107b866, 0x40f708cd, 0x40bb0d45, 0x40bf2f1a, 0x410f0493,
+        0x410606f1, 0x410d7400,
+    ]
+    .map(f32::from_bits);
+    let count = scores.len();
+    let layout =
+        ArenaLayout::build(32, 32, 1, 1, 1, 1, 1, count).map_err(|error| error.to_string())?;
+    let ops = Qwen3Ops::new(context, layout, 1).map_err(|error| error.to_string())?;
+    let mut expected = scores;
+    crate::ops::softmax_inplace(&mut expected);
+    for value in &mut expected {
+        *value = crate::ops::f16_to_f32(crate::ops::f32_to_f16(*value));
+    }
+    ops.write_f32(layout.scores, &scores)
+        .map_err(|e| e.to_string())?;
+    let commands = TokenCommands::begin(context).map_err(|e| e.to_string())?;
+    ops.record_softmax(&commands, layout.scores, 1, count)
+        .map_err(|e| e.to_string())?;
+    commands.submit_and_wait().map_err(|e| e.to_string())?;
+    let actual = ops
+        .read_f32(layout.scores, count)
+        .map_err(|e| e.to_string())?;
+    if let Some(index) = actual
+        .iter()
+        .zip(&expected)
+        .position(|(a, b)| a.to_bits() != b.to_bits())
+    {
+        return Err(format!(
+            "long softmax F16 mismatch at {index}: gpu={:#010x} cpu={:#010x}",
+            actual[index].to_bits(),
+            expected[index].to_bits()
+        ));
+    }
     Ok(())
 }
 
@@ -4320,14 +11138,1645 @@ fn check_close(
     }
 }
 
+#[cfg(all(test, feature = "vulkan"))]
+/// The SiLU probe is only meaningful at a shape close to production, so pin the
+/// one number that used to drift. This is a compile-time constant on both sides,
+/// so it costs nothing and cannot be forgotten.
+#[test]
+fn silu_probe_uses_the_production_ffn_width() {
+    assert_eq!(
+        Z_IMAGE_FFN_WIDTH,
+        crate::models::diffusion::z_image::dit::FFN_WIDTH,
+        "the SiLU probe no longer runs at the production FFN width"
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    /// Every pipeline constant has to name the shader it selects.
+    ///
+    /// The constants are indices into `OPERATOR_SHADERS`, and the table is
+    /// appended to over time. A constant that tracked the table length
+    /// instead of its own slot moved as soon as a shader was appended: the
+    /// transposed Q8_0 matmul was `OPERATOR_SHADERS.len() - 1`, so adding
+    /// the Nemotron operators made it run the SSM norm shader instead. The
+    /// failure was silent -- the pipeline built, the dispatch ran, and the
+    /// output region was never written -- so the check lives here.
+    #[test]
+    fn operator_indices_match_shader_modules() {
+        use super::*;
+        let operators: &[(usize, &str, &[u8])] = &[
+            (QUANTIZE, "quantize_q8_0", QUANTIZE_Q8_0_SHADER),
+            (QUANTIZE_K, "quantize_q8_k", QUANTIZE_Q8_K_SHADER),
+            (
+                Q8_MATMUL_GROUPED,
+                "q8_matmul_grouped",
+                Q8_MATMUL_GROUPED_SHADER,
+            ),
+            (Q4_0_MATMUL, "q4_0_matmul", Q4_0_MATMUL_SHADER),
+            (
+                Q4_0_MATMUL_TILED,
+                "q4_0_matmul_tiled_dp4a",
+                Q4_0_MATMUL_TILED_SHADER,
+            ),
+            (Q4_1_MATMUL, "q4_1_matmul", Q4_1_MATMUL_SHADER),
+            (Q5_0_MATMUL, "q5_0_matmul", Q5_0_MATMUL_SHADER),
+            (Q5_1_MATMUL, "q5_1_matmul", Q5_1_MATMUL_SHADER),
+            (
+                NEMOTRON_MOE_ROUTE,
+                "nemotron_moe_route",
+                NEMOTRON_MOE_ROUTE_SHADER,
+            ),
+            (
+                NEMOTRON_MOE_REDUCE,
+                "nemotron_moe_reduce",
+                NEMOTRON_MOE_REDUCE_SHADER,
+            ),
+            (Q4_K_MATMUL, "q4_k_matmul", Q4_K_MATMUL_SHADER),
+            (Q6_K_MATMUL, "q6_k_matmul", Q6_K_MATMUL_SHADER),
+            (F16_MATMUL, "f16_matmul", F16_MATMUL_SHADER),
+            (BF16_MATMUL, "bf16_matmul", BF16_MATMUL_SHADER),
+            (RMS_NORM, "rms_norm", RMS_NORM_SHADER),
+            (QK_NORM_ROPE, "qk_norm_rope", QK_NORM_ROPE_SHADER),
+            (KV_WRITE, "kv_write", KV_WRITE_SHADER),
+            (
+                ATTENTION_SCORES,
+                "attention_scores",
+                ATTENTION_SCORES_SHADER,
+            ),
+            (SOFTMAX, "softmax", SOFTMAX_SHADER),
+            (
+                ATTENTION_VALUES,
+                "attention_values",
+                ATTENTION_VALUES_SHADER,
+            ),
+            (SILU_MUL, "silu_mul", SILU_MUL_SHADER),
+            (ADD, "add", ADD_SHADER),
+            (
+                QWEN35_DENSE_PREPARE,
+                "qwen35_dense_prepare",
+                QWEN35_DENSE_PREPARE_SHADER,
+            ),
+            (
+                QWEN35_ATTENTION,
+                "qwen35_attention",
+                QWEN35_ATTENTION_SHADER,
+            ),
+            (
+                QWEN35_RECURRENT_CONV,
+                "qwen35_recurrent_conv",
+                QWEN35_RECURRENT_CONV_SHADER,
+            ),
+            (
+                QWEN35_RECURRENT_SSM,
+                "qwen35_recurrent_ssm",
+                QWEN35_RECURRENT_SSM_SHADER,
+            ),
+            (Q5_K_MATMUL, "q5_k_matmul", Q5_K_MATMUL_SHADER),
+            (F32_MATMUL, "f32_matmul", F32_MATMUL_SHADER),
+            (ADALN_MODULATE, "adaln_modulate", ADALN_MODULATE_SHADER),
+            (
+                Q8_MATMUL_GROUPED_TILED,
+                "q8_matmul_grouped_tiled",
+                Q8_MATMUL_GROUPED_TILED_SHADER,
+            ),
+            (
+                F16_MATMUL_TILED,
+                "f16_matmul_tiled",
+                F16_MATMUL_TILED_SHADER,
+            ),
+            (
+                ATTENTION_SCORES_TILED,
+                "attention_scores_tiled",
+                ATTENTION_SCORES_TILED_SHADER,
+            ),
+            (
+                MLX_AFFINE_MATMUL,
+                "mlx_affine_matmul",
+                MLX_AFFINE_MATMUL_SHADER,
+            ),
+            (
+                Q8_MATMUL_COOPERATIVE,
+                "q8_matmul_cooperative",
+                Q8_MATMUL_COOPERATIVE_SHADER,
+            ),
+            (
+                QK_NORM_ROPE_INTERLEAVED,
+                "qk_norm_rope_interleaved",
+                QK_NORM_ROPE_INTERLEAVED_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_WIDE,
+                "q8_matmul_tiled_dp4a_wide",
+                Q8_MATMUL_GROUPED_TILED_WIDE_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                "q8_matmul_tiled_dp4a_wide_add",
+                Q8_MATMUL_GROUPED_TILED_WIDE_ADD_SHADER,
+            ),
+            (
+                ATTENTION_VALUES_F32,
+                "attention_values_f32",
+                ATTENTION_VALUES_F32_SHADER,
+            ),
+            (
+                FLOAT_MATMUL_TILED,
+                "float_matmul_tiled",
+                FLOAT_MATMUL_TILED_SHADER,
+            ),
+            (
+                ATTENTION_ONLINE,
+                "attention_online",
+                ATTENTION_ONLINE_SHADER,
+            ),
+            (CONV3D_TILED, "conv3d_tiled", CONV3D_TILED_SHADER),
+            (
+                ATTENTION_ONLINE_WIDE,
+                "attention_online_wide",
+                ATTENTION_ONLINE_WIDE_SHADER,
+            ),
+            (
+                TIMESTRAL,
+                "timestral",
+                include_bytes!("../../shaders/bin/timestral.spv"),
+            ),
+            (
+                FLOAT_MATMUL_SMALL,
+                "float_matmul_small",
+                include_bytes!("../../shaders/bin/float_matmul_small.spv"),
+            ),
+            (MOE_REDUCE, "moe_reduce", MOE_REDUCE_SHADER),
+            (
+                Q4_K_MATMUL_COOPERATIVE,
+                "q4_k_matmul_cooperative",
+                Q4_K_MATMUL_COOPERATIVE_SHADER,
+            ),
+            (
+                QWEN35_MOE_ROUTE,
+                "qwen35_moe_route",
+                QWEN35_MOE_ROUTE_SHADER,
+            ),
+            (
+                QWEN35_MOE_REDUCE,
+                "qwen35_moe_reduce",
+                QWEN35_MOE_REDUCE_SHADER,
+            ),
+            (
+                Q5_K_MATMUL_COOPERATIVE,
+                "q5_k_matmul_cooperative",
+                Q5_K_MATMUL_COOPERATIVE_SHADER,
+            ),
+            (SENSENOVA_MHC, "sensenova_mhc", SENSENOVA_MHC_SHADER),
+            (CONV1D_TILED, "conv1d_tiled", CONV1D_TILED_SHADER),
+            (AUK_FIR, "auk_fir", AUK_FIR_SHADER),
+            (AUK_SNAKE, "auk_snake", AUK_SNAKE_SHADER),
+            (AUK_INTERLEAVE, "auk_interleave", AUK_INTERLEAVE_SHADER),
+            (AUK_SCALE, "auk_scale", AUK_SCALE_SHADER),
+            (
+                Q8_MATMUL_TRANSPOSED,
+                "q8_matmul_transposed",
+                Q8_MATMUL_TRANSPOSED_SHADER,
+            ),
+            (KV_WRITE_F32, "kv_write_f32", KV_WRITE_F32_SHADER),
+            (
+                ATTENTION_SCORES_F32,
+                "attention_scores_f32",
+                ATTENTION_SCORES_F32_SHADER,
+            ),
+            (
+                ATTENTION_VALUES_F32_KV,
+                "attention_values_f32_kv",
+                ATTENTION_VALUES_F32_KV_SHADER,
+            ),
+            (SOFTMAX_F32, "softmax_f32", SOFTMAX_F32_SHADER),
+            (
+                NEMOTRON_H_SSM_CONV,
+                "nemotron_h_ssm_conv",
+                NEMOTRON_H_SSM_CONV_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_DT,
+                "nemotron_h_ssm_dt",
+                NEMOTRON_H_SSM_DT_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_SCAN,
+                "nemotron_h_ssm_scan",
+                NEMOTRON_H_SSM_SCAN_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_GATE,
+                "nemotron_h_ssm_gate",
+                NEMOTRON_H_SSM_GATE_SHADER,
+            ),
+            (
+                NEMOTRON_H_SSM_NORM,
+                "nemotron_h_ssm_norm",
+                NEMOTRON_H_SSM_NORM_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_TRANSPOSED,
+                "q8_matmul_tiled_dp4a_transposed",
+                Q8_MATMUL_GROUPED_TILED_TRANSPOSED_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED,
+                "q8_matmul_tiled_dp4a_wide_transposed",
+                Q8_MATMUL_GROUPED_TILED_WIDE_TRANSPOSED_SHADER,
+            ),
+            (
+                Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED,
+                "q8_matmul_tiled_dp4a_wide_add_transposed",
+                Q8_MATMUL_GROUPED_TILED_WIDE_ADD_TRANSPOSED_SHADER,
+            ),
+            (PIVO_LINEAR, "pivo_linear", PIVO_LINEAR_SHADER),
+            (PIVO_ROPE, "pivo_rope", PIVO_ROPE_SHADER),
+            (PIVO_ATTENTION, "pivo_attention", PIVO_ATTENTION_SHADER),
+            (PIVO_RMS_NORM, "pivo_rms_norm", PIVO_RMS_NORM_SHADER),
+            (PIVO_CONV1D, "pivo_conv1d", PIVO_CONV1D_SHADER),
+            (PIVO_SWIGLU, "pivo_swiglu", PIVO_SWIGLU_SHADER),
+            (PIVO_SILU, "pivo_silu", PIVO_SILU_SHADER),
+            (IQ4_XS_MATMUL, "iq4_xs_matmul", IQ4_XS_MATMUL_SHADER),
+            (IQ2_XXS_MATMUL, "iq2_xxs_matmul", IQ2_XXS_MATMUL_SHADER),
+            (IQ2_XS_MATMUL, "iq2_xs_matmul", IQ2_XS_MATMUL_SHADER),
+            (IQ2_S_MATMUL, "iq2_s_matmul", IQ2_S_MATMUL_SHADER),
+            (IQ3_XXS_MATMUL, "iq3_xxs_matmul", IQ3_XXS_MATMUL_SHADER),
+            (IQ3_S_MATMUL, "iq3_s_matmul", IQ3_S_MATMUL_SHADER),
+            (IQ1_S_MATMUL, "iq1_s_matmul", IQ1_S_MATMUL_SHADER),
+            (IQ1_M_MATMUL, "iq1_m_matmul", IQ1_M_MATMUL_SHADER),
+            (Q2_K_MATMUL, "q2_k_matmul", Q2_K_MATMUL_SHADER),
+            (Q3_K_MATMUL, "q3_k_matmul", Q3_K_MATMUL_SHADER),
+        ];
+        for (index, name, shader) in operators {
+            assert_eq!(OPERATOR_SHADER_NAMES[*index], *name);
+            assert_eq!(OPERATOR_SHADERS[*index], *shader);
+        }
+        // The table has to cover every pipeline, or a new operator could
+        // still land outside the check.
+        assert_eq!(operators.len(), OPERATOR_SHADERS.len());
+    }
+
+    fn mhc_test_regions(shape: super::MhcShape, rows: usize) -> (super::MhcRegions, usize) {
+        use super::*;
+        let mut cursor = 0;
+        let s = shape.streams;
+        let regions = MhcRegions {
+            branch: f32_region(&mut cursor, rows * shape.width).unwrap(),
+            residual: f32_region(&mut cursor, rows * s * shape.width).unwrap(),
+            logits: f32_region(
+                &mut cursor,
+                rows * (2 * s + if shape.fixed_identity { 0 } else { s * s }),
+            )
+            .unwrap(),
+            post: f32_region(&mut cursor, rows * s).unwrap(),
+            mix: f32_region(&mut cursor, rows * s * s).unwrap(),
+        };
+        (regions, cursor)
+    }
+
+    #[test]
+    fn mhc_push_rejects_invalid_shapes_regions_and_bias() {
+        use super::*;
+        let shape = MhcShape {
+            width: 73,
+            streams: 4,
+            iterations: 7,
+            fixed_identity: false,
+            pre_scale: 0.5,
+        };
+        let (regions, bytes) = mhc_test_regions(shape, 3);
+        let bias = OperatorBindings {
+            descriptor_set: vk::DescriptorSet::null(),
+            sizes: [24 * 4, 0, 0],
+            weight_formats: [None; 3],
+            weight_mode: GpuMatmulMode::Prepared,
+            weight_layout: GpuWeightLayout::Native,
+        };
+        assert_eq!(
+            mhc_push(bytes, bias, 1, regions, shape, 3).unwrap().len() * 4,
+            48
+        );
+        for invalid in [
+            MhcShape { width: 0, ..shape },
+            MhcShape {
+                width: usize::MAX,
+                ..shape
+            },
+            MhcShape {
+                streams: 3,
+                ..shape
+            },
+            MhcShape {
+                iterations: 0,
+                ..shape
+            },
+            MhcShape {
+                iterations: 1025,
+                ..shape
+            },
+            MhcShape {
+                pre_scale: f32::NAN,
+                ..shape
+            },
+            MhcShape {
+                pre_scale: 0.0,
+                ..shape
+            },
+        ] {
+            assert!(mhc_push(bytes, bias, 1, regions, invalid, 3).is_err());
+        }
+        assert!(mhc_push(bytes, bias, 4, regions, shape, 3).is_err());
+        assert!(mhc_push(bytes, bias, 1, regions, shape, 0).is_err());
+        assert!(mhc_push(bytes - 4, bias, 1, regions, shape, 3).is_err());
+        assert!(mhc_push(
+            bytes,
+            bias,
+            1,
+            MhcRegions {
+                branch: ArenaRegion {
+                    offset: regions.branch.offset + 1,
+                    ..regions.branch
+                },
+                ..regions
+            },
+            shape,
+            3
+        )
+        .is_err());
+        assert!(mhc_push(
+            bytes,
+            bias,
+            1,
+            MhcRegions {
+                mix: ArenaRegion {
+                    offset: regions.post.offset,
+                    ..regions.mix
+                },
+                ..regions
+            },
+            shape,
+            3
+        )
+        .is_err());
+        assert!(mhc_push(
+            bytes,
+            OperatorBindings {
+                sizes: [23 * 4, 0, 0],
+                ..bias
+            },
+            1,
+            regions,
+            shape,
+            3
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sensenova_mhc_gpu_matches_independent_cpu_for_all_modes_and_rows() {
+        use super::*;
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("no vulkan context; skip");
+            return;
+        };
+        let close = |actual: &[f32], expected: &[f64]| {
+            assert_eq!(actual.len(), expected.len());
+            for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+                assert!(
+                    actual.is_finite()
+                        && (f64::from(actual) - expected).abs() < 2e-5 * (1.0 + expected.abs()),
+                    "mHC at {index}: gpu={actual} cpu={expected}"
+                );
+            }
+        };
+        const ROWS: usize = 3;
+        for streams in [2, 4] {
+            for fixed_identity in [false, true] {
+                let shape = MhcShape {
+                    width: 73,
+                    streams,
+                    iterations: 7,
+                    fixed_identity,
+                    pre_scale: 0.5,
+                };
+                let (regions, bytes) = mhc_test_regions(shape, ROWS);
+                let logits_width = 2 * streams + if fixed_identity { 0 } else { streams * streams };
+                let logits: Vec<f32> = (0..ROWS * logits_width)
+                    .map(|i| ((i * 17 % 31) as f32 - 15.0) * 0.13)
+                    .collect();
+                let bias: Vec<f32> = (0..logits_width)
+                    .map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.11)
+                    .collect();
+                let input: Vec<f32> = (0..ROWS * shape.width)
+                    .map(|i| (i as f32 - 80.0) * 0.01)
+                    .collect();
+                let residual: Vec<f32> = (0..ROWS * streams * shape.width)
+                    .map(|i| ((i * 29 % 127) as f32 - 63.0) * 0.03)
+                    .collect();
+                let mut expected_branch = Vec::new();
+                let mut expected_post = Vec::new();
+                let mut expected_mix = Vec::new();
+                for row in 0..ROWS {
+                    let values: Vec<f64> = (0..logits_width)
+                        .map(|i| f64::from(logits[row * logits_width + i] + bias[i]))
+                        .collect();
+                    let pre: Vec<f64> = values[..streams]
+                        .iter()
+                        .map(|v| 1.0 / (1.0 + (-v).exp()))
+                        .collect();
+                    expected_post.extend(
+                        values[streams..2 * streams]
+                            .iter()
+                            .map(|v| 2.0 / (1.0 + (-v).exp())),
+                    );
+                    for k in 0..shape.width {
+                        expected_branch.push(
+                            (0..streams)
+                                .map(|s| {
+                                    pre[s]
+                                        * f64::from(residual[(row * streams + s) * shape.width + k])
+                                })
+                                .sum::<f64>()
+                                * f64::from(shape.pre_scale),
+                        );
+                    }
+                    let mut matrix: Vec<f64> = if fixed_identity {
+                        (0..streams * streams)
+                            .map(|i| f64::from(u8::from(i / streams == i % streams)))
+                            .collect()
+                    } else {
+                        values[2 * streams..].iter().map(|v| v.exp()).collect()
+                    };
+                    if !fixed_identity {
+                        // Independent probability-domain Sinkhorn reference in f64.
+                        for _ in 0..shape.iterations {
+                            for row in matrix.chunks_exact_mut(streams) {
+                                let total: f64 = row.iter().sum();
+                                row.iter_mut().for_each(|v| *v /= total);
+                            }
+                            for column in 0..streams {
+                                let total: f64 =
+                                    (0..streams).map(|row| matrix[row * streams + column]).sum();
+                                for row in 0..streams {
+                                    matrix[row * streams + column] /= total;
+                                }
+                            }
+                        }
+                    }
+                    expected_mix.extend(matrix);
+                }
+                let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&bias)) }.unwrap();
+                {
+                    let mut ops = Qwen3Ops::new_with_size(context, bytes, 2).unwrap();
+                    let bindings = ops.bind_buffers(&[buffer]).unwrap();
+                    ops.write_f32(regions.branch, &input).unwrap();
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 0, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    let expanded: Vec<f32> = input
+                        .chunks_exact(shape.width)
+                        .flat_map(|row| (0..streams).flat_map(move |_| row.iter().copied()))
+                        .collect();
+                    assert_eq!(
+                        ops.read_f32(regions.residual, expanded.len()).unwrap(),
+                        expanded
+                    );
+                    ops.write_f32(regions.residual, &residual).unwrap();
+                    ops.write_f32(regions.logits, &logits).unwrap();
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 1, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    close(
+                        ops.read_f32(regions.branch, expected_branch.len()).unwrap(),
+                        &expected_branch,
+                    );
+                    close(
+                        ops.read_f32(regions.post, expected_post.len()).unwrap(),
+                        &expected_post,
+                    );
+                    close(
+                        ops.read_f32(regions.mix, expected_mix.len()).unwrap(),
+                        &expected_mix,
+                    );
+                    let mut merged = vec![0.0; residual.len()];
+                    for row in 0..ROWS {
+                        for i in 0..streams {
+                            for k in 0..shape.width {
+                                merged[(row * streams + i) * shape.width + k] = (0..streams)
+                                    .map(|j| {
+                                        expected_mix[(row * streams + i) * streams + j]
+                                            * f64::from(
+                                                residual[(row * streams + j) * shape.width + k],
+                                            )
+                                    })
+                                    .sum::<f64>()
+                                    + expected_post[row * streams + i]
+                                        * expected_branch[row * shape.width + k];
+                            }
+                        }
+                    }
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 2, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    close(
+                        ops.read_f32(regions.residual, merged.len()).unwrap(),
+                        &merged,
+                    );
+                    let mut reduced = Vec::new();
+                    for row in 0..ROWS {
+                        for k in 0..shape.width {
+                            reduced.push(
+                                (0..streams)
+                                    .map(|i| merged[(row * streams + i) * shape.width + k])
+                                    .sum::<f64>()
+                                    / streams as f64,
+                            );
+                        }
+                    }
+                    let commands = TokenCommands::begin(context).unwrap();
+                    ops.record_mhc(&commands, bindings, 3, regions, shape, ROWS)
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    close(
+                        ops.read_f32(regions.branch, reduced.len()).unwrap(),
+                        &reduced,
+                    );
+                }
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn recurrent_ssm_gpu_repeat_interleave_preserves_default_head_layout() {
+        use super::*;
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("no vulkan context; skip");
+            return;
+        };
+        const ROWS: usize = 2;
+        const K_HEADS: usize = 2;
+        const V_HEADS: usize = 4;
+        const DIM: usize = 2;
+        let mut cursor = 0;
+        let q = f32_region(&mut cursor, ROWS * K_HEADS * DIM).unwrap();
+        let k = f32_region(&mut cursor, ROWS * K_HEADS * DIM).unwrap();
+        let v = f32_region(&mut cursor, ROWS * V_HEADS * DIM).unwrap();
+        let gate = f32_region(&mut cursor, ROWS * V_HEADS * DIM).unwrap();
+        let beta = f32_region(&mut cursor, ROWS * V_HEADS).unwrap();
+        let alpha = f32_region(&mut cursor, ROWS * V_HEADS).unwrap();
+        let output = f32_region(&mut cursor, ROWS * V_HEADS * DIM).unwrap();
+        let state = f32_region(&mut cursor, V_HEADS * DIM * DIM).unwrap();
+        let queries: Vec<f32> = (0..ROWS * K_HEADS * DIM)
+            .map(|i| 0.1 + i as f32 * 0.07)
+            .collect();
+        let keys: Vec<f32> = (0..queries.len()).map(|i| 0.2 - i as f32 * 0.03).collect();
+        let values: Vec<f32> = (0..ROWS * V_HEADS * DIM)
+            .map(|i| -0.3 + i as f32 * 0.05)
+            .collect();
+        let initial: Vec<f32> = (0..V_HEADS * DIM * DIM).map(|i| i as f32 * 0.01).collect();
+        let norm = [0.75f32, 1.25];
+        let zero = [0.0f32; V_HEADS];
+        let buffers: Vec<GpuBuffer> = [&zero[..], &zero[..], &norm[..]]
+            .into_iter()
+            .map(|values| unsafe { context.upload_static(bytemuck::cast_slice(values)) }.unwrap())
+            .collect();
+        {
+            let mut ops = Qwen3Ops::new_with_size(context, cursor, 2).unwrap();
+            let bindings = ops.bind_buffers(&buffers).unwrap();
+            for repeat_interleave in [false, true] {
+                let mut expected_state: Vec<f64> = initial.iter().copied().map(f64::from).collect();
+                let mut expected = vec![0.0; values.len()];
+                for token in 0..ROWS {
+                    for head in 0..V_HEADS {
+                        let key_head = if repeat_interleave {
+                            head / (V_HEADS / K_HEADS)
+                        } else {
+                            head % K_HEADS
+                        };
+                        let key_at = (token * K_HEADS + key_head) * DIM;
+                        let value_at = (token * V_HEADS + head) * DIM;
+                        let state_at = head * DIM * DIM;
+                        let mut projected = [0.0; DIM];
+                        for row in 0..DIM {
+                            let state_row = &mut expected_state
+                                [state_at + row * DIM..state_at + (row + 1) * DIM];
+                            let old: f64 = state_row
+                                .iter()
+                                .enumerate()
+                                .map(|(column, value)| value * f64::from(keys[key_at + column]))
+                                .sum();
+                            let delta = (f64::from(values[value_at + row]) - old) * 0.5;
+                            for column in 0..DIM {
+                                state_row[column] += f64::from(keys[key_at + column]) * delta;
+                            }
+                            projected[row] = state_row
+                                .iter()
+                                .enumerate()
+                                .map(|(column, value)| value * f64::from(queries[key_at + column]))
+                                .sum::<f64>()
+                                / (DIM as f64).sqrt();
+                        }
+                        let inverse_rms = 1.0
+                            / (projected.iter().map(|v| v * v).sum::<f64>() / DIM as f64 + 1e-6)
+                                .sqrt();
+                        for row in 0..DIM {
+                            expected[value_at + row] =
+                                projected[row] * inverse_rms * f64::from(norm[row])
+                                    / (1.0 + (-1.0f64).exp());
+                        }
+                    }
+                }
+                for (region, data) in [
+                    (q, queries.as_slice()),
+                    (k, keys.as_slice()),
+                    (v, values.as_slice()),
+                    (gate, &[1.0; ROWS * V_HEADS * DIM]),
+                    (beta, &[0.0; ROWS * V_HEADS]),
+                    (alpha, &[0.0; ROWS * V_HEADS]),
+                    (state, initial.as_slice()),
+                ] {
+                    ops.write_f32(region, data).unwrap();
+                }
+                let commands = TokenCommands::begin(context).unwrap();
+                if repeat_interleave {
+                    ops.record_qwen35_recurrent_ssm_layout(
+                        &commands, bindings, q, k, v, gate, beta, alpha, output, state, 0, 1,
+                        K_HEADS, V_HEADS, DIM, 1e-6, ROWS, true,
+                    )
+                    .unwrap();
+                } else {
+                    ops.record_qwen35_recurrent_ssm(
+                        &commands, bindings, q, k, v, gate, beta, alpha, output, state, 0, 1,
+                        K_HEADS, V_HEADS, DIM, 1e-6, ROWS,
+                    )
+                    .unwrap();
+                }
+                commands.submit_and_wait().unwrap();
+                for (region, reference) in [(output, &expected), (state, &expected_state)] {
+                    for (index, (&actual, &expected)) in ops
+                        .read_f32(region, reference.len())
+                        .unwrap()
+                        .iter()
+                        .zip(reference)
+                        .enumerate()
+                    {
+                        assert!(
+                            actual.is_finite()
+                                && (f64::from(actual) - expected).abs()
+                                    < 2e-5 * (1.0 + expected.abs()),
+                            "repeat={repeat_interleave} at {index}: gpu={actual} cpu={expected}"
+                        );
+                    }
+                }
+            }
+        }
+        unsafe { context.destroy_completed_buffers(&buffers) }.unwrap();
+    }
+
+    /// The operator pipelines are compiled once per device. A denoiser step
+    /// records hundreds of dispatches, and building a fresh set for each of
+    /// them compiled every shader again.
+    #[test]
+    fn operator_pipelines_are_shared() {
+        crate::ops::float::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("no vulkan context; skip");
+            return;
+        };
+        let first = context.operator_pipelines().expect("pipelines");
+        let second = context.operator_pipelines().expect("pipelines");
+        assert_eq!(first.len(), second.len());
+        assert_eq!(
+            first.iter().collect::<Vec<_>>(),
+            second.iter().collect::<Vec<_>>(),
+            "the second call must hand out the same pipelines"
+        );
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[test]
+    #[ignore = "requires a Vulkan device and NEON half operands"]
+    fn vulkan_f16_neon_prepared_matches_cpu_bits() {
+        use super::*;
+        if !crate::ops::f16_uses_neon_accumulators(32) {
+            eprintln!("skipped: this CPU has no selected NEON F16 dot path");
+            return;
+        }
+        const ROWS: usize = 3;
+        const OUTPUTS: usize = 5;
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
+        check_qwen3_core_contract(context).unwrap();
+        for width in [32, 128, 256] {
+            let weight: Vec<u8> = (0..width * OUTPUTS)
+                .flat_map(|index| {
+                    crate::ops::f32_to_f16(((index * 31 % 127) as f32 - 63.0) / 32.0).to_le_bytes()
+                })
+                .collect();
+            let input: Vec<f32> = (0..ROWS * width)
+                .map(|index| {
+                    let bits = 0x3e80_0000 + ((index as u32 * 47_113) % 0x0200_0000);
+                    f32::from_bits(bits) * if index % 3 == 0 { -1.0 } else { 1.0 }
+                })
+                .collect();
+            let mut expected = Vec::new();
+            for row in input.chunks_exact(width) {
+                let rounded: Vec<_> = row
+                    .iter()
+                    .map(|&value| crate::ops::f32_to_f16(value))
+                    .collect();
+                for weights in weight.chunks_exact(width * 2) {
+                    expected.push(crate::ops::dot_f16_f16_bytes(&rounded, weights, width));
+                }
+            }
+            let mut runtime = BatchedLinearRuntime::new(context, ROWS, width, OUTPUTS, 2).unwrap();
+            let mut actual = vec![f32::NAN; ROWS * OUTPUTS];
+            runtime
+                .matmul_rows(
+                    &weight,
+                    GpuWeightFormat::F16,
+                    &input,
+                    ROWS,
+                    width,
+                    OUTPUTS,
+                    &mut actual,
+                )
+                .unwrap();
+            for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "F16 width={width} at {index}"
+                );
+            }
+        }
+    }
+
+    /// TEMPORARY kernel-development benchmark; not for commit.
+    #[test]
+    #[ignore = "benchmark; requires a Vulkan device"]
+    fn bench_quant_matmul_rows_scaling() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat};
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
+        // LFM2.5 expert shape and Qwen3-8B-ish shapes.
+        const N_IN: usize = 2048;
+        const N_OUT: usize = 1792;
+        let n = N_IN * N_OUT;
+        let cases: [(&str, GpuWeightFormat, usize); 2] = [
+            ("Q8_0", GpuWeightFormat::Q8_0, n / 32 * 34),
+            ("Q4_K", GpuWeightFormat::Q4_K, n / 256 * 144),
+        ];
+        println!(
+            "{:<6} {:>5} {:>9} {:>12} {:>13} {:>11}",
+            "fmt", "rows", "weight_MB", "ms/call", "eff_GB/s", "GFLOP/s"
+        );
+        for (name, format, bytes) in cases {
+            let weight: Vec<u8> = (0..bytes).map(|i| ((i * 131 + 7) % 251) as u8).collect();
+            for rows in [1usize, 8, 64, 256] {
+                let iters = if rows >= 256 { 20 } else { 200 };
+                let input: Vec<f32> = (0..rows * N_IN)
+                    .map(|i| ((i % 29) as f32 - 14.0) * 0.031)
+                    .collect();
+                let mut out = vec![0f32; rows * N_OUT];
+                let mut rt = BatchedLinearRuntime::new(context, rows, N_IN, N_OUT, 2).unwrap();
+                rt.matmul_rows(&weight, format, &input, rows, N_IN, N_OUT, &mut out)
+                    .unwrap();
+                let t = std::time::Instant::now();
+                for _ in 0..iters {
+                    rt.matmul_rows(&weight, format, &input, rows, N_IN, N_OUT, &mut out)
+                        .unwrap();
+                }
+                let el = t.elapsed().as_secs_f64();
+                let flops = 2.0 * rows as f64 * N_IN as f64 * N_OUT as f64;
+                println!(
+                    "{:<6} {:>5} {:>9.2} {:>12.4} {:>13.2} {:>11.2}",
+                    name,
+                    rows,
+                    bytes as f64 / 1e6,
+                    el * 1000.0 / iters as f64,
+                    (bytes * iters) as f64 / el / 1e9,
+                    flops * iters as f64 / el / 1e9
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; compares Q8 quantization to the CPU kernel"]
+    fn vulkan_q8_quantization_matches_cpu_bits() {
+        let context = crate::vulkan::VulkanContext::new().unwrap();
+        super::check_quantize_tie_even(&context).unwrap();
+    }
+
+    /// The tiled Q4_0 kernel has to be the per-row kernel's, bit for bit.
+    ///
+    /// The per-row kernel reads the weight once per (output column, token
+    /// row) pair and multiplies the four-bit values one at a time; the
+    /// tiled one reads it once per (output column, k-block) and uses the
+    /// packed dot product. The arithmetic is the same, so the results have
+    /// to be the same: the integer sum of the 32 products is exact, and
+    /// the float part keeps the per-row kernel's order, (sum * weight
+    /// scale) * activation scale, added per block.
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
+        use super::*;
+        const WIDTH: usize = 256;
+        const OUTPUTS: usize = 129;
+        for rows in [1usize, 2, 3, 5] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, rows * WIDTH * 4).unwrap();
+            let q8 = region(&mut cursor, rows * WIDTH).unwrap();
+            let scales = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
+            let sums = f32_region(&mut cursor, rows * WIDTH / 32 * 4).unwrap();
+            let output = f32_region(&mut cursor, rows * OUTPUTS * 4).unwrap();
+            let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+            let mut ops = Qwen3Ops::new_with_size(context, cursor, 2).unwrap();
+            let weight = synthetic_weight(GpuWeightFormat::Q4_0, WIDTH, OUTPUTS);
+            let buffer = unsafe { ops.context.upload_static(&weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q4_0])
+                .unwrap();
+            let values: Vec<f32> = (0..rows * WIDTH)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+
+            let mut ordinary = vec![0.0f32; rows * OUTPUTS];
+            let mut tiled = vec![0.0f32; rows * OUTPUTS];
+            for (target, tiled_kernel) in [(&mut ordinary, false), (&mut tiled, true)] {
+                ops.write_f32(input, &values).unwrap();
+                ops.write_f32(output, &vec![f32::NAN; rows * OUTPUTS])
+                    .unwrap();
+                let commands = TokenCommands::begin(ops.context).unwrap();
+                let recorded = if tiled_kernel {
+                    ops.record_weight_matmul_tiled_rows(
+                        &commands,
+                        bindings,
+                        input,
+                        q8,
+                        scales,
+                        sums,
+                        q8,
+                        scales,
+                        &[(output, OUTPUTS, OUTPUTS * 4)],
+                        WIDTH,
+                        rows,
+                        WIDTH,
+                    )
+                } else {
+                    ops.record_weight_matmul_ordinary_rows(
+                        &commands,
+                        bindings,
+                        input,
+                        q8,
+                        scales,
+                        sums,
+                        q8,
+                        scales,
+                        &[(output, OUTPUTS, OUTPUTS * 4)],
+                        WIDTH,
+                        rows,
+                        WIDTH,
+                    )
+                };
+                recorded.unwrap();
+                commands.submit_and_wait().unwrap();
+                ops.read_f32_into(output, target).unwrap();
+            }
+            for (index, (ordinary, tiled)) in ordinary.iter().zip(&tiled).enumerate() {
+                assert_eq!(
+                    ordinary.to_bits(),
+                    tiled.to_bits(),
+                    "rows={rows} value {index}"
+                );
+            }
+            unsafe { ops.context.destroy_completed_buffers(&[buffer]) }.unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; compares to the production CPU Q8 kernel"]
+    fn vulkan_q8_matches_cpu_reduction_bits() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::Q8_0};
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 65;
+        let mut context = super::VulkanContext::new().unwrap();
+        context.limits.max_compute_work_group_count[0] = 1;
+        let context = Box::leak(Box::new(context));
+        // Cover single and multiple 64-block chunks, the width limit and a 2D grid.
+        for width in [1024, 3584, 16384, 17408] {
+            let weight = super::synthetic_weight(Q8_0, width, OUTPUTS);
+            let input: Vec<_> = (0..ROWS * width)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            let mut expected = vec![0.0; ROWS * OUTPUTS];
+            let mut single = vec![f32::NAN; OUTPUTS];
+            for (input, expected) in input
+                .chunks_exact(width)
+                .zip(expected.chunks_exact_mut(OUTPUTS))
+            {
+                let mut q8 = vec![0; width];
+                let mut scales = vec![0.0; width / 32];
+                crate::ops::quantize_q8_0_into(input, width, &mut q8, &mut scales);
+                crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                    &weight, &q8, &scales, expected, width, 0, OUTPUTS,
+                );
+                unsafe {
+                    context
+                        .matmul_q8_0(&weight, &q8, &scales, &mut single, width, OUTPUTS)
+                        .unwrap();
+                }
+                for (index, (actual, expected)) in single.iter().zip(expected).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "standalone Q8 width={width} at {index}"
+                    );
+                }
+            }
+            let mut runtime = BatchedLinearRuntime::new(context, ROWS, width, OUTPUTS, 2).unwrap();
+            for rows in [1, 3, 33, 64, 65] {
+                let mut actual = vec![f32::NAN; rows * OUTPUTS];
+                let before = context.submission_count();
+                runtime
+                    .matmul_rows(
+                        &weight,
+                        Q8_0,
+                        &input[..rows * width],
+                        rows,
+                        width,
+                        OUTPUTS,
+                        &mut actual,
+                    )
+                    .unwrap();
+                assert_eq!(context.submission_count(), before + 1);
+                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "grouped Q8 width={width} rows={rows} at {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; checks ordinary GPU fallback for unavailable tiling"]
+    fn vulkan_q8_tiled_falls_back_to_ordinary_gpu() {
+        use super::*;
+        const WIDTH: usize = 96;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 5;
+        let mut context = VulkanContext::new().unwrap();
+        context.limits.max_compute_shared_memory_size = 16_384;
+        let mut cursor = 0;
+        let input = f32_region(&mut cursor, ROWS * WIDTH * 4).unwrap();
+        let q8 = region(&mut cursor, ROWS * WIDTH).unwrap();
+        let scales = f32_region(&mut cursor, ROWS * WIDTH / 32 * 4).unwrap();
+        let sums = f32_region(&mut cursor, ROWS * WIDTH / 32 * 4).unwrap();
+        let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+        assert!(!ops.q8_tiled);
+        let weight = synthetic_weight(GpuWeightFormat::Q8_0, WIDTH, OUTPUTS);
+        let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+        let bindings = ops
+            .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+            .unwrap();
+        let values: Vec<_> = (0..ROWS * WIDTH)
+            .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+            .collect();
+        ops.write_f32(input, &values).unwrap();
+        ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
+            .unwrap();
+        let before = context.submission_count();
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_weight_matmul_tiled_rows(
+            &commands,
+            bindings,
+            input,
+            q8,
+            scales,
+            sums,
+            q8,
+            scales,
+            &[(output, OUTPUTS, OUTPUTS * 4)],
+            WIDTH,
+            ROWS,
+            WIDTH,
+        )
+        .unwrap();
+        commands.submit_and_wait().unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        assert_eq!(ops.recorded_dispatch_count(), 2);
+        let mut expected = vec![0.0; ROWS * OUTPUTS];
+        for (input, expected) in values
+            .chunks_exact(WIDTH)
+            .zip(expected.chunks_exact_mut(OUTPUTS))
+        {
+            let mut packed = vec![0; WIDTH];
+            let mut scales = vec![0.0; WIDTH / 32];
+            crate::ops::quantize_q8_0_into(input, WIDTH, &mut packed, &mut scales);
+            crate::ops::kernel::q8_0::dispatch::matmul_q8_0_quantized_range(
+                &weight, &packed, &scales, expected, WIDTH, 0, OUTPUTS,
+            );
+        }
+        for (actual, expected) in ops
+            .read_f32(output, ROWS * OUTPUTS)
+            .unwrap()
+            .iter()
+            .zip(expected)
+        {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device and RUST_GPU_DISPATCH_TRACE=2; run in isolation"]
+    fn vulkan_q8_cooperative_selection_preserves_gpu_alternatives() {
+        use super::*;
+        use std::sync::atomic::Ordering::Relaxed;
+        assert!(dispatch_log_enabled());
+        for (width, outputs, rows, limited_grid, expected_pipeline, expected_grid) in [
+            (224, 33, 1, false, Q8_MATMUL_GROUPED, [1, 1, 1]),
+            (256, 4096, 1, false, Q8_MATMUL_COOPERATIVE, [2048, 1, 1]),
+            (256, 4097, 1, false, Q8_MATMUL_GROUPED, [65, 1, 1]),
+            (256, 33, 2, false, Q8_MATMUL_GROUPED, [1, 1, 2]),
+            (256, 33, 1, true, Q8_MATMUL_GROUPED, [1, 1, 1]),
+        ] {
+            let mut context = VulkanContext::new().unwrap();
+            if limited_grid {
+                context.limits.max_compute_work_group_count[..2].fill(1);
+            }
+            let layout = BatchedLinearLayout::new(rows, width, outputs).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, layout.size, 2).unwrap();
+            let block: Vec<_> = [0x00, 0x3c].into_iter().chain([1; 32]).collect();
+            let weight = block.repeat(width / 32 * outputs);
+            let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            ops.write_f32(
+                layout.q8,
+                &vec![f32::from_bits(0x0101_0101); rows * width / 4],
+            )
+            .unwrap();
+            ops.write_f32(layout.scales, &vec![1.0; rows * width / 32])
+                .unwrap();
+            ops.write_f32(layout.output, &vec![f32::NAN; rows * outputs])
+                .unwrap();
+            let (push, grid) = matmul_rows_push(
+                layout.size,
+                &context.limits,
+                bindings,
+                layout.q8,
+                layout.scales,
+                None,
+                &[(layout.output, outputs, outputs * 4)],
+                width,
+                rows,
+                width,
+            )
+            .unwrap();
+            let (expected_pipeline, expected_grid) = if ops.q8_tiled && tiled_matmul_enabled() {
+                (expected_pipeline, expected_grid)
+            } else {
+                (Q8_MATMUL_GROUPED, grid)
+            };
+            dispatch_log_reset();
+            let before = context.submission_count();
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_linear_dispatch(&commands, Q8_MATMUL_GROUPED, bindings, &push, grid);
+            commands.submit_and_wait().unwrap();
+            assert_eq!(context.submission_count(), before + 1);
+            assert_eq!(DISPATCH_LOG_LEN.load(Relaxed), 1);
+            assert_eq!(DISPATCH_LOG[0].load(Relaxed), expected_pipeline as u64);
+            for (cell, expected) in DISPATCH_LOG[2..5].iter().zip(expected_grid) {
+                assert_eq!(cell.load(Relaxed), expected as u64);
+            }
+            assert!(ops
+                .read_f32(layout.output, rows * outputs)
+                .unwrap()
+                .iter()
+                .all(|&value| value.to_bits() == (width as f32).to_bits()));
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+        }
+        dispatch_log_reset();
+    }
+
+    #[test]
+    #[ignore = "mutates the global dispatch log; run in isolation"]
+    fn dispatch_log_preserves_grid_epoch_and_capacity() {
+        use super::*;
+        use std::sync::atomic::Ordering::Relaxed;
+        dispatch_log_reset();
+        for index in 0..=DISPATCH_LOG_CAPACITY {
+            dispatch_log_new_epoch();
+            dispatch_log_push(
+                Q8_MATMUL_COOPERATIVE,
+                0x0123_4567_89ab_cdef,
+                [0x3210_0000 + index as u32, 12345, 123],
+            );
+        }
+        for index in [0, DISPATCH_LOG_CAPACITY - 1] {
+            let actual: Vec<_> = DISPATCH_LOG[index * 6..index * 6 + 6]
+                .iter()
+                .map(|cell| cell.load(Relaxed))
+                .collect();
+            assert_eq!(
+                actual,
+                [
+                    Q8_MATMUL_COOPERATIVE as u64,
+                    0x0123_4567_89ab_cdef,
+                    0x3210_0000 + index as u64,
+                    12345,
+                    123,
+                    index as u64 + 1,
+                ]
+            );
+        }
+        dump_dispatch_log();
+        dispatch_log_reset();
+        assert_eq!(DISPATCH_LOG_LEN.load(Relaxed), 0);
+        assert_eq!(DISPATCH_LOG_EPOCH.load(Relaxed), 0);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device; checks scalar, NEON and AVX2 reduction contracts"]
+    fn vulkan_q8_reduction_modes_match_golden_bits() {
+        use super::*;
+        const OUTPUTS: usize = 65;
+        const ROWS: usize = 5;
+        // Independent f32/fmaf oracle, including four cooperative chunks.
+        for (repeat, expected_bits) in [
+            (
+                1,
+                [
+                    [0x427828f6, 0x42f828f6, 0x433a1eb9, 0x437828f6, 0x439b199a],
+                    [0x427828f6, 0x42f828f6, 0x433a1eb8, 0x437828f6, 0x439b199a],
+                    [0x427828f2, 0x42f828f2, 0x433a1eb8, 0x437828f2, 0x439b1998],
+                ],
+            ),
+            (
+                33,
+                [
+                    [0x44ffea31, 0x457fea31, 0x45bfefa8, 0x45ffea31, 0x461ff265],
+                    [0x44ffea31, 0x457fea31, 0x45bfefa8, 0x45ffea31, 0x461ff265],
+                    [0x44ffea3e, 0x457fea3e, 0x45bfefa6, 0x45ffea3e, 0x461ff263],
+                ],
+            ),
+        ] {
+            let width = repeat * 96;
+            let mut context = VulkanContext::new().unwrap();
+            context.limits.max_compute_work_group_count[0] = 1;
+            let mut cursor = 0;
+            let q8 = region(&mut cursor, ROWS * width).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * width / 32 * 4).unwrap();
+            let output = f32_region(&mut cursor, ROWS * OUTPUTS * 4).unwrap();
+            // Three descriptor sets: the arena and the two weight layouts.
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 3).unwrap();
+            let coefficients = [
+                [47i8, -89, 13, 102, -63, 7, -31, 19],
+                [-101, 37, 83, -11, 59, -73, 23, -5],
+                [11, 61, -107, 29, -17, 97, -43, 3],
+            ];
+            let row: Vec<u8> = coefficients
+                .iter()
+                .flat_map(|groups| {
+                    [0x00, 0x3c]
+                        .into_iter()
+                        .chain(groups.iter().flat_map(|&value| [value as u8; 4]))
+                })
+                .collect();
+            let weight = row.repeat(repeat * OUTPUTS);
+            let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            // The same weight in the transposed layout: the kernel reads the
+            // same values, so it has to produce the same golden bits.
+            let transposed_weight =
+                crate::vulkan::q8_layout::transpose_q8_0_weight(&weight, width, OUTPUTS);
+            let transposed_buffer = unsafe { context.upload_static(&transposed_weight) }.unwrap();
+            let transposed_bindings = ops
+                .bind_weight_buffers(&[transposed_buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            let input: Vec<f32> = (1..=ROWS as u8)
+                .flat_map(|value| {
+                    std::iter::repeat_n(f32::from_bits(u32::from_le_bytes([value; 4])), width / 4)
+                })
+                .collect();
+            ops.write_f32(q8, &input).unwrap();
+            ops.write_f32(scales, &[0.13f32, 0.19, 0.37].repeat(repeat * ROWS))
+                .unwrap();
+            // Fixed IEEE-754 results distinguish block FMA, unfused adds and eight streams.
+            for (mode, expected) in [0, 1, 8].into_iter().zip(expected_bits) {
+                for pipeline in [
+                    Q8_MATMUL_GROUPED,
+                    Q8_MATMUL_GROUPED_TILED,
+                    Q8_MATMUL_COOPERATIVE,
+                    Q8_MATMUL_GROUPED_TILED_WIDE,
+                    Q8_MATMUL_GROUPED_TILED_WIDE_ADD,
+                    Q8_MATMUL_TRANSPOSED,
+                ] {
+                    // The two wide kernels fold the host's accumulation
+                    // contract into the shader instead of testing
+                    // `reduction_mode` in the token loop (a runtime branch
+                    // there costs about 40% of the kernel on the aarch64 box), so
+                    // `_WIDE` only honours the fused contract and `_WIDE_ADD`
+                    // only the unfused one.
+                    if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE && mode != 1 {
+                        continue;
+                    }
+                    if pipeline == Q8_MATMUL_GROUPED_TILED_WIDE_ADD && mode != 0 {
+                        continue;
+                    }
+                    if pipeline != Q8_MATMUL_GROUPED && !ops.q8_tiled {
+                        continue;
+                    }
+                    let transposed = pipeline == Q8_MATMUL_TRANSPOSED;
+                    let (mut push, mut dispatch) = matmul_rows_push(
+                        cursor,
+                        &context.limits,
+                        if transposed {
+                            transposed_bindings
+                        } else {
+                            bindings
+                        },
+                        q8,
+                        scales,
+                        None,
+                        &[(output, OUTPUTS, OUTPUTS * 4)],
+                        width,
+                        ROWS,
+                        width,
+                    )
+                    .unwrap();
+                    push[14] = mode;
+                    if pipeline == Q8_MATMUL_GROUPED_TILED {
+                        let tokens = if mode == 8 { 4 } else { 32 };
+                        dispatch = row_dispatch(2, ROWS.div_ceil(tokens), &context.limits).unwrap();
+                    } else if matches!(
+                        pipeline,
+                        Q8_MATMUL_GROUPED_TILED_WIDE | Q8_MATMUL_GROUPED_TILED_WIDE_ADD
+                    ) {
+                        dispatch = row_dispatch(2, ROWS.div_ceil(32), &context.limits).unwrap();
+                    } else if pipeline == Q8_MATMUL_COOPERATIVE {
+                        dispatch =
+                            matmul_dispatch(OUTPUTS.div_ceil(2), ROWS, 1, &context.limits).unwrap();
+                    }
+                    ops.write_f32(output, &vec![f32::NAN; ROWS * OUTPUTS])
+                        .unwrap();
+                    let commands = TokenCommands::begin(&context).unwrap();
+                    ops.record_linear_dispatch(
+                        &commands,
+                        pipeline,
+                        if transposed {
+                            transposed_bindings
+                        } else {
+                            bindings
+                        },
+                        &push,
+                        dispatch,
+                    );
+                    commands.submit_and_wait().unwrap();
+                    let actual = ops.read_f32(output, ROWS * OUTPUTS).unwrap();
+                    for (token, row) in actual.chunks_exact(OUTPUTS).enumerate() {
+                        for (column, value) in row.iter().enumerate() {
+                            assert_eq!(
+                                value.to_bits(),
+                                expected[token],
+                                "width={width} mode={mode} pipeline={pipeline} token={token} column={column}",
+                            );
+                        }
+                    }
+                }
+            }
+            unsafe {
+                context
+                    .destroy_completed_buffers(&[buffer, transposed_buffer])
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn tiled_attention_limits_preserve_baseline_operators() {
+        use super::{Qwen3Ops, TokenCommands, VulkanContext, VulkanError};
+        use crate::models::diffusion::z_image::dit_gpu::DitGpuSession;
+
+        for (invocations, size_x) in [(128, 256), (256, 128)] {
+            let mut context = VulkanContext::new().unwrap();
+            context.limits.max_compute_work_group_invocations = invocations;
+            context.limits.max_compute_work_group_size[0] = size_x;
+            let context = Box::leak(Box::new(context));
+            let projection_only = DitGpuSession::new_with_attention(context, 32, false).unwrap();
+            drop(projection_only);
+            assert!(matches!(
+                DitGpuSession::new_with_attention(context, 32, true),
+                Err(VulkanError::UnsupportedShape(_))
+            ));
+
+            let mut cursor = 0;
+            let qkv = super::region(&mut cursor, 384 * 4).unwrap();
+            let cache_k = super::region(&mut cursor, 128 * 4).unwrap();
+            let cache_v = super::region(&mut cursor, 128 * 4).unwrap();
+            let scratch = super::region(&mut cursor, 128 * 4).unwrap();
+            let scores = super::region(&mut cursor, 4).unwrap();
+            let q8 = super::region(&mut cursor, 32).unwrap();
+            let scales = super::region(&mut cursor, 4).unwrap();
+            let sums = super::region(&mut cursor, 4).unwrap();
+            let ops = Qwen3Ops::new_with_size(context, cursor, 1).unwrap();
+            ops.write_f32(qkv, &[1.0; 384]).unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            assert!(matches!(
+                ops.record_diy_attention_scores(
+                    &commands, qkv, cache_k, cache_v, scratch, scores, 384, 1, 1, 128, 1,
+                ),
+                Err(VulkanError::UnsupportedShape(_))
+            ));
+            ops.record_quantize_q8_0(&commands, qkv, q8, scales, sums, 32)
+                .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_bytes(q8, 32).unwrap(), &[127; 32]);
+        }
+    }
+
+    /// Compare the complete 30-head production attention shape, including
+    /// readback. Timing is diagnostic; numerical equality is the assertion.
+    #[test]
+    #[ignore = "requires a discrete GPU; attention bandwidth benchmark"]
+    fn z_image_attention_staging_matches_mapped_arena() {
+        use super::{Qwen3Ops, TokenCommands, VulkanContext};
+        use crate::models::diffusion::z_image::dit::{HEADS, HIDDEN, QKV_WIDTH, ROPE_HEAD_WIDTH};
+        let context = VulkanContext::new().unwrap();
+        if !context.is_discrete() {
+            return;
+        }
+        let rows = 1056;
+        let mut cursor = 0;
+        let qkv_region = super::region(&mut cursor, rows * QKV_WIDTH * 4).unwrap();
+        let cache_k = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let cache_v = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let scratch = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let scores = super::region(&mut cursor, rows * HEADS * rows * 4).unwrap();
+        let out = super::region(&mut cursor, rows * HIDDEN * 4).unwrap();
+        let staged = Qwen3Ops::new_device_local_with_size(&context, cursor, 1).unwrap();
+        let mapped = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        let qkv: Vec<f32> = (0..rows * QKV_WIDTH)
+            .map(|i| ((i * 37 + 11) % 211) as f32 / 211.0 - 0.5)
+            .collect();
+        let mut outputs = Vec::new();
+        for (name, ops) in [("mapped", &mapped), ("staged", &staged)] {
+            ops.write_f32(qkv_region, &qkv).unwrap();
+            let mut output = vec![0.0; rows * HIDDEN];
+            let mut compute_ms = Vec::new();
+            let mut read_ms = Vec::new();
+            for iteration in 0..13 {
+                let start = std::time::Instant::now();
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_diy_attention_full(
+                    &commands,
+                    qkv_region,
+                    cache_k,
+                    cache_v,
+                    scratch,
+                    scores,
+                    out,
+                    QKV_WIDTH,
+                    HEADS,
+                    HEADS,
+                    ROPE_HEAD_WIDTH,
+                    rows,
+                )
+                .unwrap();
+                commands.submit_and_wait().unwrap();
+                let compute = start.elapsed().as_secs_f64() * 1000.0;
+                let start = std::time::Instant::now();
+                ops.read_f32_into(out, &mut output).unwrap();
+                let read = start.elapsed().as_secs_f64() * 1000.0;
+                assert!(output.iter().all(|value| value.is_finite()));
+                if iteration >= 3 {
+                    compute_ms.push(compute);
+                    read_ms.push(read);
+                }
+            }
+            eprintln!("attention {name}: rows={rows} heads={HEADS} compute_ms={compute_ms:?} read_ms={read_ms:?}");
+            outputs.push(
+                output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(
+            outputs[0], outputs[1],
+            "staging changed attention output bits"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn staged_arena_partial_upload_preserves_gpu_writes_and_padding() {
+        use super::{ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
+        let context = VulkanContext::new().unwrap();
+        for device_local in [false, true] {
+            let ops = if device_local {
+                Qwen3Ops::new_device_local_with_size(&context, 512, 1)
+            } else {
+                Qwen3Ops::new_with_size(&context, 512, 1)
+            }
+            .unwrap();
+            let target = ArenaRegion {
+                offset: 16,
+                size: 64 * 4,
+            };
+            let addition = ArenaRegion {
+                offset: 320,
+                size: 16 * 4,
+            };
+            let mut expected: Vec<f32> = (0..64).map(|i| i as f32).collect();
+            let mut actual = vec![f32::NAN; 64];
+            ops.read_f32_into(target, &mut actual).unwrap();
+            assert_eq!(actual, vec![0.0; 64], "arena must start zeroed");
+            ops.write_f32(target, &expected).unwrap();
+            ops.write_f32(addition, &[2.0; 16]).unwrap();
+            for _ in 0..2 {
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_add(&commands, target, addition, 16).unwrap();
+                commands.submit_and_wait().unwrap();
+                for value in &mut expected[..16] {
+                    *value += 2.0;
+                }
+                let partial = ArenaRegion {
+                    offset: target.offset + 32 * 4,
+                    size: 4 * 4,
+                };
+                ops.write_f32(partial, &[123.0; 4]).unwrap();
+                expected[32..36].fill(123.0);
+                ops.read_f32_into(target, &mut actual).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "partial upload clobbered GPU output or padding"
+                );
+            }
+            // Abandon a recording: a later transfer must not replay it.
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_add(&commands, target, addition, 16).unwrap();
+            drop(commands);
+            ops.read_f32_into(target, &mut actual).unwrap();
+            assert_eq!(actual, expected);
+            let submissions = context.submission_count();
+            let short = ArenaRegion {
+                offset: target.offset,
+                size: 4,
+            };
+            assert!(ops.write_f32(short, &[1.0, 2.0]).is_err());
+            assert!(ops.read_f32_into(short, &mut [0.0; 2]).is_err());
+            let unaligned = ArenaRegion { offset: 1, size: 4 };
+            assert!(ops.write_f32(unaligned, &[0.0]).is_err());
+            ops.write_f32(target, &[]).unwrap();
+            ops.read_f32_into(target, &mut []).unwrap();
+            assert_eq!(
+                context.submission_count(),
+                submissions,
+                "invalid/empty transfers must not submit"
+            );
+            let cleared = ArenaRegion {
+                offset: target.offset + 4 * 4,
+                size: 4 * 4,
+            };
+            ops.zero_region(cleared).unwrap();
+            expected[4..8].fill(0.0);
+            ops.read_f32_into(target, &mut actual).unwrap();
+            assert_eq!(actual, expected);
+            if device_local && context.is_discrete() {
+                assert!(ops.staging.is_some());
+                assert!(
+                    ops.read_f32(target, 64).is_err(),
+                    "staging must not escape as a shared slice"
+                );
+                assert!(ops.read_bytes(target, 16).is_err());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a discrete Vulkan device"]
+    fn staged_arena_failed_transfer_recovers_before_reusing_staging() {
+        use super::{ArenaRegion, Ordering, Qwen3Ops, VulkanContext};
+        let context = VulkanContext::new().unwrap();
+        if !context.is_discrete() {
+            return;
+        }
+        let ops = Qwen3Ops::new_device_local_with_size(&context, 256, 1).unwrap();
+        let region = ArenaRegion {
+            offset: 16,
+            size: 32,
+        };
+        ops.write_f32(region, &[3.0; 8]).unwrap();
+        context.fail_fence_wait.store(true, Ordering::Relaxed);
+        let mut output = [123.0; 8];
+        assert!(ops.read_f32_into(region, &mut output).is_err());
+        assert_eq!(output, [123.0; 8]);
+        assert!(context.mutex.lock().unwrap().uncertain);
+        context.fail_wait_idle.store(true, Ordering::Relaxed);
+        let resets = context.command_resets.load(Ordering::Relaxed);
+        assert!(ops.write_f32(region, &[9.0; 8]).is_err());
+        assert_eq!(context.command_resets.load(Ordering::Relaxed), resets);
+        context.fail_wait_idle.store(false, Ordering::Relaxed);
+        ops.read_f32_into(region, &mut output).unwrap();
+        assert_eq!(
+            output, [3.0; 8],
+            "failed recovery must not mutate staging or the device"
+        );
+        ops.write_f32(region, &[9.0; 8]).unwrap();
+        ops.read_f32_into(region, &mut output).unwrap();
+        assert_eq!(output, [9.0; 8]);
+        assert!(!context.mutex.lock().unwrap().uncertain);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn staged_static_upload_preserves_bytes_and_zeroes_padding() {
+        use super::{ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let ops = Qwen3Ops::new_device_local_with_size(context, 256, 1).unwrap();
+        let mut decoder_weights = crate::vulkan::dense::UploadedBuffers::new(context);
+        let bytes: Vec<u8> = (0..67).collect();
+        for source in 0..3 {
+            let weight = unsafe {
+                match source {
+                    0 => context.upload_static(&bytes),
+                    1 => context.upload_device_static(&bytes),
+                    _ => decoder_weights.upload(&bytes),
+                }
+            }
+            .unwrap();
+            if source == 2 && context.is_discrete() {
+                assert!(weight.mapped.is_null(), "decoder weights must use VRAM");
+            }
+            let commands = TokenCommands::begin(&context).unwrap();
+            unsafe {
+                context.record_buffer_copy(commands.command, weight, ops.arena, 0, 0, weight.size)
+            };
+            commands.submit_and_wait().unwrap();
+            let mut output = vec![0.0; weight.size as usize / 4];
+            ops.read_f32_into(
+                ArenaRegion {
+                    offset: 0,
+                    size: weight.size as usize,
+                },
+                &mut output,
+            )
+            .unwrap();
+            let actual: &[u8] = bytemuck::cast_slice(&output);
+            assert_eq!(&actual[..bytes.len()], bytes);
+            assert!(actual[bytes.len()..].iter().all(|&byte| byte == 0));
+            if source != 2 {
+                unsafe { context.destroy_completed_buffers([&weight]) }.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a discrete Vulkan device"]
+    fn z_image_discrete_arena_does_not_map_gpu_intermediates() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let properties = unsafe {
+            context
+                .instance
+                .get_physical_device_properties(context._physical_device)
+        };
+        if properties.device_type != ash::vk::PhysicalDeviceType::DISCRETE_GPU {
+            eprintln!("skipped: requires a discrete GPU");
+            return;
+        }
+        let session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+                context, 32, true,
+            )
+            .unwrap();
+        assert!(
+            session.ops().arena.mapped.is_null(),
+            "discrete GPU intermediates must live in an unmapped device-local arena"
+        );
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn qwen3_chunk_attention_validates_all_spans_before_recording() {
         use super::{ArenaLayout, ArenaRegion, Qwen3Ops, TokenCommands, VulkanContext};
         let context = VulkanContext::new().unwrap();
-        let layout = ArenaLayout::build_rows(32, 32, 2, 1, 16, 8, 2, 5, 3).unwrap();
+        let layout = ArenaLayout::build_rows(32, 32, 2, 1, 16, 8, 2, 5, 3, 0).unwrap();
         let ops = Qwen3Ops::new(&context, layout, 1).unwrap();
         ops.write_f32(layout.scores, &[9.0; 30]).unwrap();
         let before = ops.read_f32(layout.scores, 30).unwrap().to_vec();
@@ -4349,7 +12798,8 @@ mod tests {
                 2,
                 1,
                 16,
-                3
+                3,
+                super::AttentionMode::PreparedF16,
             )
             .is_err());
         commands.submit_and_wait().unwrap();
@@ -4375,7 +12825,8 @@ mod tests {
                     2,
                     1,
                     16,
-                    rows
+                    rows,
+                    super::AttentionMode::PreparedF16,
                 )
                 .is_err());
         }
@@ -4395,7 +12846,8 @@ mod tests {
                 2,
                 5,
                 16,
-                3
+                3,
+                16
             )
             .is_err());
         let short = ArenaRegion {
@@ -4449,11 +12901,23 @@ mod tests {
         assert!(runtime
             .matmul_rows(&weight, F32, &[1.0; 4], 1, 4, 1, &mut output)
             .is_err());
-        assert!(runtime.weights.is_empty());
-        assert_eq!(
-            runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
-            before
-        );
+        // The weight upload has to land before `begin_commands`, because the
+        // barrier it places is what orders host writes against the dispatches
+        // that read them. A begin failure therefore happens with a valid,
+        // owned upload already in the cache; it stays there so the next call
+        // can reuse it instead of leaking or re-uploading it.
+        assert_eq!(runtime.weights.len(), 1);
+        // On UMA there is no staging buffer, so the activation copy lands
+        // before `begin_commands` to be ordered by the barrier it places; a
+        // begin failure therefore leaves the new input in the arena. With a
+        // staging buffer the copy happens after recording starts, so the
+        // arena still holds its previous contents.
+        if runtime.ops.staging.is_some() {
+            assert_eq!(
+                runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
+                before
+            );
+        }
         assert_eq!(output, [123.0]);
         assert_eq!(context.submission_count(), 0);
         runtime.begin_commands = TokenCommands::begin;
@@ -4465,7 +12929,7 @@ mod tests {
             .is_err());
         assert_eq!(runtime.weights.len(), 1);
         assert_eq!(context.submission_count(), 0);
-        let key = (weight.as_ptr() as usize, weight.len());
+        let key = (weight.as_ptr() as usize, weight.len(), 4, 1, false);
         let buffer = runtime.weights[&key].0.buffer;
         runtime.ops.arena.size = arena_size;
         runtime
@@ -4527,10 +12991,16 @@ mod tests {
                 context.command_resets.load(super::Ordering::Relaxed),
                 resets
             );
-            assert_eq!(
-                runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
-                before
-            );
+            // On UMA the activation copy is written before `begin_commands`
+            // so the barrier it places orders it, and a failed call therefore
+            // leaves the new input in the arena. A staging buffer copies after
+            // recording starts, so the arena keeps its old contents there.
+            if runtime.ops.staging.is_some() {
+                assert_eq!(
+                    runtime.ops.read_bytes(runtime.layout.input, 16).unwrap(),
+                    before
+                );
+            }
             assert_eq!(runtime.weights.len(), 1);
             assert_eq!(output, [4.0]);
             assert_eq!(context.submission_count(), 1);
@@ -4593,11 +13063,14 @@ mod tests {
     fn batched_linear_layout_bounds_and_shapes() {
         use super::{BatchedLinearLayout, GpuWeightFormat::*};
         let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: u32::MAX,
             max_compute_work_group_count: [65535; 3],
             ..Default::default()
         };
         let layout = BatchedLinearLayout::new(3, 513, 65).unwrap();
-        for format in [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K] {
+        for format in [
+            F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, MlxAffine4, MlxAffine8,
+        ] {
             let (block, bytes, _) = format.layout();
             let weight_len = 512 / block * bytes * 65;
             for rows in 1..=3 {
@@ -4644,6 +13117,7 @@ mod tests {
             .validate(&limits, 133120, Q8_0, 1539, 3, 513, 65, 195)
             .is_err());
         let narrow_limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: u32::MAX,
             max_compute_work_group_count: [65535, 65535, 2],
             ..Default::default()
         };
@@ -4660,6 +13134,179 @@ mod tests {
         ] {
             assert!(BatchedLinearLayout::new(maxima.0, maxima.1, maxima.2).is_err());
         }
+    }
+
+    #[test]
+    fn batched_linear_layout_rejects_descriptor_range_over_device_limit() {
+        let layout = super::BatchedLinearLayout::with_output_slots(2, 32, 4, 8).unwrap();
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: layout.size as u32 - 1,
+            max_compute_work_group_count: [65535; 3],
+            ..Default::default()
+        };
+        assert!(layout
+            .validate(
+                &limits,
+                32 * 4 * 4,
+                super::GpuWeightFormat::F32,
+                64,
+                2,
+                32,
+                4,
+                8
+            )
+            .is_err());
+        let layout = super::BatchedLinearLayout::new(1, 128, 65).unwrap();
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_storage_buffer_range: layout.size as u32,
+            ..limits
+        };
+        assert!(layout
+            .validate(
+                &limits,
+                128 * 65 * 4,
+                super::GpuWeightFormat::F32,
+                128,
+                1,
+                128,
+                65,
+                65
+            )
+            .is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; also run on Lavapipe in CI"]
+    fn batched_linear_device_review_f32_group_keeps_single_projection_semantics() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let n_in = 130;
+        for widths in [vec![65, 67], vec![65, 4097, 67]] {
+            let weights: Vec<Vec<u8>> = widths
+                .iter()
+                .enumerate()
+                .map(|(slot, &width)| {
+                    (0..n_in * width)
+                        .flat_map(|i| ((i as f32 * 0.137 + slot as f32).sin() * 2.3).to_le_bytes())
+                        .collect()
+                })
+                .collect();
+            let mut runtime =
+                BatchedLinearRuntime::with_output_slots(context, 33, n_in, 4097, 16, 8).unwrap();
+            for rows in [1, 17, 33] {
+                let input: Vec<f32> = (0..rows * n_in)
+                    .map(|i| (i as f32 * 0.193).cos() * 1.7)
+                    .collect();
+                let mut outputs: Vec<Vec<f32>> = widths
+                    .iter()
+                    .map(|&width| vec![f32::NAN; rows * width])
+                    .collect();
+                let specs: Vec<_> = weights
+                    .iter()
+                    .zip(&widths)
+                    .map(|(w, &width)| (w.as_slice(), F32.into(), n_in, width))
+                    .collect();
+                runtime
+                    .matmul_rows_group(
+                        &specs,
+                        &input,
+                        rows,
+                        &mut outputs
+                            .iter_mut()
+                            .map(Vec::as_mut_slice)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                for ((weight, &width), output) in weights.iter().zip(&widths).zip(&outputs) {
+                    let mut single = vec![f32::NAN; rows * width];
+                    runtime
+                        .matmul_rows(weight, F32, &input, rows, n_in, width, &mut single)
+                        .unwrap();
+                    for (i, (got, want)) in output.iter().zip(&single).enumerate() {
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "rows={rows}, width={width}, index={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; also run on Lavapipe in CI"]
+    fn batched_linear_device_review_grouped_descriptors_are_recycled() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let weights: Vec<Vec<u8>> = (1..=4)
+            .map(|i| {
+                vec![i as f32; 32 * 4]
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect()
+            })
+            .collect();
+        let mut runtime = BatchedLinearRuntime::with_output_slots(context, 1, 32, 4, 7, 8).unwrap();
+        for _ in 0..2 {
+            for a in 0..4 {
+                for b in 0..4 {
+                    if a == b {
+                        continue;
+                    }
+                    let mut x = [f32::NAN; 4];
+                    let mut y = [f32::NAN; 4];
+                    runtime
+                        .matmul_rows_group(
+                            &[
+                                (&weights[a], F32.into(), 32, 4),
+                                (&weights[b], F32.into(), 32, 4),
+                            ],
+                            &[1.0; 32],
+                            1,
+                            &mut [&mut x, &mut y],
+                        )
+                        .unwrap();
+                    assert_eq!(x, [32.0 * (a + 1) as f32; 4]);
+                    assert_eq!(y, [32.0 * (b + 1) as f32; 4]);
+                }
+            }
+        }
+        assert_eq!(runtime.weights.len(), 4);
+        context.mutex.lock().unwrap().uncertain = true;
+        context.fail_wait_idle.store(true, super::Ordering::Relaxed);
+        runtime.weight_capacity = runtime.weights.len() + runtime.grouped_weights.len();
+        let cached = runtime.grouped_weights.len();
+        assert!(cached > 0);
+        assert!(runtime.reserve_descriptor().is_err());
+        assert_eq!(runtime.grouped_weights.len(), cached);
+        context
+            .fail_wait_idle
+            .store(false, super::Ordering::Relaxed);
+        runtime.reserve_descriptor().unwrap();
+        assert!(runtime.grouped_weights.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan; also run on Lavapipe in CI"]
+    fn batched_linear_device_review_rejects_four_group_weights_before_upload() {
+        use super::{BatchedLinearRuntime, GpuWeightFormat::F32};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let mut runtime =
+            BatchedLinearRuntime::with_output_slots(context, 1, 32, 4, 16, 8).unwrap();
+        let weight = vec![0u8; 32 * 4 * 4];
+        let group = [(&weight[..], F32.into(), 32, 4); 4];
+        let mut storage = [[0.0; 4]; 4];
+        let mut outputs: Vec<&mut [f32]> = storage.iter_mut().map(|x| x.as_mut_slice()).collect();
+        assert!(runtime
+            .matmul_rows_group(&group, &[1.0; 32], 1, &mut outputs)
+            .is_err());
+        assert!(runtime.weights.is_empty() && runtime.grouped_weights.is_empty());
+        let arena = runtime.ops.arena;
+        assert!(runtime
+            .ops
+            .bind_weight_buffers_mode(&[arena; 4], &[F32; 4], super::GpuMatmulMode::Prepared)
+            .is_err());
     }
 
     #[test]
@@ -4714,8 +13361,14 @@ mod tests {
             .is_err());
             assert_eq!(context.command_resets.load(Ordering::Relaxed), resets);
             assert_eq!(context.submission_count(), submissions);
-            assert_eq!(b.weights.len(), cache_size);
-            assert_eq!(b.ops.read_bytes(b.layout.input, 128).unwrap(), arena);
+            // The weight upload is inserted before `begin_commands` (its
+            // barrier is what orders host writes), so the first failed call
+            // leaves one owned, reusable entry in `b`'s cache. Later failures
+            // must reuse it instead of growing the cache.
+            assert!(b.weights.len() <= cache_size.max(1));
+            if b.ops.staging.is_some() {
+                assert_eq!(b.ops.read_bytes(b.layout.input, 128).unwrap(), arena);
+            }
             assert_eq!(output, [123.0]);
             assert!(context.mutex.lock().unwrap().uncertain);
             context.fail_wait_idle.store(false, Ordering::Relaxed);
@@ -4748,44 +13401,188 @@ mod tests {
     #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_owned_buffers_wait_before_cleanup() {
         use super::{Ordering, VulkanContext};
-        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
+        let initial = context.compute_stats().live_allocation_bytes;
         let mut owner = super::super::qwen3::UploadedBuffers::new(context);
         let buffer = owner.upload(&[1, 2, 3, 4]).unwrap();
+        let allocated = context.compute_stats().live_allocation_bytes;
         context.mutex.lock().unwrap().uncertain = true;
         context.fail_wait_idle.store(true, Ordering::Relaxed);
         drop(owner);
         assert_eq!(context.idle_waits.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            unsafe { std::slice::from_raw_parts(buffer.mapped, 4) },
-            &[1, 2, 3, 4]
-        );
+        assert_eq!(context.compute_stats().live_allocation_bytes, allocated);
         assert!(unsafe { context.destroy_completed_buffers(&[buffer]) }.is_err());
         assert!(context.mutex.lock().unwrap().uncertain);
         context.fail_wait_idle.store(false, Ordering::Relaxed);
         unsafe { context.destroy_completed_buffers(&[buffer]).unwrap() };
         assert!(!context.mutex.lock().unwrap().uncertain);
+        assert_eq!(context.compute_stats().live_allocation_bytes, initial);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn compute_device_metrics_count_upload_reuse_and_copies() {
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let initial = context.compute_stats();
+        {
+            let mut runtime = super::BatchedLinearRuntime::new(context, 1, 4, 1, 2).unwrap();
+            let bytes = bytemuck::cast_slice(&[1.0f32; 4]);
+            let before = context.compute_stats();
+            for _ in 0..2 {
+                let mut output = [0.0];
+                runtime
+                    .matmul_rows(
+                        bytes,
+                        super::GpuWeightFormat::F32,
+                        &[1.0; 4],
+                        1,
+                        4,
+                        1,
+                        &mut output,
+                    )
+                    .unwrap();
+                assert_eq!(output, [4.0]);
+            }
+            let delta = context.compute_stats().since(before);
+            assert_eq!(delta.static_uploads, 1);
+            assert_eq!(delta.static_upload_bytes, 16);
+            assert_eq!(delta.host_write_bytes, 32);
+            assert_eq!(delta.host_read_bytes, 8);
+            assert_eq!(delta.submissions, 2);
+            assert_eq!(delta.transfer_submissions, 0);
+            assert!(delta.peak_allocation_bytes >= delta.live_allocation_bytes);
+        }
+        assert_eq!(
+            context.compute_stats().live_allocation_bytes,
+            initial.live_allocation_bytes
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_f16_tiled_preserves_storage_layouts() {
+        use super::{BatchedLinearRuntime, GpuMatmulMode, GpuWeightFormat, TokenCommands};
+        let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
+        let (rows, n_out) = (33, 65);
+        for n_in in [130, 258] {
+            let weights: Vec<_> = (0..n_in * n_out)
+                .map(|i| crate::ops::f32_to_f16(((i * 17 % 101) as f32 - 50.0) / 47.0))
+                .collect();
+            let input: Vec<_> = (0..rows * n_in)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            for transposed in [false, true] {
+                let bytes: Vec<_> = (0..n_in * n_out)
+                    .flat_map(|i| {
+                        let index = if transposed {
+                            (i % n_out) * n_in + i / n_out
+                        } else {
+                            i
+                        };
+                        weights[index].to_le_bytes()
+                    })
+                    .collect();
+                let mut runtime = BatchedLinearRuntime::new(context, rows, n_in, n_out, 2).unwrap();
+                let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
+                let mut actual = vec![f32::NAN; rows * n_out];
+                if transposed {
+                    let (key, _) = runtime.ensure_weight(&bytes, spec, n_in, n_out).unwrap();
+                    runtime.write_input(&input).unwrap();
+                    let commands = TokenCommands::begin(context).unwrap();
+                    runtime
+                        .ops
+                        .record_transposed_float_matmul_rows(
+                            &commands,
+                            runtime.weights[&key].1,
+                            runtime.layout.input,
+                            &[(runtime.layout.output, n_out, n_out * 4)],
+                            n_in,
+                            rows,
+                            n_in,
+                        )
+                        .unwrap();
+                    commands.submit_and_wait().unwrap();
+                    actual.copy_from_slice(
+                        runtime
+                            .read_output(runtime.layout.output, rows * n_out)
+                            .unwrap(),
+                    );
+                } else {
+                    runtime
+                        .matmul_rows(&bytes, spec, &input, rows, n_in, n_out, &mut actual)
+                        .unwrap();
+                }
+                for (row, activation) in input.chunks_exact(n_in).enumerate() {
+                    for column in 0..n_out {
+                        let expected =
+                            activation.iter().enumerate().fold(0.0f32, |sum, (i, &x)| {
+                                let x = crate::ops::f16_to_f32(crate::ops::f32_to_f16(x));
+                                x.mul_add(crate::ops::f16_to_f32(weights[column * n_in + i]), sum)
+                            });
+                        let got = actual[row * n_out + column];
+                        assert!(
+                            (got - expected).abs() <= 1e-4 + 2e-5 * expected.abs(),
+                            "transposed={transposed} n_in={n_in} row={row} column={column}: {got} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn batched_linear_device_rows_match_and_reuse_weights() {
-        use super::{BatchedLinearRuntime, GpuWeightFormat::*};
+        use super::{
+            ArenaRegion, BatchedLinearRuntime, GpuWeightFormat::*, Qwen3Ops, TokenCommands,
+        };
         let context = Box::leak(Box::new(super::VulkanContext::new().unwrap()));
-        let mut runtime = BatchedLinearRuntime::new(context, 3, 513, 65, 10).unwrap();
-        // Keep every source allocation alive: the cache keys are stable slices.
-        let weights: Vec<_> = [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K]
-            .into_iter()
-            .map(|format| {
-                (
-                    format,
-                    if format == Q8_0 {
-                        super::synthetic_q8_weight(512, 65, 3)
-                    } else {
-                        super::synthetic_weight(format, 512, 65)
-                    },
+        // max_rows is 64: the test runs a 64-row batch at the end. The
+        // descriptor pool holds one set per weight format plus the arena.
+        let mut runtime = BatchedLinearRuntime::new(context, 64, 513, 65, 12).unwrap();
+        if !context.shader_float64 {
+            let ops = Qwen3Ops::new_with_size(context, 4096, 4).unwrap();
+            let commands = TokenCommands::begin(context).unwrap();
+            let region = ArenaRegion {
+                offset: 0,
+                size: 256,
+            };
+            assert!(ops
+                .record_nemotron_h_ssm_dt(&commands, region, region, region, region, region, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("shaderFloat64"));
+            assert!(ops
+                .record_nemotron_h_ssm_norm(
+                    &commands,
+                    ops.arena_bindings,
+                    region,
+                    region,
+                    1,
+                    1,
+                    1e-6
                 )
-            })
-            .collect();
+                .unwrap_err()
+                .to_string()
+                .contains("shaderFloat64"));
+            drop(commands);
+        }
+        // Keep every source allocation alive: the cache keys are stable slices.
+        let weights: Vec<_> = [
+            F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K,
+        ]
+        .into_iter()
+        .map(|format| {
+            (
+                format,
+                if format == Q8_0 {
+                    super::synthetic_q8_weight(512, 65, 3)
+                } else {
+                    super::synthetic_weight(format, 512, 65)
+                },
+            )
+        })
+        .collect();
         for (slot, (format, weight)) in weights.iter().enumerate() {
             let divisor = if matches!(format, F16 | BF16) {
                 131072.0
@@ -4803,7 +13600,7 @@ mod tests {
             assert_eq!(context.submission_count(), before + 1);
             assert!(batched[195].is_nan());
             assert_eq!(runtime.weights.len(), slot + 1);
-            let key = (weight.as_ptr() as usize, weight.len());
+            let key = (weight.as_ptr() as usize, weight.len(), 512, 65, false);
             let buffer = runtime.weights[&key].0.buffer;
             let binding = runtime.weights[&key].1.descriptor_set;
             let mut singles = [0.0; 195];
@@ -4851,7 +13648,56 @@ mod tests {
                 arena_before
             );
             assert_eq!(runtime.weights.len(), slot + 1);
-            println!("batched_linear format={format:?} rows=3 exact_bits=true cached=true");
+            let input64 = input
+                .iter()
+                .copied()
+                .cycle()
+                .take(64 * 512)
+                .collect::<Vec<_>>();
+            let mut rows64 = vec![0.0; 64 * 65];
+            runtime
+                .matmul_rows(weight, *format, &input64, 64, 512, 65, &mut rows64)
+                .unwrap();
+            for row in [0, 63] {
+                let mut single = [0.0; 65];
+                runtime
+                    .matmul_rows(
+                        weight,
+                        *format,
+                        &input64[row * 512..(row + 1) * 512],
+                        1,
+                        512,
+                        65,
+                        &mut single,
+                    )
+                    .unwrap();
+                let batched_row = &rows64[row * 65..(row + 1) * 65];
+                if *format == F32 {
+                    // A narrow F32 batch takes FLOAT_MATMUL_SMALL, which
+                    // splits the K reduction across workgroups; a 64-row call
+                    // takes FLOAT_MATMUL_TILED with a serial K walk. Same
+                    // arithmetic, different summation order, so compare
+                    // relatively instead of bit-for-bit.
+                    for (index, (&got, want)) in batched_row.iter().zip(&single).enumerate() {
+                        let abs = (got - want).abs();
+                        let rel = abs / want.abs().max(1e-3);
+                        assert!(
+                            rel <= 1e-4 || abs <= 1e-3,
+                            "{format:?} row {row} column {index}: \
+                             batched={got} single={want} abs={abs} rel={rel}"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        batched_row.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        single.map(f32::to_bits),
+                        "{format:?} row {row}"
+                    );
+                }
+            }
+            assert_eq!(runtime.weights.len(), slot + 1);
+            assert_eq!(runtime.weights[&key].0.buffer, buffer);
+            println!("batched_linear format={format:?} rows=1,3,64 exact_bits=true cached=true");
         }
         let extra_weight = vec![0u8; 512 * 65 * 4];
         assert!(runtime
@@ -4865,7 +13711,7 @@ mod tests {
                 &mut [0.0; 195]
             )
             .is_err());
-        assert_eq!(runtime.weights.len(), 9);
+        assert_eq!(runtime.weights.len(), weights.len());
     }
 
     #[test]
@@ -4950,6 +13796,99 @@ mod tests {
     }
 
     #[test]
+    fn q8_matmul_fits_output_tiles_into_device_grid() {
+        use super::{matmul_rows_push, ArenaRegion, GpuWeightFormat::Q8_0, OperatorBindings};
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [2, 1, 6],
+            ..Default::default()
+        };
+        let bindings = OperatorBindings {
+            descriptor_set: super::vk::DescriptorSet::null(),
+            sizes: [65, 33, 17].map(|rows| rows * 34),
+            weight_formats: [Some(Q8_0); 3],
+            weight_mode: super::GpuMatmulMode::Prepared,
+            weight_layout: super::GpuWeightLayout::Native,
+        };
+        let region = |offset, size| ArenaRegion { offset, size };
+        let (_, dispatch) = matmul_rows_push(
+            4096,
+            &limits,
+            bindings,
+            region(0, 64),
+            region(64, 8),
+            None,
+            &[
+                (region(256, 520), 65, 260),
+                (region(1024, 264), 33, 132),
+                (region(2048, 136), 17, 68),
+            ],
+            32,
+            2,
+            32,
+        )
+        .expect("65 Q8 outputs must fit two workgroups, including the final partial tile");
+        assert_eq!(dispatch, [2, 1, 6]);
+    }
+
+    #[test]
+    fn bf16_dot_dispatch_packs_independent_output_rows() {
+        use super::{
+            matmul_rows_push, ArenaRegion, GpuMatmulMode, GpuWeightFormat::*, OperatorBindings,
+        };
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [8, 16, 16],
+            ..Default::default()
+        };
+        for (mode, rows) in [
+            (GpuMatmulMode::Prepared, 3),
+            (GpuMatmulMode::Dot, 3),
+            (GpuMatmulMode::Prepared, 5),
+            (GpuMatmulMode::Dot, 5),
+            (GpuMatmulMode::RoundedBf16, 3),
+            (GpuMatmulMode::RoundedBf16, 5),
+        ] {
+            let format = BF16;
+            let region = |offset, size| ArenaRegion { offset, size };
+            let bindings = OperatorBindings {
+                descriptor_set: super::vk::DescriptorSet::null(),
+                sizes: [65, 28, 8].map(|rows| rows * 16 * 2),
+                weight_formats: [Some(format); 3],
+                weight_mode: mode,
+                weight_layout: super::GpuWeightLayout::Native,
+            };
+            let (push, dispatch) = matmul_rows_push(
+                32768,
+                &limits,
+                bindings,
+                region(0, rows * 16 * 4),
+                region(0, 0),
+                None,
+                &[
+                    (region(4096, rows * 65 * 4), 65, 65 * 4),
+                    (region(8192, rows * 28 * 4), 28, 28 * 4),
+                    (region(12288, rows * 8 * 4), 8, 8 * 4),
+                ],
+                16,
+                rows,
+                16,
+            )
+            .unwrap();
+            let expected = match (push[1], rows) {
+                (8, 3) => [8, 2, 9],
+                (4, 3) => [5, 1, 9],
+                (8, 5) => [8, 2, 6],
+                (4, 5) => [5, 1, 6],
+                (1, 3) => [2, 1, 9],
+                (1, 5) => [2, 1, 15],
+                (_, 3) => [8, 9, 9],
+                _ => [8, 9, 15],
+            };
+            assert_eq!(dispatch, expected, "format={format:?}");
+            assert_eq!([push[5], push[8], push[11]], [65, 28, 8]);
+        }
+    }
+
+    #[test]
     fn batched_matmul_dispatch_checks_device_z_limit() {
         let limits = super::vk::PhysicalDeviceLimits {
             max_compute_work_group_count: [65535, 65535, 6],
@@ -4987,9 +13926,11 @@ mod tests {
             ..Default::default()
         };
         for rows in [1, 2, 3] {
-            for format in [F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K] {
+            for format in [
+                F32, F16, BF16, Q8_0, Q4_0, Q4_1, Q4_K, Q5_K, Q6_K, MlxAffine4, MlxAffine8,
+            ] {
                 let (block, bytes, _) = format.layout();
-                let is_float = matches!(format, F32 | F16 | BF16);
+                let is_float = format.uses_f32_input();
                 let mut regions = [
                     ArenaRegion {
                         offset: 0,
@@ -5022,8 +13963,10 @@ mod tests {
                 ];
                 let bindings = OperatorBindings {
                     descriptor_set: super::vk::DescriptorSet::null(),
-                    sizes: [((256 / block) * bytes * 3) as u64; 3],
+                    sizes: [3, 2, 1].map(|rows| ((256 / block) * bytes * rows) as u64),
                     weight_formats: [Some(format); 3],
+                    weight_mode: super::GpuMatmulMode::Prepared,
+                    weight_layout: super::GpuWeightLayout::Native,
                 };
                 let prepare = |r: &[ArenaRegion; 6]| {
                     matmul_rows_push(
@@ -5039,7 +13982,67 @@ mod tests {
                         259,
                     )
                 };
-                assert_eq!(prepare(&regions).unwrap().1, [3, 1, (rows * 3) as u32]);
+                let output_groups = match format {
+                    F32 | Q8_0 | Q4_0 | Q4_1 | Q4_K | Q5_K | Q6_K => 1,
+                    BF16 if crate::ops::has_neon() || crate::ops::has_avx2_fma() => 1,
+                    // f16_matmul packs 64/lanes_per_row rows into a workgroup,
+                    // and the lane count follows the CPU reduction for width 256.
+                    F16 => {
+                        // The three output groups hold 3, 2 and 1 rows, so the
+                        // workgroup count follows the widest one (3).
+                        let rows_per_group = match super::attention_dot_mode(256) {
+                            1 => 2,
+                            2 => 4,
+                            8 => 8,
+                            _ => 64,
+                        };
+                        (3usize.div_ceil(rows_per_group)) as u32
+                    }
+                    _ => 3,
+                };
+                assert_eq!(
+                    prepare(&regions).unwrap().1,
+                    [output_groups, 1, (rows * 3) as u32]
+                );
+                if matches!(format, MlxAffine4 | MlxAffine8) {
+                    let padded = OperatorBindings {
+                        sizes: bindings.sizes.map(|size| size + 16),
+                        ..bindings
+                    };
+                    let output = [(regions[3], 3, 20), (regions[4], 2, 16), (regions[5], 1, 8)];
+                    assert_eq!(
+                        matmul_rows_push(
+                            16384,
+                            &limits,
+                            padded,
+                            regions[0],
+                            regions[1],
+                            Some(regions[2]),
+                            &output,
+                            256,
+                            rows,
+                            259,
+                        )
+                        .unwrap()
+                        .1,
+                        [3, 1, (rows * 3) as u32],
+                    );
+                    let mut wrong_rows = padded;
+                    wrong_rows.sizes[0] += ((256 / block) * bytes) as u64;
+                    assert!(matmul_rows_push(
+                        16384,
+                        &limits,
+                        wrong_rows,
+                        regions[0],
+                        regions[1],
+                        Some(regions[2]),
+                        &output,
+                        256,
+                        rows,
+                        259,
+                    )
+                    .is_err());
+                }
                 for index in [0, 1, 2, 3, 4, 5] {
                     if (index == 1 && is_float) || (index == 2 && format != Q4_1) {
                         continue;
@@ -5069,6 +14072,69 @@ mod tests {
                 assert!(prepare(&regions).is_err());
             }
         }
+    }
+
+    /// A Q8_0 projection may be wider than 16384.
+    ///
+    /// The limit came from a kernel that staged the whole input row into
+    /// shared memory at once (`shared uint s_input[4096]`, 512 blocks). The
+    /// kernels stage the row in chunks of 64 blocks now, so the shared
+    /// memory is no longer the constraint -- but the host kept the limit,
+    /// and it rejected every model with a projection wider than 16384.
+    /// Qwen3.8-27B has a 17408 wide MLP down projection, so it could not
+    /// run on the device at all: "invalid Vulkan matmul input
+    /// width/stride".
+    #[test]
+    fn q8_matmul_accepts_a_row_wider_than_the_old_shared_memory_limit() {
+        use super::{
+            matmul_rows_push, ArenaRegion, GpuMatmulMode, GpuWeightFormat::Q8_0, GpuWeightLayout,
+            OperatorBindings,
+        };
+        let limits = super::vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [65535; 3],
+            ..Default::default()
+        };
+        // The Qwen3.8-27B MLP down projection: 17408 in, 5120 out.
+        let width = 17_408;
+        let rows = 2;
+        let outputs = 5_120;
+        let arena = 64 << 20;
+        let activation = ArenaRegion {
+            offset: 0,
+            size: rows * width,
+        };
+        let scales = ArenaRegion {
+            offset: 1 << 20,
+            size: rows * (width / 32) * 4,
+        };
+        let output = ArenaRegion {
+            offset: 2 << 20,
+            size: rows * outputs * 4,
+        };
+        let bindings = OperatorBindings {
+            descriptor_set: super::vk::DescriptorSet::null(),
+            // The weight buffer holds the output rows of the projection.
+            sizes: [((width / 32) * 34 * outputs) as u64, 0, 0],
+            weight_formats: [Some(Q8_0); 3],
+            weight_mode: GpuMatmulMode::Prepared,
+            weight_layout: GpuWeightLayout::Native,
+        };
+        let (push, dispatch) = matmul_rows_push(
+            arena,
+            &limits,
+            bindings,
+            activation,
+            scales,
+            None,
+            &[(output, outputs, outputs * 4)],
+            width,
+            rows,
+            width,
+        )
+        .expect("a Q8_0 row wider than the old limit must be accepted");
+        assert_eq!(push[2], width as u32, "the matmul width");
+        assert_eq!(push[3], (width / 32) as u32, "the blocks per row");
+        assert_eq!(dispatch, [80, 1, rows as u32], "the dispatch grid");
     }
 
     #[test]
@@ -5144,12 +14210,31 @@ mod tests {
         super::check_weight_format(&context, "q5_k").unwrap();
     }
 
+    /// The 30B's `ssm_in` projection is the widest Q5_0 matvec the device
+    /// path runs: 2688 wide, 10304 rows. The shape used to be enough to
+    /// trip the dispatch's row limits, so it is pinned here.
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn q5_0_matvec_matches_the_cpu_at_the_30b_ssm_projection_shape() {
+        let context = super::VulkanContext::new().unwrap();
+        super::check_weight_matvec(&context, "q5_0", super::GpuWeightFormat::Q5_0, 2688, 10304)
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn q5_0_and_q5_1_matvec_runs_on_vulkan() {
+        let context = super::VulkanContext::new().unwrap();
+        super::check_weight_format(&context, "q5_0").unwrap();
+        super::check_weight_format(&context, "q5_1").unwrap();
+    }
+
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn wide_quantized_matvec_runs_on_vulkan() {
         use super::GpuWeightFormat::*;
         let context = super::VulkanContext::new().unwrap();
-        for format in [Q4_0, Q4_1, Q4_K, Q5_K, Q6_K] {
+        for format in [Q4_0, Q4_1, Q5_0, Q5_1, Q4_K, Q5_K, Q6_K, Q2_K, Q3_K] {
             super::check_weight_matvec(
                 &context,
                 &format!("{format:?} width=17408"),
@@ -5162,15 +14247,104 @@ mod tests {
     }
 
     #[test]
-    fn vulkan_rope_coefficients_match_cpu_dimension_formula() {
-        let mut actual = [0.0f32; 128];
-        fill_rope_neox(&mut actual, 4, 1_000_000.0);
-        for index in 0..64 {
-            let theta =
-                4.0 * (1.0f32 / 1_000_000.0f32.powf((2 * index) as f32 / actual.len() as f32));
-            let (cosine, sine) = crate::ops::rope_sin_cos(theta);
-            assert_eq!(actual[index].to_bits(), cosine.to_bits(), "cosine {index}");
-            assert_eq!(actual[index + 64].to_bits(), sine.to_bits(), "sine {index}");
+    fn vulkan_rope_coefficients_match_cpu_recurrence() {
+        for dim in [32, 128, 256] {
+            for position in [0, 1, 4, 31] {
+                let mut actual = vec![0.0; dim];
+                fill_rope_neox(&mut actual, position, 1_000_000.0);
+                let mut expected = vec![0.0; dim];
+                expected[..dim / 2].fill(1.0);
+                crate::ops::rope_neox_inplace(&mut expected, position, dim, 1_000_000.0);
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "dimension={dim} position={position}"
+                );
+            }
+        }
+    }
+
+    /// The Qwen3-VL M-RoPE table must reproduce the CPU transform bit for
+    /// bit: the GPU applies the angles from this table, so a different axis
+    /// rule or a different theta recurrence would silently rotate the wrong
+    /// pairs. The CPU output *is* the table when the first half of the head
+    /// is 1.0 and the second half 0.0, because the rotation then yields
+    /// `head[pair] = cos` and `head[pair + half] = sin`.
+    #[test]
+    fn vulkan_mrope_interleaved_coefficients_match_cpu_recurrence() {
+        use super::*;
+        for dim in [32, 64, 128] {
+            for positions in [[0; 4], [3; 4], [7, 11, 13, 17]] {
+                let mut actual = vec![0.0; dim];
+                fill_rope_mrope_interleaved(
+                    &mut actual,
+                    positions,
+                    [24, 20, 20, 0],
+                    5_000_000.0,
+                    dim,
+                );
+                let mut expected = vec![0.0; dim];
+                expected[..dim / 2].fill(1.0);
+                crate::ops::rope_mrope_interleaved(
+                    &mut expected,
+                    positions,
+                    [24, 20, 20, 0],
+                    dim,
+                    5_000_000.0,
+                    dim,
+                );
+                assert_eq!(
+                    actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                    "dimension={dim} positions={positions:?}"
+                );
+            }
+        }
+    }
+
+    /// The M-RoPE table is the NeoX layout, not the adjacent-pair one: the
+    /// `interleaved` shader flag rotates `(2i, 2i+1)`, which is the Z-Image
+    /// DiT layout and would be wrong here.
+    #[test]
+    fn vulkan_mrope_interleaved_uses_the_split_half_pairing() {
+        use super::*;
+        let dim = 128;
+        let positions = [3, 5, 7, 9];
+        let mut coefficients = vec![0.0; dim];
+        fill_rope_mrope_interleaved(
+            &mut coefficients,
+            positions,
+            [24, 20, 20, 0],
+            5_000_000.0,
+            dim,
+        );
+        // The cosine of pair `p` lives at `p` and its sine at `p + half`,
+        // so the split-half pairs are (p, p + 64).
+        let half = dim / 2;
+        let mut head = vec![0.0; dim];
+        for pair in 0..half {
+            head[pair] = 1.0;
+        }
+        let mut rotated = head.clone();
+        crate::ops::rope_mrope_interleaved(
+            &mut rotated,
+            positions,
+            [24, 20, 20, 0],
+            dim,
+            5_000_000.0,
+            dim,
+        );
+        for pair in 0..half {
+            assert_eq!(
+                rotated[pair].to_bits(),
+                coefficients[pair].to_bits(),
+                "pair {pair} cosine"
+            );
+            assert_eq!(
+                rotated[pair + half].to_bits(),
+                coefficients[pair + half].to_bits(),
+                "pair {pair} sine"
+            );
         }
     }
 
@@ -5190,5 +14364,1066 @@ mod tests {
         assert_eq!(plan.queue_submissions, 1);
         assert_eq!(plan.fence_waits, 1);
         assert!(plan.dispatches > 28);
+    }
+    #[test]
+    fn f16_storage_does_not_select_accumulation_semantics() {
+        use super::*;
+        let layout = BatchedLinearLayout::new(2, 32, 2).unwrap();
+        let limits = vk::PhysicalDeviceLimits {
+            max_compute_work_group_count: [65535; 3],
+            ..Default::default()
+        };
+        let push_for = |mode| {
+            let binding = OperatorBindings {
+                descriptor_set: vk::DescriptorSet::null(),
+                sizes: [128, 0, 0],
+                weight_formats: [Some(GpuWeightFormat::F16), None, None],
+                weight_mode: mode,
+                weight_layout: super::GpuWeightLayout::Native,
+            };
+            matmul_rows_push(
+                layout.size,
+                &limits,
+                binding,
+                layout.input,
+                layout.scales,
+                None,
+                &[(layout.output, 2, 8)],
+                32,
+                2,
+                32,
+            )
+            .unwrap()
+            .0
+        };
+        assert_eq!(push_for(GpuMatmulMode::RoundedInputF32)[1], 0);
+        assert_eq!(
+            push_for(GpuMatmulMode::Prepared)[1],
+            if crate::ops::f16_uses_neon_accumulators(32) {
+                if cfg!(feature = "ggml-f16-dot-parity") {
+                    1
+                } else {
+                    2
+                }
+            } else {
+                0
+            }
+        );
+        assert!(layout
+            .validate(
+                &limits,
+                68,
+                GpuWeightFormat::Q8_0.with_mode(GpuMatmulMode::Dot),
+                64,
+                2,
+                32,
+                2,
+                4
+            )
+            .is_err());
+    }
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn batched_linear_device_mode_change_preserves_cache_and_host_output() {
+        use super::*;
+        let context = Box::leak(Box::new(crate::vulkan::VulkanContext::new().unwrap()));
+        let weight: Vec<u8> = (0..32)
+            .flat_map(|_| crate::ops::f32_to_f16(0.25).to_le_bytes())
+            .collect();
+        let mut runtime = BatchedLinearRuntime::new(context, 1, 32, 1, 2).unwrap();
+        let mut output = [0.0];
+        runtime
+            .matmul_rows(
+                &weight,
+                GpuWeightFormat::F16,
+                &[1.0; 32],
+                1,
+                32,
+                1,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output, [8.0]);
+        let before = context.submission_count();
+        let key = (weight.as_ptr() as usize, weight.len(), 32, 1, false);
+        let buffer = runtime.weights[&key].0.buffer;
+        let spec = GpuWeightFormat::F16.with_mode(GpuMatmulMode::RoundedInputF32);
+        assert!(runtime.validate(&weight, spec, 32, 1, 32, 1, 1).is_err());
+        assert!(runtime
+            .matmul_rows(&weight, spec, &[2.0; 32], 1, 32, 1, &mut output)
+            .is_err());
+        assert_eq!(context.submission_count(), before);
+        assert_eq!(runtime.weights[&key].0.buffer, buffer);
+        assert_eq!(output, [8.0]);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn silu_exact_libm_boundaries_run_on_vulkan() {
+        use super::*;
+        let context = VulkanContext::new().unwrap();
+        let layout = ArenaLayout::for_dims(32, 32, 1, 1, 32).unwrap();
+        let ops = Qwen3Ops::new(&context, layout, 1).unwrap();
+        let samples = [
+            0.013758551f32,
+            0.054048795,
+            -0.006148175,
+            -100.0,
+            -80.0,
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            80.0,
+            100.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        let gate = std::array::from_fn::<_, 32, _>(|i| samples[i % samples.len()]);
+        ops.write_f32(layout.gate, &gate).unwrap();
+        ops.write_f32(layout.up, &[1.0; 32]).unwrap();
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_silu_mul_rows_into(&commands, layout.gate, layout.up, layout.down, 32, 1, false)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        for (&actual, x) in ops.read_f32(layout.down, 32).unwrap().iter().zip(gate) {
+            let expected = x / (1.0 + (-x).exp());
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else if expected.is_infinite() {
+                assert_eq!(actual, expected);
+            } else {
+                assert!(
+                    (actual - expected).abs() <= 2e-7 * expected.abs().max(1e-3),
+                    "SiLU({x}): {actual} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn q4_k_cooperative_matches_row_kernel_in_both_reductions() {
+        use super::*;
+        let context = VulkanContext::new().unwrap();
+        for (n_in, n_out) in [
+            (256, 1),
+            (512, 67),
+            (2048, 512),
+            (512, 2048),
+            (4096, 2048),
+            (2048, 4096),
+            (4096, 4096),
+            (12288, 4096),
+        ] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, n_in).unwrap();
+            let q8 = region(&mut cursor, n_in).unwrap();
+            let scales = f32_region(&mut cursor, n_in / 256).unwrap();
+            let old: Vec<_> = (0..3)
+                .map(|_| f32_region(&mut cursor, n_out).unwrap())
+                .collect();
+            let new: Vec<_> = (0..3)
+                .map(|_| f32_region(&mut cursor, n_out).unwrap())
+                .collect();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let mut buffers = Vec::new();
+            for slot in 0..3 {
+                let mut bytes = synthetic_weight(GpuWeightFormat::Q4_K, n_in, n_out);
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    if i % 144 >= 16 {
+                        *byte ^= slot * 37;
+                    }
+                }
+                buffers.push(unsafe { context.upload_static(&bytes) }.unwrap());
+            }
+            let bindings = ops
+                .bind_weight_buffers(&buffers, &[GpuWeightFormat::Q4_K; 3])
+                .unwrap();
+            ops.write_f32(
+                input,
+                &(0..n_in)
+                    .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            for mode in [0, 1] {
+                let outputs = |regions: &[ArenaRegion]| {
+                    regions
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, &r)| (r, n_out.saturating_sub(slot).max(1), n_out * 4))
+                        .collect::<Vec<_>>()
+                };
+                let (mut old_push, old_grid) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    None,
+                    &outputs(&old),
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                let (mut new_push, new_grid) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    None,
+                    &outputs(&new),
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                old_push[14] = mode;
+                new_push[14] = mode;
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_quantize_q8_k(&commands, input, q8, scales, n_in)
+                    .unwrap();
+                unsafe {
+                    commands.bind(
+                        ops.pipelines[Q4_K_MATMUL],
+                        context.pipeline_layout,
+                        &[bindings.descriptor_set],
+                        bytemuck::cast_slice(&old_push),
+                    );
+                    commands.dispatch(old_grid[0], old_grid[1], old_grid[2]);
+                    commands.barrier();
+                }
+                ops.record_linear_dispatch(&commands, Q4_K_MATMUL, bindings, &new_push, new_grid);
+                commands.submit_and_wait().unwrap();
+                for slot in 0..3 {
+                    let count = n_out.saturating_sub(slot).max(1);
+                    for (i, (&a, &b)) in ops
+                        .read_f32(old[slot], count)
+                        .unwrap()
+                        .iter()
+                        .zip(ops.read_f32(new[slot], count).unwrap())
+                        .enumerate()
+                    {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "{n_in}x{n_out} slot={slot} mode={mode} i={i}"
+                        );
+                    }
+                }
+            }
+            drop(ops);
+            for buffer in buffers {
+                unsafe { context.destroy_buffer(&buffer) };
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn moe_reduce_preserves_slot_order_and_sticky_finite_check() {
+        use super::*;
+        let context = VulkanContext::new().unwrap();
+        let mut cursor = 0;
+        let width = 67;
+        let values = f32_region(&mut cursor, width * 3).unwrap();
+        let scores = f32_region(&mut cursor, 3).unwrap();
+        let output = f32_region(&mut cursor, width).unwrap();
+        let residual = f32_region(&mut cursor, width).unwrap();
+        let status = f32_region(&mut cursor, 1).unwrap();
+        let ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        let inputs: Vec<_> = [1e20, -1e20, 3.0]
+            .into_iter()
+            .flat_map(|v| std::iter::repeat_n(v, width))
+            .collect();
+        ops.write_f32(values, &inputs).unwrap();
+        ops.write_f32(scores, &[1.0; 3]).unwrap();
+        ops.write_f32(residual, &vec![2.0; width]).unwrap();
+        ops.zero_region(status).unwrap();
+        let before = context.submission_count();
+        let commands = TokenCommands::begin(&context).unwrap();
+        let invalid = ArenaRegion { size: 4, ..scores };
+        let recorded = ops.recorded_dispatch_count();
+        assert!(ops
+            .record_moe_reduce(&commands, values, invalid, output, residual, status, width, 3)
+            .is_err());
+        assert_eq!(ops.recorded_dispatch_count(), recorded);
+        ops.record_moe_reduce(
+            &commands, values, scores, output, residual, status, width, 3,
+        )
+        .unwrap();
+        assert_eq!(context.submission_count(), before);
+        commands.submit_and_wait().unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        assert_eq!(ops.read_f32(output, width).unwrap(), vec![3.0; width]);
+        assert_eq!(ops.read_f32(residual, width).unwrap(), vec![5.0; width]);
+        assert_eq!(ops.read_f32(status, 1).unwrap()[0].to_bits(), 0);
+        for bad in [f32::INFINITY, f32::NAN] {
+            ops.write_f32(values, &vec![bad; width * 3]).unwrap();
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_moe_reduce(
+                &commands, values, scores, output, residual, status, width, 3,
+            )
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_f32(status, 1).unwrap()[0].to_bits(), 1);
+            ops.write_f32(values, &inputs).unwrap();
+            let commands = TokenCommands::begin(&context).unwrap();
+            ops.record_moe_reduce(
+                &commands, values, scores, output, residual, status, width, 3,
+            )
+            .unwrap();
+            commands.submit_and_wait().unwrap();
+            assert_eq!(ops.read_f32(status, 1).unwrap()[0].to_bits(), 1);
+            ops.zero_region(status).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
+    fn silu_output_operand_preserves_inputs_and_submission_boundary() {
+        use super::*;
+        let context = VulkanContext::new().unwrap();
+        let layout = ArenaLayout::for_dims(32, 32, 1, 1, 32).unwrap();
+        let ops = Qwen3Ops::new(&context, layout, 1).unwrap();
+        let gate = [0.5f32; 32];
+        let up = [2.0f32; 32];
+        ops.write_f32(layout.gate, &gate).unwrap();
+        ops.write_f32(layout.up, &up).unwrap();
+        let before = context.submission_count();
+        let commands = TokenCommands::begin(&context).unwrap();
+        ops.record_silu_mul_rows_into(&commands, layout.gate, layout.up, layout.down, 32, 1, true)
+            .unwrap();
+        assert_eq!(context.submission_count(), before);
+        commands.submit_and_wait().unwrap();
+        assert_eq!(context.submission_count(), before + 1);
+        assert_eq!(ops.read_f32(layout.gate, 32).unwrap(), gate);
+        assert_eq!(ops.read_f32(layout.up, 32).unwrap(), up);
+        let mut expected = up;
+        crate::ops::silu_mul_approx_inplace(&gate, &mut expected);
+        for (&gpu, cpu) in ops.read_f32(layout.down, 32).unwrap().iter().zip(expected) {
+            assert!((gpu - cpu).abs() < 1e-6);
+        }
+    }
+
+    /// Times the kernels the Z-Image DiT runs per projection, quantize and the
+    /// tiled Q8_0 matmul, at the real 256x256 token count. The weight buffers
+    /// are cycled so one matrix cannot sit in L2 between iterations; three is
+    /// all `bind_weight_buffers` takes, and at these shapes a single matrix is
+    /// already 1.3 GB. Print, do not assert: this is the attribution harness
+    /// for kernel selection changes, and a whole-image A/B cannot resolve a few
+    /// percent against the ~1 s run-to-run spread.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn zimage_projection_kernel_costs() {
+        use super::*;
+        use std::time::Instant;
+        const ROWS: usize = 256;
+        const HIDDEN: usize = 3840;
+        const FFN: usize = 9728;
+        const REPS: usize = 20;
+        const STREAMS: usize = 3;
+        let context = VulkanContext::new().unwrap();
+        for (label, n_in, n_out) in [
+            ("qkv", HIDDEN, HIDDEN * 3),
+            ("out_proj", HIDDEN, HIDDEN),
+            ("ffn_w1_w3", HIDDEN, FFN),
+            ("ffn_w2", FFN, HIDDEN),
+        ] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, ROWS * n_in).unwrap();
+            let q8 = region(&mut cursor, ROWS * n_in).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * n_out).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, STREAMS).unwrap();
+            assert!(ops.q8_tiled, "device cannot run the tiled Q8_0 kernels");
+            let mut buffers = Vec::new();
+            for stream in 0..STREAMS {
+                let mut weight = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+                // Distinct content per stream so the loads cannot be coalesced
+                // away by the memory system.
+                for (index, byte) in weight.iter_mut().enumerate() {
+                    if index % 512 == stream % 512 {
+                        *byte = byte.wrapping_add(stream as u8);
+                    }
+                }
+                buffers.push(unsafe { context.upload_static(&weight) }.unwrap());
+            }
+            let formats = [GpuWeightFormat::Q8_0; STREAMS];
+            let bindings = ops.bind_weight_buffers(&buffers, &formats).unwrap();
+            ops.write_f32(
+                input,
+                &(0..ROWS * n_in)
+                    .map(|index| ((index * 7 % 251) as f32 - 125.0) / 97.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+
+            let quantize_push =
+                quantize_rows_push(cursor, input, q8, scales, Some(sums), n_in, ROWS, n_in, 32)
+                    .unwrap();
+            let quantize_dispatch = row_dispatch(n_in / 32, ROWS, &context.limits).unwrap();
+            let (matmul_push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, n_out, n_out * 4)],
+                n_in,
+                ROWS,
+                n_in,
+            )
+            .unwrap();
+            let tiles = ROWS.div_ceil(32);
+            let matmul_dispatch = row_dispatch(n_out.div_ceil(64), tiles, &context.limits).unwrap();
+
+            let time = |pipeline: usize, push: &[u32], dispatch: [u32; 3]| {
+                let mut best = f64::MAX;
+                for _ in 0..3 {
+                    let start = Instant::now();
+                    for rep in 0..REPS {
+                        let commands = TokenCommands::begin(&context).unwrap();
+                        ops.record_linear_dispatch(&commands, pipeline, bindings, push, dispatch);
+                        commands.submit_and_wait().unwrap();
+                        std::hint::black_box(rep);
+                    }
+                    best = best.min(start.elapsed().as_secs_f64() / REPS as f64 * 1e3);
+                }
+                best
+            };
+            eprintln!(
+                "[kernel-cost] {:10} quantize={:.3}ms generic={:.3}ms wide={:.3}ms",
+                label,
+                time(QUANTIZE, &quantize_push, quantize_dispatch),
+                time(Q8_MATMUL_GROUPED_TILED, &matmul_push, matmul_dispatch),
+                time(Q8_MATMUL_GROUPED_TILED_WIDE, &matmul_push, matmul_dispatch),
+            );
+            for buffer in buffers {
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            }
+        }
+    }
+
+    /// The Q8_0 device matmul with ggml's native weight layout and with the
+    /// transposed one, on the same shape.
+    ///
+    /// The two must agree bit for bit -- the transposed layout only changes
+    /// where the weight bytes live, not the arithmetic -- and the bandwidth
+    /// says whether the change is worth keeping.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn q8_0_transposed_layout_matches_and_faster() {
+        use super::*;
+        use std::time::Instant;
+        const N_IN: usize = 2304;
+        const N_OUT: usize = 98_304;
+        const ROWS: usize = 1;
+        const REPS: usize = 10;
+        let native = synthetic_weight(GpuWeightFormat::Q8_0, N_IN, N_OUT);
+        let transposed = crate::vulkan::q8_layout::transpose_q8_0_weight(&native, N_IN, N_OUT);
+        assert_eq!(native.len(), transposed.len());
+
+        // A VulkanContext owns one descriptor set, so each layout gets its own
+        // context.
+        let run = |weight: &[u8], pipeline: usize| -> (Vec<f32>, f64) {
+            let context = VulkanContext::new().unwrap();
+            let mut cursor = 0;
+            let q8 = region(&mut cursor, ROWS * N_IN).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * N_IN / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * N_IN / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * N_OUT).unwrap();
+            // Two descriptor sets: the arena and the weight.
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+            let buffer = unsafe { context.upload_static(weight) }.unwrap();
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                .unwrap();
+            let (push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, N_OUT, N_OUT * 4)],
+                N_IN,
+                ROWS,
+                N_IN,
+            )
+            .unwrap();
+            let dispatch = row_dispatch(N_OUT.div_ceil(64), 1, &context.limits).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let start = Instant::now();
+                for _ in 0..REPS {
+                    let commands = TokenCommands::begin(&context).unwrap();
+                    ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                    commands.submit_and_wait().unwrap();
+                }
+                best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+            }
+            let values = ops.read_f32(output, ROWS * N_OUT).unwrap();
+            unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            (values.to_vec(), best)
+        };
+
+        let (native_values, native_time) = run(&native, Q8_MATMUL_GROUPED);
+        let (transposed_values, transposed_time) = run(&transposed, Q8_MATMUL_TRANSPOSED);
+        let mismatches = native_values
+            .iter()
+            .zip(transposed_values.iter())
+            .filter(|(left, right)| left.to_bits() != right.to_bits())
+            .count();
+        assert_eq!(mismatches, 0, "transposed layout changed the result");
+        let bytes = (N_IN * N_OUT * 34 / 32) as f64;
+        eprintln!(
+            "[q8-transposed] native {:.3} ms ({:.1} GB/s), transposed {:.3} ms ({:.1} GB/s), {:.2}x",
+            native_time * 1e3,
+            bytes / native_time / 1e9,
+            transposed_time * 1e3,
+            bytes / transposed_time / 1e9,
+            native_time / transposed_time,
+        );
+    }
+
+    /// The transposed layout on the shapes where the tile arithmetic can go
+    /// wrong: an output count that is not a multiple of the tile width, a
+    /// single output row, and the smallest input a Q8_0 block allows.
+    ///
+    /// The native and the transposed kernel have to agree bit for bit on
+    /// every one of them.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn q8_0_transposed_layout_matches_on_edge_shapes() {
+        use super::*;
+        for (n_in, n_out) in [
+            (32, 1),
+            (32, 63),
+            (32, 64),
+            (32, 65),
+            (64, 127),
+            (32 * 5, 130),
+            (2304, 129),
+        ] {
+            let native = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+            let transposed = crate::vulkan::q8_layout::transpose_q8_0_weight(&native, n_in, n_out);
+            let run = |weight: &[u8], pipeline: usize| -> Vec<f32> {
+                let context = VulkanContext::new().unwrap();
+                let mut cursor = 0;
+                let q8 = region(&mut cursor, n_in).unwrap();
+                let scales = f32_region(&mut cursor, n_in / 32).unwrap();
+                let sums = f32_region(&mut cursor, n_in / 32).unwrap();
+                let output = f32_region(&mut cursor, n_out).unwrap();
+                let mut ops = Qwen3Ops::new_with_size(&context, cursor, 2).unwrap();
+                let buffer = unsafe { context.upload_static(weight) }.unwrap();
+                let bindings = ops
+                    .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q8_0])
+                    .unwrap();
+                let (push, _) = matmul_rows_push(
+                    cursor,
+                    &context.limits,
+                    bindings,
+                    q8,
+                    scales,
+                    Some(sums),
+                    &[(output, n_out, n_out * 4)],
+                    n_in,
+                    1,
+                    n_in,
+                )
+                .unwrap();
+                let dispatch = row_dispatch(n_out.div_ceil(64), 1, &context.limits).unwrap();
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(&commands, pipeline, bindings, &push, dispatch);
+                commands.submit_and_wait().unwrap();
+                let values = ops.read_f32(output, n_out).unwrap();
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+                values.to_vec()
+            };
+            let native_values = run(&native, Q8_MATMUL_GROUPED);
+            let transposed_values = run(&transposed, Q8_MATMUL_TRANSPOSED);
+            let mismatches = native_values
+                .iter()
+                .zip(transposed_values.iter())
+                .filter(|(left, right)| left.to_bits() != right.to_bits())
+                .count();
+            assert_eq!(mismatches, 0, "n_in={n_in} n_out={n_out}");
+        }
+    }
+
+    /// How much bandwidth the device can actually stream on this box.
+    ///
+    /// The Q8_0 matmul kernels read one output row per thread, so a warp
+    /// touches 32 sectors one row apart. This measures the floor: a plain
+    /// element-wise scale over one big buffer, where every lane reads a
+    /// neighbouring float. If this reaches the PyTorch CUDA number and the
+    /// matmul does not, the matmul kernel is the problem; if both are at the
+    /// same number, the device memory path is the limit.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn device_streaming_bandwidth() {
+        use super::*;
+        use std::time::Instant;
+        const FLOATS: usize = 60 * 1024 * 1024; // 240 MB
+        const REPS: usize = 10;
+        let context = VulkanContext::new().unwrap();
+        let mut cursor = 0;
+        let input = f32_region(&mut cursor, FLOATS).unwrap();
+        let output = f32_region(&mut cursor, FLOATS).unwrap();
+        let mut ops = Qwen3Ops::new_with_size(&context, cursor, 1).unwrap();
+        ops.write_f32(input, &vec![1.0f32; FLOATS]).unwrap();
+        let push = [
+            ops.f32_word(input, FLOATS, "bandwidth input").unwrap(),
+            ops.f32_word(output, FLOATS, "bandwidth output").unwrap(),
+            FLOATS as u32,
+            1.0f32.to_bits(),
+        ];
+        let dispatch = row_dispatch(FLOATS.div_ceil(64), 1, &context.limits).unwrap();
+        let mut best = f64::MAX;
+        for _ in 0..3 {
+            let start = Instant::now();
+            for _ in 0..REPS {
+                let commands = TokenCommands::begin(&context).unwrap();
+                ops.record_linear_dispatch(
+                    &commands,
+                    AUK_SCALE,
+                    ops.arena_bindings,
+                    &push,
+                    dispatch,
+                );
+                commands.submit_and_wait().unwrap();
+            }
+            best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+        }
+        // One read plus one write of 240 MB.
+        let bytes = (FLOATS * 4 * 2) as f64;
+        eprintln!(
+            "[stream] element-wise scale over {:.0} MB: {:.3} ms ({:.1} GB/s read+write, {:.1} GB/s read)",
+            bytes / 2e6,
+            best * 1e3,
+            bytes / best / 1e9,
+            (bytes / 2.0) / best / 1e9,
+        );
+    }
+
+    /// Times the decode-shaped Q8_0 matmul: one token against the weight
+    /// matrices of a Qwen3-8B layer, with the effective streaming bandwidth
+    /// that implies. Decode reads the whole weight set once per token, so
+    /// this is the number that decides whether the Vulkan decoder can beat
+    /// the CPU; the DiT is bandwidth-bound on much larger matrices.
+    #[test]
+    #[ignore = "requires a Vulkan device; timing harness, not a correctness gate"]
+    fn qwen3_decode_gemv_bandwidth() {
+        use super::*;
+        use std::time::Instant;
+        const ROWS: usize = 1;
+        const REPS: usize = 10;
+        const STREAMS: usize = 3;
+        let context = VulkanContext::new().unwrap();
+        for (label, n_in, n_out) in [
+            ("qkv", 4096, 4096 + 1024 + 1024),
+            ("o_proj", 4096, 4096),
+            ("ffn_gate_up", 4096, 2 * 12288),
+            ("ffn_down", 12288, 4096),
+            ("lm_head", 4096, 151936),
+        ] {
+            let mut cursor = 0;
+            let input = f32_region(&mut cursor, ROWS * n_in).unwrap();
+            let q8 = region(&mut cursor, ROWS * n_in).unwrap();
+            let scales = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let sums = f32_region(&mut cursor, ROWS * n_in / 32).unwrap();
+            let output = f32_region(&mut cursor, ROWS * n_out).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, cursor, STREAMS).unwrap();
+            let mut buffers = Vec::new();
+            for stream in 0..STREAMS {
+                let mut weight = synthetic_weight(GpuWeightFormat::Q8_0, n_in, n_out);
+                for (index, byte) in weight.iter_mut().enumerate() {
+                    if index % 512 == stream % 512 {
+                        *byte = byte.wrapping_add(stream as u8);
+                    }
+                }
+                let upload_start = Instant::now();
+                buffers.push(unsafe { context.upload_static(&weight) }.unwrap());
+                if stream == 0 {
+                    eprintln!(
+                        "[gemv] {:12} upload {:7.2} MB in {:7.2} ms ({:6.2} GB/s host->device)",
+                        label,
+                        weight.len() as f64 / 1e6,
+                        upload_start.elapsed().as_secs_f64() * 1e3,
+                        weight.len() as f64 / upload_start.elapsed().as_secs_f64() / 1e9,
+                    );
+                }
+            }
+            let formats = [GpuWeightFormat::Q8_0; STREAMS];
+            let bindings = ops.bind_weight_buffers(&buffers, &formats).unwrap();
+            ops.write_f32(
+                input,
+                &(0..ROWS * n_in)
+                    .map(|index| ((index * 7 % 251) as f32 - 125.0) / 97.0)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let (matmul_push, _) = matmul_rows_push(
+                cursor,
+                &context.limits,
+                bindings,
+                q8,
+                scales,
+                Some(sums),
+                &[(output, n_out, n_out * 4)],
+                n_in,
+                ROWS,
+                n_in,
+            )
+            .unwrap();
+            let dispatch = row_dispatch(n_out.div_ceil(64), 1, &context.limits).unwrap();
+            let bytes = n_in * n_out * 34 / 32;
+            let time = |pipeline: usize| {
+                let mut best = f64::MAX;
+                for _ in 0..3 {
+                    let start = Instant::now();
+                    for _ in 0..REPS {
+                        let commands = TokenCommands::begin(&context).unwrap();
+                        ops.record_linear_dispatch(
+                            &commands,
+                            pipeline,
+                            bindings,
+                            &matmul_push,
+                            dispatch,
+                        );
+                        commands.submit_and_wait().unwrap();
+                    }
+                    best = best.min(start.elapsed().as_secs_f64() / REPS as f64);
+                }
+                best
+            };
+            let grouped = time(Q8_MATMUL_GROUPED);
+            let wide = time(Q8_MATMUL_GROUPED_TILED_WIDE);
+            eprintln!(
+                "[gemv] {:12} {:7.2} MB  grouped {:7.2} ms ({:6.1} GB/s)  wide {:7.2} ms ({:6.1} GB/s)",
+                label,
+                bytes as f64 / 1e6,
+                grouped * 1e3,
+                bytes as f64 / grouped / 1e9,
+                wide * 1e3,
+                bytes as f64 / wide / 1e9,
+            );
+            for buffer in buffers {
+                unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
+            }
+        }
+    }
+
+    /// The PiVo operators have to agree with the host kernels.
+    ///
+    /// The acoustic encoder's output decides the frame durations, and the
+    /// durations are rounded to whole frames, so an operator that drifts
+    /// turns into a different utterance length. The check runs every operator
+    /// against a reference that follows the host kernel step by step.
+    #[test]
+    fn pivo_operators_match_the_host_kernels() {
+        use super::*;
+        let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
+        let mut runtime = PivoRuntime::new(
+            context,
+            PivoCapacity {
+                activation: 16 * 1024,
+                rope_table: 4 * 1024,
+                weight: 16 * 1024,
+                bias: 64,
+            },
+        )
+        .unwrap();
+        let mut state = 0x1234_5678u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+        };
+        let mut sample = |count: usize| -> Vec<f32> { (0..count).map(|_| next()).collect() };
+
+        // The linear projection.
+        let rows = 3;
+        let n_in = 8;
+        let n_out = 5;
+        let input = sample(rows * n_in);
+        let weight = sample(n_out * n_in);
+        let bias = sample(n_out);
+        let weight_region = runtime.upload_weight(&weight).unwrap();
+        let bias_region = runtime.upload_bias(&bias).unwrap();
+        runtime.upload(runtime.x, &input).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .linear(
+                &commands,
+                runtime.x,
+                runtime.down,
+                weight_region,
+                Some(bias_region),
+                n_in,
+                n_out,
+                rows,
+                n_in,
+                n_out,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.down, rows * n_out).unwrap();
+        let mut want = vec![0f32; rows * n_out];
+        for row in 0..rows {
+            for out in 0..n_out {
+                let mut sum = 0f32;
+                for i in 0..n_in {
+                    sum += input[row * n_in + i] * weight[out * n_in + i];
+                }
+                want[row * n_out + out] = sum + bias[out];
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-4, "linear drifted by {error:e}");
+
+        // The RMS normalisation.
+        let width = 8;
+        let norm_weight = sample(width);
+        let norm_region = runtime.upload_weight(&norm_weight).unwrap();
+        runtime.upload(runtime.normed, &input).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .rms_norm(
+                &commands,
+                runtime.normed,
+                runtime.gate,
+                norm_region,
+                width,
+                1e-6,
+                rows,
+                width,
+                width,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.gate, rows * width).unwrap();
+        let mut want = vec![0f32; rows * width];
+        for row in 0..rows {
+            let slice = &input[row * width..(row + 1) * width];
+            let sum_sq: f64 = slice.iter().map(|v| f64::from(*v) * f64::from(*v)).sum();
+            let mean_sq = (sum_sq / width as f64) as f32;
+            let scale = 1.0f32 / (mean_sq + 1e-6).sqrt();
+            for i in 0..width {
+                want[row * width + i] = slice[i] * scale * norm_weight[i];
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "rms_norm drifted by {error:e}");
+
+        // The rotary embedding.
+        let units = 4;
+        let head_width = 24;
+        let width = units * head_width;
+        let values = sample(rows * width);
+        let mut table = vec![0f32; rows * 24];
+        for (position, row) in table.chunks_exact_mut(24).enumerate() {
+            for pair in 0..12 {
+                let theta = position as f32 * ((2 * pair) as f32 * (-10000f32.ln() / 24.)).exp();
+                let (sin, cos) = theta.sin_cos();
+                row[pair] = sin;
+                row[12 + pair] = cos;
+            }
+        }
+        runtime.upload(runtime.q, &values).unwrap();
+        runtime.upload(runtime.rope_table, &table).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .rope(&commands, runtime.q, runtime.rope_table, rows, width, units)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.q, rows * width).unwrap();
+        let mut want = values.clone();
+        for (t, row) in want.chunks_exact_mut(width).enumerate() {
+            for head in row.chunks_exact_mut(head_width) {
+                for i in 0..head_width / 2 {
+                    let theta = t as f32 * ((2 * i) as f32 * (-10000f32.ln() / 24.)).exp();
+                    let (sin, cos) = theta.sin_cos();
+                    let (a, b) = (head[i], head[i + head_width / 2]);
+                    head[i] = a * cos - b * sin;
+                    head[i + head_width / 2] = b * cos + a * sin;
+                }
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "rope drifted by {error:e}");
+
+        // The attention.
+        let q_heads = 4;
+        let kv_heads = 2;
+        let head_dim = 24;
+        let q = sample(rows * q_heads * head_dim);
+        let k = sample(rows * kv_heads * head_dim);
+        let v = sample(rows * kv_heads * head_dim);
+        runtime.upload(runtime.q, &q).unwrap();
+        runtime.upload(runtime.k, &k).unwrap();
+        runtime.upload(runtime.v, &v).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .attention(
+                &commands,
+                runtime.q,
+                runtime.k,
+                runtime.v,
+                runtime.attn,
+                rows,
+                q_heads,
+                kv_heads,
+                head_dim,
+                64,
+                false,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime
+            .download(runtime.attn, rows * q_heads * head_dim)
+            .unwrap();
+        let mut want = vec![0f32; rows * q_heads * head_dim];
+        for t in 0..rows {
+            for h in 0..q_heads {
+                let query = &q[t * q_heads * head_dim + h * head_dim..][..head_dim];
+                let mut scores: Vec<f32> = (0..rows)
+                    .map(|s| {
+                        let key = &k[s * kv_heads * head_dim + (h / 2) * head_dim..][..head_dim];
+                        let mut dot = 0f32;
+                        for d in 0..head_dim {
+                            dot += query[d] * key[d];
+                        }
+                        dot / (head_dim as f32).sqrt()
+                    })
+                    .collect();
+                let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0f64;
+                for score in scores.iter_mut() {
+                    *score = (*score - max).exp();
+                    sum += f64::from(*score);
+                }
+                let scale = (1.0 / sum) as f32;
+                for score in scores.iter_mut() {
+                    *score *= scale;
+                }
+                for (s, score) in scores.iter().enumerate() {
+                    for d in 0..head_dim {
+                        want[t * q_heads * head_dim + h * head_dim + d] +=
+                            score * v[s * kv_heads * head_dim + (h / 2) * head_dim + d];
+                    }
+                }
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "attention drifted by {error:e}");
+
+        // The dilated convolution.
+        let in_channels = 8;
+        let out_channels = 4;
+        let frames = 6;
+        let kernel = 5;
+        let dilation = 2;
+        let padding = 4;
+        let out_frames = frames + 2 * padding - dilation * (kernel - 1);
+        let signal = sample(frames * in_channels);
+        let conv_weight = sample(out_channels * in_channels * kernel);
+        let conv_region = runtime.upload_weight(&conv_weight).unwrap();
+        runtime.upload(runtime.normed, &signal).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .conv1d(
+                &commands,
+                runtime.normed,
+                runtime.conv,
+                conv_region,
+                None,
+                in_channels,
+                out_channels,
+                frames,
+                out_frames,
+                kernel,
+                dilation,
+                padding,
+            )
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime
+            .download(runtime.conv, out_frames * out_channels)
+            .unwrap();
+        let mut want = vec![0f32; out_frames * out_channels];
+        for t in 0..out_frames {
+            let mut window = vec![0f32; in_channels * kernel];
+            for c in 0..in_channels {
+                for j in 0..kernel {
+                    let pos = t as isize + j as isize * dilation as isize - padding as isize;
+                    if (0..frames as isize).contains(&pos) {
+                        window[c * kernel + j] = signal[pos as usize * in_channels + c];
+                    }
+                }
+            }
+            for o in 0..out_channels {
+                let mut sum = 0f32;
+                for c in 0..in_channels {
+                    for j in 0..kernel {
+                        sum += window[c * kernel + j]
+                            * conv_weight[o * in_channels * kernel + c * kernel + j];
+                    }
+                }
+                want[t * out_channels + o] = sum;
+            }
+        }
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-4, "conv1d drifted by {error:e}");
+
+        // The gated linear unit.
+        let count = rows * 32;
+        let gate = sample(count);
+        let up = sample(count);
+        runtime.upload(runtime.gate, &gate).unwrap();
+        runtime.upload(runtime.up, &up).unwrap();
+        let commands = TokenCommands::begin(context).unwrap();
+        runtime
+            .swiglu(&commands, runtime.gate, runtime.up, runtime.down, count)
+            .unwrap();
+        commands.submit_and_wait().unwrap();
+        let got = runtime.download(runtime.down, count).unwrap();
+        let want: Vec<f32> = gate
+            .iter()
+            .zip(&up)
+            .map(|(g, u)| (g / (1.0 + (-g).exp())) * u)
+            .collect();
+        let error = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(error < 1e-5, "swiglu drifted by {error:e}");
     }
 }

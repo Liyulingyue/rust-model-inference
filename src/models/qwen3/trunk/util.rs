@@ -6,7 +6,7 @@
 //! hidden dependencies.
 
 pub use crate::core::tensor::load_f32_tensor;
-use crate::core::tensor::{GGMLType, TensorInfo, TensorSource};
+use crate::core::tensor::{GGMLType, TensorSource};
 
 pub fn optional_usize(source: &dyn TensorSource, key: &str) -> Result<Option<usize>, String> {
     let Some(value) = source.metadata(key) else {
@@ -84,25 +84,9 @@ pub fn validate_input_shapes(
     Ok(())
 }
 
+/// Delegates to `ops::sampling::greedy_checked` (same first-max tie-break).
 pub fn greedy_token(logits: &[f32]) -> Result<u32, String> {
-    let (&first, rest) = logits
-        .split_first()
-        .ok_or_else(|| "Cannot sample empty logits".to_string())?;
-    if !first.is_finite() {
-        return Err("Cannot sample non-finite logits".into());
-    }
-    let mut best_id = 0usize;
-    let mut best = first;
-    for (index, &logit) in rest.iter().enumerate() {
-        if !logit.is_finite() {
-            return Err("Cannot sample non-finite logits".into());
-        }
-        if logit > best {
-            best = logit;
-            best_id = index + 1;
-        }
-    }
-    u32::try_from(best_id).map_err(|_| "Token ID does not fit u32".into())
+    crate::ops::sampling::greedy_checked(logits)
 }
 
 pub fn validate_generation(
@@ -174,36 +158,11 @@ pub(crate) fn validate_token_ids(token_ids: &[u32], vocab: usize) -> Result<(), 
     Ok(())
 }
 
+/// Delegates to the canonical sampler in `ops::sampling` so the qwen3 CLI path
+/// and the HTTP adapters cannot drift. Behaviour is unchanged: this used to
+/// be a verbatim copy of that implementation.
 pub(crate) fn sample_token(logits: &[f32], temperature: f32) -> Result<u32, String> {
-    if temperature == 0.0 {
-        return greedy_token(logits);
-    }
-    let mut max_logit = f32::NEG_INFINITY;
-    for &logit in logits {
-        if !logit.is_finite() {
-            return Err("Cannot sample non-finite logits".into());
-        }
-        max_logit = max_logit.max(logit);
-    }
-    if logits.is_empty() {
-        return Err("Cannot sample empty logits".into());
-    }
-    let sum: f32 = logits
-        .iter()
-        .map(|logit| ((logit - max_logit) / temperature).exp())
-        .sum();
-    if !sum.is_finite() || sum <= 0.0 {
-        return Err("Sampling probability sum is not finite and positive".into());
-    }
-    let target = rand::random::<f32>() * sum;
-    let mut cumulative = 0.0;
-    for (index, &logit) in logits.iter().enumerate() {
-        cumulative += ((logit - max_logit) / temperature).exp();
-        if cumulative >= target {
-            return u32::try_from(index).map_err(|_| "Token ID does not fit u32".into());
-        }
-    }
-    u32::try_from(logits.len() - 1).map_err(|_| "Token ID does not fit u32".into())
+    crate::ops::sampling::sample_greedy_or_temperature(logits, temperature)
 }
 
 pub fn static_q8_matrix(
@@ -241,36 +200,19 @@ pub fn static_tensor(
     Ok(unsafe { std::mem::transmute::<&[u8], &'static [u8]>(bytes) })
 }
 
+/// Borrow a tensor's bytes after checking its shape, type and payload.
+///
+/// The check itself lives in [`crate::core::tensor::typed_tensor_bytes`];
+/// this stays as the qwen3 entry point. The payload is measured by the
+/// shared check, which follows the type's block layout rather than the
+/// element count.
 pub fn checked_tensor<'a>(
     source: &'a dyn TensorSource,
     name: &str,
     dims: &[u64],
     ggml_type: GGMLType,
 ) -> Result<&'a [u8], String> {
-    let info: &TensorInfo = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if info.dims != dims || info.ggml_type != ggml_type {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, ggml_type
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
+    crate::core::tensor::typed_tensor_bytes(source, name, dims, ggml_type)
 }
 
 pub fn checked_product(name: &str, left: usize, right: usize) -> Result<usize, String> {
@@ -294,7 +236,66 @@ pub fn usize_to_u64(value: usize, name: &str) -> Result<u64, String> {
 mod tests {
     use super::*;
     use crate::models::qwen3::trunk::config::{Qwen3Config, Qwen3Rope};
-    use crate::models::qwen3::trunk::tests::qwen3vl_metadata_source;
+    use crate::models::qwen3::trunk::tests::{
+        qwen2vl_metadata_source, qwen3vl_4b_metadata_source, qwen3vl_metadata_source,
+    };
+
+    /// `qwen2vl` must resolve to M-RoPE, not to Interleaved.
+    ///
+    /// Both `qwen2vl` and `qwen3vl` carry `*.rope.dimension_sections`, so a
+    /// single arm would hand the Qwen2.5-VL text tower the Qwen3-VL flavor and
+    /// silently change every qwen2vl model's positional encoding. The two
+    /// families use different multimodal rope layouts, so the arch has to be
+    /// part of the decision.
+    #[test]
+    fn qwen2vl_uses_mrope_and_keeps_qkv_bias() {
+        let config = Qwen3Config::from_source(&qwen2vl_metadata_source()).unwrap();
+        assert_eq!(
+            config.rope,
+            Qwen3Rope::Mrope {
+                sections: [16, 24, 24, 0]
+            }
+        );
+        // qwen2vl is the only arch carrying QKV bias, and it must not pick up
+        // QK norm; both would be wrong for this checkpoint.
+        assert!(config.has_qkv_bias);
+        assert!(!config.has_qk_norm);
+        assert_eq!(config.architecture, "qwen2vl");
+    }
+
+    /// The padded fourth section must not become a fourth rotary segment.
+    ///
+    /// `sections` arrives as `[16, 24, 24, 0]`; `rope_mrope` sums to 64 and
+    /// indexes `i % 64` over `half = 64` lanes, so the `axis 3` arm is
+    /// unreachable. This pins the numbers that make that true.
+    #[test]
+    fn qwen2vl_mrope_sections_sum_to_one_head_half() {
+        let sections = [16, 24, 24, 0];
+        let total: i32 = sections.iter().sum();
+        let head_dim = 128usize;
+        assert_eq!(total as usize, head_dim / 2);
+        assert_eq!(sections[3], 0);
+        // Every lane lands in axis 0/1/2, so the trailing zero is inert.
+        for i in 0..head_dim / 2 {
+            let sector = i % total as usize;
+            assert!(sector < 64, "lane {i} would reach the fourth axis");
+        }
+    }
+
+    /// Splitting `qwen2vl` onto Mrope must not disturb the Qwen3-VL arms.
+    #[test]
+    fn qwen3vl_and_qwen3_stay_on_neox_or_interleaved() {
+        let qwen3vl = Qwen3Config::from_source(&qwen3vl_metadata_source()).unwrap();
+        assert_eq!(
+            qwen3vl.rope,
+            Qwen3Rope::Interleaved {
+                sections: [24, 20, 20, 0],
+                n_dims: 128,
+            }
+        );
+        let qwen3vl_4b = Qwen3Config::from_source(&qwen3vl_4b_metadata_source()).unwrap();
+        assert!(matches!(qwen3vl_4b.rope, Qwen3Rope::Interleaved { .. }));
+    }
 
     #[test]
     fn qwen3vl_requires_qk_norm_and_fixed_imrope_sections() {
@@ -308,6 +309,37 @@ mod tests {
             }
         );
         assert_eq!(config.n_deepstack_layers, 3);
+    }
+
+    /// `Qwen3-VL-4B-Instruct` (Qwen3-4B LLM backbone) had no allowlist
+    /// entry before 2026-10-01 and was rejected at config load with
+    /// "Unsupported main-model configuration" because `n_embd=2560`,
+    /// `n_layer=36`, `n_head=32`, `n_ff=9728` did not match either the
+    /// 1024-dim 28-layer or the 2048-dim 28-layer existing entries.
+    /// Real weight: `Qwen/Qwen3-VL-4B-Instruct-GGUF` Q4_K_M
+    /// (`Qwen3VL-4B-Instruct-Q4_K_M.gguf`).
+    #[test]
+    fn qwen3vl_4b_loads_through_qwen3_allowed_dimensions_whitelist() {
+        let config = Qwen3Config::from_source(&qwen3vl_4b_metadata_source())
+            .expect("Qwen3-VL-4B must pass the Qwen3AllowedDimensions whitelist");
+        assert_eq!(config.n_embd, 2560);
+        assert_eq!(config.n_layer, 36);
+        assert_eq!(config.n_head, 32);
+        assert_eq!(config.n_head_kv, 8);
+        assert_eq!(config.n_ff, 9728);
+        assert_eq!(config.n_ctx, 262_144);
+        assert!(
+            (config.freq_base - 5_000_000.0).abs() < 1.0,
+            "freq_base={}",
+            config.freq_base
+        );
+        assert_eq!(
+            config.rope,
+            Qwen3Rope::Interleaved {
+                sections: [24, 20, 20, 0],
+                n_dims: 128,
+            }
+        );
     }
 
     #[test]

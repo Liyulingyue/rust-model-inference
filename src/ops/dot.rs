@@ -27,11 +27,57 @@ unsafe fn dot_f32_avx2(a: &[f32], b: &[f32], n: usize) -> f32 {
 
 #[inline(always)]
 fn dot_f32_scalar(a: &[f32], b: &[f32], n: usize) -> f32 {
-    let mut s = 0.0f64;
+    let mut s = 0.0f32;
     for i in 0..n {
-        s += f64::from(a[i] * b[i]);
+        s += a[i] * b[i];
     }
-    s as f32
+    s
+}
+
+/// F32 dot with ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f32_ggml(a: &[f32], b: &[f32], n: usize) -> f32 {
+    let (a, b) = (&a[..n], &b[..n]);
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: the slices cover n elements and both CPU features were checked.
+        return unsafe { dot_f32_ggml_avx2(a, b, n) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    if has_neon() {
+        return unsafe { dot_f32_neon(a, b, n) };
+    }
+    dot_f32_f64_acc(a, b, n)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_ggml_avx2(a: &[f32], b: &[f32], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut accumulators = [_mm256_setzero_ps(); 4];
+    let mut i = 0;
+    while i + 32 <= n {
+        for (j, accumulator) in accumulators.iter_mut().enumerate() {
+            let x = _mm256_loadu_ps(a.as_ptr().add(i + j * 8));
+            let y = _mm256_loadu_ps(b.as_ptr().add(i + j * 8));
+            *accumulator = _mm256_fmadd_ps(x, y, *accumulator);
+        }
+        i += 32;
+    }
+    let lanes = _mm256_add_ps(
+        _mm256_add_ps(accumulators[0], accumulators[2]),
+        _mm256_add_ps(accumulators[1], accumulators[3]),
+    );
+    let halves = _mm_add_ps(
+        _mm256_castps256_ps128(lanes),
+        _mm256_extractf128_ps(lanes, 1),
+    );
+    let pairs = _mm_hadd_ps(halves, halves);
+    let mut sum = _mm_cvtss_f32(_mm_hadd_ps(pairs, pairs));
+    while i < n {
+        sum += a[i] * b[i];
+        i += 1;
+    }
+    sum
 }
 
 /// Same throughput as `dot_f32_avx2` but with **separate `mul` + `add`** instead of
@@ -182,34 +228,31 @@ pub fn dot_f16_f32(a: &[f32], b_f16: &[u16], n: usize) -> f32 {
 
 pub fn dot_f16(a: &[u16], b: &[u16], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n);
+    // x86_64 SIMD: AVX2 + F16C converts 8 halfs to 8 f32 per `_mm256_cvtph_ps`,
+    // then FMA accumulates. This is the hot path for Qwen3-TTS DAC conv1
+    // (which uses F16 weights × F32 inputs, pre-quantized to F16 here).
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() && has_f16c() && n >= 8 {
             return unsafe { dot_f16_avx2(a, b, n) };
         }
     }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_endian = "little",
-        not(feature = "scalar-parity")
-    ))]
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if f16_uses_neon_accumulators(n) {
             (
-                f64::from(unsafe { dot_f16_fp16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
+                f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr(), prefix) }),
                 prefix,
             )
         } else {
             (0.0, 0)
         }
     };
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_endian = "little",
-        not(feature = "scalar-parity")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
+    // ponytail: stable Rust has no usable aarch64 FP16 tail intrinsic here;
+    // keep the remainder scalar and retain the 32-wide assembly fast path.
     for index in tail_start..n {
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(b[index]));
     }
@@ -252,6 +295,22 @@ unsafe fn dot_f16_avx2(a: &[u16], b: &[u16], n: usize) -> f32 {
     sum
 }
 
+pub(crate) fn f16_uses_neon_accumulators(n: usize) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    return n >= 32
+        && has_neon()
+        && if cfg!(feature = "ggml-f16-dot-parity") {
+            std::arch::is_aarch64_feature_detected!("fp16")
+        } else {
+            std::arch::is_aarch64_feature_detected!("fhm")
+        };
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
+    {
+        let _ = n;
+        false
+    }
+}
+
 pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
     debug_assert!(a.len() >= n && b.len() >= n * 2);
     #[cfg(target_arch = "x86_64")]
@@ -260,35 +319,46 @@ pub fn dot_f16_f16_bytes(a: &[u16], b: &[u8], n: usize) -> f32 {
             return unsafe { dot_f16_f16_bytes_avx2(a, b, n) };
         }
     }
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_endian = "little",
-        not(feature = "scalar-parity")
-    ))]
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     let (mut sum, tail_start) = {
         let prefix = n & !31;
-        if prefix > 0 && std::arch::is_aarch64_feature_detected!("fp16") {
+        if f16_uses_neon_accumulators(n) {
             (
-                f64::from(unsafe {
-                    dot_f16_fp16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix)
-                }),
+                f64::from(unsafe { dot_f16_neon(a.as_ptr(), b.as_ptr().cast::<u16>(), prefix) }),
                 prefix,
             )
         } else {
             (0.0, 0)
         }
     };
-    #[cfg(not(all(
-        target_arch = "aarch64",
-        target_endian = "little",
-        not(feature = "scalar-parity")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     let (mut sum, tail_start) = (0.0f64, 0usize);
     for index in tail_start..n {
         let weight = u16::from_le_bytes(b[index * 2..index * 2 + 2].try_into().unwrap());
         sum += f64::from(f16_to_f32(a[index]) * f16_to_f32(weight));
     }
     sum as f32
+}
+
+/// F16 dot product matching ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f16_ggml(a: &[u16], b: &[u16], n: usize) -> f32 {
+    let (a, b) = (&a[..n], &b[..n]);
+    #[cfg(target_endian = "little")]
+    return dot_f16_f16_bytes_ggml(a, bytemuck::cast_slice(b), n);
+    #[cfg(not(target_endian = "little"))]
+    dot_f16(a, b, n)
+}
+
+/// F16 dot product matching ggml's four-accumulator AVX reduction order.
+pub(crate) fn dot_f16_f16_bytes_ggml(a: &[u16], b: &[u8], n: usize) -> f32 {
+    debug_assert!(a.len() >= n && b.len() >= n * 2);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_avx2_fma() && has_f16c() && n >= 32 {
+            return unsafe { dot_f16_f16_bytes_ggml_avx2(a, b, n) };
+        }
+    }
+    dot_f16_f16_bytes(a, b, n)
 }
 
 /// AVX2 + F16C + FMA implementation of `dot_f16_f16_bytes`.
@@ -326,6 +396,39 @@ unsafe fn dot_f16_f16_bytes_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
         i += 1;
     }
     sum
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn dot_f16_f16_bytes_ggml_avx2(a: &[u16], b: &[u8], n: usize) -> f32 {
+    use std::arch::x86_64::*;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    let mut i = 0;
+    while i + 32 <= n {
+        for (offset, acc) in [
+            (0, &mut acc0),
+            (8, &mut acc1),
+            (16, &mut acc2),
+            (24, &mut acc3),
+        ] {
+            let va = _mm256_cvtph_ps(_mm_loadu_si128(a.as_ptr().add(i + offset) as *const __m128i));
+            let vb = _mm256_cvtph_ps(_mm_loadu_si128(
+                b.as_ptr().add((i + offset) * 2) as *const __m128i
+            ));
+            *acc = _mm256_fmadd_ps(va, vb, *acc);
+        }
+        i += 32;
+    }
+    let acc = _mm256_add_ps(_mm256_add_ps(acc0, acc2), _mm256_add_ps(acc1, acc3));
+    let mut sum = f64::from(hsum_ps(acc));
+    while i < n {
+        let weight = u16::from_le_bytes(b[i * 2..i * 2 + 2].try_into().unwrap());
+        sum += f64::from(f16_to_f32(a[i]) * f16_to_f32(weight));
+        i += 1;
+    }
+    sum as f32
 }
 
 /// BF16 weight bytes × F32 input dot product.
@@ -382,7 +485,7 @@ pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
     debug_assert!(b.len() >= n * 2);
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     {
-        if std::arch::is_aarch64_feature_detected!("neon") && n >= 4 {
+        if !super::super::scalar_mode() && has_neon() && n >= 4 {
             return unsafe { dot_bf16_f32_neon(a, b, n) };
         }
     }
@@ -393,13 +496,41 @@ pub fn dot_bf16_f32(a: &[f32], b: &[u8], n: usize) -> f32 {
 #[target_feature(enable = "neon")]
 unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
     use std::arch::aarch64::*;
+    // Widen eight BF16 values up front, then fold them into a single
+    // accumulator in ascending order. The widening (`vmovl_u16` + `vshlq`) is
+    // the bottleneck of this loop, not the FMA, so hoisting it off the
+    // dependency chain roughly triples throughput.
+    //
+    // The fold order is deliberately still strictly ascending and single
+    // accumulator: autoregressive sampling turns any logit perturbation into a
+    // different argmax at the top-k boundary and from there into a completely
+    // different sample, so bitwise-stable accumulation is worth more here than
+    // the extra throughput multiple accumulators would buy. Do not reassociate.
+    unsafe fn widen(bf16: *const u8) -> std::arch::aarch64::float32x4_t {
+        use std::arch::aarch64::*;
+        let packed = vld1_u16(bf16.cast());
+        vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(packed), 16))
+    }
+    let a_ptr = a.as_ptr();
+    let b_ptr = b.as_ptr();
     let mut acc = vdupq_n_f32(0.0);
     let mut i = 0;
+    // 16 elements per iteration: four widens issue independently, then the
+    // FMA chain stays sequential in `acc` so the result matches the scalar
+    // reference's ascending accumulation.
+    while i + 16 <= n {
+        let w0 = widen(b_ptr.add(i * 2));
+        let w1 = widen(b_ptr.add(i * 2 + 8));
+        let w2 = widen(b_ptr.add(i * 2 + 16));
+        let w3 = widen(b_ptr.add(i * 2 + 24));
+        acc = vfmaq_f32(acc, w0, vld1q_f32(a_ptr.add(i)));
+        acc = vfmaq_f32(acc, w1, vld1q_f32(a_ptr.add(i + 4)));
+        acc = vfmaq_f32(acc, w2, vld1q_f32(a_ptr.add(i + 8)));
+        acc = vfmaq_f32(acc, w3, vld1q_f32(a_ptr.add(i + 12)));
+        i += 16;
+    }
     while i + 4 <= n {
-        let packed = vld1_u16(b.as_ptr().add(i * 2).cast());
-        let bits = vshlq_n_u32(vmovl_u16(packed), 16);
-        let w = vreinterpretq_f32_u32(bits);
-        acc = vfmaq_f32(acc, w, vld1q_f32(a.as_ptr().add(i)));
+        acc = vfmaq_f32(acc, widen(b_ptr.add(i * 2)), vld1q_f32(a_ptr.add(i)));
         i += 4;
     }
     let mut sum = vaddvq_f32(acc);
@@ -409,6 +540,131 @@ unsafe fn dot_bf16_f32_neon(a: &[f32], b: &[u8], n: usize) -> f32 {
         i += 1;
     }
     sum
+}
+
+#[inline]
+pub fn dot_bf16_f32_4(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+    assert!(width <= input.len() / 4 && width <= weight.len() / 2);
+    // Empirical break-even on AVX2+FMA hosts: the 4-row shared-weight
+    // helper wins over 4× single-row `dot_bf16_f32` only when the
+    // amortized BF16→F32 promotion + 16-column FMA outweighs the loop
+    // prologue. Microbenchmarks
+    // (`tests/bench_yue4::bench_dot_bf16_f32_4_shared_vs_4single_*`)
+    // show ~1.6× at width=1024 and ~2.0× at width≥3072, but ~0.7× at
+    // width=256 because the per-call overhead dominates. The 512
+    // threshold keeps small widths on the per-row fast path.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    if has_neon() && width >= 4 {
+        return unsafe { dot_bf16_f32_4_neon(input, weight, width) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() && width >= 512 {
+        return unsafe { dot_bf16_f32_4_avx2(input, weight, width) };
+    }
+    std::array::from_fn(|row| dot_bf16_f32(&input[row * width..(row + 1) * width], weight, width))
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn dot_bf16_f32_4_neon(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+    use std::arch::aarch64::*;
+
+    let mut accumulators = [vdupq_n_f32(0.0); 4];
+    let mut column = 0;
+    while column + 4 <= width {
+        let packed = vld1_u16(weight.as_ptr().add(column * 2).cast());
+        let values = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(packed), 16));
+        for row in 0..4 {
+            accumulators[row] = vfmaq_f32(
+                accumulators[row],
+                values,
+                vld1q_f32(input.as_ptr().add(row * width + column)),
+            );
+        }
+        column += 4;
+    }
+    let mut sums = std::array::from_fn(|row| vaddvq_f32(accumulators[row]));
+    while column < width {
+        let value = bf16_to_f32(u16::from_le_bytes([
+            weight[column * 2],
+            weight[column * 2 + 1],
+        ]));
+        for row in 0..4 {
+            sums[row] += value * input[row * width + column];
+        }
+        column += 1;
+    }
+    sums
+}
+
+/// 4-row BF16×F32 dot product with shared weight loads.
+///
+/// Mirror of [`dot_bf16_f32_4_neon`] for AVX2+FMA. Four independent
+/// `_mm256` accumulators share one set of weight loads per 8-element
+/// block, exactly the same structural choice as the NEON variant
+/// (`accumulators[row] += weights * input[row * ..]`). Step width 8 =
+/// AVX2 lane count; the AVX2 path saves 4× the weight loads versus
+/// four independent `dot_bf16_f32` calls, which is the only point of
+/// this helper for the YuE2 BF16 lm_head.
+///
+/// Each outer step processes 16 columns (= two 8-wide AVX2 vectors)
+/// so the BF16→F32 promotion (`_mm256_cvtepu16_epi32` +
+/// `_mm256_slli_epi32`) is amortized across 16 columns instead of
+/// 8, lifting the per-block decode overhead out of the FMA hot path
+/// on wider `width`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_bf16_f32_4_avx2(input: &[f32], weight: &[u8], width: usize) -> [f32; 4] {
+    use std::arch::x86_64::*;
+
+    let mut accumulators = [_mm256_setzero_ps(); 4];
+    let mut column = 0;
+    while column + 16 <= width {
+        let chunk0 = _mm_loadu_si128(weight.as_ptr().add(column * 2) as *const __m128i);
+        let chunk1 = _mm_loadu_si128(weight.as_ptr().add((column + 8) * 2) as *const __m128i);
+        let bits0 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk0), 16);
+        let bits1 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk1), 16);
+        let w0 = _mm256_castsi256_ps(bits0);
+        let w1 = _mm256_castsi256_ps(bits1);
+        for row in 0..4 {
+            let base = row * width + column;
+            accumulators[row] = _mm256_fmadd_ps(
+                w0,
+                _mm256_loadu_ps(input.as_ptr().add(base)),
+                accumulators[row],
+            );
+            accumulators[row] = _mm256_fmadd_ps(
+                w1,
+                _mm256_loadu_ps(input.as_ptr().add(base + 8)),
+                accumulators[row],
+            );
+        }
+        column += 16;
+    }
+    while column + 8 <= width {
+        let chunk = _mm_loadu_si128(weight.as_ptr().add(column * 2) as *const __m128i);
+        let bits = _mm256_slli_epi32(_mm256_cvtepu16_epi32(chunk), 16);
+        let w = _mm256_castsi256_ps(bits);
+        for row in 0..4 {
+            let base = row * width + column;
+            accumulators[row] = _mm256_fmadd_ps(
+                w,
+                _mm256_loadu_ps(input.as_ptr().add(base)),
+                accumulators[row],
+            );
+        }
+        column += 8;
+    }
+    let mut sums = std::array::from_fn(|row| hsum_ps(accumulators[row]));
+    while column < width {
+        let bits = u16::from_le_bytes([weight[column * 2], weight[column * 2 + 1]]);
+        let value = bf16_to_f32(bits);
+        for row in 0..4 {
+            sums[row] += value * input[row * width + column];
+        }
+        column += 1;
+    }
+    sums
 }
 
 #[inline]
@@ -434,10 +690,24 @@ unsafe fn _mm_hsum_ps_4(v: std::arch::x86_64::__m128) -> std::arch::x86_64::__m1
     _mm_add_ps(sums, shuf2)
 }
 
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-unsafe fn dot_f16_fp16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    feature = "ggml-f16-dot-parity"
+))]
+unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
     debug_assert_eq!(n % 32, 0);
     let bits: u32;
+    // `fmla v.8h`: four **f16** accumulators, widened to f32 only at the end.
+    // Bit-for-bit what ggml's NEON attention dot does, and what
+    // `neon_f16_attention_dot_matches_ggml_four_accumulator_reduction` pins.
+    //
+    // Kept behind `ggml-f16-dot-parity` because it is not free of accuracy:
+    // the whole sum carries f16 precision, which costs about
+    // `sqrt(head_dim) * eps_f16` and can overflow to inf past 65504. The x86
+    // path never did this -- `_mm256_cvtph_ps` then `_mm256_fmadd_ps` -- so
+    // leaving this on by default also made the same function mean two different
+    // things depending on the host. TODO-025.
     asm!(
         "movi v0.8h, #0", "movi v1.8h, #0",
         "movi v2.8h, #0", "movi v3.8h, #0",
@@ -468,6 +738,83 @@ unsafe fn dot_f16_fp16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
         out("v0") _, out("v1") _, out("v2") _, out("v3") _,
         out("v4") _, out("v5") _, out("v6") _, out("v7") _,
         out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+        options(nostack, readonly),
+    );
+    f32::from_bits(bits)
+}
+
+/// `FMLAL`: f16 operands, **f32** accumulator.
+///
+/// This is the instruction the operation actually wants. The operands stay f16,
+/// so storage, load bandwidth and the decode cost are unchanged; only the
+/// accumulator widens, which is what removes the ~`sqrt(n) * eps_f16` drift,
+/// the 65504 overflow and the subnormal underflow that the `fmla .8h` form
+/// carries. It matches what the x86 path has always done, so the same function
+/// stops meaning two different things per architecture.
+///
+/// FMLAL requires FEAT_FHM; the shared dispatch checks it before entering here.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    not(feature = "ggml-f16-dot-parity")
+))]
+unsafe fn dot_f16_neon(x: *const u16, y: *const u16, n: usize) -> f32 {
+    debug_assert_eq!(n % 32, 0);
+    let bits: u32;
+    // Loads are four halves at a time rather than eight: `fmlal` consumes a
+    // `.4h` view, and A64 has no way to name the upper half of a register that
+    // was loaded as `.8h`. Loading `.4h` keeps the lane mapping obvious and
+    // costs one extra load instruction per 32 elements against a full-rate FMA.
+    //
+    // Four accumulators, same shape as the parity version, so the summation tree
+    // is a tree rather than a chain.
+    asm!(
+        "movi v0.4s, #0", "movi v1.4s, #0",
+        "movi v2.4s, #0", "movi v3.4s, #0",
+        "cbz {n}, 2f",
+        "1:",
+        "ld1 {{v4.4h}}, [{x}], #8",
+        "ld1 {{v16.4h}}, [{y}], #8",
+        "fmlal v0.4s, v4.4h, v16.4h",
+        "ld1 {{v5.4h}}, [{x}], #8",
+        "ld1 {{v17.4h}}, [{y}], #8",
+        "fmlal v1.4s, v5.4h, v17.4h",
+        "ld1 {{v6.4h}}, [{x}], #8",
+        "ld1 {{v18.4h}}, [{y}], #8",
+        "fmlal v2.4s, v6.4h, v18.4h",
+        "ld1 {{v7.4h}}, [{x}], #8",
+        "ld1 {{v19.4h}}, [{y}], #8",
+        "fmlal v3.4s, v7.4h, v19.4h",
+        "ld1 {{v8.4h}}, [{x}], #8",
+        "ld1 {{v20.4h}}, [{y}], #8",
+        "fmlal v0.4s, v8.4h, v20.4h",
+        "ld1 {{v9.4h}}, [{x}], #8",
+        "ld1 {{v21.4h}}, [{y}], #8",
+        "fmlal v1.4s, v9.4h, v21.4h",
+        "ld1 {{v10.4h}}, [{x}], #8",
+        "ld1 {{v22.4h}}, [{y}], #8",
+        "fmlal v2.4s, v10.4h, v22.4h",
+        "ld1 {{v11.4h}}, [{x}], #8",
+        "ld1 {{v23.4h}}, [{y}], #8",
+        "fmlal v3.4s, v11.4h, v23.4h",
+        "subs {n}, {n}, #32",
+        "b.ne 1b",
+        "2:",
+        "fadd v0.4s, v0.4s, v1.4s",
+        "fadd v2.4s, v2.4s, v3.4s",
+        "fadd v0.4s, v0.4s, v2.4s",
+        "faddp v0.4s, v0.4s, v0.4s",
+        "faddp s0, v0.2s",
+        "fmov {bits:w}, s0",
+        x = inout(reg) x => _,
+        y = inout(reg) y => _,
+        n = inout(reg) n => _,
+        bits = lateout(reg) bits,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+        out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+        out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+        out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+        out("v20") _, out("v21") _, out("v22") _, out("v23") _,
         options(nostack, readonly),
     );
     f32::from_bits(bits)
@@ -582,8 +929,28 @@ unsafe fn vec_mad_f16_f32_avx2(y: &mut [f32], x_f16: &[u16], v: f32) {
     }
 }
 
+/// F32 products accumulated in F64, matching the GGML scalar attention contract.
+#[inline(always)]
+pub fn dot_f32_f64_acc(a: &[f32], b: &[f32], n: usize) -> f32 {
+    a[..n]
+        .iter()
+        .zip(&b[..n])
+        .map(|(&x, &y)| f64::from(x * y))
+        .sum::<f64>() as f32
+}
+
+#[test]
+fn f64_accumulation_retains_cancellation_residual() {
+    assert_eq!(dot_f32_f64_acc(&[1e8, 1.0, -1e8], &[1.0; 3], 3), 1.0);
+    assert_eq!(dot_f32_f64_acc(&[], &[], 0), 0.0);
+}
+
 #[inline(always)]
 pub fn dot_f32(a: &[f32], b: &[f32], n: usize) -> f32 {
+    if crate::ops::scalar_mode() {
+        // ggml's scalar F32 dot rounds products to F32 and accumulates in F64.
+        return dot_f32_f64_acc(a, b, n);
+    }
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -681,7 +1048,6 @@ unsafe fn vec_scale_f32_avx2(y: &mut [f32], v: f32) {
 // pairwise summation, add it here behind a config flag and keep the current
 // fast path as the default.
 #[inline(always)]
-#[inline]
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn hsum_ps(v: std::arch::x86_64::__m256) -> f32 {
     use std::arch::x86_64::*;
@@ -1009,7 +1375,7 @@ unsafe fn vec_mad_per_channel_f32_broadcast_neon(
 /// `Σ(x - mean)² = sum_sq - 2·mean·sum + n·mean²`。
 /// 实测：AVX2 上 ~4-5× 标量 f64 reduce。
 pub fn sum_f32(values: &[f32]) -> f64 {
-    let n = values.len();
+    let _n = values.len();
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1041,7 +1407,7 @@ pub fn sum_f32(values: &[f32]) -> f64 {
 ///
 /// AVX2 实测：~4-5× 标量 f64 reduce（单 pass：broadcast mean → sub → square → 累加到 f64）。
 pub fn sum_sq_centered_f32(values: &[f32], mean: f32) -> f64 {
-    let n = values.len();
+    let _n = values.len();
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1069,7 +1435,7 @@ pub fn sum_sq_centered_f32(values: &[f32], mean: f32) -> f64 {
 /// 精度策略：每 8 f32 squares 立即 promote 到 4 f64 doubles 再 hsum 到 1 f64，
 /// 不在 f32 lane 内 partial sum（hsum_ps 会引入 ~3 ULP 误差 → PNG 不一致）。
 pub fn sum_sq_f32(values: &[f32]) -> f64 {
-    let n = values.len();
+    let _n = values.len();
     #[cfg(target_arch = "x86_64")]
     {
         if has_avx2_fma() {
@@ -1211,7 +1577,7 @@ unsafe fn sum_f32_avx2(values: &[f32]) -> f64 {
         acc += hsum_pd_256(lo) + hsum_pd_256(hi);
         i += 8;
     }
-    let mut tail = 0.0f64;
+    let _tail = 0.0f64;
     while i < n {
         acc += f64::from(values[i]);
         i += 1;
@@ -1352,6 +1718,73 @@ mod tests {
         vec_mad_per_channel_f32_broadcast,
     };
 
+    /// Times the BF16 dot product against its scalar and AVX2 halves.
+    ///
+    /// The AR decode runs one token at a time, so this dot is the whole
+    /// projection cost there.
+    #[test]
+    #[ignore = "timing probe"]
+    fn bf16_dot_timing_split() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let mut a = vec![0.01f32; n];
+        let mut bytes = vec![0x3fu8; n * 2];
+        let mut sink = 0.0f32;
+
+        fn run(
+            label: &str,
+            mut f: impl FnMut(&[f32], &[u8], usize) -> f32,
+            a: &mut Vec<f32>,
+            bytes: &mut Vec<u8>,
+            n: usize,
+            sink: &mut f32,
+        ) {
+            for it in 0..100 {
+                a[0] = it as f32 * 1e-6;
+                bytes[0] = (it % 251) as u8;
+                *sink += f(a, bytes, n);
+            }
+            let started = Instant::now();
+            for it in 0..1000 {
+                a[0] = it as f32 * 1e-6;
+                bytes[0] = (it % 251) as u8;
+                *sink += f(a, bytes, n);
+            }
+            let each = started.elapsed() / 1000;
+            eprintln!(
+                "{label}: {each:?} -> {:.2} G elem/s",
+                n as f64 / each.as_secs_f64() / 1e9
+            );
+        };
+
+        run(
+            "scalar",
+            |a, b, n| super::dot_bf16_f32_scalar(a, b, n),
+            &mut a,
+            &mut bytes,
+            n,
+            &mut sink,
+        );
+        #[cfg(target_arch = "x86_64")]
+        run(
+            "avx2",
+            |a, b, n| unsafe { super::dot_bf16_f32_avx2(a, b, n) },
+            &mut a,
+            &mut bytes,
+            n,
+            &mut sink,
+        );
+        run(
+            "dispatch",
+            super::dot_bf16_f32,
+            &mut a,
+            &mut bytes,
+            n,
+            &mut sink,
+        );
+        eprintln!("sink={sink}");
+    }
+
     #[test]
     fn f64_reductions_cover_vector_and_tail_lengths() {
         let values = [
@@ -1438,6 +1871,163 @@ mod tests {
         for (i, (a, s)) in simd.iter().zip(scalar.iter()).enumerate() {
             let denom = s.abs().max(1.0);
             assert!((a - s).abs() / denom < 1e-5, "row {i}: simd={a} scalar={s}");
+        }
+    }
+
+    fn bf16_bytes_from_f32(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|&value| crate::ops::f32_to_bf16(value).to_le_bytes())
+            .collect()
+    }
+
+    fn dot_bf16_f32_reference(weight_bytes: &[u8], input: &[f32], n: usize) -> f32 {
+        let mut sum = 0.0f32;
+        for i in 0..n {
+            let bits = u16::from_le_bytes(
+                weight_bytes[i * 2..i * 2 + 2]
+                    .try_into()
+                    .expect("weight slice has uneven bytes"),
+            );
+            sum += crate::ops::bf16_to_f32(bits) * input[i];
+        }
+        sum
+    }
+
+    #[test]
+    fn dot_bf16_f32_is_bitwise_stable_against_ascending_reference() {
+        // The NEON kernel widens 16 BF16 weights per iteration for speed, but it
+        // must keep folding them into one accumulator in ascending order.
+        // Reassociating the sum is numerically fine in isolation, yet an
+        // autoregressive sampler reads a perturbed logit as a different argmax
+        // at the top-k boundary and then emits a different token, so the
+        // divergence compounds into a different sample. Pin the invariant here
+        // rather than trusting the tolerance-based tests above.
+        //
+        // The reference mirrors the kernel's ascending fold, including FMA
+        // contraction, so this compares accumulation *order* rather than
+        // asserting parity with the plain `sum +=` scalar loop (that one rounds
+        // twice per product and has never been bit-equal to the SIMD path).
+        for n in [4usize, 16, 64, 2048, 6144] {
+            let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+            let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+            let weight_bytes = bf16_bytes_from_f32(&weights);
+            let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+            let mut ascending = [0.0f32; 4];
+            let mut chunk_index = 0usize;
+            while chunk_index * 4 < n {
+                let base = chunk_index * 4;
+                for offset in 0..4 {
+                    let index = base + offset;
+                    if index < n {
+                        let bits = u16::from_le_bytes(
+                            weight_bytes[index * 2..index * 2 + 2]
+                                .try_into()
+                                .expect("weight slice has uneven bytes"),
+                        );
+                        ascending[offset] =
+                            crate::ops::bf16_to_f32(bits).mul_add(input[index], ascending[offset]);
+                    }
+                }
+                chunk_index += 1;
+            }
+            // `vaddvq_f32` reduces the four lanes pairwise: (l0+l1)+(l2+l3).
+            let expected = (ascending[0] + ascending[1]) + (ascending[2] + ascending[3]);
+            assert_eq!(
+                simd.to_bits(),
+                expected.to_bits(),
+                "n={n}: NEON dot drifted from the ascending reference \
+                 (simd={simd}, ascending={expected}); keep the accumulation \
+                 order and stop reassociating the accumulators",
+            );
+        }
+    }
+
+    #[test]
+    fn dot_bf16_f32_matches_scalar_for_aligned_length() {
+        let n = 256usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        let denom = scalar.abs().max(1.0);
+        assert!((simd - scalar).abs() / denom < 1e-5);
+    }
+
+    #[cfg(feature = "parity-trace")]
+    #[test]
+    fn dot_bf16_f32_respects_scalar_mode() {
+        if !crate::ops::scalar_mode() {
+            return;
+        }
+        let n = 256usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.013).sin() * 2.0).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.027).cos() - 1.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let actual = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let expected = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn dot_bf16_f32_matches_scalar_for_non_aligned_length() {
+        // n = 3420 mirrors Qwen2.5-Omni's FFN_down width (n_in = n_ff = 3420)
+        // which the packed BF16×F32 AVX2 kernel refuses because 3420 % 8 != 0.
+        // Exercises the per-row dot path used by the BF16 kernel fallback.
+        let n = 3420usize;
+        let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.011).sin() * 1.5).collect();
+        let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.019).cos() + 0.5).collect();
+        let weight_bytes = bf16_bytes_from_f32(&weights);
+        let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+        let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
+        let denom = scalar.abs().max(1.0);
+        assert!(
+            (simd - scalar).abs() / denom < 1e-5,
+            "non-aligned dot diverged: simd={simd} scalar={scalar}"
+        );
+    }
+
+    #[test]
+    fn dot_bf16_f32_four_rows_preserves_individual_dot_bits() {
+        for width in [0, 1, 3, 4, 7, 15, 16, 17, 259, 2048, 6144] {
+            let input: Vec<f32> = (0..width * 4 + 1)
+                .map(|index| ((index * 29 % 73) as f32 - 36.0) * 0.017)
+                .collect();
+            let weights: Vec<f32> = (0..width)
+                .map(|index| ((index * 17 % 101) as f32 - 50.0) * 0.013)
+                .collect();
+            let mut bytes = vec![0];
+            bytes.extend(bf16_bytes_from_f32(&weights));
+            let input = &input[1..];
+            let actual = super::dot_bf16_f32_4(input, &bytes[1..], width);
+            for row in 0..4 {
+                let expected =
+                    super::dot_bf16_f32(&input[row * width..(row + 1) * width], &bytes[1..], width);
+                assert_eq!(
+                    actual[row].to_bits(),
+                    expected.to_bits(),
+                    "width={width} row={row}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dot_bf16_f32_handles_short_tail() {
+        // Smaller than the AVX2/NEON minimum (8/4 lanes) so we always go
+        // through the scalar tail inside the kernel.
+        for n in [1usize, 3, 7, 9, 13] {
+            let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.3).sin()).collect();
+            let weights: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos()).collect();
+            let weight_bytes = bf16_bytes_from_f32(&weights);
+            let simd = super::dot_bf16_f32(&input, &weight_bytes, n);
+            let scalar = dot_bf16_f32_reference(&weight_bytes, &input, n);
+            let denom = scalar.abs().max(1.0);
+            assert!(
+                (simd - scalar).abs() / denom < 1e-5,
+                "n={n}: simd={simd} scalar={scalar}"
+            );
         }
     }
 }

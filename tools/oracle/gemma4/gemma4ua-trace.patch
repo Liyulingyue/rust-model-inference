@@ -1,0 +1,122 @@
+diff --git a/common/debug.cpp b/common/debug.cpp
+index 102c6924d..2a1c20bce 100644
+--- a/common/debug.cpp
++++ b/common/debug.cpp
+@@ -4,6 +4,11 @@
+ #include "log.h"
+ 
+ #include <cmath>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <fstream>
++#include <map>
+ #include <regex>
+ #include <string>
+ #include <vector>
+@@ -74,6 +79,70 @@ static float common_ggml_get_float_value(const uint8_t * data,
+     return v;
+ }
+ 
++static std::string parity_json_escape(const std::string & value) {
++    std::string escaped;
++    for (char ch : value) {
++        if (ch == '\\' || ch == '"') escaped.push_back('\\');
++        escaped.push_back(ch);
++    }
++    return escaped;
++}
++
++static void parity_dump_tensor(const ggml_tensor * t, const uint8_t * data) {
++    const char * manifest_path = std::getenv("RMI_PARITY_TRACE");
++    if (manifest_path == nullptr || manifest_path[0] == '\0' || ggml_is_quantized(t->type)) return;
++
++    static std::string initialized_path;
++    static std::map<std::string, size_t> occurrences;
++    if (initialized_path != manifest_path) {
++        std::ofstream(manifest_path, std::ios::trunc);
++        initialized_path = manifest_path;
++        occurrences.clear();
++    }
++
++    const std::string source_name = t->name;
++    std::string name;
++    if (source_name == "normalized") {
++        name = "gemma4.audio.normalized";
++    } else if (source_name == "projected") {
++        name = "gemma4.audio.projected";
++    } else {
++        return;
++    }
++
++    const size_t occurrence = occurrences[name]++;
++    const std::string binary_path = std::string(manifest_path) + "." + source_name + "." + std::to_string(occurrence) + ".f32";
++    std::ofstream binary(binary_path, std::ios::binary | std::ios::trunc);
++    for (int64_t i3 = 0; i3 < t->ne[3]; ++i3) {
++        for (int64_t i2 = 0; i2 < t->ne[2]; ++i2) {
++            for (int64_t i1 = 0; i1 < t->ne[1]; ++i1) {
++                for (int64_t i0 = 0; i0 < t->ne[0]; ++i0) {
++                    const float value = common_ggml_get_float_value(data, t->type, t->nb, i0, i1, i2, i3);
++                    uint32_t bits;
++                    std::memcpy(&bits, &value, sizeof(bits));
++                    const char bytes[] = {char(bits), char(bits >> 8), char(bits >> 16), char(bits >> 24)};
++                    binary.write(bytes, sizeof(bytes));
++                }
++            }
++        }
++    }
++    binary.close();
++    if (!binary) throw std::runtime_error("failed to write " + binary_path);
++
++    std::ofstream manifest(manifest_path, std::ios::app);
++    manifest << "{\"name\":\"" << name << "\",\"layer\":null,\"step\":null,\"shape\":[";
++    for (int axis = 0; axis < GGML_MAX_DIMS; ++axis) {
++        if (axis) manifest << ',';
++        manifest << t->ne[axis];
++    }
++    manifest << "],\"len\":" << ggml_nelements(t)
++             << ",\"occurrence\":" << occurrence
++             << ",\"binary_path\":\"" << parity_json_escape(binary_path) << "\"}\n";
++    manifest.close();
++    if (!manifest) throw std::runtime_error("failed to write parity trace manifest");
++    if (source_name == "projected") std::exit(0);
++}
++
+ #define INDENT "    "
+ 
+ static void common_debug_print_tensor(uint8_t * data, ggml_type type, const int64_t * ne, const size_t * nb, int64_t n, bool abort_on_nan) {
+@@ -183,6 +252,7 @@ bool common_debug_cb_eval(struct ggml_tensor * t, bool ask, void * user_data) {
+ 
+     if (!ggml_is_quantized(t->type) && matches_filter) {
+         uint8_t * data = is_host ? (uint8_t *) t->data : pimpl->data.data();
++        parity_dump_tensor(t, data);
+         common_debug_print_tensor(data, t->type, t->ne, t->nb, 3, pimpl->abort_on_nan);
+     }
+ 
+diff --git a/tools/mtmd/mtmd-cli.cpp b/tools/mtmd/mtmd-cli.cpp
+index 97678c6b2..3cf81e4ba 100644
+--- a/tools/mtmd/mtmd-cli.cpp
++++ b/tools/mtmd/mtmd-cli.cpp
+@@ -106,7 +106,9 @@ struct mtmd_cli_context {
+ 
+     common_debug_cb_user_data cb_data;
+ 
+-    mtmd_cli_context(common_params & params) : llama_init(common_init_from_params(params)) {
++    mtmd_cli_context(common_params & params) :
++        llama_init(common_init_from_params(params)),
++        cb_data(params, {"normalized", "projected"}) {
+         model = llama_init->model();
+         lctx = llama_init->context();
+         vocab = llama_model_get_vocab(model);
+diff --git a/tools/mtmd/models/gemma4ua.cpp b/tools/mtmd/models/gemma4ua.cpp
+index e24bef2ed..dbbbcefa9 100644
+--- a/tools/mtmd/models/gemma4ua.cpp
++++ b/tools/mtmd/models/gemma4ua.cpp
+@@ -10,6 +10,7 @@ ggml_cgraph * clip_graph_gemma4ua::build() {
+     {
+         // embedding_pre_projection_norm
+         cur = ggml_rms_norm(ctx0, cur, hparams.eps);
++        cb(cur, "normalized", -1);
+         cur = build_mm(model.mm_input_proj_w, cur);
+         cb(cur, "projected", -1);
+     }

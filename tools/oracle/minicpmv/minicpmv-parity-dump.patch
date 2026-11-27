@@ -1,0 +1,91 @@
+--- a/tools/mtmd/mtmd.cpp	2026-10-14 15:20:59.200801152 +0800
++++ b/tools/mtmd/mtmd.cpp	2026-10-14 15:20:59.198737920 +0800
+@@ -1928,16 +1928,43 @@
+     if (image_tokens->pos == MTMD_POS_TYPE_CANVAS) {
+         // the tiles differ in size, encode them one by one
+         size_t offset = 0;
++        size_t tiles_pixels_offset = 0;
+         for (const auto & entry : image_tokens->batch_f32.entries) {
+             clip_image_f32_batch one;
+             one.entries.push_back(entry);
++            // RMI_PARITY: dump the tile pixels that feed the vision tower.
++            if (const char * dir = getenv("RMI_MTMD_DUMP_DIR")) {
++                char path[4096];
++                snprintf(path, sizeof(path), "%s/pixels_%zu.bin", dir, tiles_pixels_offset);
++                FILE * f = fopen(path, "wb");
++                if (f) {
++                    const auto & buf = entry.get_ro_buf();
++                    fwrite(buf.data(), sizeof(float), buf.size(), f);
++                    fclose(f);
++                }
++            }
+             std::vector<float> embd((size_t) n_embd_out * clip_n_output_tokens(ctx_clip, &entry));
+             if (!clip_image_batch_encode(ctx_clip, ctx->n_threads, &one, embd)) {
+                 return 1;
+             }
+             GGML_ASSERT(offset + embd.size() <= out_embd.size());
+             std::copy(embd.begin(), embd.end(), out_embd.begin() + offset);
++            // RMI_PARITY: dump this tile's projector output as raw f32 so the
++            // Rust side can be compared element-by-element.
++            {
++                const char * dir = getenv("RMI_MTMD_DUMP_DIR");
++                if (dir) {
++                    char path[4096];
++                    snprintf(path, sizeof(path), "%s/tile_%zu.bin", dir, offset / (n_embd_out ? n_embd_out : 1));
++                    FILE * f = fopen(path, "wb");
++                    if (f) {
++                        fwrite(embd.data(), sizeof(float), embd.size(), f);
++                        fclose(f);
++                    }
++                }
++            }
+             offset += embd.size();
++            tiles_pixels_offset += 1;
+         }
+         GGML_ASSERT(offset == out_embd.size());
+         return 0;
+--- a/tools/mtmd/clip.cpp	2026-10-14 15:20:59.201406848 +0800
++++ b/tools/mtmd/clip.cpp	2026-10-14 15:20:59.199000000 +0800
+@@ -1,4 +1,8 @@
+ #include "clip.h"
++#include <string>
++#include <vector>
++#include <cstdio>
++#include <cstdlib>
+ #include "clip-impl.h"
+ #include "clip-model.h"
+ #include "clip-graph.h"
+@@ -223,6 +227,33 @@
+ 
+         if (ctx_params.cb_eval != nullptr) {
+             ggml_backend_sched_set_eval_callback(sched.get(), ctx_params.cb_eval, ctx_params.cb_eval_user_data);
++        } else if (const char * dump_dir = getenv("RMI_MTMD_CB_DIR")) {
++            // RMI_PARITY: dump every labelled checkpoint so the Rust side can be
++            // compared stage by stage.
++            static std::string s_dir = dump_dir;
++            static bool s_saved = false;
++            if (!s_saved) {
++                ggml_backend_sched_set_eval_callback(sched.get(),
++                    [](ggml_tensor * t, bool ask, void * ud) {
++                        if (ask) { return true; }
++                        if (!t || !t->name) { return false; }
++                        std::string name = t->name;
++                        if (name.rfind("pos_embed", 0) != 0 && name.rfind("layer_out", 0) != 0
++                            && name.rfind("vit_merger_", 0) != 0 && name.rfind("post_ln", 0) != 0
++                            && name.rfind("merger_", 0) != 0 && name.rfind("ffn_out", 0) != 0) {
++                            return false;
++                        }
++                        std::string path = std::string((const char *) ud) + "/" + name + "_" + std::to_string((uintptr_t) t) + ".f32";
++                        FILE * f = fopen(path.c_str(), "wb");
++                        if (!f) { return false; }
++                        std::vector<float> host(ggml_nelements(t));
++                        ggml_backend_tensor_get(t, host.data(), 0, ggml_nbytes(t));
++                        fwrite(host.data(), sizeof(float), host.size(), f);
++                        fclose(f);
++                        return true;
++                    }, (void *) s_dir.c_str());
++                s_saved = true;
++            }
+         }
+ 
+         debug_output_embeddings = std::getenv("MTMD_DEBUG_EMBEDDINGS") != nullptr;

@@ -1,0 +1,152 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "f16_rounding.glsl"
+
+// Scores for the Z-Image DiT, tiled over queries.
+//
+// Eight warps cooperate on eight queries of one head against a staged run of
+// keys. The kernel this replaces gave every lane an independent (head, token)
+// pair and had it walk all `head_dim` dimensions in a serial `precise` loop:
+// sixty-four threads produced sixty-four scalars, none cooperating, and the
+// correction-summation dependency chain stopped the loop from overlapping. Head
+// dim is 128, so half the lanes idled on top of that.
+//
+// A version that gave one workgroup a single query and reduced through shared
+// memory fixed the idling but left the workgroup barrier as the clock: two
+// multiplies per lane hid behind six barriers, 270 GOP/s against the 4035 GOP/s
+// the Q8 matmul kernel sustains. Here each warp keeps its query in registers
+// across a whole run of keys, so a key staged in shared memory feeds eight
+// queries, and the cross-lane reduction is paid once per run of keys instead of
+// once per key.
+//
+// The reduction is two passes, both in place. Each of a key's 32 lane partials
+// is folded pairwise to 16, which fits in the space the 32 occupied, and then
+// one thread finishes that key. A single pass would have to keep all 32 lanes
+// live across a barrier per key, which is the cost this kernel exists to remove.
+//
+// Scores land at [row][head][token], the layout `softmax` and `attention_values`
+// already read. DiT has no causal mask: a query sees every token in its block.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint q_word;
+    uint cache_k_word;
+    uint scores_word;
+    uint sequence_length;
+    uint q_heads;
+    uint head_dim;
+    float scale;
+    uint base_position;
+    uint rows;
+    /// Row stride of the q source: `q_heads * head_dim` when q is in its own
+    /// region, wider when q is the head of an interleaved QKV projection.
+    uint q_stride;
+} pc;
+
+/// Queries per workgroup, one per warp. Must match QUERY_TILE in ops.rs.
+const uint QUERY_TILE = 8u;
+const uint WARPS = 8u;
+/// Keys staged per iteration. Tuned so the two shared arrays stay in one 16 KB
+/// block and every bank of a warp's read is a distinct word.
+const uint KEY_STAGE = 8u;
+/// Head dim 128 split over 32 lanes.
+const uint DIMS_PER_LANE = 4u;
+const uint LANES = 32u;
+/// Lane partials per key, before the pairwise fold.
+const uint PARTIALS = 32u;
+
+shared float k_stage[KEY_STAGE][128];
+// One plane per warp: `lane` repeats across warps, so a single plane would have
+// every query overwrite the last one's partial sums.
+shared float acc[WARPS][KEY_STAGE][PARTIALS];
+
+void main() {
+    // One workgroup per (head, query tile): the query tile rides in z, as the
+    // other row-based kernels do, and head is the flattened x/y group.
+    uint query_base = gl_WorkGroupID.z * QUERY_TILE;
+    uint head = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (head >= pc.q_heads || query_base >= pc.rows) return;
+    uint warp = gl_LocalInvocationID.x / LANES;
+    uint lane = gl_LocalInvocationID.x % LANES;
+    uint tid = gl_LocalInvocationID.x;
+    uint dims = pc.head_dim;
+    uint query = query_base + warp;
+    bool live = query < pc.rows;
+
+    // The cache is [position][head][dim], so a token's head block starts a whole
+    // head_dim past the previous token, not a head_dim past itself.
+    uint token_stride = pc.q_heads * dims;
+    uint head_offset = head * dims;
+    uint head_stride = pc.q_heads * pc.sequence_length;
+    uint tile_base = pc.scores_word + query_base * head_stride + head * pc.sequence_length;
+
+    // This warp's slice of its query, held in registers for the whole key run.
+    // Lane `lane` owns dimensions lane, lane+32, lane+64 and lane+96.
+    float mine[DIMS_PER_LANE];
+    for (uint d = 0u; d < DIMS_PER_LANE; d++) {
+        uint dimension = d * LANES + lane;
+        mine[d] = live && dimension < dims
+            ? round_f16_rte(uintBitsToFloat(arena.data[
+                pc.q_word + query * pc.q_stride + head * dims + dimension]))
+            : 0.0;
+    }
+
+    // Stage the keys once, then spend them on every query in the tile.
+    for (uint token_base = 0u; token_base < pc.sequence_length; token_base += KEY_STAGE) {
+        // KEY_STAGE * 128 keys over 256 threads: four per thread, and
+        // consecutive threads read consecutive words so no bank is shared.
+        for (uint i = tid; i < KEY_STAGE * 128u; i += 256u) {
+            uint token = token_base + i / 128u;
+            uint dimension = i % 128u;
+            uint value = 0u;
+            if (token < pc.sequence_length && dimension < dims) {
+                value = floatBitsToUint(round_f16_rte(uintBitsToFloat(arena.data[
+                    pc.cache_k_word + token * token_stride + head_offset + dimension])));
+            }
+            k_stage[i / 128u][i % 128u] = uintBitsToFloat(value);
+        }
+        barrier();
+        // Each warp reduces its own key, keeping the partial in its lane.
+        for (uint t = 0u; t < KEY_STAGE; t++) {
+            if (token_base + t >= pc.sequence_length) break;
+            float sum = 0.0;
+            for (uint d = 0u; d < DIMS_PER_LANE; d++) {
+                sum += mine[d] * k_stage[t][d * LANES + lane];
+            }
+            acc[warp][t][lane] = sum;
+        }
+        barrier();
+        // Pass one: fold each key's 32 partials to 16, in registers, so that the
+        // barrier which follows retires every read before any thread writes.
+        float folded[4];
+        for (uint k = 0u; k < 4u; k++) {
+            uint i = tid + k * 256u;
+            uint f = i % 16u;
+            folded[k] = acc[i / (KEY_STAGE * 16u)][(i % (KEY_STAGE * 16u)) / 16u][f * 2u]
+                + acc[i / (KEY_STAGE * 16u)][(i % (KEY_STAGE * 16u)) / 16u][f * 2u + 1u];
+        }
+        barrier();
+        for (uint k = 0u; k < 4u; k++) {
+            uint i = tid + k * 256u;
+            acc[i / (KEY_STAGE * 16u)][(i % (KEY_STAGE * 16u)) / 16u][i % 16u] = folded[k];
+        }
+        barrier();
+        // Pass two: one thread per (query, key) finishes the sum and stores.
+        for (uint i = tid; i < WARPS * KEY_STAGE; i += 256u) {
+            uint w = i / KEY_STAGE;
+            uint t = i % KEY_STAGE;
+            float total = 0.0;
+            for (uint f = 0u; f < 16u; f++) {
+                total += acc[w][t][f];
+            }
+            if (token_base + t < pc.sequence_length && query_base + w < pc.rows) {
+                arena.data[tile_base + w * head_stride + token_base + t] =
+                    floatBitsToUint(total * pc.scale);
+            }
+        }
+        // Before the next run overwrites the staging arrays.
+        barrier();
+    }
+}

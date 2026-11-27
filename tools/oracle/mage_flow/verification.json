@@ -1,0 +1,950 @@
+{
+  "oracle": {
+    "repository": "https://github.com/microsoft/Mage",
+    "commit": "76bec2bb3818863f470de7e867c2dc7f1d0bfd83",
+    "graph": "official .float() CPU graph with independent C scalar arithmetic; unknown floating operators fail closed",
+    "comparison": "ordered checkpoint name, shape, occurrence and every F32 raw u32 bit; no tolerance"
+  },
+  "source_baseline": "60c52092554e62c9fb72d9504f264b2cafd06dbe",
+  "exporter": "llama.cpp 11fe02151f79c41d0d4af7da708755d73b9c0da6 for text BF16/vision F32",
+  "precision": {
+    "weight": "original BF16 payloads; norm/vision BF16-to-F32 exact widening",
+    "activations": "F32",
+    "kv": "F32",
+    "rust_flags": [
+      "-C no-vectorize-loops",
+      "-C no-vectorize-slp"
+    ],
+    "features": [
+      "parity-trace"
+    ],
+    "environment": {
+      "RMI_SCALAR": "1"
+    },
+    "excluded": [
+      "SIMD/FMA",
+      "BLAS/Accelerate/cuBLAS/rocBLAS",
+      "GPU",
+      "quantized weights",
+      "official BF16 GPU numerical output"
+    ]
+  },
+  "modelscope_sources": {
+    "Mage-Flow-Base": {
+      "text_encoder/chat_template.json": {
+        "size": 5502,
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+      },
+      "text_encoder/config.json": {
+        "size": 1505,
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"
+      },
+      "transformer/config.json": {
+        "size": 709,
+        "sha256": "8493c3b2722738c2a824ac82b1fd9c89fefb4e354fc88363207193db7fe702de"
+      },
+      "vae/config.json": {
+        "size": 112,
+        "sha256": "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+      },
+      "transformer/diffusion_pytorch_model.safetensors": {
+        "size": 8231536784,
+        "sha256": "689b8aa28b5736cd47e038115cc49a02d18cfa3715ebe5b66555d89a1bfd9524"
+      },
+      "vae/diffusion_pytorch_model.safetensors": {
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+      },
+      "text_encoder/generation_config.json": {
+        "size": 269,
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+      },
+      "text_encoder/merges.txt": {
+        "size": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      "text_encoder/model-00001-of-00002.safetensors": {
+        "size": 4967229296,
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9"
+      },
+      "text_encoder/model-00002-of-00002.safetensors": {
+        "size": 3908490048,
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6"
+      },
+      "text_encoder/model.safetensors.index.json": {
+        "size": 64742,
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b"
+      },
+      "text_encoder/preprocessor_config.json": {
+        "size": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      "text_encoder/README.md": {
+        "size": 7133,
+        "sha256": "a884e5e78f7d6f7bfe237f909dbc41a126542e259dc79d8ab33cc8980580ff79"
+      },
+      "scheduler/scheduler_config.json": {
+        "size": 169,
+        "sha256": "438fd8bcf254740e5d3f3e9800bbd9c571e342ab87885388d1505b7531c69c02"
+      },
+      "text_encoder/tokenizer.json": {
+        "size": 7032403,
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+      },
+      "text_encoder/tokenizer_config.json": {
+        "size": 10868,
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"
+      },
+      "text_encoder/video_preprocessor_config.json": {
+        "size": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      "text_encoder/vocab.json": {
+        "size": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    },
+    "Mage-Flow": {
+      "text_encoder/chat_template.json": {
+        "size": 5502,
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+      },
+      "text_encoder/config.json": {
+        "size": 1505,
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"
+      },
+      "transformer/config.json": {
+        "size": 709,
+        "sha256": "8493c3b2722738c2a824ac82b1fd9c89fefb4e354fc88363207193db7fe702de"
+      },
+      "vae/config.json": {
+        "size": 112,
+        "sha256": "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+      },
+      "transformer/diffusion_pytorch_model.safetensors": {
+        "size": 8231536784,
+        "sha256": "04431abbc3acd1a5b86a7f77269f8e77e05a6cac3b21f35e1aef7493f6ab4934"
+      },
+      "vae/diffusion_pytorch_model.safetensors": {
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+      },
+      "text_encoder/generation_config.json": {
+        "size": 269,
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+      },
+      "text_encoder/merges.txt": {
+        "size": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      "text_encoder/model-00001-of-00002.safetensors": {
+        "size": 4967229296,
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9"
+      },
+      "text_encoder/model-00002-of-00002.safetensors": {
+        "size": 3908490048,
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6"
+      },
+      "text_encoder/model.safetensors.index.json": {
+        "size": 64742,
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b"
+      },
+      "text_encoder/preprocessor_config.json": {
+        "size": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      "text_encoder/README.md": {
+        "size": 7133,
+        "sha256": "a884e5e78f7d6f7bfe237f909dbc41a126542e259dc79d8ab33cc8980580ff79"
+      },
+      "scheduler/scheduler_config.json": {
+        "size": 169,
+        "sha256": "438fd8bcf254740e5d3f3e9800bbd9c571e342ab87885388d1505b7531c69c02"
+      },
+      "text_encoder/tokenizer.json": {
+        "size": 7032403,
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+      },
+      "text_encoder/tokenizer_config.json": {
+        "size": 10868,
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"
+      },
+      "text_encoder/video_preprocessor_config.json": {
+        "size": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      "text_encoder/vocab.json": {
+        "size": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    },
+    "Mage-Flow-Turbo": {
+      "text_encoder/chat_template.json": {
+        "size": 5502,
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+      },
+      "text_encoder/config.json": {
+        "size": 1505,
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"
+      },
+      "transformer/config.json": {
+        "size": 709,
+        "sha256": "8493c3b2722738c2a824ac82b1fd9c89fefb4e354fc88363207193db7fe702de"
+      },
+      "vae/config.json": {
+        "size": 112,
+        "sha256": "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+      },
+      "transformer/diffusion_pytorch_model.safetensors": {
+        "size": 8231536760,
+        "sha256": "6df47df3d7efc9ebdad075b87b3e9e4f74d09dca672d592271788f0ee27ab97d"
+      },
+      "vae/diffusion_pytorch_model.safetensors": {
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+      },
+      "text_encoder/generation_config.json": {
+        "size": 269,
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+      },
+      "text_encoder/merges.txt": {
+        "size": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      "text_encoder/model-00001-of-00002.safetensors": {
+        "size": 4967229296,
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9"
+      },
+      "text_encoder/model-00002-of-00002.safetensors": {
+        "size": 3908490048,
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6"
+      },
+      "text_encoder/model.safetensors.index.json": {
+        "size": 64742,
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b"
+      },
+      "text_encoder/preprocessor_config.json": {
+        "size": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      "text_encoder/README.md": {
+        "size": 7133,
+        "sha256": "a884e5e78f7d6f7bfe237f909dbc41a126542e259dc79d8ab33cc8980580ff79"
+      },
+      "scheduler/scheduler_config.json": {
+        "size": 169,
+        "sha256": "438fd8bcf254740e5d3f3e9800bbd9c571e342ab87885388d1505b7531c69c02"
+      },
+      "text_encoder/tokenizer.json": {
+        "size": 7032403,
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+      },
+      "text_encoder/tokenizer_config.json": {
+        "size": 10868,
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"
+      },
+      "text_encoder/video_preprocessor_config.json": {
+        "size": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      "text_encoder/vocab.json": {
+        "size": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    },
+    "Mage-Flow-Edit-Base": {
+      "text_encoder/chat_template.json": {
+        "size": 5502,
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+      },
+      "text_encoder/config.json": {
+        "size": 1505,
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"
+      },
+      "transformer/config.json": {
+        "size": 709,
+        "sha256": "8493c3b2722738c2a824ac82b1fd9c89fefb4e354fc88363207193db7fe702de"
+      },
+      "vae/config.json": {
+        "size": 112,
+        "sha256": "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+      },
+      "transformer/diffusion_pytorch_model.safetensors": {
+        "size": 8231536784,
+        "sha256": "9d93faa75963ba4a2ef1b64bed4fe94c2554b82e8f3fb2dbb267604a634d450d"
+      },
+      "vae/diffusion_pytorch_model.safetensors": {
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+      },
+      "text_encoder/generation_config.json": {
+        "size": 269,
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+      },
+      "text_encoder/merges.txt": {
+        "size": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      "text_encoder/model-00001-of-00002.safetensors": {
+        "size": 4967229296,
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9"
+      },
+      "text_encoder/model-00002-of-00002.safetensors": {
+        "size": 3908490048,
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6"
+      },
+      "text_encoder/model.safetensors.index.json": {
+        "size": 64742,
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b"
+      },
+      "text_encoder/preprocessor_config.json": {
+        "size": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      "text_encoder/README.md": {
+        "size": 7133,
+        "sha256": "a884e5e78f7d6f7bfe237f909dbc41a126542e259dc79d8ab33cc8980580ff79"
+      },
+      "scheduler/scheduler_config.json": {
+        "size": 169,
+        "sha256": "438fd8bcf254740e5d3f3e9800bbd9c571e342ab87885388d1505b7531c69c02"
+      },
+      "text_encoder/tokenizer.json": {
+        "size": 7032403,
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+      },
+      "text_encoder/tokenizer_config.json": {
+        "size": 10868,
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"
+      },
+      "text_encoder/video_preprocessor_config.json": {
+        "size": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      "text_encoder/vocab.json": {
+        "size": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    },
+    "Mage-Flow-Edit": {
+      "text_encoder/chat_template.json": {
+        "size": 5502,
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+      },
+      "text_encoder/config.json": {
+        "size": 1505,
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"
+      },
+      "transformer/config.json": {
+        "size": 709,
+        "sha256": "8493c3b2722738c2a824ac82b1fd9c89fefb4e354fc88363207193db7fe702de"
+      },
+      "vae/config.json": {
+        "size": 112,
+        "sha256": "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+      },
+      "transformer/diffusion_pytorch_model.safetensors": {
+        "size": 8231536784,
+        "sha256": "09cee4afa95239d850af02c9b1c006bffc71dca4a984a2a1f56edff9282d53d3"
+      },
+      "vae/diffusion_pytorch_model.safetensors": {
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+      },
+      "text_encoder/generation_config.json": {
+        "size": 269,
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+      },
+      "text_encoder/merges.txt": {
+        "size": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      "text_encoder/model-00001-of-00002.safetensors": {
+        "size": 4967229296,
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9"
+      },
+      "text_encoder/model-00002-of-00002.safetensors": {
+        "size": 3908490048,
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6"
+      },
+      "text_encoder/model.safetensors.index.json": {
+        "size": 64742,
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b"
+      },
+      "text_encoder/preprocessor_config.json": {
+        "size": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      "text_encoder/README.md": {
+        "size": 7133,
+        "sha256": "a884e5e78f7d6f7bfe237f909dbc41a126542e259dc79d8ab33cc8980580ff79"
+      },
+      "scheduler/scheduler_config.json": {
+        "size": 169,
+        "sha256": "438fd8bcf254740e5d3f3e9800bbd9c571e342ab87885388d1505b7531c69c02"
+      },
+      "text_encoder/tokenizer.json": {
+        "size": 7032403,
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+      },
+      "text_encoder/tokenizer_config.json": {
+        "size": 10868,
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"
+      },
+      "text_encoder/video_preprocessor_config.json": {
+        "size": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      "text_encoder/vocab.json": {
+        "size": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    },
+    "Mage-Flow-Edit-Turbo": {
+      "text_encoder/chat_template.json": {
+        "size": 5502,
+        "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"
+      },
+      "text_encoder/config.json": {
+        "size": 1505,
+        "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"
+      },
+      "transformer/config.json": {
+        "size": 709,
+        "sha256": "8493c3b2722738c2a824ac82b1fd9c89fefb4e354fc88363207193db7fe702de"
+      },
+      "vae/config.json": {
+        "size": 112,
+        "sha256": "abd124d603d6c6a03e9d0f2aa6d113b8c4afda0738400bdf2f99240aeaeaff76"
+      },
+      "transformer/diffusion_pytorch_model.safetensors": {
+        "size": 8231536760,
+        "sha256": "29c3726ecd64afe149eef28af3e27b6b40de52646bfd16757a37da4b6fbcf288"
+      },
+      "vae/diffusion_pytorch_model.safetensors": {
+        "size": 345053056,
+        "sha256": "34e076dc1e8a15321e1e07be5111d59cf16dd10b804b7c7e20b4de29013427e0"
+      },
+      "text_encoder/generation_config.json": {
+        "size": 269,
+        "sha256": "8469742d1fce0de951c8909b26a2c0c0d8490837ce476efb114da9e0cefc4d44"
+      },
+      "text_encoder/merges.txt": {
+        "size": 1671839,
+        "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+      },
+      "text_encoder/model-00001-of-00002.safetensors": {
+        "size": 4967229296,
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9"
+      },
+      "text_encoder/model-00002-of-00002.safetensors": {
+        "size": 3908490048,
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6"
+      },
+      "text_encoder/model.safetensors.index.json": {
+        "size": 64742,
+        "sha256": "58a7841d7bff2548dd91577d216274a83cf1b500bc6a534b809d6c1b1707cf2b"
+      },
+      "text_encoder/preprocessor_config.json": {
+        "size": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+      },
+      "text_encoder/README.md": {
+        "size": 7133,
+        "sha256": "a884e5e78f7d6f7bfe237f909dbc41a126542e259dc79d8ab33cc8980580ff79"
+      },
+      "scheduler/scheduler_config.json": {
+        "size": 169,
+        "sha256": "438fd8bcf254740e5d3f3e9800bbd9c571e342ab87885388d1505b7531c69c02"
+      },
+      "text_encoder/tokenizer.json": {
+        "size": 7032403,
+        "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"
+      },
+      "text_encoder/tokenizer_config.json": {
+        "size": 10868,
+        "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"
+      },
+      "text_encoder/video_preprocessor_config.json": {
+        "size": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+      },
+      "text_encoder/vocab.json": {
+        "size": 2776833,
+        "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+      }
+    }
+  },
+  "gguf": {
+    "mage-flow-base-dit-BF16.gguf": {
+      "size": 8231521856,
+      "sha256": "87ec7563532592c5e416521711ee18b86d4a4208c1a4b41be214b9bbb52e0b57"
+    },
+    "mage-flow-turbo-dit-BF16.gguf": {
+      "size": 8231521856,
+      "sha256": "276c2ce6e9d6e18de4cea75cfd4c0b79f37a21630e79fc83692b527dd7fd80a6"
+    },
+    "mage-vae-BF16.gguf": {
+      "size": 276163264,
+      "sha256": "7ac739aaca3ef4df3460401d9047b06944ed2c3e225a6309ce016c3cd83dd37d"
+    },
+    "qwen3vl-text-BF16.gguf": {
+      "size": 8051286272,
+      "sha256": "db9741be031c2b6157c1a3106c2a44b4744ebb2c20a53796362ed75f515ec1e3"
+    },
+    "vision-F32.gguf": {
+      "size": 1661409600,
+      "sha256": "de7d23235fce9033edeeed85beff11a63f1004ae4684befa85aaef93b8aeea04"
+    },
+    "mage-flow-flow-dit-BF16.gguf": {
+      "size": 8231521856,
+      "sha256": "fba9b5924ba13512ac7e02015cd2aa25bf6112eed20dca7d983a893a9d37b11f"
+    },
+    "mage-flow-edit-turbo-dit-BF16.gguf": {
+      "size": 8231521888,
+      "sha256": "69d4fc113654bb57dfe3b685cd571126bc73e99c738a2a4170a27b3af01bf9af"
+    },
+    "mage-flow-edit-base-dit-BF16.gguf": {
+      "size": 8231521888,
+      "sha256": "05fd6b1055cd87c0003a0e76d976d8c5e6d8960b43ea5083dd16e16849d1edd8"
+    },
+    "mage-flow-edit-dit-BF16.gguf": {
+      "size": 8231521856,
+      "sha256": "812e2f31f35a7cf2aefcc6cce247e70a0e2dd36c566e1412e865c52fa0484052"
+    }
+  },
+  "local": {
+    "platform": "macOS arm64, Apple M3 Max, 64 GiB RAM",
+    "workers": 8,
+    "checks": {
+      "turbo-dit": {
+        "checkpoints": 357,
+        "f32_values": 2647424,
+        "fixture": "1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "base-dit": {
+        "checkpoints": 357,
+        "f32_values": 2647424,
+        "fixture": "1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "flow-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-turbo-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-base-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "vae-encode": {
+        "checkpoints": 190,
+        "f32_values": 147456,
+        "fixture": "3x16x16",
+        "result": "all raw u32 bits equal"
+      },
+      "vae-decode": {
+        "checkpoints": 203,
+        "f32_values": 293632,
+        "fixture": "128x1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "rect-encode": {
+        "checkpoints": 190,
+        "f32_values": 236160,
+        "fixture": "3x16x32",
+        "result": "all raw u32 bits equal"
+      },
+      "rect-decode": {
+        "checkpoints": 203,
+        "f32_values": 530048,
+        "fixture": "128x1x2",
+        "result": "all raw u32 bits equal"
+      },
+      "vision": {
+        "checkpoints": 29,
+        "f32_values": 112640,
+        "fixture": "HWC 32x32x3",
+        "result": "all raw u32 bits equal"
+      },
+      "text": {
+        "checkpoints": 1550,
+        "f32_values": 3985963,
+        "fixture": "蓝色的猫。",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-text": {
+        "checkpoints": 3530,
+        "f32_values": 9118818,
+        "fixture": "把猫变成蓝色。, 3 cached references",
+        "result": "all raw u32 bits equal"
+      },
+      "turbo-sample": {
+        "checkpoints": 1437,
+        "f32_values": 10590725,
+        "fixture": "4 steps, CFG 1, 1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "cfg-refs-sample": {
+        "checkpoints": 1433,
+        "f32_values": 24786947,
+        "fixture": "2 steps, CFG 5, 1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "generate": {
+        "checkpoints": 3190,
+        "f32_values": 34639664,
+        "fixture": "16x16, 4 steps, CFG 1, fixed noise",
+        "result": "all raw u32 bits equal"
+      },
+      "vision-rect": {
+        "checkpoints": 29,
+        "f32_values": 675840,
+        "fixture": "HWC 64x96x3, fractional learned-position interpolation",
+        "result": "all raw u32 bits equal"
+      }
+    },
+    "edit_smoke": {
+      "edit-turbo": "16x16, 1 step, CFG 1, PNG saved without trace environment",
+      "edit-base": "16x16, 1 step, CFG 1, PNG saved without trace environment",
+      "edit": "16x16, 1 step, CFG 1, PNG saved without trace environment"
+    },
+    "oracle_environment": {
+      "python": "3.14.7",
+      "packages": {
+        "torch": "2.14.1",
+        "transformers": "4.57.6",
+        "numpy": "2.5.3",
+        "safetensors": "0.9.0rc1",
+        "Pillow": "12.3.0",
+        "diffusers": "0.38.0",
+        "einops": "0.8.2"
+      }
+    },
+    "trace_provenance": "Original adaptation traces retained; current refactor numerical checks are recorded in refactor_regression on the target host"
+  },
+  "remote": {
+    "platform": "Linux x86_64, AMD EPYC 9334, 128 logical CPUs, 503 GiB RAM",
+    "directory": "/root/rust-model-inference-mage-flow",
+    "workers": 8,
+    "checks": {
+      "turbo-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "base-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "flow-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-turbo-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-base-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-dit": {
+        "checkpoints": 357,
+        "f32_values": 6549504,
+        "fixture": "1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "vae-encode": {
+        "checkpoints": 190,
+        "f32_values": 147456,
+        "fixture": "3x16x16",
+        "result": "all raw u32 bits equal"
+      },
+      "vae-decode": {
+        "checkpoints": 203,
+        "f32_values": 293632,
+        "fixture": "128x1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "rect-encode": {
+        "checkpoints": 190,
+        "f32_values": 236160,
+        "fixture": "3x16x32",
+        "result": "all raw u32 bits equal"
+      },
+      "rect-decode": {
+        "checkpoints": 203,
+        "f32_values": 530048,
+        "fixture": "128x1x2",
+        "result": "all raw u32 bits equal"
+      },
+      "vision": {
+        "checkpoints": 29,
+        "f32_values": 112640,
+        "fixture": "HWC 32x32x3",
+        "result": "all raw u32 bits equal"
+      },
+      "text": {
+        "checkpoints": 1550,
+        "f32_values": 3985963,
+        "fixture": "蓝色的猫。",
+        "result": "all raw u32 bits equal"
+      },
+      "edit-text": {
+        "checkpoints": 3530,
+        "f32_values": 9118818,
+        "fixture": "把猫变成蓝色。, 3 cached references",
+        "result": "all raw u32 bits equal"
+      },
+      "cfg-refs-sample": {
+        "checkpoints": 1433,
+        "f32_values": 24786947,
+        "fixture": "2 steps, CFG 5, 1x2,2x1,1x1,1x1",
+        "result": "all raw u32 bits equal"
+      },
+      "generate": {
+        "checkpoints": 3190,
+        "f32_values": 34639664,
+        "fixture": "16x16, 4 steps, CFG 1, fixed noise",
+        "result": "all raw u32 bits equal"
+      },
+      "vision-rect": {
+        "checkpoints": 29,
+        "f32_values": 675840,
+        "fixture": "HWC 64x96x3, fractional learned-position interpolation",
+        "result": "all raw u32 bits equal"
+      }
+    },
+    "transport": "Lossless zlib and bytewise XOR chunks verified with source SHA256. Original HF shards restored byte-for-byte from the exact GGUF payloads and original headers, with published source SHA256 checked.",
+    "generated_rgb": {
+      "bytes": 768,
+      "result": "all decoded RGB bytes equal"
+    },
+    "edit_smoke": {
+      "edit-turbo": "PASS: 16x16 PNG without RMI_PARITY_TRACE",
+      "edit-base": "PASS: 16x16 PNG without RMI_PARITY_TRACE",
+      "edit": "PASS: 16x16 PNG without RMI_PARITY_TRACE"
+    },
+    "gguf_validation": {
+      "files_checked": 9,
+      "result": "all sizes and SHA256 match the gguf section"
+    },
+    "oracle_environment": {
+      "python": "3.12.3",
+      "packages": {
+        "torch": "2.9.1+gitff65f5b",
+        "transformers": "4.57.6",
+        "numpy": "2.1.2",
+        "safetensors": "0.7.0",
+        "Pillow": "11.0.0",
+        "diffusers": "0.38.0",
+        "einops": "0.8.2"
+      }
+    },
+    "source_validation": "Previous independent-bin refactor: all 20 code files matched its source manifest and reran 16 Rust trace comparisons plus three edit RGB regressions. See refactor_regression for that snapshot; current main-CLI integration is recorded separately in cli_integration."
+  },
+  "limitations": [
+    "Fixed F32 noise replaces official GaussianShading RNG.",
+    "Reference RGB to VL fast-processor resizing/normalization is not bitwise proven; edit PNG checks are smoke only.",
+    "Default 1024x1024 and full 20/30-step pipelines are not validated; 4/20/30-step scheduler sigmas have pinned scalar golden bits.",
+    "CPU scalar results do not establish GPU or accelerated-path equivalence."
+  ],
+  "engineering_checks": {
+    "qwen3": "104 passed, 9 ignored; parity-trace,vulkan, RMI_SCALAR=1",
+    "mage_flow": "6 passed; parity-trace,vulkan, RMI_SCALAR=1; redundant config-only test removed",
+    "shared_attention": "5 passed; parity-trace,vulkan, RMI_SCALAR=1",
+    "converter": "3 unittest cases passed",
+    "build": "release-fast parity-trace binary, local and remote; scalar Rust flags",
+    "full_suite": "not run to completion; focused results do not imply full-suite success",
+    "cli_rejections": "wrong architecture, missing CFG negative conditioning, duplicate option, malformed latent shape and existing output all rejected without output writes",
+    "default_build_check": "cargo check --profile release-fast --bin mage-flow passed with scalar Rust flags",
+    "format": "cargo fmt --check and git diff --check passed",
+    "python": "converter unittest 3 cases and py_compile passed",
+    "remote_final_build": "Final synchronized source: offline locked release-fast parity-trace binary build and CLI --help passed with scalar Rust flags",
+    "additional_filter": "An initial models::qwen3 substring filter also selected unchanged Qwen3.5 tests: 175 passed, 18 ignored, 1 failure in qwen35_config_rejects_invalid_tensor_dimensions (key_length=0 error-message assertion). The exact models::qwen3:: filter passed all 104 tests.",
+    "current_cli_boundary_checks": "Wrong DiT architecture rejected on the target host before output write; existing output rejected locally and its bytes preserved"
+  },
+  "runtime_limits": {
+    "references": 3,
+    "context_tokens": 2048,
+    "pixel_max_side": 2048,
+    "vision_conditioning_max_side": 512,
+    "packed_latent_tokens": 16384
+  },
+  "refactor_regression": {
+    "baseline_commit": "0ffe79871d3c2ecdaa6da32567ae521eae24b911",
+    "verified_at_utc": "2026-10-05T14:51:50.459828+00:00",
+    "net_source_lines_removed": 90,
+    "removed_functions": [
+      "matches_signature",
+      "validate_dit (checks moved into MageFlowDit::load)",
+      "unweighted_norm",
+      "MageVae::vector",
+      "encode_reference",
+      "resize_reference",
+      "Qwen3Session::prefill wrapper",
+      "_find_transformer",
+      "_expected_names",
+      "mage_patch"
+    ],
+    "other_removals": "vector validation closure, test-only MageFlowConfig/CONFIG and config repetition test, redundant reexports",
+    "comparison": "Fresh Rust traces compared to the existing same-host pinned C Oracle traces; vision C Oracle rebuilt and rerun for 32x32 and 64x96, also compared to its baseline. Edit CLI RGB compared to the previous verified smoke outputs; this does not prove official RGB preprocessing.",
+    "rust_trace_comparisons": 16,
+    "compared_f32_values": 113824192,
+    "command_log": "/root/rust-model-inference-mage-flow/target/mage-refactor-remote/commands.log",
+    "source_sha256": {
+      "src/bin/mage-flow.rs": "e1d15591eae5d83492db5a3ebc176b9cfe084ea5b08158796de7626b3952a00e",
+      "src/lib.rs": "cf6776001d2cab1fd3095ff107d95eff779e472a9fe4f78fb2759e122ebf2f93",
+      "src/models/bert_family/compute.rs": "cfd1f2c9d0673643acce8493e61a3a2c6f6b64936ee5c2e372754bae5087ab43",
+      "src/models/diffusion/dreamx/kernels.rs": "5a4b2bb5417bf58e354a35cd248963574adce8681142bcdd43db24af67e2823c",
+      "src/models/diffusion/mage_flow/dit.rs": "7f0eccfef079f9161c00edc3e9e408374479a7300090f359752784cda94e6a12",
+      "src/models/diffusion/mage_flow/mod.rs": "aa8f5f07d12583366f369dbf230ea13e75c667e00506aee6dfcfca63dd933bf5",
+      "src/models/diffusion/mage_flow/text.rs": "d8c48bbdcb249235a17d91c01cde6b00d1097dde92e7d8a7dfd85055254d14cc",
+      "src/models/diffusion/mage_flow/vae.rs": "578a3183c576a0e90953fd4d4fbf95c6e48541d63ae115073fe528e57f1d3676",
+      "src/models/diffusion/mod.rs": "3207728a66a7509872efeef56a70a6316ebb7b8517965ed827aa905baec41fa7",
+      "src/models/gemma4/vision/mod.rs": "b430346b3fe6b0897030e9f0b92a49526f0f9416099717d00c8355b45da73ef9",
+      "src/models/qwen3/trunk/prefill.rs": "8031934ba678786dd0a11723a45a6a693a332fef2d9bbdb0dd99e6f8786d8020",
+      "src/models/qwen3/trunk/session.rs": "12907c3f976c3840a7317c2ae11197065137666dd82706f9b8c37ed0e36f865a",
+      "src/models/qwen3/trunk/tests.rs": "4023ad0028b21eceda5c33aec47f0595fe972615c90ca29f3f0d91006166c844",
+      "src/models/qwen3/vision/mod.rs": "84f3a3caf6f5ab30502306925db582c864415d1046fce30cc9c96e98f0b4d3f4",
+      "src/ops/float.rs": "8cd31320681dd8cf4d1b6d9b8f2aa17339b3b654ab836be493e4f252782eed49",
+      "src/ops/rope/mrope.rs": "250cb2dedfbae520cc129ea25ceaca184be3caa5280bc1db1d169462a0f3aebf",
+      "tools/oracle/mage_flow/scalar.c": "8dfee92154c3637ff0756d12afb7471a5647714e1f94ca48f98a6870134dfd1e",
+      "tools/oracle/mage_flow/scalar.py": "5fbe9cd6efb2c0678897c50d18bc1158e37a94a08fb6354e3f9cf68a859ee62c",
+      "tools/oracle/mage_flow/trace.py": "df5fa99fd1de4581cf3a1040dcdf6d3d4734167578be68c018c2b76ae6405770",
+      "tools/converter/mage_flow/convert_mage_flow.py": "1be0d2e9c07c33682cf57d88267b9f02c05ad6cb4269991f43b91a6c8de512be"
+    },
+    "binary_sha256": "79730454ce41bfe951ee813d6b00819375c853107edc54fbcdae887274969795",
+    "checks": {
+      "turbo": "PASS: 357 checkpoints, 6549504 F32 values, every raw u32 bit matches",
+      "base": "PASS: 357 checkpoints, 6549504 F32 values, every raw u32 bit matches",
+      "flow": "PASS: 357 checkpoints, 6549504 F32 values, every raw u32 bit matches",
+      "edit-turbo": "PASS: 357 checkpoints, 6549504 F32 values, every raw u32 bit matches",
+      "edit-base": "PASS: 357 checkpoints, 6549504 F32 values, every raw u32 bit matches",
+      "edit": "PASS: 357 checkpoints, 6549504 F32 values, every raw u32 bit matches",
+      "vae-encode": "PASS: 190 checkpoints, 147456 F32 values, every raw u32 bit matches",
+      "vae-decode": "PASS: 203 checkpoints, 293632 F32 values, every raw u32 bit matches",
+      "rect-encode": "PASS: 190 checkpoints, 236160 F32 values, every raw u32 bit matches",
+      "rect-decode": "PASS: 203 checkpoints, 530048 F32 values, every raw u32 bit matches",
+      "vision": "PASS: 29 checkpoints, 112640 F32 values, every raw u32 bit matches",
+      "vision-oracle-baseline": "PASS: 29 checkpoints, 112640 F32 values, every raw u32 bit matches",
+      "vision-rect": "PASS: 29 checkpoints, 675840 F32 values, every raw u32 bit matches",
+      "vision-rect-oracle-baseline": "PASS: 29 checkpoints, 675840 F32 values, every raw u32 bit matches",
+      "text": "PASS: 1550 checkpoints, 3985963 F32 values, every raw u32 bit matches",
+      "edit-text": "PASS: 3530 checkpoints, 9118818 F32 values, every raw u32 bit matches",
+      "cfg": "PASS: 1433 checkpoints, 24786947 F32 values, every raw u32 bit matches",
+      "generate": "PASS: 3190 checkpoints, 34639664 F32 values, every raw u32 bit matches",
+      "edit-turbo-cli": "PASS: 16x16 PNG, all 768 RGB bytes equal to the baseline; no trace",
+      "edit-base-cli": "PASS: 16x16 PNG, all 768 RGB bytes equal to the baseline; no trace",
+      "edit-cli": "PASS: 16x16 PNG, all 768 RGB bytes equal to the baseline; no trace"
+    },
+    "generated_rgb": "PASS: 768 RGB bytes identical to the verified baseline"
+  },
+  "cli_integration": {
+    "baseline_main": "b4c40a4",
+    "production_entry": "src/main.rs -> app::run_mage_flow_cli in src/app/diffusion.rs",
+    "removed_entry": "src/bin/mage-flow.rs",
+    "raw_component_entry": "examples/mage_flow_trace.rs (no generate/edit modes)",
+    "contract": "Original BF16/F32 dtype guards, F32 activations/KV, fixed F32 noise, numerical operations and no-clobber publication retained.",
+    "local_checks": {
+      "cli": [
+        "ok. 39 passed; 0 failed; 0 ignored; 0 measured; 1228 filtered out; finished in 0.00s"
+      ],
+      "diffusion_and_atomic_publication": [
+        "ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1261 filtered out; finished in 0.02s"
+      ],
+      "actual_cli_routing": [
+        "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s",
+        "ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ],
+      "mage_flow": [
+        "ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1261 filtered out; finished in 0.00s"
+      ],
+      "qwen3": [
+        "ok. 104 passed; 0 failed; 9 ignored; 0 measured; 1154 filtered out; finished in 0.12s"
+      ],
+      "shared_attention": [
+        "ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1262 filtered out; finished in 0.00s"
+      ],
+      "bitnet_scalar": [
+        "ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1263 filtered out; finished in 0.00s"
+      ],
+      "build": "release-fast, strict scalar Rust flags, parity-trace,vulkan, main CLI and mage_flow_trace example compiled; --help passed for both",
+      "cargo_targets": "no mage-flow binary; raw mage_flow_trace example registered",
+      "format": "cargo fmt --check and git diff --check passed",
+      "full_suite": "not run; focused checks do not imply full-suite success",
+      "baseline_repairs": "Made only AVX2 functions conditional on x86_64 so scalar I2_S prepacking compiles on ARM. Updated the stale Z-Image GPU rejection test to match the existing upstream GPU support.",
+      "default_build_check": "cargo check --locked --profile release-fast --bin rust-model-inference --example mage_flow_trace passed on macOS ARM with strict scalar Rust flags and no features",
+      "all_examples_build_check": "cargo check --locked --profile release-fast --features vulkan --examples passed on macOS ARM; updated the stale ops::bitnet imports in two pre-existing examples to models::bitnet"
+    },
+    "target_host_reverification": {
+      "status": "not_run",
+      "reason": "User confirmed the target machine is powered off. SSH connections to 36.150.116.206:32963 closed before key exchange; no current source was uploaded or run on the host."
+    },
+    "historical_precision": "local, remote and refactor_regression above are previous adaptation/refactor evidence, not new main-CLI numerical evidence.",
+    "source_sha256": {
+      "examples/bitlinear_bench.rs": "44e5224a3633af96a1041aeabe4613b0a16fb612b918b0357681e9fb5affa721",
+      "examples/bitlinear_decompose.rs": "0699461322cf748cb678d92c98fd6a409cfacca2ef3e9f50fd356638269d008b",
+      "examples/mage_flow_trace.rs": "053277b58fd0701f1b83cf4d467156c8c9658f99c95f316baa1c2fb00af42ff4",
+      "src/app/cli/parse.rs": "1a6af51b162b7f12b1ac992838c220b2a52d84c3def5edd32d3b885afd99089e",
+      "src/app/cli/tests.rs": "c671a4117112d8ba38c6c7cc5573c8d5344bbd7f003ae5dc7adb4c0707e9151b",
+      "src/app/cli/types.rs": "78281977e547e28e5de84cde60ee14b1d7d4cc64cb06a63f50790740742def5d",
+      "src/app/cli/validate.rs": "2a4f79fffc4ac447dc10817c430ac0383ffab6771bb8c90a283931ffeb4e92de",
+      "src/app/diffusion.rs": "eb62dbd2ad62422133b460804d71699aac11d51c24727cde6efb6f428cad494b",
+      "src/app/mod.rs": "ca4fa9a41ea73205a173daa0cd365a7e1221c24c45762a0a341a057df1e93358",
+      "src/lib.rs": "cf6776001d2cab1fd3095ff107d95eff779e472a9fe4f78fb2759e122ebf2f93",
+      "src/main.rs": "fba31225704573eb74a54fcc2a564b6c5ca6ca9473e944ccfafd87c54d7e9597",
+      "src/models/bert_family/compute.rs": "cfd1f2c9d0673643acce8493e61a3a2c6f6b64936ee5c2e372754bae5087ab43",
+      "src/models/bitnet/forward_avx2.rs": "c948a2d8560bcc97ad253240c3ca8c5d06df9cbd891eaf6d4d6aaa9d2b9eeb03",
+      "src/models/diffusion/dreamx/kernels.rs": "84089351c7848c0801b7055eb3dc8c3d05cc5bff87d46a220b1b3d27f928759f",
+      "src/models/diffusion/mage_flow/dit.rs": "7f0eccfef079f9161c00edc3e9e408374479a7300090f359752784cda94e6a12",
+      "src/models/diffusion/mage_flow/mod.rs": "aa8f5f07d12583366f369dbf230ea13e75c667e00506aee6dfcfca63dd933bf5",
+      "src/models/diffusion/mage_flow/text.rs": "f06f5323061116ed9fabcc778f54c5bf3cd0f4fd9db7a8d033fef058711f9293",
+      "src/models/diffusion/mage_flow/vae.rs": "578a3183c576a0e90953fd4d4fbf95c6e48541d63ae115073fe528e57f1d3676",
+      "src/models/diffusion/mod.rs": "30f1bd1a171979836317a0048a8c915217470001bc23bc5a9b4f83602c5ed9ab",
+      "src/models/gemma4/vision/mod.rs": "b430346b3fe6b0897030e9f0b92a49526f0f9416099717d00c8355b45da73ef9",
+      "src/models/qwen3/trunk/prefill.rs": "6a62ee75c52156979ae55c2a2aff03c9156df15d9c085bc3864b625d762bcf90",
+      "src/models/qwen3/trunk/session.rs": "12907c3f976c3840a7317c2ae11197065137666dd82706f9b8c37ed0e36f865a",
+      "src/models/qwen3/trunk/tests.rs": "4023ad0028b21eceda5c33aec47f0595fe972615c90ca29f3f0d91006166c844",
+      "src/models/qwen3/vision/mod.rs": "84f3a3caf6f5ab30502306925db582c864415d1046fce30cc9c96e98f0b4d3f4",
+      "src/ops/float.rs": "8cd31320681dd8cf4d1b6d9b8f2aa17339b3b654ab836be493e4f252782eed49",
+      "src/ops/rope/mrope.rs": "250cb2dedfbae520cc129ea25ceaca184be3caa5280bc1db1d169462a0f3aebf",
+      "tests/mage_flow_cli.rs": "28b0e6856c2076d65f6f8d655d5bfb22fed782cdeff8d29aae3c5fb2969496d0",
+      "tools/converter/mage_flow/convert_mage_flow.py": "1be0d2e9c07c33682cf57d88267b9f02c05ad6cb4269991f43b91a6c8de512be",
+      "tools/oracle/mage_flow/scalar.c": "8dfee92154c3637ff0756d12afb7471a5647714e1f94ca48f98a6870134dfd1e",
+      "tools/oracle/mage_flow/scalar.py": "5fbe9cd6efb2c0678897c50d18bc1158e37a94a08fb6354e3f9cf68a859ee62c",
+      "tools/oracle/mage_flow/trace.py": "df5fa99fd1de4581cf3a1040dcdf6d3d4734167578be68c018c2b76ae6405770"
+    },
+    "verified_at_utc": "2026-10-06T15:54:36.656968+00:00",
+    "binary_sha256": {
+      "target/release-fast/rust-model-inference": "973683d998b582680d6faec9ddb1f0bb6993e7f11842899d55099dcec4818b5c",
+      "target/release-fast/examples/mage_flow_trace": "b128de122cbd40d198b794011ddfe4b9adb16f1140212e64f779a2063d744384"
+    }
+  }
+}

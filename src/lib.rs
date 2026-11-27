@@ -2,6 +2,7 @@ pub mod app;
 pub use app::open_or_exit;
 pub use app::run_or_exit;
 pub use models::qwen3::{get_f32_tensor, Qwen3LayerWeights};
+pub mod compute;
 pub mod core;
 pub mod format;
 pub mod models;
@@ -17,11 +18,11 @@ pub mod wgpu;
 
 pub use core::loader::{model_config_from_source, GGUFLoader};
 pub use core::memory::{BlockAllocator, KVCacheView, MemoryArena, PagedKVBlock};
-pub use core::model::{ModelGraph, QuantizedLinear};
+pub use core::model::ModelGraph;
 pub use core::scratchpad::{ExecutionScratchpad, KvCache, KvCacheF16, KvCacheF32, KvLifecycle};
 pub use core::tensor::{GGMLType, MetaValue, MetaValueType, TensorInfo, TensorSource};
 pub use core::thread_pool::ComputePool;
-pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder};
+pub use core::tokenizer::{BPETokenizer, EncodeOptions, StreamingDecoder, UgmError, UgmTokenizer};
 pub use core::traits::{ExecContext, Layer, ModelConfig};
 pub use format::ggufrs::{
     export_ggufrs, open_model_source, ComponentInfo, ComponentRole, ExportOptions, GgufrsError,
@@ -42,10 +43,12 @@ pub use models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionGrid, V
 pub use models::qwen35::{
     build_qwen35_positions, Qwen35Config, Qwen35DenseKvSnapshot, Qwen35Model,
 };
+pub use ops::linear::QuantizedLinear;
 
 pub use ops::quant::{dequant_weight_q4k, dequantize_q4_k_weight, BlockQ8K, QK_K};
 pub use ops::*;
 pub use prompt::{
     append_qwen_assistant_prefix, append_qwen_message_tokens, build_hunyuan_chat_prompt,
-    build_qwen_chat_prompt, build_simple_prompt, HunyuanMessage, QwenMessage,
+    build_lfm25_chat_prompt_with_thinking, build_qwen_chat_prompt, build_simple_prompt,
+    HunyuanMessage, Lfm2Message, QwenMessage,
 };

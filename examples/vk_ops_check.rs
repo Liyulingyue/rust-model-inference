@@ -31,10 +31,26 @@ fn main() -> ExitCode {
         eprintln!("Vulkan row operator check failed: {error}");
         return ExitCode::FAILURE;
     }
-    let legacy_formats = formats
-        .into_iter()
-        .filter(|format| *format != "q8_0")
-        .collect::<Vec<_>>();
+    // q8_0 is checked in both suites now that the matvec operator test
+    // covers it: `run_batched_matmul_check` exercises the row recorder and
+    // `run_qwen3_operator_check` exercises the legacy single-row matvec.
+    let legacy_formats = row_formats;
+    if std::env::var("SILU_ONLY").is_ok() {
+        return match rust_model_inference::vulkan::silu_ffn_scale_probe(context) {
+            Ok(0) => {
+                println!("operator=silu_mul_ffn_scale finite=true");
+                ExitCode::SUCCESS
+            }
+            Ok(n) => {
+                eprintln!("silu_mul FFN scale: {n} non-finite values");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("silu_mul FFN scale check failed: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match run_qwen3_operator_check(context, &legacy_formats) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -54,7 +70,8 @@ fn parse_options(
         match flag.as_ref() {
             "--all-formats" => {
                 formats = [
-                    "q8_0", "q4_0", "q4_1", "q4_k", "q5_k", "q6_k", "f16", "bf16", "f32",
+                    "q8_0", "q4_0", "q4_1", "q4_k", "q5_k", "q6_k", "q2_k", "q3_k", "f16", "bf16",
+                    "f32", "mlx4", "mlx8",
                 ]
                 .into_iter()
                 .map(str::to_owned)
@@ -95,7 +112,7 @@ mod tests {
         let (formats, rows) =
             super::parse_options(["--all-formats", "--rows", "3"].into_iter()).unwrap();
         assert_eq!(rows, 3);
-        assert_eq!(formats.len(), 9);
+        assert_eq!(formats.len(), 13);
         assert!(formats.iter().any(|format| format == "q8_0"));
         assert!(super::parse_options(["--rows", "0"].into_iter()).is_err());
     }

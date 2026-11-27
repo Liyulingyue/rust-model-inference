@@ -1,0 +1,584 @@
+{
+  "status": "supplementary local evidence on an unattributed test machine; not upstream acceptance",
+  "date": "2026-11-18",
+  "build": {
+    "command": "cargo build --profile release-fast --bins --features vulkan",
+    "seconds": 113.61,
+    "binary": "release-fast/rust-model-inference (built with --features vulkan)",
+    "device_banner": "Vulkan device: int8 dot product supported, shader f16 supported"
+  },
+  "model": {
+    "request": "vllm-sr/d3-turbo @ 0c9281c53740765406dcec7f20140179838a6fa5",
+    "local_conversion": "tools/converter/d3_turbo/convert.py --type bf16",
+    "gguf": "locally converted d3-turbo-bf16.gguf",
+    "bytes": 53115579168,
+    "sha256": "fb43266ae97d7a1126ac53f667ec32e062df264391819de973c2d2892ab588ec"
+  },
+  "method": {
+    "strict_device": "--compute vulkan (strict; a device failure aborts instead of falling back to CPU)",
+    "threads": 8,
+    "tolerance": "atol=5e-4, rtol=1e-4 against tools/oracle/d3_turbo/entries.json",
+    "media_fixtures": "tools/oracle/d3_turbo/make_media.py",
+    "media_fixture_sha256": {
+      "image": "030b3300bac7c27ef01512e9597e3c582196e43a4ad884daffa2f3ebcd56e706",
+      "video": "a0e480d8339f8787f95fe8e4cfdb64b40f3ef0e91dcd31626be8ef778f3a2f10",
+      "box": "f216cf16de14b0d983bc610dd1b06b6db042cf11f33613e452db756dd0cc2b34",
+      "video-box": "273a427aec862c8465385771bc90915d88f927eccf6cac1294d78d0872186c17",
+      "track": "02128991173ec97f65d3bff1716f1f3b1416fcb06a1633650a131efc84a923bc"
+    },
+    "text_request_sha256": "5bfe745aa468277c36eb4ad53de66fe1ca58077a9797c1592433e1ba8707f5ca"
+  },
+  "cli_cases": [
+    {
+      "capability": "choice+noul+score",
+      "transport": "cli",
+      "command": "PATH=/tmp/opencode/ffmpeg-bin:$PATH release-fast/rust-model-inference --model d3-turbo-bf16.gguf --decision-request tools/oracle/d3_turbo/text.json --compute vulkan --threads 8",
+      "exit": 0,
+      "seconds": 755.81,
+      "max_rss_kib": 48254068,
+      "cpu_48_thread_seconds_same_host": 110.13,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 12,
+        "max_abs_delta": 3.0821288888316367e-06,
+        "within_atol_5e-4_rtol_1e-4": true
+      },
+      "request": "text.json",
+      "request_sha256": "5bfe745aa468277c36eb4ad53de66fe1ca58077a9797c1592433e1ba8707f5ca"
+    },
+    {
+      "capability": "image",
+      "transport": "cli",
+      "command": "PATH=/tmp/opencode/ffmpeg-bin:$PATH release-fast/rust-model-inference --model d3-turbo-bf16.gguf --decision-request d3-media/image.json --compute vulkan --threads 8",
+      "exit": 0,
+      "seconds": 291.69,
+      "max_rss_kib": 50482304,
+      "cpu_48_thread_seconds_same_host": 62.52,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 3,
+        "max_abs_delta": 2.036537827265761e-09,
+        "within_atol_5e-4_rtol_1e-4": true
+      },
+      "request": "image.json",
+      "request_sha256": "030b3300bac7c27ef01512e9597e3c582196e43a4ad884daffa2f3ebcd56e706"
+    },
+    {
+      "capability": "video",
+      "transport": "cli",
+      "command": "PATH=/tmp/opencode/ffmpeg-bin:$PATH release-fast/rust-model-inference --model d3-turbo-bf16.gguf --decision-request d3-media/video.json --compute vulkan --threads 8",
+      "exit": 0,
+      "seconds": 303.96,
+      "max_rss_kib": 50049728,
+      "cpu_48_thread_seconds_same_host": 44.62,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 3,
+        "max_abs_delta": 9.5367431640625e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      },
+      "request": "video.json",
+      "request_sha256": "a0e480d8339f8787f95fe8e4cfdb64b40f3ef0e91dcd31626be8ef778f3a2f10"
+    },
+    {
+      "capability": "box",
+      "transport": "cli",
+      "command": "PATH=/tmp/opencode/ffmpeg-bin:$PATH release-fast/rust-model-inference --model d3-turbo-bf16.gguf --decision-request d3-media/box.json --compute vulkan --threads 8",
+      "exit": 0,
+      "seconds": 303.8,
+      "max_rss_kib": 50487252,
+      "cpu_48_thread_seconds_same_host": 74.0,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 7,
+        "max_abs_delta": 7.508392590727109e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      },
+      "request": "box.json",
+      "request_sha256": "f216cf16de14b0d983bc610dd1b06b6db042cf11f33613e452db756dd0cc2b34"
+    },
+    {
+      "capability": "video_box",
+      "transport": "cli",
+      "command": "PATH=/tmp/opencode/ffmpeg-bin:$PATH release-fast/rust-model-inference --model d3-turbo-bf16.gguf --decision-request d3-media/video-box.json --compute vulkan --threads 8",
+      "exit": 0,
+      "seconds": 266.36,
+      "max_rss_kib": 50070128,
+      "cpu_48_thread_seconds_same_host": 59.1,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 8,
+        "max_abs_delta": 3.349079428227597e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      },
+      "request": "video-box.json",
+      "request_sha256": "273a427aec862c8465385771bc90915d88f927eccf6cac1294d78d0872186c17"
+    },
+    {
+      "capability": "track",
+      "transport": "cli",
+      "command": "PATH=/tmp/opencode/ffmpeg-bin:$PATH release-fast/rust-model-inference --model d3-turbo-bf16.gguf --decision-request d3-media/track.json --compute vulkan --threads 8",
+      "exit": 0,
+      "seconds": 613.86,
+      "max_rss_kib": 50078428,
+      "cpu_48_thread_seconds_same_host": 120.99,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 16,
+        "max_abs_delta": 5.301615606523313e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      },
+      "request": "track.json",
+      "request_sha256": "02128991173ec97f65d3bff1716f1f3b1416fcb06a1633650a131efc84a923bc"
+    },
+    {
+      "capability": "jev_text",
+      "transport": "cli",
+      "command": "release-fast/rust-model-inference --model d3-turbo-bf16.gguf --threads 8 --compute vulkan --jev --jev-context 'A short test.' --jev-question 'Is this a short test?' --jev-output json --jev-option No --jev-option Yes --jev-positive B",
+      "exit": 0,
+      "seconds": 251.87,
+      "max_rss_kib": 48272076,
+      "cpu_48_thread_seconds_same_host": 73.27,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 7,
+        "max_abs_delta": 2.1606683731079102e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "jev_image",
+      "transport": "cli",
+      "command": "release-fast/rust-model-inference --model d3-turbo-bf16.gguf --threads 8 --compute vulkan --jev --jev-context 'A short test.' --jev-question 'Is a red box visible?' --jev-output json --jev-option No --jev-option Yes --jev-positive B --image 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAiElEQVR4nO3asQ3CUBBEwT2ZMiiBwKVSCvREC+TU4OB7ZTGnV8BOfpNky1y322wzuXAA7QDaAbQDaAfQDqAdQLvDgPfnm5X3uj/WApauT3J0DwAAAAAAAAAAAAAAAAAAAAAAAAAAAMD5gNmfe/3nx79QewRAewRAewRAewRAewRAewRAe8RfA34kYx960nkm6gAAAABJRU5ErkJggg=='",
+      "exit": 0,
+      "seconds": 246.28,
+      "max_rss_kib": 50510188,
+      "cpu_48_thread_seconds_same_host": 126.3,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 7,
+        "max_abs_delta": 1.1408701539039612e-08,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    }
+  ],
+  "http_cases": [
+    {
+      "capability": "choice+noul+score",
+      "route": "/v1/decide",
+      "http_status": 200,
+      "seconds": 754.5,
+      "cpu_48_thread_seconds_same_host": 108.6,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 12,
+        "max_abs_delta": 3.0821288888316367e-06,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "image",
+      "route": "/v1/systemone",
+      "http_status": 200,
+      "seconds": 258.4,
+      "cpu_48_thread_seconds_same_host": 59.1,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 3,
+        "max_abs_delta": 2.036537827265761e-09,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "video",
+      "route": "/v1/systemone",
+      "http_status": 200,
+      "seconds": 257.5,
+      "cpu_48_thread_seconds_same_host": 43.9,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 3,
+        "max_abs_delta": 9.5367431640625e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "box",
+      "route": "/v1/systemone",
+      "http_status": 200,
+      "seconds": 261.9,
+      "cpu_48_thread_seconds_same_host": 67.9,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 7,
+        "max_abs_delta": 7.508392590727109e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "video_box",
+      "route": "/v1/systemone",
+      "http_status": 200,
+      "seconds": 260.9,
+      "cpu_48_thread_seconds_same_host": 57.2,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 8,
+        "max_abs_delta": 3.349079428227597e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "track",
+      "route": "/v1/systemone",
+      "http_status": 200,
+      "seconds": 519.8,
+      "cpu_48_thread_seconds_same_host": 120.2,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 16,
+        "max_abs_delta": 5.301615606523313e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "jev_text",
+      "route": "/v1/jev/score",
+      "http_status": 200,
+      "seconds": 252.0,
+      "cpu_48_thread_seconds_same_host": 31.6,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 7,
+        "max_abs_delta": 2.1606683731079102e-07,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "jev_image",
+      "route": "/v1/jev/image",
+      "http_status": 200,
+      "seconds": 260.3,
+      "cpu_48_thread_seconds_same_host": 54.9,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 7,
+        "max_abs_delta": 1.1408701539039612e-08,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    {
+      "capability": "batch",
+      "route": "/v1/decide/batch",
+      "request": {
+        "requests": [
+          "contents of /tmp/opencode/d3-media/image.json"
+        ]
+      },
+      "http_status": 200,
+      "seconds": 262.7,
+      "cpu_48_thread_seconds_same_host": 165.8,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 3,
+        "max_abs_delta": 2.036537827265761e-09,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    }
+  ],
+  "gpu_monitor": {
+    "device": {
+      "samples": 900,
+      "sampling_seconds": 5,
+      "utilization_percent": {
+        "avg": 0.53,
+        "max": 25,
+        "samples_above_5_percent": 35
+      },
+      "memory_used_mib": {
+        "min": 37274,
+        "max": 37644,
+        "delta": 370
+      }
+    },
+    "note": "weights are streamed per projection; only eligible projections run on the device, scan/norm/softmax stay on CPU, so utilisation is bursty and resident VRAM stays small"
+  },
+  "notes": [
+    "Strict Vulkan completed every tested entry on this host with no device loss.",
+    "The upstream AMD RADV NAVI31 device-loss failure (validation.md, layer 3) was not retested; the shared repair and the AMD rerun remain open.",
+    "Only the locally converted bf16 GGUF was tested; f32/f16/q8_0/q4_0/q4_1/q4_k/q5_k/q6_k Vulkan rows were not rerun.",
+    "long_context, grouped JEV, asset/image-option variants and large-context acceptance were not rerun on this host.",
+    "GPU timings use 8 threads and stream 53 GiB of weights per token, so they are far slower than the 48-thread CPU path and are not performance acceptance."
+  ],
+  "auto_case": {
+    "capability": "jev_text",
+    "command": "release-fast/rust-model-inference --model d3-turbo-bf16.gguf --threads 8 --compute auto --jev --jev-context \"A short test.\" --jev-question \"Is this a short test?\" --jev-output json --jev-option No --jev-option Yes --jev-positive B",
+    "note": "Auto routed to the device (same device banner and runtime class as strict Vulkan) instead of the 73.27 s CPU path",
+    "exit": 0,
+    "seconds": 253.54,
+    "max_rss_kib": 48266644,
+    "comparison_vs_entries_json": {
+      "numeric_fields": 7,
+      "max_abs_delta": 2.1606683731079102e-07,
+      "within_atol_5e-4_rtol_1e-4": true
+    }
+  },
+  "environment": {
+    "cpu_threads": 48,
+    "memory_gib": 251,
+    "accelerator": "one Vulkan-capable discrete GPU; model and driver identity withheld",
+    "device_sharing": "the device also served an unrelated workload during the run"
+  },
+  "q8_0": {
+    "model": {
+      "request": "vllm-sr/d3-turbo @ 0c9281c53740765406dcec7f20140179838a6fa5",
+      "local_conversion": "tools/converter/d3_turbo/convert.py --type q8_0",
+      "gguf": "locally converted d3-turbo-q8_0.gguf",
+      "bytes": 29094996768,
+      "sha256": "fa8aadc2faa1a56175a6290c1574ae8b7b8c60e500a3dd6f2d6207f76b2f4e77"
+    },
+    "cli_cases": [
+      {
+        "capability": "choice+noul+score",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 128.83,
+        "max_rss_kib": 25697772,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 12,
+          "max_abs_delta": 0.019463277105146837,
+          "within_atol_5e-4_rtol_1e-4": false
+        }
+      },
+      {
+        "capability": "image",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 40.74,
+        "max_rss_kib": 28098364,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 3,
+          "max_abs_delta": 1.2834978255216178e-05,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "video",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 30.3,
+        "max_rss_kib": 27494936,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 3,
+          "max_abs_delta": 0.0054708123207092285,
+          "within_atol_5e-4_rtol_1e-4": false
+        }
+      },
+      {
+        "capability": "box",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 43.23,
+        "max_rss_kib": 28099324,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0027484101994601495,
+          "within_atol_5e-4_rtol_1e-4": false
+        }
+      },
+      {
+        "capability": "video_box",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 35.56,
+        "max_rss_kib": 27510124,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 8,
+          "max_abs_delta": 0.003614024964671614,
+          "within_atol_5e-4_rtol_1e-4": false
+        }
+      },
+      {
+        "capability": "track",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 106.56,
+        "max_rss_kib": 27520088,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 16,
+          "max_abs_delta": 0.009349305588036705,
+          "within_atol_5e-4_rtol_1e-4": false
+        }
+      },
+      {
+        "capability": "jev_text",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 24.39,
+        "max_rss_kib": 25718484,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0054880790412425995,
+          "within_atol_5e-4_rtol_1e-4": false
+        }
+      },
+      {
+        "capability": "jev_image",
+        "transport": "cli",
+        "exit": 0,
+        "seconds": 36.12,
+        "max_rss_kib": 28127908,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0004667846951633692,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      }
+    ],
+    "http_cases": [
+      {
+        "capability": "choice+noul+score",
+        "route": "/v1/decide",
+        "http_status": 200,
+        "seconds": 113.9,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 12,
+          "max_abs_delta": 0.019463277105146837,
+          "within_atol_5e-4_rtol_1e-4": false
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 12,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "image",
+        "route": "/v1/systemone",
+        "http_status": 200,
+        "seconds": 47.8,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 3,
+          "max_abs_delta": 1.2834978255216178e-05,
+          "within_atol_5e-4_rtol_1e-4": true
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 3,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "video",
+        "route": "/v1/systemone",
+        "http_status": 200,
+        "seconds": 34.8,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 3,
+          "max_abs_delta": 0.0054708123207092285,
+          "within_atol_5e-4_rtol_1e-4": false
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 3,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "box",
+        "route": "/v1/systemone",
+        "http_status": 200,
+        "seconds": 40.3,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0027484101994601495,
+          "within_atol_5e-4_rtol_1e-4": false
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "video_box",
+        "route": "/v1/systemone",
+        "http_status": 200,
+        "seconds": 37.3,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 8,
+          "max_abs_delta": 0.003614024964671614,
+          "within_atol_5e-4_rtol_1e-4": false
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 8,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "track",
+        "route": "/v1/systemone",
+        "http_status": 200,
+        "seconds": 84.9,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 16,
+          "max_abs_delta": 0.009349305588036705,
+          "within_atol_5e-4_rtol_1e-4": false
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 16,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "jev_text",
+        "route": "/v1/jev/score",
+        "http_status": 200,
+        "seconds": 32.5,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0054880790412425995,
+          "within_atol_5e-4_rtol_1e-4": false
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 0,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "jev_image",
+        "route": "/v1/jev/image",
+        "http_status": 200,
+        "seconds": 39.3,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 7,
+          "max_abs_delta": 0.0004667846951633692,
+          "within_atol_5e-4_rtol_1e-4": true
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 0,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      },
+      {
+        "capability": "batch",
+        "route": "/v1/decide/batch",
+        "http_status": 200,
+        "seconds": 36.5,
+        "comparison_vs_entries_json": {
+          "numeric_fields": 3,
+          "max_abs_delta": 1.2834978255216178e-05,
+          "within_atol_5e-4_rtol_1e-4": true
+        },
+        "comparison_vs_cli_q8_0": {
+          "numeric_fields": 3,
+          "max_abs_delta": 0.0,
+          "within_atol_5e-4_rtol_1e-4": true
+        }
+      }
+    ],
+    "cpu_q8_0_reference": {
+      "capability": "choice+noul+score",
+      "seconds": 43.94,
+      "threads": 48,
+      "comparison_vs_entries_json": {
+        "numeric_fields": 12,
+        "max_abs_delta": 0.019463277105146837,
+        "within_atol_5e-4_rtol_1e-4": false
+      },
+      "comparison_vs_gpu_q8_0": {
+        "numeric_fields": 12,
+        "max_abs_delta": 0.0,
+        "within_atol_5e-4_rtol_1e-4": true
+      }
+    },
+    "note": "q8_0 runs complete on the device and HTTP matches CLI bit for bit, but the quantization error exceeds the raw-model final-output tolerance; the CPU q8_0 model shows the same deviation, so this is a format gate rather than a device failure. The image and image-JEV answers happen to stay inside tolerance."
+  }
+}

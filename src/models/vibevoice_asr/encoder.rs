@@ -10,10 +10,7 @@
 //! the stride-alignment `extra` right padding.
 
 use crate::core::tensor::{load_f32_tensor, GGMLType, TensorSource};
-use crate::ops::{
-    gelu_erf_inplace, rms_norm, rms_norm_inplace, vec_mad_per_channel_f32,
-    vec_mad_per_channel_f32_broadcast,
-};
+use crate::ops::{gelu_erf_inplace, rms_norm, rms_norm_inplace, vec_mad_per_channel_f32_broadcast};
 
 // --------------------------------------------------------------------------- //
 // GGUF tensor loading helpers (BF16 or F32 storage → f32)
@@ -194,7 +191,7 @@ impl Conv1d {
     }
 
     /// output += patches · Wᵀ (accumulates over the bias-seeded output).
-    fn gemm_rows(&self, patches: &[f32], t_out: usize, output: &mut [f32]) {
+    fn gemm_rows(&self, patches: &[f32], _t_out: usize, output: &mut [f32]) {
         let row_width = self.n_in * self.kernel;
         for (patch_row, out_row) in patches
             .chunks_exact(row_width)

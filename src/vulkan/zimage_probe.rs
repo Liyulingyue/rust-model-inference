@@ -1,0 +1,576 @@
+//! Minimal go/no-go for batching the Z-Image DiT onto the GPU.
+//!
+//! `run_block` in `src/models/diffusion/z_image/dit.rs` calls `linear_into`
+//! once per sequence row, so a 512x512 step issues 1536 x 30 x 4 = 184,320
+//! dispatches at ~926 us each -- 150.3 s/step, slower than the 140.5 s CPU
+//! path. `Qwen3Ops::record_weight_matmul_tiled_rows` already accepts an input
+//! *matrix* (`token_rows` x `input_stride`) and quantizes it on the GPU, which
+//! is exactly what batching would need, but it is `pub(crate)` and wired only
+//! for the production paths, so an example cannot reach it.
+//!
+//! This drives it directly with the DiT's real QKV projection shape and
+//! compares against the row-at-a-time path the DiT uses today. One question:
+//! does a single batched dispatch over 1536 rows cost less than 1536
+//! single-row dispatches, by enough to pay for DiT-specific bindings? If not,
+//! the port is not worth starting.
+//!
+//! Opt in with RUST_ZIMAGE_VK_PROBE=1; it needs a Vulkan device and a
+//! `--features vulkan` build.
+use std::time::Instant;
+
+use crate::core::thread_pool::ComputePool;
+use crate::ops::float::enable_gpu;
+use crate::ops::get_vulkan_context;
+use crate::ops::kernel::q8_0::parallel::matmul_q8_0_quantized_parallel_rows;
+use crate::vulkan::ops::{tiled_matmul_enabled, GpuWeightFormat, Qwen3Ops, TokenCommands};
+
+const HIDDEN: usize = 3840;
+const QKV: usize = HIDDEN * 3;
+const ROWS: usize = 1536; // 512x512: 1024 image tokens + 512 text
+const HEADS: usize = 30;
+const HEAD_WIDTH: usize = HIDDEN / HEADS;
+
+fn synth_q8_0(n_in: usize, n_out: usize) -> Vec<u8> {
+    let blocks = n_in / 32;
+    let mut w = vec![0u8; n_out * blocks * 34];
+    for (i, b) in w.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    for row in 0..n_out {
+        for b in 0..blocks {
+            let off = (row * blocks + b) * 34;
+            w[off] = 0x00;
+            w[off + 1] = 0x18;
+        }
+    }
+    w
+}
+
+#[test]
+fn batched_rows_beat_row_at_a_time_on_the_dit_qkv_shape() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_probe().expect("batched path unavailable");
+}
+
+/// Body split out so the `?` operator is available.
+fn run_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    let weight = synth_q8_0(HIDDEN, QKV);
+    let input: Vec<f32> = (0..ROWS * HIDDEN)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+
+    // --- reference: what run_block does today, one row per dispatch ----------
+    let input_q8: Vec<u8> = (0..HIDDEN).map(|i| (i % 63) as u8).collect();
+    let input_scales: Vec<f32> = vec![0.001; HIDDEN / 32];
+    let pool = ComputePool::new(8);
+    let mut row_out = vec![0f32; QKV];
+    let row_ptr = row_out.as_mut_ptr();
+    let row_at_a_time = |rows: usize| -> f64 {
+        let t0 = Instant::now();
+        for _ in 0..rows {
+            pool.compute(|ith, nth| {
+                let out = unsafe { std::slice::from_raw_parts_mut(row_ptr, QKV) };
+                matmul_q8_0_quantized_parallel_rows(
+                    &weight,
+                    &input_q8,
+                    &input_scales,
+                    out,
+                    HIDDEN,
+                    QKV,
+                    ith,
+                    nth,
+                );
+            });
+        }
+        t0.elapsed().as_secs_f64()
+    };
+    // The difference between 2 and 64 is the marginal dispatch price, with the
+    // first-call weight upload and shader JIT amortised away.
+    let two = row_at_a_time(2);
+    let sixty_four = row_at_a_time(64);
+    let per_row = (sixty_four - two) / 62.0;
+    let per_row_us = per_row * 1e6;
+    eprintln!("row-at-a-time: {sixty_four:.4} s / 64 rows -> {per_row_us:.1} us/row");
+    eprintln!("  {ROWS} rows would take {:.1} s", per_row * ROWS as f64);
+
+    // --- candidate: one batched dispatch over every row ----------------------
+    // `ArenaLayout::for_dims` is sized for a Qwen3 decode step, where the x
+    // region only has to hold one token. The DiT needs all ROWS of activations
+    // resident, so lay the arena out by hand for this shape.
+    //
+    // Sizes come from `quantize_rows_push` / `matmul_rows_push`:
+    //   x        ROWS * HIDDEN f32
+    //   q8       ROWS * HIDDEN i8        scales  ROWS * (HIDDEN/32) f32
+    //   q4_1_sum ROWS * (HIDDEN/32) f32  q8k     unused for Q8_0, but sized anyway
+    let blocks = HIDDEN / 32;
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let x = region(ROWS * HIDDEN * 4, 4);
+    let q8 = region(ROWS * HIDDEN, 4);
+    let q8_scales = region(ROWS * blocks * 4, 4);
+    let q4_1_input_sums = region(ROWS * blocks * 4, 4);
+    let q8k = region(ROWS * HIDDEN, 4);
+    let q8k_scales = region(ROWS * blocks * 4, 4);
+    let out = region(ROWS * QKV * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+    let weight_buffer = unsafe { context.upload_static(&weight) }.map_err(|e| e.to_string())?;
+    let bindings = ops
+        .bind_weight_buffers(&[weight_buffer], &[GpuWeightFormat::Q8_0])
+        .map_err(|e| e.to_string())?;
+
+    let use_tiled = ops.supports_tiled_q8() && tiled_matmul_enabled();
+    eprintln!(
+        "batched kernel: {}",
+        if use_tiled {
+            "tiled packed int8 dot product"
+        } else {
+            "ordinary Q8_0 GPU"
+        }
+    );
+
+    // The first call pays shader JIT plus a {:.0} MiB host->device arena
+    // upload. The DiT issues 96 of these per step and 8 steps per render, but
+    // only the first ever pays that, so the steady state is what decides
+    // whether batching wins.
+    let mut head_value = 0.0f32;
+    let mut first_s = 0.0f64;
+    let mut steady_s = 0.0f64;
+    let passes = 8;
+    for pass in 0..passes {
+        let t0 = Instant::now();
+        ops.write_f32(x, &input).map_err(|e| e.to_string())?;
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        if use_tiled {
+            ops.record_weight_matmul_tiled_rows(
+                &commands,
+                bindings,
+                x,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                &[(out, QKV, QKV * 4)],
+                HIDDEN,
+                ROWS,
+                HIDDEN,
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            ops.record_weight_matmul_ordinary_rows(
+                &commands,
+                bindings,
+                x,
+                q8,
+                q8_scales,
+                q4_1_input_sums,
+                q8k,
+                q8k_scales,
+                &[(out, QKV, QKV * 4)],
+                HIDDEN,
+                ROWS,
+                HIDDEN,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut head = [0.0f32; 1];
+        ops.read_f32_into(out, &mut head)
+            .map_err(|e| e.to_string())?;
+        head_value = head[0];
+        let elapsed = t0.elapsed().as_secs_f64();
+        if pass == 0 {
+            first_s = elapsed;
+        } else {
+            steady_s += elapsed;
+        }
+    }
+    let batched_s = steady_s / (passes - 1) as f64;
+    eprintln!(
+        "batched first call (JIT + {:.0} MiB upload): {first_s:.4} s",
+        arena_bytes as f64 / 1048576.0
+    );
+    let outcome: Result<f32, crate::vulkan::VulkanError> = Ok(head_value);
+
+    match outcome {
+        Ok(value) => {
+            eprintln!("batched: {batched_s:.4} s for {ROWS} rows (q[0] = {value:.4e})");
+            let batched_per_row = batched_s / ROWS as f64;
+            eprintln!(
+                "  per row {batched_per_row:.6} s vs {per_row_us:.1} us -> {:.0}x cheaper",
+                per_row / batched_per_row
+            );
+            assert!(
+                batched_per_row < per_row,
+                "batched dispatch ({batched_per_row:.9} s/row) did not beat row-at-a-time ({per_row:.9} s/row)"
+            );
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(())
+}
+
+/// Is the tiled attention-score kernel reproducible?
+///
+/// The Z-Image device path is not: the same binary, the same seed and the
+/// same spec give different PNGs from run to run, and the fork is in the
+/// device attention chain. This is the only shader in that chain that
+/// Z-Image has of its own (ERNIE uses the standard scores kernel plus the
+/// same softmax and values kernels, and its device path is reproducible).
+///
+/// So run that one stage over the same input several times and compare the
+/// scores it writes. Every pass equal means the race is between the stages,
+/// not inside this shader.
+#[test]
+fn tiled_attention_scores_are_reproducible() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_scores_probe().expect("tiled scores probe unavailable");
+}
+
+fn run_scores_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    // 128x128 with a 32-token context: 96 rows, which is what the device
+    // path sees at that spec.
+    const ROWS: usize = 96;
+    const PASSES: usize = 8;
+
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let qkv = region(ROWS * QKV * 4, 4);
+    let cache_k = region(ROWS * HIDDEN * 4, 4);
+    let cache_v = region(ROWS * HIDDEN * 4, 4);
+    let scratch = region(ROWS * HIDDEN * 4, 4);
+    let scores = region(ROWS * HEADS * ROWS * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+
+    let input: Vec<f32> = (0..ROWS * QKV)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+    ops.write_f32(qkv, &input).map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<f32>> = None;
+    for pass in 0..PASSES {
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        ops.record_diy_attention_scores(
+            &commands, qkv, cache_k, cache_v, scratch, scores, QKV, HEADS, HEADS, HEAD_WIDTH, ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut buffer = vec![0.0f32; ROWS * HEADS * ROWS];
+        ops.read_f32_into(scores, &mut buffer)
+            .map_err(|e| e.to_string())?;
+        match &reference {
+            None => reference = Some(buffer),
+            Some(first) => {
+                let mut mismatches = 0usize;
+                let mut first_at = None;
+                for (index, (left, right)) in first.iter().zip(buffer.iter()).enumerate() {
+                    if left != right {
+                        mismatches += 1;
+                        if first_at.is_none() {
+                            first_at = Some((index, *left, *right));
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    let (index, left, right) = first_at.expect("mismatch without a position");
+                    eprintln!(
+                        "pass {pass}: {mismatches} of {} scores differ; first at {index}: {left} vs {right}",
+                        first.len()
+                    );
+                    return Err(format!(
+                        "the tiled scores kernel gave a different answer on pass {pass} \
+                         ({mismatches} of {} scores differ)",
+                        first.len()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{PASSES} passes over the same input: every score identical");
+    Ok(())
+}
+
+/// Is the fused Q/K norm and RoPE reproducible?
+///
+/// The tiled scores kernel is reproducible on its own (see the test above),
+/// so the other Z-Image-only shader in the device attention path is the one
+/// that folds the Q/K norm and the RoPE into the projection's output. It
+/// rewrites the QKV region in place, so every pass starts from the same
+/// input again.
+#[test]
+fn fused_qk_norm_rope_is_reproducible() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_qk_norm_rope_probe().expect("Q/K norm and RoPE probe unavailable");
+}
+
+fn run_qk_norm_rope_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    const ROWS: usize = 96;
+    const PASSES: usize = 8;
+
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let qkv = region(ROWS * QKV * 4, 4);
+    let rope = region(ROWS * HEAD_WIDTH * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+
+    // The Q and K norms are one gamma per head dimension each.
+    let q_norm: Vec<f32> = (0..HEAD_WIDTH)
+        .map(|i| 1.0 + (i % 7) as f32 * 0.01)
+        .collect();
+    let k_norm: Vec<f32> = (0..HEAD_WIDTH)
+        .map(|i| 0.5 + (i % 5) as f32 * 0.01)
+        .collect();
+    let q_bytes: Vec<u8> = q_norm.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let k_bytes: Vec<u8> = k_norm.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let q_buffer = unsafe { context.upload_static(&q_bytes) }.map_err(|e| e.to_string())?;
+    let k_buffer = unsafe { context.upload_static(&k_bytes) }.map_err(|e| e.to_string())?;
+    let bindings = ops
+        .bind_weight_buffers(
+            &[q_buffer, k_buffer],
+            &[GpuWeightFormat::F32, GpuWeightFormat::F32],
+        )
+        .map_err(|e| e.to_string())?;
+
+    let input: Vec<f32> = (0..ROWS * QKV)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+    let rope_table: Vec<f32> = (0..ROWS * HEAD_WIDTH)
+        .map(|i| ((i % 61) as f32 / 61.0) - 0.5)
+        .collect();
+    ops.write_f32(rope, &rope_table)
+        .map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<f32>> = None;
+    for pass in 0..PASSES {
+        // The kernel rewrites the QKV region in place, so the input goes back
+        // in before every pass.
+        ops.write_f32(qkv, &input).map_err(|e| e.to_string())?;
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        ops.record_qk_norm_rope_interleaved_rows(
+            &commands,
+            bindings,
+            qkv,
+            qkv,
+            HEADS,
+            HEADS,
+            HEAD_WIDTH,
+            rope,
+            QKV,
+            QKV,
+            HIDDEN,
+            crate::models::diffusion::z_image::dit::QK_RMS_EPSILON,
+            true,
+            true,
+            ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut buffer = vec![0.0f32; ROWS * QKV];
+        ops.read_f32_into(qkv, &mut buffer)
+            .map_err(|e| e.to_string())?;
+        match &reference {
+            None => reference = Some(buffer),
+            Some(first) => {
+                let mut mismatches = 0usize;
+                let mut first_at = None;
+                for (index, (left, right)) in first.iter().zip(buffer.iter()).enumerate() {
+                    if left != right {
+                        mismatches += 1;
+                        if first_at.is_none() {
+                            first_at = Some((index, *left, *right));
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    let (index, left, right) = first_at.expect("mismatch without a position");
+                    eprintln!(
+                        "pass {pass}: {mismatches} of {} values differ; first at {index}: {left} vs {right}",
+                        first.len()
+                    );
+                    return Err(format!(
+                        "the fused Q/K norm and RoPE gave a different answer on pass {pass} \
+                         ({mismatches} of {} values differ)",
+                        first.len()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{PASSES} passes over the same input: every value identical");
+    Ok(())
+}
+
+/// Is the whole device attention chain reproducible?
+///
+/// The two Z-Image-only shaders are reproducible on their own, and so is the
+/// stage that writes the scores. Run the chain -- the K/V copy, the scores,
+/// the softmax and the value reduction -- over the same input several times
+/// and compare the attention output it leaves in the arena.
+#[test]
+fn diy_attention_chain_is_reproducible() {
+    if std::env::var("RUST_ZIMAGE_VK_PROBE").is_err() {
+        eprintln!("skipped: set RUST_ZIMAGE_VK_PROBE=1 to run");
+        return;
+    }
+    run_chain_probe().expect("attention chain probe unavailable");
+}
+
+fn run_chain_probe() -> Result<(), String> {
+    enable_gpu();
+    let context = match get_vulkan_context() {
+        Some(context) => context,
+        None => {
+            eprintln!("skipped: no Vulkan context");
+            return Ok(());
+        }
+    };
+    eprintln!("device: {}", context.device_name());
+
+    const ROWS: usize = 96;
+    const PASSES: usize = 8;
+
+    let mut cursor = 0usize;
+    let mut region = |elements: usize, align: usize| {
+        cursor = cursor.div_ceil(align) * align;
+        let start = cursor;
+        cursor += elements;
+        crate::vulkan::ops::ArenaRegion {
+            offset: start,
+            size: elements,
+        }
+    };
+    let qkv = region(ROWS * QKV * 4, 4);
+    let cache_k = region(ROWS * HIDDEN * 4, 4);
+    let cache_v = region(ROWS * HIDDEN * 4, 4);
+    let scratch = region(ROWS * HIDDEN * 4, 4);
+    let scores = region(ROWS * HEADS * ROWS * 4, 4);
+    let out = region(ROWS * HIDDEN * 4, 4);
+    let arena_bytes = cursor.next_power_of_two();
+    eprintln!("arena: {:.1} MiB", arena_bytes as f64 / 1048576.0);
+
+    let mut ops = Qwen3Ops::new_device_local_with_size(&context, arena_bytes, 8)
+        .map_err(|e| e.to_string())?;
+
+    let input: Vec<f32> = (0..ROWS * QKV)
+        .map(|i| ((i % 251) as f32 / 251.0) - 0.5)
+        .collect();
+    ops.write_f32(qkv, &input).map_err(|e| e.to_string())?;
+
+    let mut reference: Option<Vec<f32>> = None;
+    for pass in 0..PASSES {
+        let mut commands = TokenCommands::begin(&context).map_err(|e| e.to_string())?;
+        ops.record_diy_attention_full(
+            &commands, qkv, cache_k, cache_v, scratch, scores, out, QKV, HEADS, HEADS, HEAD_WIDTH,
+            ROWS,
+        )
+        .map_err(|e| e.to_string())?;
+        commands.submit_and_wait().map_err(|e| e.to_string())?;
+        let mut buffer = vec![0.0f32; ROWS * HIDDEN];
+        ops.read_f32_into(out, &mut buffer)
+            .map_err(|e| e.to_string())?;
+        match &reference {
+            None => reference = Some(buffer),
+            Some(first) => {
+                let mut mismatches = 0usize;
+                let mut first_at = None;
+                for (index, (left, right)) in first.iter().zip(buffer.iter()).enumerate() {
+                    if left != right {
+                        mismatches += 1;
+                        if first_at.is_none() {
+                            first_at = Some((index, *left, *right));
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    let (index, left, right) = first_at.expect("mismatch without a position");
+                    eprintln!(
+                        "pass {pass}: {mismatches} of {} values differ; first at {index}: {left} vs {right}",
+                        first.len()
+                    );
+                    return Err(format!(
+                        "the attention chain gave a different answer on pass {pass} \
+                         ({mismatches} of {} values differ)",
+                        first.len()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("{PASSES} passes over the same input: every value identical");
+    Ok(())
+}

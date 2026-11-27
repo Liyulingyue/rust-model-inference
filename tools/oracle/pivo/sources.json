@@ -1,0 +1,143 @@
+{
+  "repo": "empero-ai/PiVo-1.4M",
+  "files": [
+    {
+      "Path": "LICENSE",
+      "Revision": "56778b7358b180a5b849a4eb8279610c01b84be4",
+      "Size": 11357,
+      "Sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "Path": "LICENSES/Opus-BSD-3-Clause.txt",
+      "Revision": "9e3e45cc7e63124b2b13de60150da0516feb3701",
+      "Size": 1945,
+      "Sha256": "01e1167d54a096d123cf6dfbbeb19587278845c6481d2d66d545669846079551"
+    },
+    {
+      "Path": "NOTICE",
+      "Revision": "9e3e45cc7e63124b2b13de60150da0516feb3701",
+      "Size": 544,
+      "Sha256": "d9dadef1822718ffa7b97d2706198f5b2f9e50ff1c4631a1b0bd254cb9c9d6de"
+    },
+    {
+      "Path": "THIRD_PARTY.md",
+      "Revision": "b573f75b8cc1d2f30b3d3dac0dad0827b867a80b",
+      "Size": 2795,
+      "Sha256": "74fcfc6843f555ddb971128803ea9063a62b7cde5f2cae1c2035576bb44ae86b"
+    },
+    {
+      "Path": "checkpoints/acoustic.pt",
+      "Revision": "b573f75b8cc1d2f30b3d3dac0dad0827b867a80b",
+      "Size": 2374284,
+      "Sha256": "0b4a2dc993e7e500aac1825465886ff23c11f2e1a2662577f2f5cd27f4efb4eb"
+    },
+    {
+      "Path": "checkpoints/vocoder.pt",
+      "Revision": "b573f75b8cc1d2f30b3d3dac0dad0827b867a80b",
+      "Size": 3274321,
+      "Sha256": "355d470826817afaa4e729d1b19c8383e985f365af5d2b913f1b9acdf8f7eca4"
+    },
+    {
+      "Path": "model_manifest.json",
+      "Revision": "79c651ef84be2ff0372202e5e43eee83d240c8c0",
+      "Size": 933,
+      "Sha256": "ef87c62cc79119ae5e8c3068acf78bfd8a86b40767ea90e8f7515c4616f8ecbf"
+    },
+    {
+      "Path": "onnx/conditioning.onnx",
+      "Revision": "79c651ef84be2ff0372202e5e43eee83d240c8c0",
+      "Size": 282407,
+      "Sha256": "b184d45ce06e6d9caec94430b6e07e5f7315ecd584c5c3980290a9b5286d2998"
+    },
+    {
+      "Path": "onnx/decoder.onnx",
+      "Revision": "79c651ef84be2ff0372202e5e43eee83d240c8c0",
+      "Size": 748901,
+      "Sha256": "bc46ee8d64fc400115267a2185887b72842ca318761625c248469166c9ef19ac"
+    },
+    {
+      "Path": "onnx/encoder.onnx",
+      "Revision": "75dbfb7502e0cee5cb0704213e80c78699e8e18a",
+      "Size": 1808457,
+      "Sha256": "1d483a8e23d158bc56692d9b9339015130a1db7b3341cd700595af6190a7ff34"
+    },
+    {
+      "Path": "onnx/metadata.json",
+      "Revision": "75dbfb7502e0cee5cb0704213e80c78699e8e18a",
+      "Size": 2462,
+      "Sha256": "fe5a8f85f92ff402dc7c912fea68e04489badbe3b420ef691e527c56175c096a"
+    },
+    {
+      "Path": "onnx/vocoder_step.onnx",
+      "Revision": "75dbfb7502e0cee5cb0704213e80c78699e8e18a",
+      "Size": 3001580,
+      "Sha256": "6f8ea48ebadbc7b737e5999ce7393619d7aa33b5b643ff48c5ebbcc3bc62b611"
+    },
+    {
+      "Path": "pivo/__init__.py",
+      "Revision": "3697e2790b8e020c20e03e7dc61daa30565faa46",
+      "Size": 186,
+      "Sha256": "3997e374b3732372781bf9deefef77444b0c16aadb8088255c6c196bd38cd00c"
+    },
+    {
+      "Path": "pivo/__main__.py",
+      "Revision": "3697e2790b8e020c20e03e7dc61daa30565faa46",
+      "Size": 29,
+      "Sha256": "cf7390a2508a0fcad4777a4a629fc5212ab655cb45845975995f835676a834e3"
+    },
+    {
+      "Path": "pivo/api.py",
+      "Revision": "3697e2790b8e020c20e03e7dc61daa30565faa46",
+      "Size": 2644,
+      "Sha256": "433fadb05c9386f29550ca6daabe89c4949d17f05bd075edd87fb7c562358442"
+    },
+    {
+      "Path": "pivo/audio.py",
+      "Revision": "75ad920d876812435fa79e2735b9272044a0133b",
+      "Size": 2618,
+      "Sha256": "927a564dbf0cc942781baa952e2815d113845ba1efb55f7cad2520d4fee574aa"
+    },
+    {
+      "Path": "pivo/cli.py",
+      "Revision": "75ad920d876812435fa79e2735b9272044a0133b",
+      "Size": 3008,
+      "Sha256": "720607f9c85e2d24baa3463a12330d5190385949aed91392ea5348fabea73e51"
+    },
+    {
+      "Path": "pivo/engine.py",
+      "Revision": "75ad920d876812435fa79e2735b9272044a0133b",
+      "Size": 5061,
+      "Sha256": "f5ac922e0dc85a1d34235a9af39f1f25f6d9077345b0512c59ef3e0684cd5eb6"
+    },
+    {
+      "Path": "pivo/phase.py",
+      "Revision": "f30e4987dd86aca24b05270d9035159f9ab47f26",
+      "Size": 967,
+      "Sha256": "3cbb8616fa7dd93f56e3150e2aad6cc33af41ec059343011597a3f4a2f0dc6e4"
+    },
+    {
+      "Path": "pivo/resources/CMUDICT_LICENSE",
+      "Revision": "f30e4987dd86aca24b05270d9035159f9ab47f26",
+      "Size": 1754,
+      "Sha256": "bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a"
+    },
+    {
+      "Path": "pivo/resources/cmudict.dict",
+      "Revision": "f30e4987dd86aca24b05270d9035159f9ab47f26",
+      "Size": 3618488,
+      "Sha256": "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"
+    },
+    {
+      "Path": "pivo/runtime.py",
+      "Revision": "e4d11a62a6b80e983de624a566ceb00081352a2b",
+      "Size": 5454,
+      "Sha256": "1075f3f411b9b195be55f14ea30067885627878965667fb1d84df66950c5f3e4"
+    },
+    {
+      "Path": "pivo/text.py",
+      "Revision": "e4d11a62a6b80e983de624a566ceb00081352a2b",
+      "Size": 7608,
+      "Sha256": "d239d9ff4b16b5ab822bcabc09ce6abfb74d4979d19f65521c1b5ea820609306"
+    }
+  ]
+}

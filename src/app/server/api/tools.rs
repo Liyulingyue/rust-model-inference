@@ -1,0 +1,1995 @@
+use super::protocol::{Delta, Message, Tool, ToolCall, ToolChoice};
+use crate::core::tensor::TensorSource;
+use crate::{
+    prompt::{build_qwen_chat_prompt, QwenMessage},
+    BPETokenizer,
+};
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+
+const OPEN: &str = "<tool_call>";
+const CLOSE: &str = "</tool_call>";
+const MARKERS: &[&str] = &[
+    "<tool_call",
+    "</tool_call",
+    "<function=",
+    "</function>",
+    "<parameter=",
+    "</parameter>",
+];
+const MAX_CALL_BYTES: usize = 1024 * 1024;
+
+// Text-only portions of the official Qwen/Qwen3-0.6B and Qwen/Qwen3.5-0.8B
+// tokenizer_config.json templates. ChatML controls are supplied by prompt.rs;
+// message content and tool schemas remain ordinary text, never special tokens.
+const QWEN3_TOOLS: &str = "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>";
+const QWEN3_CALL: &str = "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>";
+const QWEN35_TOOLS: &str = "# Tools\n\nYou have access to the following functions:\n\n<tools>";
+const QWEN35_CALL: &str = "\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>";
+
+fn is_qwen35(arch: &str) -> Result<bool, String> {
+    match arch {
+        // qwen2vl / qwen3vlmoe ride the same Qwen3 ChatML prompt as qwen3;
+        // their projector differs, which the runtime's image path handles.
+        "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "lfm2moe" | "qwen2vl"
+        | "qwen3vlmoe" | "mage_vl" => Ok(false),
+        // Mellum 2.1 ships ChatML (`<|im_start|>role\n … <|im_end|>\n`) with
+        // the same `# Tools` preamble as Qwen3, so it rides the Qwen3
+        // renderer.
+        "mellum" => Ok(false),
+        // Falcon-H1 uses the same ChatML role markers as Qwen (verified
+        // against the unsloth GGUF: <|im_start|>user\n...
+        // <|im_end|> <|im_start|>assistant\n), so it rides the same
+        // renderer; it has no tool grammar and no vision path, so
+        // build_prompt rejects tools/images before we get here.
+        "falcon-h1" => Ok(false),
+        // Dory 1.0 ships the same ChatML role markers (`<|im_start|>role\n …
+        // <|im_end|>\n`) as the Qwen family, so it rides the same renderer.
+        // LFM3 has its own Jinja input template and the same plain-text
+        // output parser. Neither architecture has a tool-call or vision path.
+        "dory" | "lfm3" => Ok(false),
+        // Nemotron-3 Nano is ChatML too, but it has its own renderer: the
+        // CLI encodes the built-in ChatML text with `add_special: true` and
+        // without the empty think block, so the qwen renderer would give
+        // the server a different prompt than the CLI. See
+        // `build_nemotron_chat_prompt`.
+        "nemotron_h" | "nemotron_h_moe" => Ok(false),
+        "qwen35" | "qwen35moe" | "sensenova_loop" => Ok(true),
+        // Llama-family archs go through the CLI prompt builder
+        // (`llama::trunk::build_prompt_tokens`) and don't support tool
+        // prompting. They are accepted here so `build_prompt` returns Ok
+        // when no tools are present. `phi3` (Phi-3/Phi-4) joins this set:
+        // its chat template is built by `llama::trunk::build_prompt_tokens`
+        // and the trunk has no tool-call grammar. GLM-4 (THUDM) lives on the
+        // llama trunk with its own `[gMASK]<sop><|user|>...<|assistant|>`
+        // chat template and additionally does post-attention / post-FFN
+        // RMSNorm (`attn_post_norm` / `ffn_post_norm`); last user turn only.
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4"
+        | "mistral3" | "spark2_5" => Ok(false),
+        _ => Err(format!(
+            "Tool/chat template is unsupported for architecture {arch}"
+        )),
+    }
+}
+
+fn tag_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().any(|c| matches!(c, '<' | '>' | '\n' | '\r')) {
+        return Err("Tool and parameter names cannot contain tag delimiters or newlines".into());
+    }
+    Ok(())
+}
+
+fn validate_tools(tools: &[Tool], choice: &ToolChoice) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for tool in tools {
+        tag_name(&tool.name)?;
+        if !names.insert(tool.name.as_str()) {
+            return Err(format!("Duplicate tool definition: {}", tool.name));
+        }
+        if let Some(properties) = tool.parameters.get("properties").and_then(Value::as_object) {
+            for name in properties.keys() {
+                tag_name(name)?;
+            }
+        }
+    }
+    match choice {
+        ToolChoice::Required if tools.is_empty() => {
+            Err("Required tool choice needs a tool definition".into())
+        }
+        ToolChoice::Named(name) if !names.contains(name.as_str()) => {
+            Err(format!("Unknown named tool: {name}"))
+        }
+        _ => Ok(()),
+    }
+}
+
+pub fn build_prompt(
+    source: &dyn TensorSource,
+    tokenizer: &BPETokenizer,
+    arch: &str,
+    messages: &[Message],
+    tools: &[Tool],
+    choice: &ToolChoice,
+    enable_thinking: Option<bool>,
+    jinja: &crate::prompt::jinja::Options,
+    // `jinja` resolved once at load time. Rendering through this instead of
+    // re-resolving keeps a server request from recompiling the template.
+    compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
+) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    if arch == "mage_vl" {
+        validate_tools(tools, choice)?;
+        if messages.is_empty() {
+            return Err("No messages provided".into());
+        }
+        let mut turns = Vec::new();
+        let mut images = Vec::new();
+        for m in messages {
+            if !matches!(
+                m.role.as_str(),
+                "system" | "developer" | "user" | "assistant" | "tool"
+            ) {
+                return Err(format!("Unsupported message role: {}", m.role));
+            }
+            if m.role != "assistant" && !m.calls.is_empty() {
+                return Err("Only assistant messages may contain tool calls".into());
+            }
+            if m.role == "tool" && m.call_id.is_none() {
+                return Err("Tool results need a call ID".into());
+            }
+            if m.role != "tool" && m.call_id.is_some() {
+                return Err("Only tool results may contain a call ID".into());
+            }
+            for call in &m.calls {
+                tag_name(&call.name)?;
+                if !call.arguments.is_object() {
+                    return Err("Tool call arguments must be a JSON object".into());
+                }
+            }
+            if !m.images.is_empty() && m.role != "user" {
+                return Err("Mage-VL images require a user turn".into());
+            }
+            let mut content = Vec::new();
+            let mut offset = 0;
+            for image in &m.images {
+                let end = image.text_offset.unwrap_or(0);
+                let text = m
+                    .text
+                    .get(offset..end)
+                    .ok_or("invalid image/text content ordering")?;
+                if !text.is_empty() {
+                    content.push(json!({"type":"text","text":text}));
+                }
+                content.push(json!({"type":"image"}));
+                images.push(image.bytes.clone());
+                offset = end;
+            }
+            content.push(json!({"type":"text","text":&m.text[offset..]}));
+            let calls: Vec<_> = m.calls.iter().map(|c| json!({"type":"function","function":{"name":c.name,"arguments":c.arguments}})).collect();
+            turns.push(json!({"role":if m.role=="developer" {"system"} else {&m.role},"content":content,"tool_calls":calls}));
+        }
+        let instruction = match choice {
+            ToolChoice::Auto => None,
+            ToolChoice::None if tools.is_empty() => None,
+            ToolChoice::None => Some("Do not call functions.".into()),
+            ToolChoice::Required => Some("Call at least one of the provided functions.".into()),
+            ToolChoice::Named(name) => Some(format!("Call only the function {name}.")),
+        };
+        if let Some(instruction) = instruction {
+            if turns[0]["role"] == "system" {
+                turns[0]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"type":"text","text":format!("\n{instruction}")}));
+            } else {
+                turns.insert(0, json!({"role":"system","content":instruction}));
+            }
+        }
+        let tools: Vec<_> = tools
+            .iter()
+            .map(|t| {
+                let mut function = json!({"name":t.name});
+                if let Some(description) = &t.description {
+                    function["description"] = json!(description);
+                }
+                function["parameters"] = t.parameters.clone();
+                json!({"type":"function","function":function})
+            })
+            .collect();
+        let owned;
+        let template = if let Some(t) = compiled_jinja {
+            t
+        } else {
+            owned = crate::prompt::jinja::template_from_source(&|k| source.metadata(k).cloned())
+                .ok_or("missing Mage-VL chat template")??;
+            &owned
+        };
+        return Ok((
+            crate::models::mage_vl::prompt_tokens(
+                tokenizer,
+                template,
+                &json!(turns),
+                &json!(tools),
+                enable_thinking.unwrap_or(true),
+            )?,
+            images,
+        ));
+    }
+    let lfm3_jinja;
+    let jinja = if arch == "lfm3" {
+        if !tools.is_empty()
+            || messages
+                .iter()
+                .any(|m| !m.images.is_empty() || !m.calls.is_empty())
+        {
+            return Err("LFM3 supports plain text conversations only".into());
+        }
+        lfm3_jinja = crate::prompt::jinja::Options {
+            jinja: true,
+            file: jinja.file.clone(),
+        };
+        &lfm3_jinja
+    } else {
+        jinja
+    };
+    // `--jinja` renders the model's own chat template for a multi-turn
+    // conversation. Deliberately gated to plain text turns with no tools:
+    //
+    //  * `tools` is not plumbed through the Jinja context yet, so a
+    //    tool-bearing request must keep the hand-written renderer.
+    //  * image turns need `<|vision_start|>` markers and image slicing that
+    //    the template does not describe; dropping the `attached_images`
+    //    return would silently feed the model text only.
+    //
+    // Both are fallbacks, never silent behaviour changes.
+    if tools.is_empty() && !messages.iter().any(|m| !m.images.is_empty()) {
+        let messages: Vec<crate::prompt::jinja::ChatMessage> = messages
+            .iter()
+            .map(|m| crate::prompt::jinja::ChatMessage {
+                role: m.role.clone(),
+                content: serde_json::Value::String(m.text.clone()),
+            })
+            .collect();
+        let ids = crate::prompt::jinja::conversation_tokens_with(
+            tokenizer,
+            compiled_jinja,
+            &messages,
+            true,
+            enable_thinking,
+        )?;
+        // Return the cached result before resolving anything. `Option::or`
+        // takes its argument by value, so folding the fallback into it ran
+        // the compile on every request even on a cache hit -- defeating the
+        // cache -- and made a `--chat-template-file` request fail after
+        // startup if the file was removed.
+        if let Some(ids) = ids {
+            return Ok((ids, Vec::new()));
+        }
+        // Fallback for callers that did not pre-resolve (the JEV HTTP
+        // endpoints pass no compiled template).
+        if let Some(ids) = crate::prompt::jinja::conversation_tokens(
+            tokenizer,
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            &messages,
+            true,
+            enable_thinking,
+        )? {
+            return Ok((ids, Vec::new()));
+        }
+    }
+
+    if arch == "lfm3" {
+        return Err("LFM3 requires its GGUF chat template or --chat-template-file".into());
+    }
+    // Spark 2.5 uses a custom chat template (`<|Bot|>`, `<|User|>`, `<|System|>`)
+    // that is neither ChatML nor llama-style. Use the GGUF's Jinja template via
+    // `single_turn_text` when available, falling back to the hand-transcribed
+    // format that matches `run_inference` in the Spark trunk.
+    if arch == "spark2_5" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Spark 2.5 text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Spark 2.5 text generation".into());
+        }
+        let user_text = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.text.as_str())
+            .unwrap_or("");
+        // The Spark template reads the tri-state itself; the hand-written
+        // fallback below has no "undefined" branch, so it keeps the
+        // historical direct-answer default.
+        let thinking = enable_thinking.unwrap_or(false);
+        let sos = "<｜start▁of▁sentence｜>";
+        let eos = "<｜end▁of▁sentence｜>";
+        let rendered = crate::prompt::jinja::single_turn_text(
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            sos,
+            eos,
+            user_text,
+            enable_thinking,
+        )?
+        .unwrap_or_else(|| {
+            let bot_suffix = if thinking { "<think>" } else { "</think>" };
+            format!(
+                "{sos}<|System|>\nyou are a helpful assistant.{eos}\
+                 {sos}<|User|>{user_text}{eos}\
+                 {sos}<|Bot|>{bot_suffix}"
+            )
+        });
+        let ids = tokenizer.encode(
+            &rendered,
+            crate::core::tokenizer::EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        return Ok((ids, Vec::new()));
+    }
+    let qwen35 = is_qwen35(arch)?;
+    // LFM2 / LFM2.5 have their own `role\n{content}\n` template. Rendering
+    // them with qwen ChatML happens to work (the model copes) but diverges
+    // from the CLI and from the official Jinja template — and it is the
+    // reason lfm2moe answers carried a stray `<think>` opener. Route them to
+    // the LFM2 builder, which is also what the CLI uses.
+    if matches!(arch, "lfm2moe" | "lfm2") {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for LFM2 architectures".into());
+        }
+        let lfm_messages: Vec<crate::prompt::Lfm2Message<'_>> = messages
+            .iter()
+            .filter(|m| matches!(m.role.as_str(), "system" | "user" | "assistant"))
+            .map(|m| crate::prompt::Lfm2Message {
+                role: m.role.as_str(),
+                content: m.text.as_str(),
+            })
+            .collect();
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        // LFM2 / LFM2.5 reasoning is opt-in via the prompt tail. Default
+        // is to leave the reasoning block on (matches the CLI flag and
+        // the upstream Jinja default for thinking-tuned variants);
+        // `enable_thinking = false` injects `\n\n` so the model skips
+        // straight to the answer.
+        let thinking = enable_thinking.unwrap_or(true);
+        let ids = crate::prompt::build_lfm2_chat_prompt_with_thinking(
+            &tokenizer,
+            &lfm_messages,
+            thinking,
+        )?;
+        let images: Vec<Vec<u8>> = messages
+            .iter()
+            .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+            .collect();
+        return Ok((ids, images));
+    }
+    if arch == "qwen3vl" && !tools.is_empty() {
+        return Err("Function tools are unsupported for Qwen3VL text generation".into());
+    }
+    // Falcon-H1 speaks Qwen-flavoured ChatML (`{role}`), so it
+    // shares the Qwen-family multi-turn renderer below — but it has no
+    // tool-call grammar and no vision path, so refuse tools here rather
+    // than silently rendering a tool prompt the model ignores.
+    if arch == "falcon-h1" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Falcon-H1 text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Falcon-H1 text generation".into());
+        }
+    }
+    // Dory speaks the same ChatML dialect as Falcon-H1 and has neither a
+    // tool-call grammar nor a vision path.
+    if arch == "dory" {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for Dory text generation".into());
+        }
+        if messages.iter().any(|m| !m.images.is_empty()) {
+            return Err("Image input is unsupported for Dory text generation".into());
+        }
+    }
+    let llama_family = matches!(
+        arch,
+        "llama" | "nanbeige" | "exaone" | "k2-horizon" | "granite" | "phi3" | "glm4" | "mistral3"
+    );
+    // Nemotron-3 Nano (4B and the 30B-A3B MoE) is ChatML, but it has to be
+    // rendered the way the CLI renders it: the CLI encodes the built-in
+    // ChatML text with `add_special: true` (so the prompt carries the BOS
+    // the GGUF's pre-tokenizer asks for) and without the empty think block
+    // the qwen builder appends. Routing it through `build_qwen_chat_prompt`
+    // gave the server a different prompt than the CLI -- 19 tokens against
+    // 15 for the same message -- and therefore a different answer.
+    let nemotron_family = matches!(arch, "nemotron_h" | "nemotron_h_moe");
+    if nemotron_family {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for the Nemotron-3 Nano family".into());
+        }
+        if messages.iter().any(|message| !message.images.is_empty()) {
+            return Err("Image input is unsupported for the Nemotron-3 Nano family".into());
+        }
+        let last_user = messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .ok_or_else(|| "Nemotron chat needs a user message".to_string())?;
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        let ids = crate::prompt::build_nemotron_chat_prompt(&tokenizer, &turns)?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
+        return Ok((ids, images));
+    }
+    if llama_family {
+        if !tools.is_empty() {
+            return Err("Function tools are unsupported for llama-family architectures".into());
+        }
+        // Llama-family templates CAN express history (nanbeige ChatML,
+        // granite start_of_role, plain llama `{role}\n{content}\n`). Render
+        // the whole conversation instead of only the last user turn — the old
+        // behaviour dropped system/assistant/earlier-user turns, so the model
+        // forgot everything it had been told. k2-horizon's control tokens have
+        // no multi-turn shape and the builder rejects it explicitly.
+        let last_user = messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .ok_or_else(|| "Llama-family chat needs a user message".to_string())?;
+        let tokenizer = BPETokenizer::from_gguf_metadata(|key| source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+        let turns: Vec<(&str, &str)> = messages
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.role.as_str(),
+                    "system" | "developer" | "user" | "assistant"
+                )
+            })
+            .map(|m| (m.role.as_str(), m.text.as_str()))
+            .collect();
+        // Llama-family templates bake the `THINK_MARK` opener into the
+        // assistant turn by default (matches the CLI sentinel). Reasoning
+        // models (k2-horizon, MiniCPM5) accept `enable_thinking = false`
+        // to suppress the reasoning block in the prompt tail; for plain
+        // llama / nanbeige / granite / glm4 the flag is ignored.
+        let thinking = enable_thinking.unwrap_or(false);
+        let ids = crate::models::llama::trunk::build_prompt_tokens_from_turns(
+            source, &tokenizer, &turns, thinking,
+        )?;
+        let images = messages[last_user]
+            .images
+            .iter()
+            .map(|i| i.bytes.clone())
+            .collect();
+        return Ok((ids, images));
+    }
+    validate_tools(tools, choice)?;
+    if messages.is_empty() {
+        return Err("No messages provided".into());
+    }
+    let last_user = messages.iter().rposition(|m| m.role == "user");
+    if matches!(arch, "qwen35" | "qwen35moe" | "sensenova_loop")
+        && messages
+            .iter()
+            .enumerate()
+            .any(|(index, message)| !message.images.is_empty() && Some(index) != last_user)
+    {
+        return Err("Image input is supported only in the final user message".into());
+    }
+    // Collect the attached images up front: the `turns` flattening below keeps
+    // only (role, text), and the local `messages` binding is later shadowed by
+    // the `QwenMessage` view. Dropping them here would silently degrade an
+    // image request to text-only.
+    let attached_images: Vec<Vec<u8>> = messages
+        .iter()
+        .flat_map(|m| m.images.iter().map(|i| i.bytes.clone()))
+        .collect();
+    if qwen35 && last_user.is_none() {
+        return Err("Qwen35 needs a user query in messages".into());
+    }
+    let mut turns: Vec<(String, String)> = Vec::new();
+    let merged_instructions = if tools.is_empty() {
+        0
+    } else {
+        messages
+            .iter()
+            .take_while(|message| matches!(message.role.as_str(), "system" | "developer"))
+            .count()
+    };
+    if !tools.is_empty() {
+        let leading_instructions = messages[..merged_instructions]
+            .iter()
+            .map(|message| {
+                if qwen35 {
+                    message.text.trim()
+                } else {
+                    message.text.as_str()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let mut instruction = if qwen35 { QWEN35_TOOLS } else { QWEN3_TOOLS }.to_owned();
+        for tool in tools {
+            let mut function = json!({"name":tool.name,"parameters":tool.parameters});
+            if let Some(description) = &tool.description {
+                function["description"] = Value::String(description.clone());
+            }
+            instruction.push('\n');
+            instruction.push_str(&json!({"type":"function","function":function}).to_string());
+        }
+        instruction.push_str(if qwen35 { QWEN35_CALL } else { QWEN3_CALL });
+        match choice {
+            ToolChoice::Auto => {}
+            ToolChoice::None => {
+                instruction.push_str("\n\nDo not call any functions. Answer with ordinary text.")
+            }
+            ToolChoice::Required => {
+                instruction.push_str("\n\nYou must call at least one of the provided functions.")
+            }
+            ToolChoice::Named(name) => instruction.push_str(&format!(
+                "\n\nYou must call the function {} and no other function.",
+                Value::String(name.clone())
+            )),
+        }
+        if !leading_instructions.is_empty() {
+            if qwen35 {
+                instruction.push_str("\n\n");
+                instruction.push_str(&leading_instructions);
+            } else {
+                instruction = format!("{leading_instructions}\n\n{instruction}");
+            }
+        }
+        turns.push(("system".into(), instruction));
+    }
+    let mut i = 0;
+    while i < messages.len() {
+        let message = &messages[i];
+        if message.role != "assistant" && !message.calls.is_empty() {
+            return Err("Only assistant messages may contain tool calls".into());
+        }
+        if message.role != "tool" && message.call_id.is_some() {
+            return Err("Only tool results may contain a call ID".into());
+        }
+        match message.role.as_str() {
+            "system" | "developer" => {
+                if i < merged_instructions {
+                    i += 1;
+                    continue;
+                }
+                if qwen35 && message.role == "system" && i != 0 {
+                    return Err("Qwen35 system message must be at the beginning".into());
+                }
+                turns.push((
+                    "system".into(),
+                    if qwen35 {
+                        message.text.trim().into()
+                    } else {
+                        message.text.clone()
+                    },
+                ));
+            }
+            "user" => turns.push((
+                "user".into(),
+                if qwen35 {
+                    message.text.trim().into()
+                } else {
+                    message.text.clone()
+                },
+            )),
+            "assistant" => {
+                let text = if qwen35 {
+                    message.text.trim()
+                } else {
+                    message.text.as_str()
+                };
+                let (reasoning, content) =
+                    if let Some((before, after)) = text.split_once("</think>") {
+                        (
+                            before.rsplit_once("<think>").map_or(before, |(_, v)| v),
+                            after.trim_start_matches('\n'),
+                        )
+                    } else {
+                        ("", text)
+                    };
+                let reasoning = if qwen35 {
+                    reasoning.trim()
+                } else {
+                    reasoning.trim_matches('\n')
+                };
+                let current = last_user.is_some_and(|last| i > last);
+                let mut content =
+                    if current && (qwen35 || i + 1 == messages.len() || !reasoning.is_empty()) {
+                        format!(
+                            "<think>\n{reasoning}\n</think>\n\n{}",
+                            content.trim_start_matches('\n')
+                        )
+                    } else {
+                        content.to_owned()
+                    };
+                for (call_index, call) in message.calls.iter().enumerate() {
+                    tag_name(&call.name)?;
+                    let arguments = call
+                        .arguments
+                        .as_object()
+                        .ok_or("Tool call arguments must be a JSON object")?;
+                    if call_index > 0 {
+                        content.push('\n');
+                    } else if !content.is_empty() {
+                        content.push_str(if qwen35 { "\n\n" } else { "\n" });
+                    }
+                    if qwen35 {
+                        content.push_str(&format!("<tool_call>\n<function={}>\n", call.name));
+                        for (name, value) in arguments {
+                            tag_name(name)?;
+                            let value = match value {
+                                Value::String(value) => {
+                                    if [
+                                        OPEN,
+                                        CLOSE,
+                                        "</parameter>",
+                                        "<parameter=",
+                                        "<function=",
+                                        "</function>",
+                                    ]
+                                    .iter()
+                                    .any(|tag| value.contains(tag))
+                                    {
+                                        return Err("Qwen35 string argument contains a reserved tool delimiter".into());
+                                    }
+                                    value.clone()
+                                }
+                                Value::Bool(true) => "True".into(),
+                                Value::Bool(false) => "False".into(),
+                                Value::Null => "None".into(),
+                                _ => value.to_string().replace('<', "\\u003c"),
+                            };
+                            content
+                                .push_str(&format!("<parameter={name}>\n{value}\n</parameter>\n"));
+                        }
+                        content.push_str("</function>\n</tool_call>");
+                    } else {
+                        content.push_str(&format!(
+                            "<tool_call>\n{{\"name\": {}, \"arguments\": {}}}\n</tool_call>",
+                            Value::String(call.name.clone()),
+                            call.arguments,
+                        ));
+                    }
+                }
+                turns.push(("assistant".into(), content));
+            }
+            "tool" => {
+                let mut responses = String::new();
+                while i < messages.len() && messages[i].role == "tool" {
+                    let result = &messages[i];
+                    if result.call_id.is_none() || !result.calls.is_empty() {
+                        return Err("Tool results need a call ID and cannot contain calls".into());
+                    }
+                    if !responses.is_empty() {
+                        responses.push('\n');
+                    }
+                    responses.push_str("<tool_response>\n");
+                    responses.push_str(if qwen35 {
+                        result.text.trim()
+                    } else {
+                        &result.text
+                    });
+                    responses.push_str("\n</tool_response>");
+                    i += 1;
+                }
+                turns.push(("user".into(), responses));
+                continue;
+            }
+            _ => return Err(format!("Unexpected message role: {}", message.role)),
+        }
+        i += 1;
+    }
+    let messages: Vec<QwenMessage<'_>> = turns
+        .iter()
+        .map(|(role, content)| QwenMessage { role, content })
+        .collect();
+    // WeVisOne has think tokens, but its trained assistant prefix contains none.
+    // The forced value wins over an explicit `enable_thinking: false`: the
+    // model has no thinking mechanism at all, so "off" is what it always
+    // does, and honouring the flag would insert the empty think block into a
+    // prompt the model was never trained on. The client's explicit request is
+    // still reported rather than dropped in silence.
+    let wevisone = crate::models::qwen3::is_wevisone(source);
+    if wevisone && enable_thinking == Some(false) {
+        log::warn!(
+            "enable_thinking=false is ignored for WeVisOne: its chat template has no thinking mode"
+        );
+    }
+    let thinking = enable_thinking.unwrap_or(false) || wevisone;
+    let ids = build_qwen_chat_prompt(tokenizer, &messages, thinking)?;
+    Ok((ids, attached_images))
+}
+
+pub struct OutputParser {
+    plain_text: bool,
+    qwen35: bool,
+    tools: HashMap<String, Value>,
+    choice: ToolChoice,
+    pending: String,
+    in_call: bool,
+    scan: usize,
+    quoted: bool,
+    escaped: bool,
+    text: String,
+    post_call_whitespace: String,
+    calls: Vec<ToolCall>,
+    error: Option<String>,
+    finished: bool,
+}
+
+impl OutputParser {
+    pub fn new(arch: &str, tools: &[Tool], choice: &ToolChoice) -> Self {
+        let plain_text = arch == crate::models::unlimited_ocr::MODEL_TYPE;
+        let arch = if plain_text {
+            Ok(false)
+        } else {
+            is_qwen35(arch)
+        };
+        let error = arch
+            .as_ref()
+            .err()
+            .cloned()
+            .or_else(|| validate_tools(tools, choice).err());
+        let error = error.or_else(|| {
+            (plain_text
+                && (!tools.is_empty() || !matches!(choice, ToolChoice::Auto | ToolChoice::None)))
+            .then(|| "Unlimited-OCR does not support tools".into())
+        });
+        Self {
+            plain_text,
+            qwen35: arch.unwrap_or(false),
+            tools: tools
+                .iter()
+                .map(|t| (t.name.clone(), t.parameters.clone()))
+                .collect(),
+            choice: choice.clone(),
+            pending: String::new(),
+            in_call: false,
+            scan: 0,
+            quoted: false,
+            escaped: false,
+            text: String::new(),
+            post_call_whitespace: String::new(),
+            calls: vec![],
+            error,
+            finished: false,
+        }
+    }
+
+    pub fn push(&mut self, text: &str) -> Result<Vec<Delta>, String> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        if self.finished {
+            return Err("Output parser already finished".into());
+        }
+        if self.plain_text {
+            let mut deltas = Vec::new();
+            self.emit_text(text.to_owned(), &mut deltas)?;
+            return Ok(deltas);
+        }
+        self.pending.push_str(text);
+        let result = self.drain();
+        if let Err(error) = &result {
+            self.error = Some(error.clone());
+        }
+        result
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<Delta>, String> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        if self.finished {
+            return Ok(vec![]);
+        }
+        let result = (|| {
+            let mut deltas = self.drain()?;
+            if self.in_call
+                || (self.pending.len() > 1
+                    && MARKERS
+                        .iter()
+                        .any(|tag| tag.starts_with(self.pending.as_str())))
+            {
+                return Err("truncated tool call or delimiter at end of generation".into());
+            }
+            if !self.pending.is_empty() {
+                let text = std::mem::take(&mut self.pending);
+                self.emit_text(text, &mut deltas)?;
+            }
+            match &self.choice {
+                ToolChoice::Required if self.calls.is_empty() => {
+                    return Err("Required tool choice produced no tool call".into())
+                }
+                ToolChoice::Named(name)
+                    if self.calls.is_empty()
+                        || self.calls.iter().any(|call| &call.name != name) =>
+                {
+                    return Err(format!(
+                        "Named tool choice must produce only calls to {name}"
+                    ))
+                }
+                _ => {}
+            }
+            self.finished = true;
+            Ok(deltas)
+        })();
+        if let Err(error) = &result {
+            self.error = Some(error.clone());
+        }
+        result
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn calls(&self) -> &[ToolCall] {
+        &self.calls
+    }
+
+    fn emit_text(&mut self, text: String, deltas: &mut Vec<Delta>) -> Result<(), String> {
+        if !self.calls.is_empty() && text.trim().is_empty() {
+            self.post_call_whitespace.push_str(&text);
+            return Ok(());
+        }
+        if !self.calls.is_empty() && !text.trim().is_empty() {
+            return Err("Generated non-whitespace text after a tool call".into());
+        }
+        if !text.is_empty() {
+            let text = format!("{}{text}", std::mem::take(&mut self.post_call_whitespace));
+            self.text.push_str(&text);
+            deltas.push(Delta::Text(text));
+        }
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<Vec<Delta>, String> {
+        let mut deltas = vec![];
+        loop {
+            if self.in_call {
+                if let Some(end) = self.call_close() {
+                    if end > MAX_CALL_BYTES {
+                        return Err("Tool call exceeds the 1 MiB parse limit".into());
+                    }
+                    let (name, arguments) = self.parse_call(&self.pending[..end])?;
+                    let index = self.calls.len();
+                    let id = format!("call_{}", next_call_id());
+                    deltas.push(Delta::ToolStart {
+                        index,
+                        id: id.clone(),
+                        name: name.clone(),
+                    });
+                    deltas.push(Delta::ToolArguments {
+                        index,
+                        fragment: Value::Object(arguments.clone()).to_string(),
+                    });
+                    deltas.push(Delta::ToolEnd { index });
+                    self.calls.push(ToolCall {
+                        id,
+                        name,
+                        arguments: Value::Object(arguments),
+                    });
+                    self.pending.drain(..end + CLOSE.len());
+                    self.in_call = false;
+                    self.scan = 0;
+                    self.quoted = false;
+                    self.escaped = false;
+                    continue;
+                }
+                if self.pending.len() > MAX_CALL_BYTES {
+                    return Err("Tool call exceeds the 1 MiB parse limit".into());
+                }
+                break;
+            }
+            let marker = MARKERS
+                .iter()
+                .filter_map(|tag| self.pending.find(tag).map(|i| (i, *tag)))
+                .min_by_key(|(i, _)| *i);
+            if let Some((position, _)) = marker {
+                if position > 0 {
+                    let text = self.pending.drain(..position).collect();
+                    self.emit_text(text, &mut deltas)?;
+                }
+                if self.pending.starts_with(OPEN) {
+                    if self.tools.is_empty() || matches!(self.choice, ToolChoice::None) {
+                        return Err("Model generated a tool call while tools are disabled".into());
+                    }
+                    self.pending.drain(..OPEN.len());
+                    self.post_call_whitespace.clear();
+                    self.in_call = true;
+                    continue;
+                }
+                if OPEN.starts_with(self.pending.as_str()) {
+                    break;
+                }
+                return Err("Malformed or unexpected tool delimiter outside a tool call".into());
+            }
+            let hold = (1..=self.pending.len().min(OPEN.len()))
+                .rev()
+                .find(|&n| {
+                    let start = self.pending.len() - n;
+                    self.pending.is_char_boundary(start)
+                        && MARKERS
+                            .iter()
+                            .any(|tag| tag.starts_with(&self.pending[start..]))
+                })
+                .unwrap_or(0);
+            let text = self.pending.drain(..self.pending.len() - hold).collect();
+            self.emit_text(text, &mut deltas)?;
+            break;
+        }
+        Ok(deltas)
+    }
+
+    // Keep quote state and scan position across chunks: a closing-tag literal
+    // inside a Qwen3 JSON string is data, and each byte is scanned only once.
+    fn call_close(&mut self) -> Option<usize> {
+        let bytes = self.pending.as_bytes();
+        while self.scan < bytes.len() {
+            let i = self.scan;
+            if self.quoted {
+                if self.escaped {
+                    self.escaped = false;
+                } else if bytes[i] == b'\\' {
+                    self.escaped = true;
+                } else if bytes[i] == b'"' {
+                    self.quoted = false;
+                }
+            } else if !self.qwen35 && bytes[i] == b'"' {
+                self.quoted = true;
+            } else if bytes[i] == b'<' {
+                let suffix = &bytes[i..];
+                if suffix.starts_with(CLOSE.as_bytes()) {
+                    return Some(i);
+                }
+                if CLOSE.as_bytes().starts_with(suffix) {
+                    return None;
+                }
+            }
+            self.scan += 1;
+        }
+        None
+    }
+
+    fn parse_call(&self, body: &str) -> Result<(String, Map<String, Value>), String> {
+        let (name, arguments) = if self.qwen35 {
+            let body = body
+                .trim()
+                .strip_prefix("<function=")
+                .ok_or("Qwen35 tool call must contain a function tag")?;
+            let (name, parameters) = body.split_once('>').ok_or("Malformed function tag")?;
+            let parameters = parameters
+                .strip_suffix("</function>")
+                .ok_or("Missing closing function tag")?;
+            let schema = self
+                .tools
+                .get(name)
+                .ok_or_else(|| format!("Unknown tool function: {name}"))?;
+            let properties = schema.get("properties").and_then(Value::as_object);
+            let mut rest = parameters.trim();
+            let mut arguments = Map::new();
+            while !rest.is_empty() {
+                rest = rest
+                    .strip_prefix("<parameter=")
+                    .ok_or("Malformed parameter tag")?;
+                let (key, after) = rest.split_once('>').ok_or("Malformed parameter name")?;
+                let field = properties
+                    .and_then(|fields| fields.get(key))
+                    .ok_or_else(|| format!("Unknown tool parameter: {key}"))?;
+                if arguments.contains_key(key) {
+                    return Err(format!("Duplicate tool parameter: {key}"));
+                }
+                let (raw, after) = after
+                    .split_once("</parameter>")
+                    .ok_or("Missing closing parameter tag")?;
+                // Remove only the template framing, not the string's whitespace.
+                let raw = raw.strip_prefix('\n').unwrap_or(raw);
+                let raw = raw.strip_suffix('\n').unwrap_or(raw);
+                let value = parameter_value(raw, field)?;
+                arguments.insert(key.into(), value);
+                rest = after.trim();
+            }
+            (name.to_owned(), arguments)
+        } else {
+            let value: Value = serde_json::from_str(body)
+                .map_err(|error| format!("Malformed Qwen3 tool JSON: {error}"))?;
+            let call = value
+                .as_object()
+                .ok_or("Qwen3 tool call must be a JSON object")?;
+            if call.len() != 2 {
+                return Err("Qwen3 tool call must contain only name and arguments".into());
+            }
+            let name = call
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("Tool call is missing its function name")?;
+            let arguments = call
+                .get("arguments")
+                .and_then(Value::as_object)
+                .ok_or("Tool call arguments must be a JSON object")?;
+            (name.to_owned(), arguments.clone())
+        };
+        let schema = self
+            .tools
+            .get(&name)
+            .ok_or_else(|| format!("Unknown tool function: {name}"))?;
+        validate_arguments(&arguments, schema)?;
+        Ok((name, arguments))
+    }
+}
+
+fn next_call_id() -> String {
+    // stdlib uniqueness across requests without introducing another dependency.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{t:x}_{n:x}")
+}
+
+fn matches_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
+fn valid_type(value: &Value, schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => matches_type(value, kind),
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|kind| matches_type(value, kind)),
+        None => true,
+        _ => false,
+    }
+}
+
+fn parameter_value(raw: &str, schema: &Value) -> Result<Value, String> {
+    if schema.get("type").is_none() || schema.get("type").and_then(Value::as_str) == Some("string")
+    {
+        return Ok(Value::String(raw.into()));
+    }
+    let json = match raw.trim() {
+        "True" => "true",
+        "False" => "false",
+        "None" => "null",
+        value => value,
+    };
+    if let Ok(value) = serde_json::from_str::<Value>(json) {
+        if valid_type(&value, schema) {
+            return Ok(value);
+        }
+    }
+    let string = Value::String(raw.into());
+    if valid_type(&string, schema) {
+        return Ok(string);
+    }
+    Err(format!(
+        "Tool parameter value does not match declared type {}",
+        schema.get("type").unwrap_or(&Value::Null)
+    ))
+}
+
+fn validate_arguments(arguments: &Map<String, Value>, schema: &Value) -> Result<(), String> {
+    let properties = schema.get("properties").and_then(Value::as_object);
+    for (name, value) in arguments {
+        let field = properties
+            .and_then(|fields| fields.get(name))
+            .ok_or_else(|| format!("Unknown tool parameter: {name}"))?;
+        if !valid_type(value, field) {
+            return Err(format!(
+                "Tool parameter {name} does not match its declared type"
+            ));
+        }
+    }
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for name in required.iter().filter_map(Value::as_str) {
+            if !arguments.contains_key(name) {
+                return Err(format!("Missing required tool parameter: {name}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MetaValue, MetaValueType};
+    use std::collections::HashMap;
+
+    fn tools() -> Vec<Tool> {
+        vec![Tool {
+            name: "lookup".into(),
+            description: Some("Find a city".into()),
+            parameters: json!({"type":"object","properties":{"city":{"type":"string"},"count":{"type":"integer"},"ratio":{"type":"number"},"ok":{"type":"boolean"},"filter":{"type":"object"},"items":{"type":"array"},"empty":{"type":"null"}},"required":["city"]}),
+        }]
+    }
+
+    /// A minimal BPE tokenizer: one token per character, plus the two think
+    /// markers so a prompt can be inspected for them.
+    fn thinking_tokenizer() -> crate::BPETokenizer {
+        let tokens = vec!["u", "s", "e", "r", "Ċ", "H", "i", "<think>", "</think>"];
+        let types = vec![1u32, 1, 1, 1, 1, 1, 1, 3, 4];
+        let metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".into(),
+                MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.pre".into(),
+                MetaValue::String("qwen2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".into(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    tokens
+                        .into_iter()
+                        .map(|value| MetaValue::String(value.into()))
+                        .collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".into(),
+                MetaValue::Array(
+                    MetaValueType::Uint32,
+                    types.into_iter().map(MetaValue::Uint32).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.merges".into(),
+                MetaValue::Array(MetaValueType::String, vec![]),
+            ),
+        ]);
+        crate::BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned()).unwrap()
+    }
+
+    struct MetadataOnly(HashMap<String, MetaValue>);
+
+    impl crate::core::tensor::TensorSource for MetadataOnly {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.0.get(key)
+        }
+        fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            panic!("the prompt builder must not touch tensors")
+        }
+        fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+            panic!("the prompt builder must not touch tensors")
+        }
+    }
+
+    /// The shipped thinking models branch on
+    /// `enable_thinking is defined and enable_thinking is false`: an
+    /// *undefined* value keeps the reasoning block, an explicit `false`
+    /// injects the empty one.
+    fn thinking_template() -> crate::prompt::jinja::JinjaChatTemplate {
+        crate::prompt::jinja::JinjaChatTemplate::compile(
+            "{% for m in messages %}{{ m.role }}\n{{ m.content }}\n{% endfor %}\
+             {% if add_generation_prompt %}assistant\n{% endif %}\
+             {%- if enable_thinking is defined and enable_thinking is false %}\
+            <think>\n\n</think>\n\n{% endif %}",
+            "test",
+        )
+        .unwrap()
+    }
+
+    fn prompt_ids(enable_thinking: Option<bool>) -> Vec<u32> {
+        let tokenizer = thinking_tokenizer();
+        let source = MetadataOnly(HashMap::new());
+        let messages = vec![Message {
+            role: "user".into(),
+            text: "hi".into(),
+            calls: Vec::new(),
+            call_id: None,
+            images: Vec::new(),
+        }];
+        let (ids, _) = build_prompt(
+            &source,
+            &tokenizer,
+            "qwen3",
+            &messages,
+            &[],
+            &ToolChoice::Auto,
+            enable_thinking,
+            &crate::prompt::jinja::Options::default(),
+            Some(&thinking_template()),
+        )
+        .unwrap();
+        ids
+    }
+
+    #[test]
+    fn a_missing_enable_thinking_keeps_the_models_own_default() {
+        // The contract the request field documents: "None means the model's
+        // training default". Handing the template an explicit `false` used
+        // to inject the empty think block into every thinking-tuned model,
+        // which is what turned a normal answer into a meta-comment loop.
+        let missing = prompt_ids(None);
+        let enabled = prompt_ids(Some(true));
+        let disabled = prompt_ids(Some(false));
+        assert_eq!(
+            missing, enabled,
+            "an absent enable_thinking must render like the thinking default"
+        );
+        assert_ne!(
+            missing, disabled,
+            "an explicit false must still be able to turn the reasoning block off"
+        );
+    }
+
+    #[test]
+    fn lfm3_plain_text_stream_is_accepted() {
+        let mut parser = OutputParser::new("lfm3", &[], &ToolChoice::Auto);
+        parser.push("Hello ").unwrap();
+        parser.push("世界!").unwrap();
+        parser.finish().unwrap();
+        assert_eq!(parser.text(), "Hello 世界!");
+        assert!(parser.calls().is_empty());
+    }
+
+    fn replay(arch: &str, raw: &str, split: usize) -> (String, Vec<ToolCall>) {
+        let mut parser = OutputParser::new(arch, &tools(), &ToolChoice::Auto);
+        let mut events = parser.push(&raw[..split]).unwrap();
+        events.extend(parser.push(&raw[split..]).unwrap());
+        events.extend(parser.finish().unwrap());
+        let mut text = String::new();
+        let mut streamed: Vec<(String, String, String, bool)> = vec![];
+        for event in events {
+            match event {
+                Delta::Text(value) => {
+                    assert!(!value.contains("tool_call"));
+                    text.push_str(&value);
+                }
+                Delta::ToolStart { index, id, name } => {
+                    assert_eq!(index, streamed.len());
+                    streamed.push((id, name, String::new(), false));
+                }
+                Delta::ToolArguments { index, fragment } => streamed[index].2.push_str(&fragment),
+                Delta::ToolEnd { index } => streamed[index].3 = true,
+            }
+        }
+        assert_eq!(text, parser.text());
+        assert_eq!(streamed.len(), parser.calls().len());
+        for (wire, call) in streamed.iter().zip(parser.calls()) {
+            assert_eq!((&wire.0, &wire.1), (&call.id, &call.name));
+            assert_eq!(
+                serde_json::from_str::<Value>(&wire.2).unwrap(),
+                call.arguments
+            );
+            assert!(wire.3);
+        }
+        (text, parser.calls().to_vec())
+    }
+
+    #[test]
+    fn qwen3_calls_do_not_leak_at_any_character_boundary() {
+        let raw = "天气：<tool_call>{\"name\":\"lookup\",\"arguments\":{\"city\":\"杭州 </tool_call>\"}}</tool_call>\n<tool_call>\n{\"name\":\"lookup\",\"arguments\":{\"city\":\"南京\"}}\n</tool_call>";
+        for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
+            let (text, calls) = replay("qwen3", raw, split);
+            assert_eq!(text, "天气：");
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].arguments["city"], "杭州 </tool_call>");
+            assert_ne!(calls[0].id, calls[1].id);
+        }
+        let mut parser = OutputParser::new("qwen3", &tools(), &ToolChoice::Auto);
+        for ch in raw.chars() {
+            parser.push(&ch.to_string()).unwrap();
+        }
+        parser.finish().unwrap();
+        assert_eq!(parser.text(), "天气：");
+        assert_eq!(parser.calls().len(), 2);
+    }
+
+    #[test]
+    fn qwen3_rejects_text_after_a_tool_call_at_any_character_boundary() {
+        let raw = "prefix<tool_call>{\"name\":\"lookup\",\"arguments\":{\"city\":\"杭州\"}}</tool_call> suffix";
+        for split in raw
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([raw.len()])
+        {
+            let mut parser = OutputParser::new("qwen3", &tools(), &ToolChoice::Auto);
+            let result = parser
+                .push(&raw[..split])
+                .and_then(|_| parser.push(&raw[split..]))
+                .and_then(|_| parser.finish());
+            assert!(
+                result.unwrap_err().contains("after a tool call"),
+                "split={split}"
+            );
+            assert_eq!(parser.text(), "prefix");
+        }
+    }
+
+    #[test]
+    fn qwen35_moe_uses_dense_chat_and_tool_grammar() {
+        assert!(is_qwen35("qwen35moe").unwrap());
+        let raw =
+            "<tool_call><function=lookup><parameter=city>杭州</parameter></function></tool_call>";
+        for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
+            let (text, calls) = replay("qwen35moe", raw, split);
+            assert!(text.is_empty());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "lookup");
+            assert_eq!(calls[0].arguments, json!({"city": "杭州"}));
+        }
+    }
+
+    #[test]
+    fn qwen35_parameters_keep_schema_types_and_string_whitespace() {
+        let raw = "查询：<tool_call>\n<function=lookup>\n<parameter=city>\n 杭州 \n</parameter>\n<parameter=count>2</parameter><parameter=ratio>0.5</parameter><parameter=ok>True</parameter><parameter=filter>{\"x\":1}</parameter><parameter=items>[1,\"a\"]</parameter><parameter=empty>None</parameter></function>\n</tool_call>";
+        for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
+            let (text, calls) = replay("qwen35", raw, split);
+            assert_eq!(text, "查询：");
+            assert_eq!(
+                calls[0].arguments,
+                json!({"city":" 杭州 ","count":2,"ratio":0.5,"ok":true,"filter":{"x":1},"items":[1,"a"],"empty":null})
+            );
+        }
+        let mut parser = OutputParser::new("qwen35", &tools(), &ToolChoice::Auto);
+        for ch in raw.chars() {
+            parser.push(&ch.to_string()).unwrap();
+        }
+        parser.finish().unwrap();
+        assert_eq!(parser.calls().len(), 1);
+    }
+
+    #[test]
+    fn normal_text_streams_before_finish_and_partial_markers_stay_private() {
+        let mut parser = OutputParser::new("qwen3", &tools(), &ToolChoice::Auto);
+        assert!(matches!(parser.push("你好").unwrap().as_slice(), [Delta::Text(s)] if s == "你好"));
+        assert!(parser.push("<tool_").unwrap().is_empty());
+        assert!(parser.finish().unwrap_err().contains("truncated"));
+        let mut parser = OutputParser::new("qwen3", &[], &ToolChoice::Auto);
+        parser.push("a < b").unwrap();
+        parser.finish().unwrap();
+        assert_eq!(parser.text(), "a < b");
+    }
+
+    #[test]
+    fn qwen35_multiple_calls_and_bounded_truncation() {
+        let call =
+            "<tool_call><function=lookup><parameter=city>杭州</parameter></function></tool_call>";
+        let raw = format!("{call}\n{call}");
+        for split in raw.char_indices().map(|(i, _)| i).chain([raw.len()]) {
+            let (text, calls) = replay("qwen35", &raw, split);
+            assert_eq!(text, "");
+            assert_eq!(calls.len(), 2);
+        }
+        for (arch, raw) in [
+            (
+                "qwen3",
+                "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"city\":\"杭州\"}}",
+            ),
+            (
+                "qwen35",
+                "<tool_call><function=lookup><parameter=city>杭州</parameter></function>",
+            ),
+        ] {
+            let mut parser = OutputParser::new(arch, &tools(), &ToolChoice::Auto);
+            parser.push(raw).unwrap();
+            assert!(parser.finish().unwrap_err().contains("truncated"));
+            assert!(parser.calls().is_empty());
+        }
+        let mut parser = OutputParser::new("qwen3", &tools(), &ToolChoice::Auto);
+        assert!(parser
+            .push(&format!("<tool_call>{}", "x".repeat(MAX_CALL_BYTES + 1)))
+            .unwrap_err()
+            .contains("parse limit"));
+    }
+
+    #[test]
+    fn malformed_unknown_and_wrong_architecture_calls_fail() {
+        let cases = [
+            ("qwen3", "<tool_call>{bad}</tool_call>"),
+            ("qwen3", "<tool_call>{\"name\":\"unknown\",\"arguments\":{}}</tool_call>"),
+            ("qwen3", "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"unknown\":1}}</tool_call>"),
+            ("qwen3", "<tool_call>{\"name\":\"lookup\",\"arguments\":{}}</tool_call>"),
+            ("qwen3", "<tool_call><function=lookup><parameter=city>x</parameter></function></tool_call>"),
+            ("qwen35", "<tool_call>{\"name\":\"lookup\",\"arguments\":{\"city\":\"x\"}}</tool_call>"),
+            ("qwen35", "<tool_call><function=lookup><parameter=city>x</parameter><parameter=count>2.5</parameter></function></tool_call>"),
+            ("qwen35", "<tool_call><function=lookup><parameter=city>x</parameter><parameter=city>y</parameter></function></tool_call>"),
+            ("qwen35", "<tool_call><function=lookup><parameter=wat>x</parameter></function></tool_call>"),
+            ("qwen35", "<tool_call><function=lookup><parameter=city>x</parameter></function></tool_call>suffix"),
+        ];
+        for (arch, raw) in cases {
+            let mut parser = OutputParser::new(arch, &tools(), &ToolChoice::Auto);
+            assert!(
+                parser.push(raw).and_then(|_| parser.finish()).is_err(),
+                "{arch}: {raw}"
+            );
+        }
+        for choice in [ToolChoice::Auto, ToolChoice::None] {
+            let mut parser = OutputParser::new("qwen3", &[], &choice);
+            assert!(parser.push("<tool_call>{}</tool_call>").is_err());
+        }
+        let mut parser = OutputParser::new("qwen3", &tools(), &ToolChoice::None);
+        assert!(parser.push("<tool_call>{}</tool_call>").is_err());
+    }
+
+    #[test]
+    fn required_and_named_choices_check_actual_calls_at_finish() {
+        for choice in [ToolChoice::Required, ToolChoice::Named("lookup".into())] {
+            let mut parser = OutputParser::new("qwen3", &tools(), &choice);
+            parser.push("normal answer").unwrap();
+            assert!(parser.finish().is_err());
+        }
+        let mut two = tools();
+        two.push(Tool {
+            name: "other".into(),
+            description: None,
+            parameters: json!({"type":"object","properties":{}}),
+        });
+        let mut parser = OutputParser::new("qwen3", &two, &ToolChoice::Named("lookup".into()));
+        parser
+            .push("<tool_call>{\"name\":\"other\",\"arguments\":{}}</tool_call>")
+            .unwrap();
+        assert!(parser.finish().is_err());
+    }
+
+    fn tokenizer() -> BPETokenizer {
+        let mut tokens: Vec<String> = (0..=255u32)
+            .map(|b| {
+                let visible =
+                    (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
+                let cp = if visible {
+                    b
+                } else {
+                    256 + (0..b)
+                        .filter(|v| {
+                            !((33..=126).contains(v)
+                                || (161..=172).contains(v)
+                                || (174..=255).contains(v))
+                        })
+                        .count() as u32
+                };
+                char::from_u32(cp).unwrap().to_string()
+            })
+            .collect();
+        tokens.extend(["<|im_start|>", "<|im_end|>", "<think>", "</think>"].map(str::to_owned));
+        let mut types = vec![MetaValue::Uint32(1); 256];
+        types.extend(vec![MetaValue::Uint32(3); 4]);
+        let metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".into(),
+                MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.pre".into(),
+                MetaValue::String("qwen2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".into(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    tokens.into_iter().map(MetaValue::String).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".into(),
+                MetaValue::Array(MetaValueType::Uint32, types),
+            ),
+            (
+                "tokenizer.ggml.merges".into(),
+                MetaValue::Array(MetaValueType::String, vec![]),
+            ),
+        ]);
+        BPETokenizer::from_gguf_metadata(|k| metadata.get(k).cloned()).unwrap()
+    }
+
+    struct TestSource(Option<MetaValue>);
+    impl crate::core::tensor::TensorSource for TestSource {
+        fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+            (key == crate::models::qwen3::WEVISONE_SOURCE_REVISION_KEY)
+                .then_some(self.0.as_ref())
+                .flatten()
+        }
+        fn tensor_info(&self, _name: &str) -> Option<&crate::core::tensor::TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, _name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+    fn source() -> std::sync::Arc<dyn crate::core::tensor::TensorSource> {
+        std::sync::Arc::new(TestSource(None))
+    }
+
+    fn user_message() -> Vec<Message> {
+        vec![Message {
+            role: "user".into(),
+            text: "question".into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        }]
+    }
+
+    #[test]
+    fn mage_template_keeps_images_in_each_turn_and_validates_history() {
+        let template = crate::prompt::jinja::JinjaChatTemplate::compile(
+            include_str!("../../../../tests/fixtures/mage_vl/chat_template.jinja")
+                .trim_end_matches('\n'),
+            "Mage fixture",
+        )
+        .unwrap();
+        let source = source();
+        let tokenizer = tokenizer();
+        let mut messages = user_message();
+        messages[0]
+            .images
+            .push(super::super::image_input::ImageRef::new(vec![1], "first"));
+        messages[0].images[0].text_offset = Some(4);
+        messages.push(Message {
+            role: "assistant".into(),
+            text: "earlier".into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        });
+        let mut second = user_message().remove(0);
+        second.text = "later".into();
+        second
+            .images
+            .push(super::super::image_input::ImageRef::new(vec![2], "second"));
+        messages.push(second);
+        let render = |messages: &[Message]| {
+            build_prompt(
+                source.as_ref(),
+                &tokenizer,
+                "mage_vl",
+                messages,
+                &[],
+                &ToolChoice::None,
+                Some(false),
+                &Default::default(),
+                Some(&template),
+            )
+        };
+        let mut single = user_message();
+        single[0]
+            .images
+            .push(super::super::image_input::ImageRef::new(vec![1], "single"));
+        let cli_ids = crate::prompt::jinja::render_tokens(
+            &tokenizer,
+            &template,
+            &[crate::prompt::jinja::ChatMessage {
+                role: "user".into(),
+                content: json!([{"type":"image"},{"type":"text","text":single[0].text}]),
+            }],
+            true,
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(render(&single).unwrap().0, cli_ids);
+        let (ids, images) = render(&messages).unwrap();
+        assert_eq!(images, vec![vec![1], vec![2]]);
+        let text = tokenizer.decode(&ids, true);
+        assert_eq!(text.matches("<|image_pad|>").count(), 2);
+        assert!(text.contains("ques<|vision_start|><|image_pad|><|vision_end|>tion"));
+        assert!(text.find("earlier").unwrap() < text.find("later").unwrap());
+        assert!(text.ends_with("<think>\n\n</think>\n\n"));
+        messages[0].role = "unknown".into();
+        assert!(render(&messages).is_err());
+        messages[0].role = "user".into();
+        messages[0].call_id = Some("bad".into());
+        assert!(render(&messages).is_err());
+    }
+
+    #[test]
+    fn hybrid_images_stay_in_the_final_user_turn() {
+        let tokenizer = tokenizer();
+        let mut messages: Vec<Message> = [
+            ("system", "instructions"),
+            ("user", "first question"),
+            ("assistant", "first answer"),
+            ("user", "followup"),
+        ]
+        .into_iter()
+        .map(|(role, text)| Message {
+            role: role.into(),
+            text: text.into(),
+            calls: vec![],
+            call_id: None,
+            images: vec![],
+        })
+        .collect();
+        let image = super::super::image_input::ImageRef::new(vec![1], "test image");
+        for arch in ["qwen35", "qwen35moe", "sensenova_loop"] {
+            for index in 0..3 {
+                messages[index].images.push(image.clone());
+                assert!(build_prompt(
+                    source().as_ref(),
+                    &tokenizer,
+                    arch,
+                    &messages,
+                    &[],
+                    &ToolChoice::Auto,
+                    None,
+                    &crate::prompt::jinja::Options::default(),
+                    None,
+                )
+                .unwrap_err()
+                .contains("only in the final user message"));
+                messages[index].images.clear();
+            }
+            messages[3].images.push(image.clone());
+            let (ids, images) = build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                arch,
+                &messages,
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(images, vec![image.bytes.clone()]);
+            let text = tokenizer.decode(&ids, true);
+            for content in ["instructions", "first question", "first answer", "followup"] {
+                assert!(text.contains(content), "{text}");
+            }
+            messages[3].images.clear();
+        }
+    }
+
+    #[test]
+    fn wevisone_assistant_prefix_has_no_thinking_markers() {
+        let tokenizer = tokenizer();
+        for marked in [false, true] {
+            let source = TestSource(marked.then(|| MetaValue::String("released".into())));
+            let (ids, _) = build_prompt(
+                &source,
+                &tokenizer,
+                "qwen3vl",
+                &user_message(),
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap();
+            let text = tokenizer.decode(&ids, true);
+            assert_eq!(text.contains("<think>"), !marked, "{text}");
+            if marked {
+                assert!(text.ends_with("<|im_start|>assistant\n"), "{text}");
+            }
+        }
+    }
+
+    /// The compiled template has to be what renders, not a fresh resolve.
+    ///
+    /// Before, the request path folded the fallback into `Option::or`, whose
+    /// argument is evaluated eagerly, so the template was re-read from disk on
+    /// every request even on a cache hit. Deleting the file after startup is
+    /// the observable form of that: the cached copy must still answer, and the
+    /// uncached path must fail, proving the two really differ.
+    #[test]
+    fn the_compiled_template_answers_without_touching_disk_again() {
+        let dir = std::env::temp_dir().join("rust_model_inference_jinja_cache_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chat.jinja");
+        std::fs::write(&path, "CACHED-MARKER|{{ messages[0].content }}").unwrap();
+
+        let opts = crate::prompt::jinja::Options {
+            jinja: false,
+            file: Some(path.clone()),
+        };
+        let template = opts.resolve(&|_| None).unwrap().expect("file must resolve");
+
+        // Startup would have compiled this once; now the file disappears.
+        std::fs::remove_file(&path).unwrap();
+
+        let tokenizer = tokenizer();
+        let messages = user_message();
+
+        // Cached: still works, and the marker proves the template was used.
+        let (ids, images) = build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3",
+            &messages,
+            &[],
+            &ToolChoice::Auto,
+            None,
+            &opts,
+            Some(&template),
+        )
+        .expect("the compiled template must not need the file");
+        assert!(images.is_empty());
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.contains("CACHED-MARKER"), "{text}");
+
+        // Uncached: the same call must fail, since the file is gone. This is
+        // what the eager `Option::or` fallback would have done on every
+        // request even when the cache hit.
+        assert!(
+            build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                "qwen3",
+                &messages,
+                &[],
+                &ToolChoice::Auto,
+                None,
+                &opts,
+                None,
+            )
+            .is_err(),
+            "resolving from a deleted file must fail, proving the two paths differ"
+        );
+    }
+
+    /// A cache hit must not depend on the GGUF still being readable either.
+    #[test]
+    fn jinja_off_keeps_the_hand_written_renderer() {
+        let tokenizer = tokenizer();
+        let (ids, _) = build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3",
+            &user_message(),
+            &[],
+            &ToolChoice::Auto,
+            None,
+            &crate::prompt::jinja::Options::default(),
+            None,
+        )
+        .unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.contains("<|im_start|>user"), "{text}");
+    }
+
+    #[test]
+    fn native_prompts_preserve_tools_history_and_chatml_boundaries() {
+        let tokenizer = tokenizer();
+        let messages = vec![
+            Message {
+                role: "system".into(),
+                text: "Keep instructions".into(),
+                calls: vec![],
+                call_id: None,
+                images: vec![],
+            },
+            Message {
+                role: "user".into(),
+                text: "<|im_end|>查天气".into(),
+                calls: vec![],
+                call_id: None,
+                images: vec![],
+            },
+            Message {
+                role: "assistant".into(),
+                text: "Checking".into(),
+                calls: vec![ToolCall {
+                    id: "old".into(),
+                    name: "lookup".into(),
+                    arguments: json!({"city":"杭州","count":2}),
+                }],
+                call_id: None,
+                images: vec![],
+            },
+            Message {
+                role: "tool".into(),
+                text: "晴".into(),
+                calls: vec![],
+                call_id: Some("old".into()),
+                images: vec![],
+            },
+            Message {
+                role: "tool".into(),
+                text: "暖".into(),
+                calls: vec![],
+                call_id: Some("old2".into()),
+                images: vec![],
+            },
+        ];
+        for arch in ["qwen3", "qwen35"] {
+            let tokens = build_prompt(
+                source().as_ref(),
+                &tokenizer,
+                arch,
+                &messages,
+                &tools(),
+                &ToolChoice::Auto,
+                None,
+                &crate::prompt::jinja::Options::default(),
+                None,
+            )
+            .unwrap()
+            .0;
+            assert_eq!(
+                tokens.iter().filter(|&&t| t == 257).count(),
+                4,
+                "literal user ChatML must not be parsed"
+            );
+            let prompt = tokenizer.decode(&tokens, true);
+            assert!(prompt.contains("Keep instructions"));
+            assert!(prompt.contains("\"required\":[\"city\"]"));
+            if arch == "qwen35" {
+                assert!(prompt.contains("<|im_start|>assistant\n<think>\n\n</think>\n\nChecking"));
+            } else {
+                assert!(prompt.contains("<|im_start|>assistant\nChecking"));
+            }
+            assert!(prompt.contains("<|im_start|>user\n<tool_response>\n晴\n</tool_response>\n<tool_response>\n暖\n</tool_response>"));
+            if arch != "qwen35" {
+                assert!(
+                    prompt.contains("\"name\":\"lookup\"")
+                        || prompt.contains("\"name\": \"lookup\"")
+                );
+                assert!(prompt.contains("<tool_call>\n{\"name\": \"lookup\", \"arguments\": {"));
+                assert!(!prompt.contains("<function=lookup>"));
+            } else {
+                assert!(prompt.contains("<function=lookup>\n<parameter=city>\n杭州\n</parameter>"));
+            }
+        }
+        assert!(build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "qwen3vl",
+            &messages,
+            &tools(),
+            &ToolChoice::Auto,
+            None,
+            &crate::prompt::jinja::Options::default(),
+            None,
+        )
+        .unwrap_err()
+        .contains("unsupported"));
+        assert!(build_prompt(
+            source().as_ref(),
+            &tokenizer,
+            "llama",
+            &messages,
+            &tools(),
+            &ToolChoice::Auto,
+            None,
+            &crate::prompt::jinja::Options::default(),
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn developer_messages_keep_their_position_as_system_turns() {
+        let tokenizer = tokenizer();
+        let messages = vec![
+            Message {
+                role: "user".into(),
+                text: "question".into(),
+                calls: vec![],
+                call_id: None,
+                images: vec![],
+            },
+            Message {
+                role: "developer".into(),
+                text: "later instruction".into(),
+                calls: vec![],
+                call_id: None,
+                images: vec![],
+            },
+        ];
+        for arch in ["qwen3", "qwen3vl", "qwen35"] {
+            let prompt = tokenizer.decode(
+                &build_prompt(
+                    source().as_ref(),
+                    &tokenizer,
+                    arch,
+                    &messages,
+                    &[],
+                    &ToolChoice::Auto,
+                    None,
+                    &crate::prompt::jinja::Options::default(),
+                    None,
+                )
+                .unwrap()
+                .0,
+                true,
+            );
+            assert!(prompt.contains(
+                "<|im_start|>user\nquestion<|im_end|>\n<|im_start|>system\nlater instruction<|im_end|>"
+            ));
+        }
+    }
+
+    #[test]
+    fn leading_instructions_merge_into_the_tool_system_turn() {
+        let tokenizer = tokenizer();
+        for instructions in [
+            vec![Message {
+                role: "developer".into(),
+                text: "developer instruction".into(),
+                calls: vec![],
+                call_id: None,
+                images: vec![],
+            }],
+            vec![
+                Message {
+                    role: "system".into(),
+                    text: "system instruction".into(),
+                    calls: vec![],
+                    call_id: None,
+                    images: vec![],
+                },
+                Message {
+                    role: "developer".into(),
+                    text: "developer instruction".into(),
+                    calls: vec![],
+                    call_id: None,
+                    images: vec![],
+                },
+            ],
+        ] {
+            let mut messages = instructions;
+            messages.push(Message {
+                role: "user".into(),
+                text: "question".into(),
+                calls: vec![],
+                call_id: None,
+                images: vec![],
+            });
+            for arch in ["qwen3", "qwen35"] {
+                let prompt = tokenizer.decode(
+                    &build_prompt(
+                        source().as_ref(),
+                        &tokenizer,
+                        arch,
+                        &messages,
+                        &tools(),
+                        &ToolChoice::Auto,
+                        None,
+                        &crate::prompt::jinja::Options::default(),
+                        None,
+                    )
+                    .unwrap()
+                    .0,
+                    true,
+                );
+                assert_eq!(
+                    prompt.matches("<|im_start|>system\n").count(),
+                    1,
+                    "{arch}: {prompt}"
+                );
+                let developer = prompt.find("developer instruction").unwrap();
+                let user = prompt.find("<|im_start|>user\nquestion").unwrap();
+                assert!(developer < user, "{arch}: {prompt}");
+                if messages[0].role == "system" {
+                    assert!(
+                        prompt.find("system instruction").unwrap() < developer,
+                        "{arch}: {prompt}"
+                    );
+                }
+            }
+        }
+    }
+}

@@ -7,12 +7,20 @@
 
 ```
 converter/
+├── arktts/       ← Audio8-TTS-Realistic-Air BF16 主模型 / F32 codec 转换器
 ├── breeze/       ← 原版与扩展精度转换器
+├── bge/          ← BAAI BGE 文本和视觉 embedding 转换器
+├── clm/          ← Contrastive-LM 投影头转换器和测试
 ├── dots/         ← dots writer、转换器和测试
 ├── dreamx/       ← DreamX 转换器和测试
+├── edge0/        ← Edge0-35B MLX-affine 转换器、反量化与测试
+├── gliner/       ← GLiNER 转换器和测试
+├── minimind/     ← MiniMind-3 safetensors → `qwen3`/`qwen3moe`、MiniMind2-MoE `.pth` → `minimind2moe` 转换器和测试
 ├── neohorse/     ← NeoHorse 转换器和测试
+├── ovisocr3/     ← OvisOCR3 Qwen3.5 主模型/mmproj 转换器和测试
 ├── qwen_drive/   ← Qwen-Drive 转换器、测试和 source-tensors.json
 ├── vibevoice/    ← 原版与扩展精度转换器
+├── yue2/         ← YuE2 主模型与 decoder-only VAE 转换器
 └── utils/        ← 共享 GGUF reader/writer、dtype 和量化工具
 ```
 
@@ -20,14 +28,231 @@ converter/
 
 | 路径 | 备注 |
 |---|---|
+| `arktts/convert_arktts.py` | [Audio8-TTS-Realistic-Air](arktts/README.md)：保留主模型 BF16 payload，展开 codec weight norm，导出共享 bundle ID 的配套 GGUF |
 | `breeze/convert_breeze_plain.py` | 原版未量化导出 |
 | `breeze/convert_breeze.py` | 支持 `--quant bf16/f16/f32/q8_0/q4_0/q4_mixed` 和 `--codec-quant f32/q8_0` |
+| `bge/convert_bge.py` | BAAI `bge-*` 的 BERT/XLM-R、Mistral、Qwen2/Qwen3、Gemma2 权重转换；支持单文件/分片 safetensors 与 PyTorch ZIP `.bin`，输出 `F32` 或 `Q8_0` |
+| `bge/convert_bge_visual.py` | Visualized BGE `.pth`、BGE-VL CLIP、LLaVA-NeXT、Screenshot 转换；文本、视觉、projector 和 tokenizer 合入一个 GGUF，输出 `F32` 或 `Q8_0` |
+| `clm/convert_clm.py` | CLM 投影头 F32 导出 |
 | `dots/convert_dots_tts.py` | dots 专用 writer 与 BF16/Q8_0 导出 |
 | `dreamx/convert_dreamx_creator.py` | DreamX 主模型/mmproj 配对导出 |
+| `edge0/convert_edge0.py` | Edge0-35B MLX-affine；支持 `--quant lossless/f32/f16/q8_0/q4_0` |
+| `edge0/mlx_affine.py` | MLX-affine 反量化（与 `MlxAffineKernel::decode_row` 对齐） |
+| `minimind/convert_minimind3.py` | [MiniMind-3 dense/MoE](minimind/README.md)：官方 safetensors → `qwen3`/`qwen3moe`；支持 `--quant f16/f32/bf16/q8_0/q4_0`，校验 Q/K norm、routed expert、tied `lm_head`、tokenizer 和全部形状；K-quant 因 2432 行宽不支持 |
+| `minimind/convert_minimind2moe.py` | [MiniMind2-MoE](minimind/README.md)：`.pth` → `minimind2moe`；支持 `--quant f16/f32/bf16/q8_0/q4_0`，校验 routed/shared expert、tied `lm_head` 和 tokenizer；K-quant 因 640/1728 行宽不支持 |
 | `neohorse/convert_neohorse.py` | 使用固定 llama.cpp 版本导出 |
+| `ovisocr3/convert_ovisocr3.py` | 校验 ModelScope OvisOCR3 的 473 个 BF16 张量，并用固定 llama.cpp `b96806d96061049a5b574269b049bf6241d63d46` 导出 `qwen35` 主模型和 `qwen3vl` mmproj |
 | `qwen_drive/convert_qwen_drive.py` | `inspect`、`export`、`verify` |
 | `vibevoice/convert_vibevoice_asr_original.py` | 原版导出 |
 | `vibevoice/convert_vibevoice_asr.py` | 扩展精度导出 |
+| `yue2/convert_yue2.py` | 导出 `yue2` 主模型和 `yue2_vae` F32 decoder；`--quant bf16/f32/q8_0/q4_0/q4_k_m/q6_k`（默认 `bf16` 零拷贝）；固定协议/tokenizer metadata，原子写入并读回校验 |
+
+## 共享量化工具
+
+`utils/quantize_gguf.py` 把任意 GGUF 转成更小的格式，读取 F32 或 BF16 源，
+`--format` 支持 `q8_0` / `q4_k` / `q5_k` / `q6_k` / `f16` / `bf16`，
+`--keep NAME` 让指定张量留在源类型（运行时按浮点向量读取的张量需要它）。
+
+K-quant 的编码器在 `utils/kquants.py`：`q4_k` / `q6_k` 是 ggml 参考实现的
+向量化移植，`q5_k` 是新增的，同样按 `quantize_row_q5_K_ref` 的结构实现
+（16 个候选 scale、`get_scale_min_k4` 的 12 字节子 scale/min 表、
+第五位单独存 32 字节）。布局与运行时自己的解码器一致，可以用
+`cargo run --example kquant_roundtrip -- <fmt> <values.f32> <payload.bin>`
+交叉验证：把 Python 编码的 payload 交给 Rust 解码器，看还原误差。
+
+| 格式 | 每 256 值字节数 | 相对 RMS 误差（高斯样本） |
+|---|---|---|
+| `q4_k` | 144 | 7.2 % |
+| `q5_k` | 176 | 3.6 % |
+| `q6_k` | 210 | 1.8 % |
+## OvisOCR3
+
+先按文件下载 ModelScope `ATH-MaaS/OvisOCR3`，并准备固定的 llama.cpp
+`b96806d96061049a5b574269b049bf6241d63d46` checkout：
+
+```bash
+.venv/bin/python -m tools.converter.ovisocr3.convert_ovisocr3 \
+  models/OvisOCR3 \
+  --llama-cpp /path/to/llama.cpp \
+  --outfile models/OvisOCR3-BF16.gguf \
+  --mmproj-outfile models/mmproj-OvisOCR3-BF16.gguf
+```
+
+The adapter validates the architecture, all 473 BF16 source tensors,
+tokenizer and image processor before conversion. It also exports the source
+pixel budget (`65536` to `16777216`) into the mmproj metadata. Without these
+keys, the runtime falls back to another model's defaults: a 32x32 input yields
+9 image tokens instead of the source configuration's 64 tokens at 256x256.
+The official README's `448²` to `2880²` values are explicit vLLM overrides,
+not the checkpoint's saved defaults; this exporter preserves the saved values.
+
+The validated ModelScope source has `model.safetensors` SHA-256
+`aa2311c6b22b07cf3afe9aac6e8bcb02a2b19dd8671b2a91d0b144071577e600` and is
+1,706,030,528 bytes. Runtime validation uses a separate fixed llama.cpp
+`11fe0215` reference, whose GDN epsilon formula matches the existing runtime.
+The older converter pin uses a different normalization formula, so its failing
+strict recurrent comparison is not a rounding-only difference or a passing
+alignment result. Exact checks cover tokenizer/structure/embedding/initial
+zero state; accumulated arithmetic uses independently calibrated numerical
+bounds. See [the validation report](../oracle/ovisocr3/README.md) for pins,
+hashes, commands, results and coverage limits.
+
+
+## BGE 转换与推理
+
+先从 ModelScope 下载某个 `BAAI/bge-*` 原始仓库到 `models/`，再在仓库根目录运行：
+
+```bash
+.venv/bin/python -m tools.converter.bge.convert_bge \
+  models/BAAI-bge-small-en-v1-5 models/bge-small-en-v1.5-Q8_0.gguf \
+  --quant Q8_0
+
+./target/release-fast/rust-model-inference \
+  --model models/bge-small-en-v1.5-Q8_0.gguf \
+  --prompt "hello world" --embedding --embedding-output raw
+```
+
+2026-10-13 核对 ModelScope `BAAI` 组织后的纯文本 embedding 清单，共 20 个：
+
+| 家族 | 模型 | 向量维度 |
+|---|---|---|
+| 英文 BERT | `bge-small-en`、`bge-small-en-v1.5` | 384 |
+| 中文 BERT | `bge-small-zh`、`bge-small-zh-v1.5` | 512 |
+| BERT base | `bge-base-en`、`bge-base-en-v1.5`、`bge-base-zh`、`bge-base-zh-v1.5` | 768 |
+| BERT large | `bge-large-en`、`bge-large-en-v1.5`、`bge-large-zh`、`bge-large-zh-v1.5`、`bge-large-zh-noinstruct` | 1024 |
+| XLM-R | `bge-m3`、`bge-m3-retromae`、`bge-m3-unsupervised` | 1024 |
+| Mistral | `bge-en-icl` | 4096 |
+| Qwen2 | `bge-code-v1` | 1536 |
+| Gemma2 | `bge-multilingual-gemma2` | 3584 |
+| Qwen3 | `bge-reasoner-embed-qwen3-8b-0923` | 4096 |
+
+转换器覆盖上述 BERT
+（中英文 small/base/large、v1.5 和 `bge-large-zh-noinstruct`）、XLM-R
+（`bge-m3`、`bge-m3-retromae`、`bge-m3-unsupervised`），以及 decoder-only
+（`bge-en-icl`、`bge-code-v1`、`bge-multilingual-gemma2`、
+`bge-reasoner-embed-qwen3-8b-0923`）。BERT/XLM-R GGUF 使用 `bert` 架构；
+Mistral 使用标准 GGUF `llama` 架构和 Q/K RoPE 排列；其余 decoder 使用
+`qwen2`、`qwen3` 或 `gemma2` 架构。BERT/XLM-R 取 CLS 向量，decoder 取
+最后一个有效 token 的 hidden state，然后做 L2 归一化。
+
+`F32` 将源浮点权重导出为 F32；`Q8_0` 量化 token embedding 和线性层，norm、bias、
+位置表和 token-type 表保留 F32。转换前会检查 tokenizer 词表、必需张量、shape
+和未处理的额外张量，避免静默丢权重。
+
+BGE-M3 输出 dense 向量；sparse/ColBERT 输出和 reranker 不在本次范围内。
+Decoder query 的任务指令或 ICL 示例由调用方按模型卡拼入 prompt。
+
+另有 8 个视觉仓库，合计覆盖 28 个 BGE embedding 仓库。
+`bge-visualized` 仓库的两个 checkpoint 分别转换：
+
+| 家族 | ModelScope BAAI 仓库 / checkpoint | 向量维度 | GGUF 架构与标记 |
+|---|---|---|---|
+| EVA02 + BERT | `bge-visualized/Visualized_base_en_v1.5.pth` | 768 | `bert` + `bge.visualized` |
+| EVA02 + XLM-R | `bge-visualized/Visualized_m3.pth` | 1024 | `bert` + `bge.visualized` |
+| CLIP | `BGE-VL-base`、`BGE-VL-large` | 512 / 768 | `bge-vl-clip` |
+| LLaVA-NeXT + Mistral | `BGE-VL-v1.5-zs`、`BGE-VL-v1.5-mmeb`、`BGE-VL-MLLM-S1`、`BGE-VL-MLLM-S2` | 4096 | `llama` + `bge.llava_next` |
+| Qwen2.5-VL | `BGE-VL-Screenshot` | 2048 | `qwen2vl` + `bge.screenshot` |
+
+```bash
+# 下载时明确列出所需文件；分片模型必须下载全部权重分片。
+models/.venv/bin/modelscope download --model BAAI/BGE-VL-base \
+  model.safetensors config.json tokenizer.json preprocessor_config.json \
+  --local_dir models/BAAI-BGE-VL-base
+
+.venv/bin/python -m tools.converter.bge.convert_bge_visual \
+  models/BAAI-BGE-VL-base models/BGE-VL-base-Q8_0.gguf --quant Q8_0
+
+# Visualized checkpoint 使用对应原始文本仓库的 config/tokenizer。
+.venv/bin/python -m tools.converter.bge.convert_bge_visual \
+  models/BAAI-bge-visualized/Visualized_base_en_v1.5.pth \
+  models/Visualized-base-Q8_0.gguf --quant Q8_0 \
+  --text-model models/BAAI-bge-base-en-v1-5
+
+./target/release-fast/rust-model-inference \
+  --model models/BGE-VL-base-Q8_0.gguf --embedding --embedding-output raw \
+  --image picture.png --prompt "a red car"
+
+./target/release-fast/rust-model-server \
+  --model models/BGE-VL-base-Q8_0.gguf --embedding --port 8080
+```
+
+视觉 BGE 支持纯文本、单图和图文融合，均只需一个 GGUF，无需 `--mmproj`。
+HTTP `/v1/embeddings` 接受 `{"image":"<base64 image>","prompt":"a red car"}`；
+纯文本仍用 `input`，音频/视频返回 400。
+CLIP 的文本与图像 projection 相加后归一化；Visualized 的视觉 tokens 与文本一起
+经过 BERT/XLM-R；LLaVA/Screenshot 取最后 hidden state 后归一化。
+LLaVA 默认使用官方 candidate `[INST]` 模板，支持直传完整 `[INST]` query 模板。
+Screenshot 自动选择 text/image/query 模板，也支持直传完整 ChatML 模板，最长 3072 tokens。
+Q8_0 只量化行宽为 32 倍数的二维矩阵，其余视觉权重保留 F32。
+视觉 decoder 使用 F32 KV；LLaVA 目前逐 token 处理约 2,900 个视觉 tokens，
+CPU 图像推理较慢，尚未做批量 prefill 的吞吐优化。
+
+验证：真实 BGE-small-en-v1.5、两版 small-zh、M3 原始权重转换和 CLI 已运行，
+四种文本 decoder 的真实分片索引共 1,490 个张量已核对。
+文本与四种视觉家族的 F32/Q8_0 合成 CLI fixtures、无 mmproj 的视觉 HTTP 路径通过。
+真实 CLIP base/large、Visualized base/M3 的 F32/Q8_0，及 Screenshot、LLaVA-v1.5-zs 的 Q8_0 已完成三种输入检查；完整覆盖及哈希见 [验证记录](../oracle/bge/verification.json)。
+按本次要求，量化、F16/BF16 舍入、GELU 查表和其它有损算子全部跳过数值对齐；
+7 类无损标量算子的 44 组输入、208,828 个 F32 位模式与固定 GGML Oracle 一致。
+Tokenizer 独立比较 IDs；这些检查不建立完整模型、SIMD 或 Q8_0 的逐位结论。
+见 [Oracle 复现与边界](../oracle/bge/README.md)。
+
+```bash
+BGE_RUST_BIN=target/release-fast/rust-model-inference \
+  BGE_SERVER_BIN=target/release-fast/rust-model-server \
+  .venv/bin/python -m unittest tools.converter.bge.test_convert_bge \
+  tools.converter.bge.test_convert_bge_visual tools.oracle.bge.test_compare -v
+```
+
+## yue2 量化支持现状
+
+VAE 恒为 F32，仅主模型可量化。只有 338 个 transformer 投影 + 2 个
+`time_embedder` 矩阵参与量化；1-D norm、两个 184704 宽的词表矩阵以及
+position / bridge 查表保持 BF16（loader 走 `load_f32_tensor`，且对量化误差最敏感）。
+
+| `--quant` | 体积 | 张量 | 转换耗时 | Rust 端加载 | 验证 |
+|---|---|---|---|---|---|
+| `bf16` (default) | 7.26 GB | 628 × BF16 | 零拷贝 | ✅ | 10.24 s 音频，peak 0.86 |
+| `f32` | 12.91 GB | 394 F32 + 234 BF16 | 快速 | ✅ | 用于排查量化误差 |
+| `q8_0` | 4.61 GB | 394 Q8_0 + 234 BF16 | 25 s | ✅ 加载 | ⚠ **NAR 崩坏**，见下 |
+| `q4_0` | 3.20 GB | 394 Q4_0 + 234 BF16 | ~50 s | ✅ | 类型往返校验通过 |
+| `ar_q8_0` | 5.94 GB | 196 Q8_0 + 198 BF16 | ~100 s | ✅ | AR -21%、端到端 -13%；**另一首曲子** |
+| `q4_k_m` | ~3.2 GB | 混合 Q4_K / Q6_K | Q6_K 已加速，完整导出待重测 | ✅ | 见下 |
+| `q6_k` | 3.93 GB | 394 Q6_K + 234 BF16 | 已批量化，完整导出待重测 | ✅ | 见下 |
+
+体积为按张量精确计算值（量化目标 394 个 / 2.82 B 参数，其余 0.81 B 保持 BF16）；
+`q8_0` 的 4.61 GB 与实测导出 4.62 GB 一致。
+
+`q4_k_m` 对 `v_proj` / `down_proj` 用 6-bit block，其余 4-bit，与 Edge0 的策略一致。
+
+> ⚠ **Q8_0 / Q4_0 会毁掉 YuE2 的 NAR 声学流。** 量化本身正常（逐张量反量化
+> SNR 约 45 dB），但 NAR 是 flow-matching 扩散求解，误差随步数放大：实测 1 步可听、
+> 4 步和 32 步都是一团浆糊，而同样配置下 BF16 完全正常。用
+> `RMI_YUE2_LEGACY_ATTN=1` 切回原始注意力后 Q8_0 一样崩坏，故与注意力实现无关。
+> **出成品音频必须用默认的 `bf16`**；量化模式仅供测速与 AR 阶段单点验证。
+> 详见 `docs/usage/yue2.md` §2.1。
+
+Q6_K 量化已改为 NumPy 分块向量化：保留 19 个候选及原有 F64 顺序累加、F32/F16
+舍入和编码布局，每批最多 1024 个 256 元素块，不新增依赖。与 `e7f0cc8` 的标量
+实现对照，M3 Max / Python 3.12 / NumPy 2.5.3 上，真实 YuE2
+`model.layers.0.mlp.down_proj.weight` 的前 1,048,576 个权重，三次中位数从
+7.886 s 降到 0.129 s（约 61 倍）；同一完整 2048×6144 矩阵单次对照从
+108.516 s 降到 1.504 s（约 72 倍），两组输出均逐字节一致。这是 Q6_K 编码耗时，
+**不是完整模型导出的提速倍数**；Q4_K 搜索及 NAR 的量化限制不变。
+
+批大小现在由 `K_SEARCH_MAX_BLOCKS = 256` 显式封顶，而不是从字节预算推出来：
+Q4_K 每个 super-block 的瞬时 F64 中间量约 40 KiB，5 GiB 预算会要 32k 块，
+中间量全部冲出缓存，峰值 RSS 达 5.5 GiB。单线程 NumPy、8.4M 值实测，Q4_K
+从 2.22 M values/s、5.5 GiB 变为 3.35 M values/s、150 MiB；搜索按
+super-block 独立，各批大小输出逐字节一致，定值摘要不变。
+
+回归检查：
+
+```bash
+python -m pytest -q tools/converter/utils/test_kquants.py \
+  tools/converter/edge0/test_convert_edge0.py tools/converter/yue2/test_convert_yue2.py
+```
+
+本机样例音频见 `models/YuE2-gguf/samples/`（`/models/` 已被 `.gitignore` 忽略，不随仓库分发）。
 
 ## breeze 量化支持现状
 
@@ -37,7 +262,7 @@ converter/
 | `f16` | `breeze-tts-2-F16.gguf` | BF16 → F16 重编码 | ✅ | 59 frames / 222K wav |
 | `f32` | `breeze-tts-2-F32.gguf` | BF16 → F32 重编码 | ✅ | 44 frames / 166K wav |
 | `q8_0` | `breeze-tts-2-Q8_0.gguf` | learned 2D weight 矩阵量化到 Q8_0 | ✅ | 29 frames / 17s **3.6× speedup**（v3 baseline；md5 `b051f3c1...`） |
-| `q4_0` | `breeze-tts-2-Q4_0.gguf` | learned 2D weight 矩阵量化到 Q4_0 | ⚠️ | 128 frames / 481K wav — **输出退化**；`docs/TODO.md#todo-004` |
+| `q4_0` | `breeze-tts-2-Q4_0.gguf` | learned 2D weight 矩阵量化到 Q4_0 | ⚠️ | 128 frames / 481K wav — **输出退化**；`docs/develop/TODO.md#todo-004-breeze-q4_0-不可用--走-per-tensor-混合精度路径` |
 
 `--codec-quant` 默认 `f32`；可设 `q8_0` 把 Mimi codec 的 learned 2D weight 也量化。
 
@@ -48,6 +273,49 @@ converter/
 
 这些张量走 `core::tensor::load_f32_tensor`（仅 F32/BF16）。量化它们会破坏
 loader；除非 `load_f32_tensor` 也扩到接受 Q 类型，否则永远保留源 dtype。
+
+## edge0 量化支持现状
+
+Edge0-35B 的源 checkpoint **已经是 MLX 4-bit affine 量化**（`group_size=64`，
+router 为 8-bit），不是原始 BF16。所以这里的 `--quant` 语义与 breeze 相反：
+除 `lossless` 外都是**第二次**有重量化。
+
+| `--quant` | 输出张量类型 | payload | 用途 | Rust 端加载 |
+|---|---|---|---|---|
+| `lossless` (default) | packed U32 → GGUF I32 | 19.0 GB | 架构对齐，oracle 逐位验证 | ✅ `MlxAffineKernel` |
+| `f32` | 全部矩阵 → F32 | 129 GiB | affine 展开的最高保真参考 | ✅ 但内存不足时不可用 |
+| `f16` | 全部矩阵 → F16 | 64.6 GiB | 通用 GGML 消费者 | ✅ |
+| `q8_0` | 全部矩阵 → Q8_0 | 34.3 GiB | 通用 GGML 消费者 | ✅ |
+| `q4_0` | 全部矩阵 → Q4_0 | 18.2 GiB | 通用 GGML 消费者 | ✅ |
+
+`lossless` 保持字节完全一致，因此是唯一能跑 scalar oracle 的格式。其他模式把
+affine group 展开成 F32 后重新编码，`scales`/`biases` 随之合并进矩阵、不再单独
+输出；norm、SSM 参数和 LoRA 仍保留源精度。metadata 记录 `edge0.quant.mode`，
+`edge0.quant.group_size` 只在 `lossless` 下出现。
+
+`load_affine` 按张量类型分派：I32 走 `load_packed`（`MlxAffineKernel`），F32/F16/
+Q8_0/Q4_0 走 `load_expanded`（通用量化 kernel，按 expert 步长切片）。所以除
+`lossless` 外的所有模式都能被 Rust 加载推理。
+
+**历史实测（lossless 仍使用逐元素标量点积的版本；`Hello`，greedy，官方参考 `[9419, 0, 2500, 628]`）：**
+
+| 模式 | 文件大小 | 生成速度（8 线程） | token IDs |
+|---|---|---|---|
+| `lossless` | 19 GB | 0.1 t/s | ✅ 逐位一致 |
+| `q4_0` | 18.2 GB | **22.9 t/s** | ✅ 逐位一致 |
+| `q8_0` | 34.3 GB | 16.8 t/s | ✅ 逐位一致 |
+| `f16` | 64.6 GB | 8.7 t/s | ✅ 逐位一致 |
+
+当时 `q4_0` 因复用通用量化 kernel，实测比 `lossless` 快 **229×**，是推荐的生产格式。
+当前 lossless 已改用按行解码和共享 SIMD 点积，MoE 也接入了线程池；上表不是当前版本的性能测量。
+`f32` 需要 129 GiB，原测试机器内存不足。
+
+反量化公式（`mlx_affine.py` 与 `src/ops/kernel/mlx_affine.rs` 必须一致）：
+
+```
+value(row, col) = bf16(scales[group]) * q + bf16(biases[group])
+group           = row * (n_in // 64) + col // 64
+```
 
 ## utils 现状（`converter/utils/gguf.py`）
 
@@ -79,7 +347,11 @@ PYTHONPATH=. python3 -m unittest \
   tools.converter.neohorse.test_convert_neohorse \
   tools.converter.qwen_drive.test_convert_qwen_drive \
   tools.converter.vibevoice.test_convert_vibevoice_asr_original \
-  tools.converter.vibevoice.test_convert_vibevoice_asr
+  tools.converter.vibevoice.test_convert_vibevoice_asr \
+  tools.converter.yue2.test_convert_yue2
+
+# edge0 的反量化测试是 pytest 风格（用 parametrize），单独跑
+PYTHONPATH=. python3 -m pytest tools/converter/edge0/test_convert_edge0.py
 ```
 
 ## 不变原则

@@ -6,10 +6,44 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use image::RgbImage;
 
-use crate::models::qwen3::tts::codec::encode_wav_pcm16;
+use crate::format::wav::encode_wav_pcm16_channels;
+
+/// The external encoder the video writer and the muxer shell out to.
+pub const FFMPEG: &str = "ffmpeg";
+
+/// Check that `program` can be started.
+fn require_program(program: &str) -> Result<(), String> {
+    match Command::new(program)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "{program} is installed but exited with {status}; the video path needs a working {program}"
+        )),
+        Err(error) => Err(format!(
+            "{program} is required to write the video but could not be started: {error}. \
+             It is a runtime dependency of the video path, not a model component: install it \
+             (for example `winget install Gyan.FFmpeg`, `apt install ffmpeg`, or \
+             `brew install ffmpeg`) and make sure it is on PATH."
+        )),
+    }
+}
+
+/// Check that ffmpeg is available.
+///
+/// The video writer and the muxer shell out to ffmpeg, so a machine without
+/// it cannot write the video. Checking it before the sampling and the VAE
+/// decode turns a failure at the end of a long run into a failure at the
+/// start of it.
+pub fn require_ffmpeg() -> Result<(), String> {
+    require_program(FFMPEG)
+}
 
 pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
-    encode_wav_pcm16(samples, sample_rate).map_err(|error| error.to_string())
+    encode_wav_pcm16_channels(samples, sample_rate, 1)
 }
 
 pub fn write_wav_atomic(
@@ -105,12 +139,17 @@ impl FfmpegVideoWriter {
                 temp_path.display()
             )
         })?;
-        let mut child = Command::new("ffmpeg")
+        let mut child = Command::new(FFMPEG)
             .args(ffmpeg_video_args(width, height, fps, &temp_path)?)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .spawn()
-            .map_err(|error| format!("Start ffmpeg for DreamX video: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Start ffmpeg for DreamX video: {error}. {FFMPEG} is a runtime dependency \
+                     of the video path: install it and make sure it is on PATH."
+                )
+            })?;
         let stdin = child
             .stdin
             .take()
@@ -191,7 +230,7 @@ pub fn mux_audio_atomic(
             temp_path.display()
         )
     })?;
-    let status = Command::new("ffmpeg")
+    let status = Command::new(FFMPEG)
         .arg("-y")
         .arg("-i")
         .arg(video)
@@ -202,7 +241,12 @@ pub fn mux_audio_atomic(
         .arg("mp4")
         .arg(&temp_path)
         .status()
-        .map_err(|error| format!("Start ffmpeg for DreamX mux: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "Start ffmpeg for DreamX mux: {error}. {FFMPEG} is a runtime dependency \
+                 of the video path: install it and make sure it is on PATH."
+            )
+        })?;
     if !status.success() {
         let _ = std::fs::remove_file(&temp_path);
         return Err(format!("DreamX mux ffmpeg exited with {status}"));
@@ -293,5 +337,16 @@ mod tests {
             .windows(2)
             .any(|values| values == ["-pix_fmt", "rgb24"]));
         assert!(args.windows(2).any(|values| values == ["-r", "24"]));
+    }
+
+    /// A missing external program has to read as a runtime dependency, not
+    /// as a model problem: the fix is installing it, not re-downloading
+    /// weights.
+    #[test]
+    fn a_missing_external_program_is_reported_as_a_runtime_dependency() {
+        let error = super::require_program("rmi-no-such-program").unwrap_err();
+        assert!(error.contains("rmi-no-such-program"), "{error}");
+        assert!(error.contains("runtime dependency"), "{error}");
+        assert!(error.contains("on PATH"), "{error}");
     }
 }

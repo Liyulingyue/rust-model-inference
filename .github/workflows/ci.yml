@@ -15,15 +15,106 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
 
+  x86:
+    name: x86 dispatch regressions
+    # Ubuntu 26.04's loader requires F16C; this job also runs with it masked.
+    runs-on: ubuntu-24.04
+    env:
+      # Keep feature detection dynamic when QEMU removes an ISA feature.
+      RUSTFLAGS: -C target-cpu=x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require native SIMD coverage
+        run: |
+          test "$(uname -m)" = x86_64
+          for feature in avx2 fma f16c; do
+            grep -qw "$feature" /proc/cpuinfo
+          done
+      - run: cargo test --locked --lib ops::softmax::tests::softmax_approx_avx2_
+      - run: 'cargo test --locked --lib ops::math::exp::tests::'
+      - run: 'cargo test --locked --lib ops::kernel::q8_0::'
+      - run: cargo test --locked --lib raw_hidden_
+      - run: 'cargo test --locked --lib models::vela3::'
+      - run: 'cargo test --locked --lib models::qwen3::tests::'
+      - run: 'cargo test --locked --lib models::qwen3::vision::tests::'
+      - run: 'cargo test --locked --lib core::tensor::tests::'
+      # The loader unification's differential test: the shared loader has to
+      # agree with the per-model loaders it replaced, tensor by tensor. The
+      # synthetic half needs no checkpoint, so it runs here; the real-weight
+      # half is `#[ignore]`d and runs with `--ignored` on a machine that has
+      # the GGUFs.
+      - run: cargo test --locked --test todo003_loader_diff
+      - run: 'cargo test --locked --lib format::safetensors::tests::'
+      - run: cargo test --locked --test system_one_cli
+      - run: 'cargo test --locked --lib models::nemotron_reuse::'
+      - run: cargo test --locked --test nemotron_reuse_cli
+      - run: cargo test --locked --lib pjit
+      - run: cargo test --locked --lib image_generation
+      - name: FastFrames-L model, transport and oracle regressions
+        run: |
+          cargo test --locked --lib fastframes_l
+          cargo test --locked --lib video_generation
+          python3 -m venv target/fastframes-ci-venv
+          target/fastframes-ci-venv/bin/python -m pip install numpy==2.3.4
+          target/fastframes-ci-venv/bin/python -m unittest tools.oracle.fastframes_l.test_compare
+      - run: python3 -m unittest discover -s tools/oracle/vela3 -p 'test_*.py'
+      - run: python3 -m unittest discover -s tools/oracle/minicpmv -p 'test_*.py'
+      - run: cargo test --locked --lib ggml_dots_honor_scalar_dispatch
+      - run: RMI_SCALAR=1 cargo test --locked --lib ggml_dots_honor_scalar_dispatch
+      - run: cargo test --locked --lib hy_mt2_
+      - run: cargo test --locked --lib hy_
+      - run: RMI_SCALAR=1 cargo test --locked --lib hy_
+      - run: 'cargo test --locked --lib ops::audio::'
+      - run: cargo test --locked --lib unlimited_ocr
+      - run: cargo test --locked --lib pivo
+      - run: cargo test --locked --lib woof
+      - name: Woof conversion and download regressions
+        run: |
+          python3 -m venv target/woof-ci-venv
+          target/woof-ci-venv/bin/python -m pip install -r tools/oracle/underdog_woof/requirements.txt
+          target/woof-ci-venv/bin/python -m unittest tools.converter.underdog_woof.test_convert_underdog_woof
+      - run: cargo test --locked --test pivo_cli
+      - run: 'cargo test --locked --lib models::diffusion::dreamx::kernels::tests::'
+      - run: cargo test --locked --test unlimited_ocr_cli
+      - run: cargo test --locked --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline
+      - name: Q8 dispatch without F16C
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-user
+          cargo test --locked --lib --no-run --message-format=json > target/x86-test-build.jsonl
+          test_bin=$(python3 -c 'import json; print(next(r["executable"] for line in open("target/x86-test-build.jsonl") if (r := json.loads(line)).get("executable") and r["target"]["kind"] == ["lib"]))')
+          qemu-x86_64 -cpu Haswell,-f16c "$test_bin" --exact ops::kernel::q8_0::dispatch::tests::avx2_without_f16c_uses_scalar --ignored
+
   vulkan:
     name: Vulkan compile and shaders
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools
+      - run: sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools mesa-vulkan-drivers libvulkan1
       - run: bash scripts/vulkan-shaders.sh check
       - run: cargo check --locked --features vulkan --lib
       - run: cargo check --locked --features vulkan --bin rust-model-inference
       - run: cargo check --locked --features vulkan --bin rust-model-server
       - run: cargo check --locked --features vulkan --examples
+      # TODO-050: the steps above never build the integration tests, so a test
+      # that needs a feature can break the build without CI noticing.
+      - run: cargo check --locked --all-targets
+      - run: cargo check --locked --all-targets --features vulkan,parity-trace
+      - run: 'cargo test --locked --features vulkan --lib compute::tests::'
+      - run: cargo test --locked --features vulkan --lib woof
+      - run: cargo test --locked --features vulkan --lib legacy_auto_requires_gpu_opt_in_before_initializing
+      - run: cargo test --locked --features vulkan --lib batched_linear_layout_
+      # Shape validation only -- no device needed, so it runs here. A Q8_0
+      # projection may be wider than 16384 now that the kernels chunk the
+      # input row; the guard that said otherwise kept Qwen3.8-27B off the
+      # device.
+      - run: cargo test --locked --features vulkan --lib q8_matmul_accepts_a_row_wider
+      - name: Grouped linear device regressions on Lavapipe
+        run: |
+          export VK_DRIVER_FILES="$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)"
+          test -n "$VK_DRIVER_FILES"
+          cargo test --locked --features vulkan --lib batched_linear_device_review_ -- --ignored --test-threads=1
+      - run: cargo test --locked --features vulkan --lib raw_hidden_
+      - run: 'cargo test --locked --features vulkan --lib qwen_image_2_1::gpu::tests::'
+      - run: cargo test --locked --features vulkan --test qwen_image_2_1_unit --test qwen_image_2_1_pipeline

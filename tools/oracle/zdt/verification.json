@@ -1,0 +1,158 @@
+{
+  "validated_on": "2026-11-05",
+  "host": "aarch64 Linux, CPU (NEON), 8 inference threads",
+  "profile": "release-fast",
+  "oracle": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "commit": "11fe02151f79c41d0d4af7da708755d73b9c0da6",
+    "patch": "llama-trace.patch",
+    "second_reference": "the upstream TaichuAI/ZDTaichu5.0-9B checkpoint, run in PyTorch"
+  },
+  "comparison": "Exact tokenizer IDs; numerical bounds for the quantized and approximate operators. No whole-model bitwise parity claim.",
+  "files": [
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q4_K_M.gguf",
+      "sha256": "83bda0ff1a752979b99c895bec84f2d6cfff0c3ab4c32bdc2da731774a4ac2f0",
+      "bytes": 5629101440,
+      "role": "text tower"
+    },
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/mmproj-ZDTaichu5.0-9B-BF16.gguf",
+      "sha256": "96f58047108b8f251b2b244f52e0b44be853f1231dffccc90787c898ee6b9684",
+      "bytes": 1647178144,
+      "role": "projector"
+    },
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q5_K_M.gguf",
+      "sha256": "09283e9fd31c362b34749a9f1ef51827be26273fb78020729be565823167b955",
+      "role": "text tower"
+    },
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q6_K.gguf",
+      "sha256": "47de7513ed7d1332cf86cc2478b2d4d29a71b8215c3bf468c8e7fda8c4e0225c",
+      "role": "text tower"
+    },
+    {
+      "file": "models/ZDTaichu5.0-9B-GGUF/ZDTaichu5.0-9B-Q8_0.gguf",
+      "sha256": "b28340e7bd05104a3f67eeb4a11d092accbb75b536ea7373b081bc68f2190880",
+      "role": "text tower"
+    }
+  ],
+  "text": {
+    "prompt_tokens": 19,
+    "generated_ids": [
+      19,
+      248046
+    ],
+    "greedy_ids_match_reference": true,
+    "logits": [
+      {
+        "relative_l2": 0.003809717475773548,
+        "max_abs": 0.3119239807128906
+      },
+      {
+        "relative_l2": 0.0010481015760923087,
+        "max_abs": 0.15314865112304688
+      }
+    ],
+    "relative_l2_bound": 0.02
+  },
+  "tokenizer": {
+    "reference": "the pinned llama-tokenize",
+    "prompts": 5,
+    "result": "exact token IDs for every prompt"
+  },
+  "vision": {
+    "input": "512x512 already normalized debug RGB [0,0,1]",
+    "llama_cpp_f32_weights": {
+      "relative_l2": 0.00035952,
+      "bound": 0.001,
+      "reference": "identical BF16 values widened exactly to F32; F32 activations"
+    },
+    "llama_cpp_bf16_weights": {
+      "relative_l2": 0.0047034,
+      "bound": 0.01,
+      "reference": "the original BF16 weights"
+    },
+    "upstream_pytorch": {
+      "relative_l2": 0.00147076,
+      "bound": 0.005,
+      "reference": "the upstream C-RADIO tower in PyTorch, conditioner disabled and the GGUF's position table"
+    },
+    "tokens": 256,
+    "projection_dim": 4096
+  },
+  "quantization_tiers": {
+    "text": {
+      "Q4_K_M": {
+        "greedy": "4",
+        "jev_red": 0.9825,
+        "jev_blue": 0.0175,
+        "logit_gap": 4.03
+      },
+      "Q5_K_M": {
+        "greedy": "4",
+        "jev_red": 0.9447,
+        "jev_blue": 0.0553,
+        "logit_gap": 2.85
+      },
+      "Q6_K": {
+        "greedy": "4",
+        "jev_red": 0.941,
+        "jev_blue": 0.059,
+        "logit_gap": 2.77
+      },
+      "Q8_0": {
+        "greedy": "4",
+        "jev_red": 0.9159,
+        "jev_blue": 0.0841,
+        "logit_gap": 2.39
+      }
+    },
+    "projector": "only published as BF16; the F32 reference is the BF16 values widened exactly"
+  },
+  "entry_points": {
+    "cli_text": "What is 2+2? -> 4",
+    "cli_image": "blue / red / green fixtures -> blue / red / green; 256 vision tokens",
+    "http_text": "4",
+    "http_image": "blue / red / green fixtures -> blue / red / green",
+    "jev_text": "red 0.9825 / blue 0.0175",
+    "jev_image": "blue 0.9999 / red 0.0001",
+    "vulkan_text": "the 40-step greedy output is identical to the CPU's",
+    "vulkan_image": "the tower's matmuls run on the device (the compute trace prints backend=Vulkan); the attention, norm and softmax parts stay on the CPU, so the CLI still reports backend=partial mode=mmproj",
+    "invalid_nemotron_with_qwen3vl": "clip.projector_type nemotron_v2_vl is not supported with architecture qwen3vl"
+  },
+  "checks": {
+    "contracts": 8,
+    "vision_llama_cpp": 2,
+    "vision_upstream_pytorch": 1,
+    "tokenizer": 5,
+    "text_logits": 2,
+    "quantization_tiers": 4,
+    "entry_points": 8
+  },
+  "limitations": [
+    "The GGUF's position embeddings are the upstream 128x128 table interpolated with align_corners=True, while the upstream inference interpolates with align_corners=False. The tables differ by relative L2 0.629774 and the projected features by 0.2015. The Rust encoder implements the GGUF contract, which is also llama.cpp's.",
+    "The upstream path normalizes twice (the image processor with the ImageNet statistics, then the tower's conditioner with the CLIP statistics); llama.cpp and the Rust engine normalize once with the GGUF's statistics. The faithful upstream path differs from llama.cpp by relative L2 4.54.",
+    "The vision tower's device path covers the matmuls only: the attention, norm and softmax parts stay on the CPU, so the CLI still reports backend=partial mode=mmproj. The device path is also not faster than the CPU yet -- the projection takes 36.93 s on the CPU and 27.62 s on the device, because every weight rebuilds its device pipeline (see TODO-049).",
+    "The HTTP usage counters do not include the vision placeholder tokens, so an image request reports the text prompt's token count. This is the shared HTTP runtime's behaviour for every multimodal model, not specific to this one.",
+    "No Intern-Decision-4B-style larger variant, video or audio input, or performance benchmark is claimed."
+  ],
+  "baseline_failures": [
+    "qwen35_config_rejects_invalid_tensor_dimensions"
+  ],
+  "device_path": {
+    "status": "the projection matrices run on the Vulkan device",
+    "evidence": "RMI_COMPUTE_TRACE prints scope=linear backend=Vulkan rows=1034 for the tower's matmuls",
+    "relative_l2_f32_weights": 0.00035911,
+    "relative_l2_bf16_weights": 0.00470339,
+    "relative_l2_upstream_pytorch": 0.00147061,
+    "cpu_gpu_relative_difference": "about 5e-7 on every reference; the CPU and the device paths pass the same bounds",
+    "projection_time_first_call": {
+      "cpu": 36.934,
+      "device": 27.615
+    },
+    "note": "the first device call uploads the 1.6 GB of BF16 weights; the timings are the oracle test's encode of one 512x512 image",
+    "memory": "the tower's weights stay BF16 and borrow the mapped bytes, so the encoder holds no F32 copy of them; only the 3.9 MB patch embedding and the 1-D vectors are materialized"
+  }
+}

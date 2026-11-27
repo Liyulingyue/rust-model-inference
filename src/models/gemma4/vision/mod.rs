@@ -1,11 +1,72 @@
 pub mod config;
-use crate::core::tensor::{GGMLType, TensorSource};
+mod uv_config;
+mod uv_model;
+use crate::core::tensor::{typed_tensor_bytes, GGMLType, MetaValue, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{
     dot_f16_f16_bytes, dot_f32, f16_to_f32, f32_to_f16, rope_neox_inplace, softmax_inplace,
 };
 pub use config::Gemma4VisionConfig;
 use std::path::Path;
+pub use uv_config::Gemma4UvConfig;
+pub use uv_model::Gemma4UvVisionModel;
+
+/// Either the E2B (`gemma4v`) block-based vision encoder or the 12B
+/// (`gemma4uv`) unified patch-embedder. Both produce flat `Vec<f32>`
+/// patch embeddings in the trunk's embedding space; callers can stay
+/// agnostic of which architecture is loaded.
+pub enum Gemma4VisionEncoder<'a> {
+    E2b(Gemma4VisionModel<'a>),
+    Uv(Gemma4UvVisionModel<'a>),
+}
+
+impl<'a> Gemma4VisionEncoder<'a> {
+    pub fn encode_path(&self, path: &Path) -> Result<Vec<f32>, String> {
+        match self {
+            Gemma4VisionEncoder::E2b(model) => model.encode_path(path),
+            Gemma4VisionEncoder::Uv(model) => model.encode_path(path),
+        }
+    }
+    pub fn embd(&self) -> usize {
+        match self {
+            Gemma4VisionEncoder::E2b(_) => EMBED,
+            Gemma4VisionEncoder::Uv(model) => model.config.embd,
+        }
+    }
+    pub fn projection(&self) -> usize {
+        match self {
+            Gemma4VisionEncoder::E2b(_) => PROJECTION,
+            Gemma4VisionEncoder::Uv(model) => model.config.projection,
+        }
+    }
+}
+
+/// Build the appropriate vision encoder based on the mmproj's
+/// `clip.vision.projector_type`. Returns the E2B block-based vision model
+/// for `"gemma4v"` or the 12B unified patch-embedder for `"gemma4uv"`.
+pub fn build_vision_encoder<'a>(
+    source: &'a dyn TensorSource,
+    threads: usize,
+) -> Result<Gemma4VisionEncoder<'a>, String> {
+    let projector = source
+        .metadata("clip.vision.projector_type")
+        .and_then(|value| match value {
+            MetaValue::String(value) => Some(value.as_str()),
+            _ => None,
+        })
+        .ok_or("Missing metadata: clip.vision.projector_type")?;
+    match projector {
+        "gemma4uv" => Ok(Gemma4VisionEncoder::Uv(Gemma4UvVisionModel::from_source(
+            source, threads,
+        )?)),
+        other if other.starts_with("gemma4v") => Ok(Gemma4VisionEncoder::E2b(
+            Gemma4VisionModel::from_source(source, threads)?,
+        )),
+        other => Err(format!(
+            "Unsupported Gemma4 vision projector_type: {other:?}"
+        )),
+    }
+}
 
 const EMBED: usize = 768;
 const FFN: usize = 3072;
@@ -112,7 +173,7 @@ impl<'a> Gemma4VisionModel<'a> {
             "v.patch_embd.weight",
             &[PATCH as u64, PATCH as u64, 3, EMBED as u64],
         )?;
-        let positions = f32_tensor_bytes(
+        let positions = finite_f32_tensor_bytes(
             source,
             "v.position_embd.weight",
             &[EMBED as u64, POSITION_ROWS as u64, 2],
@@ -778,13 +839,21 @@ fn add_inplace(target: &mut [f32], source: &[f32]) -> Result<(), String> {
     validate_finite("Gemma4 residual", target)
 }
 
-pub(crate) fn resize_bicubic_pillow(
+pub fn resize_bicubic_pillow(
     rgb: &[u8],
     width: usize,
     height: usize,
     target_width: usize,
     target_height: usize,
 ) -> Result<Vec<u8>, String> {
+    if width == 0
+        || height == 0
+        || target_width == 0
+        || target_height == 0
+        || rgb.len() != checked_len("RGB resize", &[width, height, 3])?
+    {
+        return Err("Invalid RGB resize dimensions or payload".into());
+    }
     if width == target_width && height == target_height {
         return Ok(rgb.to_vec());
     }
@@ -907,7 +976,7 @@ fn f16_tensor<'a>(
     name: &str,
     dims: &[u64],
 ) -> Result<&'a [u8], String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F16)?;
+    let bytes = typed_tensor_bytes(source, name, dims, GGMLType::F16)?;
     if bytes.chunks_exact(2).any(|chunk| {
         let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
         bits & 0x7c00 == 0x7c00
@@ -917,12 +986,17 @@ fn f16_tensor<'a>(
     Ok(bytes)
 }
 
-fn f32_tensor_bytes<'a>(
+/// The F32 bytes of a tensor, rejecting a non-finite value.
+///
+/// [`crate::core::tensor::f32_tensor_bytes`] does the shape, type and
+/// payload checks; this adds the value check that Gemma4 wants on its
+/// weights.
+fn finite_f32_tensor_bytes<'a>(
     source: &'a dyn TensorSource,
     name: &str,
     dims: &[u64],
 ) -> Result<&'a [u8], String> {
-    let bytes = checked_tensor(source, name, dims, GGMLType::F32)?;
+    let bytes = crate::core::tensor::f32_tensor_bytes(source, name, dims)?;
     if bytes
         .chunks_exact(4)
         .any(|chunk| !f32::from_le_bytes(chunk.try_into().unwrap()).is_finite())
@@ -933,7 +1007,7 @@ fn f32_tensor_bytes<'a>(
 }
 
 fn f32_tensor(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<Vec<f32>, String> {
-    let bytes = f32_tensor_bytes(source, name, dims)?;
+    let bytes = finite_f32_tensor_bytes(source, name, dims)?;
     Ok(bytes
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
@@ -943,38 +1017,6 @@ fn f32_tensor(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<Vec
 fn f32_scalar(source: &dyn TensorSource, name: &str) -> Result<f32, String> {
     let values = f32_tensor(source, name, &[1])?;
     Ok(values[0])
-}
-
-fn checked_tensor<'a>(
-    source: &'a dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    kind: GGMLType,
-) -> Result<&'a [u8], String> {
-    let info = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if dims.is_empty() || dims.contains(&0) || info.dims != dims || info.ggml_type != kind {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            info.dims, info.ggml_type, dims, kind
-        ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid tensor byte size: {name}"))?,
-    )
-    .map_err(|_| format!("Tensor byte size does not fit usize: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    Ok(bytes)
 }
 
 fn read_f32(bytes: &[u8], index: usize) -> f32 {

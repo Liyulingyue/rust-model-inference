@@ -30,13 +30,42 @@ import numpy as np
 GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
+GGML_Q4_1 = 3
 GGML_Q8_0 = 8
+GGML_Q4K = 12
+GGML_Q5K = 13
+GGML_Q6K = 14
 GGML_I64 = 27
+GGML_I32 = 26
 GGML_BF16 = 30
 
 GGUF_ALIGNMENT = 32
 
-_ELEMENT_BYTES = {GGML_F32: 4, GGML_F16: 2, GGML_Q8_0: 0, GGML_Q4_0: 0, GGML_I64: 8, GGML_BF16: 2}
+_T_UINT8 = 0
+_T_INT8 = 1
+_T_UINT16 = 2
+_T_INT16 = 3
+_T_UINT32 = 4
+_T_INT32 = 5
+_T_FLOAT32 = 6
+_T_BOOL = 7
+_T_STRING = 8
+_T_ARRAY = 9
+_T_UINT64 = 10
+_T_INT64 = 11
+_T_FLOAT64 = 12
+
+_ELEMENT_BYTES = {
+    GGML_F32: 4,
+    GGML_F16: 2,
+    GGML_Q8_0: 0,
+    GGML_Q4_0: 0,
+    GGML_I32: 4,
+    GGML_I64: 8,
+    GGML_BF16: 2,
+}
+#: Bytes per 256-value super-block for the k-quants, keyed by GGML type.
+_K_BLOCK_BYTES = {GGML_Q4K: 144, GGML_Q5K: 176, GGML_Q6K: 210}
 
 
 def validated_dir(raw: str, *, must_exist: bool) -> Path:
@@ -52,6 +81,22 @@ class Tensor:
     dtype: str
     shape: tuple[int, ...]
     raw: bytes
+
+
+@dataclass(frozen=True)
+class MetaArray:
+    """Metadata array with an explicit GGUF element type."""
+
+    element_type: int
+    values: tuple
+
+
+@dataclass(frozen=True)
+class MetaScalar:
+    """Metadata scalar with an explicit GGUF element type."""
+
+    element_type: int
+    value: object
 
 
 @dataclass
@@ -255,11 +300,65 @@ def quantize_q4_0(values: np.ndarray) -> bytes:
     return out.tobytes()
 
 
+def quantize_q4_1(values: np.ndarray) -> bytes:
+    """GGML Q4_1: 32 values per block with a 20-byte layout.
+
+    Layout per block:
+      * f16 scale (the block range divided by 15)
+      * f16 min (the block minimum)
+      * 16 bytes of int4 nibbles (low nibble = element i, high nibble =
+        element 16 + i)
+
+    The repository's Q4_1 kernel (`ops::kernel::q4_1`) dequantizes a nibble
+    ``q`` as ``d * q + m`` with ``q`` read as an unsigned 0..15 value, so the
+    block keeps its minimum in ``m`` and spreads the range over the 15 steps
+    between ``m`` and ``m + 15 * d``. The scale and the minimum are rounded to
+    F16 *before* the payload is quantized, so the values the runtime sees are
+    the ones the grid was built from.
+    """
+    Q4_BLOCK = 32
+    Q4_BLOCK_BYTES = 20  # f16 scale + f16 min + 16 nibble-bytes
+    flat = np.ascontiguousarray(values, dtype=np.float32).reshape(-1)
+    if flat.size % Q4_BLOCK:
+        raise ValueError(
+            f"q4_1 payload {flat.size} elements is not a multiple of block size {Q4_BLOCK}"
+        )
+    blocks = flat.reshape(-1, Q4_BLOCK)
+    minimum = blocks.min(axis=1)
+    maximum = blocks.max(axis=1)
+    scale = ((maximum - minimum) / 15.0).astype(np.float16)
+    scale_f32 = scale.astype(np.float32)
+    min_f16 = minimum.astype(np.float16)
+    min_f32 = min_f16.astype(np.float32)
+    inverse = np.zeros_like(scale_f32)
+    nonzero = scale_f32 != 0.0
+    inverse[nonzero] = 1.0 / scale_f32[nonzero]
+    scaled = (blocks - min_f32[:, None]) * inverse[:, None]
+    # ``roundf`` in the reference converter rounds halfway cases away from
+    # zero; ``np.rint`` would use ties-to-even instead.
+    rounded = np.where(scaled >= 0.0, np.floor(scaled + 0.5), np.ceil(scaled - 0.5))
+    q_int = rounded.clip(0.0, 15.0).astype(np.uint8)
+    # GGML stores the first and second 16-element halves in the low and high
+    # nibbles of each byte, the same layout the Q4_0 payload uses.
+    low = q_int[:, :16]
+    high = q_int[:, 16:]
+    packed = (high << 4) | low
+    out = np.empty((blocks.shape[0], Q4_BLOCK_BYTES), dtype=np.uint8)
+    out[:, 0:2] = scale.view(np.uint8).reshape(-1, 2)
+    out[:, 2:4] = min_f16.view(np.uint8).reshape(-1, 2)
+    out[:, 4:] = packed
+    return out.tobytes()
+
+
 def bf16_bytes_to_q8_0(raw_bf16: bytes) -> bytes:
     words = np.frombuffer(raw_bf16, dtype="<u2")
     f32 = np.empty(words.size, dtype=np.float32)
     for i, bits in enumerate(words):
-        f32[i] = struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+        # Convert to a Python int first: numpy 2 keeps the uint16 dtype for
+        # `<<`, so `bits << 16` overflows to 0 and every weight decodes as
+        # zero.
+        b = int(bits)
+        f32[i] = struct.unpack("<f", struct.pack("<I", b << 16))[0]
     return quantize_q8_0(f32)
 
 
@@ -268,24 +367,81 @@ def _gguf_str(value: str) -> bytes:
     return struct.pack("<Q", len(raw)) + raw
 
 
+def _gguf_scalar(value_type: int, value: object) -> bytes:
+    formats = {
+        _T_UINT8: ("<B", int),
+        _T_INT8: ("<b", int),
+        _T_UINT16: ("<H", int),
+        _T_INT16: ("<h", int),
+        _T_UINT32: ("<I", int),
+        _T_INT32: ("<i", int),
+        _T_FLOAT32: ("<f", float),
+        _T_BOOL: ("<B", bool),
+        _T_UINT64: ("<Q", int),
+        _T_INT64: ("<q", int),
+        _T_FLOAT64: ("<d", float),
+    }
+    fmt, converter = formats.get(value_type, (None, None))
+    if fmt is None:
+        raise ValueError(f"unsupported GGUF metadata element type {value_type}")
+    return struct.pack(fmt, converter(value))
+
+
 def _gguf_meta_value(value) -> bytes:
+    if isinstance(value, MetaScalar):
+        return struct.pack("<I", value.element_type) + _gguf_scalar(value.element_type, value.value)
+    if isinstance(value, MetaArray):
+        payload = b"".join(_gguf_scalar(value.element_type, item) for item in value.values)
+        return (
+            struct.pack("<I", _T_ARRAY)
+            + struct.pack("<I", value.element_type)
+            + struct.pack("<Q", len(value.values))
+            + payload
+        )
     if isinstance(value, str):
-        return struct.pack("<I", 8) + _gguf_str(value)
+        return struct.pack("<I", _T_STRING) + _gguf_str(value)
     if isinstance(value, bool):
-        return struct.pack("<I", 27) + struct.pack("<I", int(value))
+        return struct.pack("<I", _T_BOOL) + struct.pack("<B", int(value))
     if isinstance(value, int):
-        return struct.pack("<I", 27) + struct.pack("<q", value)
+        if value < 0:
+            return struct.pack("<I", _T_INT64) + struct.pack("<q", value)
+        return struct.pack("<I", _T_UINT64) + struct.pack("<Q", value)
     if isinstance(value, float):
-        return struct.pack("<I", 6) + struct.pack("<d", value)
+        return struct.pack("<I", _T_FLOAT64) + struct.pack("<d", value)
     if isinstance(value, list):
-        payload = b"".join(_gguf_meta_value(v) for v in value)
-        return struct.pack("<I", 9) + struct.pack("<Q", len(value)) + payload
+        return struct.pack("<I", _T_ARRAY) + _gguf_array(value)
     raise TypeError(f"unsupported metadata value: {value!r}")
 
 
+def model_metadata_value(value):
+    """Use llama.cpp's model metadata types, preserving explicitly typed values."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return MetaScalar(_T_UINT32 if value >= 0 else _T_INT32, value)
+    if isinstance(value, float):
+        return MetaScalar(_T_FLOAT32, value)
+    if isinstance(value, list) and value:
+        if all(type(item) is int for item in value):
+            return MetaArray(_T_INT32, tuple(value))
+        if all(type(item) is float for item in value):
+            return MetaArray(_T_FLOAT32, tuple(value))
+    return value
+
+
 def _gguf_array(values: list) -> bytes:
-    payload = b"".join(_gguf_meta_value(v) for v in values)
-    return struct.pack("<Q", len(values)) + payload
+    if all(isinstance(value, str) for value in values):
+        payload = b"".join(_gguf_str(value) for value in values)
+        return struct.pack("<I", _T_STRING) + struct.pack("<Q", len(values)) + payload
+    if all(isinstance(value, bool) for value in values):
+        return struct.pack("<I", _T_BOOL) + struct.pack("<Q", len(values)) + bytes(values)
+    if all(isinstance(value, int) and 0 <= value <= 0xFFFFFFFF for value in values):
+        payload = b"".join(struct.pack("<I", value) for value in values)
+        return struct.pack("<I", _T_UINT32) + struct.pack("<Q", len(values)) + payload
+    if all(isinstance(value, float) for value in values):
+        payload = b"".join(struct.pack("<d", value) for value in values)
+        return struct.pack("<I", _T_FLOAT64) + struct.pack("<Q", len(values)) + payload
+    raise ValueError(f"mixed or unsupported metadata array: {values!r}")
 
 
 def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
@@ -299,6 +455,17 @@ def _tensor_nbytes(ggml_type: int, dims: tuple[int, ...]) -> int:
         if n % 32 != 0:
             raise ValueError(f"Q4_0 tensor with {n} elements not divisible by 32")
         return (n // 32) * 18
+    if ggml_type == GGML_Q4_1:
+        n = math.prod(dims)
+        if n % 32 != 0:
+            raise ValueError(f"Q4_1 tensor with {n} elements not divisible by 32")
+        return (n // 32) * 20
+    block_bytes = _K_BLOCK_BYTES.get(ggml_type)
+    if block_bytes is not None:
+        n = math.prod(dims)
+        if n % 256 != 0:
+            raise ValueError(f"k-quant tensor with {n} elements not divisible by 256")
+        return (n // 256) * block_bytes
     element_bytes = _ELEMENT_BYTES.get(ggml_type)
     if element_bytes is None:
         raise ValueError(f"unsupported ggml type {ggml_type}")
@@ -419,47 +586,90 @@ def gguf_dims(torch_dims: tuple) -> tuple:
 
 
 def _read_gguf(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tuple[int, ...], int, int]]]:
-    with path.open("rb") as source:
-        magic = source.read(4)
-        if magic != b"GGUF":
-            raise ValueError(f"{path}: not a GGUF file")
-        version = struct.unpack("<I", source.read(4))[0]
-        if version != 3:
-            raise ValueError(f"{path}: unsupported GGUF version {version}")
-        n_tensors = struct.unpack("<Q", source.read(8))[0]
-        n_metadata = struct.unpack("<Q", source.read(8))[0]
+    file_size = path.stat().st_size
+    position = 0
+    source = path.open("rb")
+
+    def take(fmt: str):
+        nonlocal position
+        size = struct.calcsize(fmt)
+        raw = source.read(size)
+        if len(raw) != size:
+            raise ValueError(f"{path}: truncated GGUF")
+        position += size
+        values = struct.unpack(fmt, raw)
+        return values[0] if len(values) == 1 else values
+
+    def string() -> str:
+        nonlocal position
+        length = take("<Q")
+        raw = source.read(length)
+        if len(raw) != length:
+            raise ValueError(f"{path}: truncated GGUF string")
+        position += length
+        return raw.decode("utf-8")
+
+    def value_for_type(value_type: int) -> object:
+        if value_type == _T_STRING:
+            return string()
+        if value_type == _T_BOOL:
+            return bool(take("<B"))
+        formats = {
+            _T_UINT8: "<B",
+            _T_INT8: "<b",
+            _T_UINT16: "<H",
+            _T_INT16: "<h",
+            _T_UINT32: "<I",
+            _T_INT32: "<i",
+            _T_FLOAT32: "<f",
+            _T_UINT64: "<Q",
+            _T_INT64: "<q",
+            _T_FLOAT64: "<d",
+        }
+        fmt = formats.get(value_type)
+        if fmt is None:
+            raise ValueError(f"{path}: unsupported GGUF metadata type {value_type}")
+        return take(fmt)
+
+    def value() -> object:
+        value_type = take("<I")
+        if value_type == _T_ARRAY:
+            item_type, count = take("<I"), take("<Q")
+            return [value_for_type(item_type) for _ in range(count)]
+        return value_for_type(value_type)
+
+    try:
+        if take("<4s") != b"GGUF" or take("<I") != 3:
+            raise ValueError(f"{path}: unsupported GGUF header")
+        tensor_count, metadata_count = take("<Q"), take("<Q")
         metadata: dict[str, object] = {}
-        for _ in range(n_metadata):
-            key_len = struct.unpack("<Q", source.read(8))[0]
-            key = source.read(key_len).decode("utf-8")
-            metadata[key] = _read_meta(source)
-        tensors: dict[str, tuple[int, tuple[int, ...], int, int]] = {}
-        for _ in range(n_tensors):
-            name_len = struct.unpack("<Q", source.read(8))[0]
-            name = source.read(name_len).decode("utf-8")
-            n_dims = struct.unpack("<I", source.read(4))[0]
-            dims = tuple(struct.unpack(f"<{n_dims}Q", source.read(8 * n_dims)))
-            ggml_type = struct.unpack("<I", source.read(4))[0]
-            nbytes = struct.unpack("<Q", source.read(8))[0]
-            start = source.tell()
-            source.seek(start + nbytes)
-            tensors[name] = (ggml_type, dims, start, start + nbytes)
-    return metadata, tensors
-
-
-def _read_meta(source: io.BufferedReader) -> object:
-    tag = struct.unpack("<I", source.read(4))[0]
-    if tag == 8:
-        length = struct.unpack("<Q", source.read(8))[0]
-        return source.read(length).decode("utf-8")
-    if tag == 6:
-        return struct.unpack("<d", source.read(8))[0]
-    if tag == 27:
-        return struct.unpack("<q", source.read(8))[0]
-    if tag == 9:
-        length = struct.unpack("<Q", source.read(8))[0]
-        return [_read_meta(source) for _ in range(length)]
-    raise ValueError(f"unsupported metadata tag {tag}")
+        for _ in range(metadata_count):
+            key = string()
+            if key in metadata:
+                raise ValueError(f"{path}: duplicate metadata key {key}")
+            metadata[key] = value()
+        pending = []
+        tensor_names = set()
+        for _ in range(tensor_count):
+            name = string()
+            dimension_count = take("<I")
+            dims = tuple(take("<Q") for _ in range(dimension_count))
+            ggml_type, relative_offset = take("<I"), take("<Q")
+            if name in tensor_names:
+                raise ValueError(f"{path}: duplicate tensor {name}")
+            tensor_names.add(name)
+            pending.append((name, ggml_type, dims, relative_offset))
+        data_start = (position + GGUF_ALIGNMENT - 1) // GGUF_ALIGNMENT * GGUF_ALIGNMENT
+        tensors = {}
+        for name, ggml_type, dims, relative_offset in pending:
+            length = _tensor_nbytes(ggml_type, dims)
+            absolute_offset = data_start + relative_offset
+            if absolute_offset < data_start or absolute_offset + length > file_size:
+                raise ValueError(f"{path}: tensor {name} lies outside file")
+            tensors[name] = (ggml_type, dims, length, absolute_offset)
+        return metadata, tensors
+    finally:
+        source.close()
 
 
 def read_gguf_directory(path: Path) -> tuple[dict[str, object], dict[str, tuple[int, tuple[int, ...], int]]]:
@@ -468,13 +678,13 @@ def read_gguf_directory(path: Path) -> tuple[dict[str, object], dict[str, tuple[
 
 
 def read_gguf_tensor_bytes(path: Path, name: str) -> bytes:
-    metadata, tensors = _read_gguf(path)
+    _metadata, tensors = _read_gguf(path)
     if name not in tensors:
         raise KeyError(f"{path}: missing tensor {name}")
-    _, _, start, end = tensors[name]
+    _, _, length, offset = tensors[name]
     with path.open("rb") as source:
-        source.seek(start)
-        return source.read(end - start)
+        source.seek(offset)
+        return source.read(length)
 
 
 def emit_tensor(gguf: GgufWriter, name: str, tensor: Tensor, quant: str) -> None:
@@ -518,6 +728,8 @@ __all__ = [
     "Q8_0_BLOCK",
     "Q8_0_BLOCK_BYTES",
     "Tensor",
+    "MetaArray",
+    "MetaScalar",
     "Safetensors",
     "open_safetensors",
     "validated_dir",

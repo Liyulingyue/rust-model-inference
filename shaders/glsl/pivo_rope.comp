@@ -1,0 +1,49 @@
+#version 450
+
+// Rotary position embedding for the PiVo attention.
+//
+// PiVo uses the split-half convention: within a 24 wide head the element `i`
+// pairs with the element `i + 12`, and the angle of the pair is
+// `position * 10000^(-2i/24)`.
+//
+// The sine and the cosine come from a table that the host fills, one entry
+// per position and pair. The host's own `sin_cos` is the reference for the
+// whole pipeline, and a device's transcendental is a couple of ULP away from
+// it -- enough to move a frame duration, because the durations are rounded
+// to whole frames and the rounding margin of the shortest oracle case is
+// 0.0024 frames. The table keeps the rotation bit for bit the host's.
+//
+// One lane handles one rotated pair. Splitting the pair over two lanes would
+// race: the lane that writes the low half reads the high half, and the lane
+// that writes the high half reads the low half.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint buffer_word; uint table_word; uint rows; uint width; uint units;
+} pc;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint unit = index / 12u;
+    uint pair = index % 12u;
+    uint row = unit / pc.units;
+    if (row >= pc.rows) return;
+    // The unit index is global, so the head inside the row is the unit
+    // without the rows in front of it.
+    uint head = unit - row * pc.units;
+
+    uint table = pc.table_word + row * 24u + pair;
+    precise float sine = uintBitsToFloat(arena.data[table]);
+    precise float cosine = uintBitsToFloat(arena.data[table + 12u]);
+
+    uint word = pc.buffer_word + row * pc.width + head * 24u + pair;
+    float first = uintBitsToFloat(arena.data[word]);
+    float second = uintBitsToFloat(arena.data[word + 12u]);
+    precise float low = first * cosine - second * sine;
+    precise float high = second * cosine + first * sine;
+    arena.data[word] = floatBitsToUint(low);
+    arena.data[word + 12u] = floatBitsToUint(high);
+}

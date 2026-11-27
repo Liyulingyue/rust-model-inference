@@ -1,0 +1,24 @@
+diff --git a/tools/mtmd/mtmd-cli.cpp b/tools/mtmd/mtmd-cli.cpp
+--- a/tools/mtmd/mtmd-cli.cpp
++++ b/tools/mtmd/mtmd-cli.cpp
+@@ -16,0 +17,2 @@
++#include <cstdio>
++#include <cstdlib>
+@@ -359,0 +362,17 @@
++            if (chunk_type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
++                if (const char * out = std::getenv("RMI_JINA_AUDIO_EMBD")) {
++                    const size_t rows = mtmd_input_chunk_get_n_tokens(chunk);
++                    const size_t width = llama_model_n_embd_inp(ctx.model);
++                    FILE * file = std::fopen(out, "wb");
++                    if (!file) {
++                        LOG_ERR("Failed to open audio embedding output\n");
++                        return 1;
++                    }
++                    const bool written = std::fwrite(embd, sizeof(float), rows * width, file) == rows * width;
++                    const bool closed = std::fclose(file) == 0;
++                    if (!written || !closed) {
++                        LOG_ERR("Failed to write audio embedding output\n");
++                        return 1;
++                    }
++                }
++            }

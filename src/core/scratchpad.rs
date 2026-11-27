@@ -20,16 +20,57 @@ pub struct ExecutionScratchpad {
     pub down_buf: Vec<f32>,
     pub gate_buf: Vec<f32>,
     pub up_buf: Vec<f32>,
+    /// Fused gate+up buffer for archs whose FFN ships a single
+    /// `[n_embd, 2*n_ff]` `ffn_up.weight` (e.g. GLM-4). Splits in half
+    /// after the matmul: `ffn_fused[..n_ff]` is the gate projection,
+    /// `ffn_fused[n_ff..]` is the up projection. Sized to `2 * n_ff`
+    /// (no head-dim overflow possible).
+    pub ffn_fused: Vec<f32>,
     pub logits: Vec<f32>,
     pub q8_buf: Vec<u8>,
     pub scale_buf: Vec<f32>,
     /// Pre-quantized Q8_K blocks for K-quant kernels (Q4_K / Q6_K). One
     /// block holds 256 f32 elements as i8 + scales. Sized for the largest
     /// n_in a K-quant matmul will see (= max(n_embd_q, n_ff)).
-    pub q8k_buf: Vec<crate::ops::quant::BlockQ8K>,
+    pub q8k_buf: Vec<crate::core::tensor::BlockQ8K>,
     pub score_stride: usize,
     pub scores: Vec<f32>,
-    pub attention_values: Vec<f32>,
+    /// Maximum number of rows a single chunked prefill may hold.
+    /// Buffers sized for `n_embd * 1` work for any `B = 1` call
+    /// but need to be sized `n_embd * max_rows` to support `B > 1`.
+    /// The legacy `new` constructor sets `max_rows = 1` so existing
+    /// per-token paths keep their original memory footprint.
+    pub max_rows: usize,
+}
+
+impl Default for ExecutionScratchpad {
+    fn default() -> Self {
+        // `Default` is only here so direct struct-literal init in
+        // existing callers (e.g. `qwen3/trunk/session.rs:146`)
+        // keeps compiling without naming every field. The actual
+        // size-correct construction goes through `new` /
+        // `new_batched`.
+        Self {
+            x: Vec::new(),
+            normed: Vec::new(),
+            q: Vec::new(),
+            k_new: Vec::new(),
+            v_new: Vec::new(),
+            attn_out: Vec::new(),
+            attn_proj: Vec::new(),
+            down_buf: Vec::new(),
+            gate_buf: Vec::new(),
+            up_buf: Vec::new(),
+            ffn_fused: Vec::new(),
+            logits: Vec::new(),
+            q8_buf: Vec::new(),
+            scale_buf: Vec::new(),
+            q8k_buf: Vec::new(),
+            score_stride: 0,
+            scores: Vec::new(),
+            max_rows: 1,
+        }
+    }
 }
 
 pub struct KvCacheF16 {
@@ -45,6 +86,29 @@ pub struct KvCacheF32 {
 pub enum KvCache {
     F16(KvCacheF16),
     F32(KvCacheF32),
+}
+
+/// KV 缓存的元素排列顺序。
+///
+/// 两种布局的总元素数相同，只是同一层内的下标排列不同：
+///
+/// - `PositionMajor`：`[layer][position][head][dim]`，一个位置的整行连续。
+///   每步 decode 写一行只需一次连续拷贝，是默认布局；但跨位置扫一个 head
+///   时步长是 `kv_heads * head_dim`（YuE2 为 4 KiB），每行只用 `head_dim`
+///   个元素。
+/// - `HeadMajor`：`[layer][head][position][dim]`，一个 head 的所有位置连续。
+///   写入一个 token 变成 `kv_heads` 段 `head_dim` 的连续拷贝，而 attention
+///   扫一个 head 时完全顺序访问（页复用与硬件预取都能生效）。
+///
+/// 存储本身（[`KvCache`]）只是字节容器，不带布局语义；布局由 [`KvState`]
+/// 携带，读写双方必须与构造时选择的一致。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KvLayout {
+    /// `[layer][position][head][dim]`
+    #[default]
+    PositionMajor,
+    /// `[layer][head][position][dim]`
+    HeadMajor,
 }
 
 impl ExecutionScratchpad {
@@ -82,33 +146,65 @@ impl ExecutionScratchpad {
         n_threads: usize,
         max_ctx: usize,
     ) -> Self {
+        // Legacy per-token constructor: `max_rows = 1` so every
+        // buffer stays at its original single-row size. Callers
+        // that want a chunked prefill scratch use
+        // [`ExecutionScratchpad::new_batched`] instead.
+        Self::new_batched(
+            n_embd, n_embd_q, n_embd_gqa, n_ff, vocab, n_threads, max_ctx, 1,
+        )
+    }
+}
+
+impl ExecutionScratchpad {
+    /// Build a scratchpad sized to hold up to `max_rows` rows of
+    /// prefill state in one chunk. `max_rows == 1` reproduces the
+    /// legacy per-token footprint exactly; `max_rows > 1` widens
+    /// the per-row buffers (`x`, `normed`, `q`, `k_new`, `v_new`,
+    /// `attn_out`, `attn_proj`, `down_buf`, `gate_buf`, `up_buf`)
+    /// to `rows × width` so a `forward_chunk(rows, …)` call can
+    /// hold the full chunk's activations and Q/K/V without
+    /// copying row-by-row.
+    pub fn new_batched(
+        n_embd: usize,
+        n_embd_q: usize,
+        n_embd_gqa: usize,
+        n_ff: usize,
+        vocab: usize,
+        n_threads: usize,
+        max_ctx: usize,
+        max_rows: usize,
+    ) -> Self {
+        let max_rows = max_rows.max(1);
         let max_n_in = n_embd_q.max(n_ff).max(n_embd * 3);
         let score_stride = max_ctx.div_ceil(256) * 256;
+        let row_scale = max_rows;
         Self {
-            x: vec![0.0f32; n_embd],
-            normed: vec![0.0f32; n_embd],
-            q: vec![0.0f32; n_embd_q],
-            k_new: vec![0.0f32; n_embd_gqa],
-            v_new: vec![0.0f32; n_embd_gqa],
-            attn_out: vec![0.0f32; n_embd_q],
-            attn_proj: vec![0.0f32; n_embd],
-            down_buf: vec![0.0f32; n_embd],
-            gate_buf: vec![0.0f32; n_ff.max(n_embd * 3)],
-            up_buf: vec![0.0f32; n_ff.max(n_embd * 3)],
+            x: vec![0.0f32; n_embd * row_scale],
+            normed: vec![0.0f32; n_embd * row_scale],
+            q: vec![0.0f32; n_embd_q * row_scale],
+            k_new: vec![0.0f32; n_embd_gqa * row_scale],
+            v_new: vec![0.0f32; n_embd_gqa * row_scale],
+            attn_out: vec![0.0f32; n_embd_q * row_scale],
+            attn_proj: vec![0.0f32; n_embd * row_scale],
+            down_buf: vec![0.0f32; n_embd * row_scale],
+            gate_buf: vec![0.0f32; n_ff.max(n_embd * 3) * row_scale],
+            up_buf: vec![0.0f32; n_ff.max(n_embd * 3) * row_scale],
+            ffn_fused: vec![0.0f32; 2 * n_ff.max(n_embd * 3) * row_scale],
             logits: vec![0.0f32; vocab],
-            q8_buf: vec![0u8; max_n_in],
-            scale_buf: vec![0.0f32; max_n_in / 32],
+            q8_buf: vec![0u8; max_n_in * row_scale],
+            scale_buf: vec![0.0f32; max_n_in / 32 * row_scale],
             q8k_buf: vec![
-                crate::ops::quant::BlockQ8K {
+                crate::core::tensor::BlockQ8K {
                     d: 0.0,
                     qs: [0; 256],
                     bsums: [0; 16],
                 };
-                max_n_in / 256
+                (max_n_in + 255) / 256 * row_scale
             ],
             score_stride,
             scores: vec![0.0f32; n_threads * score_stride],
-            attention_values: vec![0.0f32; n_threads * score_stride],
+            max_rows,
         }
     }
 }
@@ -128,6 +224,19 @@ impl KvCache {
             k: vec![0.0f32; size],
             v: vec![0.0f32; size],
         })
+    }
+
+    pub fn clear(&mut self) {
+        match self {
+            KvCache::F16(c) => {
+                c.k.fill(0);
+                c.v.fill(0);
+            }
+            KvCache::F32(c) => {
+                c.k.fill(0.0);
+                c.v.fill(0.0);
+            }
+        }
     }
 }
 
@@ -224,6 +333,9 @@ pub enum KvLifecycle {
 pub struct KvState {
     pub arch: std::sync::Arc<KvArch>,
     pub format: KvFormat,
+    /// 缓冲区的元素排列顺序。默认 `PositionMajor`（历史行为）；需要按 head
+    /// 顺序扫描的模型（YuE2）构造后调用 [`KvState::with_layout`] 切换。
+    pub layout: KvLayout,
     pub lifecycle: KvLifecycle,
     pub cache: KvCache,
     pub capacity: usize,
@@ -232,7 +344,7 @@ pub struct KvState {
 }
 
 impl KvState {
-    /// 创建新的 KV 状态（默认 `Ephemeral` 生命周期）。
+    /// 创建新的 KV 状态（默认 `Ephemeral` 生命周期，`PositionMajor` 布局）。
     pub fn new(arch: std::sync::Arc<KvArch>, format: KvFormat, capacity: usize) -> Self {
         let stride = arch.n_head_kv * arch.n_embd_head_k.max(arch.n_embd_head_v);
         let cache = match format {
@@ -242,12 +354,19 @@ impl KvState {
         Self {
             arch,
             format,
+            layout: KvLayout::PositionMajor,
             lifecycle: KvLifecycle::Ephemeral,
             cache,
             capacity,
             seq_len: 0,
             last_access: std::time::Instant::now(),
         }
+    }
+
+    /// 切换元素排列顺序。只改变索引解释，不重新分配（两种布局的总大小相同）。
+    pub fn with_layout(mut self, layout: KvLayout) -> Self {
+        self.layout = layout;
+        self
     }
 
     pub fn with_lifecycle(mut self, lifecycle: KvLifecycle) -> Self {
@@ -301,7 +420,7 @@ impl KvState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionScratchpad, KvArch, KvFormat, KvLifecycle, KvState};
+    use super::{ExecutionScratchpad, KvArch, KvCache, KvFormat, KvLayout, KvLifecycle, KvState};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -310,7 +429,6 @@ mod tests {
         let scratch = ExecutionScratchpad::new(1, 1, 1, 1, 1, 2, 257);
 
         assert_eq!(scratch.scores.len(), 1024);
-        assert_eq!(scratch.attention_values.len(), 1024);
         let (first_thread, second_thread) = scratch.scores.split_at(512);
         assert_eq!(first_thread.len(), 512);
         assert_eq!(second_thread.len(), 512);
@@ -387,5 +505,31 @@ mod tests {
         let f16_bytes = arch.bytes_per_token(KvFormat::F16);
         let f32_bytes = arch.bytes_per_token(KvFormat::F32);
         assert_eq!(f32_bytes, f16_bytes * 2);
+    }
+
+    #[test]
+    fn kv_state_defaults_to_position_major_and_layout_is_metadata_only() {
+        let arch = make_arch();
+        let position_major = KvState::new(arch.clone(), KvFormat::F32, 16);
+        assert_eq!(position_major.layout, KvLayout::PositionMajor);
+        let total = match &position_major.cache {
+            KvCache::F32(cache) => cache.k.len(),
+            KvCache::F16(_) => unreachable!(),
+        };
+
+        // Switching the layout must not reallocate or change the element count:
+        // both layouts are permutations of the same `[layer][capacity][stride]`
+        // buffer.
+        let head_major = position_major.with_layout(KvLayout::HeadMajor);
+        assert_eq!(head_major.layout, KvLayout::HeadMajor);
+        assert_eq!(
+            match &head_major.cache {
+                KvCache::F32(cache) => cache.k.len(),
+                KvCache::F16(_) => unreachable!(),
+            },
+            total
+        );
+        assert_eq!(head_major.arch, arch);
+        assert_eq!(head_major.capacity, 16);
     }
 }

@@ -1,15 +1,65 @@
+pub mod arktts;
+pub mod audio8;
+pub mod bert_family;
+pub mod bge_vl;
+pub mod bitnet;
 pub mod breeze;
+/// Renamed to [`crate::prompt::legacy`].
+///
+/// Kept as a deprecated re-export so moving the module was not a breaking
+/// change for anyone importing `rust_model_inference::models::chat_template`.
+#[deprecated(note = "use crate::prompt::legacy instead")]
+pub mod chat_template {
+    pub use crate::prompt::legacy::*;
+}
+
+pub mod clm;
+pub mod d3_turbo;
+pub mod decision;
+pub mod decoder_embedding;
+pub mod dflash;
 pub mod diffusion;
+pub mod dory;
 pub mod dots;
-pub mod dspark;
+pub mod edge0;
+pub mod embeddinggemma2;
+pub mod falcon_h1;
+pub mod funasr;
+pub mod gemma2;
+pub mod gemma3;
 pub mod gemma4;
+pub mod gemma_embedding;
+pub mod gliner;
+pub mod gliner_boundary;
+pub mod gliner_ettin;
+pub mod hy_simulmt;
+pub mod hybrid;
+pub mod laya;
 pub mod lfm2;
 pub mod lfm25;
 pub mod lfm2moe;
+pub mod lfm3;
 pub mod llama;
+pub mod mage_vl;
+pub mod mellum;
+pub mod minicpmv;
 pub mod nemotron_h;
+pub mod nemotron_reuse;
+pub mod occamy;
+pub mod phi3;
+pub mod pivo;
 pub mod qwen3;
 pub mod qwen35;
 pub mod qwen_drive;
+pub mod sensenova_loop;
 pub mod spark;
+pub mod thx02;
+pub mod timestral;
+pub mod underdog_woof;
+pub mod unlimited_ocr;
+pub mod vela3;
 pub mod vibevoice_asr;
+pub mod wevisone_vl;
+pub mod xing4_0;
+pub mod yue2;
+pub mod zdt;

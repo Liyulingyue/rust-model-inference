@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
@@ -11,6 +12,7 @@ layout(push_constant) uniform PC {
     uint output_stride;
     uint scales_stride;
     uint token_rows;
+    uint signed_scale;
 } pc;
 
 float value_at(uint index) {
@@ -21,56 +23,14 @@ int nearest_int(float value) {
     return int((floatBitsToUint(value + 12582912.0) & 0x007fffffu) - 0x00400000u);
 }
 
-float divide_finite_normal(float numerator, float denominator) {
-    uint numerator_bits = floatBitsToUint(numerator);
-    uint denominator_bits = floatBitsToUint(denominator);
-    uint sign = (numerator_bits ^ denominator_bits) & 0x80000000u;
-    uint numerator_exponent = (numerator_bits >> 23u) & 0xffu;
-    uint denominator_exponent = (denominator_bits >> 23u) & 0xffu;
-    if (numerator_exponent == 0u || numerator_exponent == 0xffu
-        || denominator_exponent == 0u || denominator_exponent == 0xffu) {
-        return numerator / denominator;
-    }
-
-    uint numerator_mantissa = (numerator_bits & 0x007fffffu) | 0x00800000u;
-    uint denominator_mantissa = (denominator_bits & 0x007fffffu) | 0x00800000u;
-    int exponent = int(numerator_exponent) - int(denominator_exponent);
-    if (numerator_mantissa < denominator_mantissa) {
-        numerator_mantissa <<= 1u;
-        exponent -= 1;
-    }
-
-    uint quotient = 1u;
-    uint remainder = numerator_mantissa - denominator_mantissa;
-    for (uint bit = 0u; bit < 23u; ++bit) {
-        quotient <<= 1u;
-        remainder <<= 1u;
-        if (remainder >= denominator_mantissa) {
-            remainder -= denominator_mantissa;
-            quotient |= 1u;
-        }
-    }
-
-    remainder <<= 1u;
-    bool guard = remainder >= denominator_mantissa;
-    if (guard) remainder -= denominator_mantissa;
-    bool sticky = remainder != 0u;
-    if (guard && (sticky || (quotient & 1u) != 0u)) {
-        quotient += 1u;
-        if (quotient == 0x01000000u) {
-            quotient >>= 1u;
-            exponent += 1;
-        }
-    }
-
-    int result_exponent = exponent + 127;
-    if (result_exponent <= 0 || result_exponent >= 255) {
-        return numerator / denominator;
-    }
-    return uintBitsToFloat(
-        sign | (uint(result_exponent) << 23u) | (quotient & 0x007fffffu)
-    );
+int round_away(float value) {
+    float magnitude = abs(value);
+    float integral = floor(magnitude);
+    // Adding 0.5 first rounds the predecessor of 0.5 up to 1.0.
+    return int(sign(value) * (integral + (magnitude - integral >= 0.5 ? 1.0 : 0.0)));
 }
+
+#include "f32_divide.glsl"
 
 void main() {
     if (gl_LocalInvocationID.x != 0u) return;
@@ -95,16 +55,22 @@ void main() {
         arena.data[pc.scales_word + row * pc.scales_stride + block] = 0u;
         return;
     }
-    precise float iscale = divide_finite_normal(-127.0, max_value);
+    precise float scale = pc.signed_scale != 0u
+        ? 0.0 : divide_finite_normal(amax, 127.0);
+    precise float iscale = pc.signed_scale != 0u
+        ? divide_finite_normal(-127.0, max_value)
+        : divide_finite_normal(1.0, scale);
     for (uint index = 0u; index < 64u; ++index) {
         uint packed = 0u;
         for (uint byte = 0u; byte < 4u; ++byte) {
             precise float scaled = iscale * value_at(base + index * 4u + byte);
-            int quantized = min(nearest_int(scaled), 127);
+            int quantized = pc.signed_scale != 0u
+                ? clamp(nearest_int(scaled), -127, 127)
+                : clamp(round_away(scaled), -127, 127);
             packed |= uint(quantized & 255) << (byte * 8u);
         }
         arena.data[pc.output_word + row * pc.output_stride + block * 64u + index] = packed;
     }
-    precise float scale = divide_finite_normal(1.0, iscale);
+    if (pc.signed_scale != 0u) scale = divide_finite_normal(1.0, iscale);
     arena.data[pc.scales_word + row * pc.scales_stride + block] = floatBitsToUint(scale);
 }

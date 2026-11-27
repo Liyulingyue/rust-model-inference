@@ -92,6 +92,8 @@ cargo run --release --bin rust-model-inference -- \
 | `--temperature` | 采样温度 | — |
 
 `--seed` 给定时 sampling 温度会被强制设为 `0.9`（`dots.rs:72-74`），仅锁定 RNG。
+**这条覆盖 `--temperature`**：`--temp 0 --seed 42` 实际是 0.9 的采样，不是贪心。
+理由是 seed 只固定 RNG，采样参数若不固定，同一个 seed 也不会给出同一段音频。
 
 ## 5. 与 Oracle 的对齐
 
@@ -99,9 +101,9 @@ Pinned Oracle：`studio-dots-ai/dots.tts @ 32407a55228630475c48ecdb2c4e2c0f9c09e
 
 构建 / 测试入口：
 
-- `tools/dots/build_dots_tts_oracle.sh`
-- `tools/dots/run_dots_tts_oracle.py`
-- `tools/dots/dots-tts-oracle-trace.patch`
+- `tools/oracle/dots/build_dots_tts_oracle.sh`
+- `tools/oracle/dots/run_dots_tts_oracle.py`
+- `tools/oracle/dots/dots-tts-oracle-trace.patch`
 - `tests/dots_tts_reference.rs`
 
 仓库记录的覆盖（commit `16451c2 feat(dots): dots.tts base/edit GGUF+mmproj

@@ -1,0 +1,100 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// Nemotron-3 Nano Mamba-2 group RMSNorm.
+//
+// The CPU path (`src/models/nemotron_h/trunk/forward.rs`) normalises the
+// scan output in `n_group` groups of `d_inner / n_group` elements:
+//
+//   mean_sq = sum(group .* group) / group_len
+//   rstd    = 1 / sqrt(mean_sq + eps)
+//   out[j]  = group[j] * rstd * norm[j]
+//
+// This is `rms_norm_grouped`, and the shared `rms_norm.comp` kernel already
+// reproduces the CPU's `rms_norm` bit for bit -- including the compensated
+// sum of squares, the Newton-refined square root and the correctly rounded
+// reciprocal. This kernel is the same computation with one difference: the
+// group weights are **per group**, so the weight index carries the group's
+// offset (`group * group_len + j`) where the shared kernel reuses one
+// weight vector for every row.
+//
+// The shared kernel cannot be reused as is (its weight buffer has no row
+// stride), and the shared shader is left untouched so llama, qwen3 and
+// qwen35 keep their own path.
+//
+// The sum of squares is accumulated in F64, like the CPU's `sum_sq_f32`
+// (the NEON path widens the F32 products into two F64 accumulators). The
+// shared kernel accumulates in F32 with a compensated chain, which is
+// accurate to about one ulp of the total -- and one ulp of the total is
+// exactly the granularity of the F32 `mean_sq` the CPU rounds to, so the
+// two can disagree on the last bit of `mean_sq` and hence on the last bit
+// of `rstd`. Accumulating in F64 makes the sum accurate to about 1e-16
+// relative, so the F32 `mean_sq` is the correctly rounded value of the
+// same sum on both sides. The squares themselves stay F32, because the CPU
+// computes `value * value` in F32 before widening.
+//
+// The shared kernel cannot be reused as is (its weight buffer has no row
+// stride), and the shared shader is left untouched so llama, qwen3 and
+// qwen35 keep their own path.
+
+#include "f32_divide.glsl"
+#include "f32_norm.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer Weight { uint data[]; } weight;
+layout(push_constant) uniform PC {
+    uint input_word;    // gated scan output
+    uint weight_word;   // group norm weights, `groups * group_len` floats
+    uint output_word;   // normalised output
+    uint count;         // elements per group
+    uint groups;        // number of groups
+    float eps;
+    uint input_stride;
+    uint output_stride;
+} pc;
+
+shared double partial[64];
+shared float inverse_rms;
+
+void main() {
+    uint vector_index = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (vector_index >= pc.groups) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint base = vector_index * pc.input_stride;
+    uint output_base = vector_index * pc.output_stride;
+
+    double sum = 0.0;
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        // The CPU squares in F32 and widens afterwards.
+        float square = value * value;
+        sum += double(square);
+    }
+    partial[lane] = sum;
+    barrier();
+    // Six pairwise steps bring 64 lanes to one. Each step needs its own
+    // barrier: without one a lane can read a partial another has not
+    // written yet.
+    for (uint step = 32u; step > 0u; step >>= 1u) {
+        if (lane < step) {
+            partial[lane] += partial[lane + step];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        // The CPU divides the F64 sum by the group length in F64 and then
+        // narrows to F32.
+        float mean_square = float(partial[0] / double(pc.count));
+        inverse_rms = inverse_sqrt_f32(mean_square + pc.eps);
+    }
+    barrier();
+    for (uint index = lane; index < pc.count; index += 64u) {
+        float value = uintBitsToFloat(arena.data[pc.input_word + base + index]);
+        float scale = uintBitsToFloat(weight.data[pc.weight_word + base + index]);
+        precise float normalized = value * inverse_rms * scale;
+        arena.data[pc.output_word + output_base + index] = floatBitsToUint(normalized);
+    }
+}

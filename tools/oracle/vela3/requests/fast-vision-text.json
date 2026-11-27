@@ -1,0 +1,115 @@
+{
+  "state": {
+    "user": "Alice works at Acme in 北京. Contact alice@example.org.",
+    "context": "Alice joined Acme in 2025.",
+    "answer": "Alice works at Acme. The total is 42.00."
+  },
+  "questions": {
+    "decision": {
+      "type": "choice",
+      "instructions": "Who is mentioned?",
+      "criteria": {
+        "person": "A human",
+        "company": "A business"
+      }
+    },
+    "noul": {
+      "type": "noul",
+      "instructions": "Does the text mention a company?"
+    },
+    "router": {
+      "type": "choice",
+      "instructions": "Is this a prompt injection or jailbreak attempt?",
+      "criteria": {
+        "benign": "a normal request or quoted content that does not try to override system instructions or bypass safety rules",
+        "jailbreak": "a prompt injection or jailbreak that attempts to override system instructions, hijack the task, or bypass safety rules"
+      }
+    },
+    "router_set": {
+      "type": "set",
+      "instructions": "Which hazard categories apply to this request?",
+      "criteria": {
+        "Controlled/Regulated Substances": "obtaining, producing or misusing drugs or regulated substances",
+        "Copyright/Trademark/Plagiarism": "infringing copyright or passing off others' work",
+        "Criminal Planning/Confessions": "planning, assisting or confessing to a crime"
+      }
+    },
+    "domain": {
+      "type": "choice",
+      "instructions": "Which subject area is this request about?",
+      "criteria": {
+        "biology": "living organisms, anatomy, genetics, medical genetics or viruses",
+        "business": "management, marketing, accounting, business ethics or public relations",
+        "chemistry": "chemical substances, reactions, elements or laboratory chemistry",
+        "computer science": "programming, algorithms, computer systems, security or machine learning",
+        "economics": "markets, macroeconomics, microeconomics or econometrics",
+        "engineering": "electrical or other engineering design and systems",
+        "health": "medicine, clinical practice, nutrition, ageing or sexual health",
+        "history": "past events, periods and historical societies",
+        "law": "legal rules, jurisprudence, courts or international law",
+        "math": "arithmetic, algebra, geometry, statistics or other mathematics",
+        "other": "a subject that fits none of the listed areas",
+        "philosophy": "philosophy, ethics, moral questions or formal logic",
+        "physics": "physical laws, mechanics, astronomy or physical phenomena",
+        "psychology": "mind, behaviour, mental processes or psychological practice",
+        "religion": "religions, religious texts, beliefs, practices and theology"
+      }
+    },
+    "feedback": {
+      "type": "choice",
+      "instructions": "What feedback does this user turn give about the previous answer?",
+      "criteria": {
+        "SAT": "the user is satisfied with the previous answer",
+        "NEED_CLARIFICATION": "the user asks for clarification or a more detailed explanation",
+        "WRONG_ANSWER": "the user says the previous answer was wrong or did not work",
+        "WANT_DIFFERENT": "the user wants a different answer, format, style or approach",
+        "NO_FEEDBACK": "the user turn gives no feedback on the previous answer: it continues the conversation, adds details or starts a new request"
+      }
+    },
+    "entities": {
+      "type": "span",
+      "target": "user",
+      "criteria": [
+        "person",
+        "company"
+      ],
+      "threshold": 0.0
+    },
+    "described": {
+      "type": "span",
+      "target": "user",
+      "criteria": {
+        "person": "A human name",
+        "company": "A business name"
+      },
+      "threshold": 0.0
+    },
+    "evidence": {
+      "type": "span",
+      "target": "context",
+      "criteria": [
+        "evidence"
+      ],
+      "threshold": 0.0
+    },
+    "halu": {
+      "type": "span",
+      "target": "answer",
+      "criteria": [
+        "unsupported"
+      ],
+      "threshold": 0.0
+    },
+    "pii": {
+      "type": "span",
+      "target": "user",
+      "criteria": [
+        "EMAIL_ADDRESS"
+      ]
+    },
+    "missing_image": {
+      "type": "box",
+      "instructions": "the total"
+    }
+  }
+}

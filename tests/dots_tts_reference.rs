@@ -7,7 +7,7 @@ fn oracle_runner() -> Command {
     let mut command = Command::new("python3");
     command.arg(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tools/dots/run_dots_tts_oracle.py"
+        "/tools/oracle/dots/run_dots_tts_oracle.py"
     ));
     command
 }
@@ -18,7 +18,7 @@ fn oracle_base_schedule_includes_encoded_prompt_and_target_budget() {
         "import importlib.util; ",
         "spec=importlib.util.spec_from_file_location('runner', r'",
         env!("CARGO_MANIFEST_DIR"),
-        "/tools/dots/run_dots_tts_oracle.py'); ",
+        "/tools/oracle/dots/run_dots_tts_oracle.py'); ",
         "runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner); ",
         "print(runner.base_max_generate_length(19_201, 7_680))"
     );
@@ -143,7 +143,7 @@ fn oracle_runner_rejects_trace_and_wav_inside_canonical_checkout() {
     .to_owned();
     let script = format!(
         "import importlib.util,sys; spec=importlib.util.spec_from_file_location('runner', r'{}'); runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner); runner.PINNED_SHA={:?}; sys.argv=['runner','--checkout',r'{}','--model-dir',r'{}','--mode','base','--text','hello','--ref-audio',r'{}','--ref-text','reference','--latent-noise',r'{}','--dit-noise',r'{}','--trace',r'{}','--out',r'{}']; runner.main()",
-        env!("CARGO_MANIFEST_DIR").to_owned() + "/tools/dots/run_dots_tts_oracle.py",
+        env!("CARGO_MANIFEST_DIR").to_owned() + "/tools/oracle/dots/run_dots_tts_oracle.py",
         sha,
         checkout.display(),
         inputs.join("model").display(),
@@ -202,7 +202,7 @@ fn oracle_builder_treats_input_checkout_as_read_only() {
     let output = Command::new("bash")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tools/dots/build_dots_tts_oracle.sh"
+            "/tools/oracle/dots/build_dots_tts_oracle.sh"
         ))
         .arg(&directory)
         .output()
@@ -228,6 +228,7 @@ fn oracle_builder_treats_input_checkout_as_read_only() {
 #[cfg(feature = "parity-trace")]
 mod parity_support {
     use rand::SeedableRng;
+    use rust_model_inference::format::wav::write_wav_f32_channels;
     use rust_model_inference::models::dots::generate::{
         read_dots_wav_for_parity, synthesize_request_with_noise, GenerateOptions, GenerationRequest,
     };
@@ -235,7 +236,6 @@ mod parity_support {
         build_edit_generation_schedule, build_generation_schedule,
     };
     use rust_model_inference::models::dots::DotsTtsModel;
-    use rust_model_inference::models::qwen3::tts::codec::write_wav_f32;
     use rust_model_inference::{
         open_model_source, BPETokenizer, ComponentRole, ComputePool, TensorSource,
     };
@@ -351,7 +351,7 @@ mod parity_support {
         let output = Command::new("bash")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tools/dots/build_dots_tts_oracle.sh"
+                "/tools/oracle/dots/build_dots_tts_oracle.sh"
             ))
             .arg(input)
             .output()
@@ -575,7 +575,7 @@ mod parity_support {
             .env("PYTHONNOUSERSITE", "1")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/tools/dots/run_dots_tts_oracle.py"
+                "/tools/oracle/dots/run_dots_tts_oracle.py"
             ))
             .args(["--checkout", oracle_checkout.to_str().unwrap()])
             .args(["--model-dir", oracle_model.to_str().unwrap()])
@@ -709,7 +709,7 @@ mod parity_support {
         .unwrap();
         std::env::remove_var("RMI_PARITY_TRACE");
         std::env::remove_var("RMI_PARITY_FILTER");
-        write_wav_f32(&rust_wav, &waveform, 48_000).unwrap();
+        write_wav_f32_channels(&rust_wav, &waveform, 48_000, 1).unwrap();
 
         let payload = compare_traces(&rust_trace, &oracle_trace);
         let pcm = pcm16(&rust_wav);

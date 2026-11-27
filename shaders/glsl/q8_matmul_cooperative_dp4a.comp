@@ -1,0 +1,112 @@
+#version 450
+#extension GL_EXT_spirv_intrinsics : require
+// glslang 15 lacks the GLSL dot extension; emit signed packed SPIR-V.
+spirv_instruction(extensions = ["SPV_KHR_integer_dot_product"], capabilities = [6018, 6019], id = 4450)
+int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
+// Adjacent block loads and more workgroups for single-token projections.
+const uint OUTPUT_ROWS = 2u;
+const uint CHUNK_BLOCKS = 32u;
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint q8_word; uint scales_word; uint n_in; uint blocks_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint reduction_mode; uint input_stride; uint q8_stride;
+    uint scales_stride; uint input_sum_stride; uint q8k_stride;
+    uint q8k_scales_stride; uint token_rows;
+} pc;
+shared uint input_words[CHUNK_BLOCKS * 8];
+shared float input_scales[CHUNK_BLOCKS];
+shared int dots[OUTPUT_ROWS * CHUNK_BLOCKS * 8];
+shared float scales[OUTPUT_ROWS * CHUNK_BLOCKS];
+shared float sums[OUTPUT_ROWS * 8];
+
+float f16_decode(uint bits) {
+    uint sign = (bits >> 15u) & 1u;
+    int exponent = int((bits >> 10u) & 31u);
+    uint mantissa = bits & 1023u;
+    float value;
+    if (exponent == 0) value = (float(mantissa) / 1024.0) * exp2(-14.0);
+    else if (exponent == 31) return 0.0;
+    else value = (1.0 + float(mantissa) / 1024.0) * exp2(float(exponent - 15));
+    return sign == 0u ? value : -value;
+}
+uint weight_word(uint slot, uint index) {
+    if (slot == 0u) return w0.data[index];
+    if (slot == 1u) return w1.data[index];
+    return w2.data[index];
+}
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint token = gl_WorkGroupID.z / pc.group_count;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint first_row = group * OUTPUT_ROWS;
+    uint count = slot == 0u ? pc.rows0 : slot == 1u ? pc.rows1 : pc.rows2;
+    const uint BLOCK_LANES = 64u / OUTPUT_ROWS;
+    uint worker_row = lane / BLOCK_LANES;
+    uint row_offset = min(first_row + worker_row, count - 1u) * pc.blocks_per_row * 34u;
+    uint stream_count = pc.reduction_mode == 8u ? 8u : 1u;
+    uint reducer_row = lane / stream_count;
+    uint reducer_stream = lane % stream_count;
+    precise float acc = 0.0;
+    for (uint chunk = 0u; chunk < pc.blocks_per_row; chunk += CHUNK_BLOCKS) {
+        uint blocks = min(uint(CHUNK_BLOCKS), pc.blocks_per_row - chunk);
+        for (uint index = lane; index < blocks * 8u; index += 64u)
+            input_words[index] = arena.data[pc.q8_word + token * pc.q8_stride + chunk * 8u + index];
+        for (uint index = lane; index < blocks; index += 64u)
+            input_scales[index] = uintBitsToFloat(arena.data[pc.scales_word + token * pc.scales_stride + chunk + index]);
+        barrier();
+        for (uint block = lane % BLOCK_LANES; block < blocks; block += BLOCK_LANES) {
+            uint offset = row_offset + (chunk + block) * 34u;
+            uint scale_word = weight_word(slot, offset >> 2u);
+            uint scale_bits = (offset & 3u) == 0u ? scale_word & 65535u : scale_word >> 16u;
+            uint shared_block = worker_row * CHUNK_BLOCKS + block;
+            precise float scale = f16_decode(scale_bits) * input_scales[block];
+            scales[shared_block] = scale;
+            int block_dot = 0;
+            for (uint part = 0u; part < 8u; part++) {
+                uint byte_offset = offset + 2u + part * 4u;
+                uint a = weight_word(slot, byte_offset >> 2u);
+                uint b = weight_word(slot, (byte_offset >> 2u) + 1u);
+                uint shift = (byte_offset & 3u) * 8u;
+                uint packed = shift == 0u ? a : (a >> shift) | (b << (32u - shift));
+                int value = dotPacked4x8EXT(int(packed), int(input_words[block * 8u + part]), 0u);
+                if (pc.reduction_mode == 8u) dots[shared_block * 8u + part] = value;
+                else block_dot += value;
+            }
+            if (pc.reduction_mode != 8u) dots[shared_block * 8u] = block_dot;
+        }
+        barrier();
+        // Integer dots are independent; each FMA/add stream keeps CPU block order.
+        if (reducer_row < OUTPUT_ROWS) {
+            for (uint block = 0u; block < blocks; block++) {
+                uint shared_block = reducer_row * CHUNK_BLOCKS + block;
+                float value = float(dots[shared_block * 8u + reducer_stream]);
+                precise float product = value * scales[shared_block];
+                acc = pc.reduction_mode == 0u ? acc + product : fma(value, scales[shared_block], acc);
+            }
+        }
+        if (chunk + CHUNK_BLOCKS < pc.blocks_per_row) barrier();
+    }
+    if (pc.reduction_mode == 8u) {
+        if (reducer_row < OUTPUT_ROWS) sums[lane] = acc;
+        barrier();
+    }
+    if (lane >= OUTPUT_ROWS || first_row + lane >= count) return;
+    precise float result = acc;
+    if (pc.reduction_mode == 8u) {
+        uint start = lane * 8u;
+        precise float a = (sums[start] + sums[start + 4u]) + (sums[start + 1u] + sums[start + 5u]);
+        precise float b = (sums[start + 2u] + sums[start + 6u]) + (sums[start + 3u] + sums[start + 7u]);
+        result = a + b;
+    }
+    uint output_word = slot == 0u ? pc.output0_word : slot == 1u ? pc.output1_word : pc.output2_word;
+    uint stride = slot == 0u ? pc.output0_stride : slot == 1u ? pc.output1_stride : pc.output2_stride;
+    arena.data[output_word + token * stride + first_row + lane] = floatBitsToUint(result);
+}

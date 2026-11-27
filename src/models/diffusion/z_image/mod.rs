@@ -1,10 +1,13 @@
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::models::diffusion::DiffusionPipeline;
 use crate::ops::kernel::f16::F16Kernel;
 use crate::ops::matmul_q8_0_quantized_parallel_rows;
 use std::sync::Arc;
 
 pub(crate) mod dit;
+#[cfg(feature = "vulkan")]
+pub(crate) mod dit_gpu;
 pub(crate) mod text;
 pub(crate) mod vae;
 
@@ -73,6 +76,27 @@ impl ZImagePipeline {
             total_start.elapsed().as_secs_f64() * 1000.0,
         );
         Ok(rgb)
+    }
+}
+
+impl DiffusionPipeline for ZImagePipeline {
+    type Options = ZImageOptions;
+
+    fn load(
+        diffusion: Arc<dyn TensorSource>,
+        text: Arc<dyn TensorSource>,
+        vae: Arc<dyn TensorSource>,
+        n_threads: usize,
+    ) -> Result<Self, String> {
+        Self::load(diffusion, text, vae, n_threads)
+    }
+
+    fn generate_rgb(
+        &self,
+        prompt: &str,
+        options: &ZImageOptions,
+    ) -> Result<crate::models::diffusion::DiffusionRgb, String> {
+        self.generate_rgb(prompt, options)
     }
 }
 
@@ -149,6 +173,26 @@ pub(crate) enum Component {
     Vae,
 }
 
+/// Recognizes a Z-Image DiT GGUF.
+///
+/// The export tags itself `general.architecture = "pig"`, but the tensor
+/// signature is checked as well: the CLI and the HTTP server both have to
+/// tell a Z-Image DiT from the other diffusion models before they can pick
+/// a pipeline, and a file that carries the wrong tag must still be
+/// recognized rather than silently dispatched elsewhere.
+pub(crate) fn matches_signature(source: &dyn TensorSource) -> bool {
+    let arch = source
+        .metadata("general.architecture")
+        .and_then(crate::core::tensor::MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch == "pig" {
+        return true;
+    }
+    source.tensor_info("x_embedder.weight").is_some()
+        && source.tensor_info("cap_embedder.0.weight").is_some()
+        && source.tensor_info("final_layer.linear.weight").is_some()
+}
+
 pub(crate) fn validate_component(
     source: &dyn TensorSource,
     component: Component,
@@ -160,45 +204,34 @@ pub(crate) fn validate_component(
     }
 }
 
-fn require_tensor(
-    source: &dyn TensorSource,
-    name: &str,
-    dims: &[u64],
-    ggml_type: GGMLType,
-) -> Result<(), String> {
+/// A 2-D projection the reader can execute: either the quantized kernel or the
+/// F16 one. The dispatch happens in [`linear_into_scaled_impl`], so the loader
+/// should not pin one dtype here -- F16 additionally gives an unquantized
+/// model, which is the whole point of exporting one.
+fn require_matrix(source: &dyn TensorSource, name: &str, dims: &[u64]) -> Result<(), String> {
     let info = source
         .tensor_info(name)
         .ok_or_else(|| format!("Missing tensor: {name}"))?;
     if info.dims != dims {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if info.ggml_type != ggml_type {
+    // The format belongs to the file, not to the loader: the Q8_0 DiT stores
+    // its main stack in Q8_0, the F16 one in F16, and the F32 one keeps that
+    // stack in Q8_0 while the refiner and the embedders are F32.
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::F32
+    ) {
         return Err(format!(
-            "Invalid {name} type: expected {ggml_type:?}, got {:?}",
+            "Invalid {name} type: expected F16, Q8_0 or F32, got {:?}",
             info.ggml_type
         ));
-    }
-    let expected = usize::try_from(
-        info.checked_nbytes()
-            .ok_or_else(|| format!("Invalid {name} byte size"))?,
-    )
-    .map_err(|_| format!("Invalid {name} byte size"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!("Invalid {name} byte length"));
     }
     Ok(())
 }
 
 fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
-    require_tensor(
-        source,
-        "model.embed_tokens.weight",
-        &[2560, 151936],
-        GGMLType::Q8_0,
-    )?;
+    require_matrix(source, "model.embed_tokens.weight", &[2560, 151936])?;
     for layer in 0..36 {
         let prefix = format!("model.layers.{layer}");
         for (suffix, dims) in [
@@ -210,7 +243,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             ("self_attn.q_proj.weight", [2560, 4096]),
             ("self_attn.v_proj.weight", [2560, 1024]),
         ] {
-            require_tensor(source, &format!("{prefix}.{suffix}"), &dims, GGMLType::Q8_0)?;
+            require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         for (suffix, dims) in [
             ("input_layernorm.weight", 2560),
@@ -218,7 +251,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             ("self_attn.k_norm.weight", 128),
             ("self_attn.q_norm.weight", 128),
         ] {
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("{prefix}.{suffix}"),
                 &[dims],
@@ -226,7 +259,7 @@ fn validate_text(source: &dyn TensorSource) -> Result<(), String> {
             )?;
         }
     }
-    require_tensor(source, "model.norm.weight", &[2560], GGMLType::F32)
+    super::common::require_tensor(source, "model.norm.weight", &[2560], GGMLType::F32)
 }
 
 fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
@@ -239,8 +272,10 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("t_embedder.mlp.2.bias", 256),
         ("x_embedder.bias", 3840),
     ] {
-        require_tensor(source, name, &[dims], GGMLType::F32)?;
+        super::common::require_tensor(source, name, &[dims], GGMLType::F32)?;
     }
+    // The weights of the DiT come as F16 in one file and as F32 in another;
+    // the loader reads whichever the file declares.
     for (name, dims) in [
         ("cap_embedder.1.weight", [2560, 3840]),
         ("cap_pad_token", [3840, 1]),
@@ -251,7 +286,12 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
         ("x_embedder.weight", [64, 3840]),
         ("x_pad_token", [3840, 1]),
     ] {
-        require_tensor(source, name, &dims, GGMLType::F16)?;
+        crate::core::tensor::require_tensor_meta(
+            source,
+            name,
+            &dims,
+            &[GGMLType::F16, GGMLType::F32],
+        )?;
     }
     for layer in 0..2 {
         validate_refiner(source, &format!("context_refiner.{layer}"), false)?;
@@ -259,7 +299,7 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
     }
     for layer in 0..30 {
         let prefix = format!("layers.{layer}");
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_modulation.0.bias"),
             &[15360],
@@ -273,7 +313,9 @@ fn validate_dit(source: &dyn TensorSource) -> Result<(), String> {
             ("feed_forward.w2.weight", [10240, 3840]),
             ("feed_forward.w3.weight", [3840, 10240]),
         ] {
-            require_tensor(source, &format!("{prefix}.{suffix}"), &dims, GGMLType::Q8_0)?;
+            // The reader dispatches on the stored dtype, so both the quantized
+            // kernel and the F16 kernel are valid here. Accept either.
+            require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
         }
         validate_transformer_vectors(source, &prefix)?;
     }
@@ -286,13 +328,12 @@ fn validate_refiner(
     has_adaln: bool,
 ) -> Result<(), String> {
     if has_adaln {
-        require_tensor(
+        require_matrix(
             source,
             &format!("{prefix}.adaLN_modulation.0.weight"),
             &[256, 15360],
-            GGMLType::F16,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.adaLN_modulation.0.bias"),
             &[15360],
@@ -306,7 +347,7 @@ fn validate_refiner(
         ("feed_forward.w2.weight", [10240, 3840]),
         ("feed_forward.w3.weight", [3840, 10240]),
     ] {
-        require_tensor(source, &format!("{prefix}.{suffix}"), &dims, GGMLType::F16)?;
+        require_matrix(source, &format!("{prefix}.{suffix}"), &dims)?;
     }
     validate_transformer_vectors(source, prefix)
 }
@@ -320,7 +361,7 @@ fn validate_transformer_vectors(source: &dyn TensorSource, prefix: &str) -> Resu
         ("ffn_norm1.weight", 3840),
         ("ffn_norm2.weight", 3840),
     ] {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{suffix}"),
             &[dims],
@@ -331,11 +372,26 @@ fn validate_transformer_vectors(source: &dyn TensorSource, prefix: &str) -> Resu
 }
 
 fn validate_vae(source: &dyn TensorSource) -> Result<(), String> {
+    validate_vae_decoder(source, 16)
+}
+
+pub(crate) fn validate_flux2_vae(source: &dyn TensorSource) -> Result<(), String> {
+    validate_vae_decoder(source, 32)?;
+    super::common::require_tensor(
+        source,
+        "post_quant_conv.weight",
+        &[1, 1, 32, 32],
+        GGMLType::F16,
+    )?;
+    super::common::require_tensor(source, "post_quant_conv.bias", &[32], GGMLType::F32)
+}
+
+fn validate_vae_decoder(source: &dyn TensorSource, latent_channels: u64) -> Result<(), String> {
     for (name, dims, ggml_type) in [
         ("decoder.conv_in.bias", &[512][..], GGMLType::F32),
         (
             "decoder.conv_in.weight",
-            &[3, 3, 16, 512][..],
+            &[3, 3, latent_channels, 512][..],
             GGMLType::F16,
         ),
         ("decoder.conv_out.bias", &[3][..], GGMLType::F32),
@@ -347,7 +403,7 @@ fn validate_vae(source: &dyn TensorSource) -> Result<(), String> {
         ("decoder.norm_out.bias", &[128][..], GGMLType::F32),
         ("decoder.norm_out.weight", &[128][..], GGMLType::F32),
     ] {
-        require_tensor(source, name, dims, ggml_type)?;
+        super::common::require_tensor(source, name, dims, ggml_type)?;
     }
     validate_vae_attention(source, "decoder.mid.attn_1", 512)?;
     validate_vae_block(source, "decoder.mid.block_1", 512, 512, false)?;
@@ -370,13 +426,13 @@ fn validate_vae(source: &dyn TensorSource) -> Result<(), String> {
             )?;
         }
         if stage != 0 {
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("decoder.up.{stage}.upsample.conv.weight"),
                 &[3, 3, output_channels, output_channels],
                 GGMLType::F16,
             )?;
-            require_tensor(
+            super::common::require_tensor(
                 source,
                 &format!("decoder.up.{stage}.upsample.conv.bias"),
                 &[output_channels],
@@ -393,26 +449,36 @@ fn validate_vae_attention(
     channels: u64,
 ) -> Result<(), String> {
     for name in ["k", "proj_out", "q", "v"] {
-        require_tensor(
+        let weight = format!("{prefix}.{name}.weight");
+        let linear = source.tensor_info(&weight).is_some_and(|info| {
+            info.ggml_type == GGMLType::F32 && info.dims == [channels, channels]
+        });
+        let linear_dims = [channels, channels];
+        let conv_dims = [1, 1, channels, channels];
+        super::common::require_tensor(
             source,
-            &format!("{prefix}.{name}.weight"),
-            &[1, 1, channels, channels],
-            GGMLType::F16,
+            &weight,
+            if linear {
+                &linear_dims[..]
+            } else {
+                &conv_dims[..]
+            },
+            if linear { GGMLType::F32 } else { GGMLType::F16 },
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.bias"),
             &[channels],
             GGMLType::F32,
         )?;
     }
-    require_tensor(
+    super::common::require_tensor(
         source,
         &format!("{prefix}.norm.weight"),
         &[channels],
         GGMLType::F32,
     )?;
-    require_tensor(
+    super::common::require_tensor(
         source,
         &format!("{prefix}.norm.bias"),
         &[channels],
@@ -431,13 +497,13 @@ fn validate_vae_block(
         ("conv1", [3, 3, input_channels, output_channels]),
         ("conv2", [3, 3, output_channels, output_channels]),
     ] {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.weight"),
             &dims,
             GGMLType::F16,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.bias"),
             &[output_channels],
@@ -445,13 +511,13 @@ fn validate_vae_block(
         )?;
     }
     for (name, channels) in [("norm1", input_channels), ("norm2", output_channels)] {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.weight"),
             &[channels],
             GGMLType::F32,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.{name}.bias"),
             &[channels],
@@ -459,13 +525,13 @@ fn validate_vae_block(
         )?;
     }
     if has_shortcut {
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.nin_shortcut.weight"),
             &[1, 1, input_channels, output_channels],
             GGMLType::F16,
         )?;
-        require_tensor(
+        super::common::require_tensor(
             source,
             &format!("{prefix}.nin_shortcut.bias"),
             &[output_channels],
@@ -479,6 +545,12 @@ pub(crate) struct Q8Scratch {
     scaled: Vec<f32>,
     force_f32_row: Vec<f32>,
     f16_input: Vec<u16>,
+    /// Per-thread F16 staging buffers, indexed by `ith`. `forward_scaled_rows`
+    /// converts the input row into f16 itself, and the pool runs the rows
+    /// concurrently, so each worker needs its own buffer -- but they are
+    /// allocated once here and reused across every call, the way `f16_input`
+    /// is, rather than a fresh `Vec` per worker per matmul.
+    f16_inputs: Vec<Vec<u16>>,
     values: Vec<u8>,
     scales: Vec<f32>,
 }
@@ -489,6 +561,7 @@ impl Q8Scratch {
             scaled: Vec::new(),
             force_f32_row: Vec::new(),
             f16_input: Vec::new(),
+            f16_inputs: Vec::new(),
             values: vec![0; n_in],
             scales: vec![0.0; n_in.div_ceil(32)],
         }
@@ -595,7 +668,10 @@ fn linear_into_scaled_impl(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::Q8_0) {
+    if !matches!(
+        info.ggml_type,
+        GGMLType::F16 | GGMLType::Q8_0 | GGMLType::F32
+    ) {
         return Err(format!(
             "Unsupported matrix type {:?} for {name}",
             info.ggml_type
@@ -613,14 +689,85 @@ fn linear_into_scaled_impl(
         return Err(format!("Invalid {name} byte length"));
     }
     match info.ggml_type {
-        GGMLType::F16 => F16Kernel::new(bytes).forward_scaled(
-            input,
-            output,
-            n_in,
-            n_out,
-            scale,
-            &mut q8.f16_input,
-        ),
+        GGMLType::F16 => {
+            // `F16Kernel::forward_scaled` always runs `forward_scaled_rows` with
+            // ith=0/nth=1, i.e. a single thread, while the Q8_0 branch below
+            // fans out over the pool. Row-partition it here so F16 weights get
+            // the same parallelism -- otherwise an F16 model is one thread for
+            // a whole DiT step.
+            let weight_ptr = bytes.as_ptr() as usize;
+            let weight_len = bytes.len();
+            let input_ptr = input.as_ptr() as usize;
+            let input_len = input.len();
+            let output_ptr = output.as_mut_ptr() as usize;
+            let output_len = output.len();
+            let scale_copy = scale;
+            let threads = pool.n_threads();
+            if q8.f16_inputs.len() < threads {
+                q8.f16_inputs.resize_with(threads, Vec::new);
+            }
+            let staging = &q8.f16_inputs[..threads];
+            let staging_ptr = staging.as_ptr() as usize;
+            pool.compute(move |ith, nth| {
+                let weight =
+                    unsafe { std::slice::from_raw_parts(weight_ptr as *const u8, weight_len) };
+                let values =
+                    unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, output_len) };
+                let buffer = unsafe { &mut *((staging_ptr as *mut Vec<u16>).add(ith)) };
+                F16Kernel::new(weight)
+                    .forward_scaled_rows(values, out, n_in, n_out, scale_copy, buffer, ith, nth);
+            });
+        }
+        GGMLType::F32 => {
+            // The F32 weights of the F32 DiT: the same row-partitioned shape
+            // as the F16 branch, with the kernel that reads f32 weights. The
+            // scale follows the same contract as the other two formats: it
+            // multiplies the input before the multiply and the output divides
+            // it out again, so only the rounding differs.
+            if scale != 1.0 {
+                q8.scaled.resize(n_in, 0.0);
+                for (scaled, &value) in q8.scaled.iter_mut().zip(input) {
+                    *scaled = value * scale;
+                }
+            }
+            let Some(kernel) =
+                crate::ops::kernel::f32::F32Kernel::from_le_bytes(bytes, n_in, n_out)
+            else {
+                return Err(format!("Invalid {name} byte length"));
+            };
+            let weight = crate::ops::kernel::Kernel::f32_slice(&kernel)
+                .ok_or_else(|| format!("Invalid {name} weight layout"))?;
+            let weight_ptr = weight.as_ptr() as usize;
+            let weight_len = weight.len();
+            let scaled_input = if scale == 1.0 {
+                input.as_ptr()
+            } else {
+                q8.scaled.as_ptr()
+            } as usize;
+            let input_len = n_in;
+            let output_ptr = output.as_mut_ptr() as usize;
+            let output_len = output.len();
+            let threads = pool.n_threads();
+            pool.compute(move |ith, nth| {
+                let values =
+                    unsafe { std::slice::from_raw_parts(scaled_input as *const f32, input_len) };
+                let out =
+                    unsafe { std::slice::from_raw_parts_mut(output_ptr as *mut f32, output_len) };
+                let weight =
+                    unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, weight_len) };
+                crate::ops::kernel::f32::forward_f32_rows_dispatch(
+                    weight, values, out, n_in, n_out, ith, nth,
+                );
+            });
+            if scale != 1.0 {
+                let inverse_scale = scale.recip();
+                for value in output {
+                    *value *= inverse_scale;
+                }
+            }
+        }
         GGMLType::Q8_0 => {
             if scale == 1.0 {
                 q8.prepare(input, n_in)?;
@@ -731,6 +878,12 @@ fn matmul_q8_0_ggml(
     }
 }
 
+/// A one-tensor [`TensorSource`] for tests that need real GGUF bytes.
+#[cfg(test)]
+pub(crate) fn test_source() -> crate::models::diffusion::z_image::tests::TestSource {
+    crate::models::diffusion::z_image::tests::TestSource::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,7 +893,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[derive(Default)]
-    struct TestSource {
+    pub(crate) struct TestSource {
         metadata: HashMap<String, MetaValue>,
         tensors: HashMap<String, TensorInfo>,
         data: HashMap<String, Vec<u8>>,
@@ -788,7 +941,7 @@ mod tests {
             self
         }
 
-        fn with_raw_tensor(
+        pub(crate) fn with_raw_tensor(
             mut self,
             name: &str,
             dims: &[u64],
@@ -864,6 +1017,7 @@ mod tests {
         let source = TestSource::f16_matrix("w", &[2, 2], [1.0, 2.0, 3.0, 4.0]);
         let mut scratch = Q8Scratch::new(2);
         let mut output = [0.0; 2];
+        let pool = ComputePool::new(2);
 
         linear_into(
             &source,
@@ -873,10 +1027,15 @@ mod tests {
             &[5.0, 6.0],
             &mut output,
             &mut scratch,
-            &ComputePool::new(1),
+            &pool,
         )
         .unwrap();
-        let input_ptr = scratch.f16_input.as_ptr();
+        // A DiT step runs 30 layers x 4 projections x 2 (pre-NAR and in-loop),
+        // so the F16 staging buffers have to survive across calls instead of
+        // being reallocated per matmul.
+        assert_eq!(scratch.f16_inputs.len(), 2);
+        let pointers: Vec<*const u16> = scratch.f16_inputs.iter().map(|b| b.as_ptr()).collect();
+        assert!(pointers.iter().all(|p| !p.is_null()));
         linear_into(
             &source,
             "w",
@@ -885,13 +1044,50 @@ mod tests {
             &[5.0, 6.0],
             &mut output,
             &mut scratch,
-            &ComputePool::new(1),
+            &pool,
         )
         .unwrap();
 
         assert_eq!(output, [17.0, 39.0]);
-        assert_eq!(scratch.f16_input.as_ptr(), input_ptr);
-        assert_eq!(scratch.f16_input.len(), 2);
+        let after: Vec<*const u16> = scratch.f16_inputs.iter().map(|b| b.as_ptr()).collect();
+        assert_eq!(after, pointers);
+        assert_eq!(scratch.f16_inputs[0].len(), 2);
+    }
+
+    #[test]
+    fn f16_linear_matches_across_thread_counts() {
+        // Row partitioning must not change the result: the pool hands each
+        // worker a private staging buffer, and both halves have to agree with
+        // the single-threaded path to the last bit.
+        let source = TestSource::f16_matrix("w", &[2, 2], [1.5, -2.0, 3.0, 1.0]);
+        let input = [1.0, 2.0];
+        let mut single = [0.0; 2];
+        let mut parallel = [0.0; 2];
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &input,
+            &mut single,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &input,
+            &mut parallel,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(4),
+        )
+        .unwrap();
+
+        assert_eq!(single, parallel);
+        assert_eq!(single, [-2.5, 5.0]);
     }
 
     #[test]
@@ -1022,7 +1218,7 @@ mod tests {
     #[test]
     fn linear_rejects_unsupported_matrix_type() {
         let source =
-            TestSource::default().with_raw_tensor("w", &[2, 2], GGMLType::F32, vec![0; 16]);
+            TestSource::default().with_raw_tensor("w", &[2, 2], GGMLType::Q4_0, vec![0; 16]);
         let error = linear_into(
             &source,
             "w",
@@ -1034,7 +1230,37 @@ mod tests {
             &ComputePool::new(1),
         )
         .unwrap_err();
-        assert_eq!(error, "Unsupported matrix type F32 for w");
+        assert_eq!(error, "Unsupported matrix type Q4_0 for w");
+    }
+
+    #[test]
+    fn linear_reads_f32_weights_as_they_are() {
+        // The F32 tier of the DiT stores its refiner and its embedders in
+        // F32; the loader takes the format the file declares.
+        let source = TestSource::default().with_raw_tensor(
+            "w",
+            &[2, 2],
+            GGMLType::F32,
+            [1.0f32, 2.0, 3.0, 4.0]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+        );
+        // The weight is one row of `n_in` per output, like every other
+        // format: row 0 is (1, 2) and row 1 is (3, 4).
+        let mut output = [0.0; 2];
+        linear_into(
+            &source,
+            "w",
+            2,
+            2,
+            &[1.0; 2],
+            &mut output,
+            &mut Q8Scratch::new(2),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+        assert_eq!(output, [3.0, 7.0]);
     }
 
     #[test]
@@ -1150,5 +1376,36 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::matches_signature;
+    use crate::models::diffusion::common::testing::NameOnlySource;
+
+    #[test]
+    fn the_pig_tag_is_enough() {
+        let source = NameOnlySource::new(Some("pig"), &[]);
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn the_tensor_signature_recognizes_a_mis_tagged_file() {
+        let source = NameOnlySource::new(
+            Some("wan"),
+            &[
+                "x_embedder.weight",
+                "cap_embedder.0.weight",
+                "final_layer.linear.weight",
+            ],
+        );
+        assert!(matches_signature(&source));
+    }
+
+    #[test]
+    fn another_model_is_not_recognized() {
+        let source = NameOnlySource::new(Some("wan"), &["layers.0.self_attention.to_q.weight"]);
+        assert!(!matches_signature(&source));
     }
 }

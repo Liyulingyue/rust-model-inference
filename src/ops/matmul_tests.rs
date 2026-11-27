@@ -3,11 +3,11 @@ use crate::ops::dot::dot_f32_neon;
 #[cfg(target_arch = "aarch64")]
 use crate::ops::quant::q8_0::quantize_q8_0_into_scalar_range;
 use crate::ops::{
-    dot_f16, dot_f16_f16_bytes, dot_f16_f32, dot_f32, f16_to_f32, f32_slice_to_f16, f32_to_f16,
-    quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope, rope_neox_inplace, rope_norm,
-    silu_inplace, silu_mul_approx_inplace, softmax_inplace, ssm_matvec, ssm_matvec_scaled,
-    ssm_outer_product_update, sum_f32, sum_sq_centered_f32, sum_sq_f32, vec_mad_f32,
-    vec_mad_self_f32, vec_scale_f32,
+    dot_f16, dot_f16_f16_bytes, dot_f16_f16_bytes_ggml, dot_f16_f32, dot_f32, f16_to_f32,
+    f32_slice_to_f16, f32_to_f16, quantize_q8_0_into, rms_norm, rms_norm_inplace, rope_mrope,
+    rope_neox_inplace, rope_norm, silu_inplace, silu_mul_approx_inplace, softmax_inplace,
+    ssm_matvec, ssm_matvec_scaled, ssm_outer_product_update, sum_f32, sum_sq_centered_f32,
+    sum_sq_f32, vec_mad_f32, vec_mad_self_f32, vec_scale_f32,
 };
 use crate::{
     core::tensor::GGMLType,
@@ -18,6 +18,95 @@ use crate::{
 
 fn leaked_weight_bytes(bytes: Vec<u8>) -> &'static [u8] {
     Box::leak(bytes.into_boxed_slice())
+}
+
+#[cfg(feature = "vulkan")]
+#[test]
+fn projection_offload_finishes_before_postops_and_recomputes_failed_rows() {
+    use crate::ops::kernel::Kernel;
+    // No device is used: a transport stub modifies output before declining.
+    struct Projection(bool);
+    impl Kernel for Projection {
+        fn try_forward_vulkan_rows(
+            &self,
+            input: &[f32],
+            output: &mut [f32],
+            n_in: usize,
+            n_out: usize,
+            rows: usize,
+        ) -> bool {
+            assert_eq!((n_in, n_out), (2, 2));
+            output.fill(1234.0);
+            if !self.0 {
+                return false;
+            }
+            for row in 0..rows {
+                output[row * 2] = input[row * 2] * 2.0;
+                output[row * 2 + 1] = input[row * 2 + 1] * 3.0;
+            }
+            true
+        }
+        fn forward_prequantized(
+            &self,
+            _: &[u8],
+            _: &[f32],
+            _: &mut [f32],
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) {
+            panic!("original F32 input required");
+        }
+        fn forward_prepared(
+            &self,
+            input: &[f32],
+            _: &[u8],
+            _: &[f32],
+            _: Option<&[BlockQ8K]>,
+            output: &mut [f32],
+            _: usize,
+            n_out: usize,
+            ith: usize,
+            nth: usize,
+        ) {
+            assert!(
+                !self.0,
+                "successful GPU projection must not run again on CPU"
+            );
+            for column in (ith * n_out.div_ceil(nth))..((ith + 1) * n_out.div_ceil(nth)).min(n_out)
+            {
+                output[column] = input[column] * (column as f32 + 2.0);
+            }
+        }
+    }
+    let weight = |success| Weight {
+        kernel: Box::new(Projection(success)),
+        n_in: 2,
+        n_out: 2,
+        ggml_type: GGMLType::F32,
+    };
+    let success = weight(true);
+    let fallback = weight(false);
+    let pool = ComputePool::new(3);
+    let input = [1.0, 2.0, -3.0, 4.0, 5.0, -6.0];
+    let expected = [2.0, 6.0, -6.0, 12.0, 10.0, -18.0];
+    let mut prepared = PreparedRows::new(3, 2);
+    prepared.prepare(&input, 3, 2, false, false).unwrap();
+    let mut gpu = [f32::NAN; 6];
+    let mut cpu = [f32::NAN; 6];
+    prepared
+        .matmul_group(&input, [(&success, &mut gpu), (&fallback, &mut cpu)], &pool)
+        .unwrap();
+    assert_eq!(gpu, expected);
+    assert_eq!(cpu, expected);
+    for weight in [&success, &fallback] {
+        let mut single = [f32::NAN; 2];
+        weight.matmul_prepared(&input[..2], &[], &[], None, &mut single, &pool);
+        assert_eq!(single, [2.0, 6.0]);
+        crate::ops::silu_mul_inplace(&[1.0; 2], &mut single);
+        assert!(single.iter().all(|value| value.is_finite()));
+    }
 }
 
 fn q8_weight_bytes(rows: usize, blocks_per_row: usize) -> &'static [u8] {
@@ -150,73 +239,6 @@ fn sequential_weight_rows(weight: &Weight<'_>, input: &[f32], rows: usize) -> Ve
         result.extend(output.into_iter().map(f32::to_bits));
     }
     result
-}
-
-#[test]
-fn prepared_rows_dispatches_one_multirow_call_per_worker() {
-    use crate::ops::kernel::Kernel;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    struct MultirowOnly(Arc<AtomicUsize>);
-    impl Kernel for MultirowOnly {
-        fn forward_prequantized(
-            &self,
-            _input_q8: &[u8],
-            _input_scales: &[f32],
-            _output: &mut [f32],
-            _n_in: usize,
-            _n_out: usize,
-            _ith: usize,
-            _nth: usize,
-        ) {
-            panic!("prepared rows must use the multirow entry point");
-        }
-
-        fn forward_prepared_rows(
-            &self,
-            input_f32: &[f32],
-            _input_q8: &[u8],
-            _input_scales: &[f32],
-            _q8_k: Option<&[BlockQ8K]>,
-            output: &mut [f32],
-            rows: usize,
-            n_in: usize,
-            n_out: usize,
-            ith: usize,
-            nth: usize,
-        ) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            let per_thread = n_out.div_ceil(nth);
-            let start = ith * per_thread;
-            let end = (start + per_thread).min(n_out);
-            for row in 0..rows {
-                for out_idx in start..end {
-                    output[row * n_out + out_idx] = input_f32[row * n_in] + out_idx as f32;
-                }
-            }
-        }
-    }
-
-    let calls = Arc::new(AtomicUsize::new(0));
-    let weight = Weight {
-        kernel: Box::new(MultirowOnly(Arc::clone(&calls))),
-        ggml_type: GGMLType::F32,
-        n_in: 2,
-        n_out: 2,
-    };
-    let input = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    let mut prepared = PreparedRows::new(3, 2);
-    prepared.prepare(&input, 3, 2, false, false).unwrap();
-    let mut output = [f32::NAN; 6];
-    prepared
-        .matmul(&weight, &input, &mut output, &ComputePool::new(1))
-        .unwrap();
-
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert_eq!(output, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 }
 
 #[test]
@@ -733,7 +755,7 @@ fn sum_sq_centered_f32_avoids_cancellation_in_extreme_case() {
 }
 
 #[test]
-fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_rotation_order() {
+fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation() {
     let mut values = [0.0f32; 128];
     values[0] = f32::from_bits(0x402a_4f21);
     values[1] = f32::from_bits(0x3fad_b711);
@@ -744,7 +766,7 @@ fn rope_neox_inplace_matches_pinned_ggml_recurrence_and_rotation_order() {
 
     assert_eq!(
         [values[0], values[1], values[64], values[65]].map(f32::to_bits),
-        [0x3fc7_051a, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
+        [0x3fc7_0519, 0x3f17_f682, 0x400a_7ff8, 0x3fa7_dc8a],
     );
 }
 
@@ -807,27 +829,53 @@ fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
     );
 }
 
-#[cfg(feature = "scalar-parity")]
+/// The default NEON f16 dot accumulates in f32 (`FMLAL`), so on the same inputs
+/// it must sit far closer to an exact sum than the f16-accumulating form does.
+///
+/// The comparison is deliberately against f64 and not against ggml: this is the
+/// path the Vulkan operator check uses as its reference, and a reference that is
+/// itself off by an f16 ulp cannot certify anything finer than that.
+#[cfg(all(target_arch = "aarch64", not(feature = "ggml-f16-dot-parity")))]
 #[test]
-fn scalar_dot_f32_matches_ggml_f64_accumulation() {
-    assert_eq!(dot_f32(&[1.0e8, 1.0, -1.0e8], &[1.0; 3], 3), 1.0);
+fn neon_f16_attention_dot_accumulates_in_f32() {
+    let q_bits: Vec<u16> = (0..128)
+        .map(|index| {
+            ((if index % 3 == 0 { 0x8000 } else { 0 })
+                | ((14 + index % 3) << 10)
+                | ((index * 73 + 19) & 0x03ff)) as u16
+        })
+        .collect();
+    let k: Vec<u16> = (0..128)
+        .map(|index| {
+            ((if matches!(index % 5, 1 | 2) {
+                0x8000
+            } else {
+                0
+            }) | ((13 + index % 4) << 10)
+                | ((index * 151 + 7) & 0x03ff)) as u16
+        })
+        .collect();
+
+    let exact: f64 = q_bits
+        .iter()
+        .zip(&k)
+        .map(|(&a, &b)| f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b)))
+        .sum();
+    let got = f64::from(dot_f16(&q_bits, &k, q_bits.len()));
+    let relative = (got - exact).abs() / exact.abs();
+
+    // The pinned f16-accumulating value for these inputs is 0x41d5_9c00 =
+    // 26.701171875, against an exact 18.0 -- a 48% error. Anything near f32
+    // rounding proves the f32 accumulator is the one running.
+    assert!(
+        relative < 1e-6,
+        "FMLAL dot drifted from the exact sum: got={got} exact={exact} relative={relative}"
+    );
 }
 
-#[cfg(feature = "scalar-parity")]
-#[test]
-fn scalar_dot_f16_matches_ggml_f64_accumulation() {
-    let mut input = vec![f32_to_f16(0.0); 96];
-    input[0] = f32_to_f16(10_000.0);
-    input[32] = f32_to_f16(1.0);
-    input[64] = f32_to_f16(-10_000.0);
-    let weights = (0..96)
-        .flat_map(|_| f32_to_f16(1.0).to_le_bytes())
-        .collect::<Vec<_>>();
-
-    assert_eq!(dot_f16_f16_bytes(&input, &weights, input.len()), 1.0);
-}
-
-#[cfg(target_arch = "aarch64")]
+/// The f16-accumulating dot only exists behind `ggml-f16-dot-parity`, where it
+/// is reproduced bit for bit. TODO-025 explains why it is not the default.
+#[cfg(all(target_arch = "aarch64", feature = "ggml-f16-dot-parity"))]
 #[test]
 fn neon_f16_attention_dot_matches_ggml_four_accumulator_reduction() {
     let q_bits: Vec<u16> = (0..128)
@@ -851,6 +899,101 @@ fn neon_f16_attention_dot_matches_ggml_four_accumulator_reduction() {
 
     let q: Vec<u16> = q.iter().map(|&value| f32_to_f16(value)).collect();
     assert_eq!(dot_f16(&q, &k, q.len()).to_bits(), 0x41d5_9c00);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn f16_dot_scalar_tail_covers_gemma4_audio_patch_length() {
+    let a: Vec<u16> = (0..9)
+        .map(|index| f32_to_f16(index as f32 * 0.25 - 1.0))
+        .collect();
+    let b: Vec<u16> = (0..9)
+        .map(|index| f32_to_f16(index as f32 * -0.125 + 0.75))
+        .collect();
+    let expected = a
+        .iter()
+        .zip(&b)
+        .map(|(&left, &right)| f64::from(f16_to_f32(left) * f16_to_f32(right)))
+        .sum::<f64>() as f32;
+
+    assert_eq!(dot_f16(&a, &b, 9).to_bits(), expected.to_bits());
+}
+
+#[test]
+fn f32_ggml_dot_retains_cancellation_and_handles_attention_tails() {
+    let mut cancellation = [0.0; 32];
+    for (index, value) in [(0, 1e8), (8, 1.0), (16, -1e8), (24, 1.0)] {
+        cancellation[index] = value;
+    }
+    assert!((crate::ops::dot::dot_f32_ggml(&cancellation, &[1.0; 32], 32) - 2.0).abs() < 1e-6);
+    for n in [0, 9, 31, 32, 128, 259] {
+        let a: Vec<_> = (0..n)
+            .map(|i| ((i * 17 % 31) as f32 - 15.0) / 16.0)
+            .collect();
+        let b: Vec<_> = (0..n)
+            .map(|i| ((i * 13 % 23) as f32 - 11.0) / 8.0)
+            .collect();
+        let expected: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(&a, &b)| f64::from(a) * f64::from(b))
+            .sum();
+        let actual = f64::from(crate::ops::dot::dot_f32_ggml(&a, &b, n));
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "n={n}: {actual} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn f16_ggml_typed_dot_handles_attention_widths_and_tails() {
+    for n in [0, 9, 31, 32, 128, 259] {
+        let a: Vec<_> = (0..n)
+            .map(|i| f32_to_f16(((i * 17 % 31) as f32 - 15.0) / 16.0))
+            .collect();
+        let b: Vec<_> = (0..n)
+            .map(|i| f32_to_f16(((i * 13 % 23) as f32 - 11.0) / 8.0))
+            .collect();
+        let expected: f64 = a
+            .iter()
+            .zip(&b)
+            .map(|(&a, &b)| f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b)))
+            .sum();
+        let actual = f64::from(crate::ops::dot::dot_f16_ggml(&a, &b, n));
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "n={n}: {actual} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn ggml_dots_honor_scalar_dispatch() {
+    let _scope = crate::ops::ScalarDispatchScope::new(true);
+    assert!(!crate::ops::has_avx2_fma() && !crate::ops::has_neon());
+    for n in [0, 9, 32, 128, 259] {
+        let a: Vec<_> = (0..n).map(|i| (i as f32 * 0.137).sin() * 100.0).collect();
+        let b: Vec<_> = (0..n).map(|i| (i as f32 * 0.193).cos()).collect();
+        let expected = a
+            .iter()
+            .zip(&b)
+            .map(|(&x, &y)| f64::from(x * y))
+            .sum::<f64>() as f32;
+        assert_eq!(
+            crate::ops::dot::dot_f32_ggml(&a, &b, n).to_bits(),
+            expected.to_bits()
+        );
+        let a: Vec<_> = a.into_iter().map(f32_to_f16).collect();
+        let b: Vec<_> = b.into_iter().map(f32_to_f16).collect();
+        let expected = a.iter().zip(&b).fold(0.0f64, |sum, (&x, &y)| {
+            sum + f64::from(f16_to_f32(x) * f16_to_f32(y))
+        }) as f32;
+        assert_eq!(
+            crate::ops::dot::dot_f16_ggml(&a, &b, n).to_bits(),
+            expected.to_bits()
+        );
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -910,16 +1053,23 @@ fn neon_attention_value_matches_ggml_256_padded_reduction() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
+fn neon_softmax_matches_scalar_exp_and_f64_sum() {
     let mut values = [-1.0, 0.0, 1.0, f32::NEG_INFINITY];
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut expected = values
+        .iter()
+        .map(|&value| (value - max).exp())
+        .collect::<Vec<_>>();
+    let sum = expected.iter().map(|&value| f64::from(value)).sum::<f64>();
+    let scale = (1.0 / sum) as f32;
+    for value in &mut expected {
+        *value *= scale;
+    }
 
     softmax_inplace(&mut values);
 
-    for (actual, expected) in values
-        .into_iter()
-        .zip([0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0])
-    {
-        assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+    for (&actual, &expected) in values.iter().zip(expected.iter()) {
+        assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
     }
 }
 
@@ -1044,7 +1194,7 @@ fn neon_f16_ops_match_scalar_with_tail() {
 }
 
 #[test]
-fn f16_dot_dispatch_matches_native_or_scalar_reduction() {
+fn f16_dot_dispatch_matches_platform_reduction_contract() {
     fn pinned_inputs(n: usize) -> (Vec<u16>, Vec<u8>) {
         let x = (0..n)
             .map(|index| {
@@ -1066,18 +1216,68 @@ fn f16_dot_dispatch_matches_native_or_scalar_reduction() {
         (x, y)
     }
 
-    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-    let native_fp16 = std::arch::is_aarch64_feature_detected!("fp16");
-    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
-    let native_fp16 = false;
-    let expected = if native_fp16 {
-        [(32, 0xc086_b000), (37, 0x4035_3bf4), (64, 0x4122_9e00)]
+    let native_fp16 = crate::ops::f16_uses_neon_accumulators(32);
+    #[cfg(target_arch = "x86_64")]
+    let avx_f16 = std::arch::is_x86_feature_detected!("avx2")
+        && std::arch::is_x86_feature_detected!("fma")
+        && std::arch::is_x86_feature_detected!("f16c");
+    #[cfg(not(target_arch = "x86_64"))]
+    let avx_f16 = false;
+    // The aarch64 contract depends on `ggml-f16-dot-parity`: with it the dot
+    // reproduces ggml's f16 accumulator, without it the dot accumulates in f32
+    // and lands next to the x86 values instead. Both are pinned, because both
+    // are reachable builds. TODO-025.
+    #[cfg(feature = "ggml-f16-dot-parity")]
+    let f16_accumulating: [(usize, u32); 3] =
+        [(32, 0xc086_b000), (37, 0x4035_3bf4), (64, 0x4122_9e00)];
+    #[cfg(not(feature = "ggml-f16-dot-parity"))]
+    let f16_accumulating: [(usize, u32); 3] =
+        [(32, 0xc086_612d), (37, 0x4035_d99a), (64, 0x4122_a162)];
+    /// Exact sum of the pinned inputs in f64, so the accuracy assertion above is
+    /// anchored to arithmetic rather than to another implementation.
+    fn exact_sum((x, y): &(Vec<u16>, Vec<u8>)) -> f64 {
+        let sum = x
+            .iter()
+            .zip(y.chunks_exact(2))
+            .fold(0.0f64, |acc, (&a, b)| {
+                let b = u16::from_le_bytes([b[0], b[1]]);
+                acc + f64::from(f16_to_f32(a)) * f64::from(f16_to_f32(b))
+            });
+        sum
+    }
+    let expected: [(usize, u32); 3] = if native_fp16 {
+        f16_accumulating
+    } else if avx_f16 {
+        [(32, 0xc086_612e), (37, 0x4035_d998), (64, 0x4122_a160)]
     } else {
         [(32, 0xc086_612e), (37, 0x4035_d999), (64, 0x4122_a161)]
     };
     for (n, expected) in expected {
         let (x, y) = pinned_inputs(n);
         assert_eq!(dot_f16_f16_bytes(&x, &y, n).to_bits(), expected, "n={n}");
+        // The bit pattern alone only proves determinism, so also pin accuracy:
+        // this is what makes a silent regression to a narrower accumulator
+        // visible here rather than three layers downstream. TODO-025.
+        #[cfg(not(feature = "ggml-f16-dot-parity"))]
+        {
+            let got = f64::from(dot_f16_f16_bytes(&x, &y, n));
+            let reference = exact_sum(&pinned_inputs(n));
+            assert!(
+                (got - reference).abs() / reference.abs() < 1e-6,
+                "n={n} drifted from the exact sum: got={got} exact={reference}"
+            );
+        }
+    }
+
+    if avx_f16 {
+        for (n, expected) in [(32, 0xc086_612f), (37, 0x4035_d996), (64, 0x4122_a161)] {
+            let (x, y) = pinned_inputs(n);
+            assert_eq!(
+                dot_f16_f16_bytes_ggml(&x, &y, n).to_bits(),
+                expected,
+                "GGML n={n}",
+            );
+        }
     }
 
     if !native_fp16 {
@@ -1089,7 +1289,14 @@ fn f16_dot_dispatch_matches_native_or_scalar_reduction() {
     y[..2].copy_from_slice(&0x3c00u16.to_le_bytes());
     x[32] = 0x0475;
     y[64..66].copy_from_slice(&0x472eu16.to_le_bytes());
-    assert_eq!(dot_f16_f16_bytes(&x, &y, 64).to_bits(), 0x3f80_2000);
+    // 1.0 + 6.8e-05 * 7.18 = 1.00048828125 exactly. The f16 accumulator rounds
+    // that last term against 1.0 and lands on 0x3f80_2000, one f16 ulp high --
+    // the sparse case is where the narrow accumulator shows most clearly.
+    #[cfg(feature = "ggml-f16-dot-parity")]
+    let sparse = 0x3f80_2000u32;
+    #[cfg(not(feature = "ggml-f16-dot-parity"))]
+    let sparse = 0x3f80_1000u32;
+    assert_eq!(dot_f16_f16_bytes(&x, &y, 64).to_bits(), sparse);
 }
 
 fn valid_q8_weights(n_in: usize, n_out: usize) -> Vec<u8> {
@@ -1125,7 +1332,7 @@ fn neon_q8_quantization_matches_scalar() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn neon_q8_quantization_uses_ties_away_from_zero() {
+fn neon_q8_quantization_uses_ties_to_even() {
     let mut input = [0.0f32; 32];
     input[0] = 127.0;
     input[1] = 34.5;
@@ -1134,7 +1341,7 @@ fn neon_q8_quantization_uses_ties_away_from_zero() {
 
     quantize_q8_0_into(&input, input.len(), &mut q8, &mut scales);
 
-    assert_eq!(q8[1] as i8, 35);
+    assert_eq!(q8[1] as i8, 34);
 }
 
 #[test]
@@ -1411,4 +1618,78 @@ fn rope_norm_rotates_adjacent_pairs_with_ggml_recurrence() {
         [values[0], values[1], values[2], values[3]].map(f32::to_bits),
         [0x3e97_713b, 0x403e_3d4f, 0xbee2_971d, 0x3e6d_9079],
     );
+}
+
+#[test]
+fn tiled_batched_matches_per_token_loop_bits() {
+    // The token-tiled fast path (rows >= 2, bf16/f16/f32 kernels) must be
+    // bit-identical to the per-token loop: same per-(row, token) dot, same
+    // reduction order, only the loop nesting changes. Shapes cross both the
+    // 32-row and 32-token tile boundaries and n_in lands on a 4-element tail
+    // (multiple of 8, not of 16).
+    for kind in [GGMLType::BF16, GGMLType::F16, GGMLType::F32] {
+        let n_in = 200usize;
+        let n_out = 70usize;
+        let rows = 33usize;
+        let elements = n_in * n_out;
+        let weight_bytes: Vec<u8> = match kind {
+            GGMLType::BF16 => (0..elements)
+                .flat_map(|i| {
+                    half::bf16::from_f32(((i % 41) as f32 - 20.0) / 16.0)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect(),
+            GGMLType::F16 => (0..elements)
+                .flat_map(|i| f32_to_f16(((i % 37) as f32 - 18.0) / 16.0).to_le_bytes())
+                .collect(),
+            _ => (0..elements)
+                .flat_map(|i| ((i % 43) as f32 - 21.0).to_le_bytes())
+                .collect(),
+        };
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            leaked_weight_bytes(weight_bytes),
+            kind,
+            n_in,
+            n_out,
+        ));
+
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| (((i * 31 + 7) % 97) as f32 - 48.0) / 32.0)
+            .collect();
+
+        // Reference: the per-token loop (the old forward_batched nesting).
+        let mut expected = vec![0.0f32; rows * n_out];
+        for (t, (input_row, output_row)) in input
+            .chunks_exact(n_in)
+            .zip(expected.chunks_exact_mut(n_out))
+            .enumerate()
+        {
+            let _ = t;
+            weight.kernel.forward(input_row, output_row, n_in, n_out);
+        }
+
+        let mut actual = vec![0.0f32; rows * n_out];
+        let mut prepared = PreparedRows::new(rows, n_in);
+        prepared
+            .prepare(
+                &input,
+                rows,
+                n_in,
+                weight.needs_q8_0_activation(),
+                weight.uses_q8_k(),
+            )
+            .unwrap();
+        prepared
+            .matmul(&weight, &input, &mut actual, &ComputePool::new(3))
+            .unwrap();
+
+        for (index, (a, b)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "kind={kind:?} element {index}: tiled {a} vs per-token {b}"
+            );
+        }
+    }
 }

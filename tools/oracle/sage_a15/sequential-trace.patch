@@ -1,0 +1,51 @@
+--- a/examples/eval-callback/eval-callback.cpp
++++ b/examples/eval-callback/eval-callback.cpp
+@@ -276,6 +276,7 @@
+     // experts. This only touches names it verified are present.
+     void write_moe(const std::vector<llama_token> & tokens, int n_layer, int step) {
+         write_tokens("qwen35moe.prompt_ids", tokens);
++        write_moe_tensor("model.input_embed", "model.input_embed", -1, step);
+         for (int layer = 0; layer < n_layer; ++layer) {
+             const std::string suffix = "-" + std::to_string(layer);
+             // Boundary nodes for every layer: this is the per-layer profile.
+@@ -351,6 +352,7 @@
+             if (!tensors_.count(name)) continue;
+             write_moe_tensor(name, name, -1, step);
+         }
++        tensors_.clear();
+         (void) n_layer;
+     }
+ 
+@@ -573,13 +575,26 @@
+     const llama_vocab * vocab = llama_model_get_vocab(model);
+     const bool add_bos = llama_vocab_get_add_bos(vocab);
+     std::vector<llama_token> tokens = common_tokenize(ctx, params.prompt, add_bos, true);
+-    if (tokens.size() != 1) {
+-        throw std::runtime_error(
+-                "qwen35moe oracle needs exactly one token so no ubatch padding can be "
+-                "confused with a real token; got " + std::to_string(tokens.size()));
++    if (tokens.empty() || params.n_predict < 1) {
++        throw std::runtime_error("Sage oracle requires input tokens and -n >= 1");
+     }
+     const int n_layer = llama_model_n_layer(model);
+-    if (llama_decode(ctx, llama_batch_get_one(tokens.data(), 1))) return false;
+-    trace.write_moe(tokens, n_layer, 0);
++    const int n_vocab = llama_vocab_n_tokens(vocab);
++    int position = 0;
++    auto decode_one = [&](llama_token token) {
++        if (llama_decode(ctx, llama_batch_get_one(&token, 1))) return false;
++        trace.write_moe({token}, n_layer, position++);
++        return true;
++    };
++    for (llama_token token : tokens) {
++        if (!decode_one(token)) return false;
++    }
++    std::vector<llama_token> generated;
++    for (int i = 0; i < params.n_predict; ++i) {
++        const llama_token next = greedy_token(ctx, n_vocab);
++        generated.push_back(next);
++        if (i + 1 < params.n_predict && !decode_one(next)) return false;
++    }
++    trace.write_greedy(generated);
+     return true;
+ }

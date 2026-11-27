@@ -2,7 +2,9 @@
 
 use std::sync::atomic::Ordering;
 
-#[cfg(target_arch = "x86_64")]
+use std::sync::OnceLock;
+
+#[cfg(any(target_arch = "x86_64", feature = "vulkan"))]
 use std::sync::atomic::AtomicBool;
 
 #[cfg(target_arch = "x86_64")]
@@ -29,7 +31,9 @@ pub fn gpu_requested() -> bool {
 pub fn gpu_matmul_active() -> bool {
     !crate::core::thread_pool::gpu_matmul_disabled()
         && !crate::vulkan::gpu_broken()
-        && get_vulkan_context().is_some()
+        && get_vulkan_context()
+            .map(|ctx| !ctx.is_software_icd())
+            .unwrap_or(false)
 }
 
 #[cfg(not(feature = "vulkan"))]
@@ -48,13 +52,7 @@ pub fn mark_gpu_broken(reason: &str) {
 }
 
 #[cfg(feature = "vulkan")]
-use std::sync::OnceLock;
-
-#[cfg(feature = "vulkan")]
 use crate::vulkan::VulkanContext;
-
-#[cfg(feature = "wgpu")]
-use std::sync::OnceLock;
 
 #[cfg(feature = "wgpu")]
 use crate::wgpu::WgpuContext;
@@ -67,18 +65,83 @@ static HAS_AVX2_FMA: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
 static HAS_F16C: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
+static HAS_AVXVNNI: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX512_FMA: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX512_BW: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "vulkan")]
 static VULKAN_CONTEXT: OnceLock<Result<VulkanContext, String>> = OnceLock::new();
 
 #[cfg(feature = "vulkan")]
+pub(crate) fn is_shared_vulkan_context(context: &VulkanContext) -> bool {
+    matches!(VULKAN_CONTEXT.get(), Some(Ok(shared)) if std::ptr::eq(shared, context))
+}
+
+#[cfg(feature = "vulkan")]
+static VULKAN_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "vulkan")]
+extern "C" fn shutdown_vulkan() {
+    VULKAN_SHUTTING_DOWN.store(true, Ordering::Release);
+    let cleanup = || {
+        crate::ops::kernel::vulkan::release_shared_runtimes()?;
+        crate::vulkan::matmul_q4k::release_shared_runtime()?;
+        crate::vulkan::matmul_iq::release_shared_runtime()?;
+        if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
+            context.shutdown()?;
+        }
+        Ok::<_, crate::vulkan::VulkanError>(())
+    };
+    if let Err(error) = cleanup() {
+        log::error!("Vulkan shutdown retained resources: {error}");
+    }
+    // Keep Entry loaded until the driver's own process-exit callbacks finish.
+}
+
+#[cfg(feature = "vulkan")]
 use std::sync::Mutex;
 
 #[cfg(feature = "vulkan")]
 pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
-    if !GPU_ENABLED.load(Ordering::Relaxed) {
+    if !crate::ops::gpu_requested()
+        || crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Cpu
+    {
         return None;
+    }
+    shared_vulkan_context()
+        .map_err(|e| {
+            eprintln!("[GPU] Vulkan init failed: {e}. Falling back to CPU.");
+        })
+        .ok()
+}
+
+/// Start the device initialization in the background.
+///
+/// Bringing the Vulkan device up costs about 300 ms on the aarch64 box -- the
+/// driver loads its compiler and enumerates the device -- and a session
+/// that opens a 12 GB checkpoint has that time to spare. The context is
+/// shared, so whoever needs it first waits for the same initialization.
+#[cfg(feature = "vulkan")]
+pub fn warm_vulkan_context() {
+    if !GPU_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("vulkan-init".into())
+        .spawn(|| {
+            let _ = shared_vulkan_context();
+        });
+}
+
+/// Device initialization is shared; choosing this device belongs to each session.
+#[cfg(feature = "vulkan")]
+pub(crate) fn shared_vulkan_context() -> Result<&'static VulkanContext, String> {
+    if VULKAN_SHUTTING_DOWN.load(Ordering::Acquire) {
+        return Err("Vulkan is shutting down".into());
     }
     // Warmup runs INSIDE the init closure: the driver JITs the compute
     // pipeline on first dispatch (seconds on Meteor Lake), and any thread
@@ -92,6 +155,13 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
                 match unsafe { ctx.warmup() } {
                     Ok(()) => {
                         eprintln!("[GPU] Warmup done in {:.1}s", t0.elapsed().as_secs_f64());
+                        // Rust statics have no Drop; stop driver workers before its finalizers.
+                        extern "C" {
+                            fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
+                        }
+                        if unsafe { atexit(shutdown_vulkan) } != 0 {
+                            return Err("cannot register Vulkan process cleanup".into());
+                        }
                         Ok(ctx)
                     }
                     Err(e) => {
@@ -103,12 +173,13 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
             }
             Err(e) => Err(e),
         });
-    match result {
-        Ok(ctx) => Some(ctx),
-        Err(e) => {
-            eprintln!("[GPU] Vulkan init failed: {}. Falling back to CPU.", e);
-            None
-        }
+    result.as_ref().map_err(Clone::clone)
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn release_vulkan_weight(weight: &[u8]) {
+    if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
+        context.release_cached_weight(weight);
     }
 }
 
@@ -182,27 +253,36 @@ fn init_cpu_features() {
     }
     let avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
     let f16c = is_x86_feature_detected!("f16c");
+    let avxvnni = is_x86_feature_detected!("avxvnni");
+    let avx512_fma = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("fma");
+    let avx512bw = is_x86_feature_detected!("avx512bw");
     HAS_AVX2_FMA.store(avx2_fma, Ordering::Relaxed);
     HAS_F16C.store(f16c, Ordering::Relaxed);
+    HAS_AVXVNNI.store(avxvnni, Ordering::Relaxed);
+    HAS_AVX512_FMA.store(avx512_fma, Ordering::Relaxed);
+    HAS_AVX512_BW.store(avx512bw, Ordering::Relaxed);
     INIT_DONE.store(true, Ordering::Relaxed);
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "scalar-parity")))]
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn has_avx2_fma() -> bool {
+    if scalar_mode() {
+        return false;
+    }
     if !INIT_DONE.load(Ordering::Relaxed) {
         init_cpu_features();
     }
     HAS_AVX2_FMA.load(Ordering::Relaxed)
 }
 
-#[cfg(any(not(target_arch = "x86_64"), feature = "scalar-parity"))]
+#[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
 pub const fn has_avx2_fma() -> bool {
     false
 }
 
-#[cfg(all(target_arch = "x86_64", not(feature = "scalar-parity")))]
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub fn has_f16c() -> bool {
     if !INIT_DONE.load(Ordering::Relaxed) {
@@ -211,19 +291,183 @@ pub fn has_f16c() -> bool {
     HAS_F16C.load(Ordering::Relaxed)
 }
 
-#[cfg(any(not(target_arch = "x86_64"), feature = "scalar-parity"))]
+#[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
 pub const fn has_f16c() -> bool {
     false
 }
 
-#[cfg(all(target_arch = "aarch64", not(feature = "scalar-parity")))]
+/// AVX-VNNI (`vpdpbusd`, CPUID `avx_vnni`): one-instruction int8 dot.
+/// Used by the `q8_0::avxvnni` reference kernel and its tests; the
+/// production Q8_0 dispatch deliberately stays on AVX2 (see TODO-AVX-VNNI
+/// in docs/develop/TODO.md).
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub const fn has_neon() -> bool {
-    true
+pub fn has_avxvnni() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVXVNNI.load(Ordering::Relaxed)
 }
 
-#[cfg(any(not(target_arch = "aarch64"), feature = "scalar-parity"))]
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avxvnni() -> bool {
+    false
+}
+
+/// AVX-512F zmm FMA (`vfmadd231ps` on `__m512`): gates the zmm
+/// packed-weight matmul kernels (`f32/avx512.rs`, `bf16/avx512.rs`,
+/// `f16/avx512.rs`). Needs AVX-512F plus FMA so the shared skeleton can keep
+/// using the FMA encoding family. See the SIMD table in
+/// `docs/develop/TODO.md`.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn has_avx512_fma() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVX512_FMA.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avx512_fma() -> bool {
+    false
+}
+
+/// AVX-512BW (byte/word granularity zmm ops). The BF16 zmm kernel needs it
+/// for `_mm512_cvtepu16_epi32` (`vpmovzxwd` with a zmm destination).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn has_avx512bw() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVX512_BW.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avx512bw() -> bool {
+    false
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub fn has_neon() -> bool {
+    !scalar_mode()
+}
+
+/// Opt-in scalar dispatch for reproducible inference and bitwise Oracle comparisons.
+/// Set `RMI_SCALAR=1` before starting the process. This also works in ordinary
+/// builds; the `parity-trace` feature is only needed to capture checkpoints.
+///
+/// The effect is *implicit*: `has_avx2_fma()` / `has_neon()` report
+/// `false` while this returns `true`, so every `if has_avx2_fma()`
+/// dispatch site (Q8_0 quantizer, silu_mul, softmax, dot, matmuls, …)
+/// transparently falls back to its scalar branch. No kernel is changed
+/// and no dispatch site needs to know about this function directly.
+///
+/// The environment variable is read **once, on first call**, and cached
+/// for the lifetime of the process. Set it before the process starts
+/// (`RMI_SCALAR=1 ./binary …`); flipping it later has no effect. Because
+/// std environment variables are process-global and Rust tests run in
+/// parallel threads inside one process, tests cannot expect to toggle
+/// this per-test — the first caller wins.
+#[inline]
+pub fn scalar_mode() -> bool {
+    static SCALAR: OnceLock<bool> = OnceLock::new();
+    SCALAR_DISPATCH.get() || *SCALAR.get_or_init(|| std::env::var_os("RMI_SCALAR").is_some())
+}
+
+thread_local! {
+    static SCALAR_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reference arithmetic for one synchronous graph, without changing other sessions.
+pub(crate) struct ScalarDispatchScope {
+    previous: bool,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ScalarDispatchScope {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            previous: SCALAR_DISPATCH.replace(SCALAR_DISPATCH.get() || enabled),
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for ScalarDispatchScope {
+    fn drop(&mut self) {
+        SCALAR_DISPATCH.set(self.previous);
+    }
+}
+
+#[cfg(test)]
+mod scoped_dispatch_tests {
+    use super::{scalar_mode, ScalarDispatchScope};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn reference_dispatch_restores_nested_scopes_and_pool_workers() {
+        let before = scalar_mode();
+        let pool = crate::ComputePool::new(3);
+        let visited = AtomicUsize::new(0);
+        {
+            let _outer = ScalarDispatchScope::new(true);
+            {
+                let _inner = ScalarDispatchScope::new(false);
+                assert!(scalar_mode());
+            }
+            pool.compute(|_, _| {
+                if scalar_mode() {
+                    visited.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            assert_eq!(visited.load(Ordering::Relaxed), 3);
+            let chunks = std::sync::Arc::new(AtomicUsize::new(0));
+            let seen = chunks.clone();
+            pool.compute_with_chunks(17, move |_, _| {
+                assert!(scalar_mode());
+                seen.fetch_add(1, Ordering::Relaxed);
+            });
+            assert_eq!(chunks.load(Ordering::Relaxed), 17);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| assert_eq!(scalar_mode(), before))
+                    .join()
+                    .unwrap();
+            });
+        }
+        assert_eq!(scalar_mode(), before);
+        visited.store(0, Ordering::Relaxed);
+        pool.compute(|_, _| {
+            if scalar_mode() == before {
+                visited.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(visited.load(Ordering::Relaxed), 3);
+        let _ = std::panic::catch_unwind(|| {
+            let _scope = ScalarDispatchScope::new(true);
+            panic!("unwind the numerical scope");
+        });
+        assert_eq!(scalar_mode(), before);
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
 #[inline(always)]
 pub const fn has_neon() -> bool {
     false
@@ -464,6 +708,101 @@ unsafe fn f32_slice_to_f16_avx2(src: &[f32], dst: &mut [u16]) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn legacy_auto_requires_gpu_opt_in_before_initializing() {
+        const CHILD: &str = "RMI_LEGACY_GPU_OPT_IN_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!super::gpu_requested());
+            assert!(super::VULKAN_CONTEXT.get().is_none());
+            let _scope = crate::compute::ComputePolicy::Auto.enter_legacy_scope();
+            assert!(super::get_vulkan_context().is_none());
+            assert!(super::VULKAN_CONTEXT.get().is_none());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ops::float::tests::legacy_auto_requires_gpu_opt_in_before_initializing",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; checks cleanup in isolated processes"]
+    fn shared_vulkan_context_cleans_up_before_driver_exit() {
+        const CHILD: &str = "RMI_VULKAN_EXIT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            static CONTEXT: std::sync::atomic::AtomicPtr<crate::vulkan::VulkanContext> =
+                std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+            extern "C" fn audit() {
+                let context = CONTEXT.load(std::sync::atomic::Ordering::Relaxed);
+                if context.is_null() {
+                    return;
+                }
+                let context = unsafe { &*context };
+                // This callback was registered before initialization, so cleanup
+                // must precede it just as it must precede the driver's finalizer.
+                if context.compute_stats().live_allocation_bytes != 0
+                    || super::shared_vulkan_context().is_ok()
+                {
+                    std::process::abort();
+                }
+            }
+            extern "C" {
+                fn atexit(callback: extern "C" fn()) -> std::ffi::c_int;
+            }
+            assert_eq!(unsafe { atexit(audit) }, 0);
+            let context = super::shared_vulkan_context().unwrap();
+            CONTEXT.store(
+                std::ptr::from_ref(context).cast_mut(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            context.operator_pipelines().unwrap();
+            crate::vulkan::matmul_q4k::matmul_q4_k(
+                context,
+                &[0; 144],
+                &[1.0; 256],
+                1,
+                256,
+                1,
+                &mut [0.0],
+            )
+            .unwrap();
+            assert!(context.compute_stats().live_allocation_bytes > 0);
+            return;
+        }
+        for _ in 0..3 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ops::float::tests::shared_vulkan_context_cleans_up_before_driver_exit",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

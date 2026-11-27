@@ -12,13 +12,13 @@ LLAMA_PIN = "b96806d96061049a5b574269b049bf6241d63d46"
 
 
 def validate_source(model: Path) -> None:
-    config = json.loads((model / "config.json").read_text())
+    config = json.loads((model / "config.json").read_text(encoding="utf-8"))
     if config.get("architectures") != ["Qwen3_5ForCausalLM"]:
         raise ValueError("expected text-only Qwen3_5ForCausalLM")
-    tokenizer = json.loads((model / "tokenizer.json").read_text())
+    tokenizer = json.loads((model / "tokenizer.json").read_text(encoding="utf-8"))
     if tokenizer.get("normalizer") != {"type": "NFC"}:
         raise ValueError("expected NeoHorse NFC tokenizer")
-    names = json.loads((model / "model.safetensors.index.json").read_text())["weight_map"]
+    names = json.loads((model / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
     if any(name.startswith(("mtp.", "model.mtp.")) for name in names):
         raise ValueError("this exporter expects NeoHorse without MTP weights")
 

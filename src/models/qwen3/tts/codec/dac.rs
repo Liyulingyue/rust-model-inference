@@ -22,7 +22,7 @@ use crate::models::qwen3::tts::codec::conv::{
 use crate::models::qwen3::tts::codec::snake::snake1d_inplace;
 use crate::models::qwen3::tts::{load_f16_or_f32_tensor, load_f16_tensor};
 use crate::ops::gelu_ggml_f16_inplace;
-use crate::ops::{f16_to_f32, f32_to_f16, matmul_q8_0_quantized_parallel, quantize_q8_0_into};
+use crate::ops::{matmul_q8_0_quantized_parallel, quantize_q8_0_into};
 
 #[cfg(unix)]
 #[cfg_attr(not(target_vendor = "apple"), link(name = "m"))]

@@ -15,10 +15,14 @@
 //! `matmul_f32_vs_f32_simd` core across BF16/F16/F32.
 
 use super::Kernel;
+use std::borrow::Cow;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512;
+pub mod ggml;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 #[cfg(target_arch = "aarch64")]
@@ -26,23 +30,47 @@ pub mod neon_q8;
 pub mod scalar;
 
 #[derive(Debug, Clone)]
-pub struct F32Kernel {
-    weight: Vec<f32>,
+pub struct F32Kernel<'a> {
+    weight: Cow<'a, [f32]>,
     n_in: usize,
     n_out: usize,
 }
 
-impl F32Kernel {
+impl<'a> F32Kernel<'a> {
     pub fn new(weight: Vec<f32>, n_in: usize, n_out: usize) -> Self {
         Self {
-            weight,
+            weight: Cow::Owned(weight),
             n_in,
             n_out,
         }
     }
+
+    pub fn from_le_bytes(bytes: &'a [u8], n_in: usize, n_out: usize) -> Option<Self> {
+        if bytes.len() != n_in.checked_mul(n_out)?.checked_mul(4)? {
+            return None;
+        }
+        let weight = if cfg!(target_endian = "little") {
+            bytemuck::try_cast_slice(bytes).ok().map(Cow::Borrowed)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            Cow::Owned(
+                bytes
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect(),
+            )
+        });
+        Some(Self {
+            weight,
+            n_in,
+            n_out,
+        })
+    }
 }
 
-impl Kernel for F32Kernel {
+impl Kernel for F32Kernel<'_> {
     fn f32_slice(&self) -> Option<&[f32]> {
         Some(&self.weight)
     }
@@ -126,9 +154,45 @@ impl Kernel for F32Kernel {
         nth: usize,
     ) {
         if input_f32.len() >= n_in {
-            scalar::forward_f32_rows(&self.weight, input_f32, output, n_in, n_out, ith, nth);
+            forward_f32_rows_dispatch(&self.weight, input_f32, output, n_in, n_out, ith, nth);
         } else {
             self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
+        }
+    }
+
+    /// ggml-parity path: same input as `forward_prepared`, but the F32 dot
+    /// uses `ggml_vec_dot_f32`'s four-accumulator NEON reduction. Only the
+    /// Nemotron trunk opts in; every other caller keeps the default F32
+    /// contract (single scalar accumulator, left-to-right).
+    fn forward_prepared_ggml(
+        &self,
+        input_f32: &[f32],
+        input_q8: &[u8],
+        input_scales: &[f32],
+        q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        ith: usize,
+        nth: usize,
+    ) {
+        if input_f32.len() >= n_in {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if start < end {
+                ggml::forward_f32_rows_ggml(&self.weight, input_f32, output, n_in, start, end);
+            }
+        } else {
+            self.forward_prepared(
+                input_f32,
+                input_q8,
+                input_scales,
+                q8_k,
+                output,
+                n_in,
+                n_out,
+                ith,
+                nth,
+            );
         }
     }
 
@@ -143,6 +207,12 @@ impl Kernel for F32Kernel {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
+        // Token-tiled path when available: identical per-(row, token) values,
+        // weight rows reused from L1/L2 instead of re-streamed per token.
+        if n_tokens >= 2 && self.supports_token_tiled_batching(n_in) {
+            self.forward_batched_rows(input, output, n_in, n_out, n_tokens, 0, n_out);
+            return;
+        }
         for token in 0..n_tokens {
             forward_f32_rows_dispatch(
                 &self.weight,
@@ -154,6 +224,63 @@ impl Kernel for F32Kernel {
                 1,
             );
         }
+    }
+
+    fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
+        if cfg!(target_arch = "x86_64") && crate::ops::has_avx512_fma() && n_in % 16 == 0 {
+            return true;
+        }
+        n_in % 8 == 0 && cfg!(target_arch = "x86_64") && crate::ops::has_avx2_fma()
+    }
+
+    /// Token-tiled batching: the AVX-512 (zmm) path when `n_in % 16 == 0`,
+    /// otherwise the AVX2 path (same gates as the per-token row kernel).
+    fn forward_batched_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        n_tokens: usize,
+        row_start: usize,
+        row_end: usize,
+    ) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if n_in % 16 == 0 && crate::ops::has_avx512_fma() {
+                let weight_bytes: &[u8] = bytemuck::cast_slice(&self.weight);
+                unsafe {
+                    avx512::matmul_f32_vs_f32_avx512_tiled(
+                        weight_bytes,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
+            if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+                let weight_bytes: &[u8] = bytemuck::cast_slice(&self.weight);
+                unsafe {
+                    avx2::matmul_f32_vs_f32_avx2_tiled(
+                        weight_bytes,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
+        }
+        false
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, output: &mut [f32]) {
@@ -186,6 +313,17 @@ pub(crate) fn forward_f32_rows_dispatch(
 ) {
     #[cfg(target_arch = "x86_64")]
     {
+        if n_in % 16 == 0 && crate::ops::has_avx512_fma() {
+            let (start, end) = scalar::row_range(n_out, ith, nth);
+            if end > start {
+                let my_out = &mut output[start..end];
+                let weight_bytes: &[u8] = bytemuck::cast_slice(weight);
+                unsafe {
+                    avx512::matmul_f32_vs_f32_avx512(weight_bytes, input, my_out, n_in, start, end);
+                    return;
+                }
+            }
+        }
         if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
             let (start, end) = scalar::row_range(n_out, ith, nth);
             if end > start {
@@ -237,6 +375,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prepared_f32_uses_the_same_dispatch_as_direct_forward() {
+        let mut input = [0.0f32; 64];
+        input[0] = 16_777_216.0;
+        input[4] = 1.0;
+        input[8] = -16_777_216.0;
+        input[12] = 1.0;
+        let kernel = F32Kernel::new(vec![1.0; 64 * 3], 64, 3);
+        let mut expected = [0.0; 3];
+        kernel.forward(&input, &mut expected, 64, 3);
+        for worker in 0..5 {
+            let mut output = [f32::NAN; 3];
+            kernel.forward_prepared(&input, &[], &[], None, &mut output, 64, 3, worker, 5);
+            for row in 0..3 {
+                if (3 * worker / 5..3 * (worker + 1) / 5).contains(&row) {
+                    assert_eq!(output[row].to_bits(), expected[row].to_bits());
+                } else {
+                    assert!(output[row].is_nan());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn f32_kernel_row_sum() {
         let w = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let input = [1.0f32, 1.0, 1.0];
@@ -258,6 +419,35 @@ mod tests {
         kernel.forward(&input, &mut output, 3, 2);
 
         assert_eq!(output, [140.0, 320.0]);
+    }
+
+    #[test]
+    fn borrowed_f32_preserves_owned_kernel_bits_without_copying() {
+        let values: Vec<f32> = (0..64).map(|i| (i as f32 - 23.) / 7.).collect();
+        let le_bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes = if cfg!(target_endian = "little") {
+            bytemuck::cast_slice(&values)
+        } else {
+            &le_bytes
+        };
+        let borrowed = F32Kernel::from_le_bytes(bytes, 16, 4).unwrap();
+        if cfg!(target_endian = "little") {
+            assert_eq!(borrowed.f32_slice().unwrap().as_ptr(), values.as_ptr());
+        }
+        let owned = F32Kernel::new(values.clone(), 16, 4);
+        let input = vec![0.3; 32];
+        let (mut actual, mut expected) = (vec![0.; 8], vec![0.; 8]);
+        borrowed.forward_batched(&input, &mut actual, 16, 4);
+        owned.forward_batched(&input, &mut expected, 16, 4);
+        assert_eq!(
+            actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        assert!(F32Kernel::from_le_bytes(&bytes[..bytes.len() - 1], 16, 4).is_none());
+        let mut unaligned = vec![0];
+        unaligned.extend_from_slice(bytes);
+        let fallback = F32Kernel::from_le_bytes(&unaligned[1..], 16, 4).unwrap();
+        assert_eq!(fallback.f32_slice().unwrap(), values);
     }
 
     #[test]

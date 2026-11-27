@@ -1,0 +1,30 @@
+#version 450
+
+// ReLU(x)^2 activation, one workgroup of 64 lanes per 64-element group.
+//
+// llama.cpp builds the Nemotron-H FFN as `LLM_FFN_RELU_SQR`
+// (`src/models/nemotron-h.cpp`): the up projection is followed by
+// `max(x, 0)^2` and then the down projection. The square is taken after the
+// clamp, so a negative input contributes zero rather than a positive square.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint input_word;
+    uint count;
+    uint rows;
+    uint row_stride;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+    index += row * pc.row_stride;
+    float value = uintBitsToFloat(arena.data[pc.input_word + index]);
+    float clamped = max(value, 0.0);
+    arena.data[pc.input_word + index] = floatBitsToUint(clamped * clamped);
+}

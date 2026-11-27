@@ -1,0 +1,967 @@
+use std::path::PathBuf;
+use std::str::FromStr;
+
+use super::types::{
+    parse_embedding_output, CliOptions, JevBlockInput, JevQuestion, KvFormat, LatentUpsampleKind,
+    RefinerDecoderKind, XVectorMode,
+};
+
+pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
+    let mut options = CliOptions::default();
+    // A flag-shaped prompt value is not a mode switch.
+    let mut parsed_flags = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        parsed_flags.push(i);
+        match args[i].as_str() {
+            "--enhance" => options.enhance = true,
+            "--yue2" => options.yue2 = true,
+            "--dreamx" => options.dreamx = true,
+            "--astronex" => options.astronex = true,
+            "--planner" => {
+                options.planner = Some(required_path_value(args, &mut i, "--planner")?);
+            }
+            "--perception" => {
+                options.perception = Some(required_path_value(args, &mut i, "--perception")?);
+            }
+            "--scenes" => {
+                options.scenes = Some(required_path_value(args, &mut i, "--scenes")?);
+            }
+            "--image-root" => {
+                options.image_root = Some(required_path_value(args, &mut i, "--image-root")?);
+            }
+            "--frames" => {
+                options.frames = Some(required_path_value(args, &mut i, "--frames")?);
+            }
+            "--mode" => {
+                options.planning_mode = Some(required_string_value(args, &mut i, "--mode")?);
+            }
+            "--num-samples" => {
+                options.num_samples = Some(required_usize_value(args, &mut i, "--num-samples")?);
+            }
+            "--num-steps" => {
+                options.num_steps = Some(required_usize_value(args, &mut i, "--num-steps")?);
+            }
+            "--output" => {
+                options.output = Some(required_path_value(args, &mut i, "--output")?);
+            }
+            "--model" => {
+                if i + 1 < args.len() {
+                    options.model = args[i + 1].as_str().into();
+                    i += 1;
+                }
+            }
+            "--laya-request" => {
+                options.laya_request = Some(required_path_value(args, &mut i, "--laya-request")?);
+            }
+            "--wevisone-request" => {
+                options.wevisone_request =
+                    Some(required_path_value(args, &mut i, "--wevisone-request")?);
+            }
+            "--wevisone-decoder" => {
+                options.wevisone_decoder =
+                    Some(required_path_value(args, &mut i, "--wevisone-decoder")?);
+            }
+            "--timestral-request" => {
+                options.timestral_request =
+                    Some(required_path_value(args, &mut i, "--timestral-request")?);
+            }
+            "--system-one-request" => {
+                options.system_one_request =
+                    Some(required_path_value(args, &mut i, "--system-one-request")?);
+            }
+            "--decision-request" => {
+                options.decision_request =
+                    Some(required_path_value(args, &mut i, "--decision-request")?);
+            }
+            "--decision-thinker" => {
+                options.decision_thinker =
+                    Some(required_path_value(args, &mut i, "--decision-thinker")?);
+            }
+            "--adapter" => {
+                options.adapter = Some(required_path_value(args, &mut i, "--adapter")?);
+            }
+            "--prompt" => {
+                if i + 1 < args.len() {
+                    options.prompt = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--lyrics" => {
+                options.lyrics = Some(required_string_value(args, &mut i, "--lyrics")?);
+            }
+            "--chat-template" => {
+                if i + 1 < args.len() {
+                    options.chat_template = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--chat-template-file" => {
+                options.chat_template_file = Some(PathBuf::from(required_string_value(
+                    args,
+                    &mut i,
+                    "--chat-template-file",
+                )?));
+            }
+            "--jinja" => options.jinja = true,
+            "--negative-prompt" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --negative-prompt")?;
+                options.negative_prompt = Some(value.clone());
+                i += 1;
+            }
+            "--max-tokens" | "--n-gen" => {
+                if i + 1 < args.len() {
+                    options.max_tokens = Some(args[i + 1].parse().unwrap_or(128));
+                    i += 1;
+                }
+            }
+            "--max-context" => {
+                if i + 1 < args.len() {
+                    options.max_context = Some(args[i + 1].parse().unwrap_or(8192));
+                    i += 1;
+                }
+            }
+            "--repetition-penalty" => {
+                if i + 1 < args.len() {
+                    let v: f32 = args[i + 1].parse().unwrap_or(1.0);
+                    if v <= 0.0 {
+                        return Err(format!(
+                            "--repetition-penalty must be > 0 (1.0 = disabled, > 1.0 = suppress repeats)"
+                        ));
+                    }
+                    options.repetition_penalty = Some(v);
+                    i += 1;
+                }
+            }
+            "--prefill-batch-size" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --prefill-batch-size")?;
+                options.prefill_batch_size = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --prefill-batch-size value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--mtp-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --mtp-draft")?;
+                options.mtp_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --mtp-draft value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--dspark-model" => {
+                let value = args.get(i + 1).ok_or("Missing value for --dspark-model")?;
+                let path = std::path::Path::new(value);
+                if !path.exists() {
+                    return Err(format!("--dspark-model file not found: {value}"));
+                }
+                options.dspark_model = Some(value.to_string());
+                i += 1;
+            }
+            "--ngram-draft" => {
+                let value = args.get(i + 1).ok_or("Missing value for --ngram-draft")?;
+                options.ngram_draft = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --ngram-draft value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--ngram-lookup" => {
+                let value = args.get(i + 1).ok_or("Missing value for --ngram-lookup")?;
+                let lookup = value
+                    .parse::<usize>()
+                    .map_err(|error| format!("Invalid --ngram-lookup value: {error}"))?;
+                if lookup == 0 {
+                    return Err("Invalid --ngram-lookup value: must be at least 1".into());
+                }
+                options.ngram_lookup = Some(lookup);
+                i += 1;
+            }
+            "--steps" => {
+                let value = args.get(i + 1).ok_or("Missing value for --steps")?;
+                options.steps = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --steps value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--video-frames" => {
+                let value = args.get(i + 1).ok_or("Missing value for --video-frames")?;
+                options.astronex_frames = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --video-frames value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--width" => options.width = Some(required_usize_value(args, &mut i, "--width")?),
+            "--height" => options.height = Some(required_usize_value(args, &mut i, "--height")?),
+            "--cfg" => {
+                options.cfg = Some(
+                    required_string_value(args, &mut i, "--cfg")?
+                        .parse()
+                        .map_err(|error| format!("Invalid --cfg value: {error}"))?,
+                );
+            }
+            "--noise" => options.noise = Some(required_path_value(args, &mut i, "--noise")?),
+            "--reference" => {
+                options
+                    .references
+                    .push(required_path_value(args, &mut i, "--reference")?)
+            }
+            // LongCat Image Edit. `--components` points at a directory of
+            // safetensors rather than a GGUF, so it has no --text-encoder
+            // equivalent.
+            "--kind" => options.longcat_kind = Some(required_string_value(args, &mut i, "--kind")?),
+            "--components" => {
+                options.components = Some(required_path_value(args, &mut i, "--components")?)
+            }
+            "--input" => options.input = Some(required_path_value(args, &mut i, "--input")?),
+            "--side" => options.side = Some(required_usize_value(args, &mut i, "--side")?),
+            "--guidance" => {
+                options.guidance = Some(
+                    required_string_value(args, &mut i, "--guidance")?
+                        .parse()
+                        .map_err(|error| format!("Invalid --guidance value: {error}"))?,
+                )
+            }
+            "--resolution" | "--size" => {
+                let flag = args[i].clone();
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| format!("Missing value for {flag}"))?;
+                options.resolution = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid {flag} value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--seed" => {
+                let value = args.get(i + 1).ok_or("Missing value for --seed")?;
+                options.seed = Some(
+                    value
+                        .parse::<i64>()
+                        .map_err(|error| format!("Invalid --seed value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--duration" => {
+                let value = args.get(i + 1).ok_or("Missing value for --duration")?;
+                options.duration_seconds = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --duration value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--fps" => {
+                let value = args.get(i + 1).ok_or("Missing value for --fps")?;
+                options.fps = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --fps value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--target-spatial-tokens" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --target-spatial-tokens")?;
+                options.target_spatial_tokens =
+                    Some(value.parse::<usize>().map_err(|error| {
+                        format!("Invalid --target-spatial-tokens value: {error}")
+                    })?);
+                i += 1;
+            }
+            "--refine" => options.refine = Some(true),
+            "--no-refine" => options.refine = Some(false),
+            "--refiner-kv-len" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --refiner-kv-len")?;
+                options.refiner_kv_len = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --refiner-kv-len value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--latent-upsample" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --latent-upsample")?;
+                options.latent_upsample = Some(match value.as_str() {
+                    "bilinear" => LatentUpsampleKind::Bilinear,
+                    "flash" => LatentUpsampleKind::Flash,
+                    "causal2d" => LatentUpsampleKind::Causal2d,
+                    _ => {
+                        return Err(format!(
+                            "Invalid --latent-upsample {value:?}; expected bilinear, flash, or causal2d"
+                        ));
+                    }
+                });
+                i += 1;
+            }
+            "--refiner-decoder" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("Missing value for --refiner-decoder")?;
+                options.refiner_decoder = Some(match value.as_str() {
+                    "wan" => RefinerDecoderKind::Wan,
+                    "lightvae" => RefinerDecoderKind::LightVae,
+                    _ => {
+                        return Err(format!(
+                            "Invalid --refiner-decoder {value:?}; expected wan or lightvae"
+                        ));
+                    }
+                });
+                i += 1;
+            }
+            "--dry-run" => options.dry_run = true,
+            "--overwrite" => options.overwrite = true,
+            "--allow-memory-overcommit" => options.allow_memory_overcommit = true,
+            "--temp" => {
+                if i + 1 < args.len() {
+                    options.temperature = Some(args[i + 1].parse().unwrap_or(0.6));
+                    i += 1;
+                }
+            }
+            "--temperature" => {
+                let value = args.get(i + 1).ok_or("Missing value for --temperature")?;
+                options.temperature = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --temperature value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--cfg-scale" => {
+                let value = args.get(i + 1).ok_or("Missing value for --cfg-scale")?;
+                options.cfg_scale = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --cfg-scale value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--auk-sway" => {
+                let value = args.get(i + 1).ok_or("Missing value for --auk-sway")?;
+                options.auk_sway = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --auk-sway value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--auk-flash" => {
+                options.auk_flash = true;
+            }
+            "--top-k" => {
+                let value = args.get(i + 1).ok_or("Missing value for --top-k")?;
+                options.top_k = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|error| format!("Invalid --top-k value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--top-p" => {
+                let value = args.get(i + 1).ok_or("Missing value for --top-p")?;
+                options.top_p = Some(
+                    value
+                        .parse::<f32>()
+                        .map_err(|error| format!("Invalid --top-p value: {error}"))?,
+                );
+                i += 1;
+            }
+            "--threads" => {
+                if i + 1 < args.len() {
+                    options.threads = args[i + 1].parse().unwrap_or(0);
+                    i += 1;
+                }
+            }
+            "--dump-logits" => options.dump_logits = true,
+            "--embedding" => options.embedding = true,
+            "--embedding-output" => {
+                options.embedding_output =
+                    parse_embedding_output(args.get(i + 1).map(String::as_str))?;
+                i += 1;
+            }
+            "--rerank" => options.rerank = true,
+            "--rerank-query" => {
+                options.rerank_query = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--rerank-doc" => {
+                if let Some(doc) = args.get(i + 1) {
+                    options.rerank_documents.push(doc.clone());
+                    i += 1;
+                }
+            }
+            "--rerank-documents" => {
+                options.rerank_documents_file = args.get(i + 1).cloned().map(PathBuf::from);
+                i += 1;
+            }
+            "--rerank-instruction" => {
+                options.rerank_instruction = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--rerank-max-tokens" => {
+                options.rerank_max_tokens = args.get(i + 1).and_then(|value| value.parse().ok());
+                i += 1;
+            }
+            "--bench" => options.bench = true,
+            "--thinking" => options.thinking = Some(true),
+            "--no-thinking" => options.thinking = Some(false),
+            "--profile" => options.profile = true,
+            "--gpu" => options.gpu = true,
+            "--compute" => {
+                if options.compute.is_some() {
+                    return Err("--compute may be specified only once".into());
+                }
+                options.compute = Some(
+                    match required_string_value(args, &mut i, "--compute")?.as_str() {
+                        "cpu" => crate::compute::ComputePolicy::Cpu,
+                        "auto" => crate::compute::ComputePolicy::Auto,
+                        "vulkan" => crate::compute::ComputePolicy::Vulkan,
+                        _ => return Err("--compute expects cpu, auto or vulkan".into()),
+                    },
+                );
+            }
+            "--kv-cache" => {
+                if i + 1 < args.len() {
+                    options.kv_format = match args[i + 1].get(0..) {
+                        Some("f32") => KvFormat::F32,
+                        _ => KvFormat::F16,
+                    };
+                    options.kv_format_explicit = true;
+                    i += 1;
+                }
+            }
+            "--mmproj" => {
+                if i + 1 < args.len() {
+                    options.mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--clm-head" => {
+                if i + 1 < args.len() {
+                    options.clm_head = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--gliner2-decide" => options.gliner2_decide = true,
+            "--gliner2-boundary" => options.gliner2_boundary = true,
+            "--gliner2-schema" => {
+                if i + 1 < args.len() {
+                    options.gliner2_schema = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--tts-model" => {
+                if i + 1 < args.len() {
+                    options.tts_model = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--tts-mmproj" => {
+                if i + 1 < args.len() {
+                    options.tts_mmproj = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--qwen-omni-bf16" => {
+                if i + 1 < args.len() {
+                    options.qwen_omni_bf16 = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--image" => {
+                if i + 1 < args.len() {
+                    options.image = Some(args[i + 1].as_str().into());
+                    i += 1;
+                }
+            }
+            "--video" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --video")?;
+                options.video = Some(value.as_str().into());
+                i += 1;
+            }
+            "--vae" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --vae")?;
+                options.vae = Some(value.as_str().into());
+                i += 1;
+            }
+            "--text-encoder" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --text-encoder")?;
+                options.text_encoder = Some(value.as_str().into());
+                i += 1;
+            }
+            "--audio" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --audio")?;
+                options.audio = Some(value.as_str().into());
+                i += 1;
+            }
+            "--chunk" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --chunk")?;
+                options.chunk_seconds = Some(value.parse().map_err(|_| "Invalid --chunk value")?);
+                i += 1;
+            }
+            "--srt" => options.srt = true,
+            "--qwen-image-turbo" => options.qwen_image_turbo = true,
+            "--qwen-context-file" => {
+                options.qwen_context_file =
+                    Some(required_path_value(args, &mut i, "--qwen-context-file")?);
+            }
+            "--qwen-latent-file" => {
+                options.qwen_latent_file =
+                    Some(required_path_value(args, &mut i, "--qwen-latent-file")?);
+            }
+            "--qwen-latent-width" => {
+                options.qwen_latent_width =
+                    Some(required_usize_value(args, &mut i, "--qwen-latent-width")?);
+            }
+            "--qwen-latent-height" => {
+                options.qwen_latent_height =
+                    Some(required_usize_value(args, &mut i, "--qwen-latent-height")?);
+            }
+            "--qwen-timestep" => {
+                let value = args.get(i + 1).ok_or("Missing value for --qwen-timestep")?;
+                let timestep = value
+                    .parse::<f32>()
+                    .map_err(|error| format!("Invalid --qwen-timestep value: {error}"))?;
+                if !timestep.is_finite() {
+                    return Err("--qwen-timestep must be finite".into());
+                }
+                options.qwen_timestep = Some(timestep);
+                i += 1;
+            }
+            "--vad" => {
+                options.vad = Some(required_path_value(args, &mut i, "--vad")?);
+            }
+            "--vad-maxseg" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --vad-maxseg")?;
+                options.vad_maxseg = value.parse().map_err(|_| "Invalid --vad-maxseg value")?;
+                i += 1;
+            }
+            "--ref-audio" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --ref-audio")?;
+                options.ref_audio = Some(value.as_str().into());
+                i += 1;
+            }
+            "--ref-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --ref-text")?;
+                options.ref_text = Some(value.clone());
+                i += 1;
+            }
+            "--source-audio" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --source-audio")?;
+                options.source_audio = Some(value.as_str().into());
+                i += 1;
+            }
+            "--source-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --source-text")?;
+                options.source_text = Some(value.clone());
+                i += 1;
+            }
+            "--target-text" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --target-text")?;
+                options.target_text = Some(value.clone());
+                i += 1;
+            }
+            "--instruction" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or("Missing value for --instruction")?;
+                options.instruction = Some(value.clone());
+                i += 1;
+            }
+            "--use-xvector" => {
+                let value = args.get(i + 1).ok_or("Missing value for --use-xvector")?;
+                options.use_xvector = XVectorMode::from_str(value)?;
+                options.use_xvector_supplied = true;
+                i += 1;
+            }
+            "--language" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --language")?;
+                options.language = Some(value.clone());
+                i += 1;
+            }
+            "--tts" => options.tts = true,
+            "--voice" => options.voice = Some(required_string_value(args, &mut i, "--voice")?),
+            "--speed" => {
+                options.speed = Some(
+                    required_string_value(args, &mut i, "--speed")?
+                        .parse()
+                        .map_err(|_| "--speed must be a number between 0.5 and 2.0")?,
+                );
+            }
+            "--pronunciations" => {
+                options.pronunciations =
+                    Some(required_string_value(args, &mut i, "--pronunciations")?)
+            }
+            "--edit" => options.edit = true,
+            "--out" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --out")?;
+                options.out = Some(value.as_str().into());
+                i += 1;
+            }
+            "--jev" => options.jev = true,
+            "--jev-multi" => options.jev_multi = true,
+            "--jev-block" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-block")?;
+                if options.jev_questions.is_empty() {
+                    return Err("--jev-block must follow a --jev-question".into());
+                }
+                options.jev_blocks.push(JevBlockInput {
+                    label: value.clone(),
+                    options: Vec::new(),
+                });
+                i += 1;
+            }
+            "--jev-context" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-context")?;
+                options.jev_context = Some(value.clone());
+                i += 1;
+            }
+            "--jev-question" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-question")?;
+                options.jev_questions.push(JevQuestion {
+                    text: value.clone(),
+                    options: Vec::new(),
+                });
+                i += 1;
+            }
+            "--jev-option" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-option")?;
+                if !options.jev_blocks.is_empty() {
+                    options
+                        .jev_blocks
+                        .last_mut()
+                        .unwrap()
+                        .options
+                        .push(value.clone());
+                } else if options.jev_questions.is_empty() {
+                    return Err(
+                        "--jev-option must follow a --jev-question (or be the first argument after --jev)"
+                            .into(),
+                    );
+                } else {
+                    options
+                        .jev_questions
+                        .last_mut()
+                        .unwrap()
+                        .options
+                        .push(value.clone());
+                }
+                i += 1;
+            }
+            "--jev-positive" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-positive")?;
+                options.jev_positive = Some(value.clone());
+                i += 1;
+            }
+            "--jev-output" => {
+                let value = args
+                    .get(i + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or("Missing value for --jev-output")?;
+                match value.as_str() {
+                    "text" => options.jev_output_json = false,
+                    "json" => options.jev_output_json = true,
+                    other => {
+                        return Err(format!(
+                            "--jev-output must be 'text' or 'json', got {other:?}"
+                        ));
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                if options.audio.is_none() && !args[i].starts_with("--") && !args[i].is_empty() {
+                    options.audio = Some(args[i].as_str().into());
+                }
+            }
+        }
+        i += 1;
+    }
+    options.supplied_flags = parsed_flags
+        .iter()
+        .map(|index| args[*index].clone())
+        .collect();
+    if options.enhance {
+        apply_mode_flags(Mode::Enhance, args, &parsed_flags)?;
+    }
+    if options.decision_request.is_some() {
+        crate::app::decision::validate_options(&options)?;
+        apply_mode_flags(Mode::Decision, args, &parsed_flags)?;
+    }
+    if options.system_one_request.is_some() {
+        apply_mode_flags(Mode::SystemOne, args, &parsed_flags)?;
+    }
+    if options.gpu && options.compute.is_some() {
+        return Err("--gpu and --compute cannot be combined".into());
+    }
+    if options.timestral_request.is_some() && args.iter().any(|arg| arg == "--serve") {
+        return Err("--timestral-request is a CLI forecast mode; --serve is unsupported".into());
+    }
+    options.serve = args.iter().any(|arg| arg == "--serve");
+    Ok(options)
+}
+
+/// A CLI mode that declares which flags it accepts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Mode {
+    /// `--enhance`: the RE-UPE audio enhancement mode.
+    Enhance,
+    /// `--decision-request`: the THX-02 decision mode.
+    Decision,
+    /// `--system-one-request`: the Vela3 / System One mode.
+    SystemOne,
+}
+
+impl Mode {
+    /// How the mode is named in the error message.
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Enhance => "--enhance",
+            Mode::Decision => "--decision-request",
+            Mode::SystemOne => "--system-one-request",
+        }
+    }
+
+    /// Whether the mode rejects the flags it does not list.
+    ///
+    /// The decision mode has never had a whitelist: it takes any flag and
+    /// only checks the values of the ones it knows.
+    fn rejects_unlisted(self) -> bool {
+        match self {
+            Mode::Enhance | Mode::SystemOne => true,
+            Mode::Decision => false,
+        }
+    }
+}
+
+/// The value a flag carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Value {
+    /// The flag stands alone.
+    None,
+    /// The flag is followed by a path.
+    Path,
+    /// The flag is followed by a number.
+    Number,
+}
+
+/// A flag, the value it carries, and the modes that accept it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FlagRule {
+    /// The flag as it appears on the command line.
+    pub(crate) name: &'static str,
+    /// The value the flag carries.
+    pub(crate) value: Value,
+    /// The modes that accept the flag.
+    pub(crate) modes: &'static [Mode],
+}
+
+/// The flags the modes accept, and the modes that accept each of them.
+///
+/// The mode check used to be three inline `match` blocks, one per mode, and
+/// each spelled out the flags its mode took. A flag that more than one mode
+/// took had to be listed in every one of them, so a new mode meant editing
+/// the other lists as well: the `| "--gpu"` in the system-one list looked
+/// like a special case, but it was another copy of the same list.
+///
+/// Listing each flag once, with the modes that accept it, is the fix: a
+/// shared flag is one entry, and a mode that takes it is one more mode in
+/// that entry.
+pub(crate) const FLAG_RULES: &[FlagRule] = &[
+    FlagRule {
+        name: "--model",
+        value: Value::Path,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--threads",
+        value: Value::Number,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--compute",
+        value: Value::None,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--gpu",
+        value: Value::None,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--audio",
+        value: Value::Path,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--out",
+        value: Value::Path,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--enhance",
+        value: Value::None,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--overwrite",
+        value: Value::None,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--serve",
+        value: Value::None,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--adapter",
+        value: Value::None,
+        modes: &[Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--system-one-request",
+        value: Value::None,
+        modes: &[Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--decision-request",
+        value: Value::None,
+        modes: &[Mode::Decision],
+    },
+    FlagRule {
+        name: "--decision-thinker",
+        value: Value::Path,
+        modes: &[Mode::Decision],
+    },
+    FlagRule {
+        name: "--max-context",
+        value: Value::Number,
+        modes: &[Mode::Decision],
+    },
+];
+
+/// Apply `mode`'s flag rules to the flags that were parsed.
+fn apply_mode_flags(mode: Mode, args: &[String], parsed_flags: &[usize]) -> Result<(), String> {
+    for &index in parsed_flags {
+        let mut index = index;
+        let flag = args[index].as_str();
+        match FLAG_RULES.iter().find(|rule| rule.name == flag) {
+            Some(rule) if rule.modes.contains(&mode) => match rule.value {
+                Value::None => {}
+                Value::Path => {
+                    required_path_value(args, &mut index, flag)?;
+                }
+                Value::Number => {
+                    required_usize_value(args, &mut index, flag)?;
+                }
+            },
+            // The decision mode has no whitelist: any flag is accepted.
+            _ if !mode.rejects_unlisted() => {}
+            _ => return Err(format!("{} cannot be combined with {flag}", mode.name())),
+        }
+    }
+    Ok(())
+}
+
+/// Whether `mode` accepts `flag`.
+///
+/// The shared flags live in [`FLAG_RULES`]; this is the one lookup every
+/// mode check goes through.
+pub(crate) fn flag_is_allowed_for(flag: &str, mode: Mode) -> bool {
+    FLAG_RULES
+        .iter()
+        .find(|rule| rule.name == flag)
+        .is_some_and(|rule| rule.modes.contains(&mode))
+}
+
+fn required_string_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {
+    let value = args
+        .get(*index + 1)
+        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("Missing value for {flag}"))?;
+    *index += 1;
+    Ok(value.clone())
+}
+
+fn required_path_value(args: &[String], index: &mut usize, flag: &str) -> Result<PathBuf, String> {
+    required_string_value(args, index, flag).map(PathBuf::from)
+}
+
+fn required_usize_value(args: &[String], index: &mut usize, flag: &str) -> Result<usize, String> {
+    required_string_value(args, index, flag)?
+        .parse()
+        .map_err(|error| format!("Invalid {flag} value: {error}"))
+}

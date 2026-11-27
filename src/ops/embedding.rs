@@ -3,14 +3,17 @@
 use crate::core::tensor::GGMLType;
 
 pub const SUPPORTED_EMBEDDING_TYPES: &[GGMLType] = &[
+    GGMLType::F32,
     GGMLType::F16,
     GGMLType::BF16,
     GGMLType::Q8_0,
     GGMLType::Q4_0,
     GGMLType::Q4K,
+    GGMLType::Q5_0,
     GGMLType::Q6K,
     GGMLType::Q5K,
     GGMLType::IQ4_NL,
+    GGMLType::Q1_0,
 ];
 
 pub fn is_supported_embedding(ggml_type: GGMLType) -> bool {
@@ -34,18 +37,34 @@ pub fn embedding_lookup(
     out: &mut [f32],
 ) {
     match embd_type {
+        GGMLType::F32 => embedding_lookup_f32(weight, token_id, n_embd, out),
         GGMLType::F16 => embedding_lookup_f16(weight, token_id, n_embd, out),
         GGMLType::Q8_0 => embedding_lookup_q8_0(weight, token_id, n_embd, out),
         GGMLType::Q4_0 => embedding_lookup_q4_0(weight, token_id, n_embd, out),
         GGMLType::Q4K => embedding_lookup_q4_k(weight, token_id, n_embd, out),
+        GGMLType::Q5_0 => embedding_lookup_q5_0(weight, token_id, n_embd, out),
         GGMLType::Q6K => embedding_lookup_q6_k(weight, token_id, n_embd, out),
         GGMLType::Q5K => embedding_lookup_q5_k(weight, token_id, n_embd, out),
         GGMLType::BF16 => embedding_lookup_bf16(weight, token_id, n_embd, out),
         GGMLType::IQ4_NL => embedding_lookup_iq4_nl(weight, token_id, n_embd, out),
+        GGMLType::Q1_0 => embedding_lookup_q1_0(weight, token_id, n_embd, out),
         _ => panic!(
             "unsupported embedding type {embd_type:?}; supported: {:?}",
             SUPPORTED_EMBEDDING_TYPES
         ),
+    }
+}
+
+pub fn embedding_lookup_f32(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let row_start = token_id as usize * n_embd * 4;
+    for (index, value) in out.iter_mut().take(n_embd).enumerate() {
+        let offset = row_start + index * 4;
+        *value = f32::from_le_bytes([
+            weight[offset],
+            weight[offset + 1],
+            weight[offset + 2],
+            weight[offset + 3],
+        ]);
     }
 }
 
@@ -86,10 +105,45 @@ pub fn embedding_lookup_q4_0(weight: &[u8], token_id: u32, n_embd: usize, out: &
     }
 }
 
+/// Q4_1 embedding row lookup.
+///
+/// The Q4_1 kernel dequantizes a nibble `q` as `d * q + m` with `q` read as
+/// an unsigned 0..15 value, so the row carries its minimum in the `m` field
+/// instead of folding it into the scale.
+pub fn embedding_lookup_q4_1(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let blocks_per_row = n_embd / 32;
+    let row_off = token_id as usize * blocks_per_row * 20;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * 20;
+        let d = super::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+        let m = super::f16_to_f32(u16::from_le_bytes([weight[off + 2], weight[off + 3]]));
+        for j in 0..16usize {
+            let q = weight[off + 4 + j];
+            let q0 = (q & 0x0F) as f32 * d + m;
+            let q1 = (q >> 4) as f32 * d + m;
+            out[b * 32 + j] = q0;
+            out[b * 32 + j + 16] = q1;
+        }
+    }
+}
+
 pub fn embedding_lookup_q4_k(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
     let row_bytes = n_embd / crate::ops::quant::QK_K * crate::ops::quant::BLOCK_Q4K_SIZE;
     let row_start = token_id as usize * row_bytes;
     crate::ops::quant::dequantize_row_q4_k(
+        &weight[row_start..row_start + row_bytes],
+        &mut out[..n_embd],
+    );
+}
+
+/// Q5_0 embedding row lookup.
+///
+/// The 30B's `token_embd.weight` is Q5_0, so this is on the critical path
+/// rather than a fallback: every token of every prompt goes through it.
+pub fn embedding_lookup_q5_0(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    let row_bytes = n_embd / 32 * 22;
+    let row_start = token_id as usize * row_bytes;
+    crate::ops::quant::dequantize_row_q5_0(
         &weight[row_start..row_start + row_bytes],
         &mut out[..n_embd],
     );
@@ -136,4 +190,43 @@ pub fn embedding_lookup_q5_k(weight: &[u8], token_id: u32, n_embd: usize, out: &
         &weight[row_start..row_start + row_bytes],
         &mut out[..n_embd],
     );
+}
+
+pub fn embedding_lookup_q1_0(weight: &[u8], token_id: u32, n_embd: usize, out: &mut [f32]) {
+    const BLOCK_ELEMENTS: usize = 128;
+    const BLOCK_BYTES: usize = 18;
+    let blocks_per_row = n_embd / BLOCK_ELEMENTS;
+    let row_off = token_id as usize * blocks_per_row * BLOCK_BYTES;
+    for b in 0..blocks_per_row {
+        let off = row_off + b * BLOCK_BYTES;
+        let d = super::f16_to_f32(u16::from_le_bytes([weight[off], weight[off + 1]]));
+        let bits = &weight[off + 2..off + BLOCK_BYTES];
+        for j in 0..BLOCK_ELEMENTS {
+            let byte_idx = j / 8;
+            let bit_idx = j % 8;
+            let bit = (bits[byte_idx] >> bit_idx) & 1;
+            out[b * BLOCK_ELEMENTS + j] = if bit != 0 { d } else { -d };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{embedding_lookup, embedding_lookup_f32, is_supported_embedding};
+    use crate::core::tensor::GGMLType;
+
+    #[test]
+    fn f32_embedding_lookup_reads_little_endian_rows() {
+        let weight = [1.0f32, 2.0, 3.0, 4.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut output = [0.0; 2];
+        embedding_lookup_f32(&weight, 1, 2, &mut output);
+        assert_eq!(output, [3.0, 4.0]);
+        output.fill(0.0);
+        embedding_lookup(&weight, 0, 2, GGMLType::F32, &mut output);
+        assert_eq!(output, [1.0, 2.0]);
+        assert!(is_supported_embedding(GGMLType::F32));
+    }
 }

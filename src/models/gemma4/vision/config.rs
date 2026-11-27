@@ -1,6 +1,6 @@
 use super::super::contract::{
-    require_array, require_bool, require_clip, require_clippable, require_f32, require_string,
-    require_tensor, require_u32,
+    require_array, require_bool, require_clip, require_clippable, require_f32, require_tensor,
+    require_u32,
 };
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
 
@@ -19,7 +19,18 @@ impl Gemma4VisionConfig {
     pub fn from_source(source: &dyn TensorSource) -> Result<Self, String> {
         require_clip(source)?;
         require_bool(source, "clip.has_vision_encoder", true)?;
-        require_string(source, "clip.vision.projector_type", "gemma4v")?;
+        // The E2B mmproj uses the exact string "gemma4v". The 12B Unsloth
+        // variant uses "gemma4uv" and is dispatched to its own config —
+        // see `Gemma4UvConfig::from_source`.
+        let _projector_type = match source.metadata("clip.vision.projector_type") {
+            Some(MetaValue::String(value)) if value == "gemma4v" => value.clone(),
+            Some(value) => {
+                return Err(format!(
+                    "Invalid metadata clip.vision.projector_type: expected \"gemma4v\", got {value:?}"
+                ));
+            }
+            None => return Err("Missing metadata: clip.vision.projector_type".into()),
+        };
         require_u32(source, "clip.vision.projection_dim", 1536)?;
         require_u32(source, "clip.vision.image_size", 224)?;
         require_u32(source, "clip.vision.patch_size", 16)?;

@@ -1,0 +1,61 @@
+{
+  "state": {
+    "user": "🙂 Alice 在北京的 Acme 工作。 Email a@b.org."
+  },
+  "questions": {
+    "choice": {
+      "type": "choice",
+      "instructions": "Who is named?",
+      "criteria": {
+        "person": "a human",
+        "company": null
+      }
+    },
+    "noul": {
+      "type": "noul",
+      "instructions": "Is a person mentioned?"
+    },
+    "intent": {
+      "type": "choice",
+      "instructions": "What does the user want the assistant to do?",
+      "criteria": {
+        "general_quirky": "chit-chat or an unusual request",
+        "qa_factoid": "ask a factual general-knowledge question"
+      }
+    },
+    "domain": {
+      "type": "choice",
+      "instructions": "Which subject area is this request about?",
+      "criteria": {
+        "business": "companies and employment",
+        "other": null
+      }
+    },
+    "opt_in": {
+      "type": "choice",
+      "instructions": "Who is named?",
+      "criteria": {
+        "person": "a human",
+        "company": null
+      },
+      "decision_adapter": true
+    },
+    "ner_auto": {
+      "type": "span",
+      "criteria": ["person"],
+      "threshold": 0.0
+    },
+    "relation": {
+      "type": "span",
+      "instructions": "Which spans are related to Alice by these relations?",
+      "criteria": ["employer"],
+      "definitions": null,
+      "threshold": 0.0
+    },
+    "pii": {
+      "type": "span",
+      "criteria": ["EMAIL_ADDRESS"],
+      "threshold": 0.0
+    }
+  }
+}

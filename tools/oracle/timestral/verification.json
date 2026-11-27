@@ -1,0 +1,387 @@
+{
+  "oracle": "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff",
+  "source_sha256": "1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa",
+  "tensor_count": 203,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "50d59312a1c47a4dbc155f106403f5538a68d24ac5da5ea412218e9df0a03689",
+  "torch": "2.9.1",
+  "atol": 3e-05,
+  "rtol": 0.0003,
+  "cases": {
+    "missing_default": {
+      "scalar": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_raw",
+          "max_abs": 5.817413330078125e-05,
+          "nrmse": 5.3422995087901996e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 2.0265579223632812e-06,
+          "nrmse": 5.055465483683588e-07
+        },
+        "max_abs": 0.003662109375
+      },
+      "simd": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.block_quantiles",
+          "max_abs": 8.96453857421875e-05,
+          "nrmse": 2.17600551081997e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 8.344650268554688e-07,
+          "nrmse": 2.614122911074122e-07
+        },
+        "max_abs": 0.00244140625
+      }
+    },
+    "multivariate": {
+      "scalar": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.refined",
+          "max_abs": 12.5,
+          "nrmse": 1.5834591244794383e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.000415802001953125,
+          "nrmse": 2.5322791357488683e-06
+        },
+        "max_abs": 12.5
+      },
+      "simd": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.refined",
+          "max_abs": 5.9375,
+          "nrmse": 7.289485673746106e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.0004119873046875,
+          "nrmse": 2.5819794506081606e-06
+        },
+        "max_abs": 5.9375
+      }
+    },
+    "numeric_covariates": {
+      "scalar": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.3.attn.0.output",
+          "max_abs": 0.00020503997802734375,
+          "nrmse": 3.163609171608297e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 2.8133392333984375e-05,
+          "nrmse": 1.8250016282881935e-06
+        },
+        "max_abs": 0.001953125
+      },
+      "simd": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.12.attn.0.output",
+          "max_abs": 0.0001068115234375,
+          "nrmse": 2.0534968756100714e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.0967254638671875e-05,
+          "nrmse": 6.148812100170309e-07
+        },
+        "max_abs": 0.001220703125
+      }
+    },
+    "constant": {
+      "scalar": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 5.5670738220214844e-05,
+          "nrmse": 4.364263289041166e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.0,
+          "nrmse": 0.0
+        },
+        "max_abs": 0.00238037109375
+      },
+      "simd": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.10.attn.0.output",
+          "max_abs": 9.775161743164062e-06,
+          "nrmse": 1.4229636344941054e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.0,
+          "nrmse": 0.0
+        },
+        "max_abs": 0.0009765625
+      }
+    },
+    "all_missing": {
+      "scalar": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.block_quantiles",
+          "max_abs": 704.0,
+          "nrmse": 5.772161187280217e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 7.2177499532699585e-09,
+          "nrmse": 2.396942724433459e-07
+        },
+        "max_abs": 704.0
+      },
+      "simd": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.block_quantiles",
+          "max_abs": 1360.0,
+          "nrmse": 1.170529437031059e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 3.166496753692627e-08,
+          "nrmse": 1.0705866651437523e-06
+        },
+        "max_abs": 1360.0
+      }
+    },
+    "feedback_window": {
+      "scalar": {
+        "checkpoints": 565,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.output",
+          "max_abs": 0.00045013427734375,
+          "nrmse": 1.9681527063014757e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.00015592575073242188,
+          "nrmse": 7.496641616248405e-06
+        },
+        "max_abs": 0.014892578125
+      },
+      "simd": {
+        "checkpoints": 565,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.v",
+          "max_abs": 6.139278411865234e-05,
+          "nrmse": 8.693015076389674e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 4.3392181396484375e-05,
+          "nrmse": 1.9370616871156984e-06
+        },
+        "max_abs": 0.00732421875
+      }
+    },
+    "covariate_feedback": {
+      "scalar": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.4.attn.0.output",
+          "max_abs": 0.000676274299621582,
+          "nrmse": 1.44488699958649e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 2.1457672119140625e-06,
+          "nrmse": 7.340085435205928e-07
+        },
+        "max_abs": 0.002197265625
+      },
+      "simd": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.4.attn.0.output",
+          "max_abs": 0.000446319580078125,
+          "nrmse": 9.655713966754046e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.8775463104248047e-06,
+          "nrmse": 4.889860175028512e-07
+        },
+        "max_abs": 0.00146484375
+      }
+    },
+    "long_horizon": {
+      "scalar": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.21.attn.0.v",
+          "max_abs": 0.00028014183044433594,
+          "nrmse": 1.3014872419273606e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.09619140625,
+          "nrmse": 2.9342355058014932e-06
+        },
+        "max_abs": 2784.0
+      },
+      "simd": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.21.attn.0.v",
+          "max_abs": 0.0003135204315185547,
+          "nrmse": 1.085735963510008e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.07373046875,
+          "nrmse": 3.1497254458086848e-06
+        },
+        "max_abs": 4256.0
+      }
+    },
+    "explicit_mask": {
+      "scalar": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.output",
+          "max_abs": 2.9802322387695312e-05,
+          "nrmse": 2.5403238016947236e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.1920928955078125e-06,
+          "nrmse": 1.019493769741002e-06
+        },
+        "max_abs": 0.007080078125
+      },
+      "simd": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.13.attn.0.output",
+          "max_abs": 2.002716064453125e-05,
+          "nrmse": 1.5677096753387563e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.7881393432617188e-06,
+          "nrmse": 6.121299713199019e-07
+        },
+        "max_abs": 0.00244140625
+      }
+    },
+    "clipping_window": {
+      "scalar": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 3.7136487662792206e-08,
+          "rmse": 1.4524675941978786e-08,
+          "nrmse": 2.894615968644461e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 3.885780586188048e-16,
+          "rmse": 1.8747509522238493e-16,
+          "nrmse": 1.8747509522238495e-10
+        },
+        "max_abs": 0.0020751953125
+      },
+      "simd": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 8.09086486697197e-08,
+          "rmse": 3.518738764968691e-08,
+          "nrmse": 7.01247825373448e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.3322676295501878e-15,
+          "rmse": 3.299203968071563e-16,
+          "nrmse": 3.299203968071563e-10
+        },
+        "max_abs": 0.00048828125
+      }
+    }
+  },
+  "rmse_rtol": 5e-05,
+  "acceptance": {
+    "exact": [
+      "all 203 F32 weight payloads and shapes",
+      "checkpoint sequence, shapes, occurrence counts",
+      "observation and attention masks, positions, missing-value patch channels"
+    ],
+    "max_abs_error": "<= 3e-5 + 3e-4 * max_abs(reference)",
+    "rmse": "<= 3e-5 + 5e-5 * RMS(reference)",
+    "reported_nrmse": "RMSE / max(RMS(reference), 1e-6)"
+  },
+  "summary": {
+    "cases": 10,
+    "executions": 20,
+    "checkpoints": 6788,
+    "maximum_forecast_abs_error": 0.09619140625,
+    "maximum_forecast_nrmse": 7.496641616248405e-06,
+    "maximum_intermediate_nrmse": 7.01247825373448e-05
+  },
+  "note": "Nine cases passed the stricter pure relative RMS check; the near-zero clipping_window case uses the documented mixed absolute/relative RMS check. Both sets used the same numeric binary. The recorded head values are finite, so the final finite-range head clamp preserves them. Final dispatch/help changes and the overflow edge assertion are verified separately.",
+  "engineering": {
+    "focused_rust_unit_tests": 8,
+    "python_tests": 2,
+    "full_default_cargo_test": "compile error in unchanged examples/vk_mem_info.rs: get_vulkan_context is gated behind vulkan",
+    "lib_bins_tests": {
+      "passed": 1224,
+      "failed": 23,
+      "ignored": 79,
+      "note": "Stopped after library tests; these failures are in paths untouched by this change. Not claimed as a passing full suite.",
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_matches_pinned_scalar_dot_bits",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_non_bf16_weight",
+        "models::gemma4::trunk::tests::per_layer_projection_rejects_wrong_bf16_storage_length",
+        "models::qwen35::trunk::config::tests::qwen35_config_rejects_invalid_tensor_dimensions",
+        "models::qwen35::vision::tests::layer_norm_stats_match_ggml_grouped_f32_variance",
+        "ops::argmax::tests::all_negative",
+        "ops::argmax::tests::large_random",
+        "ops::argmax::tests::middle_max",
+        "ops::argmax::tests::tail_handles_non_aligned_lengths",
+        "ops::argmax::tests::ties_pick_lowest_index",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum",
+        "ops::rope::tests::rope_neox_inplace_simd_matches_scalar_fallback"
+      ]
+    },
+    "focused_rust_unit_command": "cargo test --profile release-fast --features parity-trace --lib timestral",
+    "focused_cli_tests": 2,
+    "focused_cli_command": "cargo test --profile release-fast --features parity-trace --test timestral_cli",
+    "optimized_cli_build": "cargo build --profile release-fast --features parity-trace --bin rust-model-inference: passed",
+    "format": "cargo fmt --all -- --check: passed"
+  },
+  "final_cli_recheck": {
+    "binary_sha256": "065dd19846e9762b04bf275c33c4348f225a6044f517d96bdb8c5f7fa4a9cb81",
+    "cases": [
+      "numeric_covariates",
+      "clipping_window"
+    ],
+    "executions": 4,
+    "checkpoints": 1132,
+    "result": "passed: latest optimized CLI, exact contract/structure/occurrences, mixed numerical bounds, JSON output and quantile levels"
+  }
+}

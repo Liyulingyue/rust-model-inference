@@ -1,5 +1,65 @@
 //! Softmax activation and related utilities.
 
+/// ggml-exact softmax (`ggml_compute_forward_soft_max_f32` + NEON
+/// `ggml_vec_soft_max_f32`).
+///
+/// The differences from `softmax_inplace` are the ones that matter for
+/// bit-exact parity with llama.cpp on aarch64:
+///
+/// * the exponential is ggml's polynomial `ggml_v_expf`, not libm's
+///   `expf`, for the vectorized body; the leftover tail uses libm's
+///   `expf`, exactly like ggml;
+/// * the exponential values are summed in `f64` per 4-lane group, and the
+///   final reciprocal is rounded to `f32` before the scaling pass.
+///
+/// Callers that do not need oracle parity should keep using
+/// `softmax_inplace`.
+#[inline(always)]
+pub fn softmax_ggml_inplace(x: &mut [f32]) {
+    if x.is_empty() {
+        return;
+    }
+    let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    #[cfg(target_arch = "aarch64")]
+    if crate::ops::has_neon() {
+        // SAFETY: NEON is available (runtime probe).
+        let sum = unsafe { softmax_ggml_neon(x, max) };
+        let scale = (1.0 / sum) as f32;
+        for value in x {
+            *value *= scale;
+        }
+        return;
+    }
+    softmax_inplace(x);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn softmax_ggml_neon(x: &mut [f32], max: f32) -> f64 {
+    use std::arch::aarch64::*;
+
+    let n4 = x.len() / 4 * 4;
+    let max_v = vdupq_n_f32(max);
+    let mut sum = 0.0f64;
+    let mut i = 0;
+    while i < n4 {
+        let value = crate::ops::activation::ggml_v_expf_neon(vsubq_f32(
+            vld1q_f32(x.as_ptr().add(i)),
+            max_v,
+        ));
+        vst1q_f32(x.as_mut_ptr().add(i), value);
+        sum += vaddvq_f32(value) as f64;
+        i += 4;
+    }
+    while i < x.len() {
+        let value = (*x.get_unchecked(i) - max).exp();
+        *x.get_unchecked_mut(i) = value;
+        sum += value as f64;
+        i += 1;
+    }
+    sum
+}
+
 #[inline(always)]
 pub fn softmax_inplace(x: &mut [f32]) {
     if x.is_empty() {
@@ -57,7 +117,8 @@ unsafe fn softmax_approx_inplace_avx2(x: &mut [f32]) {
         let hi = _mm_castsi128_ps(_mm256_extractf128_si256(_mm256_castps_si256(max_v), 1));
         let combined = _mm_max_ps(lo, hi);
         let high = _mm_movehl_ps(combined, combined);
-        let final_max = _mm_max_ss(combined, high);
+        let paired = _mm_max_ps(combined, high);
+        let final_max = _mm_max_ss(paired, _mm_movehdup_ps(paired));
         max_val = max_val.max(_mm_cvtss_f32(final_max));
         i += 8;
     }
@@ -238,6 +299,29 @@ mod tests {
                     a,
                     rel_diff
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn softmax_approx_avx2_handles_large_max_in_every_lane() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        for len in [8, 16, 19] {
+            for peak in 0..len {
+                let mut input = vec![0.0; len];
+                input[peak] = 100.0;
+                input[(peak + 2) % len] = 99.0;
+                let mut expected = input.clone();
+                softmax_inplace(&mut expected);
+                unsafe { softmax_approx_inplace_avx2(&mut input) };
+                assert!(input.iter().all(|v| v.is_finite()), "len={len} peak={peak}");
+                assert!((input.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+                assert!(input
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| (a - b).abs() < 1e-6));
             }
         }
     }

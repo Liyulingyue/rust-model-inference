@@ -7,11 +7,12 @@ Z-Image Turbo 是文生图模型，分三个独立 GGUF 组件：
 - Flux VAE：`--vae`
 
 GGUF `general.architecture = pig`，对应 `src/models/diffusion/pig.rs` 与
-`src/models/diffusion/z_image/`。CLI 入口 `src/app/image.rs::run_z_image_cli`。
+`src/models/diffusion/z_image/`。CLI 入口 `src/app/diffusion.rs::run_z_image_cli`。
 
-> 共用前置：构建 `cargo build --release --bin rust-model-inference`。
-> 当前**仅 CPU**，**仅 512×512**，**仅 txt2img**。
-> img2img、GPU、Z-Image Base 列为 `Unsupported`（SUPPORTED_MODELS.md）。
+> 共用前置：构建 `cargo build --release --features vulkan --bin rust-model-inference`。
+> CPU 的 pinned Oracle 验证范围为 **512×512、txt2img**。
+> Vulkan 为实验性后端，运行加 `--gpu`。`default = []` 不含 Vulkan，省略构建 feature 时仍走 CPU。
+> img2img、Z-Image Base 仍为 `Unsupported`；设备验证见 [RADV 记录](../develop/VULKAN_RADV_VALIDATIONS.md)。
 
 ## 1. 三组件
 
@@ -24,66 +25,607 @@ cargo run --release --bin rust-model-inference -- \
   --steps 8 --resolution 512 --seed 42 --threads 1 --out fox.png
 ```
 
-三个 GGUF 缺任一都会立即拒绝（`src/app/mod.rs:32-37`）：
+三个 GGUF 缺任一都会立即拒绝。加载 `pig` 架构时先过一道聚合检查
+（`reject_incomplete_z_image_architecture`，`src/app/mod.rs:187-192`）：
 
 ```
 Z-Image model requires --text-encoder, --vae, --prompt, and --out
 ```
 
+过了这道之后，参数解析阶段还有逐项检查
+（`z_image_cli_options`，`src/app/cli/options.rs:608-637`），分别报
+`Z-Image requires --text-encoder` / `--vae` / `--out` / `--prompt`。
+
 `--prompt` / `--out` 同样必填。
+
+### 实测耗时（aarch64 Vulkan 主机，20 核，512×512，8 步）
+
+> 以下为上游 `main`（`d7d88d4b`）记录的实机结果；本分支合并后的 aarch64 整图尚未复验。
+> 本分支另有 F32 累加与 Q8 kernel 改动，不能将这些历史数字当作当前分支的验收结果。
+
+prompt "A red fox sleeping beneath a pine tree"（16 token），seed 42，`--threads 8`，
+`cargo build --release --features vulkan`。2026-10-12，FFN 合批 + SiLU 饱和修复 +
+Q/K norm 与交错 RoPE 上设备之后。
+
+同一二进制、只切开关的同会话对照：
+
+| 阶段 | CPU | GPU（`--gpu`） |
+|---|---|---|
+| text_encode | 0.6 s | **0.65–0.84 s**（见下方 gate）|
+| denoise | 563.3 s | **42.0 s** |
+| vae_decode | 10.6 s | **6.1 s** |
+| **总计** | **574.6 s** | **49.0 s** |
+
+denoise 13.2×、端到端 11.6×。多次运行输出逐字节一致。
+`RUST_GPU_TEXT=1` 输出亦逐字节一致（text gate 只改执行位置不改算术）。
+`RUST_GPU_ATTENTION=0` **不**逐字节一致（PSNR 31.4 dB）——这是该开关本身的语义，
+见下文「GPU 路径从来就不是逐位精确的」。
+
+> `denoise` 50.3 s 与 55.1 s 的差距来自两个分支：`zimage`（50.3 s）与
+> `codex/unified-compute-dispatch` 的 `da5ed52`（54.1–55.1 s）。后者为修复
+> refiner 累加契约引入了额外的 F32 累加路径（见下节），代价约 4 s。
+> 两分支对 CPU 基线的 PSNR 分别为 33.34 dB 与 32.08 dB，**互不相同**——
+> F16 → F32 的累加契约变化会改变末位精度，不要假设两分支逐字节一致。
+
+当前 `--steps N` 跑 **N 次** forward：8 步在 `RUST_GPU_DIAG=1` 下打出 8 行 sigma，
+`dispatches` 每步 +300（300→2400）。
+
+denoise 分段（`[gpu-block-profile]`，8 步合计 50.3 s）：
+
+| 阶段 | 8 步 | 占比 | 位置 |
+|---|---|---|---|
+| ffn: main stack | 25.4 s | 50.5% | GPU（Q8_0 tiled）|
+| **attention** | 10.8 s | 21.5% | **GPU** |
+| norm+adaln+qkv | 7.7 s | 15.4% | GPU |
+| out proj | 3.0 s | 6.0% | GPU |
+| ffn: refiner | 2.4 s | 4.8% | GPU（F16 tiled）|
+| &nbsp;&nbsp;其中 host silu | 4.8 s | 9.6% | **host**（w1/w3 之间）|
+| &nbsp;&nbsp;其中 w1 readback | 2.4 s | 4.7% | **host** |
+| &nbsp;&nbsp;其中 rope | 0.9 s | 1.8% | ~~host~~ → **GPU**（已融合进 norm+adaln+qkv）|
+| modulation | 0.02 s | 0.0% | host |
+
+**真正在 host 的是 8.1 s / 50.3 s = 16.1%**，其中 host silu + w1 readback 合计
+7.2 s——`run_block_gpu` 把 w1 投影回读、在 host 做 silu、再传给 w2。三者合并到单个
+command buffer 的尝试**仍未完成**；注意那次失败与本文档另一处已修复的 `-inf`
+**不是同一个问题**，见「两个 `-inf` 不是同一个问题」。
+
+> **out proj 曾经有一大块没被 profile 单独统计的 host 开销。** slot 4 同时包住
+> GPU 投影、回读，以及一个 `for row in 0..3840` 的单线程循环——每行做一次
+> `rms_norm_inplace` 加一次 `add_modulated_residual`，后者的带 gate 分支逐元素调用
+> `gate.tanh()`。每 block 跑两次（out proj 后、FFN 后），512×512 下合计约 2900 万次
+> tanh，全部落在调用线程上。`readback_norm_and_residual_rows` 把它按行分片到
+> ComputePool：行是各缓冲的互不相交切片，所以这是纯重分区，**输出逐字节一致**
+> （已验证），denoise 63.9 s → 50.3 s，slot 4 由 8.7 s 降到 3.0 s。
+
+> ⚠️ **`attention (gpu)` 这一行的标签曾经是错的**。`GPU_PHASE_LABELS` 曾把 slot 3
+> 硬编码成 `attention (host)`，而该计时器同时包住 GPU 与 CPU 两个分支。实测
+> `RUST_GPU_ATTENTION=0` 后 slot 3 从 10.8 s 涨到 **27.0 s**（单步 3.4 s），确认
+> 默认走的是 GPU。标签已改为按 `gpu_attention_enabled()` 动态取值。
+
+### ⚠️ 绝对值不可信，只有 A/B 差值可信
+
+历史表格（GPU 150 s / 单步 16.8 s、CPU 466 s、PyTorch 1.89 s/forward）已全部作废，
+不要引用。上表的 70.6 s 是**同会话 A/B**，只有它与它的比值可用。PyTorch 未在本次
+重测，任何与它的比值仍需重新测量。
+
+> **线程数也非越多越好**：16 线程首步 269.3 s，反而慢于 8 线程的 140.5 s。
+
+### 历史归档：DiT GPU 化过程（2026-10-06 之前的 A/B）
+
+以下记录 DiT 上 GPU 期间每次改造的相对收益，**当时的绝对值均已作废**，当前基线见上文。
+保留是为了说明「为什么这些改动存在」，不要用它和今天的 70.6 s 直接比较。
+
+历史文档写 14.7 s/步。本机当时实测**纯净 HEAD（9a831ee）已经是 23.07 s/步**，
+`release`（fat LTO）与 `release-fast` 相差 0.1 s，所以**不是编译 profile**。旁证
+VAE 解码——只跑一次、与步数无关、代码未改——在多次相同运行里分别是
+34.5 / 44.8 / 77.2 s，本身带 2.2× 噪声，**不能用于任何归因**。
+
+同会话前后对照（8 步 / 512 / seed 42 / 20 线程 / release-fast）：
+
+| | 纯净 HEAD | +F16 改造 | +attention 上 GPU |
+|---|---|---|---|
+| denoise | 184.5 s | 158.8 s | **109.3 s** |
+| 单步 | 23.07 s | 19.85 s | **13.35 s** |
+| refiner/步 | 3608 ms | 1421 ms | 1421 ms |
+| attention/步 | ~3.4 s（CPU） | ~3.4 s（CPU） | **~0.31 s（GPU）** |
+| 总计 | 231.5 s | 211.7 s | 145.4 s |
+
+前两列输出逐字节一致。attention 那一列**不逐字节一致**，见下节。
+
+#### 合并 FFN 到单个 command buffer：已尝试，未能完成
+
+目标是把 `run_block_gpu` 里的 w1 → w3 → silu → w2 录进**同一个**
+`TokenCommands`，一次 submit 一次 readback，替掉现在的 3 次
+`project_scaled`（各自 `submit_and_wait`）+ host silu。
+
+`DitGpuSession::record_ffn` 已写出来，逻辑本身在**分开提交**时经逐步
+readback 验证是正确的（Z_DEBUG_FFN=1，512×512，rows=3840）：
+
+```
+after w1  : finite 327680/327680  min -1.73e1  max 1.37e1
+after w3  : finite 327680/327680  min -3.91e1  max 2.69e1
+after silu: finite 327680/327680  min -4.78e2  max 3.44e2
+after w2  : finite 122880/122880  min -1.02e3  max 4.08e3
+```
+
+silu 的输出区间与 CPU 参考一致（按 w1/w3 的实测极值算 silu(gate)*up
+得 [-531.8, 365.8]，设备给出 [-477.8, 343.8]，符号与量级吻合），所以
+**silu shader 本身是对的**，`SILU_MUL_SHADER` + `Layout.gate/up` 这条路
+可行。
+
+**但合成一个 command buffer 后输出全 -inf**，而逐步 submit 的版本正确。
+已排除的解释（都不是原因）：
+
+- 缺 barrier。`compute_barrier` 是 SHADER_WRITE → SHADER_READ | SHADER_WRITE、
+  COMPUTE → COMPUTE，语义正确；在 w1/w3/silu/w2 每步前后都加，仍然全 -inf。
+- descriptor set 混叠。silu 绑 `self.arena_bindings`，投影绑各自的
+  `bindings.descriptor_set`，两者来自同一个 pool 的不同 set。
+- 区域重叠。`Layout` 用 bump allocator，`x/normed/out/qkv/gate/up/q8/
+  q8_scales/q4_1_input_sums/q8k/q8k_scales` 依次 `take()`，尺寸算下来
+  `rows_ffn == rows*FFN_WIDTH`，同为大小但偏移不同。
+- 形状。W1/W3 n_in=HIDDEN n_out=FFN_WIDTH，W2 n_in=FFN_WIDTH n_out=HIDDEN，
+  与 GGUF 里 `(3840,10240)/(10240,3840)/(3840,10240)` 一致；W1/W2/W3 都是
+  Q8_0（GGML type 8），走 tiled Q8_0 + 32 元素量化。
+
+剩下的差异只有"三个 dispatch 挤在一个 buffer 里 vs 各自 submit"。
+`TokenCommands::begin` 复用**同一个** `command_buffer` 并先调
+`recover_commands` + `reset_command_buffer`（`vulkan.rs:420`），而
+`begin` 全程持有 `context.mutex`。分开提交时每次 `read_f32_into` 都会把
+host 读钉在 pipeline 上，等于强制刷新；合批后所有 GPU 阶段只能靠
+barrier 互相可见——而 barrier 已证明加对了。
+
+改动已回退。留在这里是为了让下一个人不必重走：silu 数值已验证正确，
+卡的是合批机制本身。
+
+> ⚠️ **本节末尾曾猜测「根因是 descriptor set 与 pipeline 布局在跨 dispatch
+> 复用时的状态」——这个猜测是错的，请不要沿用。** 见下面「两个 `-inf` 不是
+> 同一个问题」。
+
+### 两个 `-inf` 不是同一个问题
+
+历史上出现过两次形态相似、**成因完全不同**的 `-inf`。混为一谈会一直查错方向。
+
+| | FFN 合批（下方「历史归档」）| refiner F32 累加 |
+|---|---|---|
+| 现象 | 合批单 buffer 时 activation 全 `-inf` | 第 6 步后 `predicted flow` 全 `-inf` |
+| 触发条件 | 合批进同一 command buffer | **任何** `--gpu` 运行，无需合批 |
+| 当时结论 | 「根因未定位，怀疑 descriptor set」| 无人注意 |
+| 真实成因 | **至今未定位**（见下方独立测试）| refiner 权重用 `GpuMatmulMode::Prepared` 绑定，累加契约与 CPU 不符 |
+| 状态 | 未完成 | **已修复**（`c82f453`）|
+
+第二个的真实成因：`DitGpuSession::bind_weight_as` 之前对 F16 refiner 权重调用
+`bind_weight_buffers`，走默认的 `GpuMatmulMode::Prepared`。refiner 需要的是
+「F16 输入舍入 + **F32** 累加」，而 `Prepared` 的累加顺序不同，数值溢出成 `-inf`，
+逐层放大后在 denoise 中段炸掉。修复是让 F16 权重显式绑到
+`GpuMatmulMode::RoundedInputF32`（`dit_gpu.rs` 的 `bind_weight_as`），
+并补了 `f16_refiner_projection_keeps_f32_accumulation` 测试守住契约。
+
+**它在 `codex/unified-compute-dispatch` 的 `409c2f1` 上 100% 复现**（连跑三次都是
+第 6 步报 `Non-finite Z-Image predicted flow: len=65536, nan=65536, -inf=65536`），
+`da5ed52` 之后消失。这是它最有用的地方：一个稳定的最小复现，而 FFN 合批那个
+至今只在特定合批路径下偶发。
+
+### FFN 合批已排除的假设
+
+`batched_ffn_chain_matches_incremental_submission`
+（`dit_gpu.rs`，随 `9e9015b` 加入）在真实 FFN 形状上跑完整四 dispatch 链
+（w1 → w3 → silu → w2），合批一次提交与逐个提交对比：aarch64 上 983040 个元素
+**全部有限且逐元素一致**。所以「驱动丢弃长 command buffer 尾部」这个假设在
+FFN 上被证伪——FFN 只有 4 个 dispatch，比 Qwen3.5 触发该问题的 ~230 少三个数量级。
+
+那个测试是将来任何人重试 FFN 合批的前置安全网，同时它记录了「合批在真机上
+已验证正确」。
+
+> 工程向的完整快照与加速路线见 `docs/develop/ZIMAGE_STATUS.md`。
+
+### 2026-10-06 在当前 HEAD（合入 #151/#152 后）复测的分解
+
+`[gpu-block-profile]` 是代码里已有的分段计时（`GPU_PHASE_LABELS`），8 步
+512×512 seed 42，20 线程，合计 107.2 s：
+
+| 阶段 | 8 步 | 占比 |
+|---|---|---|
+| ffn: main stack (gpu) | 50.7 s | 47.3% |
+| out proj (gpu) | 21.8 s | 20.4% |
+| ffn: refiner | 11.5 s | 10.7% |
+| **attention (host)** | 10.9 s | 10.1% |
+| norm+adaln+qkv (gpu) | 10.6 s | 9.9% |
+| **rope (host)** | 1.7 s | 1.6% |
+| modulation (host) | 0.02 s | 0.0% |
+| &nbsp;&nbsp;其中 w1 readback | 3.1 s | 2.9% |
+| &nbsp;&nbsp;其中 **host silu** | **12.3 s** | **11.5%** |
+
+**26% 的时间在 host 上**：attention 10.9 s + rope 1.7 s + w1 readback 3.1 s +
+host silu 12.3 s。标签里的 `(host)` 不是笔误。
+
+同步次数是硬约束：`RUST_GPU_SUBMIT_TRACE=1` 在 3 步上给出 3308 次提交，
+即**每步 1103 次** `submit_and_wait`，而每步只有 320 次 dispatch——平均每
+3.4 次同步才凑一次有意义的 GPU 工作。`queue_submit` 本身 0.009 ms，费用
+全在 `wait_for_fences`。根源是 `run_block_gpu` 每 block 有 5 次 readback
+（QKV、out proj、w1/w3/w2），34 block × 5 ≈ 170 次/步。
+
+`run_block_gpu` 里 w1/w3 投影后在 host 做 silu 再传回给 w2，是纯粹的
+CPU/GPU 边界错配：`SILU_MUL_SHADER` 已经是 pipeline 16（YuE2 AR 在用），
+`Layout` 也已有 `gate`/`up` 区域，所以这段可以整段留在设备上。
+
+⚠️ **但改的时候必须把 w1+w3+silu+w2 录进同一个 command buffer**。
+`project_scaled` 自带 `submit_and_wait`（`dit_gpu.rs:434`），
+`record_projection` 才是"录到在途 buffer、不回读"的那个变体。用
+`session.begin()` 单独录 silu 会让这个 `TokenCommands` 在语句结束时被丢弃
+（drop 不提交），w2 于是读到未激活的 gate——实测 PSNR 掉到 5.11 dB，整张图
+报废。该改动已回退。
+
+## 画质：attention 上 GPU 没有抬高偏差
+
+拿同 seed 的三张图对比（512×512，8 步）：A = 纯 CPU 渲染，B = GPU 路径 +
+CPU attention，C = GPU 路径 + GPU attention。
+
+| 对比 | mean\|Δ\| | PSNR |
+|---|---|---|
+| A↔B（CPU vs 旧 GPU 路径） | 4.93 | 28.43 dB |
+| A↔C（CPU vs 新 GPU 路径） | **5.01** | **28.96 dB** |
+| B↔C（两种 attention 互比） | 3.45 | 31.42 dB |
+
+**A↔C 没有比 A↔B 更差**，所以设备 attention 落在 GPU 路径本来就有偏差之内，
+没有新增代价。整条 GPU 路径与纯 CPU 的 28–29 dB 差距早于本次改动（f16 舍入贯穿
+Q8 主栈、F16 refiner 与 QKV），**GPU 路径从来就不是逐位精确的**，需要与 CPU 输出
+对拍时用 `RUST_GPU_ATTENTION=0` 把它关掉。
+
+差异集中在高频：把图模糊一下 PSNR 涨到 32.6 dB，降采样 /8 涨到 35.2 dB，
+说明结构与构图没有变，差的是细纹理与像素级噪声——肉眼"一眼看过去一样、近看有
+差异"就是这个 PSNR 区间的典型表现。
+
+### 环境变量
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `RUST_GPU_ATTENTION` | `1` | `0` 把 DiT attention 放回 CPU 逐行路径 |
+| `RUST_GPU_F16_REF` | `1` | `0` 把 refiner 栈放回 CPU |
+| `RUST_GPU_TILED` | `1` | `0` 关掉 Q8_0 tiled matmul |
+| `RUST_GPU_DIAG` | 关 | 打印每步 GPU 上的 block / dispatch 数 |
+| `RUST_GPU_TEXT` | `0` | `1` 把 Qwen3 文本编码器的投影放回 GPU（**默认关，见下**）|
+
+在重建绝对基线之前，不要用这些数字与 PyTorch 的 1.89 s/forward 算比值。
+
+#### ⚠️ Qwen3 文本编码器默认在 CPU 上跑
+
+这是**有意为之的临时 gate**，不是「文本编码器不适合 GPU」的结论。
+
+`Qwen3TextEncoder::forward_to_block` 的循环是 token 在外、层在内，所以每个
+`(token, layer)` 组合发出 7 次**单行**投影。它们经
+`matmul_q8_0_quantized_parallel_rows` 上设备，而该入口只有 `n_in` 上界、没有行数
+下界，于是 16 token 的 prompt 产生 `16×35×7 = 3920` 次 fenced 单行提交——每次为
+一行真实计算重传 10-25 MB Q8_0 权重。实测 **GPU 5.42 s vs CPU 0.65 s**（8 线程）。
+
+这与 `#164` 修掉的 VAE「一次 dispatch 一个 fence」是同一种形状（那次是 76× 倒挂）。
+守卫是 thread-local 且只覆盖这一次 forward，**没有下沉到
+`matmul_q8_0_quantized_parallel_rows`**——那个算子与 Z-Image DiT 共用，`--gpu`
+在 DiT 上是 8.8× 收益，不能被牵连。
+
+等价的修法（待做）：把 prefill 批量化。投影本身是逐行无关的 GEMM，且 `attention`
+已经只读严格因果的 `scores[..=position]` 窗口，所以把循环嵌套换成 layer 外 /
+token 内（或直接一层一次投影全部 token）**数值等价**，3920 次单行 dispatch 变
+`35×7=245` 次批量 dispatch，每次权重上传被所有 token 摊薄。**不需要改模型或
+cache 布局**——`cache[(layer*token_count + position)]` 两种嵌套共用。
+
+`RUST_GPU_TEXT=1` 保留旧行为，供上述优化做对照测量。
+
+### 让 GPU 路径快起来的四件事
+
+1. **Q8_0 grouped matmul 的 tiling。** 旧 kernel 每个 workgroup 只算**一个**
+   输出元素：64 个 lane 切分 K 维再做树形归约，于是每字节权重只服务**一个**
+   token，权重复用为 1。实测 W2 形状 757.6 ms / 110 GOP/s，而同一形状 PyTorch
+   约 5900 GOP/s。`shaders/glsl/q8_matmul_tiled_dp4a.comp` 让 lane 持有输出列、
+   一次权重加载复用于一个 token tile 的寄存器累加器。token tile 从 8 加到 32
+   后（W2 形状 64.4 → 20.6 ms，1289 → 4035 GOP/s；64 会超出寄存器而回落）
+   合计 **37×**，与旧 kernel 相对误差 9.5e-7。
+
+2. **attention 在 host 上并行，并按 query 分块。** 它一度占单步 75.9%，
+   128 GMAC 却要搬 514 GB——每个 K 向量 528 KiB，每个 query 重读一遍整套。
+   按 ~46 GB/s 的 STREAM 带宽正好是那 10 s。分成 8 个 query 一块后每个 K
+   向量只读一次，10.0 s → 3.4 s。分块 8 最优（16 → 16.6 s，32 → 16.5 s，
+   再大 score 行撑爆 L1）。由于每个 (query, head) 只读 `qkv`、只写 `output`
+   的一段连续区间，这只是重排循环而非近似，测试要求与单线程**逐位相同**。
+
+3. **host 写 → device 读的 barrier。** arena 是 CPU 直接写、shader 直接读的
+   映射内存，缺失 HOST→COMPUTE barrier 时能否看见写入只取决于速度：旧 kernel
+   每次 dispatch 约 700 ms，写入早被"看见"；tiled kernel 约 64 ms，同种子两次
+   渲染就会差 1.9–5.8/255，且只有 arena 大到装不进缓存的 512×512 才复现
+   （256×256 逐位一致）。`VulkanContext::host_write_barrier` 在每次 submit 前
+   补上它。
+
+4. **F16 refiner 上 GPU。** 两层 refiner 栈在 GGUF 里是 F16，而绑定只接受
+   Q8_0，所以 4 个 block 曾整个走 CPU 逐行路径，比 30 层主栈在 GPU上还贵。
+   `shaders/glsl/f16_matmul_tiled.comp` 是 Q8_0 tiled kernel 的浮点版。
+
+5. **F16 kernel 的两处改写，refiner 再快 2.54×。** 权重解码原本是手写位运算：
+   每个值一次分支加一次 `exp2()`，而 Q8_0 的 dequant 只有一次乘法。权重本来
+   就成对塞在一个 32-bit word 里，改用原生 `unpackHalf2x16` 一次取两个、零
+   分支（顺带把 inf/nan 与 subnormal 也算对了）。第二处是共享内存：激活在入
+   shared 之前已经 `round_f16_rte` 过，却仍以 f32 存放，占 32 KB，正好是每 SM
+   预算的一半，只塞得下一个 workgroup；Q8_0 kernel 同一块 chunk 只占 16 KB。
+   改成按 f16 成对打包后同样是 16 KB。refiner 3610 ms → 1423 ms/步，同 seed
+   输出与旧 kernel 逐字节一致。**refiner 是解码受限而不是字节受限**，所以把
+   权重换成更小的量化格式没有意义——这一点先测出来省掉了一次错误方向的重做。
+
+> **`examples/dit_vk_bench.rs` 的 0.4×–1.36× 是误导性的**：它测的是 GEMV
+> （`gpu_out` 只有一行长），权重复用同样为 1，于是读带宽看起来正常，却完全
+> 没有测到真实形状。判断 kernel 速度必须用
+> `zimage_tiled_matmul_beats_the_one_token_per_weight_kernel`，它轮流读取 8 个
+> 不同权重矩阵以绕开 L2，单矩阵热缓存下会报出 10 万 GOP/s 的假数字。
+
+### 还在 host 上的
+
+DiT 的整条链现在都在设备上：rms_norm、AdaLN 调制、QKV 投影、Q/K norm、
+交错 RoPE、attention、out proj、FFN 四个投影、SiLU。剩下真正跑在 CPU 的只有：
+
+| 阶段 | 耗时 | 说明 |
+|---|---|---|
+| FFN 的 W2 输出回读 | 1.38 s / 8 步 | 回读后接 norm + 门控残差 |
+| AdaLN modulation | 0.02 s | 每 block 的 scale/shift 向量 |
+| rope | 0.3 ms | 已在设备，只是 profile 槽位仍标 host |
+
+**回读那一项是剩下最大的一块。** W2 的输出要进 `readback_norm_and_residual_rows`
+做 ffn_norm2 和门控残差，两者都作用在 `HIDDEN` 宽的整行上而不是 FFN 宽度，
+所以搬上设备要先确认这条链在 F16 arena 上的舍入契约。
+
+attention 早期确实搬不动——DiT 没有 KV cache（每个 token 只看自己 block 里的每个
+token 一次），而现成的 scores/values operator 按 decoder 的
+`[layer][position][head][dim]` 缓存布局索引。现在通过给 `kv_write` 和
+`attention_scores` 加源 stride、并让整段序列作为单个 block 走 `full_attention`
+（去掉 decoder 依赖的 causal 上限）解决；scores 用的是 tiled kernel，
+带 `QUERY_TILE` 的 query 分块。
+
+> `RUST_GPU_DIAG=1` 会逐步打印 `blocks_on_gpu` 与 `projections`。这个计数器
+> 抓到过一次静默故障：block 0 报错后 `mark_gpu_broken` 把设备锁死，而 block
+> profile 仍报出看似合理的 14 s/步 GPU 时间——只有"没有 block 进入
+> `run_block_gpu`"能说明问题。
 
 ## 2. 参数约束
 
-来自 `src/app/cli.rs:447-449`：
+来自 `src/app/cli/options.rs:635-637`（`src/app/cli.rs` 已拆分，旧路径失效）：
 
 - `--steps` 必须正整数
 - `--resolution` 必须正整数且 **divisible by 16**
 
-## 3. 已知范围
+## 3. 从 PyTorch 权重转换
+
+上游 `gguf-org/z-image-gguf` 只提供 Q8_0 一档 DiT。仓库自带的转换器可以从
+原始 safetensors 重新导出：
+
+```bash
+models/.venv/bin/python tools/converter/z_image/convert_z_image.py \
+  models/Z-Image-Turbo --out-dir models/z-image-gguf-mine --outtype q8_0
+```
+
+参数：
+
+| 选项 | 说明 |
+|---|---|
+| `--outtype` | `q8_0`（默认）/ `f16` / `f32` |
+| `--components` | `all`（默认）/ `dit` / `vae` / `text` |
+| `--overwrite` | 覆盖已有输出 |
+
+| 档位 | DiT 体积 | 每步耗时（8 线程） | 与上游权重差异 |
+|---|---|---|---|
+| `q8_0` | 6.73 GB | 140.5 s | 3.75 / 255 |
+| `f16` | 11.47 GB | 138.8 s | **3.44 / 255** |
+| `f32` | 22.93 GB | — | — |
+
+`q8_0` 模式下两个 refiner 栈保持 F16（每步只跑两次，量化收益不抵误差），
+30 个主层按 `--outtype` 走。
+
+> **F16 不更快。** 权重流量翻倍（10.6 GB vs 5.64 GB）正好抵消了省掉输入量化
+> 的收益，两者落在噪声范围内。它的价值是精度更接近原始权重。
+
+VAE 只导出 `decoder.*`（txt2img 是 latent → 像素，编码器用不上）。
+
+## 4. 已知范围
 
 | 范围 | 状态 |
 |---|---|
 | Z-Image Turbo（CPU、512×512、txt2img） | `Verified`（[tests/z_image_reference.rs](../../tests/z_image_reference.rs) 覆盖 pinned Oracle） |
 | Z-Image Base | `Unsupported` |
 | img2img | `Unsupported` |
-| GPU 后端 | `Unsupported`（仓库 CPU-only） |
+| GPU 后端 | `Experimental`（DiT 与 F16 VAE 卷积 offload；[RADV 记录](../develop/VULKAN_RADV_VALIDATIONS.md)） |
 
-## 4. 与 Oracle 的对齐
+GPU 一列的判定依据与已知缺口：
+
+- **已跑通**：aarch64 Vulkan 主机（`--features vulkan` 构建）上 8 步 512×512 端到端出图，
+  **70.6 s**（同会话 CPU 574.6 s，8.1×）；`RUST_GPU_DIAG=1` 报 `blocks_on_gpu=34`
+  （全部 34 层进入 `run_block_gpu`），每步 170 次 projection。
+- **画质**：同 seed 512×512 8 步，GPU 与 CPU 输出 PSNR **32.21 dB**，
+  mean\|Δ\| 3.01/255（Q8_0 倒数对齐 CPU 后；此前 31.61 dB / 3.44）。`RUST_GPU_TEXT=1` 的输出与默认配置逐字节一致；
+  `RUST_GPU_ATTENTION=0` 与默认相差 PSNR 31.4 dB（该开关按设计改变浮点路径）。
+- **单测覆盖**：`cargo test --features vulkan --lib` 下 5 个 GPU 正确性测试通过
+  （AdaLN 调制、融合 norm+modulate、batched QKV、W2 scale 抵消、attention 分块逐位一致）。
+- **RADV 记录**：512×512 八步出图 402.758633 s；128×128 两步 CPU/GPU
+  为 359.780291 / 26.349318 s，PSNR 39.3589 dB。权重与执行范围见链接，和 aarch64 记录分开看待。
+- **验证边界**：`tests/z_image_reference.rs` 是纯 CPU 且 `#[ignore]`。
+  GPU 成图来自实机运行；像素不逐位一致，512×512 CPU 成品对比和整条浮点管线 parity 尚未完成。
+- **已知缺口**：
+  - **DiT attention 已在 GPU**（默认 `RUST_GPU_ATTENTION=1`，实测 10.8 s/8 步；
+    关掉后 27.0 s）。旧版本文档与 `GPU_PHASE_LABELS` 曾误标为 host，标签已修正。
+  - **RoPE 已上设备**：`qk_norm_rope_interleaved.comp` 把 Q/K 的 rms_norm 与
+    交错 RoPE 融进 QKV 的同一个 command buffer，QKV 不再回 host
+    （`rope (host)` 893.8 ms → 0.3 ms，denoise 43.1 → 42.0 s）。
+    **AdaLN modulation 仍在 host**（0.02 s，可忽略）。
+  - **FFN 的 w1/w3 激活要经 host silu + 回读**，合计 7.2 s / 50.3 s = 14.3%，
+    是 denoise 剩余最大的一块 host 开销。合批到单 command buffer 后这部分
+    **完全消失**（host silu 从 profile 里消失，`ffn: main stack` 25.4 → 16.3 s，
+    denoise 52.7 → 43.4 s，端到端 59.9 → 50.6 s），**但整图会产出 `-inf`**。
+    根因见下方「FFN 合批的 `-inf`：已定位」。
+
+### FFN 合批的 `-inf`：已定位
+
+历史上这个失败被归因为「descriptor set 与 pipeline 布局在跨 dispatch 复用时的
+状态」，并注明「根因未定位」。**那个归因是错的**，2026-10-12 用逐层放开的办法
+定位到了真正的机制。
+
+`FFN_BATCH_MAX=<n>` 让合批只对 `layer < n` 生效，二分结果是：
+
+| 放开层数 | 结果 |
+|---|---|
+| 0（全走原路径）| ✅ 正常出图 |
+| 2 | ✅ layer 0、1 合批，正常 |
+| 4 | ❌ **layer 3 首个产出 `-inf`** |
+
+逐阶段读回（同 seed、256×256、单步）把放大链定位到 **w1 本身**：
+
+| 路径 | layer | w1 输出 amax | w1 非有限 |
+|---|---|---|---|
+| 原路径（逐 dispatch submit）| 2 | 83.8 | 0 |
+| 原路径（逐 dispatch submit）| 3 | **103.2** | **0** |
+| 合批（单 command buffer）| 2 | 767 | 0 |
+| 合批（单 command buffer）| 3 | **6314** | **191 / 2621440** |
+
+**输入完全正常**：合批路径下 layer 3 送进 `x` 的激活 amax 仅 90.6、零非有限值，
+与原路径一致。变的只有执行方式。
+
+所以合批的算术本身没错——`record_ffn` 自己在 rows=3840 的真实形状上逐元素正确
+（`batched_ffn_chain_matches_incremental_submission`，14 745 600 个元素全部有限且与
+逐个提交一致）。
+
+**真正的根因在 `record_silu_mul`，而且与 DiT 完全无关。** 用一个独立自检
+（`silu_ffn_scale_probe`，FFN 真实规模 3840×9728）单独调这个算子即可复现：
+**37 324 800 个激活里 16 009 509 个（43%）非有限**。
+
+`shaders/glsl/silu_mul.comp` 的 `exp_approx` 把 exp 输入 clamp 在 `±88.376`
+（exp 溢出点），但 silu 的补偿算法
+
+```glsl
+res = fma(-den, act, gate);   // 灾难性抵消
+act = fma(res, 1/den, act);   // 需要 1/den 是正规数
+```
+
+要求 `1/denominator` 落在 f32 正规数范围。clamp=88.376 时 `1/den = 4.16e-39`，
+**低于正规数下限 1.18e-38**，落进次正规数区间，修正项产出 NaN。clamp=80 时
+`1/den = 1.8e-35`，是正规数。
+
+为什么只有合批会暴露：原路径的 silu 在 **host 上做**，从不调用这个 GPU 算子。
+合批第一次把它放进 dispatch 链，才碰到这个从未在生产规模验证过的缺陷——原自检
+只覆盖 `N_FF = 96`，真实规模是它的 38.9 万倍。
+
+两个佐证：
+
+- `RUST_GPU_F16_REF=0`（refiner 的 F16 权重不上设备）时合批路径正常——
+  出问题的是 F16 路径，Q8_0 的 main stack 不受影响。
+- 去掉 silu（w1+w3+w2 仍在同一 buffer）即可正常出图；`record_silu_mul` 是唯一的
+  破坏者。
+
+**已修复**：clamp 改 `±80`，并新增生产规模门禁。⚠️ clamp 值不可调回 88.376，
+且 GPU SiLU 自此与 CPU 不再逐位一致（PSNR 33.34 → 31.61 dB）。
+完整风险登记见 [`docs/develop/TODO.md`](../develop/TODO.md) TODO-020。
+
+### 其余已知缺口
+
+  - **refiner 的 F32 累加契约曾导致整条流程 `-inf`**（本分支已修复，见下）。
+  - ~~QKV 每 block 重新上传~~ **已消除**：RoPE 上设备后 QKV 不再往返
+    （原先每 block 下 177 MB + 上 177 MB，实测合计只值约 1.3 s——这台机器上
+    177 MB 的单向传输约 0.4 s，先前「传输值 1.9–3.9 s」的估计偏高）。
+  - **Qwen3 文本编码器默认在 CPU 上跑**（临时 gate，见第 1 节环境变量表）。
+  - **VAE 只 offload 卷积**：GroupNorm、SiLU、nearest upsample 与 VAE 内 attention
+    仍在 CPU。当前 VAE 6.0 s 已优于 CPU 的 10.6 s，故非瓶颈。
+
+## 5. 与 Oracle 的对齐
 
 Pinned Oracle：[leejet/stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)
 @ `97d2990807fe6d558e395f8764198d7c7e7b411c`
 
 构建 / 测试入口：
 
-- `tools/z_image/build_stable_diffusion_oracle.sh`
-- `tools/z_image/stable-diffusion-z-image-trace.patch`
+- `tools/oracle/z_image/build_stable_diffusion_oracle.sh`
+- `tools/oracle/z_image/stable-diffusion-z-image-trace.patch`
 - `tests/z_image_reference.rs`
 
 > 仓库口头习惯说的 `Dif.cpp` 实际指这个 stable-diffusion.cpp fork，
 > `docs/REFERENCE_IMPLEMENTATIONS.md` 顶端有说明。
 
-## 5. CLI 选项速查
+## 6. CLI 选项速查
 
-| 选项 | 用途 | 必填 |
-|---|---|---|
-| `--model` | DiT GGUF | ✓ |
-| `--text-encoder` | Qwen3 文本编码器 GGUF | ✓ |
-| `--vae` | Flux VAE GGUF | ✓ |
-| `--prompt` | 文生图 prompt | ✓ |
-| `--out` | 输出 PNG 路径 | ✓ |
-| `--steps` | Euler 步数（NFE） | ✓ |
-| `--resolution` | 输出分辨率（divisible by 16） | ✓ |
-| `--seed` | RNG 种子 | — |
-| `--threads` | ComputePool 线程数 | — |
+| 选项 | 用途 | 必填 | 默认 |
+|---|---|---|---|
+| `--model` | DiT GGUF | ✓ | — |
+| `--text-encoder` | Qwen3 文本编码器 GGUF | ✓ | — |
+| `--vae` | Flux VAE GGUF | ✓ | — |
+| `--prompt` | 文生图 prompt | ✓ | — |
+| `--out` | 输出 PNG 路径 | ✓ | — |
+| `--steps` | Euler 步数（NFE） | — | 8 |
+| `--resolution` | 输出分辨率（divisible by 16） | — | 512 |
+| `--seed` | RNG 种子 | — | 0 |
+| `--threads` | ComputePool 线程数 | — | 自动 |
+| `--gpu` | DiT 投影与 F16 VAE 卷积走 Vulkan 后端 | — | 关 |
 
-## 6. 相关源码索引
+只有前五项必填（聚合检查在 `src/app/mod.rs:187-192`，逐项检查在
+`src/app/cli/options.rs:608-632`）；`--steps` / `--resolution` 取 `unwrap_or`
+默认值（`:633-634`），旧版本文档把这两个标成必填是错的。
 
-- `src/app/image.rs` — `run_z_image_cli` 主入口
-- `src/app/mod.rs:32-37` — pig arch 三组件必填检查
-- `src/app/cli.rs:447-449` — `--steps` / `--resolution` 校验
+`--gpu` 刻意不在互斥表里（`options.rs:600-604`）：DiT 投影经
+`matmul_q8_0_quantized_parallel_rows` 交给 Vulkan backend，不支持的形状逐个回退，
+所以这个开关在这里是有意义的。F16 VAE 的 1×1 / 3×3 卷积也可 offload；
+attention、norms 与 VAE 的 BF16/F32 分支保持 CPU 执行。
+
+## 7. HTTP 入口
+
+服务端有 `POST /v1/images/generations`（与 P-JiT 共用路由）。模型按**权重签名**判定
+（`general.architecture=pig`，或张量名 `x_embedder.weight` + `cap_embedder.0.weight` +
+`final_layer.linear.weight`），所以启动服务不需要额外开关。
+
+```bash
+target/release/rust-model-inference --serve --host 127.0.0.1 --port 8099 \
+  --model models/z-image-gguf-mine/z-image-turbo-q8_0.gguf \
+  --text-encoder models/z-image-gguf-mine/qwen3_4b_f32-q8_0.gguf \
+  --vae models/z-image-gguf-mine/pig_flux_vae_fp32-f16.gguf
+```
+
+```bash
+curl -s -X POST http://127.0.0.1:8099/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A red fox sleeping beneath a pine tree","size":"512x512","steps":8,"seed":42}'
+```
+
+返回 `{"created":…,"data":[{"b64_json":…}]}`，`b64_json` 是 PNG 的 base64。
+
+请求字段与约束：
+
+| 字段 | 说明 |
+|---|---|
+| `prompt` | 必填，1..=32768 字节，不能是空白 |
+| `size` | `WIDTHxHEIGHT`，必须方形；与 `width`/`height` 互斥 |
+| `width` / `height` | 单独给一边时按方形处理；两边不等就报 400 |
+| `steps` | 采样步数，必须为正 |
+| `seed` | 随机种子 |
+| `guidance` | **不支持** —— Z-Image 没有 CFG 分支，带了报 400 |
+| `n` | 只接受 1 |
+| `response_format` | 只接受 `b64_json` |
+
+分辨率必须是 16 的倍数（VAE 的 latent 形状要求），服务端与 CLI 的检查一致。
+
+实测（aarch64 Vulkan 主机，release 构建，128×128 / 2 步 / seed 42）：HTTP 返回的 PNG 与
+同一权重的 CLI 输出**逐位相同**（md5 `86caef6e632c995511bf2395fc1933ad`）；
+debug 与 release 构建的结果也逐位相同。
+
+CLI 与 HTTP 走的是同一份模型代码：`DiffusionPipeline::generate_rgb`
+（`src/models/diffusion/z_image/`），HTTP 层只把请求映射成 `ZImageOptions`，不碰计算。
+
+## 8. 相关源码索引
+
+- `src/app/diffusion.rs` — `run_z_image_cli` 主入口
+- `src/app/server/diffusion.rs` — HTTP 后端（请求映射，不含模型计算）
+- `src/app/server/image_generation.rs` — `/v1/images/generations` 路由与请求体
+- `src/app/mod.rs:187-192` — `reject_incomplete_z_image_architecture`（pig 三组件聚合检查）
+- `src/app/cli/options.rs:608-637` — 逐项必填 + `--steps`/`--resolution` 校验
+- `src/ops/float.rs:31-43` — `gpu_matmul_active()`；无 vulkan feature 时恒为 false
+- `src/main.rs:419-424` — `ops::enable_gpu()`（须在 Z-Image 分支内提前调用）
 - `src/models/diffusion/pig.rs` — DiT 模型
-- `src/models/diffusion/z_image/dit.rs` — DiT forward
+- `src/models/diffusion/z_image/dit.rs` — DiT forward（`run_block_gpu` 在 `:2312-2688`）
+- `src/models/diffusion/z_image/dit_gpu.rs` — GPU DiT 会话（`DitGpuSession`）
 - `src/models/diffusion/z_image/text.rs` — Qwen3 文本编码器
 - `src/models/diffusion/z_image/vae.rs` — Flux VAE
-- `tests/z_image_reference.rs` — pinned Oracle 对齐
+- `tests/z_image_reference.rs` — pinned Oracle 对齐（纯 CPU，`#[ignore]`）
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Oracle pin 与构建脚本
+- `tools/converter/z_image/convert_z_image.py` — safetensors → 三组件 GGUF
+- `tools/converter/z_image/probe_layout.py` — 只读 header，打印张量名/维度分布
+
+> `src/models/diffusion/z_image/dit_gpu_block.rs` 是被取代的旧 GPU 实现，**未在
+> `mod.rs` 里声明**，无任何引用。改动前先确认自己不是在读死代码。

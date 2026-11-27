@@ -1,0 +1,2457 @@
+use super::generation::{sample_token, validate_gemma4_temperature};
+use super::vision::{
+    build_qwen3_media_positions, encode_qwen35_image, inject_qwen_media_embeddings,
+    inject_vision_embeddings, validate_single_qwen_media,
+};
+use crate::app::cli::{resolve_thread_count, KvFormat};
+use crate::app::media::{decode_image, normalize_resized_image};
+use crate::core::tensor::TensorSource;
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::format::ggufrs::{open_model_source, ComponentRole};
+
+/// The system turn Qwen2.5-Omni requires; shared by the hand-built and
+/// Jinja2 prompt builders so both produce the same conversation.
+const OMNI_SYSTEM_TEXT: &str = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.";
+use crate::models::hybrid::HybridTextModel;
+use crate::models::qwen3::vision::{
+    qwen_smart_resize as qwen3vl_smart_resize, VisionEncoder as VisionEncoder3vl,
+    VisionScratchpad as VisionScratchpad3vl,
+};
+use crate::models::qwen3::{Qwen3GenerateOptions, Qwen3Input, Qwen3Model};
+use crate::models::qwen35::build_qwen35_positions;
+use crate::models::qwen35::trunk::HybridSession;
+use crate::models::qwen35::vision::{
+    qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
+    VisionScratchpad as VisionScratchpad35,
+};
+use crate::prompt::{append_qwen_assistant_prefix, append_qwen_message_tokens};
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::Arc;
+
+/// Multimodal forward (vision + audio + text → generated text). The
+/// HTTP server's `/v1/jev/image` and `/v1/jev/image_grouped` paths
+/// call this directly with `max_new_tokens=1` to approximate the
+/// argmax-over-labels behaviour of JEV on multimodal inputs; the
+/// per-arch multimodal logits-only forward (which would let us
+/// apply the same scoring as text JEV) is not yet implemented for
+/// Qwen3.5, so the 1-token-generation approach is the pragmatic
+/// fallback. `run_qwen3_family_multimodal_capture_text` wraps this
+/// for the gemma4 path which has a separate forward signature.
+pub fn run_qwen3_family_multimodal(
+    llm_source: &dyn TensorSource,
+    model_source: Arc<dyn TensorSource>,
+    mmproj_path: &Path,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<String, String> {
+    validate_single_qwen_media(
+        image_path.is_some(),
+        video_path.is_some(),
+        audio_path.is_some(),
+    )?;
+    // Shared ComputePool for vision-encoder matmuls (Qwen2.5-Omni vision
+    // encode is otherwise single-threaded BF16; see `matmul_weight_batch_pooled`).
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    let mmproj: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(mmproj_path, ComponentRole::Mmproj)
+            .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?,
+    );
+    let media_kind = if audio_path.is_some() {
+        crate::app::media::MediaKind::Audio
+    } else if video_path.is_some() {
+        crate::app::media::MediaKind::Video
+    } else {
+        crate::app::media::MediaKind::Image
+    };
+    let family =
+        crate::app::media::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
+    let mut media = Vec::new();
+    let mut media_deepstack_layers: Vec<Vec<f32>> = Vec::new();
+    let mut media_grid_shapes = Vec::new();
+    if let Some(audio_path) = audio_path {
+        let samples = crate::app::media::decode_audio(audio_path)?;
+        media =
+            crate::models::qwen3::omni::encode_audio(Arc::clone(&mmproj), &samples, n_threads_arg)?;
+    } else {
+        let mut frames = if let Some(path) = image_path {
+            vec![decode_image(path)?]
+        } else {
+            crate::app::media::decode_video(video_path.ok_or("missing image or video input")?)?
+        };
+        let is_video = video_path.is_some();
+        let (first_w, first_h) = {
+            let first = frames.first().ok_or("media produced no frames")?;
+            (first.width() as usize, first.height() as usize)
+        };
+        let (grid_w, grid_h) = match family {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
+                let encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
+                (grid.image_width(), grid.image_height())
+            }
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                if is_video {
+                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                }
+                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                (grid.image_width(), grid.image_height())
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
+        };
+        let (mean, std) = match family {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
+                let encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                (encoder.config.image_mean, encoder.config.image_std)
+            }
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
+                let encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                (encoder.config.image_mean, encoder.config.image_std)
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
+        };
+        let normalized = frames
+            .drain(..)
+            .map(|frame| normalize_resized_image(&frame, grid_w, grid_h, &mean, &std))
+            .collect::<Result<Vec<_>, _>>()?;
+        let pairs = if is_video {
+            (0..normalized.len())
+                .step_by(2)
+                .map(|index| (index, (index + 1).min(normalized.len() - 1)))
+                .collect::<Vec<_>>()
+        } else {
+            vec![(0, 0)]
+        };
+        match family {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
+                let mut encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                encoder.precompute();
+                let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
+                let mut scratch = VisionScratchpad3vl::new(&encoder.config);
+                for (a, b) in pairs {
+                    encoder.encode_pair(
+                        &normalized[a],
+                        &normalized[b],
+                        grid.image_width(),
+                        grid.image_height(),
+                        &mut scratch,
+                    )?;
+                    media.extend_from_slice(&scratch.projected);
+                    let deepstack_layers = encoder
+                        .config
+                        .has_deepstack_layers
+                        .iter()
+                        .filter(|enabled| **enabled)
+                        .count();
+                    if deepstack_layers > 0 {
+                        if scratch.deepstack.len() % deepstack_layers != 0 {
+                            return Err("Vision deepstack output is not layer aligned".into());
+                        }
+                        if media_deepstack_layers.is_empty() {
+                            media_deepstack_layers.resize_with(deepstack_layers, Vec::new);
+                        } else if media_deepstack_layers.len() != deepstack_layers {
+                            return Err(
+                                "Vision deepstack layer count changed between frames".into()
+                            );
+                        }
+                        let per_layer = scratch.deepstack.len() / deepstack_layers;
+                        for (layer, output) in media_deepstack_layers.iter_mut().enumerate() {
+                            output.extend_from_slice(
+                                &scratch.deepstack[layer * per_layer..(layer + 1) * per_layer],
+                            );
+                        }
+                    }
+                    media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                }
+            }
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                encoder.precompute();
+                if is_video {
+                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                }
+                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                let mut scratch = VisionScratchpad35::new(&encoder.config);
+                for (a, b) in pairs {
+                    encoder.encode_pair(
+                        &normalized[a],
+                        &normalized[b],
+                        grid.image_width(),
+                        grid.image_height(),
+                        &mut scratch,
+                        &pool,
+                    )?;
+                    media.extend_from_slice(&scratch.projected);
+                    media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                }
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|key| llm_source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    // Captured before `model_source` is moved into the model below: the
+    // Jinja2 path needs `tokenizer.chat_template` off the GGUF.
+    let jinja_metadata = {
+        let src = Arc::clone(&model_source);
+        move |k: &str| src.metadata(k).cloned()
+    };
+    let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), Arc::clone(&pool))?;
+    let width = model.config().n_embd;
+    if media.len() % width != 0 {
+        return Err(format!(
+            "Media projector width does not match model width {width}"
+        ));
+    }
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
+    let start = tokenizer
+        .special_token_id(start_name)
+        .ok_or_else(|| format!("Required token missing: {start_name}"))?;
+    let pad = tokenizer
+        .special_token_id(pad_name)
+        .ok_or_else(|| format!("Required token missing: {pad_name}"))?;
+    let end = tokenizer
+        .special_token_id(end_name)
+        .ok_or_else(|| format!("Required token missing: {end_name}"))?;
+    let rows = media.len() / width;
+    let media_deepstack = media_deepstack_layers.concat();
+    let deepstack_layers = if media_deepstack.is_empty() {
+        0
+    } else {
+        let per_layer = rows
+            .checked_mul(width)
+            .ok_or("Media deepstack shape overflow")?;
+        if per_layer == 0 || media_deepstack.len() % per_layer != 0 {
+            return Err("Media deepstack output is not row aligned".into());
+        }
+        media_deepstack.len() / per_layer
+    };
+    if deepstack_layers != model.config().n_deepstack_layers {
+        return Err(format!(
+            "Deepstack layer mismatch: model={}, projector={deepstack_layers}",
+            model.config().n_deepstack_layers
+        ));
+    }
+    // `--jinja` renders the model's own template, which already knows the
+    // `<|vision_start|><|image_pad|><|vision_end|>` shape. The template
+    // writes one `<|image_pad|>` per media item; the projector produced
+    // `rows` grid tokens, so the placeholder is expanded into a contiguous
+    // run first — the contract `build_qwen3_media_positions` documents.
+    // The system turn stays Omni-only, matching the hand-built path below.
+    let jinja_system = if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
+        Some(OMNI_SYSTEM_TEXT)
+    } else {
+        None
+    };
+    // One part per attachment, and the count is `rows`: the number of
+    // projected tokens divided by the width. Deriving it from the vision grid
+    // shapes instead left audio with an empty list -- Omni audio produces
+    // embeddings but no vision grid -- so the template emitted no content part
+    // and the placeholder count did not match.
+    let mut jinja_media: Vec<crate::prompt::jinja::MediaPart> = Vec::new();
+    if image_path.is_some() {
+        jinja_media.push(crate::prompt::jinja::MediaPart::new(
+            media_kind.content_type(),
+            rows,
+        ));
+    }
+    if video_path.is_some() {
+        // One content part per frame: the vision path pushed one grid shape per
+        // frame, and the template emits a placeholder for each of them.
+        let frames = media_grid_shapes.len().max(1);
+        let per_frame = rows / frames;
+        for _ in 0..frames {
+            jinja_media.push(crate::prompt::jinja::MediaPart::new(
+                media_kind.content_type(),
+                per_frame,
+            ));
+        }
+    }
+    if audio_path.is_some() {
+        jinja_media.push(crate::prompt::jinja::MediaPart::new(
+            media_kind.content_type(),
+            rows,
+        ));
+    }
+    let jinja_template = jinja.resolve(&jinja_metadata)?;
+    if let Some(jinja_ids) = crate::prompt::jinja::media_conversation_tokens(
+        tokenizer.as_ref(),
+        jinja_template.as_ref(),
+        pad,
+        &jinja_media,
+        prompt,
+        jinja_system,
+        Some(false),
+    )? {
+        let mut embeddings = model.embed_tokens(&jinja_ids)?;
+        let deepstack_embeddings = inject_qwen_media_embeddings(
+            &jinja_ids,
+            pad,
+            &mut embeddings,
+            &media,
+            &media_deepstack,
+            width,
+        )?;
+        let positions = build_qwen3_media_positions(&jinja_ids, pad, &media_grid_shapes)?;
+        let generation = model.generate(
+            Qwen3Input {
+                token_ids: &jinja_ids,
+                positions: &positions,
+                embeddings: Some(&embeddings),
+                deepstack_embeddings: (!deepstack_embeddings.is_empty())
+                    .then_some(deepstack_embeddings.as_slice()),
+            },
+            Qwen3GenerateOptions {
+                max_new_tokens: max_tokens,
+                temperature,
+                prefill_batch_size,
+            },
+        )?;
+        print!("{}", generation.text);
+        io::stdout().flush().map_err(|error| error.to_string())?;
+        println!();
+        return Ok(generation.text);
+    }
+    let mut content = vec![start];
+    content.extend(std::iter::repeat_n(pad, rows));
+    content.push(end);
+    content.extend(tokenizer.encode(
+        prompt,
+        EncodeOptions {
+            add_special: false,
+            parse_special: false,
+        },
+    ));
+    let mut token_ids = Vec::new();
+    // Qwen2.5-Omni (qwen2vl arch with `qwen2.5o` projector) requires a
+    // modality-aware system prompt per the upstream README—without it,
+    // the assistant role can drift (audio output only works with the
+    // exact prompt; for text-only multimodal a generic variant still helps
+    // the model behave as a virtual-human assistant). We only inject the
+    // system turn when the projector family matches `Qwen25Omni`, so
+    // qwen3vl / qwen3vlmoe (Qwen3-VL family) keep their existing
+    // system-less behaviour.
+    if matches!(family, crate::app::media::ProjectorFamily::Qwen25Omni) {
+        let system_text = match media_kind {
+            crate::app::media::MediaKind::Audio => {
+                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
+            }
+            crate::app::media::MediaKind::Video => {
+                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
+            }
+            crate::app::media::MediaKind::Image => {
+                "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
+            }
+        };
+        append_qwen_message_tokens(
+            &mut token_ids,
+            &tokenizer,
+            "system",
+            &tokenizer.encode(
+                system_text,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ),
+        )?;
+    }
+    append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
+    append_qwen_assistant_prefix(
+        &mut token_ids,
+        &tokenizer,
+        matches!(arch, "qwen3vl" | "qwen3vlmoe"),
+    )?;
+    let mut embeddings = model.embed_tokens(&token_ids)?;
+    let deepstack_embeddings = inject_qwen_media_embeddings(
+        &token_ids,
+        pad,
+        &mut embeddings,
+        &media,
+        &media_deepstack,
+        width,
+    )?;
+    let positions = build_qwen3_media_positions(&token_ids, pad, &media_grid_shapes)?;
+    let generation = model.generate(
+        Qwen3Input {
+            token_ids: &token_ids,
+            positions: &positions,
+            embeddings: Some(&embeddings),
+            deepstack_embeddings: (!deepstack_embeddings.is_empty())
+                .then_some(deepstack_embeddings.as_slice()),
+        },
+        Qwen3GenerateOptions {
+            max_new_tokens: max_tokens,
+            temperature,
+            prefill_batch_size,
+        },
+    )?;
+    print!("{}", generation.text);
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    println!();
+    Ok(generation.text)
+}
+
+/// Logits-only multimodal forward for qwen3 / qwen3vl. Mirrors
+/// [`run_qwen3_family_multimodal`] but skips autoregressive
+/// generation and returns the final-position logits vector
+/// (length = vocab_size). Used by the `/v1/jev/image` and
+/// `/v1/jev/image_grouped` HTTP endpoints so callers can apply
+/// true JEV argmax-over-labels scoring on multimodal inputs
+/// without paying the cost of generation + parsing.
+#[allow(clippy::too_many_arguments)]
+/// Encode one image with the `minicpmv4_7` projector.
+///
+/// Resizes the image onto the overview tile, and when the slice instructions
+/// ask for a grid, also onto the refined canvas that the slices are cut from.
+/// Each tile goes through [`crate::models::minicpmv::encode_tile`], and the
+/// separator rows that follow it (`</image>`, `<slice>`, `</slice>`, newline,
+/// per `clip_suffix_rows`) are appended from `v.tok_embd_sep`.
+///
+/// The returned [`VisionGrid`] describes the canvas. `grid_w x grid_h` is the
+/// token grid of the **last** tile — llama.cpp's `canvas_tile_grid` scales every
+/// other tile's grid from it — and `grid_t` carries the slice grid width.
+fn encode_minicpmv47_image(
+    mmproj_source: &dyn TensorSource,
+    image_path: &Path,
+    n_threads_arg: usize,
+) -> Result<(VisionGrid, Vec<f32>, Vec<[usize; 4]>), String> {
+    use crate::models::minicpmv::{
+        append_suffix, encode_tile, get_slice_instructions, suffix_plan, ImageSize,
+        MiniCpmV47Scratch, MiniCpmV47Weights,
+    };
+
+    let started = std::time::Instant::now();
+    let weights = MiniCpmV47Weights::load(mmproj_source)?;
+    let cfg = weights.config.clone();
+    let image = decode_image(image_path)?;
+    let original = ImageSize {
+        width: usize::try_from(image.width()).map_err(|_| "image width does not fit usize")?,
+        height: usize::try_from(image.height()).map_err(|_| "image height does not fit usize")?,
+    };
+    let inst = get_slice_instructions(&cfg, original);
+    let plan = suffix_plan(inst.grid_size.width, inst.grid_size.height);
+    let ps = cfg.patch_size;
+
+    // [overview, slices row-major], each already at its own pixel size.
+    let mut tiles: Vec<(image::DynamicImage, usize, usize)> = Vec::new();
+    tiles.push((
+        resize_to(&image, inst.overview_size.width, inst.overview_size.height)?,
+        inst.overview_size.width,
+        inst.overview_size.height,
+    ));
+    let mut reference_grid = (
+        inst.overview_size.width / ps / cfg.n_merge,
+        inst.overview_size.height / ps / cfg.n_merge,
+    );
+    if inst.has_slices() {
+        let refined = resize_to(&image, inst.refined_size.width, inst.refined_size.height)?;
+        for slice in &inst.slices {
+            tiles.push((
+                crop_box(&refined, slice.x, slice.y, slice.width, slice.height)?,
+                slice.width,
+                slice.height,
+            ));
+        }
+        let last = inst.slices.last().expect("has_slices implies a last slice");
+        reference_grid = (
+            last.width / ps / cfg.n_merge,
+            last.height / ps / cfg.n_merge,
+        );
+    }
+
+    let pool = Arc::new(crate::core::thread_pool::ComputePool::new(
+        n_threads_arg.max(1),
+    ));
+    let mut scratch = MiniCpmV47Scratch::default();
+    let mut projected: Vec<f32> = Vec::new();
+    let mut token_grids: Vec<crate::models::minicpmv::vision::TileGrid> = Vec::new();
+    for (index, ((tile, width, height), suffix)) in tiles.iter().zip(plan.iter()).enumerate() {
+        let (nx, ny) = (width / ps, height / ps);
+        let pixels = crate::app::media::normalize_resized_image(
+            tile,
+            *width,
+            *height,
+            &cfg.image_mean,
+            &cfg.image_std,
+        )?;
+        let mut embd = encode_tile(&weights, &mut scratch, &pool, &pixels, nx, ny)?;
+        append_suffix(&weights, suffix, &mut embd);
+        let expected = cfg.output_tokens(nx, ny, suffix.len());
+        if embd.len() != expected * cfg.n_embd_text {
+            return Err(format!(
+                "tile {index}: encoder produced {} rows, expected {expected}",
+                embd.len() / cfg.n_embd_text
+            ));
+        }
+        projected.extend_from_slice(&embd);
+        // One 2x2 merge at the vit_merger and one in the final projector, so
+        // a side loses a factor of `n_merge` (4) from patch count to tokens.
+        let half = |v: usize| v / 2;
+        let per_side_x = if cfg.n_merge == 2 {
+            half(nx)
+        } else {
+            half(half(nx))
+        };
+        let per_side_y = if cfg.n_merge == 2 {
+            half(ny)
+        } else {
+            half(half(ny))
+        };
+        token_grids.push(crate::models::minicpmv::vision::TileGrid {
+            grid_w: per_side_x.max(1),
+            grid_h: per_side_y.max(1),
+        });
+    }
+    // `pos_0` is the KV slot the `<|image_pad|>` marker will occupy, so the
+    // canvas origin (`base = pos_0 - 1`) lands on the text row before it.
+    let canvas = crate::models::minicpmv::vision::canvas_positions(
+        &token_grids,
+        &plan,
+        inst.grid_size.width,
+        inst.grid_size.height,
+        MARKER_SLOT,
+    )?;
+    if canvas.len() != projected.len() / cfg.n_embd_text {
+        return Err(format!(
+            "canvas positions ({}) do not match the projected rows ({})",
+            canvas.len(),
+            projected.len() / cfg.n_embd_text
+        ));
+    }
+
+    let (grid_w, grid_h) = reference_grid;
+    println!(
+        "MiniCPM-V 4.7 vision: {}x{} -> overview {}x{} + {} slices ({}x{} grid), \
+{} tokens in {:.3}s",
+        original.width,
+        original.height,
+        inst.overview_size.width,
+        inst.overview_size.height,
+        inst.slices.len(),
+        inst.grid_size.width,
+        inst.grid_size.height,
+        projected.len() / cfg.n_embd_text,
+        started.elapsed().as_secs_f64(),
+    );
+    Ok((
+        VisionGrid {
+            grid_t: inst.grid_size.width.max(1),
+            grid_h: grid_h.max(1),
+            grid_w: grid_w.max(1),
+            patch_size: ps,
+            merge_size: cfg.n_merge,
+        },
+        projected,
+        canvas,
+    ))
+}
+
+/// Placeholder KV slot the `<|image_pad|>` marker occupies. The canvas origin
+/// is `pos_0 - 1`, so this is the position of the token right before `<image>`.
+const MARKER_SLOT: usize = 1;
+
+fn resize_to(
+    image: &image::DynamicImage,
+    width: usize,
+    height: usize,
+) -> Result<image::DynamicImage, String> {
+    let w = u32::try_from(width).map_err(|_| "target width does not fit u32")?;
+    let h = u32::try_from(height).map_err(|_| "target height does not fit u32")?;
+    if width == 0 || height == 0 {
+        return Err("target size must be non-zero".into());
+    }
+    if image.width() == w && image.height() == h {
+        return Ok(image.clone());
+    }
+    Ok(image.resize_exact(w, h, image::imageops::FilterType::Triangle))
+}
+
+fn crop_box(
+    image: &image::DynamicImage,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<image::DynamicImage, String> {
+    let x = u32::try_from(x).map_err(|_| "crop x does not fit u32")?;
+    let y = u32::try_from(y).map_err(|_| "crop y does not fit u32")?;
+    let w = u32::try_from(width).map_err(|_| "crop width does not fit u32")?;
+    let h = u32::try_from(height).map_err(|_| "crop height does not fit u32")?;
+    let rgb = image.to_rgb8();
+    let cropped = image::imageops::crop_imm(&rgb, x, y, w, h).to_image();
+    Ok(image::DynamicImage::ImageRgb8(cropped))
+}
+
+/// MiniCPM-V 4.7's projector, config, slicing and per-tile encoder are
+/// implemented in `crate::models::minicpmv`, but the canvas layout gives every
+/// tile one M-RoPE slot and the separators after it one slot each, which the
+/// shared anyres builder (`build_qwen35_positions`) cannot express. So the
+/// anyres-shaped helpers below cannot serve this family at all; the canvas path
+/// in `run_qwen35_family_multimodal_logits` is the only one that can.
+const MINICPMV47_CANVAS_ONLY_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): this anyres helper does \
+not handle it. Its tile separators (`</image>`, `<slice>`, `</slice>`, newline) are embeddings \
+with no token id, and its canvas gives every tile one M-RoPE slot, which build_qwen35_positions \
+cannot express; use the minicpmv4_7 canvas path instead.";
+
+/// The same projector's canvas path, reached with `--jinja` off.
+///
+/// This used to reuse the wording above and claim the wiring was missing. That
+/// gap is closed: the canvas path splices the media span over the single
+/// `<|image_pad|>` that the checkpoint's own `tokenizer.chat_template` emits.
+/// What actually arrives here is that `--jinja` is off, so `jinja.resolve()`
+/// returns `None`, `text_conversation_tokens` has no template to read the marker
+/// from and returns `None`, and the "not wired" story sent two debugging rounds
+/// after a problem that did not exist. 1B has always needed `--jinja`; this is
+/// not a new restriction.
+const MINICPMV47_JINJA_MSG: &str = "MiniCPM-V 4.7 (minicpmv4_7): pass --jinja, or \
+--chat-template-file <path.jinja>. The projector, slicing and canvas positions are implemented and \
+need exactly one <|image_pad|> marker, which only the checkpoint's own tokenizer.chat_template \
+emits; with jinja disabled there is no template to take that marker from, so the prompt cannot \
+be built.";
+pub fn run_qwen3_family_multimodal_logits(
+    llm_source: &dyn TensorSource,
+    model_source: Arc<dyn TensorSource>,
+    mmproj_path: &Path,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    // Prepended as the chat-template system message when set. Callers that need
+    // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
+    // endpoints leave it `None` to keep Qwen's default system text.
+    system_prompt: Option<&str>,
+    max_context: usize,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    use crate::app::media::{frame_pairs, normalize_resized_image};
+    use crate::core::scratchpad::{KvFormat as Qwen3KvFormat, KvLifecycle};
+    use crate::models::qwen3::Qwen3Session;
+
+    if crate::app::arch_of(llm_source) == "mage_vl" {
+        if video_path.is_some() || audio_path.is_some() {
+            return Err("Mage-VL-Cowork supports image/text input only".into());
+        }
+        let vision =
+            open_model_source(mmproj_path, ComponentRole::Mmproj).map_err(|e| e.to_string())?;
+        let image = decode_image(image_path.ok_or("Mage-VL JEV requires --image")?)?;
+        let threads = resolve_thread_count(
+            n_threads_arg,
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        );
+        return crate::models::mage_vl::image_logits(
+            model_source,
+            vision.as_ref(),
+            image,
+            prompt,
+            system_prompt,
+            threads,
+            prefill_batch_size,
+            max_context,
+        );
+    }
+    validate_single_qwen_media(
+        image_path.is_some(),
+        video_path.is_some(),
+        audio_path.is_some(),
+    )?;
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or_default();
+    let mmproj: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(mmproj_path, ComponentRole::Mmproj)
+            .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?,
+    );
+    let media_kind = if audio_path.is_some() {
+        crate::app::media::MediaKind::Audio
+    } else if video_path.is_some() {
+        crate::app::media::MediaKind::Video
+    } else {
+        crate::app::media::MediaKind::Image
+    };
+    let family =
+        crate::app::media::validate_mmproj_capabilities(arch, mmproj.as_ref(), media_kind)?;
+    let mut media = Vec::new();
+    let mut media_deepstack_layers: Vec<Vec<f32>> = Vec::new();
+    let mut media_grid_shapes = Vec::new();
+    if let Some(audio_path) = audio_path {
+        let samples = crate::app::media::decode_audio(audio_path)?;
+        media =
+            crate::models::qwen3::omni::encode_audio(Arc::clone(&mmproj), &samples, n_threads_arg)?;
+    } else {
+        let mut frames = if let Some(path) = image_path {
+            vec![decode_image(path)?]
+        } else {
+            crate::app::media::decode_video(video_path.ok_or("missing image or video input")?)?
+        };
+        let is_video = video_path.is_some();
+        let (first_w, first_h) = {
+            let first = frames.first().ok_or("media produced no frames")?;
+            (first.width() as usize, first.height() as usize)
+        };
+        let (grid_w, grid_h) = match family {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
+                let encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
+                (grid.image_width(), grid.image_height())
+            }
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                if is_video {
+                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                }
+                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                (grid.image_width(), grid.image_height())
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
+        };
+        let norm_stats = match family {
+            _ => ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+        };
+        let pairs = frame_pairs(frames.len());
+        let mut normalized = Vec::with_capacity(frames.len());
+        for frame in &frames {
+            normalized.push(normalize_resized_image(
+                frame,
+                grid_w,
+                grid_h,
+                &norm_stats.0,
+                &norm_stats.1,
+            )?);
+        }
+        match family {
+            crate::app::media::ProjectorFamily::Qwen3VlMerger => {
+                let mut encoder = VisionEncoder3vl::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                encoder.precompute();
+                let grid = qwen3vl_smart_resize(first_w, first_h, &encoder.config)?;
+                let mut scratch = VisionScratchpad3vl::new(&encoder.config);
+                for (a, b) in pairs {
+                    encoder.encode_pair(
+                        &normalized[a],
+                        &normalized[b],
+                        grid_w,
+                        grid_h,
+                        &mut scratch,
+                    )?;
+                    media.extend_from_slice(&scratch.projected);
+                    let deepstack_layers = encoder
+                        .config
+                        .has_deepstack_layers
+                        .iter()
+                        .filter(|&&enabled| enabled)
+                        .count();
+                    if deepstack_layers == 0 {
+                        media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                        continue;
+                    }
+                    if scratch.deepstack.len() % deepstack_layers != 0 {
+                        return Err("Vision deepstack output is not layer aligned".into());
+                    }
+                    if media_deepstack_layers.is_empty() {
+                        media_deepstack_layers.resize_with(deepstack_layers, Vec::new);
+                    } else if media_deepstack_layers.len() != deepstack_layers {
+                        return Err("Vision deepstack layer count changed between frames".into());
+                    }
+                    let per_layer = scratch.deepstack.len() / deepstack_layers;
+                    for (layer, output) in media_deepstack_layers.iter_mut().enumerate() {
+                        output.extend_from_slice(
+                            &scratch.deepstack[layer * per_layer..(layer + 1) * per_layer],
+                        );
+                    }
+                    media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                }
+            }
+            crate::app::media::ProjectorFamily::Qwen25Omni => {
+                let mut encoder = VisionEncoder35::from_source(
+                    mmproj.as_ref(),
+                    std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                        n_threads_arg.max(1),
+                    )),
+                )
+                .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+                encoder.precompute();
+                if is_video {
+                    encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+                    encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+                }
+                let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+                let mut scratch = VisionScratchpad35::new(&encoder.config);
+                for (a, b) in pairs {
+                    encoder.encode_pair(
+                        &normalized[a],
+                        &normalized[b],
+                        grid.image_width(),
+                        grid.image_height(),
+                        &mut scratch,
+                        &pool,
+                    )?;
+                    media.extend_from_slice(&scratch.projected);
+                    media_grid_shapes.push((grid.grid_h, grid.grid_w));
+                }
+            }
+            crate::app::media::ProjectorFamily::MiniCpmV47 => {
+                return Err(MINICPMV47_CANVAS_ONLY_MSG.to_string());
+            }
+            crate::app::media::ProjectorFamily::NemotronV2Vl => {
+                // The RADIO projector is wired to a qwen35 tower; the media
+                // check in `validate_mmproj_capabilities` rejects the pairing
+                // before this point, so this arm only states the reason.
+                return Err(
+                    "the nemotron_v2_vl projector needs a qwen35 tower, not the qwen3 family"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|key| llm_source.metadata(key).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    let model = Qwen3Model::from_source(model_source, Arc::clone(&tokenizer), Arc::clone(&pool))?;
+    let width = model.config().n_embd;
+    if media.len() % width != 0 {
+        return Err(format!(
+            "Media projector width does not match model width {width}"
+        ));
+    }
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
+    let start = tokenizer
+        .special_token_id(start_name)
+        .ok_or_else(|| format!("Required token missing: {start_name}"))?;
+    let pad = tokenizer
+        .special_token_id(pad_name)
+        .ok_or_else(|| format!("Required token missing: {pad_name}"))?;
+    let end = tokenizer
+        .special_token_id(end_name)
+        .ok_or_else(|| format!("Required token missing: {end_name}"))?;
+    let rows = media.len() / width;
+    let mut content = vec![start];
+    content.extend(std::iter::repeat_n(pad, rows));
+    content.push(end);
+    content.extend(tokenizer.encode(
+        prompt,
+        EncodeOptions {
+            add_special: false,
+            parse_special: false,
+        },
+    ));
+    let mut token_ids = Vec::new();
+    if let Some(system_text) = system_prompt {
+        append_qwen_message_tokens(
+            &mut token_ids,
+            &tokenizer,
+            "system",
+            &tokenizer.encode(
+                system_text,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ),
+        )?;
+    }
+    append_qwen_message_tokens(&mut token_ids, &tokenizer, "user", &content)?;
+    append_qwen_assistant_prefix(
+        &mut token_ids,
+        &tokenizer,
+        matches!(arch, "qwen3vl" | "qwen3vlmoe"),
+    )?;
+    let mut embeddings = model.embed_tokens(&token_ids)?;
+    let media_deepstack = media_deepstack_layers
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let deepstack = inject_qwen_media_embeddings(
+        &token_ids,
+        pad,
+        &mut embeddings,
+        &media,
+        &media_deepstack,
+        width,
+    )?;
+    let positions = build_qwen3_media_positions(&token_ids, pad, &media_grid_shapes)?;
+    let capacity = token_ids.len() + 1;
+    let mut session = Qwen3Session::new_with_kv_state(
+        &model,
+        capacity.min(model.config().n_ctx),
+        Qwen3KvFormat::F16,
+        KvLifecycle::Ephemeral,
+    )?;
+    let t0 = std::time::Instant::now();
+    let input = Qwen3Input {
+        token_ids: &token_ids,
+        positions: &positions,
+        embeddings: Some(&embeddings),
+        deepstack_embeddings: (!deepstack.is_empty()).then_some(deepstack.as_slice()),
+    };
+    let (logits, _dur) = session.forward_logits(input, prefill_batch_size)?;
+    Ok((logits, t0.elapsed()))
+}
+
+/// Logits-only multimodal forward for qwen35 (Qwen2.5-Omni vision
+/// encoder path). Mirrors the qwen35 multimodal setup inside
+/// `run_multimodal_with_video_ref` but ends with a single
+/// `session.step` call to return the final-position logits vector.
+/// Used by the `/v1/jev/image` and `/v1/jev/image_grouped` HTTP
+/// endpoints so callers can apply true JEV argmax-over-labels
+/// scoring on multimodal inputs.
+pub fn run_qwen35_family_multimodal_logits(
+    llm_source: &dyn TensorSource,
+    mmproj_path: &Path,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    // Prepended as the chat-template system message when set. Callers that need
+    // their own instructions (the JEV scorer) pass `Some`; the HTTP multimodal
+    // endpoints leave it `None` to keep Qwen's default system text.
+    system_prompt: Option<&str>,
+    // Already resolved. Passing `Options` here used to make callers rebuild
+    // them, which is how `--chat-template-file` got dropped on this path.
+    jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
+) -> Result<(Vec<f32>, std::time::Duration), String> {
+    use crate::app::media::frame_pairs;
+    use crate::models::qwen35::vision::{
+        qwen_smart_resize as qwen35_smart_resize, VisionEncoder as VisionEncoder35, VisionGrid,
+        VisionScratchpad as VisionScratchpad35,
+    };
+    if audio_path.is_some() {
+        return Err(format!(
+            "Only gemma4 architecture is supported for multimodal audio, got: qwen35"
+        ));
+    }
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        n_threads_arg,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let mmproj: Arc<dyn TensorSource> = Arc::from(
+        open_model_source(mmproj_path, ComponentRole::Mmproj)
+            .map_err(|error| format!("Failed to load mmproj {}: {error}", mmproj_path.display()))?,
+    );
+
+    // Decode image / video.
+    let frames: Vec<image::DynamicImage> = if let Some(path) = image_path {
+        vec![decode_image(path)?]
+    } else if let Some(path) = video_path {
+        crate::app::media::decode_video(path)?
+    } else {
+        return Err("qwen35 multimodal requires --image or --video".into());
+    };
+    let is_video = video_path.is_some();
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    if arch == crate::models::sensenova_loop::ARCH {
+        crate::app::media::validate_mmproj_capabilities(
+            arch,
+            mmproj.as_ref(),
+            if is_video {
+                crate::app::media::MediaKind::Video
+            } else {
+                crate::app::media::MediaKind::Image
+            },
+        )?;
+    }
+
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
+    // Video and image use different pad tokens, so all three ids follow the
+    // media kind. Hardcoding `image_pad` here made the Jinja path expand
+    // looking for a token the template never emitted (it emits `video_pad` for
+    // a video), so the placeholder count came out zero.
+    let media_kind = if is_video {
+        crate::app::media::MediaKind::Video
+    } else {
+        crate::app::media::MediaKind::Image
+    };
+    // The projector family picks the encoder, not the tower: the RADIO
+    // projector (ZDTaichu5.0-9B) and the Qwen2.5-Omni projector are both
+    // driven from a qwen35 tower.
+    let family =
+        crate::app::media::validate_mmproj_capabilities("qwen35", mmproj.as_ref(), media_kind)?;
+    let (grid, vis_embeddings) = if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
+        let mut embeddings: Vec<f32> = Vec::new();
+        let mut grid = None;
+        for frame in &frames {
+            let (frame_grid, projected) = crate::app::text::vision::encode_nemotron_v2_vl_image(
+                mmproj.as_ref(),
+                frame,
+                n_threads_arg,
+            )?;
+            embeddings.extend_from_slice(&projected);
+            grid = Some(frame_grid);
+        }
+        (grid.ok_or("media produced no frames")?, embeddings)
+    } else {
+        let (first_w, first_h) = {
+            let first = frames.first().ok_or("media produced no frames")?;
+            (first.width() as usize, first.height() as usize)
+        };
+        let mut encoder = VisionEncoder35::from_source(
+            mmproj.as_ref(),
+            std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                n_threads_arg.max(1),
+            )),
+        )
+        .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+        encoder.precompute();
+        if is_video {
+            encoder.config.image_min_pixels = encoder.config.video_min_pixels;
+            encoder.config.image_max_pixels = encoder.config.video_max_pixels;
+        }
+        let grid = qwen35_smart_resize(first_w, first_h, &encoder.config)?;
+        let mut scratch = VisionScratchpad35::new(&encoder.config);
+        let pairs = frame_pairs(frames.len());
+        let mut vis_embeddings: Vec<f32> = Vec::new();
+        for (a, b) in pairs {
+            let normalized_a = crate::app::media::normalize_resized_image(
+                &frames[a],
+                grid.image_width(),
+                grid.image_height(),
+                &[0.5, 0.5, 0.5],
+                &[0.5, 0.5, 0.5],
+            )?;
+            let normalized_b = crate::app::media::normalize_resized_image(
+                &frames[b],
+                grid.image_width(),
+                grid.image_height(),
+                &[0.5, 0.5, 0.5],
+                &[0.5, 0.5, 0.5],
+            )?;
+            encoder.encode_pair(
+                &normalized_a,
+                &normalized_b,
+                grid.image_width(),
+                grid.image_height(),
+                &mut scratch,
+                &pool,
+            )?;
+            vis_embeddings.extend_from_slice(&scratch.projected);
+        }
+        (grid, vis_embeddings)
+    };
+    drop(vision_cpu);
+    let n_vis_tokens = grid.token_count();
+
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    let (start_name, pad_name, end_name) = media_kind.placeholder_tokens();
+    let image_token_id = tokenizer
+        .special_token_id(pad_name)
+        .ok_or_else(|| format!("Required token missing: <|{pad_name}|>"))?;
+    let vision_start = tokenizer
+        .special_token_id(start_name)
+        .ok_or_else(|| format!("Required token missing: <|{start_name}|>"))?;
+    let vision_end = tokenizer
+        .special_token_id(end_name)
+        .ok_or_else(|| format!("Required token missing: <|{end_name}|>"))?;
+    let image_grids: Vec<VisionGrid> = vec![VisionGrid {
+        grid_t: grid.grid_t,
+        grid_h: grid.grid_h,
+        grid_w: grid.grid_w,
+        patch_size: grid.patch_size,
+        merge_size: grid.merge_size,
+    }];
+    // `--jinja`: the shipped Qwen3-VL template already emits
+    // `<|vision_start|><|image_pad|><|vision_end|>`; the placeholder is
+    // expanded to a contiguous run so `build_qwen35_positions` (below) sees
+    // exactly the layout it documents.
+    let jinja_media = [crate::prompt::jinja::MediaPart::new(
+        media_kind.content_type(),
+        n_vis_tokens,
+    )];
+    let prompt_ids = match crate::prompt::jinja::media_conversation_tokens(
+        &tokenizer,
+        jinja,
+        image_token_id,
+        &jinja_media,
+        prompt,
+        system_prompt,
+        Some(false),
+    )? {
+        Some(ids) => ids,
+        None => {
+            let mut content_tokens = vec![vision_start];
+            content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
+            content_tokens.push(vision_end);
+            content_tokens.extend(tokenizer.encode(
+                prompt,
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ));
+            let mut prompt_ids = Vec::new();
+            if let Some(system_text) = system_prompt {
+                append_qwen_message_tokens(
+                    &mut prompt_ids,
+                    &tokenizer,
+                    "system",
+                    &tokenizer.encode(
+                        system_text,
+                        EncodeOptions {
+                            add_special: false,
+                            parse_special: false,
+                        },
+                    ),
+                )?;
+            }
+            append_qwen_message_tokens(&mut prompt_ids, &tokenizer, "user", &content_tokens)?;
+            append_qwen_assistant_prefix(&mut prompt_ids, &tokenizer, false)?;
+            prompt_ids
+        }
+    };
+    let image_token_id_u32 = image_token_id;
+    let image_token_id_i32 = i32::try_from(image_token_id_u32)
+        .map_err(|_| format!("Token ID {image_token_id_u32} exceeds i32"))?;
+    let (prompt_positions, _next_text_position) =
+        build_qwen35_positions(&prompt_ids, Some(image_token_id_u32), &image_grids)?;
+    let prompt_tokens: Vec<i32> = prompt_ids
+        .iter()
+        .copied()
+        .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
+        .collect::<Result<_, _>>()?;
+
+    let mut llm = HybridTextModel::from_source(llm_source)
+        .map_err(|error| format!("Failed to parse Qwen3.5 model: {error}"))?;
+    let max_seq = (prompt_tokens.len() + 1)
+        .min(llm.trunk().config.n_ctx)
+        .min(max_context);
+    let prompt_embd = inject_vision_embeddings(
+        llm.trunk(),
+        &prompt_tokens,
+        Some(image_token_id_i32),
+        &vis_embeddings,
+        n_vis_tokens,
+        llm.trunk().config.n_embd,
+    )?;
+    let t0 = std::time::Instant::now();
+    let mut session = HybridSession::new_with_prefill_batch_size(
+        &mut llm,
+        max_seq,
+        prefill_batch_size,
+        std::sync::Arc::clone(&pool),
+    )?;
+    let logits = session.step(&prompt_embd, prompt_tokens.len(), &prompt_positions)?;
+    Ok((logits, t0.elapsed()))
+}
+
+pub fn run_multimodal(
+    llm_source: &dyn TensorSource,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
+    run_multimodal_with_video_ref(
+        llm_source,
+        model_path,
+        mmproj_path,
+        image_path,
+        None,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        prefill_batch_size,
+        max_context,
+        repetition_penalty,
+        None,
+        None,
+        0,
+        None,
+        0,
+        crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
+        jinja,
+    )
+}
+
+pub fn run_multimodal_with_video(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
+    run_multimodal_with_video_and_mtp(
+        llm_source,
+        model_path,
+        mmproj_path,
+        image_path,
+        video_path,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        prefill_batch_size,
+        max_context,
+        repetition_penalty,
+        None,
+        0,
+        None,
+        0,
+        crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
+        jinja,
+    )
+}
+
+/// The same path with the MTP draft head enabled.
+///
+/// `mtp_draft` is the number of tokens the draft head proposes per
+/// speculative decoding round; zero keeps the plain one-token-at-a-time
+/// decode. `dspark_model` is a DFlash / DSpark sidecar path: when set, the
+/// sidecar drafts instead of the MTP head, and `mtp_draft` (defaulting to 8)
+/// is the per-round draft budget it is clamped to.
+pub fn run_multimodal_with_video_and_mtp(
+    llm_source: Arc<dyn TensorSource>,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    thinking: Option<bool>,
+    mtp_draft: usize,
+    dspark_model: Option<&Path>,
+    ngram_draft: usize,
+    ngram_lookup: usize,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
+    let owned_source = Arc::clone(&llm_source);
+    run_multimodal_with_video_ref(
+        llm_source.as_ref(),
+        model_path,
+        mmproj_path,
+        image_path,
+        video_path,
+        audio_path,
+        prompt,
+        max_tokens,
+        temperature,
+        n_threads_arg,
+        prefill_batch_size,
+        max_context,
+        repetition_penalty,
+        thinking,
+        Some(owned_source),
+        mtp_draft,
+        dspark_model,
+        ngram_draft,
+        ngram_lookup,
+        jinja,
+    )
+}
+
+pub(super) fn run_gemma4_capture_text(
+    _model_path: &Path,
+    _mmproj_path: Option<&Path>,
+    _image_path: Option<&Path>,
+    _audio_path: Option<&Path>,
+    _prompt: &str,
+    _max_tokens: usize,
+    _n_threads_arg: usize,
+    _prefill_batch_size: usize,
+) -> Result<String, String> {
+    // Gemma4 multimodal path is implemented in `crate::models::gemma4`;
+    // for now, the TTS post-processor is opt-in and the gemma4 capture
+    // path is left as a TODO. The pipeline above documents this gap.
+    Err("Omni → TTS capture-text is not yet implemented for gemma4".into())
+}
+
+pub(super) fn run_multimodal_with_video_ref(
+    llm_source: &dyn TensorSource,
+    model_path: &Path,
+    mmproj_path: Option<&Path>,
+    image_path: Option<&Path>,
+    video_path: Option<&Path>,
+    audio_path: Option<&Path>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    prefill_batch_size: usize,
+    max_context: usize,
+    _repetition_penalty: f32,
+    thinking: Option<bool>,
+    model_source: Option<Arc<dyn TensorSource>>,
+    mtp_draft: usize,
+    dspark_model: Option<&Path>,
+    ngram_draft: usize,
+    ngram_lookup: usize,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
+    let arch = llm_source
+        .metadata("general.architecture")
+        .and_then(|v| v.to_string_val())
+        .unwrap_or_default();
+    validate_gemma4_temperature(arch, temperature)?;
+    if arch == crate::models::sensenova_loop::ARCH && video_path.is_some() {
+        return Err("SenseNova Loop multimodal generation does not support --video".into());
+    }
+    if arch == "gemma4" {
+        if video_path.is_some() {
+            return Err("Gemma4 multimodal generation does not support --video".into());
+        }
+        return crate::models::gemma4::run_gemma4(crate::models::gemma4::Gemma4Request {
+            model: model_path,
+            mmproj: mmproj_path,
+            image: image_path,
+            audio: audio_path,
+            prompt,
+            max_tokens,
+            threads: n_threads_arg,
+            kv_format: KvFormat::F32,
+            prefill_batch_size,
+        });
+    }
+    if matches!(arch, "qwen2vl" | "qwen3vl" | "qwen3vlmoe")
+        && (image_path.is_some() || video_path.is_some() || audio_path.is_some())
+    {
+        return run_qwen3_family_multimodal(
+            llm_source,
+            model_source.ok_or("Qwen multimodal routing requires an owned model source")?,
+            mmproj_path.ok_or("multimodal Qwen models require --mmproj")?,
+            image_path,
+            video_path,
+            audio_path,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            prefill_batch_size,
+            jinja,
+        )
+        .map(|text| {
+            // Multimodal text is already printed inside the function;
+            // this branch swallows the value for the caller that only
+            // expects a unit result.
+            let _ = text;
+        });
+    }
+    if audio_path.is_some() {
+        return Err(format!(
+            "Only gemma4 architecture is supported for multimodal audio, got: {arch}"
+        ));
+    }
+    println!("LLM arch: {}", arch);
+    if arch == "lfm2" {
+        // LFM2.5-VL: mmproj carries the SigLIP encoder + LFM2 projector.
+        let mmproj = mmproj_path.ok_or("LFM2.5-VL requires --mmproj")?;
+        let mmproj_source = open_model_source(mmproj, ComponentRole::Mmproj)
+            .map_err(|e| format!("Failed to load mmproj {}: {e}", mmproj.display()))?;
+        let image = image_path.ok_or("LFM2.5-VL requires --image")?;
+        return crate::models::lfm2::vision::run_multimodal(
+            llm_source,
+            mmproj_source.as_ref(),
+            image,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            crate::core::scratchpad::KvFormat::F16,
+            max_context,
+        );
+    }
+    if arch == "edge0" && (image_path.is_some() || video_path.is_some()) {
+        return Err("Edge0-35B preview contains no vision weights; text input only".into());
+    }
+    if arch != "qwen35"
+        && arch != "qwen35moe"
+        && arch != "qwen3vl"
+        && arch != "edge0"
+        && arch != "sensenova_loop"
+    {
+        return Err(format!(
+            "Only qwen35, qwen35moe, qwen3vl, and edge0 architectures are supported \
+             for multimodal, got: {arch}"
+        ));
+    }
+
+    let t_img_start = std::time::Instant::now();
+    // MiniCPM-V 4.7 lays its tiles on one 2D canvas, so its M-RoPE positions
+    // come from `canvas_positions` instead of the anyres grid builder.
+    let mut canvas_positions: Option<Vec<[usize; 4]>> = None;
+    let vision_cpu = (arch == crate::models::sensenova_loop::ARCH)
+        .then(|| crate::compute::ComputePolicy::Cpu.enter_legacy_scope());
+    let (image_grid, vis_embeddings_vec) = if let Some(image_path) = image_path {
+        let projector_path = mmproj_path.unwrap_or(model_path);
+        println!("Loading mmproj {} ...", projector_path.display());
+        let mmproj_source =
+            open_model_source(projector_path, ComponentRole::Mmproj).map_err(|error| {
+                if mmproj_path.is_none() {
+                    format!(
+                        "Model {} has no bundled mmproj; pass --mmproj: {error}",
+                        model_path.display()
+                    )
+                } else {
+                    format!(
+                        "Failed to load mmproj {}: {error}",
+                        projector_path.display()
+                    )
+                }
+            })?;
+
+        if arch == "qwen3vl" {
+            let mut encoder = VisionEncoder3vl::from_source(
+                mmproj_source.as_ref(),
+                std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+                    n_threads_arg.max(1),
+                )),
+            )
+            .map_err(|error| format!("Failed to parse vision encoder: {error}"))?;
+            encoder.precompute();
+            println!(
+                "Vision encoder loaded: {} layers, n_embd={}, image_size={}, patch_size={}, merge={}",
+                encoder.config.n_layer,
+                encoder.config.n_embd,
+                encoder.config.image_size,
+                encoder.config.patch_size,
+                encoder.config.spatial_merge_size
+            );
+            let t_load = std::time::Instant::now();
+            let image = decode_image(image_path)?;
+            let t_load = t_load.elapsed();
+            let original_w = usize::try_from(image.width())
+                .map_err(|_| "Original image width does not fit usize")?;
+            let original_h = usize::try_from(image.height())
+                .map_err(|_| "Original image height does not fit usize")?;
+            let grid = qwen3vl_smart_resize(original_w, original_h, &encoder.config)?;
+            let t_preproc = std::time::Instant::now();
+            let pixels = normalize_resized_image(
+                &image,
+                grid.image_width(),
+                grid.image_height(),
+                &encoder.config.image_mean,
+                &encoder.config.image_std,
+            )?;
+            let t_preproc = t_preproc.elapsed();
+            println!(
+                "Image resized to {}x{} ({} vision tokens)",
+                grid.image_width(),
+                grid.image_height(),
+                grid.token_count()
+            );
+            let projection_dim = encoder.config.projection_dim;
+            let mut scratch = VisionScratchpad3vl::new(&encoder.config);
+            println!("Encoding image...");
+            let t_venc = std::time::Instant::now();
+            let encoded_grid = encoder.encode_image(
+                &pixels,
+                grid.image_width(),
+                grid.image_height(),
+                &mut scratch,
+            )?;
+            let t_venc = t_venc.elapsed();
+            if encoded_grid != grid {
+                return Err(format!(
+                    "Vision grid mismatch: preprocess={grid:?}, encoder={encoded_grid:?}"
+                ));
+            }
+            let projected_len = grid
+                .token_count()
+                .checked_mul(projection_dim)
+                .ok_or("Projected vision length overflow")?;
+            if scratch.projected.len() != projected_len {
+                return Err(format!(
+                    "Projected vision length mismatch: expected {projected_len}, got {}",
+                    scratch.projected.len()
+                ));
+            }
+            let t_img_total = t_img_start.elapsed();
+            eprintln!(
+                "[pipeline-timing] image_total={:.3}s  image_load={:.3}s ({:.0}%)  preprocess={:.3}s ({:.0}%)  vision_encode={:.3}s ({:.0}%)",
+                t_img_total.as_secs_f64(),
+                t_load.as_secs_f64(), t_load.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
+                t_preproc.as_secs_f64(), t_preproc.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
+                t_venc.as_secs_f64(), t_venc.as_secs_f64()/t_img_total.as_secs_f64()*100.0,
+            );
+            println!(
+                "Vision tokens: {} (dim={})",
+                grid.token_count(),
+                projection_dim
+            );
+            (
+                Some(VisionGrid {
+                    grid_t: grid.grid_t,
+                    grid_h: grid.grid_h,
+                    grid_w: grid.grid_w,
+                    patch_size: grid.patch_size,
+                    merge_size: grid.merge_size,
+                }),
+                scratch.projected.clone(),
+            )
+        } else {
+            // The projector family decides the encoder, not the tower: both
+            // the Omni and the RADIO projectors are driven from the qwen35
+            // branch here, and the previous version handed a `qwen3vl_merger`
+            // to the Omni encoder purely because the tower was qwen35.
+            let family = crate::app::media::validate_mmproj_capabilities(
+                arch,
+                mmproj_source.as_ref(),
+                crate::app::media::MediaKind::Image,
+            )?;
+            if family == crate::app::media::ProjectorFamily::NemotronV2Vl {
+                let frame = crate::app::media::decode_image(image_path)?;
+                let (grid, projected) = crate::app::text::vision::encode_nemotron_v2_vl_image(
+                    mmproj_source.as_ref(),
+                    &frame,
+                    n_threads_arg,
+                )?;
+                (Some(grid), projected)
+            } else if family == crate::app::media::ProjectorFamily::MiniCpmV47 {
+                let (grid, projected, canvas) =
+                    encode_minicpmv47_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
+                canvas_positions = Some(canvas);
+                (Some(grid), projected)
+            } else {
+                let (grid, projected) =
+                    encode_qwen35_image(mmproj_source.as_ref(), image_path, n_threads_arg)?;
+                (Some(grid), projected)
+            }
+        }
+    } else {
+        (None, Vec::new())
+    };
+    drop(vision_cpu);
+    let n_vis_tokens = image_grid.map(|g| g.token_count()).unwrap_or(0);
+    let vis_embeddings = &vis_embeddings_vec[..];
+    if image_grid.is_some() {
+        println!(
+            "First 5 vision embedding values: {:?}",
+            &vis_embeddings[..5.min(vis_embeddings.len())]
+        );
+    }
+
+    let mut llm = HybridTextModel::from_source(llm_source)
+        .map_err(|error| format!("Failed to parse hybrid text model: {error}"))?;
+    let model_name = llm_source
+        .metadata("general.name")
+        .and_then(|value| value.to_string_val())
+        .unwrap_or("hybrid-text");
+    let config = &llm.trunk().config;
+    println!("{model_name} model loaded: {} layers, n_embd={}, n_head={}, n_ff={}, rope_freq_base={}, rope_sections={:?}, rope_dim_count={}", config.n_layer, config.n_embd, config.n_head, config.n_ff, config.rope_freq_base, config.rope_dimension_sections, config.rope_dimension_count);
+
+    let tokenizer = BPETokenizer::from_gguf_metadata(|k| llm_source.metadata(k).cloned())
+        .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
+    let image_token_id = if image_grid.is_some() {
+        Some(
+            tokenizer
+                .special_token_id("image_pad")
+                .ok_or("Required token missing: <|image_pad|>")?,
+        )
+    } else {
+        None
+    };
+
+    let mut content_tokens = Vec::new();
+    if let Some(image_token_id) = image_token_id {
+        content_tokens.push(
+            tokenizer
+                .special_token_id("vision_start")
+                .ok_or("Required token missing: <|vision_start|>")?,
+        );
+        // MiniCPM-V 4.7 emits exactly one `<|image_pad|>` per image (that is
+        // what its own GGUF template does) and then projects N embedding rows
+        // over it; the separator rows in between have no token id. Every other
+        // family keeps one placeholder per projected row.
+        if canvas_positions.is_some() {
+            content_tokens.push(image_token_id);
+        } else {
+            content_tokens.extend(std::iter::repeat(image_token_id).take(n_vis_tokens));
+        }
+        content_tokens.push(
+            tokenizer
+                .special_token_id("vision_end")
+                .ok_or("Required token missing: <|vision_end|>")?,
+        );
+    }
+    content_tokens.extend(tokenizer.encode(
+        prompt,
+        EncodeOptions {
+            add_special: false,
+            parse_special: false,
+        },
+    ));
+
+    // `--jinja` renders the checkpoint's own template. MiniCPM-V 4.7's emits a
+    // single `<|image_pad|>` per image, which is exactly what the canvas path
+    // wants: the media span is spliced over that one marker.
+    let prompt_ids = match (canvas_positions.is_some(), image_token_id) {
+        (true, Some(marker)) => {
+            let special = crate::prompt::jinja::special_token_literals(&tokenizer);
+            let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+            let media = [crate::prompt::jinja::MediaPart::new("image", 1)];
+            let mut ids = crate::prompt::jinja::media_conversation_tokens(
+                &tokenizer,
+                template.as_ref(),
+                marker,
+                &media,
+                prompt,
+                None,
+                Some(true),
+            )?
+            .ok_or_else(|| MINICPMV47_JINJA_MSG.to_string())?;
+            // `mtmd_tokenizer` injects `<image_id>N</image_id>` ahead of every
+            // image for this projector (`use_image_id`), before the `<image>`
+            // marker. The chat template knows nothing about it, so it has to be
+            // added here.
+            let image_id_tokens = tokenizer.encode(
+                "<image_id>0</image_id>",
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: true,
+                },
+            );
+            if let Some(at) = ids.iter().position(|&id| id == marker) {
+                for (offset, id) in image_id_tokens.iter().enumerate() {
+                    ids.insert(at + offset, *id);
+                }
+            }
+            ids
+        }
+        (false, Some(marker)) if arch == crate::models::sensenova_loop::ARCH => {
+            let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+            crate::prompt::jinja::media_conversation_tokens(
+                &tokenizer,
+                template.as_ref(),
+                marker,
+                &[crate::prompt::jinja::MediaPart::image(n_vis_tokens)],
+                prompt,
+                None,
+                Some(false),
+            )?
+            .ok_or("SenseNova image generation requires --jinja")?
+        }
+        (false, None) if arch == crate::models::sensenova_loop::ARCH => {
+            match crate::prompt::jinja::single_turn_tokens(
+                &tokenizer,
+                jinja,
+                &|k| llm_source.metadata(k).cloned(),
+                prompt,
+                Some(false),
+            )? {
+                Some(ids) => ids,
+                None => {
+                    let mut ids = Vec::new();
+                    append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+                    append_qwen_assistant_prefix(&mut ids, &tokenizer, false)?;
+                    ids
+                }
+            }
+        }
+        _ => {
+            // The HTTP `build_prompt` path picks its renderer the same way:
+            // the checkpoint's own chat template when Jinja2 is on, the
+            // hand-written ChatML builder otherwise. Keeping the same rule
+            // here is what makes `--thinking` mean the same thing on both
+            // front-ends -- with the template it is the template's
+            // `enable_thinking` branch, with the builder it is the builder's
+            // think block.
+            let rendered = if jinja.enabled() {
+                let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+                // The template takes the attachment as a structured content
+                // part, the way the OpenAI-shaped messages do.
+                let content = match image_token_id {
+                    Some(_) => serde_json::json!([
+                        { "type": "image" },
+                        { "type": "text", "text": prompt },
+                    ]),
+                    None => serde_json::Value::String(prompt.to_string()),
+                };
+                let messages = [crate::prompt::jinja::ChatMessage {
+                    role: "user".into(),
+                    content,
+                }];
+                crate::prompt::jinja::conversation_tokens_with(
+                    &tokenizer,
+                    template.as_ref(),
+                    &messages,
+                    true,
+                    thinking,
+                )?
+            } else {
+                None
+            };
+            match rendered {
+                Some(ids) => match image_token_id {
+                    // The template emits one placeholder per attachment; the
+                    // projector produced `n_vis_tokens` rows, so the span is
+                    // widened the same way the HTTP path widens it.
+                    Some(pad) => crate::prompt::jinja::expand_vision_placeholders(
+                        &ids,
+                        pad,
+                        &[n_vis_tokens],
+                    )?,
+                    None => ids,
+                },
+                None => {
+                    // No template to render: keep the hand-written ChatML
+                    // prompt, with the same default the HTTP fallback uses.
+                    let mut ids = Vec::new();
+                    append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+                    append_qwen_assistant_prefix(&mut ids, &tokenizer, thinking.unwrap_or(false))?;
+                    ids
+                }
+            }
+        }
+    };
+    let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> =
+        image_grid.iter().copied().collect();
+    let prompt_tokens: Vec<i32> = prompt_ids
+        .iter()
+        .copied()
+        .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
+        .collect::<Result<_, _>>()?;
+    // Canvas layouts own their positions: one per embedding row, with the
+    // marker replaced by the whole media span.
+    let (prompt_positions, mut next_text_position) = match (&canvas_positions, image_token_id) {
+        (Some(canvas), Some(marker)) => {
+            let marker =
+                i32::try_from(marker).map_err(|_| format!("Token ID {marker} exceeds i32"))?;
+            let (positions, next) = crate::app::text::vision::minicpmv47_prompt_positions(
+                &prompt_tokens,
+                marker,
+                0,
+                canvas,
+            );
+            (positions, next)
+        }
+        _ => build_qwen35_positions(&prompt_ids, image_token_id, &image_grids)?,
+    };
+
+    let projected_count = if vis_embeddings.is_empty() {
+        0
+    } else {
+        let projection_dim = config.n_embd;
+        if vis_embeddings.len() % projection_dim != 0 {
+            return Err(format!(
+                "Projected vision embeddings are not row aligned: {} values for a \
+                 {projection_dim}-wide tower, so the projector does not match the model",
+                vis_embeddings.len()
+            ));
+        }
+        vis_embeddings.len() / projection_dim
+    };
+    // The canvas path intentionally breaks both invariants: separators add
+    // rows beyond the grid's token count, and the marker is one token that
+    // expands to many embedding rows.
+    let canvas_path = canvas_positions.is_some();
+    if !canvas_path
+        && (projected_count != n_vis_tokens || prompt_positions.len() != prompt_tokens.len())
+    {
+        return Err(format!(
+            "Vision/position count mismatch: placeholders={n_vis_tokens}, projected={projected_count}, positions={}, tokens={}",
+            prompt_positions.len(),
+            prompt_tokens.len()
+        ));
+    }
+    let image_token_id = image_token_id
+        .map(|id| i32::try_from(id).map_err(|_| format!("Token ID {id} exceeds i32")))
+        .transpose()?;
+
+    println!(
+        "Prompt tokens: {} (including {} vision placeholders)",
+        prompt_tokens.len(),
+        n_vis_tokens
+    );
+    eprintln!(
+        "[RUST_TOKENS] n={} ids={:?}",
+        prompt_tokens.len(),
+        prompt_tokens
+    );
+
+    let prompt_embd = match (&canvas_positions, image_token_id) {
+        (Some(_), Some(marker)) => {
+            let marker =
+                i32::try_from(marker).map_err(|_| format!("Token ID {marker} exceeds i32"))?;
+            let rows = vis_embeddings.len() / config.n_embd;
+            let (embeddings, _span) = crate::app::text::vision::inject_media_span(
+                llm.trunk(),
+                &prompt_tokens,
+                marker,
+                vis_embeddings,
+                rows,
+                config.n_embd,
+            )?;
+            embeddings
+        }
+        _ => inject_vision_embeddings(
+            llm.trunk(),
+            &prompt_tokens,
+            image_token_id,
+            vis_embeddings,
+            n_vis_tokens,
+            config.n_embd,
+        )?,
+    };
+    #[cfg(feature = "parity-trace")]
+    {
+        let flat_positions = prompt_positions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        crate::parity_trace::report(crate::parity_trace::token_ids(
+            "qwen35.prompt_ids",
+            &prompt_ids,
+        ));
+        crate::parity_trace::report(crate::parity_trace::usize_values(
+            "qwen35.mrope_positions",
+            &[prompt_positions.len(), 4],
+            &flat_positions,
+        ));
+        crate::parity_trace::report(crate::parity_trace::bool_values(
+            "qwen35.layer_is_recurrent",
+            &config.is_recurrent,
+        ));
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "qwen35.embedding",
+            None,
+            &[prompt_tokens.len(), config.n_embd],
+            &prompt_embd,
+        ));
+    }
+
+    let n_embd_row = llm.trunk().config.n_embd;
+    // The canvas path expands one marker token into many embedding rows, so
+    // the session has to be sized by rows, not by tokens.
+    let n_prompt = prompt_tokens.len();
+    let prompt_rows = prompt_embd.len() / n_embd_row;
+    // A DFlash sidecar takes over the drafting when one is named: the MTP
+    // draft count (defaulting to 8, the typical DSpark block size) becomes
+    // the per-round budget, clamped by the sidecar's trained block size.
+    let dspark_drafts = match dspark_model {
+        Some(_) => {
+            if mtp_draft > 0 {
+                mtp_draft
+            } else {
+                8
+            }
+        }
+        None => 0,
+    };
+    // The n-gram lookup drafts when a budget is named. It is exclusive with
+    // the other axes (validated at parse time and by the runtime gate), so
+    // reaching here with ngram_draft > 0 means the other two are off.
+    let ngram_drafts = ngram_draft;
+    // The speculative path writes the KV of the drafted tokens before it
+    // knows whether the target accepts them, so the cache needs room for
+    // one round of drafts on top of the committed tokens.
+    let mtp_overhead = if mtp_draft > 0 || dspark_drafts > 0 || ngram_drafts > 0 {
+        mtp_draft.max(dspark_drafts).max(ngram_drafts) + 1
+    } else {
+        0
+    };
+    let max_seq = (prompt_rows + max_tokens + mtp_overhead)
+        .min(config.n_ctx)
+        .min(max_context);
+    let mut all_tokens = prompt_tokens.clone();
+
+    if mtp_draft > 0 && dspark_drafts == 0 {
+        // The draft head embeds the prompt tokens itself, so it needs the
+        // token ids: the vision path, whose prompt rows are projected
+        // embeddings, cannot use it.
+        if llm.trunk().mtp.is_none() {
+            return Err(
+                "--mtp-draft needs a checkpoint with an MTP draft head (Qwen3.5 dense)".into(),
+            );
+        }
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--mtp-draft needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--mtp-draft needs greedy decoding (--temp 0)".into());
+        }
+    }
+    if dspark_drafts > 0 {
+        // The sidecar embeds the prompt tokens itself (through the target's
+        // embedding table), so it needs the token ids like the MTP head
+        // does: the vision path, whose prompt rows are projected embeddings,
+        // cannot use it.
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--dspark-model needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--dspark-model needs greedy decoding (--temp 0)".into());
+        }
+    }
+    if ngram_drafts > 0 {
+        // Same rule as the sidecar: the lookup runs on token ids, so a
+        // vision prompt (whose rows are projected embeddings) has no history
+        // to look up, and the verification is batched greedy.
+        if prompt_rows != prompt_tokens.len() {
+            return Err(
+                "--ngram-draft needs a text-only prompt: the vision path expands the prompt \
+                 into projected embedding rows"
+                    .into(),
+            );
+        }
+        if temperature > 0.0 {
+            return Err("--ngram-draft needs greedy decoding (--temp 0)".into());
+        }
+    }
+
+    let n_threads = if n_threads_arg > 0 { n_threads_arg } else { 8 };
+    let pool = std::sync::Arc::new(ComputePool::new(n_threads));
+    eprintln!("compute pool: {} threads", pool.n_threads());
+    let session_start = std::time::Instant::now();
+    let mut session = HybridSession::new_with_prefill_batch_size(
+        &mut llm,
+        max_seq,
+        prefill_batch_size,
+        std::sync::Arc::clone(&pool),
+    )?;
+    eprintln!(
+        "[pipeline-timing] session_init={:.6}s",
+        session_start.elapsed().as_secs_f64()
+    );
+
+    let mut generated = String::new();
+    #[cfg(feature = "parity-trace")]
+    let mut greedy_token_ids = Vec::with_capacity(max_tokens);
+    let mut decoder = tokenizer.streaming_decoder(false);
+    println!("\n--- Generation ---");
+    let t_gen_start = std::time::Instant::now();
+    let mut t_prompt = 0.0;
+    let mut t_decode = 0.0;
+    let mut decode_evals = 0usize;
+
+    // The speculative path below commits several tokens per round, so the
+    // one-token-at-a-time loop runs zero times when a draft head is on.
+    let plain_steps = if mtp_draft > 0 || dspark_drafts > 0 || ngram_drafts > 0 {
+        0
+    } else {
+        max_tokens
+    };
+    for step in 0..plain_steps {
+        let t0 = std::time::Instant::now();
+        let tokens = if step == 0 {
+            &prompt_tokens
+        } else {
+            &all_tokens[all_tokens.len() - 1..all_tokens.len() - 1 + 1]
+        };
+        // On the canvas path the prompt is longer in embeddings than in tokens
+        // (the separator rows have no id), so prefill by row count.
+        let n_tok = if step == 0 {
+            prompt_embd.len() / n_embd_row
+        } else {
+            tokens.len()
+        };
+
+        let decode_embedding;
+        let embeddings = if step == 0 {
+            prompt_embd.as_slice()
+        } else {
+            let token_id = u32::try_from(tokens[0])
+                .map_err(|_| format!("invalid negative token id {}", tokens[0]))?;
+            decode_embedding = session.embed_tokens(&[token_id])?;
+            decode_embedding.as_slice()
+        };
+
+        let decode_position = [[
+            next_text_position,
+            next_text_position,
+            next_text_position,
+            0,
+        ]];
+        let positions = if step == 0 {
+            &prompt_positions[..]
+        } else {
+            &decode_position[..]
+        };
+        let logits = session.step(embeddings, n_tok, positions)?;
+        // Parity debugging: top-10 logits per step when RUST_QWEN35_DEBUG_LOGITS
+        // is set (mirrors the other trunks).
+        if std::env::var("RUST_QWEN35_DEBUG_LOGITS").is_ok() {
+            let mut idxs: Vec<(usize, f32)> =
+                logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let tag = if step == 0 {
+                prompt_tokens.len() - 1
+            } else {
+                prompt_tokens.len() - 1 + step
+            };
+            let mut line = format!("RUST_LOGITS step={} top10:", tag);
+            for k in 0..10 {
+                line.push_str(&format!(" {}:{:.5}", idxs[k].0, idxs[k].1));
+            }
+            line.push('\n');
+            let _ = io::stderr().write_all(line.as_bytes());
+            let _ = io::stderr().flush();
+        }
+        let t_step = t0.elapsed().as_secs_f64();
+        if step == 0 {
+            t_prompt += t_step;
+        } else {
+            t_decode += t_step;
+            decode_evals += 1;
+            next_text_position = next_text_position
+                .checked_add(1)
+                .ok_or("Qwen3.5 decode position overflow")?;
+        }
+
+        let next_token = if temperature <= 0.0 {
+            logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i as i32)
+                .unwrap_or(0)
+        } else {
+            sample_token(&logits, temperature)
+        };
+        #[cfg(feature = "parity-trace")]
+        greedy_token_ids.push(next_token as u32);
+
+        // Stop on EOS, on qwen-style `<|im_end|>`, and on K2-Horizon's
+        // `<|ifm|im_end|>`. The K2-Horizon literal is registered via
+        // `K2_HORIZON_SEMANTIC_TOKENS` so `special_token_id("ifm|im_end")`
+        // returns the right id; for other architectures that lookup is
+        // a no-op (the token isn't in their vocab).
+        if next_token >= 0 {
+            let nt = next_token as u32;
+            if tokenizer.eos_id() == Some(nt)
+                || tokenizer.special_token_id("im_end") == Some(nt)
+                || tokenizer.special_token_id("ifm|im_end") == Some(nt)
+            {
+                break;
+            }
+        }
+
+        let token_str = decoder.push(next_token as u32);
+        generated.push_str(&token_str);
+        print!("{}", token_str);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        all_tokens.push(next_token);
+    }
+
+    if mtp_draft > 0 && dspark_drafts == 0 {
+        // The speculative path: the MTP draft head proposes tokens and the
+        // target checks them in one forward pass, so a round can commit
+        // more than one token.
+        //
+        // The head embeds the prompt tokens itself, so it needs the token
+        // ids: the vision path, whose prompt rows are projected
+        // embeddings, cannot use it.
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        // The prefill and the rounds are timed apart: the prefill reads the
+        // whole model once, the rounds read it once per round.
+        let logits = session.prefill_with_mtp(&ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation =
+            session.mtp_generate_after_prefill(logits, &prompt_positions, max_tokens, mtp_draft)?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[mtp] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    } else if dspark_drafts > 0 {
+        // The DSpark speculative path: a DFlash sidecar proposes a block of
+        // tokens in one pass and the target checks them in one forward, so
+        // a round can commit more than one token. The sidecar shares the
+        // target's embedding table (llama.cpp's `ctx_other`).
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        let sidecar_source = crate::open_model_source(
+            dspark_model.expect("checked by the guard above"),
+            crate::ComponentRole::Llm,
+        )
+        .map_err(|error| error.to_string())?;
+        let dflash_weights =
+            crate::models::dflash::trunk::weights::load_weights(sidecar_source.as_ref())?;
+        let token_embd =
+            crate::models::dflash::trunk::weights::load_weight(llm_source, "token_embd.weight")
+                .ok_or("the target model has no token_embd.weight for the DSpark sidecar")?;
+        let mut dflash = crate::models::dflash::DflashSession::new(
+            dflash_weights,
+            token_embd,
+            pool.n_threads(),
+            max_seq,
+            prefill_batch_size.max(dspark_drafts + 1),
+        );
+        // The prefill and the rounds are timed apart, like the MTP path.
+        let logits = session.prefill_with_dspark(&mut dflash, &ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation = session.dspark_generate_after_prefill(
+            &mut dflash,
+            logits,
+            &prompt_positions,
+            max_tokens,
+            dspark_drafts,
+        )?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[dspark] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    } else if ngram_drafts > 0 {
+        // The n-gram speculative path: the committed token history
+        // drafts (llama.cpp's `ngram-simple`) and the target verifies the
+        // proposal in one forward per round. No sidecar, no draft head: a
+        // round with no lookup match degenerates into the plain
+        // one-token step, so the output is always the greedy output.
+        let t0 = std::time::Instant::now();
+        let ids: Vec<u32> = prompt_tokens
+            .iter()
+            .map(|id| u32::try_from(*id).map_err(|_| "invalid negative token id".to_string()))
+            .collect::<Result<Vec<u32>, String>>()?;
+        let config = crate::core::ngram::NgramSimpleConfig {
+            size_n: ngram_lookup,
+            size_m: ngram_drafts,
+        };
+        // The prefill and the rounds are timed apart, like the MTP path.
+        let logits = session.step_with_tokens(&ids, &prompt_positions)?;
+        t_prompt += t0.elapsed().as_secs_f64();
+        let t1 = std::time::Instant::now();
+        let generation = session.ngram_generate_after_prefill(
+            logits,
+            &ids,
+            &prompt_positions,
+            max_tokens,
+            &config,
+        )?;
+        t_decode += t1.elapsed().as_secs_f64();
+        decode_evals += generation.rounds;
+        eprintln!(
+            "[ngram] {} rounds, {}/{} drafts accepted ({:.1}%)",
+            generation.rounds,
+            generation.accepted,
+            generation.drafted,
+            100.0 * generation.accepted as f64 / generation.drafted.max(1) as f64
+        );
+        for id in generation.tokens {
+            #[cfg(feature = "parity-trace")]
+            greedy_token_ids.push(id);
+            // The same stop rule as the one-token-at-a-time path.
+            if tokenizer.eos_id() == Some(id)
+                || tokenizer.special_token_id("im_end") == Some(id)
+                || tokenizer.special_token_id("ifm|im_end") == Some(id)
+            {
+                break;
+            }
+            let token_str = decoder.push(id);
+            generated.push_str(&token_str);
+            print!("{}", token_str);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            all_tokens.push(id as i32);
+        }
+    }
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::token_ids(
+        "qwen35.greedy_token_ids",
+        &greedy_token_ids,
+    ));
+
+    let tail = decoder.finish();
+    generated.push_str(&tail);
+    if !tail.is_empty() {
+        print!("{}", tail);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+    }
+
+    let generation_time = t_gen_start.elapsed();
+    let gen_ms = generation_time.as_millis();
+    let n_gen = all_tokens.len() - n_prompt;
+    let tok_s = if gen_ms > 0 {
+        n_gen as f64 / gen_ms as f64 * 1000.0
+    } else {
+        0.0
+    };
+    let per_second = |count: usize, secs: f64| {
+        if secs > 0.0 {
+            count as f64 / secs
+        } else {
+            0.0
+        }
+    };
+    println!("\n--- End ---");
+    #[cfg(feature = "vulkan")]
+    {
+        crate::vulkan::dump_submit_trace();
+        crate::vulkan::dump_dispatch_trace();
+    }
+    eprintln!(
+        "[pipeline-timing] prompt_rows={prompt_rows} generated_tokens={n_gen} decode_evals={decode_evals} prefill={t_prompt:.6}s decode={t_decode:.6}s generation_total={:.6}s",
+        generation_time.as_secs_f64()
+    );
+    eprintln!(
+        "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
+        per_second(prompt_rows, t_prompt),
+        per_second(decode_evals, t_decode),
+        tok_s
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensenova_video_is_rejected_before_loading_media() {
+        struct Source(crate::core::tensor::MetaValue);
+        impl TensorSource for Source {
+            fn metadata(&self, key: &str) -> Option<&crate::core::tensor::MetaValue> {
+                (key == "general.architecture").then_some(&self.0)
+            }
+            fn tensor_info(&self, _: &str) -> Option<&crate::core::tensor::TensorInfo> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+            fn tensor_slice(&self, _: &str) -> Option<&[u8]> {
+                panic!("unsupported video must be rejected before loading tensors")
+            }
+        }
+        let source = Source(crate::core::tensor::MetaValue::String(
+            "sensenova_loop".into(),
+        ));
+        let error = run_multimodal_with_video_ref(
+            &source,
+            Path::new("missing-model.gguf"),
+            Some(Path::new("missing-mmproj.gguf")),
+            None,
+            Some(Path::new("missing-video.mp4")),
+            None,
+            "describe",
+            1,
+            0.0,
+            1,
+            1,
+            64,
+            1.0,
+            None,
+            None,
+            0,
+            None,
+            0,
+            crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
+            &crate::prompt::jinja::Options::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "SenseNova Loop multimodal generation does not support --video"
+        );
+    }
+}

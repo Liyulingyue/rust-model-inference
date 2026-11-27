@@ -1,9 +1,15 @@
-use super::config::{CONTEXT, HEADS};
 use super::forward::Gemma4InputRow;
 use super::scratch::Gemma4Scratch;
 use super::weights::Gemma4Model;
-use crate::core::prefill::{checked_prefill_batch_size, DEFAULT_PREFILL_BATCH_SIZE};
+use crate::compute::{
+    linear::{LinearBinding, LinearExecutor, LinearMode},
+    ComputePolicy,
+};
+use crate::core::prefill::{
+    checked_prefill_batch_size, prefill_chunks, ChunkedPrefill, DEFAULT_PREFILL_BATCH_SIZE,
+};
 use crate::core::scratchpad::KvFormat;
+use crate::ops::kernel::Weight;
 
 pub struct Gemma4Session<'model> {
     pub(super) model: &'model Gemma4Model,
@@ -11,74 +17,82 @@ pub struct Gemma4Session<'model> {
     pub(super) scratch: Gemma4Scratch,
     pub(super) seq_len: usize,
     pub(super) prefill_batch_size: usize,
-    pub(super) prefill_linear: Gemma4PrefillLinear,
+    pub(super) prefill_linear: Gemma4PrefillLinear<'model>,
 }
 
 #[derive(Default)]
-pub(super) struct Gemma4PrefillLinear {
-    #[cfg(feature = "vulkan")]
-    pub(super) runtime: Option<crate::vulkan::ops::BatchedLinearRuntime>,
+pub(super) struct Gemma4PrefillLinear<'model> {
+    pub(super) runtime: Option<LinearExecutor<'model, 'static>>,
     #[cfg(all(test, feature = "vulkan"))]
     pub(super) dispatcher: Option<std::sync::Arc<std::sync::Mutex<super::tests::LinearDispatcher>>>,
 }
 
-impl Gemma4PrefillLinear {
-    fn new(_model: &Gemma4Model, _rows: usize) -> Self {
-        #[cfg(feature = "vulkan")]
-        {
-            use crate::vulkan::{ops::BatchedLinearRuntime, VulkanError};
-            if !crate::ops::gpu_requested()
-                || crate::core::thread_pool::gpu_matmul_disabled()
-                || crate::vulkan::gpu_broken()
-            {
-                return Self::default();
-            }
-            let Some(context) = crate::ops::get_vulkan_context() else {
-                crate::vulkan::mark_gpu_broken("Gemma4 prefill Vulkan initialization failed");
-                return Self::default();
-            };
-            let result = Self::limits(_model).and_then(|(n_in, n_out, descriptors)| {
-                BatchedLinearRuntime::new(context, _rows.min(CONTEXT), n_in, n_out, descriptors)
-            });
-            return match result {
-                Ok(runtime) => Self {
-                    runtime: Some(runtime),
-                    ..Self::default()
-                },
-                Err(VulkanError::UnsupportedShape(_)) => Self::default(),
-                Err(error) => {
-                    crate::vulkan::mark_gpu_broken(&error.to_string());
-                    Self::default()
-                }
-            };
+impl<'model> Gemma4PrefillLinear<'model> {
+    fn new(model: &'model Gemma4Model, rows: usize) -> Self {
+        let bindings = Self::weights(model)
+            .into_iter()
+            .map(|weight| LinearBinding {
+                weight,
+                mode: LinearMode::Prepared,
+            })
+            .collect();
+        let runtime = LinearExecutor::new(
+            ComputePolicy::legacy(),
+            bindings,
+            rows.min(model.config.n_ctx),
+            model.pool.clone(),
+        )
+        .map_err(|error| log::debug!("Gemma4 linear: {error}"))
+        .ok();
+        Self {
+            runtime,
+            ..Self::default()
         }
-        #[cfg(not(feature = "vulkan"))]
-        Self::default()
     }
 
-    #[cfg(feature = "vulkan")]
-    pub(super) fn limits(
-        model: &Gemma4Model,
-    ) -> Result<(usize, usize, usize), crate::vulkan::VulkanError> {
-        // Each visited projection has a distinct tensor label. Shared-KV layers
-        // never project K/V; embeddings and the tied vocabulary output stay CPU.
-        std::iter::once(&model.per_layer_model_proj)
+    fn weights(model: &'model Gemma4Model) -> Vec<&'model Weight<'static>> {
+        let per_layer_iter: Box<dyn Iterator<Item = &'model Weight<'static>> + 'model> =
+            if let Some(p) = model.per_layer_model_proj.as_ref() {
+                Box::new(std::iter::once(p))
+            } else {
+                Box::new(std::iter::empty())
+            };
+        per_layer_iter
             .chain(model.layers.iter().enumerate().flat_map(|(index, layer)| {
-                [
-                    Some(&layer.attn_q),
-                    Some(&layer.attn_output),
-                    Some(&layer.ffn_gate),
-                    Some(&layer.ffn_up),
-                    Some(&layer.ffn_down),
-                    Some(&layer.inp_gate),
-                    Some(&layer.proj),
-                    (index < model.config.base_kv_layers()).then_some(&layer.attn_k),
-                    (index < model.config.base_kv_layers()).then_some(&layer.attn_v),
-                ]
-                .into_iter()
-                .flatten()
+                let base_kv = model.config.base_kv_layers();
+                let mut items: Vec<&Weight<'static>> = vec![
+                    &layer.attn_q,
+                    &layer.attn_output,
+                    &layer.ffn_gate,
+                    &layer.ffn_up,
+                    &layer.ffn_down,
+                ];
+                if let Some(ig) = layer.inp_gate.as_ref() {
+                    items.push(ig);
+                }
+                if let Some(pj) = layer.proj.as_ref() {
+                    items.push(pj);
+                }
+                if index < base_kv {
+                    if let Some(k) = layer.attn_k.as_ref() {
+                        items.push(k);
+                    }
+                    if let Some(v) = layer.attn_v.as_ref() {
+                        items.push(v);
+                    }
+                }
+                items.into_iter()
             }))
-            .try_fold((0, 0, 1usize), |(n_in, n_out, descriptors), weight| {
+            .collect()
+    }
+
+    #[cfg(all(test, feature = "vulkan"))]
+    pub(super) fn limits(
+        model: &'model Gemma4Model,
+    ) -> Result<(usize, usize, usize), crate::vulkan::VulkanError> {
+        Self::weights(model).into_iter().try_fold(
+            (0, 0, 1usize),
+            |(n_in, n_out, descriptors), weight| {
                 Ok((
                     n_in.max(weight.n_in),
                     n_out.max(weight.n_out),
@@ -86,7 +100,8 @@ impl Gemma4PrefillLinear {
                         .checked_add(1)
                         .ok_or(crate::vulkan::VulkanError::OutOfMemory)?,
                 ))
-            })
+            },
+        )
     }
 
     pub(super) fn active(&self) -> bool {
@@ -99,7 +114,10 @@ impl Gemma4PrefillLinear {
             if self.dispatcher.is_some() {
                 return true;
             }
-            return self.runtime.is_some();
+            return self
+                .runtime
+                .as_ref()
+                .is_some_and(LinearExecutor::uses_vulkan);
         }
         #[cfg(not(feature = "vulkan"))]
         false
@@ -124,7 +142,7 @@ impl Gemma4PrefillLinear {
                 #[cfg(not(test))]
                 let injected = false;
                 if !injected {
-                    crate::vulkan::mark_gpu_broken(&error.to_string());
+                    log::info!("Gemma4 linear disabled: {error}");
                 }
                 self.runtime = None;
                 false
@@ -162,10 +180,11 @@ impl<'model> Gemma4Session<'model> {
         let kv = (0..base)
             .map(|layer| {
                 let head_dim = cfg.head_dim(layer);
+                let kv_heads = cfg.kv_heads(layer);
                 KvLayer {
                     head_dim,
-                    row_width: cfg.kv_heads * head_dim,
-                    group_size: HEADS / cfg.kv_heads,
+                    row_width: kv_heads * head_dim,
+                    group_size: cfg.n_heads / kv_heads,
                     keys: Vec::new(),
                     values: Vec::new(),
                 }
@@ -174,7 +193,7 @@ impl<'model> Gemma4Session<'model> {
         Ok(Self {
             model,
             kv,
-            scratch: Gemma4Scratch::new(cfg, prefill_batch_size.min(CONTEXT)),
+            scratch: Gemma4Scratch::new(cfg, prefill_batch_size.min(cfg.n_ctx)),
             seq_len: 0,
             prefill_batch_size,
             prefill_linear: Gemma4PrefillLinear::new(model, prefill_batch_size),
@@ -250,4 +269,88 @@ pub(super) fn require_f32_kv(kv_format: KvFormat) -> Result<(), String> {
         return Err("Gemma4 incremental session requires an F32 KV cache".into());
     }
     Ok(())
+}
+
+impl<'model> ChunkedPrefill for Gemma4Session<'model> {
+    type Input = Vec<Gemma4InputRow>;
+
+    fn input_len(input: &Self::Input) -> usize {
+        input.len()
+    }
+
+    fn max_chunk_size(&self) -> usize {
+        self.model.config.n_ctx
+    }
+
+    fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    fn set_seq_len(&mut self, len: usize) {
+        self.seq_len = len;
+    }
+
+    fn forward_chunk(
+        &mut self,
+        input: &Self::Input,
+        rows: usize,
+        _base_position: usize,
+        _project_logits: bool,
+    ) -> Result<Option<Vec<f32>>, String> {
+        if rows != input.len() {
+            return Err(format!(
+                "Gemma4Session::forward_chunk only handles whole-input chunks; \
+                 rows = {rows} vs input.len() = {}",
+                input.len()
+            ));
+        }
+        let logits = self.forward_rows(input)?;
+        Ok(Some(logits))
+    }
+
+    fn prefill(
+        &mut self,
+        input: &Self::Input,
+        batch_size: usize,
+    ) -> Result<Option<Vec<f32>>, String> {
+        let batch_size = checked_prefill_batch_size(Some(batch_size))?;
+        let total = Self::input_len(input);
+        if total == 0 {
+            return Ok(None);
+        }
+        let mut last_logits: Option<Vec<f32>> = None;
+        for chunk in prefill_chunks(total, batch_size) {
+            let rows = chunk.len();
+            let base = self.seq_len;
+            let is_last = chunk.end == total;
+            last_logits =
+                <Self as ChunkedPrefill>::forward_chunk(self, input, rows, base, is_last)?;
+            self.set_seq_len(base + rows);
+        }
+        Ok(last_logits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunked_prefill_input_len_matches_token_count() {
+        let rows = vec![Gemma4InputRow::Token(0); 7];
+        assert_eq!(<Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows), 7);
+    }
+
+    #[test]
+    fn chunked_prefill_default_loop_clamps_batch_to_one_for_now() {
+        // Gemma4 actually supports B > 1 via its own `prefill_chunks`
+        // dispatch inside `forward_rows`, but the trait `forward_chunk`
+        // contract only handles whole-input chunks today — the default
+        // `prefill` loop calls `forward_chunk` once per chunk, and the
+        // B > 1 case routes to `forward_rows` which already does the
+        // chunking. Verify the input contract stays compatible with the
+        // `prefill_chunks` B = 1 walk.
+        let rows = vec![Gemma4InputRow::Token(0); 1];
+        assert_eq!(<Gemma4Session<'_> as ChunkedPrefill>::input_len(&rows), 1);
+    }
 }

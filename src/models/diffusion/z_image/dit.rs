@@ -4,6 +4,7 @@ use half::f16;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
+use crate::ops::attention_value_reduce;
 use crate::ops::dot_f32;
 use crate::ops::{
     rms_norm, rms_norm_inplace, rope_sin_cos, silu, silu_inplace, silu_mul_inplace,
@@ -23,41 +24,41 @@ const MT_LOWER_MASK: u32 = 0x7fff_ffff;
 const PATCH_SIZE: usize = 2;
 const ROPE_THETA: f32 = 256.0;
 const ROPE_AXES: [usize; 3] = [32, 48, 48];
-const ROPE_HEAD_WIDTH: usize = 128;
+pub(crate) const ROPE_HEAD_WIDTH: usize = 128;
 const SEQUENCE_MULTIPLE: usize = 32;
 const LATENT_CHANNELS: usize = 16;
 const PATCH_WIDTH: usize = LATENT_CHANNELS * PATCH_SIZE * PATCH_SIZE;
 const CAP_WIDTH: usize = 2_560;
-const HIDDEN: usize = 3_840;
-const HEADS: usize = 30;
-const QKV_WIDTH: usize = HIDDEN * 3;
-const FFN_WIDTH: usize = 10_240;
-const TIME_WIDTH: usize = 256;
+pub(crate) const HIDDEN: usize = 3_840;
+pub(crate) const HEADS: usize = 30;
+pub(crate) const QKV_WIDTH: usize = HIDDEN * 3;
+pub(crate) const FFN_WIDTH: usize = 10_240;
+pub(crate) const TIME_WIDTH: usize = 256;
 const TIME_HIDDEN: usize = 1_024;
 const MAIN_LAYERS: usize = 30;
 const REFINER_LAYERS: usize = 2;
-const RMS_EPSILON: f32 = 1e-5;
-const QK_RMS_EPSILON: f32 = 1e-6;
+pub(crate) const RMS_EPSILON: f32 = 1e-5;
+pub(crate) const QK_RMS_EPSILON: f32 = 1e-6;
 const FINAL_NORM_EPSILON: f32 = 1e-6;
 
-struct ModulationWeights {
-    matrix: String,
-    bias: Vec<f32>,
+pub(crate) struct ModulationWeights {
+    pub(crate) matrix: String,
+    pub(crate) bias: Vec<f32>,
 }
 
-struct BlockWeights {
-    qkv: String,
-    out: String,
-    w1: String,
-    w2: String,
-    w3: String,
-    attention_norm1: Vec<f32>,
-    attention_norm2: Vec<f32>,
-    q_norm: Vec<f32>,
-    k_norm: Vec<f32>,
-    ffn_norm1: Vec<f32>,
-    ffn_norm2: Vec<f32>,
-    modulation: Option<ModulationWeights>,
+pub(crate) struct BlockWeights {
+    pub(crate) qkv: String,
+    pub(crate) out: String,
+    pub(crate) w1: String,
+    pub(crate) w2: String,
+    pub(crate) w3: String,
+    pub(crate) attention_norm1: Vec<f32>,
+    pub(crate) attention_norm2: Vec<f32>,
+    pub(crate) q_norm: Vec<f32>,
+    pub(crate) k_norm: Vec<f32>,
+    pub(crate) ffn_norm1: Vec<f32>,
+    pub(crate) ffn_norm2: Vec<f32>,
+    pub(crate) modulation: Option<ModulationWeights>,
 }
 
 pub(crate) struct ZImageDit {
@@ -85,7 +86,6 @@ pub(crate) struct DitScratch {
     attention: Vec<f32>,
     ffn: Vec<f32>,
     scores: Vec<f32>,
-    value_column: Vec<f32>,
     modulation: Vec<f32>,
     rope: Vec<f32>,
     patches: Vec<f32>,
@@ -94,6 +94,13 @@ pub(crate) struct DitScratch {
     time_hidden: [f32; TIME_HIDDEN],
     time: [f32; TIME_WIDTH],
     q8: Q8Scratch,
+    /// Batched Vulkan sessions, one per distinct sequence length: the context
+    /// refiner runs over the text tokens, the other two stacks over the image
+    /// tokens. Created on first use and kept for the render, because the upload
+    /// of the 5.64 GB of weights is the expensive part and is worth doing once.
+    #[cfg(feature = "vulkan")]
+    gpu:
+        std::collections::HashMap<usize, crate::models::diffusion::z_image::dit_gpu::DitGpuSession>,
 }
 
 impl DitScratch {
@@ -106,7 +113,6 @@ impl DitScratch {
             attention: Vec::new(),
             ffn: Vec::new(),
             scores: Vec::new(),
-            value_column: Vec::new(),
             modulation: Vec::new(),
             rope: Vec::new(),
             patches: Vec::new(),
@@ -115,6 +121,8 @@ impl DitScratch {
             time_hidden: [0.0; TIME_HIDDEN],
             time: [0.0; TIME_WIDTH],
             q8: Q8Scratch::new(FFN_WIDTH),
+            #[cfg(feature = "vulkan")]
+            gpu: std::collections::HashMap::new(),
         }
     }
 
@@ -158,11 +166,6 @@ impl DitScratch {
             "Z-Image FFN",
         )?;
         resize_zeroed(&mut self.scores, total_tokens, "Z-Image attention scores")?;
-        resize_zeroed(
-            &mut self.value_column,
-            total_tokens,
-            "Z-Image attention values",
-        )?;
         resize_zeroed(&mut self.modulation, HIDDEN * 4, "Z-Image AdaLN modulation")?;
         resize_zeroed(
             &mut self.rope,
@@ -183,19 +186,23 @@ fn checked_product(left: usize, right: usize, name: &str) -> Result<usize, Strin
         .ok_or_else(|| format!("Z-Image {name} shape overflow"))
 }
 
+/// Reports nan/inf counts, the finite range and the first bad index, which is
+/// strictly more than the shared check in [`super::common`]. That one only
+/// supplies the predicate; the diagnostics stay here because they are the point
+/// of this version.
 fn require_finite(values: &[f32], name: &str) -> Result<(), String> {
-    if values.iter().all(|value| value.is_finite()) {
+    if super::super::common::all_finite(values) {
         Ok(())
     } else {
         let n_nan = values.iter().filter(|v| v.is_nan()).count();
         let n_inf = values.iter().filter(|v| v.is_infinite()).count();
         let n_neg = values
             .iter()
-            .filter(|v| v.is_finite() == false && v.is_sign_negative())
+            .filter(|v| v.is_infinite() && v.is_sign_negative())
             .count();
         let n_pos = values
             .iter()
-            .filter(|v| v.is_finite() == false && v.is_sign_positive())
+            .filter(|v| v.is_infinite() && v.is_sign_positive())
             .count();
         let (min, max) = values
             .iter()
@@ -277,7 +284,7 @@ fn force_f32_linear_into(
     if info.dims != [n_in as u64, n_out as u64] {
         return Err(format!("Invalid {name} dimensions"));
     }
-    if info.ggml_type != GGMLType::F16 {
+    if !matches!(info.ggml_type, GGMLType::F16 | GGMLType::F32) {
         return Err(format!("Invalid {name} type for force-F32 linear"));
     }
     let bytes = source
@@ -287,14 +294,32 @@ fn force_f32_linear_into(
         return Err(format!("Invalid {name} byte length"));
     }
     scratch.force_f32_row.resize(n_in, 0.0);
-    let row_bytes = n_in
-        .checked_mul(2)
-        .ok_or_else(|| format!("Invalid {name} row byte size"))?;
-    for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
-        for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
-            *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+    match info.ggml_type {
+        GGMLType::F16 => {
+            let row_bytes = n_in
+                .checked_mul(2)
+                .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+            for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+                for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(2)) {
+                    *value = f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32();
+                }
+                *output = dot_f32(&scratch.force_f32_row, input, n_in);
+            }
         }
-        *output = dot_f32(&scratch.force_f32_row, input, n_in);
+        GGMLType::F32 => {
+            // The F32 file stores the weights as f32 already, so the row is
+            // read as it is rather than widened from F16.
+            let row_bytes = n_in
+                .checked_mul(4)
+                .ok_or_else(|| format!("Invalid {name} row byte size"))?;
+            for (row, output) in bytes.chunks_exact(row_bytes).zip(output) {
+                for (value, chunk) in scratch.force_f32_row.iter_mut().zip(row.chunks_exact(4)) {
+                    *value = f32::from_le_bytes(chunk.try_into().unwrap());
+                }
+                *output = dot_f32(&scratch.force_f32_row, input, n_in);
+            }
+        }
+        _ => unreachable!(),
     }
     Ok(())
 }
@@ -371,14 +396,17 @@ pub(crate) fn euler_flow_step(
 }
 
 #[derive(Clone, Copy)]
-struct AdaLnModulation<'a> {
-    scale_msa: &'a [f32],
-    gate_msa: &'a [f32],
-    scale_mlp: &'a [f32],
-    gate_mlp: &'a [f32],
+pub(crate) struct AdaLnModulation<'a> {
+    pub(crate) scale_msa: &'a [f32],
+    pub(crate) gate_msa: &'a [f32],
+    pub(crate) scale_mlp: &'a [f32],
+    pub(crate) gate_mlp: &'a [f32],
 }
 
-fn split_adaln_modulation(values: &[f32], hidden: usize) -> Result<AdaLnModulation<'_>, String> {
+pub(crate) fn split_adaln_modulation(
+    values: &[f32],
+    hidden: usize,
+) -> Result<AdaLnModulation<'_>, String> {
     let expected = hidden
         .checked_mul(4)
         .ok_or("Z-Image AdaLN width overflow")?;
@@ -399,7 +427,10 @@ fn split_adaln_modulation(values: &[f32], hidden: usize) -> Result<AdaLnModulati
     })
 }
 
-fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<(), String> {
+pub(crate) fn scale_modulated_branch(
+    values: &mut [f32],
+    scales: Option<&[f32]>,
+) -> Result<(), String> {
     let Some(scales) = scales else {
         return Ok(());
     };
@@ -412,7 +443,7 @@ fn scale_modulated_branch(values: &mut [f32], scales: Option<&[f32]>) -> Result<
     Ok(())
 }
 
-fn add_modulated_residual(
+pub(crate) fn add_modulated_residual(
     tokens: &mut [f32],
     residual: &[f32],
     gates: Option<&[f32]>,
@@ -431,6 +462,77 @@ fn add_modulated_residual(
             vec_add_into(residual, tokens);
         }
     }
+    Ok(())
+}
+
+/// Row-partitioned form of the `copy -> rms_norm -> add_modulated_residual`
+/// tail that `run_block_gpu` runs after each projection it reads back.
+///
+/// `normed` holds the readback of a projection, `tokens` is the residual
+/// accumulator it is added into, and `weight` / `gates` are this block's norm
+/// gamma and AdaLN gate (both length `HIDDEN`).
+///
+/// The gated branch of `add_modulated_residual` is a scalar loop calling
+/// `gate.tanh()` once per element, and at 512x512 each invocation covers
+/// `rows * HIDDEN` = 3840 * 3840 elements. `run_block_gpu` does this twice per
+/// block (after the output projection and after the FFN), so one denoise step
+/// pays for it 34 * 2 times on the calling thread. Rows are disjoint slices of
+/// every buffer, so splitting them across the pool is a pure re-partition: the
+/// arithmetic per element, and therefore the result, is unchanged.
+fn readback_norm_and_residual_rows(
+    pool: &ComputePool,
+    tokens: &mut [f32],
+    normed: &mut [f32],
+    projected: &[f32],
+    weight: &[f32],
+    gates: Option<&[f32]>,
+    rows: usize,
+) -> Result<(), String> {
+    let width = HIDDEN;
+    if projected.len() != rows * width
+        || normed.len() != projected.len()
+        || tokens.len() != projected.len()
+        || weight.len() != width
+        || gates.is_some_and(|values| values.len() != width)
+    {
+        return Err("Invalid Z-Image readback residual shapes".into());
+    }
+    // Raw pointers keep the closure independent of the borrow checker: each
+    // worker only touches the rows it owns.
+    let tokens_ptr = tokens.as_mut_ptr() as usize;
+    let normed_ptr = normed.as_mut_ptr() as usize;
+    let projected_ptr = projected.as_ptr() as usize;
+    let weight_ptr = weight.as_ptr() as usize;
+    let gates_ptr = gates.map_or(0, |values| values.as_ptr() as usize);
+    pool.compute(move |ith, nth| {
+        let per_worker = rows.div_ceil(nth);
+        let start = (ith * per_worker).min(rows);
+        let end = (start + per_worker).min(rows);
+        if start >= end {
+            return;
+        }
+        // SAFETY: row r is only visited by the worker owning it, and the four
+        // row buffers are `rows * width` long and verified above. `projected`,
+        // `weight` and the gates are read-only.
+        let tokens =
+            unsafe { std::slice::from_raw_parts_mut(tokens_ptr as *mut f32, rows * width) };
+        let normed =
+            unsafe { std::slice::from_raw_parts_mut(normed_ptr as *mut f32, rows * width) };
+        let projected =
+            unsafe { std::slice::from_raw_parts(projected_ptr as *const f32, rows * width) };
+        let weight = unsafe { std::slice::from_raw_parts(weight_ptr as *const f32, width) };
+        let gates = (gates_ptr != 0)
+            .then(|| unsafe { std::slice::from_raw_parts(gates_ptr as *const f32, width) });
+        for row in start..end {
+            let begin = row * width;
+            let end = begin + width;
+            let out = &mut normed[begin..end];
+            out.copy_from_slice(&projected[begin..end]);
+            rms_norm_inplace(out, weight, RMS_EPSILON);
+            add_modulated_residual(&mut tokens[begin..end], out, gates)
+                .expect("row shapes checked above");
+        }
+    });
     Ok(())
 }
 
@@ -516,7 +618,7 @@ fn z_image_model_timestep(sigma: f32) -> f32 {
     1_000.0 - sigma * 1_000.0
 }
 
-fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
+pub(crate) fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), String> {
     if values.len() != rope.len() || values.len() % 2 != 0 {
         return Err("Invalid compact Z-Image RoPE slice".into());
     }
@@ -529,56 +631,189 @@ fn rotate_interleaved_inplace(values: &mut [f32], rope: &[f32]) -> Result<(), St
     Ok(())
 }
 
-fn attention_into(
+pub(crate) fn attention_into(
     qkv: &[f32],
     tokens: usize,
     heads: usize,
     head_width: usize,
     scores: &mut [f32],
-    value_column: &mut [f32],
     output: &mut [f32],
+    pool: &ComputePool,
 ) -> Result<(), String> {
     let hidden = checked_product(heads, head_width, "attention hidden")?;
     let qkv_width = checked_product(hidden, 3, "attention QKV")?;
     if qkv.len() != checked_product(tokens, qkv_width, "attention QKV rows")?
         || output.len() != checked_product(tokens, hidden, "attention output")?
         || scores.len() < tokens
-        || value_column.len() < tokens
     {
         return Err("Invalid Z-Image attention buffers".into());
     }
     let scale = 1.0 / (head_width as f32).sqrt();
-    for query in 0..tokens {
+    let value_base = hidden * 2;
+    let query_blocks = tokens.div_ceil(ATTENTION_QUERY_BLOCK);
+    let work_items = checked_product(heads, query_blocks, "attention work items")?;
+
+    // Two things make this loop's cost memory, not arithmetic. Every K vector is
+    // 512 KiB per head, and the serial form re-read the whole set once per
+    // query: 514 GB of K traffic per denoise step, which at the ~46 GB/s this
+    // box sustains in STREAM is the 10 s the profile was reporting. So queries
+    // are processed in blocks and each K vector is loaded once for the block,
+    // which divides the traffic by the block size. Second, a (query, head) pair
+    // touches only `qkv` and one contiguous run of `output`, so the block form
+    // is the serial form with a different loop order -- the products, and their
+    // order, are unchanged, so this cannot move a bit.
+    //
+    // The score rows are per thread because the serial code reused the caller's
+    // `scores` buffer for every pair; two threads sharing it would stomp.
+    // The caller's `scores` buffer is one row long, which the block form cannot
+    // use, so the single-threaded path keeps one query at a time. It is the
+    // test and single-core path; the per-(query, key) products are the same
+    // either way, so it still has to agree with the blocked one bit for bit.
+    let threads = pool.n_threads().max(1);
+    if threads == 1 {
         for head in 0..heads {
-            let query_start = query * qkv_width + head * head_width;
-            let query_values = &qkv[query_start..query_start + head_width];
-            for key in 0..tokens {
-                let key_start = key * qkv_width + hidden + head * head_width;
-                // aarch64 上 `dot_f32` 内部 `has_neon()` 是 `const true`，
-                // 编译器会消除分支，等价于直接调 `dot_f32_neon`。
-                let dot = dot_f32(
-                    query_values,
-                    &qkv[key_start..key_start + head_width],
-                    head_width,
-                );
-                scores[key] = dot * scale;
-            }
-            softmax_inplace(&mut scores[..tokens]);
-            let output_start = query * hidden + head * head_width;
-            for dimension in 0..head_width {
-                for key in 0..tokens {
-                    value_column[key] =
-                        qkv[key * qkv_width + hidden * 2 + head * head_width + dimension];
+            for block in 0..query_blocks {
+                let query_base = block * ATTENTION_QUERY_BLOCK;
+                let query_count = (tokens - query_base).min(ATTENTION_QUERY_BLOCK);
+                for local in 0..query_count {
+                    let query = query_base + local;
+                    attention_head_block(
+                        qkv,
+                        tokens,
+                        head_width,
+                        hidden,
+                        qkv_width,
+                        value_base,
+                        scale,
+                        &mut scores[..tokens],
+                        query,
+                        1,
+                        head,
+                        output.as_mut_ptr(),
+                    );
                 }
-                output[output_start + dimension] =
-                    dot_f32(&value_column[..tokens], &scores[..tokens], tokens);
             }
         }
+        return Ok(());
     }
+    ATTENTION_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let needed = threads * ATTENTION_QUERY_BLOCK * tokens;
+        if scratch.len() < needed {
+            scratch.resize(needed, 0.0);
+        }
+        let scratch_ptr = scratch.as_mut_ptr();
+        let output_ptr = output.as_mut_ptr();
+        pool.compute(|thread, threads| {
+            for item in (thread..work_items).step_by(threads) {
+                let head = item / query_blocks;
+                let block = item % query_blocks;
+                let query_base = block * ATTENTION_QUERY_BLOCK;
+                let query_count = (tokens - query_base).min(ATTENTION_QUERY_BLOCK);
+                // SAFETY: `thread` indexes only this worker's rows, and the
+                // `output` slice is this item's own queries for one head. The
+                // work items partition (head, query block), so no two overlap.
+                let rows = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        scratch_ptr.add(thread * ATTENTION_QUERY_BLOCK * tokens),
+                        query_count * tokens,
+                    )
+                };
+                attention_head_block(
+                    qkv,
+                    tokens,
+                    head_width,
+                    hidden,
+                    qkv_width,
+                    value_base,
+                    scale,
+                    rows,
+                    query_base,
+                    query_count,
+                    head,
+                    output_ptr,
+                );
+            }
+        });
+    });
     Ok(())
 }
 
-fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(), String> {
+/// Queries share a K vector while a block is in flight.
+/// Queries that share each K vector.
+///
+/// The block's score rows are `ATTENTION_QUERY_BLOCK * tokens` floats, and at
+/// 512x512 that is 33 KiB at 8, 66 KiB at 16 and 132 KiB at 32. Measured on a
+/// full step: 8 -> 15.2 s, 16 -> 16.6 s, 32 -> 16.5 s, so past 8 the rows stop
+/// fitting in L1 and the traffic saved is paid back in misses.
+const ATTENTION_QUERY_BLOCK: usize = 8;
+
+thread_local! {
+    static ATTENTION_SCRATCH: std::cell::RefCell<Vec<f32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One (head, query block): the scores of every query in the block against
+/// every key, then each query's softmax and value reduction.
+#[allow(clippy::too_many_arguments)]
+fn attention_head_block(
+    qkv: &[f32],
+    tokens: usize,
+    head_width: usize,
+    hidden: usize,
+    qkv_width: usize,
+    value_base: usize,
+    scale: f32,
+    scores: &mut [f32],
+    query_base: usize,
+    query_count: usize,
+    head: usize,
+    output: *mut f32,
+) {
+    // The key loop is outermost so each K vector is read once for the whole
+    // query block rather than once per query.
+    for key in 0..tokens {
+        let key_start = key * qkv_width + hidden + head * head_width;
+        let key_values = &qkv[key_start..key_start + head_width];
+        for local in 0..query_count {
+            let query = query_base + local;
+            let query_start = query * qkv_width + head * head_width;
+            scores[local * tokens + key] = dot_f32(
+                &qkv[query_start..query_start + head_width],
+                key_values,
+                head_width,
+            ) * scale;
+        }
+    }
+    // `output` is [query][head][head_width], so a fixed head's runs for
+    // consecutive queries are `hidden` apart, not adjacent.
+    for local in 0..query_count {
+        let query = query_base + local;
+        let row = &mut scores[local * tokens..(local + 1) * tokens];
+        softmax_inplace(row);
+        let at = query * hidden + head * head_width;
+        // SAFETY: `at + head_width <= tokens * hidden` because the caller
+        // validated the shapes, and work items partition (head, query block),
+        // so no other item writes this run.
+        let out = unsafe { std::slice::from_raw_parts_mut(output.add(at), head_width) };
+        attention_value_reduce(
+            qkv,
+            row,
+            out,
+            value_base + head * head_width,
+            qkv_width,
+            0,
+            tokens,
+            head_width,
+        );
+    }
+}
+
+pub(crate) fn layer_norm_no_affine(
+    input: &[f32],
+    output: &mut [f32],
+    eps: f32,
+) -> Result<(), String> {
     if input.is_empty() || input.len() != output.len() {
         return Err("Invalid Z-Image final LayerNorm buffers".into());
     }
@@ -586,9 +821,15 @@ fn layer_norm_no_affine(input: &[f32], output: &mut [f32], eps: f32) -> Result<(
     let mean = sum / input.len() as f32;
     #[cfg(target_arch = "aarch64")]
     let variance = {
-        let mut chunks = input.chunks_exact(4);
+        let group = if crate::ops::scalar_mode() { 1 } else { 4 };
+        let mut chunks = input.chunks_exact(group);
         let mut sum = 0.0f64;
         for chunk in &mut chunks {
+            if group == 1 {
+                let centered = chunk[0] - mean;
+                sum += f64::from(centered * centered);
+                continue;
+            }
             let centered_0 = chunk[0] - mean;
             let centered_1 = chunk[1] - mean;
             let centered_2 = chunk[2] - mean;
@@ -810,11 +1051,28 @@ impl ZImageDit {
             ));
         }
         let t_setup_done = std::time::Instant::now();
+
+        // Decide the backend once per render. A session that fails to build, or
+        // a device that breaks mid-render, must not leave the first layers on
+        // the GPU and the rest on the CPU: the two round differently and the
+        // image would depend on where it failed.
+        #[cfg(feature = "vulkan")]
+        let mut gpu_enabled = crate::ops::gpu_matmul_active();
+
         for (_index, block) in self.context_refiners.iter().enumerate() {
-            run_block(
+            #[cfg(feature = "vulkan")]
+            let mut session = if gpu_enabled {
+                take_gpu_session(scratch, padded_text, &mut gpu_enabled)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut session: Option<()> = None;
+            let outcome = run_block_dispatch(
                 self.source.as_ref(),
                 self.pool.as_ref(),
                 block,
+                _index,
                 padded_text,
                 &mut scratch.text[..text_hidden],
                 &scratch.rope[..text_rope],
@@ -823,10 +1081,20 @@ impl ZImageDit {
                 &mut scratch.attention,
                 &mut scratch.ffn,
                 &mut scratch.scores,
-                &mut scratch.value_column,
                 &mut scratch.modulation,
                 &mut scratch.q8,
-            )?;
+                #[cfg(feature = "vulkan")]
+                session.as_mut(),
+                #[cfg(not(feature = "vulkan"))]
+                None::<&mut ()>,
+            );
+            outcome?;
+            #[cfg(feature = "vulkan")]
+            if let Some(session) = session {
+                scratch.gpu.insert(padded_text, session);
+            }
+            #[cfg(not(feature = "vulkan"))]
+            drop(session);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 &format!("z_image.dit.context_refiner.{_index}"),
@@ -836,10 +1104,19 @@ impl ZImageDit {
             ));
         }
         for (_index, block) in self.noise_refiners.iter().enumerate() {
-            run_block(
+            #[cfg(feature = "vulkan")]
+            let mut session = if gpu_enabled {
+                take_gpu_session(scratch, padded_image, &mut gpu_enabled)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut session: Option<()> = None;
+            let outcome = run_block_dispatch(
                 self.source.as_ref(),
                 self.pool.as_ref(),
                 block,
+                REFINER_LAYERS + _index,
                 padded_image,
                 &mut scratch.image[..image_hidden],
                 &scratch.rope[text_rope..text_rope + image_rope],
@@ -848,10 +1125,20 @@ impl ZImageDit {
                 &mut scratch.attention,
                 &mut scratch.ffn,
                 &mut scratch.scores,
-                &mut scratch.value_column,
                 &mut scratch.modulation,
                 &mut scratch.q8,
-            )?;
+                #[cfg(feature = "vulkan")]
+                session.as_mut(),
+                #[cfg(not(feature = "vulkan"))]
+                None::<&mut ()>,
+            );
+            outcome?;
+            #[cfg(feature = "vulkan")]
+            if let Some(session) = session {
+                scratch.gpu.insert(padded_image, session);
+            }
+            #[cfg(not(feature = "vulkan"))]
+            drop(session);
             #[cfg(feature = "parity-trace")]
             crate::parity_trace::report(crate::parity_trace::checkpoint(
                 &format!("z_image.dit.noise_refiner.{_index}"),
@@ -868,10 +1155,19 @@ impl ZImageDit {
         let total_hidden = text_hidden + image_hidden;
         let total_rope = text_rope + image_rope;
         for (_index, block) in self.layers.iter().enumerate() {
-            run_block(
+            #[cfg(feature = "vulkan")]
+            let mut session = if gpu_enabled {
+                take_gpu_session(scratch, total_tokens, &mut gpu_enabled)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut session: Option<()> = None;
+            let outcome = run_block_dispatch(
                 self.source.as_ref(),
                 self.pool.as_ref(),
                 block,
+                2 * REFINER_LAYERS + _index,
                 total_tokens,
                 &mut scratch.tokens[..total_hidden],
                 &scratch.rope[..total_rope],
@@ -880,12 +1176,42 @@ impl ZImageDit {
                 &mut scratch.attention,
                 &mut scratch.ffn,
                 &mut scratch.scores,
-                &mut scratch.value_column,
                 &mut scratch.modulation,
                 &mut scratch.q8,
-            )?;
+                #[cfg(feature = "vulkan")]
+                session.as_mut(),
+                #[cfg(not(feature = "vulkan"))]
+                None::<&mut ()>,
+            );
+            outcome?;
+            #[cfg(feature = "vulkan")]
+            if let Some(session) = session {
+                scratch.gpu.insert(total_tokens, session);
+            }
+            #[cfg(not(feature = "vulkan"))]
+            drop(session);
         }
         let t_layers_done = std::time::Instant::now();
+        // Per-block count of projections the GPU took. This is the probe that
+        // found the AdaLN latch: an empty list meant `run_block_gpu` had stopped
+        // being called, so the render was silently on the CPU with no error in
+        // the timings. Set RUST_GPU_DIAG=1 to see it.
+        #[cfg(feature = "vulkan")]
+        if gpu_diag_enabled() {
+            if let Some(session) = scratch.gpu.get(&total_tokens) {
+                let (blocks, projections) = GPU_BLOCKS_TAKEN.with(|c| {
+                    let mut taken = c.borrow_mut();
+                    let seen = (taken.0, taken.1);
+                    *taken = (0, 0);
+                    seen
+                });
+                eprintln!(
+                    "[diag] sigma={sigma:.3} dispatches={} blocks_on_gpu={blocks} projections={projections}",
+                    session.ops().recorded_dispatch_count(),
+                );
+            }
+        }
+
         eprintln!(
             "[profile] sigma={:.3} setup={:.1}ms main_layers={:.1}ms total_so_far={:.1}ms",
             sigma,
@@ -1009,6 +1335,8 @@ impl ZImageDit {
         PROFILE_TIMERS.with(|cell| {
             *cell.borrow_mut() = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         });
+        #[cfg(feature = "vulkan")]
+        gpu_profile_reset();
         for pair in sigmas.windows(2) {
             let sigma = pair[0];
             let sigma_next = pair[1];
@@ -1023,6 +1351,14 @@ impl ZImageDit {
             euler_flow_step(&mut latent, &scratch.velocity, sigma, sigma_next)?;
             require_finite(&latent, "Euler latent")?;
         }
+        #[cfg(feature = "vulkan")]
+        gpu_profile_report(sigmas.len() - 1);
+        #[cfg(feature = "vulkan")]
+        {
+            crate::vulkan::dump_submit_trace();
+            crate::vulkan::ops::dump_dispatch_trace();
+            crate::vulkan::ops::dump_dispatch_log();
+        }
         // 输出累计的 profile
         let t = PROFILE_TIMERS.with(|cell| *cell.borrow());
         let total = t.0 + t.1 + t.2 + t.3 + t.4 + t.5 + t.6 + t.7 + t.8;
@@ -1036,7 +1372,11 @@ impl ZImageDit {
         eprintln!("  rms_norm:              {:8.1}ms ({:5.1}%)", t.1, pct(t.1));
         eprintln!("  scale_modulated:      {:8.1}ms ({:5.1}%)", t.2, pct(t.2));
         eprintln!("  linear qkv:           {:8.1}ms ({:5.1}%)", t.3, pct(t.3));
-        eprintln!("  rope_neox_inplace:    {:8.1}ms ({:5.1}%)", t.4, pct(t.4));
+        eprintln!(
+            "  rope_neox_inplace:                {:8.1}ms ({:5.1}%)",
+            t.4,
+            pct(t.4)
+        );
         eprintln!("  attention_into:       {:8.1}ms ({:5.1}%)", t.5, pct(t.5));
         eprintln!("  linear out:           {:8.1}ms ({:5.1}%)", t.6, pct(t.6));
         eprintln!("  linear ffn (w1+w3+w2): {:8.1}ms ({:5.1}%)", t.7, pct(t.7));
@@ -1057,6 +1397,96 @@ impl ZImageDit {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Route one block to the GPU, falling back to [`run_block`] on any problem.
+///
+/// `layer` identifies the weight matrices for the session's upload cache and is
+/// ignored by the CPU path, which looks them up by name.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn run_block_dispatch(
+    source: &dyn TensorSource,
+    pool: &ComputePool,
+    block: &BlockWeights,
+    layer: usize,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+    session: Option<&mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession>,
+) -> Result<(), String> {
+    if let Some(session) = session {
+        #[cfg(feature = "vulkan")]
+        let attention_on_gpu = gpu_attention_enabled();
+        #[cfg(not(feature = "vulkan"))]
+        let attention_on_gpu = false;
+        match run_block_gpu(
+            session,
+            source,
+            block,
+            layer,
+            rows,
+            tokens,
+            rope,
+            time,
+            qkv,
+            attention,
+            ffn,
+            scores,
+            modulation,
+            q8,
+            pool,
+            attention_on_gpu,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // A shape the device rejects leaves it healthy, so only a real
+                // device failure trips the fuse. Switching backends mid-render
+                // would change the output, so the choice is latched per render
+                // by the caller rather than per block.
+                eprintln!("[GPU] Z-Image block {layer} fell back to the CPU: {error}");
+                if !error.contains("Unsupported") && !error.contains("dispatch failed") {
+                    crate::vulkan::mark_gpu_broken(&error);
+                }
+            }
+        }
+    }
+    run_block(
+        source, pool, block, rows, tokens, rope, time, qkv, attention, ffn, scores, modulation, q8,
+    )
+}
+
+/// Without the Vulkan feature the wrapper collapses to the CPU block, so the
+/// call sites do not each need a cfg.
+#[cfg(not(feature = "vulkan"))]
+#[allow(clippy::too_many_arguments)]
+fn run_block_dispatch(
+    source: &dyn TensorSource,
+    pool: &ComputePool,
+    block: &BlockWeights,
+    _layer: usize,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+    _session: Option<&mut ()>,
+) -> Result<(), String> {
+    run_block(
+        source, pool, block, rows, tokens, rope, time, qkv, attention, ffn, scores, modulation, q8,
+    )
+}
+
 fn run_block(
     source: &dyn TensorSource,
     pool: &ComputePool,
@@ -1069,7 +1499,6 @@ fn run_block(
     attention: &mut [f32],
     ffn: &mut [f32],
     scores: &mut [f32],
-    value_column: &mut [f32],
     modulation: &mut [f32],
     q8: &mut Q8Scratch,
 ) -> Result<(), String> {
@@ -1082,7 +1511,6 @@ fn run_block(
         || attention.len() < hidden_len
         || ffn.len() < ffn_len
         || scores.len() < rows
-        || value_column.len() < rows
         || modulation.len() < HIDDEN * 4
     {
         return Err("Invalid Z-Image transformer scratch".into());
@@ -1098,7 +1526,7 @@ fn run_block(
     let mut t_linear_out = std::time::Duration::ZERO;
     let mut t_linear_ffn = std::time::Duration::ZERO;
     let mut t_residual = std::time::Duration::ZERO;
-    let mut t_other = std::time::Duration::ZERO;
+    let _t_other = std::time::Duration::ZERO;
     let block_start = std::time::Instant::now();
 
     let modulations = if let Some(weights) = &block.modulation {
@@ -1177,8 +1605,8 @@ fn run_block(
         HEADS,
         ROPE_HEAD_WIDTH,
         scores,
-        value_column,
         &mut attention[..hidden_len],
+        pool,
     )?;
     t_attention = t.elapsed();
 
@@ -1303,26 +1731,90 @@ thread_local! {
         std::cell::RefCell::new((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 }
 
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct FloatSinCos {
-    sine: f32,
-    cosine: f32,
+/// The GPU block's own breakdown, because `PROFILE_TIMERS` is fed by the CPU
+/// block and reads all zeroes on this path -- which is what made the CPU
+/// attention share of a step unknowable from the profile output.
+thread_local! {}
+
+#[cfg(feature = "vulkan")]
+fn gpu_diag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RUST_GPU_DIAG").is_ok())
 }
 
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn __sincosf_stret(value: f32) -> FloatSinCos;
+/// How many blocks in the step took the GPU path, and how many projections each
+/// bound. Diagnostic only, and the number that matters is the count: zero when
+/// the device has been latched off.
+#[cfg(feature = "vulkan")]
+thread_local! {
+    static GPU_BLOCKS_TAKEN: std::cell::RefCell<(usize, usize)> =
+        const { std::cell::RefCell::new((0, 0)) };
 }
 
-fn torch_sin_cos(value: f32) -> (f32, f32) {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let result = __sincosf_stret(value);
-        return (result.cosine, result.sine);
+#[cfg(feature = "vulkan")]
+thread_local! {
+    static GPU_PROFILE_TIMERS: std::cell::RefCell<[f64; 10]> =
+        const { std::cell::RefCell::new([0.0; 10]) };
+}
+
+const GPU_PHASE_LABELS: [&str; 9] = [
+    "modulation (host)",
+    "norm+adaln+qkv (gpu)",
+    "rope (host)",
+    "attention (host)",
+    "out proj (gpu)",
+    "ffn: main stack (gpu)",
+    "ffn: refiner",
+    "  w1 readback (of ffn)",
+    "  host silu (of ffn)",
+];
+
+/// Slot 3 wraps both the device and the CPU attention branch, so its host/gpu
+/// suffix cannot be a constant. `RUST_GPU_ATTENTION=0` moves ~27 s of the step
+/// (measured: 10.8 s -> 27.0 s over 8 steps at 512x512, seed 42) into this slot,
+/// which is what the runtime value reports.
+#[cfg(feature = "vulkan")]
+fn gpu_phase_label(slot: usize) -> &'static str {
+    match slot {
+        3 if gpu_attention_enabled() => "attention (gpu)",
+        3 => "attention (host)",
+        _ => GPU_PHASE_LABELS[slot],
     }
-    #[cfg(not(target_os = "macos"))]
-    (value.cos(), value.sin())
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_profile_add(slot: usize, started: std::time::Instant) {
+    GPU_PROFILE_TIMERS.with(|cell| {
+        cell.borrow_mut()[slot] += started.elapsed().as_secs_f64() * 1e3;
+    });
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_profile_reset() {
+    GPU_PROFILE_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 10]);
+}
+
+#[cfg(feature = "vulkan")]
+fn gpu_profile_report(steps: usize) {
+    let t = GPU_PROFILE_TIMERS.with(|cell| *cell.borrow());
+    // Slots 7 and 8 are subsets of slot 5, so the total stops at the first
+    // non-overlapping 7; counting them again would report a step that never
+    // happened.
+    const DISJOINT: usize = 7;
+    let total: f64 = t[..DISJOINT].iter().sum();
+    if total <= 0.0 {
+        return;
+    }
+    let pct = |x: f64| x / total * 100.0;
+    eprintln!("\n[gpu-block-profile over {steps} denoise steps] total={total:.1}ms");
+    for (slot, label) in GPU_PHASE_LABELS.iter().enumerate() {
+        let label = gpu_phase_label(slot);
+        let value = t[slot];
+        if value == 0.0 && label.starts_with("  ") {
+            continue;
+        }
+        eprintln!("  {label:22} {value:9.1}ms ({:5.1}%)", pct(value));
+    }
 }
 
 pub(crate) struct TorchMt19937 {
@@ -1411,20 +1903,33 @@ impl TorchMt19937 {
         radius * theta.cos()
     }
 
-    fn normal_fill_16(values: &mut [f32]) {
+    fn normal_fill_16(values: &mut [f32], sd_cpp: bool) {
         debug_assert_eq!(values.len(), 16);
         for index in 0..8 {
             let u1 = 1.0 - values[index];
             let u2 = values[index + 8];
             let radius = (-2.0 * u1.ln()).sqrt();
-            let theta = (2.0 * std::f64::consts::PI * f64::from(u2)) as f32;
-            let (cosine, sine) = torch_sin_cos(theta);
+            let theta = if sd_cpp {
+                (2.0 * std::f32::consts::PI) * u2
+            } else {
+                (2.0 * std::f64::consts::PI * f64::from(u2)) as f32
+            };
+            let (sine, cosine) = theta.sin_cos();
             values[index] = radius * cosine;
             values[index + 8] = radius * sine;
         }
     }
 
     pub(crate) fn fill_normal(&mut self, output: &mut [f32]) {
+        self.fill_normal_impl(output, false);
+    }
+
+    /// stable-diffusion.cpp's CPU RNG rounds 2*pi to F32 before multiplication.
+    pub(crate) fn fill_normal_sd_cpp(&mut self, output: &mut [f32]) {
+        self.fill_normal_impl(output, true);
+    }
+
+    fn fill_normal_impl(&mut self, output: &mut [f32], sd_cpp: bool) {
         if output.len() < 16 {
             for value in output {
                 *value = self.normal_double() as f32;
@@ -1436,14 +1941,14 @@ impl TorchMt19937 {
             *value = Self::uniform_f32(self.rand_u32());
         }
         for start in (0..output.len() - 15).step_by(16) {
-            Self::normal_fill_16(&mut output[start..start + 16]);
+            Self::normal_fill_16(&mut output[start..start + 16], sd_cpp);
         }
         if output.len() % 16 != 0 {
             let tail = output.len() - 16;
             for value in &mut output[tail..] {
                 *value = Self::uniform_f32(self.rand_u32());
             }
-            Self::normal_fill_16(&mut output[tail..]);
+            Self::normal_fill_16(&mut output[tail..], sd_cpp);
         }
     }
 }
@@ -1728,8 +2233,1233 @@ fn z_image_rope_into(
     Ok(())
 }
 
-#[cfg(test)]
+/// Fetch, or build, the batched session for a sequence length, temporarily
+/// moving it out of the scratch.
+///
+/// The session owns the uploaded weights, so it has to live somewhere for the
+/// whole render, but holding a borrow into `scratch` would conflict with the
+/// buffers `run_block` needs. Taking it out for the duration of one block and
+/// putting it back on the way out avoids that, at the cost of a map insert per
+/// block -- negligible against a dispatch.
+///
+/// `enabled` is latched off on the first failure so the rest of the render
+/// stays on one backend.
+#[cfg(feature = "vulkan")]
+fn take_gpu_session(
+    scratch: &mut DitScratch,
+    rows: usize,
+    enabled: &mut bool,
+) -> Option<crate::models::diffusion::z_image::dit_gpu::DitGpuSession> {
+    if !*enabled {
+        return None;
+    }
+    if !scratch.gpu.contains_key(&rows) {
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            *enabled = false;
+            return None;
+        };
+        // The attention regions are 134 MB at the 1056-token shape, so they are
+        // only reserved when the device attention is actually going to run.
+        #[cfg(feature = "vulkan")]
+        let with_attention = gpu_attention_enabled();
+        #[cfg(not(feature = "vulkan"))]
+        let with_attention = false;
+        match crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+            context,
+            rows,
+            with_attention,
+        ) {
+            Ok(session) => {
+                scratch.gpu.insert(rows, session);
+            }
+            Err(error) => {
+                eprintln!("[GPU] Z-Image DiT session unavailable ({error}); using the CPU");
+                *enabled = false;
+                return None;
+            }
+        }
+    }
+    scratch.gpu.remove(&rows)
+}
+
+/// Whether to bind the F16 refiner stacks to the GPU.
+///
+/// On: the four refiner blocks' FFN drops from 5.72 s to 3.32 s of a step and
+/// the render agrees with the CPU slightly better, 2.17/255 against 2.26,
+/// because the kernel's f16 rounding matches what the CPU row path does.
+///
+/// Whether to bind the F16 refiner stacks to the GPU.
+///
+/// The context refiner has no AdaLN weights and no time input, so its
+/// `modulations` is `None` -- the fused QKV chain takes `Option<&[f32]>` and
+/// skips the AdaLN dispatch when it is absent, which is what `scale_modulated_branch`
+/// does with a missing scale on the CPU.
+///
+/// `RUST_GPU_ATTENTION=0` puts the DiT attention back on the CPU row path.
+///
+/// On by default. The chain was measured against a CPU render of the same seed
+/// and the difference did not grow: 28.96 dB against 28.43 dB for the CPU
+/// attention render, both away from the same CPU reference, so the device path
+/// lands inside the divergence the rest of the GPU path already carries rather
+/// than adding to it. Turning it off is for when bit-level agreement with the CPU
+/// output matters, which the GPU path has never provided.
+#[cfg(feature = "vulkan")]
+fn gpu_attention_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_ATTENTION")
+            .map(|value| value != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// `RUST_GPU_F16=0` keeps every F16 projection on the CPU row path.
+///
+/// The name used to be `RUST_GPU_F16_REF` and it used to switch the refiner
+/// stacks only. It now switches all of them, because the main stack can
+/// take them: the FFN down projection is the exception and stays on the CPU
+/// whatever this says.
+#[cfg(feature = "vulkan")]
+fn f16_projections_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RUST_GPU_F16")
+            .map(|value| value != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// Bind the F16 refiner weights without dispatching on them.
+///
+/// This separates the two things enabling the refiner does, which is the only
+/// way to tell "1.4 GB of F16 weights sitting next to the Q8 ones costs the
+/// main stack something per block" from "the F16 path is being taken costs
+/// something per block". Diagnostic only: `bind_block_weights` reporting a
+/// projection as bound is what routes the block onto the device, so this
+/// returns the set it will actually use.
+#[cfg(feature = "vulkan")]
+fn f16_refiner_resident_only() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("RUST_GPU_F16_RESIDENT").is_ok())
+}
+
+/// Upload and bind this block's projections, once per render.
+///
+/// The main stack is Q8_0 and binds all five. The two refiner stacks are F16 in
+/// the GGUF and bind nothing unless the F16 projections are enabled, so by default
+/// every refiner projection falls through to the per-row CPU path below.
+#[cfg(feature = "vulkan")]
+fn bind_block_weights(
+    session: &mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession,
+    source: &dyn TensorSource,
+    block: &BlockWeights,
+    layer: usize,
+) -> std::collections::HashSet<crate::models::diffusion::z_image::dit_gpu::Projection> {
+    use crate::models::diffusion::z_image::dit_gpu::Projection;
+
+    let mut bound = std::collections::HashSet::new();
+    // The F16 weights get uploaded either way when this is set; only the
+    // decision to dispatch on them changes, which is the whole point.
+    let resident_only = f16_refiner_resident_only() && f16_projections_enabled();
+    for (projection, name) in [
+        (Projection::Qkv, &block.qkv),
+        (Projection::Out, &block.out),
+        (Projection::W1, &block.w1),
+        (Projection::W2, &block.w2),
+        (Projection::W3, &block.w3),
+    ] {
+        if session.has_weight(layer, projection) {
+            bound.insert(projection);
+            continue;
+        }
+        let Some(info) = source.tensor_info(name) else {
+            continue;
+        };
+        // Q8_0 for the main stack, F16 for the refiner stacks: the GPU has a
+        // tiled kernel for each, and re-quantizing the refiner to Q8_0 would
+        // move it to the device at the cost of its precision.
+        let format = match info.ggml_type {
+            GGMLType::Q8_0 => crate::vulkan::ops::GpuWeightFormat::Q8_0,
+            // The F16 device matmul is the refiner's contract, and the refiner
+            // stacks are the only place it was measured: they have no AdaLN
+            // weights and no time input. The main stack differs -- its
+            // activations carry the AdaLN modulation and the time embedding --
+            // and dispatching it with the same kernel does not survive a
+            // second step. Measured on the F16 DiT (128x128): the first step
+            // (sigma 1.000) matched the CPU render to 58.3 dB, and the second
+            // step (sigma 0.003) came back with every flow value NaN, 1024 of
+            // 1024. The CPU render of the same spec is finite, so the F16
+            // weights are not at fault; the device path is.
+            //
+            // So the F16 weights bind for the refiner stacks only, and a model
+            // whose main stack is F16 keeps that stack on the CPU row path,
+            // which is the same policy the K-quant DiT gets (TODO-032). The
+            // F16 main stack on the device is a gap in the shared float matmul,
+            // tracked as TODO-076.
+            //
+            // The F16 tiled kernel is also off by default. It is 7x faster than
+            // the CPU row path on the refiner's shapes (3.74 s -> 0.52 s of a
+            // step) and agrees with it to 2.17/255, but with the refiner on the
+            // device the main stack's FFN slot measured 6.68 s against 3.81 s
+            // before, and 8.00 s with the refiner back on the CPU -- so the step
+            // total did not move and the regression is not explained. The slot
+            // is not stable enough across instrumentation changes to attribute
+            // it, so this stays opt-in until it is.
+            GGMLType::F16 if f16_projections_enabled() => {
+                // The FFN down projection is the one projection the device
+                // path cannot take in F16. The CPU path writes it with
+                // `linear_into_scaled(.., 1.0 / 128.0)`, which scales the
+                // activations down before they are rounded to F16 -- and
+                // rounding is what has a range. The device path has no such
+                // pre-scale, so the F16 intermediate is rounded as it stands:
+                // at the second step of a render it is around 3.6e6, which is
+                // past the 65504 an F16 holds, and the projection came back
+                // with 53760 infinities in it. Those infinities are the
+                // NaNs: the next block's tokens came back with them, and the
+                // flow with them.
+                //
+                // The matmul is linear, so scaling the input changes nothing
+                // but the rounding -- which is exactly what has to change. The
+                // device path has no way to scale the FFN intermediate (it
+                // never leaves the device), so the projection stays on the
+                // CPU row path for the main stack, where the pre-scale is
+                // already part of the contract.
+                if matches!(projection, Projection::W2) && layer >= 2 * REFINER_LAYERS {
+                    continue;
+                }
+                crate::vulkan::ops::GpuWeightFormat::F16
+            }
+            _ => continue,
+        };
+        let Some(bytes) = source.tensor_slice(name) else {
+            continue;
+        };
+        if session
+            .bind_weight_as(layer, projection, bytes, format)
+            .is_ok()
+            && !resident_only
+        {
+            bound.insert(projection);
+        }
+    }
+    bound
+}
+
+/// The GPU twin of [`run_block`].
+///
+/// Same arithmetic in the same order, but the five projections become five
+/// dispatches covering the whole sequence instead of one per row per
+/// projection. A step therefore issues 120 dispatches rather than 184,320,
+/// which is the difference between paying the 128 us submit-and-fence floor
+/// once per projection and paying it per row.
+///
+/// Element-wise work -- rms_norm, the AdaLN scale, silu, the residual add --
+/// stays on the CPU, using the same functions in the same order as
+/// `run_block`. The buffer roles are copied too: w1 lands in `qkv`, w3 in
+/// `ffn`, `silu_mul_inplace` folds w3 into w1's slot, and w2 reads `ffn` with
+/// the 1/128 scale. Getting any of that wrong is what produced a 64/255
+/// difference from the CPU path, so it is spelled out here rather than
+/// reshuffled.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn run_block_gpu(
+    session: &mut crate::models::diffusion::z_image::dit_gpu::DitGpuSession,
+    source: &dyn TensorSource,
+    block: &BlockWeights,
+    layer: usize,
+    rows: usize,
+    tokens: &mut [f32],
+    rope: &[f32],
+    time: Option<&[f32]>,
+    qkv: &mut [f32],
+    attention: &mut [f32],
+    ffn: &mut [f32],
+    scores: &mut [f32],
+    modulation: &mut [f32],
+    q8: &mut Q8Scratch,
+    pool: &ComputePool,
+    attention_on_gpu: bool,
+) -> Result<(), String> {
+    use crate::models::diffusion::z_image::dit_gpu::Projection;
+
+    let hidden_len = rows * HIDDEN;
+    let qkv_len = rows * QKV_WIDTH;
+    let ffn_len = rows * FFN_WIDTH;
+    let bound = bind_block_weights(session, source, block, layer);
+    GPU_BLOCKS_TAKEN.with(|cell| {
+        let mut taken = cell.borrow_mut();
+        taken.0 += 1;
+        taken.1 += bound.len();
+    });
+
+    let t_phase = std::time::Instant::now();
+    // --- AdaLN, identical to the CPU path ------------------------------------
+    let modulations = if let Some(weights) = &block.modulation {
+        let time = time.ok_or("Missing Z-Image AdaLN input")?;
+        linear_into_ggml(
+            source,
+            &weights.matrix,
+            TIME_WIDTH,
+            HIDDEN * 4,
+            time,
+            &mut modulation[..HIDDEN * 4],
+            q8,
+            pool,
+        )?;
+        for (value, bias) in modulation[..HIDDEN * 4].iter_mut().zip(&weights.bias) {
+            *value += *bias;
+        }
+        let split = split_adaln_modulation(&modulation[..HIDDEN * 4], HIDDEN)?;
+        Some(split)
+    } else {
+        if time.is_some() {
+            return Err("Unexpected Z-Image AdaLN input".into());
+        }
+        None
+    };
+
+    gpu_profile_add(0, t_phase);
+    let t_phase = std::time::Instant::now();
+
+    // --- QKV: normalise, modulate and project in one command buffer ----------
+    let layout = *session.layout();
+    if bound.contains(&Projection::Qkv) {
+        // The normed and modulated activations are consumed by the QKV matmul
+        // and by nothing else, so the GPU keeps them: no upload, no download,
+        // and the per-row host loop is gone.
+        session
+            .ops()
+            .write_f32(layout.x, &tokens[..hidden_len])
+            .map_err(|e| format!("Z-Image DiT token upload failed: {e}"))?;
+        // `modulations` is None for the context refiner, which has no AdaLN
+        // weights and no time input. The CPU branch passes that straight
+        // through to `scale_modulated_branch`; unwrapping it here turned a
+        // legitimate shape into an error, and the error latched the GPU off for
+        // every remaining step of the render.
+        // When attention also runs on the device, Q/K norm and RoPE fold into the
+        // same command buffer and the projection never reaches the host. The CPU
+        // attention path still needs it there, and still rotates it below.
+        let fused_qk_rope = attention_on_gpu;
+        if fused_qk_rope {
+            session
+                .ensure_rope(rope, rows)
+                .map_err(|e| format!("Z-Image DiT RoPE table upload failed: {e}"))?;
+        }
+        session
+            .record_attention_qkv(
+                layer,
+                &block.attention_norm1,
+                modulations.map(|values| values.scale_msa),
+                &block.q_norm,
+                &block.k_norm,
+                fused_qk_rope,
+            )
+            .map_err(|e| format!("Z-Image DiT fused QKV dispatch failed: {e}"))?;
+        if !fused_qk_rope {
+            qkv[..qkv_len].copy_from_slice(session.readback(qkv_len));
+        }
+    } else {
+        for row in 0..rows {
+            let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
+            let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+            rms_norm(token, &block.attention_norm1, normalized, RMS_EPSILON);
+            scale_modulated_branch(normalized, modulations.map(|values| values.scale_msa))?;
+        }
+        for row in 0..rows {
+            linear_into(
+                source,
+                &block.qkv,
+                HIDDEN,
+                QKV_WIDTH,
+                &attention[row * HIDDEN..(row + 1) * HIDDEN],
+                &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH],
+                q8,
+                pool,
+            )?;
+        }
+    }
+
+    gpu_profile_add(1, t_phase);
+    let t_phase = std::time::Instant::now();
+
+    // --- RoPE on Q and K, per row and per head, same as the CPU path ----------
+    //
+    // Already applied on the device by `record_attention_qkv` when attention is
+    // fused; this loop is the CPU attention path and the no-GPU path.
+    let qkv_normed_on_device = bound.contains(&Projection::Qkv) && attention_on_gpu;
+    if !qkv_normed_on_device {
+        for row in 0..rows {
+            let rotation = &rope[row * ROPE_HEAD_WIDTH..(row + 1) * ROPE_HEAD_WIDTH];
+            let row_qkv = &mut qkv[row * QKV_WIDTH..(row + 1) * QKV_WIDTH];
+            for head in 0..HEADS {
+                let start = head * ROPE_HEAD_WIDTH;
+                let query = &mut row_qkv[start..start + ROPE_HEAD_WIDTH];
+                rms_norm_inplace(query, &block.q_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(query, rotation)?;
+                let key_start = HIDDEN + start;
+                let key = &mut row_qkv[key_start..key_start + ROPE_HEAD_WIDTH];
+                rms_norm_inplace(key, &block.k_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(key, rotation)?;
+            }
+        }
+    }
+
+    gpu_profile_add(2, t_phase);
+    let t_phase = std::time::Instant::now();
+
+    // --- attention -----------------------------------------------------------
+    // The GPU chain reads the RoPE'd QKV straight out of the arena, so the row
+    // the CPU just rotated has to go back up. That upload is ~48 MB per block at
+    // this shape, which is far less than the arithmetic it replaces, and it buys
+    // back the single largest stage in the step.
+    if attention_on_gpu {
+        // Copy the regions out first: `layout()` borrows the session, and the
+        // recording below needs it mutably.
+        let regions = *session.layout();
+        // The fused path leaves the normed, rotated QKV in the arena already.
+        // Uploading the host copy on top of it would undo the fusion.
+        if !qkv_normed_on_device {
+            session
+                .ops()
+                .write_f32(regions.qkv, &qkv[..qkv_len])
+                .map_err(|error| error.to_string())?;
+        }
+        session
+            .record_diy_attention(rows, regions.attention_scores, regions.attention_out)
+            .map_err(|error| error.to_string())?;
+        session
+            .ops()
+            .read_f32_into(regions.attention_out, &mut attention[..hidden_len])
+            .map_err(|error| error.to_string())?;
+    } else {
+        attention_into(
+            &qkv[..qkv_len],
+            rows,
+            HEADS,
+            ROPE_HEAD_WIDTH,
+            scores,
+            &mut attention[..hidden_len],
+            pool,
+        )?;
+    }
+
+    gpu_profile_add(3, t_phase);
+    let t_phase = std::time::Instant::now();
+
+    // --- output projection, then norm and residual per row -------------------
+    if bound.contains(&Projection::Out) {
+        session
+            .project(
+                layer,
+                Projection::Out,
+                layout.x,
+                &attention[..hidden_len],
+                layout.out,
+            )
+            .map_err(|e| format!("Z-Image DiT out dispatch failed: {e}"))?;
+        let projected = session.readback(hidden_len);
+        readback_norm_and_residual_rows(
+            pool,
+            tokens,
+            &mut qkv[..hidden_len],
+            projected,
+            &block.attention_norm2,
+            modulations.map(|values| values.gate_msa),
+            rows,
+        )?;
+    } else {
+        for row in 0..rows {
+            let out = &mut qkv[row * HIDDEN..(row + 1) * HIDDEN];
+            linear_into(
+                source,
+                &block.out,
+                HIDDEN,
+                HIDDEN,
+                &attention[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                q8,
+                pool,
+            )?;
+            rms_norm_inplace(out, &block.attention_norm2, RMS_EPSILON);
+            add_modulated_residual(
+                &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                modulations.map(|values| values.gate_msa),
+            )?;
+        }
+    }
+
+    gpu_profile_add(4, t_phase);
+    let t_phase = std::time::Instant::now();
+
+    // --- FFN ------------------------------------------------------------------
+    let gate_on_gpu = bound.contains(&Projection::W1);
+    let up_on_gpu = bound.contains(&Projection::W3);
+    let down_on_gpu = bound.contains(&Projection::W2);
+    for row in 0..rows {
+        let token = &tokens[row * HIDDEN..(row + 1) * HIDDEN];
+        let normalized = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+        rms_norm(token, &block.ffn_norm1, normalized, RMS_EPSILON);
+        scale_modulated_branch(normalized, modulations.map(|values| values.scale_mlp))?;
+    }
+
+    let ffn_start = std::time::Instant::now();
+    let batch_limit: usize = std::env::var("FFN_BATCH_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
+    if gate_on_gpu && up_on_gpu && down_on_gpu && layer < batch_limit {
+        // One command buffer for the whole FFN. All three projections run at
+        // scale 1.0, so nothing has to cross the bus between w1, w3, the SiLU
+        // product and w2 -- the gate/up buffers are `ffn_len` wide and reading
+        // them back was the single largest host cost in the step.
+        //
+        // `x` has to be refreshed here. The unfused path uploaded the current
+        // activations into it on every `project_scaled` call, but slot 1 and
+        // slot 4 both write regions that overlap `x` in time, so whatever the
+        // fused QKV chain left there is stale by now. Without this the batched
+        // chain multiplies the wrong input and the render comes out at ~5 dB.
+        session
+            .ops()
+            .write_f32(layout.x, &attention[..hidden_len])
+            .map_err(|e| format!("Z-Image DiT FFN activation upload failed: {e}"))?;
+        let commands = session
+            .begin()
+            .map_err(|e| format!("Z-Image DiT FFN begin failed: {e}"))?;
+        let commands = session
+            .record_ffn(commands, layer, ffn_len)
+            .map_err(|e| format!("Z-Image DiT FFN record failed: {e}"))?;
+        commands
+            .submit_and_wait()
+            .map_err(|e| format!("Z-Image DiT FFN submit failed: {e}"))?;
+        // `readback` returns whatever the last `read_into` staged, and a
+        // recorded-but-not-read dispatch never stages anything -- so without
+        // this the norm+residual tail consumes the out-projection's leftovers.
+        session
+            .read_projection(Projection::W2, layout.out)
+            .map_err(|e| format!("Z-Image DiT FFN readback failed: {e}"))?;
+        let t_ffn = std::time::Instant::now();
+        let down = session.readback(hidden_len);
+        readback_norm_and_residual_rows(
+            pool,
+            tokens,
+            &mut attention[..hidden_len],
+            down,
+            &block.ffn_norm2,
+            modulations.map(|values| values.gate_mlp),
+            rows,
+        )?;
+        gpu_profile_add(7, t_ffn);
+    } else if gate_on_gpu {
+        // w1's output is the silu'd side, so it goes to the `gate` region and
+        // the product is formed on the host before w2 sees it.
+        session
+            .project_scaled(
+                layer,
+                Projection::W1,
+                layout.x,
+                &attention[..hidden_len],
+                layout.gate,
+                1.0,
+            )
+            .map_err(|e| format!("Z-Image DiT w1 dispatch failed: {e}"))?;
+        let t_ffn = std::time::Instant::now();
+        let mut gate = session.readback(ffn_len).to_vec();
+        gpu_profile_add(7, t_ffn);
+        let t_ffn = std::time::Instant::now();
+        if up_on_gpu {
+            session
+                .project(
+                    layer,
+                    Projection::W3,
+                    layout.x,
+                    &attention[..hidden_len],
+                    layout.up,
+                )
+                .map_err(|e| format!("Z-Image DiT w3 dispatch failed: {e}"))?;
+            let up = session.readback(ffn_len);
+            let t_silu = std::time::Instant::now();
+            for index in 0..ffn_len {
+                let gate_value = gate[index];
+                gate[index] = (gate_value / (1.0 + (-gate_value).exp())) * up[index];
+            }
+            gpu_profile_add(8, t_silu);
+        } else {
+            for row in 0..rows {
+                let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
+                linear_into(
+                    source,
+                    &block.w3,
+                    HIDDEN,
+                    FFN_WIDTH,
+                    input,
+                    &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                    q8,
+                    pool,
+                )?;
+                for index in 0..FFN_WIDTH {
+                    let at = row * FFN_WIDTH + index;
+                    let gate_value = gate[at];
+                    gate[at] = (gate_value / (1.0 + (-gate_value).exp())) * ffn[at];
+                }
+            }
+        }
+        // w2 reads the activated buffer, which the CPU path keeps in `ffn`.
+        if down_on_gpu {
+            // 1.0, not the 1/128 `run_block` writes: that one is a no-op
+            // because `linear_into_scaled_impl` applies its scale twice and
+            // they cancel. See `DitGpuSession::project_scaled`.
+            session
+                .project_scaled(layer, Projection::W2, layout.gate, &gate, layout.out, 1.0)
+                .map_err(|e| format!("Z-Image DiT w2 dispatch failed: {e}"))?;
+            let down = session.readback(hidden_len);
+            readback_norm_and_residual_rows(
+                pool,
+                tokens,
+                &mut attention[..hidden_len],
+                down,
+                &block.ffn_norm2,
+                modulations.map(|values| values.gate_mlp),
+                rows,
+            )?;
+        } else {
+            for row in 0..rows {
+                let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+                linear_into_scaled(
+                    source,
+                    &block.w2,
+                    FFN_WIDTH,
+                    HIDDEN,
+                    &gate[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                    out,
+                    q8,
+                    pool,
+                    1.0 / 128.0,
+                )?;
+                rms_norm_inplace(out, &block.ffn_norm2, RMS_EPSILON);
+                add_modulated_residual(
+                    &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                    out,
+                    modulations.map(|values| values.gate_mlp),
+                )?;
+            }
+        }
+    } else {
+        // No FFN projection is on the GPU: this is `run_block` verbatim.
+        for row in 0..rows {
+            let input = &attention[row * HIDDEN..(row + 1) * HIDDEN];
+            linear_into(
+                source,
+                &block.w1,
+                HIDDEN,
+                FFN_WIDTH,
+                input,
+                &mut qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                q8,
+                pool,
+            )?;
+            linear_into(
+                source,
+                &block.w3,
+                HIDDEN,
+                FFN_WIDTH,
+                input,
+                &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                q8,
+                pool,
+            )?;
+            silu_mul_inplace(
+                &mut qkv[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                &mut ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+            );
+            let out = &mut attention[row * HIDDEN..(row + 1) * HIDDEN];
+            linear_into_scaled(
+                source,
+                &block.w2,
+                FFN_WIDTH,
+                HIDDEN,
+                &ffn[row * FFN_WIDTH..(row + 1) * FFN_WIDTH],
+                out,
+                q8,
+                pool,
+                1.0 / 128.0,
+            )?;
+            rms_norm_inplace(out, &block.ffn_norm2, RMS_EPSILON);
+            add_modulated_residual(
+                &mut tokens[row * HIDDEN..(row + 1) * HIDDEN],
+                out,
+                modulations.map(|values| values.gate_mlp),
+            )?;
+        }
+    }
+
+    // The FFN splits by backend: the main stack's five projections bind Q8_0
+    // and run on the device, while the refiner blocks are F16 in the GGUF and
+    // fall through to the per-row CPU path.
+    // The three stacks are laid out refiner-first: context_refiners take layers
+    // 0..REFINER_LAYERS, noise_refiners REFINER_LAYERS..2*REFINER_LAYERS, and
+    // the main stack 2*REFINER_LAYERS onward. The earlier MAIN_LAYERS bound
+    // sliced through the main stack, so this slot was summing two stacks.
+    if layer < 2 * REFINER_LAYERS {
+        gpu_profile_add(6, ffn_start);
+    } else {
+        gpu_profile_add(5, ffn_start);
+    }
+
+    Ok(())
+}
+
+#[cfg(all(test, feature = "vulkan"))]
 mod tests {
+    use super::*;
+
+    /// The fused interleaved Q/K norm + RoPE must match the host chain exactly.
+    ///
+    /// `qk_norm_rope` is the NeoX layout and cannot serve the DiT, so this pins
+    /// the variant that can: the same serial norm reduction, but a rotation that
+    /// pairs *adjacent* elements the way `rotate_interleaved_inplace` does.
+    ///
+    /// Two properties this has to get right, which a comparison that only checks
+    /// "the picture still looks fine" would not catch:
+    ///
+    /// * the rotation pairing -- NeoX reads `lane` against `lane + 64`, interleaved
+    ///   reads `2 * lane` against `2 * lane + 1`;
+    /// * that V, the third span of the row, is left completely alone. The shader
+    ///   only ever receives the Q and K regions, so a mis-derived K base would
+    ///   silently land on V instead of failing.
+    ///
+    /// The comparison is bitwise. The kernel copies the norm reduction verbatim
+    /// from the NeoX one precisely so that holds; if a future change relaxes
+    /// that, this test should fail loudly rather than a downstream render
+    /// quietly drifting.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn gpu_interleaved_qk_norm_rope_matches_the_host_chain() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+
+        // The production shape, not a toy one: the whole point of the 512x512
+        // block is 3840 tokens across 30 heads, and a stride or span mistake that
+        // happens to survive a handful of rows does not necessarily survive
+        // 3840 of them.
+        let dim = ROPE_HEAD_WIDTH;
+        let heads = HEADS;
+        let q_span = HEADS * ROPE_HEAD_WIDTH;
+        let qkv_width = QKV_WIDTH;
+        // `z_image_rope` pads the text run to its own alignment, so the token
+        // count is read off the table rather than assumed -- deriving it the
+        // other way round silently asks for a table of the wrong length.
+        let rope = z_image_rope(512, 52 * PATCH_SIZE, 64 * PATCH_SIZE).expect("rope table");
+        let rows = rope.len() / ROPE_HEAD_WIDTH;
+        assert_eq!(rows * ROPE_HEAD_WIDTH, rope.len());
+        let qkv_len = rows * qkv_width;
+
+        // Deterministic spread over a few orders of magnitude, so the norm
+        // reduction sees a realistic mix instead of values clustered near 1.
+        let input: Vec<f32> = (0..qkv_len)
+            .map(|i| {
+                let a = ((i * 2654435761usize) % 4096) as f32 / 4096.0;
+                let b = ((i / 7 + 13) % 4096) as f32 / 4096.0;
+                (a * 2.0 - 1.0) * (0.125 + 1.875 * b)
+            })
+            .collect();
+        let q_norm: Vec<f32> = (0..dim)
+            .map(|i| 0.8 + 0.4 * ((i * 31 % 97) as f32 / 97.0))
+            .collect();
+        let k_norm: Vec<f32> = (0..dim)
+            .map(|i| 0.7 + 0.5 * ((i * 17 % 89) as f32 / 89.0))
+            .collect();
+
+        let mut expected = input.clone();
+        for row in 0..rows {
+            let rotation = &rope[row * dim..(row + 1) * dim];
+            let row_qkv = &mut expected[row * qkv_width..(row + 1) * qkv_width];
+            for head in 0..heads {
+                let start = head * dim;
+                let query = &mut row_qkv[start..start + dim];
+                rms_norm_inplace(query, &q_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(query, rotation).expect("host rope");
+                let key_start = q_span + start;
+                let key = &mut row_qkv[key_start..key_start + dim];
+                rms_norm_inplace(key, &k_norm, QK_RMS_EPSILON);
+                rotate_interleaved_inplace(key, rotation).expect("host rope");
+            }
+        }
+
+        let mut ops = crate::vulkan::ops::Qwen3Ops::new_with_size(
+            context,
+            (qkv_len * 4 + rope.len() * 4).next_multiple_of(1 << 20) + (1 << 20),
+            8,
+        )
+        .expect("ops");
+        let qkv = crate::vulkan::ops::ArenaRegion {
+            offset: 0,
+            size: qkv_len * 4,
+        };
+        let table = crate::vulkan::ops::ArenaRegion {
+            offset: qkv_len * 4,
+            size: rope.len() * 4,
+        };
+        ops.write_f32(qkv, &input).expect("write qkv");
+        ops.write_f32(table, &rope).expect("write rope");
+
+        let upload = |values: &[f32]| unsafe {
+            context.upload_static(
+                &values
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
+        };
+        let bindings = ops
+            .bind_buffers(&[upload(&q_norm).expect("q"), upload(&k_norm).expect("k")])
+            .expect("bind norms");
+
+        let commands = crate::vulkan::ops::TokenCommands::begin(context).expect("begin");
+        ops.record_qk_norm_rope_interleaved_rows(
+            &commands,
+            bindings,
+            qkv,
+            qkv,
+            heads,
+            heads,
+            dim,
+            table,
+            qkv_width,
+            qkv_width,
+            q_span,
+            QK_RMS_EPSILON,
+            true,
+            true,
+            rows,
+        )
+        .expect("record");
+        commands.submit_and_wait().expect("submit");
+
+        let got = ops.read_f32(qkv, qkv_len).expect("read");
+        let bad: Vec<usize> = got
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .filter(|(_, (a, b))| a.to_bits() != b.to_bits())
+            .map(|(i, _)| i)
+            .take(8)
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "interleaved Q/K norm+RoPE diverges from the host chain at {bad:?} \
+             (rows={rows} heads={heads} dim={dim}, first got {:?} expected {:?})",
+            bad.iter().map(|&i| got[i]).collect::<Vec<_>>(),
+            bad.iter().map(|&i| expected[i]).collect::<Vec<_>>()
+        );
+
+        // V must be bit-identical to the input: the shader is only handed the Q
+        // and K regions, so this is what catches a mis-derived K base.
+        for row in 0..rows {
+            let v = &got[row * qkv_width + 2 * q_span..row * qkv_width + 3 * q_span];
+            let v_in = &input[row * qkv_width + 2 * q_span..row * qkv_width + 3 * q_span];
+            assert_eq!(v, v_in, "row {row}: V was modified");
+        }
+    }
+
+    /// The fused AdaLN modulation must match `scale_modulated_branch` exactly.
+    ///
+    /// This is the operator that keeps the normalised rows on the device: the CPU
+    /// path runs it per row on the host, and a fused chain runs it as a dispatch
+    /// against an arena region. If the two disagree, every downstream projection in
+    /// the block sees a different input, which is the class of bug that produced a
+    /// 64/255 image earlier.
+    #[cfg(all(test, feature = "vulkan"))]
+    #[test]
+    fn gpu_adaln_modulate_matches_the_cpu_branch() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        // 32 rows, since the session pads the sequence to a multiple of the
+        // shader's 32-value block.
+        let rows = 32usize;
+        // The session sizes its arena from the real block dimensions, so the test
+        // has to use the real width too -- writing 256-wide rows into a
+        // 3840-wide region would be testing the wrong offsets.
+        let width = HIDDEN;
+        let values: Vec<f32> = (0..rows * width)
+            .map(|i| ((i % 61) as f32 / 61.0) - 0.5)
+            .collect();
+        let scale: Vec<f32> = (0..width).map(|i| 0.5 + (i % 7) as f32 * 0.1).collect();
+
+        let mut expected = values.clone();
+        for row in 0..rows {
+            scale_modulated_branch(&mut expected[row * width..(row + 1) * width], Some(&scale))
+                .unwrap();
+        }
+
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        let bytes: Vec<u8> = scale.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let buffer = unsafe { context.upload_static(&bytes) }.expect("upload");
+        let bindings = session
+            .ops_mut()
+            .bind_buffers(std::slice::from_ref(&buffer))
+            .expect("bind");
+
+        let layout = *session.layout();
+        session.ops().write_f32(layout.x, &values).expect("write");
+        let commands = session.begin().expect("begin");
+        session
+            .ops()
+            .record_adaln_modulate_rows(&commands, bindings, layout.x, width, rows, width)
+            .expect("record");
+        commands.submit_and_wait().expect("submit");
+        let mut got = vec![0.0; rows * width];
+        session.ops().read_f32_into(layout.x, &mut got).unwrap();
+
+        let max_abs = expected
+            .iter()
+            .zip(got.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "modulate: max_abs={max_abs:.3e} expected[0]={:.6} got[0]={:.6}",
+            expected[0], got[0]
+        );
+        assert!(
+            max_abs < 1e-6,
+            "fused AdaLN modulate diverges from scale_modulated_branch by {max_abs:e}"
+        );
+    }
+
+    /// The fused chain the GPU block now runs: rms_norm into `normed`, then AdaLN
+    /// in place. The CPU equivalent is the per-row `rms_norm` plus
+    /// `scale_modulated_branch` that the unfused path used, and the QKV matmul sees
+    /// whatever lands in the input region -- so this is the boundary where a
+    /// mismatch would turn into a visibly different image rather than a caught
+    /// error.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn gpu_fused_norm_and_modulate_match_the_per_row_cpu_chain() {
+        use crate::models::diffusion::z_image::dit_gpu::NormKind;
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 32usize;
+        let width = HIDDEN;
+        let tokens: Vec<f32> = (0..rows * width)
+            .map(|i| ((i % 61) as f32 / 61.0) - 0.5)
+            .collect();
+        let gamma: Vec<f32> = (0..width).map(|i| 0.9 + (i % 13) as f32 * 0.01).collect();
+        let scale: Vec<f32> = (0..width).map(|i| 0.5 + (i % 7) as f32 * 0.1).collect();
+
+        let mut expected = tokens.clone();
+        for row in 0..rows {
+            let slice = &mut expected[row * width..(row + 1) * width];
+            rms_norm(
+                &tokens[row * width..(row + 1) * width],
+                &gamma,
+                slice,
+                RMS_EPSILON,
+            );
+            scale_modulated_branch(slice, Some(&scale)).unwrap();
+        }
+
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        let layout = *session.layout();
+        session.ops().write_f32(layout.x, &tokens).expect("write");
+        session
+            .bind_norm(0, NormKind::AttentionNorm1, &gamma)
+            .expect("norm");
+        session.bind_modulation(&scale).expect("modulation");
+        let norm = session
+            .norm_bindings(0, NormKind::AttentionNorm1)
+            .expect("norm bindings");
+        let modulation = session.modulation_bindings().expect("modulation bindings");
+
+        // AdaLN runs in place, so the normed values have to be snapshotted between
+        // the two dispatches to tell which stage diverged.
+        let commands = session.begin().expect("begin");
+        session
+            .ops()
+            .record_rms_norm_rows(
+                &commands,
+                norm,
+                layout.x,
+                layout.normed,
+                width,
+                RMS_EPSILON,
+                rows,
+                width,
+                width,
+            )
+            .expect("rms_norm");
+        commands.submit_and_wait().expect("submit norm");
+        let mut normed = vec![0.0; rows * width];
+        session
+            .ops()
+            .read_f32_into(layout.normed, &mut normed)
+            .unwrap();
+
+        let mut expected_normed = tokens.clone();
+        for row in 0..rows {
+            let target = &mut expected_normed[row * width..(row + 1) * width];
+            rms_norm(
+                &tokens[row * width..(row + 1) * width],
+                &gamma,
+                target,
+                RMS_EPSILON,
+            );
+        }
+
+        let commands = session.begin().expect("begin");
+        session
+            .ops()
+            .record_adaln_modulate_rows(&commands, modulation, layout.normed, width, rows, width)
+            .expect("adaln");
+        commands.submit_and_wait().expect("submit adaln");
+        let mut got = vec![0.0; rows * width];
+        session
+            .ops()
+            .read_f32_into(layout.normed, &mut got)
+            .unwrap();
+
+        let norm_error = normed
+            .iter()
+            .zip(expected_normed.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_abs = got
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("chain: norm-only vs cpu={norm_error:e} full vs cpu={max_abs:e}");
+        assert!(
+            norm_error < 1e-5,
+            "fused rms_norm diverges from the CPU norm by {norm_error}"
+        );
+        assert!(
+            max_abs < 1e-4,
+            "fused norm+AdaLN diverges from the per-row CPU chain by {max_abs}"
+        );
+    }
+
+    /// Compare the batched GPU projection against the per-row CPU one, element by
+    /// element, on a single block's QKV weight.
+    ///
+    /// The end-to-end comparison is useless for locating a mismatch: one step is 30
+    /// blocks, each mixing a projection with a norm, a modulation and a residual, so
+    /// a 64/255 image difference could come from anywhere. This isolates the one
+    /// operation that differs -- one dispatch over all rows instead of one per row
+    /// -- and reports where the first element goes wrong.
+    #[cfg(all(test, feature = "vulkan"))]
+    #[test]
+    fn gpu_batched_qkv_matches_the_per_row_cpu_projection() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+
+        // A small row count keeps the test fast; the kernel is row-count agnostic.
+        let rows = 32usize;
+        let source = crate::models::diffusion::z_image::test_source();
+        // Q8_0 row layout: 34 bytes per 32 values -- an f16 scale then 32 int8.
+        let mut weight = Vec::with_capacity(QKV_WIDTH * (HIDDEN / 32) * 34);
+        for row in 0..QKV_WIDTH {
+            for block in 0..HIDDEN / 32 {
+                let scale = f16::from_f32(1.0 / 32.0);
+                weight.extend_from_slice(&scale.to_bits().to_le_bytes());
+                for k in 0..32 {
+                    let index = block * 32 + k;
+                    weight.push((((row * 31 + index * 7) % 255) as i16 - 127) as i8 as u8);
+                }
+            }
+        }
+        let source = source.with_raw_tensor(
+            "qkv",
+            &[HIDDEN as u64, QKV_WIDTH as u64],
+            GGMLType::Q8_0,
+            weight,
+        );
+
+        let input: Vec<f32> = (0..rows * HIDDEN)
+            .map(|i| ((i % 97) as f32 / 97.0) - 0.5)
+            .collect();
+
+        // CPU: one row at a time, exactly as run_block does it.
+        let mut cpu = vec![0f32; rows * QKV_WIDTH];
+        let mut scratch = Q8Scratch::new(HIDDEN);
+        let pool = ComputePool::new(1);
+        for row in 0..rows {
+            linear_into(
+                &source,
+                "qkv",
+                HIDDEN,
+                QKV_WIDTH,
+                &input[row * HIDDEN..(row + 1) * HIDDEN],
+                &mut cpu[row * QKV_WIDTH..(row + 1) * QKV_WIDTH],
+                &mut scratch,
+                &pool,
+            )
+            .unwrap();
+        }
+
+        // GPU: one dispatch for the whole sequence.
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        session
+            .bind_weight(
+                0,
+                crate::models::diffusion::z_image::dit_gpu::Projection::Qkv,
+                source.tensor_slice("qkv").unwrap(),
+            )
+            .expect("bind");
+        let layout = *session.layout();
+        session
+            .project(
+                0,
+                crate::models::diffusion::z_image::dit_gpu::Projection::Qkv,
+                layout.x,
+                &input,
+                layout.qkv,
+            )
+            .expect("project");
+        let gpu = session.readback(rows * QKV_WIDTH);
+
+        let first_bad = cpu
+            .iter()
+            .zip(gpu.iter())
+            .position(|(a, b)| (a - b).abs() > 1e-3);
+        let max_abs = cpu
+            .iter()
+            .zip(gpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("qkv: rows={rows} cpu[0]={:.6} gpu[0]={:.6}", cpu[0], gpu[0]);
+        eprintln!("qkv: first_bad={first_bad:?} max_abs={max_abs:.3e}");
+        assert_eq!(first_bad, None, "batched qkv diverges from the CPU path");
+    }
+
+    /// The FFN down projection is the one that carries a scale: `run_block` folds
+    /// 1/128 into it via `linear_into_scaled`, and `project_scaled` has to
+    /// reproduce that exactly. Checking it separately matters because a silent
+    /// factor of 128 here survives a full render as a plausible-looking image.
+    #[cfg(all(test, feature = "vulkan"))]
+    #[test]
+    fn gpu_batched_down_projection_reproduces_the_cpu_scale() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 32usize;
+        let ffn_width = FFN_WIDTH;
+        let source = crate::models::diffusion::z_image::test_source();
+        let mut weight = Vec::with_capacity(HIDDEN * (ffn_width / 32) * 34);
+        for row in 0..HIDDEN {
+            for block in 0..ffn_width / 32 {
+                let scale = f16::from_f32(1.0 / 64.0);
+                weight.extend_from_slice(&scale.to_bits().to_le_bytes());
+                for k in 0..32 {
+                    let index = block * 32 + k;
+                    weight.push((((row * 17 + index * 5) % 255) as i16 - 127) as i8 as u8);
+                }
+            }
+        }
+        let source = source.with_raw_tensor(
+            "w2",
+            &[ffn_width as u64, HIDDEN as u64],
+            GGMLType::Q8_0,
+            weight,
+        );
+        let input: Vec<f32> = (0..rows * ffn_width)
+            .map(|i| ((i % 89) as f32 / 89.0) - 0.5)
+            .collect();
+
+        let mut cpu = vec![0f32; rows * HIDDEN];
+        let mut scratch = Q8Scratch::new(ffn_width);
+        let pool = ComputePool::new(1);
+        for row in 0..rows {
+            // run_block passes 1/128 here, but linear_into_scaled_impl applies its
+            // scale twice and they cancel, so plain linear_into is what the CPU
+            // path actually computes.
+            linear_into(
+                &source,
+                "w2",
+                ffn_width,
+                HIDDEN,
+                &input[row * ffn_width..(row + 1) * ffn_width],
+                &mut cpu[row * HIDDEN..(row + 1) * HIDDEN],
+                &mut scratch,
+                &pool,
+            )
+            .unwrap();
+        }
+
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        session
+            .bind_weight(
+                0,
+                crate::models::diffusion::z_image::dit_gpu::Projection::W2,
+                source.tensor_slice("w2").unwrap(),
+            )
+            .expect("bind");
+        let layout = *session.layout();
+        // The FFN width does not fit the session's HIDDEN-sized `x` region, so the
+        // input goes through its own buffer: this test is about the scale, not
+        // about reusing the QKV staging.
+        let input_region = layout.gate;
+        let output_region = layout.out;
+        session
+            .project_scaled(
+                0,
+                crate::models::diffusion::z_image::dit_gpu::Projection::W2,
+                input_region,
+                &input,
+                output_region,
+                1.0,
+            )
+            .unwrap_or_else(|e| panic!("project failed: {e}"));
+        let gpu = session.readback(rows * HIDDEN);
+
+        let first_bad = cpu
+            .iter()
+            .zip(gpu.iter())
+            .position(|(a, b)| (a - b).abs() > 1e-3);
+        let max_abs = cpu
+            .iter()
+            .zip(gpu.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("w2: cpu[0]={:.6} gpu[0]={:.6}", cpu[0], gpu[0]);
+        eprintln!("w2: first_bad={first_bad:?} max_abs={max_abs:.3e}");
+        assert_eq!(
+            first_bad, None,
+            "scaled down projection diverges from the CPU path"
+        );
+    }
+
     use super::super::Q8Scratch;
     #[cfg(target_os = "macos")]
     use super::ROPE_HEAD_WIDTH;
@@ -1769,22 +3499,23 @@ mod tests {
             if name != self.info.name {
                 return None;
             }
-            self.slice_calls.fetch_add(1, Ordering::Relaxed);
+            self.slice_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Some(&self.bytes)
         }
     }
 
     fn expected_seed_42_20_bits() -> Vec<u32> {
         vec![
-            0x3ff6_a527,
-            0x3fbe_5f54,
+            0x3ff6_a52a,
+            0x3fbe_5f53,
             0x3f66_9567,
-            0xc006_c0dd,
+            0xc006_c0db,
             0xbf42_14e2,
             0x3f8a_0650,
             0x3f4d_0143,
             0x3fd7_1e93,
-            0x3eb6_3341,
+            0x3eb6_3345,
             0xbf2f_c686,
             0xbefc_9934,
             0x3e77_4894,
@@ -1792,7 +3523,7 @@ mod tests {
             0x3d2b_0c00,
             0xbe80_ce79,
             0x3f5c_1fb0,
-            0xbe9e_9487,
+            0xbe9e_9482,
             0xbeca_9a91,
             0x3f4d_ac3c,
             0xbf1f_20e0,
@@ -1822,7 +3553,12 @@ mod tests {
         force_f32_linear_into(&source, "w", &[5.0, 6.0], &mut output, 2, 2, &mut scratch).unwrap();
 
         assert_eq!(output, [17.0, 39.0]);
-        assert_eq!(source.slice_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            source
+                .slice_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
         assert_eq!(scratch.force_f32_row.as_ptr(), row_ptr);
         assert_eq!(scratch.force_f32_row.len(), 2);
     }
@@ -1858,6 +3594,20 @@ mod tests {
             0x41d3_f6d2
         };
         assert_eq!(output[0].to_bits(), expected);
+    }
+
+    #[test]
+    fn sd_cpp_cpu_rng_matches_pinned_seed_42() {
+        let mut values = [0.; 2048];
+        TorchMt19937::new(42).fill_normal_sd_cpp(&mut values);
+        assert_eq!(
+            values[..16].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [
+                0x3ff6a52a, 0x3fbe5f53, 0x3f669567, 0xc006c0db, 0x3f2dacd5, 0xbf9e0591, 0xbd306787,
+                0xbfcd65ba, 0xbf408bf0, 0x3fd3095b, 0xbec8f2f6, 0xbfb3a967, 0xbf3a566d, 0xbf0f36d1,
+                0xbf44d2a1, 0x3f432f9f,
+            ]
+        );
     }
 
     #[test]
@@ -1956,8 +3706,8 @@ mod tests {
         let rope = z_image_rope(27, 2, 2).unwrap();
         let frequency_nine = 26 * ROPE_HEAD_WIDTH + 9 * 2;
 
-        assert!((rope[frequency_nine] - f32::from_bits(0x3ebc_bf5e)).abs() < 1e-6);
-        assert!((rope[frequency_nine + 1] - f32::from_bits(0x3f6d_f840)).abs() < 1e-6);
+        assert_eq!(rope[frequency_nine].to_bits(), 0x3ebc_bf5e);
+        assert_eq!(rope[frequency_nine + 1].to_bits(), 0x3f6d_f840);
     }
 
     #[test]
@@ -2118,8 +3868,8 @@ mod tests {
 
     #[test]
     fn final_image_helpers_reject_invalid_lengths() {
-        assert!(real_image_row(&[0.0; 9], 2, 2, 3, 0, 2).is_err());
-        assert!(real_image_row(&[0.0; 10], 2, 4, 3, 0, 2).is_err());
+        assert!(real_image_row(&[0.0; 8], 2, 2, 3, 0, 2).is_err());
+        assert!(real_image_row(&[0.0; 8], 2, 4, 3, 0, 2).is_err());
 
         let mut short_patches = [0.0; 7];
         let mut velocity = [0.0; 8];
@@ -2259,9 +4009,9 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 6.0, 8.0, // token 1: q, k, v
         ];
         let mut scores = [0.0; 2];
-        let mut value_column = [0.0; 2];
         let mut output = [0.0; 4];
-        attention_into(&qkv, 2, 1, 2, &mut scores, &mut value_column, &mut output).unwrap();
+        let pool = ComputePool::new(1);
+        attention_into(&qkv, 2, 1, 2, &mut scores, &mut output, &pool).unwrap();
         assert_eq!(output, [4.0, 6.0, 4.0, 6.0]);
     }
 
@@ -2311,12 +4061,12 @@ mod tests {
             ]);
         }
         let mut scores = [0.0f32; 32];
-        let mut value_column = [0.0f32; 32];
         let mut output = [0.0f32; 32];
 
-        attention_into(&qkv, 32, 1, 1, &mut scores, &mut value_column, &mut output).unwrap();
+        let pool = ComputePool::new(1);
+        attention_into(&qkv, 32, 1, 1, &mut scores, &mut output, &pool).unwrap();
 
-        assert!((output[5] - f32::from_bits(0x3ffa_6cf2)).abs() < 1e-5);
+        assert_eq!(output[5].to_bits(), 0x3ffa_6cf2);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -2347,18 +4097,19 @@ mod tests {
 
         silu_mul_inplace(&gate, &mut up);
 
-        for (actual, expected) in up.into_iter().zip([
-            0x3da2_273a,
-            0xbe46_5c2c,
-            0x3db9_7ff0,
-            0x3d07_14a2,
-            0xbe1c_cd08,
-            0xbd5b_8df1,
-            0xbc92_8b91,
-            0x3db6_bb17,
-        ]) {
-            assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
-        }
+        assert_eq!(
+            up.map(f32::to_bits),
+            [
+                0x3da2_273a,
+                0xbe46_5c2c,
+                0x3db9_7ff0,
+                0x3d07_14a2,
+                0xbe1c_cd08,
+                0xbd5b_8df1,
+                0xbc92_8b91,
+                0x3db6_bb17,
+            ],
+        );
     }
 
     #[test]
@@ -2445,10 +4196,16 @@ mod tests {
     #[test]
     fn dit_boundaries_reject_non_finite_values() {
         assert!(require_finite(&[0.0, -1.0], "context").is_ok());
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert!(require_finite(&[0.0, value], "context")
-                .unwrap_err()
-                .contains("Non-finite Z-Image context"));
+        for (value, counts) in [
+            (f32::NAN, "nan=1, inf=0 (+inf=0, -inf=0)"),
+            (f32::from_bits(0xffc0_0000), "nan=1, inf=0 (+inf=0, -inf=0)"),
+            (f32::INFINITY, "nan=0, inf=1 (+inf=1, -inf=0)"),
+            (f32::NEG_INFINITY, "nan=0, inf=1 (+inf=0, -inf=1)"),
+        ] {
+            assert_eq!(
+                require_finite(&[0.0, value], "context").unwrap_err(),
+                format!("Non-finite Z-Image context: len=2, {counts}, finite_range=[0.000,0.000], first_bad_idx=1")
+            );
         }
     }
 
@@ -2462,5 +4219,573 @@ mod tests {
             .unwrap(),
         );
         ZImageDit::load(source, Arc::new(ComputePool::new(1))).unwrap();
+    }
+
+    /// How much is the Q8_0 grouped matmul's tiling worth?
+    ///
+    /// `q8_matmul_grouped_dp4a` gives one workgroup per (token, output column) pair,
+    /// so every weight byte is loaded, multiplied and discarded for exactly one
+    /// token. Inside the render on the aarch64 box that measured 108 GOP/s at this shape,
+    /// against PyTorch's ~5900 GOP/s. `q8_matmul_tiled_dp4a` keeps a weight load
+    /// alive across eight tokens, which is the only reason a GEMM beats a GEMV.
+    ///
+    /// Two numbers per kernel, because the gap between them is the trap. `hot`
+    /// re-reads one weight matrix, which stays resident in L2 and reports over
+    /// 100,000 GOP/s. `stream` cycles eight distinct matrices the way the render
+    /// cycles 150, and is the honest one.
+    ///
+    /// Ignored because it takes tens of seconds; run it with `--ignored`.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "multi-second GPU benchmark, not a correctness gate"]
+    fn zimage_tiled_matmul_beats_the_one_token_per_weight_kernel() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 1056usize;
+        let projection = crate::models::diffusion::z_image::dit_gpu::Projection::W2;
+        let n_in = projection.n_in();
+        let n_out = projection.n_out();
+        let (input, _) = tiled_bench_synthetic(rows, n_in, n_out);
+
+        // Eight distinct 42 MB matrices: 335 MB, well past any plausible L2.
+        const LAYERS: usize = 8;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        if !session.ops().supports_tiled_q8() {
+            eprintln!("skipped: tiled Q8_0 is unavailable on this device or disabled by DP4A=0");
+            return;
+        }
+        for layer in 0..LAYERS {
+            let (_, weight) = tiled_bench_synthetic(rows + layer, n_in, n_out);
+            session
+                .bind_weight(layer, projection, &weight)
+                .expect("bind weight");
+        }
+        let layout = *session.layout();
+        session.ops().write_f32(layout.gate, &input).expect("write");
+        let layers: Vec<usize> = (0..LAYERS).collect();
+
+        // Correctness first: tiled has to agree with the kernel in production.
+        let (_, grouped_out) = session
+            .bench_projection(0, projection, layout.gate, layout.out, false, 1)
+            .expect("grouped");
+        let (_, tiled_out) = session
+            .bench_projection(0, projection, layout.gate, layout.out, true, 1)
+            .expect("tiled");
+        let max_abs = tiled_out
+            .iter()
+            .zip(grouped_out.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = grouped_out
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0f32, f32::max);
+        eprintln!("rows={rows} n_in={n_in} n_out={n_out}  max|Δ| {max_abs:e} (scale {scale:e})");
+
+        let work = 2.0 * (rows * n_in * n_out) as f64;
+        let mut streaming = [0.0f64; 2];
+        for (index, (label, tiled)) in [
+            ("grouped (one token per weight)", false),
+            ("tiled (eight tokens per weight)", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let hot = session
+                .bench_projection(0, projection, layout.gate, layout.out, tiled, 5)
+                .expect("hot")
+                .0;
+            let stream = session
+                .bench_projection_streaming(&layers, projection, layout.gate, layout.out, tiled, 3)
+                .expect("stream")
+                * 1e3;
+            streaming[index] = stream;
+            eprintln!("{label}");
+            eprintln!(
+                "  L2-hot, one matrix     {hot:8.2} ms  {:9.0} GOP/s",
+                work / (hot / 1e3) / 1e9
+            );
+            eprintln!(
+                "  streaming, 8 matrices  {stream:8.2} ms  {:9.0} GOP/s",
+                work / (stream / 1e3) / 1e9
+            );
+        }
+        eprintln!("\n  streaming speedup: {:.2}x", streaming[0] / streaming[1]);
+
+        assert!(
+            max_abs <= scale * 1e-3,
+            "tiled matmul diverges from the grouped one by {max_abs} (scale {scale})"
+        );
+        assert!(
+            streaming[1] < streaming[0],
+            "tiled matmul is not faster when streaming: {:.2} ms vs {:.2} ms",
+            streaming[1],
+            streaming[0]
+        );
+    }
+
+    /// Deterministic f32 activations and Q8_0 weights. The `salt` shifts the
+    /// generator so different layers get different matrices, which is what makes
+    /// the streaming measurement read memory rather than L2.
+    fn tiled_bench_synthetic(rows: usize, n_in: usize, n_out: usize) -> (Vec<f32>, Vec<u8>) {
+        let mut state =
+            0x2545_f491_4f6c_dd1d_u64 ^ (rows as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|_| (next() % 255) as f32 / 127.0 - 1.0)
+            .collect();
+        // Q8_0 is 34 bytes per 32 elements: an f16 scale then 32 int8.
+        let mut weight = vec![0u8; n_out * n_in / 32 * 34];
+        for chunk in weight.chunks_exact_mut(34) {
+            chunk[0] = 0x2c;
+            chunk[1] = 0x00;
+            for slot in chunk[2..].iter_mut() {
+                *slot = (next() % 255) as u8;
+            }
+        }
+        (input, weight)
+    }
+
+    /// Splitting attention across threads must not move a bit.
+    ///
+    /// A (query, head) pair reads only `qkv` and writes one contiguous run of
+    /// `output`, so the parallel path is the serial path with the loop order
+    /// changed -- but the score row had to become per-thread to make that true,
+    /// and that is exactly the kind of change that can silently corrupt a row if
+    /// two threads are ever handed the same scratch. This compares the two
+    /// directly at the real shape, single-threaded versus the whole pool.
+    #[test]
+    fn parallel_attention_matches_the_serial_loop_bitwise() {
+        let tokens = 256usize;
+        let heads = 4usize;
+        let head_width = 16usize;
+        let hidden = heads * head_width;
+        let qkv: Vec<f32> = (0..tokens * hidden * 3)
+            .map(|i| ((i % 97) as f32 / 97.0) - 0.5)
+            .collect();
+        let mut serial = vec![0f32; tokens * hidden];
+        let mut parallel = vec![0f32; tokens * hidden];
+        let mut scores = vec![0f32; tokens];
+
+        let one = ComputePool::new(1);
+        let many = ComputePool::new(8);
+        attention_into(
+            &qkv,
+            tokens,
+            heads,
+            head_width,
+            &mut scores,
+            &mut serial,
+            &one,
+        )
+        .unwrap();
+        attention_into(
+            &qkv,
+            tokens,
+            heads,
+            head_width,
+            &mut scores,
+            &mut parallel,
+            &many,
+        )
+        .unwrap();
+
+        let mut first_bad = None;
+        for (index, (a, b)) in serial.iter().zip(parallel.iter()).enumerate() {
+            if a.to_bits() != b.to_bits() && first_bad.is_none() {
+                first_bad = Some((index, *a, *b));
+            }
+        }
+        eprintln!(
+            "parallel vs serial: {} outputs, first difference {first_bad:?}",
+            serial.len()
+        );
+        assert!(
+            first_bad.is_none(),
+            "parallel attention differs from serial at {first_bad:?}"
+        );
+    }
+
+    /// Removed: the scores-only comparison no longer has a valid premise.
+    ///
+    /// `record_diy_attention` records the whole chain, and softmax normalises the
+    /// score row in place, so reading `attention_scores` after the call returns
+    /// probabilities rather than raw scores. `gpu_diy_attention_chain_matches_the_
+    /// cpu_reference` covers this stage with strictly more reach: the scores are its
+    /// first step, so a layout or ordering fault there lands in the final delta at
+    /// order 1 rather than the 7.6e-5 the chain actually reports.
+
+    /// The whole GPU attention chain against a CPU reference at the real shape.
+    ///
+    /// The gate for putting DiT attention on the device. Two things make the
+    /// reference more than a transcription of `attention_into`:
+    ///
+    /// The GPU rounds to f16 where the CPU path stays in f32 -- the probabilities
+    /// coming out of softmax, and the score and value reads in the reduction. The
+    /// reference rounds at the same two points, so a layout or ordering mistake
+    /// shows up as a large delta instead of hiding inside f16 noise.
+    ///
+    /// `attention_into` also accumulates the softmax denominator in f64 while the
+    /// kernel sums in f32 with a Kahan correction. The reference sums in f64 like
+    /// the CPU does, which leaves a residue far below the tolerance.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "builds a scores region of rows x HEADS x rows"]
+    fn gpu_diy_attention_chain_matches_the_cpu_reference() {
+        use crate::ops::float::enable_gpu;
+        use crate::ops::float::{f16_to_f32, f32_to_f16};
+
+        fn round_f16(value: f32) -> f32 {
+            f16_to_f32(f32_to_f16(value))
+        }
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 256usize;
+        let heads = HEADS;
+        let head_dim = ROPE_HEAD_WIDTH;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+                context, rows, true,
+            )
+            .expect("session");
+        let layout = *session.layout();
+
+        let qkv: Vec<f32> = (0..rows * QKV_WIDTH)
+            .map(|i| (((i * 37 + 11) % 211) as f32 / 211.0) - 0.5)
+            .collect();
+        session.ops().write_f32(layout.qkv, &qkv).expect("write");
+
+        // Reference, in the GPU's rounding convention.
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let mut expected = vec![0f32; rows * HIDDEN];
+        let mut row = vec![0f32; rows];
+        for query in 0..rows {
+            for head in 0..heads {
+                for token in 0..rows {
+                    let q = &qkv[query * QKV_WIDTH + head * head_dim
+                        ..query * QKV_WIDTH + (head + 1) * head_dim];
+                    let k = &qkv[token * QKV_WIDTH + HIDDEN + head * head_dim
+                        ..token * QKV_WIDTH + HIDDEN + (head + 1) * head_dim];
+                    let mut sum = 0f32;
+                    for d in 0..head_dim {
+                        // The kernel reads both operands as f16.
+                        sum += round_f16(q[d]) * round_f16(k[d]);
+                    }
+                    row[token] = round_f16(sum * scale);
+                }
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut denominator = 0f64;
+                for value in row.iter_mut() {
+                    *value = (*value - max).exp();
+                    denominator += f64::from(*value);
+                }
+                let norm = round_f16(1.0 / denominator as f32);
+                for value in row.iter_mut() {
+                    *value = round_f16(*value * norm);
+                }
+                let out = &mut expected
+                    [query * HIDDEN + head * head_dim..query * HIDDEN + (head + 1) * head_dim];
+                for token in 0..rows {
+                    let v = &qkv[token * QKV_WIDTH + 2 * HIDDEN + head * head_dim
+                        ..token * QKV_WIDTH + 2 * HIDDEN + (head + 1) * head_dim];
+                    for d in 0..head_dim {
+                        out[d] += row[token] * round_f16(v[d]);
+                    }
+                }
+            }
+        }
+
+        session
+            .record_diy_attention(rows, layout.attention_scores, layout.attention_out)
+            .expect("gpu attention");
+        let mut got = vec![0.0; rows * HIDDEN];
+        session
+            .ops()
+            .read_f32_into(layout.attention_out, &mut got)
+            .expect("read");
+
+        let mut max_abs = 0f32;
+        let mut worst = 0usize;
+        for (i, (a, b)) in got.iter().zip(expected.iter()).enumerate() {
+            if (a - b).abs() > max_abs {
+                max_abs = (a - b).abs();
+                worst = i;
+            }
+        }
+        let scale_of = expected.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        eprintln!(
+            "gpu vs cpu attention: rows={rows} max|Δ|={max_abs:e} (scale {scale_of:e}) at \
+         query {} dim {}: got {:.6} want {:.6}",
+            worst / HIDDEN,
+            worst % HIDDEN,
+            got[worst],
+            expected[worst]
+        );
+        // Only the summation order may differ now, so this is a tight bound.
+        assert!(
+            max_abs <= scale_of * 1e-3,
+            "GPU attention diverges from the reference by {max_abs} (scale {scale_of})"
+        );
+    }
+
+    /// How the GPU attention chain compares with the CPU attention it replaces.
+    ///
+    /// This is the number behind the end-to-end win: attention was the largest
+    /// stage in a step, and the chain covers scores, softmax and the value
+    /// reduction, so unlike the scores-only measurement it is the whole cost.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "benchmark, seconds per shape"]
+    fn gpu_diy_attention_chain_beats_the_cpu_attention() {
+        use crate::ops::float::enable_gpu;
+        use std::time::Instant;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let heads = HEADS;
+        let head_dim = ROPE_HEAD_WIDTH;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new_with_attention(
+                context, 1056, true,
+            )
+            .expect("session");
+        let layout = *session.layout();
+        for rows in [256usize, 1056] {
+            // Sized for the largest shape below, so the smaller one only under-fills
+            // the regions rather than overflowing them.
+            // The session is sized for 1056 rows, the largest shape measured here.
+            let qkv: Vec<f32> = (0..rows * QKV_WIDTH)
+                .map(|i| (((i * 37 + 11) % 211) as f32 / 211.0) - 0.5)
+                .collect();
+            session.ops().write_f32(layout.qkv, &qkv).expect("write");
+            let scale = 1.0 / (head_dim as f32).sqrt();
+
+            let cpu = Instant::now();
+            let mut expected = vec![0f32; rows * HIDDEN];
+            let mut row = vec![0f32; rows];
+            for query in 0..rows {
+                for head in 0..heads {
+                    for token in 0..rows {
+                        let q = &qkv[query * QKV_WIDTH + head * head_dim
+                            ..query * QKV_WIDTH + (head + 1) * head_dim];
+                        let k = &qkv[token * QKV_WIDTH + HIDDEN + head * head_dim
+                            ..token * QKV_WIDTH + HIDDEN + (head + 1) * head_dim];
+                        let mut sum = 0f32;
+                        for d in 0..head_dim {
+                            sum += q[d] * k[d];
+                        }
+                        row[token] = sum * scale;
+                    }
+                    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let mut denominator = 0f64;
+                    for value in row.iter_mut() {
+                        *value = (*value - max).exp();
+                        denominator += f64::from(*value);
+                    }
+                    let norm = 1.0 / denominator as f32;
+                    for value in row.iter_mut() {
+                        *value *= norm;
+                    }
+                    let out = &mut expected
+                        [query * HIDDEN + head * head_dim..query * HIDDEN + (head + 1) * head_dim];
+                    for token in 0..rows {
+                        let v = &qkv[token * QKV_WIDTH + 2 * HIDDEN + head * head_dim
+                            ..token * QKV_WIDTH + 2 * HIDDEN + (head + 1) * head_dim];
+                        for d in 0..head_dim {
+                            out[d] += row[token] * v[d];
+                        }
+                    }
+                }
+            }
+            let cpu = cpu.elapsed().as_secs_f64();
+
+            let mut best = f64::INFINITY;
+            for _ in 0..3 {
+                let start = Instant::now();
+                session
+                    .record_diy_attention(rows, layout.attention_scores, layout.attention_out)
+                    .expect("gpu attention");
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            let macs = 2.0 * rows as f64 * heads as f64 * rows as f64 * head_dim as f64;
+            eprintln!(
+                "attention rows={rows}: cpu {:.1} ms | gpu {:.1} ms | {:.1}x | {:.0} GOP/s",
+                cpu * 1e3,
+                best * 1e3,
+                cpu / best,
+                macs / best / 1e9
+            );
+        }
+    }
+
+    /// Is the Q8 main stack already at the machine's streaming limit?
+    ///
+    /// The QKV chain in `record_attention_qkv` reports 28.2 ms under a single fence
+    /// for rms_norm, AdaLN and the QKV matmul together. The matmul alone reads
+    /// 3840 x 11520 Q8_0 weights, which at the rate the FFN projections stream should
+    /// cost well over 28 ms on its own -- the chain total being smaller than the
+    /// matmul's own floor is a contradiction, and one of the two numbers is wrong.
+    ///
+    /// This measures each projection the render actually runs, streaming eight
+    /// distinct matrices the way the render cycles its layers, so the numbers are
+    /// honest rather than L2-hot. It answers whether the FFN is at the roof (and so
+    /// has nothing left) or whether the QKV projection is running short of what its
+    /// shape implies -- which would point at the chain's other two stages instead.
+    #[test]
+    #[ignore = "multi-second GPU benchmark, not a correctness gate"]
+    #[cfg(feature = "vulkan")]
+    fn zimage_projection_shapes_stream_at_the_machine_limit() {
+        use crate::ops::float::enable_gpu;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 1056usize;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        let layout = *session.layout();
+        const LAYERS: usize = 8;
+        for projection in [
+            crate::models::diffusion::z_image::dit_gpu::Projection::Qkv,
+            crate::models::diffusion::z_image::dit_gpu::Projection::Out,
+            crate::models::diffusion::z_image::dit_gpu::Projection::W1,
+            crate::models::diffusion::z_image::dit_gpu::Projection::W2,
+        ] {
+            let n_in = projection.n_in();
+            let n_out = projection.n_out();
+            for layer in 0..LAYERS {
+                let (_, weight) = tiled_bench_synthetic(rows + layer, n_in, n_out);
+                session
+                    .bind_weight(layer, projection, &weight)
+                    .expect("bind");
+            }
+            let layers: Vec<usize> = (0..LAYERS).collect();
+            // QKV is 11520 wide, so it needs the qkv region; the rest fit in `out`.
+            let output = if n_out > HIDDEN {
+                layout.qkv
+            } else {
+                layout.out
+            };
+            let ms = session
+                .bench_projection_streaming(&layers, projection, layout.gate, output, true, 3)
+                .expect("stream")
+                * 1e3;
+            let gop = 2.0 * (rows * n_in * n_out) as f64 / (ms / 1e3) / 1e9;
+            eprintln!("{projection:?} {n_in}x{n_out}: {ms:7.2} ms  {gop:6.0} GOP/s");
+        }
+    }
+
+    /// What the QKV chain spends time on once the matmul is accounted for.
+    ///
+    /// `record_attention_qkv` puts rms_norm, AdaLN and the matmul under a single
+    /// fence, so subtracting the matmul's separately measured time is the only way
+    /// to see the other two -- and doing that across sessions is how the 1.55 s
+    /// "missing time" was invented earlier. This measures each stage on its own,
+    /// in one session, at the shape the render uses.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "GPU benchmark, not a correctness gate"]
+    fn zimage_qkv_norm_and_adaln_cost_at_the_render_shape() {
+        use crate::models::diffusion::z_image::dit_gpu::NormKind;
+        use crate::ops::float::enable_gpu;
+        use std::time::Instant;
+
+        enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            eprintln!("skipped: no Vulkan context");
+            return;
+        };
+        let rows = 1056usize;
+        let hidden = HIDDEN;
+        let mut session =
+            crate::models::diffusion::z_image::dit_gpu::DitGpuSession::new(context, rows)
+                .expect("session");
+        let layout = *session.layout();
+        let (rms_gamma, _) = tiled_bench_synthetic(rows, hidden, hidden);
+        let scale: Vec<f32> = (0..hidden * 6).map(|i| 0.01 * (i % 7) as f32).collect();
+        session
+            .bind_norm(0, NormKind::AttentionNorm1, &rms_gamma[..hidden])
+            .expect("bind norm");
+        session.bind_modulation(&scale).expect("bind modulation");
+        let norm = session
+            .norm_bindings(0, NormKind::AttentionNorm1)
+            .expect("norm");
+        let mod_bind = session.modulation_bindings().expect("modulation");
+        session
+            .ops()
+            .write_f32(layout.x, &vec![0.5f32; rows * hidden])
+            .expect("write");
+
+        let mut best_rms = f64::INFINITY;
+        let mut best_adaln = f64::INFINITY;
+        for _ in 0..5 {
+            let mut commands = session.begin().expect("begin");
+            session
+                .ops()
+                .record_rms_norm_rows(
+                    &commands,
+                    norm,
+                    layout.x,
+                    layout.normed,
+                    hidden,
+                    RMS_EPSILON,
+                    rows,
+                    hidden,
+                    hidden,
+                )
+                .expect("rms");
+            let start = Instant::now();
+            commands.submit_and_wait().expect("submit");
+            best_rms = best_rms.min(start.elapsed().as_secs_f64());
+
+            let mut commands = session.begin().expect("begin");
+            session
+                .ops()
+                .record_adaln_modulate_rows(
+                    &commands,
+                    mod_bind,
+                    layout.normed,
+                    hidden,
+                    rows,
+                    hidden,
+                )
+                .expect("adaln");
+            let start = Instant::now();
+            commands.submit_and_wait().expect("submit");
+            best_adaln = best_adaln.min(start.elapsed().as_secs_f64());
+        }
+        eprintln!(
+        "rows={rows} hidden={hidden}: rms_norm {:.3} ms | adaln_modulate {:.3} ms | sum {:.3} ms",
+        best_rms * 1e3,
+        best_adaln * 1e3,
+        (best_rms + best_adaln) * 1e3
+    );
+        eprintln!(
+            "  bytes moved: rms {:.1} MB, adaln {:.1} MB",
+            3.0 * rows as f64 * hidden as f64 * 4.0 / 1e6,
+            2.0 * rows as f64 * hidden as f64 * 4.0 / 1e6
+        );
     }
 }

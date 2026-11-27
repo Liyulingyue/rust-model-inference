@@ -11,8 +11,12 @@ use crate::ops::hsum_ps;
 ///
 /// Tiles rows in groups of 4 for ILP; trailing rows handled by a single-row
 /// fallback. Selected by `dispatch::matmul_q8_0_quantized_range` on
-/// x86_64 hosts with AVX2.
+/// x86_64 hosts with AVX2, FMA and F16C.
+///
+/// # Safety
+/// The caller must verify AVX2, FMA and F16C support.
 #[inline(never)]
+#[target_feature(enable = "avx2,fma,f16c")]
 pub unsafe fn matmul_q8_0_vs_q8_0_avx2(
     weight: &[u8],
     input_q8: &[u8],
@@ -211,7 +215,7 @@ mod tests {
 
     #[test]
     fn q8_0_avx2_matches_scalar_uniform() {
-        if !crate::ops::has_avx2_fma() {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() {
             return;
         }
         // 8 rows × 16 blocks/row = 8 rows × 512 input = 4096 weights / 4096 in
@@ -234,7 +238,7 @@ mod tests {
 
     #[test]
     fn q8_0_avx2_matches_scalar_real_model() {
-        if !crate::ops::has_avx2_fma() {
+        if !crate::ops::has_avx2_fma() || !crate::ops::has_f16c() {
             return;
         }
         let loader = match crate::core::loader::GGUFLoader::from_file(
@@ -255,7 +259,12 @@ mod tests {
         let n_in = tensor.dims[0] as usize;
         let n_out = tensor.dims[1] as usize;
         let blocks = n_in / 32;
-        let q8: Vec<u8> = (0..blocks * 32).map(|i| (i as i8) as u8).collect();
+        // Stay inside the Q8_0 contract (|q| ≤ 127): the production
+        // quantizer never emits ±128, and -128 would break the SIMD sign
+        // fixup.
+        let q8: Vec<u8> = (0..blocks * 32)
+            .map(|i| (i as i8 as i16).clamp(-127, 127) as i8 as u8)
+            .collect();
         let scales: Vec<f32> = (0..blocks).map(|b| 0.01 + (b as f32) * 0.001).collect();
         assert_avx2_matches_scalar("q8_0-model-blk0-attnq", &weight, &q8, &scales);
     }

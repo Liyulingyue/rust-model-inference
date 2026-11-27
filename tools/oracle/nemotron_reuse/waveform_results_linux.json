@@ -1,0 +1,288 @@
+[
+  {
+    "name": "noisy_8000",
+    "mode": "cpu",
+    "seconds": 0.5686290599405766,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.0098355021327734,
+      "rmse": 0.002588930519219715,
+      "reference_peak": 0.06331800669431686,
+      "reference_rms": 0.010679449985232278
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_8000",
+    "mode": "auto",
+    "seconds": 0.5241891071200371,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.0098355021327734,
+      "rmse": 0.002588930519219715,
+      "reference_peak": 0.06331800669431686,
+      "reference_rms": 0.010679449985232278
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_16000",
+    "mode": "cpu",
+    "seconds": 0.9928400740027428,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.012953832745552063,
+      "rmse": 0.002604313221112658,
+      "reference_peak": 0.03936602547764778,
+      "reference_rms": 0.008955676045300181
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_16000",
+    "mode": "auto",
+    "seconds": 1.0961933080106974,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.012953832745552063,
+      "rmse": 0.002604313221112658,
+      "reference_peak": 0.03936602547764778,
+      "reference_rms": 0.008955676045300181
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_22050",
+    "mode": "cpu",
+    "seconds": 1.2687640059739351,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.006664527580142021,
+      "rmse": 0.0017999920322115252,
+      "reference_peak": 0.02036244608461857,
+      "reference_rms": 0.004951068741012048
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_22050",
+    "mode": "auto",
+    "seconds": 1.2767826914787292,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.006664527580142021,
+      "rmse": 0.0017999920322115252,
+      "reference_peak": 0.02036244608461857,
+      "reference_rms": 0.004951068741012048
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_24000",
+    "mode": "cpu",
+    "seconds": 1.4720863848924637,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.0017283773049712181,
+      "rmse": 0.00044908003850574154,
+      "reference_peak": 0.026057232171297073,
+      "reference_rms": 0.0048502128512707176
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_24000",
+    "mode": "auto",
+    "seconds": 1.4038273431360722,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.0017283773049712181,
+      "rmse": 0.00044908003850574154,
+      "reference_peak": 0.026057232171297073,
+      "reference_rms": 0.0048502128512707176
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_32000",
+    "mode": "cpu",
+    "seconds": 1.861975286155939,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.004643316147848964,
+      "rmse": 0.0010255816495091934,
+      "reference_peak": 0.015739405527710915,
+      "reference_rms": 0.003807947421150094
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_32000",
+    "mode": "auto",
+    "seconds": 1.9796358961611986,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.004643316147848964,
+      "rmse": 0.0010255816495091934,
+      "reference_peak": 0.015739405527710915,
+      "reference_rms": 0.003807947421150094
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_44100",
+    "mode": "cpu",
+    "seconds": 2.2469083424657583,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.0015834444093343336,
+      "rmse": 0.00039987437596107205,
+      "reference_peak": 0.013745822012424469,
+      "reference_rms": 0.0033031176321426685
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_44100",
+    "mode": "auto",
+    "seconds": 2.5424006953835487,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.0015834444093343336,
+      "rmse": 0.00039987437596107205,
+      "reference_peak": 0.013745822012424469,
+      "reference_rms": 0.0033031176321426685
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_48000",
+    "mode": "cpu",
+    "seconds": 2.8429669346660376,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.001028402242809534,
+      "rmse": 0.00022952462996339871,
+      "reference_peak": 0.013833914883434772,
+      "reference_rms": 0.0029679882245192864
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "noisy_48000",
+    "mode": "auto",
+    "seconds": 2.503765230998397,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.001028402242809534,
+      "rmse": 0.00022952462996339871,
+      "reference_peak": 0.013833914883434772,
+      "reference_rms": 0.0029679882245192864
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "silence_8000",
+    "mode": "cpu",
+    "seconds": 0.7293104026466608,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 3.292405745014548e-05,
+      "rmse": 1.7486015689399587e-05,
+      "reference_peak": 0.03883758559823036,
+      "reference_rms": 0.00707793254609583
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "silence_8000",
+    "mode": "auto",
+    "seconds": 0.7518124189227819,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 3.292405745014548e-05,
+      "rmse": 1.7486015689399587e-05,
+      "reference_peak": 0.03883758559823036,
+      "reference_rms": 0.00707793254609583
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "speech_44100",
+    "mode": "cpu",
+    "seconds": 4.0349819883704185,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.00016467692330479622,
+      "rmse": 3.1672696501074735e-05,
+      "reference_peak": 0.010154030285775661,
+      "reference_rms": 0.0014432965206697267
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "speech_44100",
+    "mode": "auto",
+    "seconds": 3.930707808583975,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.00016467692330479622,
+      "rmse": 3.1672696501074735e-05,
+      "reference_peak": 0.010154030285775661,
+      "reference_rms": 0.0014432965206697267
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "stereo_16000",
+    "mode": "cpu",
+    "seconds": 1.969245696440339,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.012953832745552063,
+      "rmse": 0.0018995723674525022,
+      "reference_peak": 0.03936602547764778,
+      "reference_rms": 0.007930236656186864
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "stereo_16000",
+    "mode": "auto",
+    "seconds": 1.9712697640061378,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.012953832745552063,
+      "rmse": 0.0018995723674525022,
+      "reference_peak": 0.03936602547764778,
+      "reference_rms": 0.007930236656186864
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "chunked_8000",
+    "mode": "cpu",
+    "seconds": 20.77289930731058,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.06798411905765533,
+      "rmse": 0.003266162326721778,
+      "reference_peak": 0.2381943017244339,
+      "reference_rms": 0.008140387948790271
+    },
+    "checkpoints": []
+  },
+  {
+    "name": "chunked_8000",
+    "mode": "auto",
+    "seconds": 21.030029892921448,
+    "checkpoint_validation": false,
+    "end_to_end": {
+      "max_abs": 0.06798411905765533,
+      "rmse": 0.003266162326721778,
+      "reference_peak": 0.2381943017244339,
+      "reference_rms": 0.008140387948790271
+    },
+    "checkpoints": []
+  }
+]

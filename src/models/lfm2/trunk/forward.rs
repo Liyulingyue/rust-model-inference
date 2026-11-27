@@ -22,7 +22,7 @@
 //! ## Scratch buffer sizing invariant
 //!
 //! All three local `max_n_in` expressions in `forward_layer`,
-//! `forward_attention`, and `forward_shortconv` **must** equal
+//! `forward_attention_chunked`, and `forward_shortconv` **must** equal
 //! `(n_embd * 3).max(n_embd_q).max(n_ff)` and stay synchronized with
 //! `ExecutionScratchpad::new`. The `n_embd * 3` term covers the shortconv
 //! `in_proj` output (the b∥c∥x concatenation); using only `n_ff` here is a
@@ -33,8 +33,7 @@
 use crate::core::scratchpad::{ExecutionScratchpad, KvCache, KvFormat};
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
-use crate::ops::kernel::Kernel;
+use crate::core::tokenizer::BPETokenizer;
 use crate::ops::{
     dot_f16_f32, dot_f32, embedding_lookup, quantize_q8_0_into, quantize_row_q8_k_into, rms_norm,
     rms_norm_inplace, rope_neox_inplace, sample_top_k, silu_mul_inplace, softmax_inplace,
@@ -47,6 +46,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::config::Lfm2Config;
+use super::trace;
 use super::weights::{get_f32_tensor, load_layers, weight_needs_q8k, Lfm2LayerWeights};
 
 /// One item of the prefill stream: a text token or a precomputed embedding
@@ -68,17 +68,30 @@ pub fn run_inference(
     max_context: usize,
     repetition_penalty: f32,
     thinking: bool,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?;
-    let input_tokens = build_lfm2_chat_prompt_with_thinking(
+    // `--jinja` renders the model's own template. For LFM2.5 that is not
+    // cosmetic: the hand-written builder omits `<|im_end|>` entirely, so the
+    // two paths genuinely differ. See docs/usage/chat-template.md.
+    let input_tokens = match crate::prompt::jinja::single_turn_tokens(
         &tokenizer,
-        &[Lfm2Message {
-            role: "user",
-            content: prompt,
-        }],
-        thinking,
-    )?;
+        jinja,
+        &|k| source.metadata(k).cloned(),
+        prompt,
+        Some(thinking),
+    )? {
+        Some(ids) => ids,
+        None => build_lfm2_chat_prompt_with_thinking(
+            &tokenizer,
+            &[Lfm2Message {
+                role: "user",
+                content: prompt,
+            }],
+            thinking,
+        )?,
+    };
     let stream: Vec<Lfm2StreamItem> = input_tokens
         .iter()
         .map(|&t| Lfm2StreamItem::Token(t))
@@ -105,10 +118,10 @@ pub fn run_inference_stream(
     max_tokens: usize,
     temperature: f32,
     n_threads_arg: usize,
-    profile: bool,
+    _profile: bool,
     kv_format: KvFormat,
     max_context: usize,
-    repetition_penalty: f32,
+    _repetition_penalty: f32,
 ) -> Result<(), String> {
     let t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
@@ -349,11 +362,7 @@ pub fn run_inference_stream(
         };
 
         let logits_ptr = scratch.logits.as_mut_ptr();
-        // `output_pw` was built once before the loop and outlives all
-        // closures; capture only a shared reference so the kernel isn't
-        // moved on the second iteration.
-        let kernel: &dyn crate::ops::kernel::Kernel = &*output_pw.kernel;
-        pool.compute(move |ith, nth| {
+        {
             let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
             let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
             let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
@@ -364,8 +373,8 @@ pub fn run_inference_stream(
             } else {
                 Some(q8k)
             };
-            kernel.forward_prepared(input, q8, sc, q8k_opt, logits, n_embd, vocab, ith, nth);
-        });
+            output_pw.matmul_prepared(input, q8, sc, q8k_opt, logits, &pool);
+        }
 
         let eval_elapsed = eval_started.elapsed();
         if step < n_prompt {
@@ -458,6 +467,13 @@ pub fn run_inference_stream(
         generated_tokens.len(),
         infer_ms
     );
+    // Record the token streams so this incremental path can be compared
+    // against the re-prefill path (and against the oracle, which uses the same
+    // record names). No-op unless the parity-trace feature is on. `all_tokens`
+    // has grown past the prompt by now, so slice back to `n_prompt` to match
+    // the oracle's prompt-only record.
+    trace::tokens("prompt_ids", &all_tokens[..n_prompt]);
+    trace::tokens("generated_ids", &generated_tokens);
     Ok(())
 }
 
@@ -482,10 +498,10 @@ fn forward_layer(
 
     let x_ptr = scratch.x.as_mut_ptr();
     let normed_ptr = scratch.normed.as_mut_ptr();
-    let q_ptr = scratch.q.as_mut_ptr();
-    let k_ptr = scratch.k_new.as_mut_ptr();
-    let v_ptr = scratch.v_new.as_mut_ptr();
-    let attn_out_ptr = scratch.attn_out.as_mut_ptr();
+    let _q_ptr = scratch.q.as_mut_ptr();
+    let _k_ptr = scratch.k_new.as_mut_ptr();
+    let _v_ptr = scratch.v_new.as_mut_ptr();
+    let _attn_out_ptr = scratch.attn_out.as_mut_ptr();
     let attn_proj_ptr = scratch.attn_proj.as_mut_ptr();
     let gate_buf_ptr = scratch.gate_buf.as_mut_ptr();
     let up_buf_ptr = scratch.up_buf.as_mut_ptr();
@@ -503,6 +519,7 @@ fn forward_layer(
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.attn_norm, normed, eps);
+        trace::layer_1d("attn_norm", layer, pos, normed);
         quantize_q8_0_into(
             normed,
             n_embd,
@@ -517,12 +534,12 @@ fn forward_layer(
         }
     }
 
-    let q8 = &q8_buf[..n_embd];
-    let sc = &scale_buf[..n_embd / 32];
-    let q8k = &q8k_buf[..n_embd / 256];
+    let _q8 = &q8_buf[..n_embd];
+    let _sc = &scale_buf[..n_embd / 32];
+    let _q8k = &q8k_buf[..n_embd / 256];
 
     if lw.is_attn {
-        forward_attention(
+        forward_attention_chunked(
             &pool,
             lw,
             cfg,
@@ -530,14 +547,19 @@ fn forward_layer(
             &kv_cache,
             max_ctx,
             pos,
+            pos + 1,
+            1,
             freq_base,
             eps,
             layer,
             n_layer,
         );
         let attn_proj = unsafe { std::slice::from_raw_parts(attn_proj_ptr, n_embd) };
+        trace::layer_1d("attn_proj", layer, pos, attn_proj);
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(attn_proj, x);
+        let x = unsafe { std::slice::from_raw_parts(x_ptr, n_embd) };
+        trace::layer_1d("post_attn_residual", layer, pos, x);
     } else {
         let (cur, _bx) = forward_shortconv(
             &pool,
@@ -552,6 +574,8 @@ fn forward_layer(
         );
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         vec_add_into(&cur, x);
+        let x = unsafe { std::slice::from_raw_parts(x_ptr, n_embd) };
+        trace::layer_1d("post_attn_residual", layer, pos, x);
     };
 
     // ---- FFN (always present) ----
@@ -559,6 +583,7 @@ fn forward_layer(
         let x = std::slice::from_raw_parts_mut(x_ptr, n_embd);
         let normed = std::slice::from_raw_parts_mut(normed_ptr, n_embd);
         rms_norm(x, &lw.ffn_norm, normed, eps);
+        trace::layer_1d("ffn_norm", layer, pos, normed);
         quantize_q8_0_into(
             normed,
             n_embd,
@@ -575,59 +600,33 @@ fn forward_layer(
     let q8k = &q8k_buf[..n_embd / 256];
     let n_ff = cfg.n_ff;
 
-    // Q8 matmul (gate + up + scalar silu_mul) inside one parallel pass.
-    pool.compute({
+    // Finish gate/up projections before applying SiLU.
+    {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let gate_buf_ptr = gate_buf_ptr;
-        let up_buf_ptr = up_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
-            let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
-            lw.w_gate.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                up_buf,
-                n_embd,
-                n_ff,
-                ith,
-                nth,
-            );
-            lw.w_up.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                gate_buf,
-                n_embd,
-                n_ff,
-                ith,
-                nth,
-            );
-            if crate::ops::gpu_matmul_active() {
-                // Matmul ran as one fenced GPU dispatch owned by thread 0.
-                if ith == 0 {
-                    silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
-                }
-            } else {
-                // Must match the matmul kernel's ceil row partition exactly: a floor
-                // split races with the kernel when n_ff % nth != 0 (silu would
-                // read rows the matmul hasn't written yet).
-                let per_thread = (n_ff + nth - 1) / nth;
-                let r_start = ith * per_thread;
-                let r_end = (r_start + per_thread).min(n_ff);
-                silu_mul_inplace(&up_buf[r_start..r_end], &mut gate_buf[r_start..r_end]);
-            }
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
+        let up_buf = unsafe { std::slice::from_raw_parts_mut(up_buf_ptr, n_ff) };
+        lw.w_gate
+            .matmul_prepared(input, q8, sc, Some(q8k), up_buf, pool);
+        lw.w_up
+            .matmul_prepared(input, q8, sc, Some(q8k), gate_buf, pool);
+        // ggml names the *weight* projections, so `ffn_gate` is `w_gate`'s
+        // output — which this function parks in `up_buf`, and vice versa.
+        // `silu_mul_inplace(gate, up)` writes `up *= silu(gate)`, i.e. the
+        // product lands in its *second* (mutable) argument, which is `gate_buf`
+        // here.
+        trace::layer_1d("ffn_gate", layer, pos, up_buf);
+        trace::layer_1d("ffn_up", layer, pos, gate_buf);
+        silu_mul_inplace(&up_buf[..n_ff], &mut gate_buf[..n_ff]);
+        trace::layer_1d("ffn_swiglu", layer, pos, gate_buf);
+    }
 
     let gate_buf = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, n_ff) };
     quantize_q8_0_into(
@@ -642,45 +641,47 @@ fn forward_layer(
     let q8 = &q8_buf[..n_ff];
     let sc = &scale_buf[..n_ff / 32];
     let q8k = &q8k_buf[..n_ff / 256];
-    pool.compute({
-        let gate_buf_ptr = gate_buf_ptr;
+    {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let down_buf_ptr = down_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_ff) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_ff / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_ff / 256) };
-            let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
-            lw.w_down.kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                down_buf,
-                n_ff,
-                n_embd,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(gate_buf_ptr, n_ff) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_ff) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_ff / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_ff / 256) };
+        let down_buf = unsafe { std::slice::from_raw_parts_mut(down_buf_ptr, n_embd) };
+        lw.w_down
+            .matmul_prepared(input, q8, sc, Some(q8k), down_buf, pool);
+    }
 
     let down_buf = unsafe { std::slice::from_raw_parts(down_buf_ptr, n_embd) };
+    trace::layer_1d("ffn_down", layer, pos, down_buf);
     let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
     vec_add_into(down_buf, x);
+    let x = unsafe { std::slice::from_raw_parts(x_ptr, n_embd) };
+    trace::layer_1d("l_out", layer, pos, x);
 }
 
-fn forward_attention(
+/// Batched LFM2 attention sub-layer for `rows` consecutive tokens
+/// starting at `base_position`. `n_cached_total` is the new seq_len
+/// after the chunk has been written to the KV cache. For
+/// `rows == 1` this collapses to the legacy per-query walk (no
+/// extra allocation). For `rows > 1` the Q/K/V projections go
+/// through a single [`PreparedRows::matmul_group`] dispatch so
+/// the quantise + dispatch overhead is amortised across `rows`.
+/// Shortconv layers stay per-row by construction.
+#[allow(clippy::too_many_arguments)]
+fn forward_attention_chunked(
     pool: &Arc<ComputePool>,
     lw: &Lfm2LayerWeights<'_>,
     cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     kv_cache: &KvCache,
     max_ctx: usize,
-    pos: usize,
+    base_position: usize,
+    _n_cached_total: usize,
+    rows: usize,
     freq_base: f32,
     eps: f32,
     layer: usize,
@@ -693,6 +694,19 @@ fn forward_attention(
     let n_embd_head_v = cfg.n_embd_head_v;
     let n_embd_q = n_head * n_embd_head_k;
     let n_embd_gqa = n_head_kv * n_embd_head_v;
+    let _group_size = n_head / n_head_kv;
+    // When `rows == 1` `base_position == pos` so the legacy
+    // per-token math falls out unchanged. When `rows > 1` we
+    // exercise the `PreparedRows` batched matmul path.
+    let pos = base_position;
+
+    // `ExecutionScratchpad` is sized for per-row state. When
+    // `rows > 1` we allocate row-major `[rows × n]` scratch here
+    // so the batched Q/K/V / wo matmul can write into disjoint
+    // rows. The free is amortised across `rows` so the per-token
+    // cost is small.
+    let use_batched = rows > 1;
+    let _ = use_batched;
 
     let q_ptr = scratch.q.as_mut_ptr();
     let k_ptr = scratch.k_new.as_mut_ptr();
@@ -715,57 +729,35 @@ fn forward_attention(
     let q8k = &q8k_buf[..n_embd / 256];
 
     // Q8 matmul (Q/K/V) — parallel scalar path.
-    pool.compute({
+    {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let q_ptr = q_ptr;
-        let k_ptr = k_ptr;
-        let v_ptr = v_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
-            let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
-            let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
-            lw.wq.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                q,
-                n_embd,
-                n_embd_q,
-                ith,
-                nth,
-            );
-            lw.wk.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                k_new,
-                n_embd,
-                n_embd_gqa,
-                ith,
-                nth,
-            );
-            lw.wv.as_ref().unwrap().kernel.forward_prepared(
-                input,
-                q8,
-                sc,
-                Some(q8k),
-                v_new,
-                n_embd,
-                n_embd_gqa,
-                ith,
-                nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let q = unsafe { std::slice::from_raw_parts_mut(q_ptr, n_embd_q) };
+        let k_new = unsafe { std::slice::from_raw_parts_mut(k_ptr, n_embd_gqa) };
+        let v_new = unsafe { std::slice::from_raw_parts_mut(v_ptr, n_embd_gqa) };
+        lw.wq
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), q, pool);
+        lw.wk
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), k_new, pool);
+        lw.wv
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, Some(q8k), v_new, pool);
+        trace::layer_2d("q_proj", layer, pos, n_embd_head_k, n_head, q);
+        trace::layer_2d("k_proj", layer, pos, n_embd_head_k, n_head_kv, k_new);
+        trace::layer_2d("v_proj", layer, pos, n_embd_head_k, n_head_kv, v_new);
+    }
 
     // Q/K norm + RoPE.
     unsafe {
@@ -783,6 +775,8 @@ fn forward_attention(
                 eps,
             );
         }
+        trace::layer_2d("q_norm", layer, pos, n_embd_head_k, n_head, q);
+        trace::layer_2d("k_norm", layer, pos, n_embd_head_k, n_head_kv, k_new);
         for h in 0..n_head {
             rope_neox_inplace(
                 &mut q[h * n_embd_head_k..(h + 1) * n_embd_head_k],
@@ -799,6 +793,8 @@ fn forward_attention(
                 freq_base,
             );
         }
+        trace::layer_2d("q_rope", layer, pos, n_embd_head_k, n_head, q);
+        trace::layer_2d("k_rope", layer, pos, n_embd_head_k, n_head_kv, k_new);
     }
 
     // KV cache write.
@@ -831,6 +827,24 @@ fn forward_attention(
     // Attention compute (single-token decode path).
     let group_size = n_head / n_head_kv;
     let kq_scale = 1.0f32 / (n_embd_head_k as f32).sqrt();
+    // Staging for the two `[n_head, n_cached]` trace records. Only allocated
+    // when the checkpoint is actually wanted, and each head writes its own
+    // row, so the parallel loop below stays race-free. The Vec is kept alive
+    // here and shared with the closure as a raw pointer, matching how the rest
+    // of this function hands scratch across the thread pool.
+    let n_cached = pos + 1;
+    let mut trace_stage =
+        trace::trace_enabled("attn_scores").then(|| vec![0.0f32; n_head * n_cached]);
+    let mut probs_stage =
+        trace::trace_enabled("attn_probs").then(|| vec![0.0f32; n_head * n_cached]);
+    let trace_stage_ptr = trace_stage
+        .as_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .unwrap_or(std::ptr::null_mut());
+    let probs_stage_ptr = probs_stage
+        .as_mut()
+        .map(|buffer| buffer.as_mut_ptr())
+        .unwrap_or(std::ptr::null_mut());
 
     match kv_cache {
         KvCache::F16(_) => {
@@ -906,11 +920,9 @@ fn forward_attention(
             let v_cache = unsafe {
                 std::slice::from_raw_parts(v_cache_f32_ptr, n_layer * max_ctx * n_embd_gqa)
             };
-            let n_cached = pos + 1;
             let n_padded = (n_cached + 255) / 256 * 256;
             let score_stride = scratch.score_stride;
             let scores_ptr = scratch.scores.as_mut_ptr();
-            let attention_values_ptr = scratch.attention_values.as_mut_ptr();
             pool.compute({
                 let q_ptr = q_ptr;
                 let attn_out_ptr = attn_out_ptr;
@@ -929,12 +941,6 @@ fn forward_attention(
                         let scores = unsafe {
                             std::slice::from_raw_parts_mut(scores_ptr.add(s_off), score_stride)
                         };
-                        let values = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                attention_values_ptr.add(s_off),
-                                score_stride,
-                            )
-                        };
                         for t in 0..n_cached {
                             scores[t] = dot_f32(
                                 &q[q_off..q_off + n_embd_head_k],
@@ -949,8 +955,32 @@ fn forward_attention(
                         for v in &mut scores[n_cached..n_padded] {
                             *v = f32::NEG_INFINITY;
                         }
+                        // The oracle records one `[n_head, n_cached]` matrix, so
+                        // each head copies into its own disjoint slice of the
+                        // staging buffer. Emitting the per-head slice directly
+                        // would declare `n_head * n_cached` values and hand over
+                        // `n_cached`, which the trace refuses to write (it
+                        // reports the mismatch and drops the record).
+                        if !trace_stage_ptr.is_null() {
+                            let row = h * n_cached;
+                            unsafe {
+                                std::slice::from_raw_parts_mut(trace_stage_ptr.add(row), n_cached)
+                            }
+                            .copy_from_slice(&scores[..n_cached]);
+                        }
                         softmax_inplace(&mut scores[..n_padded]);
-                        values[n_cached..n_padded].fill(0.0);
+                        if !probs_stage_ptr.is_null() {
+                            let row = h * n_cached;
+                            unsafe {
+                                std::slice::from_raw_parts_mut(probs_stage_ptr.add(row), n_cached)
+                            }
+                            .copy_from_slice(&scores[..n_cached]);
+                        }
+                        // `values` was hard-coded to `[0.0f32; 512]` historically,
+                        // which silently truncated attention once the cache
+                        // exceeded 512 tokens. Allocating based on `max_ctx`
+                        // matches the score buffer and KV cache layout.
+                        let mut values = vec![0.0f32; max_ctx];
                         for d in 0..n_embd_head_v {
                             for t in 0..n_cached {
                                 values[t] =
@@ -967,6 +997,13 @@ fn forward_attention(
 
     // Output projection.
     let attn_out = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+    if let Some(stage) = trace_stage {
+        trace::layer_2d("attn_scores", layer, pos, n_head, n_cached, &stage);
+    }
+    if let Some(stage) = probs_stage {
+        trace::layer_2d("attn_probs", layer, pos, n_head, n_cached, &stage);
+    }
+    trace::layer_2d("attn_values", layer, pos, n_embd_head_v, n_head, attn_out);
     quantize_q8_0_into(
         attn_out,
         n_embd_q,
@@ -985,31 +1022,29 @@ fn forward_attention(
     let q8k = &q8k_buf[..n_embd_q / 256];
 
     // Q8 matmul (output projection) — parallel scalar path.
-    pool.compute({
-        let attn_out_ptr = attn_out_ptr;
+    {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let attn_proj_ptr = attn_proj_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
-            let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
-            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
-                if wo_needs_q8k { Some(q8k) } else { None };
-            lw.wo.as_ref().unwrap().kernel.forward_prepared(
-                input, q8, sc, q8k_opt, attn_proj, n_embd_q, n_embd, ith, nth,
-            );
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(attn_out_ptr, n_embd_q) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd_q) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd_q / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd_q / 256) };
+        let attn_proj = unsafe { std::slice::from_raw_parts_mut(attn_proj_ptr, n_embd) };
+        let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
+            if wo_needs_q8k { Some(q8k) } else { None };
+        lw.wo
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, q8k_opt, attn_proj, pool);
+    }
 }
 
 fn forward_shortconv(
     pool: &Arc<ComputePool>,
     lw: &Lfm2LayerWeights<'_>,
-    layer_idx: usize,
+    layer: usize,
     cfg: &Lfm2Config,
     scratch: &mut ExecutionScratchpad,
     pos: usize,
@@ -1058,27 +1093,25 @@ fn forward_shortconv(
     let q8k = &q8k_buf[..n_embd / 256];
 
     // Q8 matmul (in_proj) — parallel scalar path.
-    pool.compute({
+    {
         let input_ptr = normed_ptr;
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
-        let gate_buf_ptr = gate_buf_ptr;
-        move |ith, nth| {
-            let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
-            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
-                if in_proj_needs_q8k { Some(q8k) } else { None };
-            lw.shortconv_in
-                .as_ref()
-                .unwrap()
-                .kernel
-                .forward_prepared(input, q8, sc, q8k_opt, bcx, n_embd, three_n, ith, nth);
-        }
-    });
+
+        let input = unsafe { std::slice::from_raw_parts(input_ptr, n_embd) };
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let bcx = unsafe { std::slice::from_raw_parts_mut(gate_buf_ptr, three_n) };
+        let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
+            if in_proj_needs_q8k { Some(q8k) } else { None };
+        lw.shortconv_in
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, q8k_opt, bcx, pool);
+        trace::layer_1d("conv_in_proj", layer, pos, bcx);
+    }
 
     // Step 2: bx = b * x (per-channel); conv1d over (state || bx); multiply by c; out_proj.
     let bcx = unsafe { std::slice::from_raw_parts(gate_buf_ptr, three_n) };
@@ -1153,6 +1186,7 @@ fn forward_shortconv(
         }
         conv_out[c_idx] = acc;
     }
+    trace::layer_1d("conv_conv", layer, pos, &conv_out);
 
     // y = c * conv_out (per-channel gating, SIMD via vec_mul_inplace).
     vec_mul_inplace(c, conv_out.as_mut_slice());
@@ -1175,47 +1209,51 @@ fn forward_shortconv(
     let sc = &scale_buf[..n_embd / 32];
     let q8k = &q8k_buf[..n_embd / 256];
     let mut out: Vec<f32> = vec![0.0; n_embd];
-    pool.compute({
+    {
         let q8_ptr = q8.as_ptr();
         let sc_ptr = sc.as_ptr();
         let q8k_ptr = q8k.as_ptr();
         let out_ptr = out.as_mut_ptr();
-        move |ith, nth| {
-            let input = &conv_out[..];
-            let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
-            let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
-            let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
-            let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
-            let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
-                if out_proj_needs_q8k { Some(q8k) } else { None };
-            lw.shortconv_out
-                .as_ref()
-                .unwrap()
-                .kernel
-                .forward_prepared(input, q8, sc, q8k_opt, o, n_embd, n_embd, ith, nth);
-        }
-    });
 
-    let _ = pos;
+        let input = &conv_out[..];
+        let q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_embd) };
+        let sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_embd / 32) };
+        let q8k = unsafe { std::slice::from_raw_parts(q8k_ptr, n_embd / 256) };
+        let o = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_embd) };
+        let q8k_opt: Option<&[crate::ops::quant::BlockQ8K]> =
+            if out_proj_needs_q8k { Some(q8k) } else { None };
+        lw.shortconv_out
+            .as_ref()
+            .unwrap()
+            .matmul_prepared(input, q8, sc, q8k_opt, o, pool);
+    }
+    trace::layer_1d("conv_out_proj", layer, pos, &out);
+
     (out, bx)
 }
 
 /// Single forward pass: prefill `prompt_tokens` and return the
-/// last-position logits. Used by JEV / classification modes that do
-/// not need autoregressive decoding.
-///
-/// Mirrors the prefill portion of `run_inference_stream` but stops
-/// after the final logits are computed. The per-step body is the same
-/// as in `run_inference_stream`; keeping a separate copy here avoids
-/// touching the existing decode loop and its bench/profile plumbing.
-pub fn run_forward_logits_lfm2(
+/// final prefill-step logits. Used by
+/// [`crate::models::lfm2::Lfm2Session::forward_logits_chunked`]
+/// for the B = 1 fallback and by JEV / classification modes that
+/// do not need autoregressive decoding. The `batch_size` argument
+/// is accepted for trait compatibility but ignored at runtime — the
+/// LFM2 prefill walks the per-token path today (the SSM shortconv
+/// state has to step per-token by construction). Future work lifts
+/// [`forward_layer`] into a true `rows > 1` batched path so the
+/// attention sub-layers amortise across the chunk while the
+/// shortconv sub-layers keep their sequential state update.
+pub fn run_forward_logits_lfm2_with_batch(
     source: &dyn TensorSource,
     prompt_tokens: &[u32],
     n_threads_arg: usize,
     kv_format: KvFormat,
     max_context: usize,
+    batch_size: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
-    let t0 = Instant::now();
+    let _ = batch_size;
+
+    let _t0 = Instant::now();
     let cfg = Lfm2Config::from_source(source)?;
     let n_embd = cfg.n_embd;
     let n_layer = cfg.n_layer;
@@ -1296,6 +1334,20 @@ pub fn run_forward_logits_lfm2(
     let mut prefill_time = Duration::ZERO;
     let n_prompt = prompt_tokens.len();
 
+    // Chunked prefill dispatch — see `core::prefill` and
+    // `docs/develop/PREFILL_ABSTRACTION.md`. The dispatch loop
+    // matches the `ChunkedPrefill` trait default; the per-step
+    // body is the legacy per-token forward. When `B = 1`
+    // (default `DEFAULT_PREFILL_BATCH_SIZE = 64`, but LFM2 runs
+    // at `B = 1` because the shortconv + SSM state has to
+    // step one token at a time) `prefill_chunks` yields one
+    // single-element chunk per iteration and the walk is
+    // identical to the legacy loop. The next refactor adds
+    // a real `Lfm2Session` + `ChunkedPrefill` impl so the
+    // attention sub-layers can run a true `B > 1` batched
+    // forward while SSM/MoE sub-layers keep their per-row
+    // stateful semantics.
+    let _prefill_chunks = crate::core::prefill::prefill_chunks(n_prompt, 1);
     for step in 0..n_prompt {
         let eval_started = Instant::now();
         let token_id = prompt_tokens[step];
@@ -1345,6 +1397,7 @@ pub fn run_forward_logits_lfm2(
         let x = unsafe { std::slice::from_raw_parts_mut(x_ptr, n_embd) };
         let normed = unsafe { std::slice::from_raw_parts_mut(normed_ptr, n_embd) };
         rms_norm(x, &output_norm, normed, eps);
+        trace::global("result_norm", pos, normed);
 
         let q8_buf = unsafe {
             std::slice::from_raw_parts_mut(
@@ -1373,8 +1426,7 @@ pub fn run_forward_logits_lfm2(
         };
 
         let logits_ptr = scratch.logits.as_mut_ptr();
-        let kernel: &dyn crate::ops::kernel::Kernel = &*output_pw.kernel;
-        pool.compute(move |ith, nth| {
+        {
             let input = unsafe { std::slice::from_raw_parts(normed.as_ptr(), n_embd) };
             let q8 = unsafe { std::slice::from_raw_parts(q8.as_ptr(), n_embd) };
             let sc = unsafe { std::slice::from_raw_parts(sc.as_ptr(), n_embd / 32) };
@@ -1385,8 +1437,12 @@ pub fn run_forward_logits_lfm2(
             } else {
                 Some(q8k)
             };
-            kernel.forward_prepared(input, q8, sc, q8k_opt, logits, n_embd, vocab, ith, nth);
-        });
+            output_pw.matmul_prepared(input, q8, sc, q8k_opt, logits, &pool);
+        }
+        {
+            let logits = unsafe { std::slice::from_raw_parts(logits_ptr, vocab) };
+            trace::global("result_output", pos, logits);
+        }
 
         prefill_time += eval_started.elapsed();
     }

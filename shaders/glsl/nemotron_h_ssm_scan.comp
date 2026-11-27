@@ -1,0 +1,137 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Nemotron-3 Nano Mamba-2 selective scan.
+//
+// The CPU path (`ssm_scan_row_neon` in
+// `src/models/nemotron_h/trunk/forward.rs`) mirrors ggml's
+// `ggml_compute_forward_ssm_scan_f32`:
+//
+//   * the state row is 128 elements wide (`d_state`), split into eight
+//     blocks of sixteen;
+//   * each block feeds four vector accumulators, one per four-lane group,
+//     and each accumulator is updated with a fused multiply-add:
+//     `acc = acc + new_state * c`;
+//   * the state update itself is two separate multiplies and an add:
+//     `new_state = state * dA + b * x_dt`;
+//   * the four accumulators are reduced with a pairwise tree and then
+//     horizontally.
+//
+// The reduction order is load-bearing: a single accumulator rounds
+// differently and drifts across the SSM layers.
+//
+// One lane owns one scalar accumulator and walks the eight blocks in
+// order, which reproduces the accumulator's update order exactly. ggml's
+// block `g` holds the elements `g * 16 + j * 4 + l` in vector accumulator
+// `j` at lane `l`, so the lane that owns element `g * 16 + p` owns the
+// scalar accumulator `p` of the row:
+//
+//   s[p] for p in 0..16, with p = j * 4 + l
+//
+// The reduction then follows ggml's `GGML_F32x4_REDUCE` and the NEON
+// horizontal add:
+//
+//   s[l]    += s[8 + l]      // acc[0] += acc[2]
+//   s[4 + l] += s[12 + l]    // acc[1] += acc[3]
+//   s[l]    += s[4 + l]      // acc[0] += acc[1]
+//   sum = (s[0] + s[1]) + (s[2] + s[3])   // vaddvq_f32
+//
+// Sixteen lanes cover a whole state row, and a 64-lane group covers four
+// rows. The CPU path's scalar tail (a state row whose length is not a
+// multiple of sixteen) does not exist here: `d_state` is 128.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint state_word;    // persistent scan state for this layer
+    uint x_word;        // post-SiLU conv `x`, `inner` floats
+    uint b_word;        // `groups * d_state` floats
+    uint c_word;        // `groups * d_state` floats
+    uint dt_word;       // softplus time step, `heads` floats
+    uint da_word;       // per-head decay, `heads` floats
+    uint d_word;        // per-head D skip, `heads` floats
+    uint out_word;      // scan output plus D skip, `inner` floats
+    uint inner;         // 7680
+    uint heads;         // 96
+    uint headdim;       // 80
+    uint d_state;       // 128
+    uint groups;        // 8
+} pc;
+
+shared float partial[64];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint row_in_group = lane / 16u;
+    uint position = lane % 16u;
+    uint rows_per_group = 64u / 16u;
+    uint row = gl_WorkGroupID.x * rows_per_group + row_in_group;
+    uint rows_total = pc.heads * pc.headdim;
+    bool valid = row < rows_total;
+
+    uint d_state = pc.d_state;
+    uint blocks = d_state / 16u;
+    precise float accumulator = 0.0;
+
+    if (valid) {
+        uint head = row / pc.headdim;
+        uint channel = row % pc.headdim;
+        uint group = head / (pc.heads / pc.groups);
+        float decay = uintBitsToFloat(arena.data[pc.da_word + head]);
+        float dt = uintBitsToFloat(arena.data[pc.dt_word + head]);
+        float x = uintBitsToFloat(arena.data[pc.x_word + head * pc.headdim + channel]);
+        float x_dt = x * dt;
+
+        uint state_base = pc.state_word + row * d_state;
+        uint b_base = pc.b_word + group * d_state;
+        uint c_base = pc.c_word + group * d_state;
+
+        for (uint block = 0u; block < blocks; block++) {
+            uint element = block * 16u + position;
+            float state = uintBitsToFloat(arena.data[state_base + element]);
+            float b = uintBitsToFloat(arena.data[b_base + element]);
+            float c = uintBitsToFloat(arena.data[c_base + element]);
+            // ggml: `ax = s0 * dA; ay = B * x_dt; ax = ax + ay;` -- two
+            // multiplies and an add, not a fused multiply-add.
+            precise float new_state = (state * decay) + (b * x_dt);
+            arena.data[state_base + element] = floatBitsToUint(new_state);
+            // ggml: `acc = acc + new_state * c`.
+            accumulator = fma(new_state, c, accumulator);
+        }
+    }
+
+    // Every lane of the group reaches the barriers, including the lanes of
+    // a row that does not exist.
+    partial[lane] = accumulator;
+    barrier();
+
+    // ggml's `acc[0] += acc[2]` and `acc[1] += acc[3]`, in lane terms:
+    // accumulator `l` covers the elements `l`, `8 + l`, `4 + l` and
+    // `12 + l`.
+    uint base = row_in_group * 16u;
+    if (position < 4u) {
+        precise float even = partial[base + position];
+        precise float odd = partial[base + 8u + position];
+        precise float middle = partial[base + 4u + position];
+        precise float last = partial[base + 12u + position];
+        partial[base + position] = (even + odd) + (middle + last);
+    }
+    barrier();
+
+    if (position == 0u && valid) {
+        // `vaddvq_f32` reduces the four lanes pairwise:
+        // `(s[0] + s[1]) + (s[2] + s[3])`.
+        precise float low = partial[base] + partial[base + 1u];
+        precise float high = partial[base + 2u] + partial[base + 3u];
+        precise float reduced = low + high;
+        // The D skip is added to the scan output, as ggml does:
+        // `y = ggml_add(y, ggml_mul(x, ssm_d))`.
+        uint head = row / pc.headdim;
+        uint channel = row % pc.headdim;
+        float x = uintBitsToFloat(arena.data[pc.x_word + head * pc.headdim + channel]);
+        float d = uintBitsToFloat(arena.data[pc.d_word + head]);
+        precise float y = reduced + d * x;
+        arena.data[pc.out_word + head * pc.headdim + channel] = floatBitsToUint(y);
+    }
+}

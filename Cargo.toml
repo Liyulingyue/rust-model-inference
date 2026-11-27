@@ -8,7 +8,10 @@ license = "MIT"
 [features]
 default = []
 parity-trace = []
-scalar-parity = []
+# Reproduce ggml's f16-accumulating NEON dot bit for bit instead of
+# accumulating in f32. Off by default: see TODO-025. The f16 *storage* is
+# unaffected either way -- this only picks the accumulator width.
+ggml-f16-dot-parity = []
 vulkan = ["dep:ash", "dep:raw-window-handle"]
 wgpu = ["dep:wgpu"]
 
@@ -22,11 +25,15 @@ raw-window-handle = { version = "0.6", optional = true }
 bytemuck = "1.0"
 wgpu = { version = "29", features = ["spirv"], optional = true }
 log = "0.4"
+env_logger = "0.11"
+# Blocking client: image URLs are fetched inside the request handler's
+# `spawn_blocking` closure, so an async client would buy nothing.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 futures = "0.3"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["cors"] }
 rand = "0.8"
@@ -34,6 +41,10 @@ unicode_categories = "0.1"
 sha2 = "0.10"
 base64 = "0.22"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+regex = "1.13"
+fancy-regex = "0.17"
+unicode-normalization = "0.1.26"
+minijinja = { version = "2.24.0", features = ["json", "fuel", "preserve_order"] }
 
 [profile.release]
 opt-level = 3
@@ -59,3 +70,95 @@ path = "src/bin/codec_test.rs"
 [[bin]]
 name = "rust-model-server"
 path = "src/bin/server.rs"
+
+[[bin]]
+name = "dump_meta"
+path = "src/bin/dump_meta.rs"
+
+[[bin]]
+name = "dump_tensors"
+path = "src/bin/dump_tensors.rs"
+
+[[bin]]
+name = "dump_dims"
+path = "src/bin/dump_dims.rs"
+
+[[bin]]
+name = "dump_emb"
+path = "src/bin/dump_emb.rs"
+
+[[bin]]
+name = "ggufrs"
+path = "src/bin/ggufrs.rs"
+
+# Vulkan example binaries are feature-gated: each starts with
+# `#![cfg(feature = "vulkan")]`, so without the feature the file is
+# empty and `cargo test --examples` complains "main function not found".
+# Mark them `required-features` so `cargo build` / `cargo test` skip them
+# by default and they only build when the user explicitly opts in via
+# `--features vulkan`.
+[[example]]
+name = "vk_bench"
+path = "examples/vk_bench.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "vk_check"
+path = "examples/vk_check.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "vk_ops_check"
+path = "examples/vk_ops_check.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "astronex_gpu_determinism"
+path = "examples/astronex_gpu_determinism.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "astronex_text_determinism"
+path = "examples/astronex_text_determinism.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "mage_vae_conv_probe"
+path = "examples/mage_vae_conv_probe.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "spv_compile_probe"
+path = "examples/spv_compile_probe.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "dit_cost_model"
+path = "examples/dit_cost_model.rs"
+
+[[example]]
+name = "gpu_ceiling"
+path = "examples/gpu_ceiling.rs"
+required-features = ["vulkan"]
+
+# Not crate-level gated, but it calls `ops::get_vulkan_context`, which only
+# exists in a Vulkan build.
+[[example]]
+name = "vk_mem_info"
+path = "examples/vk_mem_info.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "dit_vk_bench"
+path = "examples/dit_vk_bench.rs"
+required-features = ["vulkan"]
+
+[[example]]
+name = "test_openjev_nli"
+path = "examples/test_openjev_nli.rs"
+
+# Uses `parity_trace`, which only exists with the feature on.
+[[test]]
+name = "nemotron3_nano_moe"
+path = "tests/nemotron3_nano_moe.rs"
+required-features = ["parity-trace"]

@@ -3,6 +3,90 @@
 //! `sum_sq_f32`（通用 reduce Σ x² → f64）和它的 AVX2/NEON 内核放在
 //! `ops/dot.rs`，与 `hsum_ps` 等横向归约工具同处。本文件只调用之。
 
+/// Layer normalization (BERT family, `ggml_norm` + affine weight/bias).
+///
+/// `y[i] = (x[i] - mean) / sqrt(var + eps) * weight[i] + bias[i]`
+///
+/// Two precision paths, selected by the `parity-trace` cargo feature so the
+/// function has a single semantic contract for callers:
+///
+/// - **Default build** (no `parity-trace`): mean computed in f64, centered
+///   values in f64, variance accumulated in f64. This is the more precise
+///   option and does **not** mirror `llama.cpp` exactly — we keep the f64
+///   budget rather than locking into a less-precise design to match a
+///   reference. The 1–2 ULP gap vs `llama.cpp` is well below noise for
+///   embedding similarity and does not flip s_pos / s_rel / s_unrel
+///   ordering in any BERT-family test.
+/// - **`parity-trace` build** (compiled with `--features parity-trace`):
+///   mean is rounded to f32 before dividing (matches `ggml_compute_forward_
+///   norm_f32`), centered values stay in f32, and the squared-and-promoted
+///   variance is still accumulated in f64. This path is bit-equal with
+///   the `llama.cpp b96806d9` scalar oracle used by `tools/oracle/jina_bert_v2`,
+///   which is the only reason to enable it.
+///
+/// The two paths use `#[cfg(feature = "parity-trace")]` rather than runtime
+/// branching because the `mean` variable's type differs (f32 vs f64), so the
+/// downstream `centered` calculation needs a different type in each arm.
+/// `scalar_mode()` (the runtime flag used by `dot_f32` / `gelu_ggml_f16`)
+/// cannot resolve this — it returns one type. Compile-time gating keeps
+/// the production path zero-cost and type-stable.
+///
+/// `bias` may be empty when a tensor carries only an affine scale.
+pub fn layer_norm(input: &[f32], weight: &[f32], bias: &[f32], eps: f32, output: &mut [f32]) {
+    let n = input.len().min(weight.len()).min(output.len());
+    // ModernBERT's LayerNorm declares `bias: false`, so the affine step is scale
+    // only. An empty bias means "no bias" rather than a shape mismatch.
+    assert!(
+        bias.is_empty() || bias.len() == n,
+        "layer_norm bias must be empty or match the row length"
+    );
+    if n == 0 {
+        return;
+    }
+    let sum: f64 = input[..n].iter().map(|&value| f64::from(value)).sum();
+
+    // See the function-level doc for the precision rationale. The split is
+    // `cfg`-gated because `mean`'s type differs between the two paths.
+    #[cfg(feature = "parity-trace")]
+    let mean: f32 = sum as f32 / n as f32;
+    #[cfg(not(feature = "parity-trace"))]
+    let mean: f64 = sum / n as f64;
+
+    let var: f64 = input[..n]
+        .iter()
+        .map(|&value| {
+            #[cfg(feature = "parity-trace")]
+            {
+                let centered: f32 = value - mean;
+                f64::from(centered * centered)
+            }
+            #[cfg(not(feature = "parity-trace"))]
+            {
+                let centered: f64 = f64::from(value) - mean;
+                centered * centered
+            }
+        })
+        .sum();
+    let var = var / n as f64;
+    let scale = 1.0f32 / (var as f32 + eps).sqrt();
+    if bias.is_empty() {
+        for i in 0..n {
+            output[i] = (input[i] - mean as f32) * scale * weight[i];
+        }
+        return;
+    }
+    for i in 0..n {
+        #[cfg(feature = "parity-trace")]
+        {
+            output[i] = (input[i] - mean) * scale * weight[i] + bias[i];
+        }
+        #[cfg(not(feature = "parity-trace"))]
+        {
+            output[i] = (input[i] - mean as f32) * scale * weight[i] + bias[i];
+        }
+    }
+}
+
 pub fn rms_norm(input: &[f32], weight: &[f32], output: &mut [f32], eps: f32) {
     let n = input.len().min(weight.len()).min(output.len());
     let sum_sq = super::sum_sq_f32(&input[..n]);

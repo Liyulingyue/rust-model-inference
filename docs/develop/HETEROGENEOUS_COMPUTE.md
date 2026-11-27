@@ -2,6 +2,38 @@
 
 > **文档用途：** 本文定义 `rust-model-inference` 在多后端（AVX2 / NEON / Scalar / Vulkan / wgpu / 未来 CUDA · Metal）共存场景下的设计原则、当前形态评估与目标架构。配套的依赖方向约束见 [`MODEL_ORGANIZATION.md`](MODEL_ORGANIZATION.md)、GPU 模块归属见 [`REFACTOR_PLAN.md`](REFACTOR_PLAN.md) §1。
 
+
+## 现行实现（2026-10-09）
+
+统一计算入口已落在 `compute` 层，实施依据是
+[统一计算计划](../superpowers/plans/2026-10-08-unified-compute-dispatch.md)。
+下面原有的 Registry、priority、全模型迁移示例保留为历史设计，**不再是本轮实施要求**。
+本轮证据和限制见 [验证记录](UNIFIED_COMPUTE_VALIDATION.md)。
+
+```text
+模型权重与语义 → LinearExecutor / 共用 dense recipe
+                    ├─ CPU → 原 Kernel / PreparedRows → AVX2 / NEON / scalar
+                    └─ Vulkan → recorder → 驻留 arena / chunk 提交
+```
+
+- 权重格式分发和设备分发是两个层次。Q8、Q4、F16、BF16 等复用模型流程，
+  各格式仍需匹配的 kernel 和激活/归约契约，不能先全部转 Q8。
+- `ComputePolicy::{Cpu,Auto,Vulkan}` 独立于共享设备初始化。默认 CPU；CPU scope
+  覆盖兼容入口、请求线程及 ComputePool worker，退出后恢复上一作用域。
+- `LinearExecutor` 借用模型权重并拥有上传缓存；`Prepared`、`Forward`、`F16Strict`
+  分别校验。Gemma4 公共 projection 和 AuK 每 render linear 已复用它；这仍是局部卸载。
+- Qwen3 与标准 Llama session 复用 `run_dense_layer` 的同一运算顺序，Vulkan
+  再复用 `DenseVulkanSession` 的上传、arena、提交、KV delta 和 reset。特殊 RoPE、
+  SWA、softcap、scale、bias、post-norm 等未实现组合明确拒绝。
+- Qwen3.5 保留自己的 recurrent/conv/SSM recipe，复用策略与事务规则。
+  GPU 成功且 shadow 校验通过才提交；Auto 失败重算整个未提交 chunk，
+  强制 Vulkan 保留成功前缀并返回错误。
+- 不用 GPU 优先级代替性能门槛。新增 Llama Auto 路径留在 CPU；
+  既有 Auto 路径仍是实验性。原有权重格式、硬件历史测试不能替代本轮测量。
+- ARM prepared F16 的 32 路 half 累加已在公共 shader 匹配，并处理 FMA 的
+  double-rounding tie；非 32 对齐的 half-prefix/F64-tail 组合由执行层拒绝。
+  这不是对所有平台/格式逐位相等的承诺，`F16Strict` GPU 仍不支持。
+
 ---
 
 ## 1. 核心原则
@@ -62,7 +94,7 @@ dtype 轴是 **dequant + matmul** 的内层选择；op 轴是 **element-wise + a
 | 标量为底 | `kernel/q8_0/scalar.rs`、`activation/*::scalar_*`、`quant/scalar` 等，每个 dtype kernel 都有 scalar fallback | ✅ |
 | 启动期探测 | `has_avx2_fma()` / `has_neon()` / `has_f16c()` / `get_vulkan_context()` 在 `ops/float.rs` 一次性 `init_cpu_features()` 写死 | ✅ |
 | GPU 后端可插拔 | `vulkan.rs` 暴露 `VulkanContext`，`wgpu.rs` 暴露 `WgpuContext`；都通过 `OnceLock` 懒初始化 | ✅（仅 vulkan 有生产路径；wgpu 是 operator-check 级别的原型，见 §3.6） |
-| 正确性参照 | `parity_trace.rs` 落盘 SIMD/GPU 输出与 scalar 对比；`#[cfg(feature = "parity-trace")]` 同时强制 SIMD 路径退化为 scalar（`ops/quant/q8_0.rs:7` 等） | ✅ |
+| 正确性参照 | `parity_trace.rs` 在 `feature=parity-trace` 下落盘输出；所有构建均可用 `RMI_SCALAR=1` 把 `has_avx2_fma()` / `has_neon()` 打成 `false`，CPU SIMD 派发点透明回落到 scalar 参照路径，kernel 本身不改，见 §3.7 | ✅ |
 | dtype 抽象 | `Kernel` trait（`forward_prequantized / forward_prepared`）+ 13 个 dtype 实现 + `QuantizedTensor` 枚举 + `Weight<'a>` 持 `Box<dyn Kernel>` | ✅ |
 | GPU 会话 | `Qwen3VulkanSession`（`src/vulkan/qwen3.rs`）、`Qwen35VulkanSession`（`src/vulkan/qwen35.rs`），启动期 `check_eligibility` + 整段 forward 上 GPU | ✅ |
 | 模型级 GPU 开关 | `gpu_matmul_active()` / `disable_gpu_matmul_for_scope()` / `GPU_BROKEN` 三层组合：模型决策 + RAII 作用域 + 进程级熔断 | ✅ |
@@ -123,6 +155,32 @@ GPU 后端分散在三处：
 * 仅被 `vk_*_check` 系列测试与 operator-check 路径使用。
 
 Backend Registry 不应在「wgpu 平等接入」之前提这件事——除非先实现 23 个算子并接入两条 GPU 会话路径。
+
+---
+
+### 3.7 scalar 参照路径的运行期开关（`RMI_SCALAR`）
+
+做 llama.cpp bitwise 对比时需要一条**确定性的 scalar 参照路径**。这个开关由 `ops/float.rs::scalar_mode()` 提供，三重性质决定它很安全：
+
+1. **双重门控**——必须 `--features parity-trace` 编译 **且** `RMI_SCALAR` 环境变量非空。普通构建里它编译成常量 `false`，零成本。
+2. **隐式回落，不写新 kernel**——它让 `has_avx2_fma()` / `has_neon()` 返回 `false`，于是所有既有 `if has_avx2_fma()` / `if has_neon()` 派发点（Q8_0 quantizer、`dot_f32`、`silu_mul`、softmax、matmul、各 dtype kernel）自然走 scalar 分支。没有任何 dispatch 点需要直接调用它。
+3. **纯增量**——开关缺省时 parity-trace 构建与普通构建行为一致（照常跑 SIMD）；要参照路径时才 opt-in。
+
+**语义（重要）**：环境变量在**首次调用时读取一次**并缓存整个进程生命周期（`OnceLock`）。必须在进程启动前设置：
+
+```bash
+RMI_SCALAR=1 ./target/release/rust-model-inference --model m.gguf -p Hello
+```
+
+运行期改环境变量无效。又因为 std 环境变量是**进程全局**、而 Rust 测试在同一进程内多线程并行跑，测试**不能**指望 per-test 切换这个开关——第一个调用者定调，之后所有测试共享该值。
+
+**跑 parity 测试套件必须带上环境变量**，否则参照类测试会因为拿到 SIMD 舍入（如 `round-to-nearest-even`）而非 llama.cpp 的 scalar 舍入（`roundf`）而失败：
+
+```bash
+RMI_SCALAR=1 cargo test --test quantized_inference --features parity-trace
+# llama 家族 oracle 工作流（见 docs/usage/llama.md）
+RMI_NANBEIGE_MODEL=... RMI_NANBEIGE_ORACLE_TRACE=... RMI_SCALAR=1 cargo test --test nanbeige --features parity-trace -- --ignored
+```
 
 ---
 
@@ -309,4 +367,4 @@ src/vulkan/
 * **不接管模型级 GPU Session 的生命周期。** `Qwen3VulkanSession` / `Qwen35VulkanSession` 由 `models/{qwen3,qwen35}/trunk/session.rs` 创建与销毁；Backend Registry 只承载 per-op backend。
 * **不强制 wgpu 接入生产路径。** wgpu 当前是 operator-check 级别的实验后端，与 vulkan 不是平级关系。
 * **不重写 dtype 轴。** `Kernel` trait + 13 个 dtype kernel + `QuantizedTensor` + `Weight<'a>` 已稳定，是 op 轴的统一依赖面；Backend Registry 是 op 轴的薄包装，不是 `Kernel` 的替代。
-* **`parity_trace` 不仅是落盘**——feature 启用时同时强制 SIMD 路径退化为 scalar（`ops/quant/q8_0.rs:7` 等处的 `#[cfg(all(target_arch = "x86_64", not(feature = "parity-trace")))]`）。Backend Registry 收敛后这一行为必须保留。
+* **标量精度开关独立于落盘功能**——所有构建下 `RMI_SCALAR=1` 都会把 `has_avx2_fma()` / `has_neon()` 打成 `false`（`ops/float.rs::scalar_mode`），令 CPU SIMD 派发点透明回落到 scalar 参照路径；仅捕获检查点需要 `feature=parity-trace`。这是启动时读取并缓存的运行期环境变量开关，机制与调用方式见 §3.7。Backend Registry 收敛后这一行为必须保留。

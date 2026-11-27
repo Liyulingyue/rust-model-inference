@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Nemotron-3 Nano Mamba-2 z gate.
+//
+// The CPU path (`src/models/nemotron_h/trunk/forward.rs`) applies the gate
+// after the scan and the D skip:
+//
+//   z_gated = silu(z)          // z is the first `d_inner` half of the
+//   y       = z_gated * y      // in-projection output
+//
+// The SiLU is ggml's, so the gate's exponential matches the CPU path's
+// `silu_ggml_inplace` bit for bit. ggml's NEON path works four lanes at a
+// time and picks the exponential's fast or overflow path per group of
+// four, so this kernel also gives every invocation four consecutive
+// channels. The gated width is `d_inner` = 7680, a multiple of four, so
+// the CPU path has no scalar tail.
+
+#include "exp_ggml.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint z_word;    // the z half of the in-projection output
+    uint y_word;    // scan output plus D skip
+    uint out_word;  // gated output
+    uint count;     // 7680
+} pc;
+
+void main() {
+    uint base = gl_GlobalInvocationID.x * 4u;
+    if (base >= pc.count) return;
+
+    float z[4];
+    float y[4];
+    for (uint lane = 0u; lane < 4u; lane++) {
+        z[lane] = uintBitsToFloat(arena.data[pc.z_word + base + lane]);
+        y[lane] = uintBitsToFloat(arena.data[pc.y_word + base + lane]);
+    }
+
+    float activated[4];
+    silu_ggml4(z, activated);
+    for (uint lane = 0u; lane < 4u; lane++) {
+        precise float gated = activated[lane] * y[lane];
+        arena.data[pc.out_word + base + lane] = floatBitsToUint(gated);
+    }
+}

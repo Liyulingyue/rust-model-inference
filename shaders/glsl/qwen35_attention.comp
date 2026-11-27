@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 64) in;
 
@@ -15,9 +16,22 @@ layout(push_constant) uniform PC {
     uint q_heads;
     uint kv_heads;
     uint head_dim;
+    // Reduction width the host pads the score/value buffers to (a multiple of
+    // 256). The CPU trunk reduces over `n_attend.div_ceil(256) * 256` elements
+    // with the tail zero-filled, so matching that width here keeps the SIMD
+    // reduction order identical and the prompt logits stable as the sequence
+    // grows.
+    uint padded_length;
+    uint reduction_lanes;
 } pc;
 
 shared float scores[4096];
+shared float lane_max[64];
+shared float lane_sum[64];
+
+#include "f32_dot.glsl"
+#include "host_libm.glsl"
+#include "f32_divide.glsl"
 
 void main() {
     uint head = gl_WorkGroupID.x;
@@ -28,51 +42,112 @@ void main() {
     uint kv_head = head / (pc.q_heads / pc.kv_heads);
     uint kv_count = pc.kv_heads * pc.head_dim;
     uint q_base = pc.q_word + (row * pc.q_heads + head) * pc.head_dim;
+    uint padded = pc.padded_length;
+    float scale = inversesqrt(float(pc.head_dim));
 
-    if (lane == 0u) {
-        float maximum = -3.402823466e+38;
-        float scale = inversesqrt(float(pc.head_dim));
-        for (uint token = 0u; token < sequence_length; token++) {
+    // Scores are computed across the 64 invocations: each lane takes a slice of
+    // the tokens, so the 64-wide workgroup is doing work instead of leaving
+    // lane 0 to serialise the whole attention row.
+    for (uint token = lane; token < padded; token += 64u) {
+        if (token < sequence_length) {
             uint k_base = pc.cache_k_word
                 + (pc.layer * pc.capacity + token) * kv_count
                 + kv_head * pc.head_dim;
-            precise float dot = 0.0;
-            for (uint index = 0u; index < pc.head_dim; index++) {
-                dot = fma(
-                    uintBitsToFloat(arena.data[q_base + index]),
-                    uintBitsToFloat(arena.data[k_base + index]),
-                    dot
-                );
+            // Match `dot_f32_avx2`: eight independent accumulators then a
+            // horizontal sum. A single accumulator drifts enough over 100+
+            // tokens to reorder the top logits.
+            precise float dot[16];
+            for (uint l = 0u; l < 16u; l++) dot[l] = 0.0;
+            uint width = max(pc.reduction_lanes, 1u);
+            uint vector_end = pc.reduction_lanes == 0u ? 0u : pc.head_dim / width * width;
+            for (uint index = 0u; index < vector_end; index++) {
+                uint stream = index % width;
+                dot[stream] = fma(uintBitsToFloat(arena.data[q_base + index]),
+                    uintBitsToFloat(arena.data[k_base + index]), dot[stream]);
             }
-            float score = dot * scale;
-            scores[token] = score;
-            maximum = max(maximum, score);
-        }
-        precise float sum = 0.0;
-        for (uint token = 0u; token < sequence_length; token++) {
-            float value = exp(scores[token] - maximum);
-            scores[token] = value;
-            sum += value;
-        }
-        float inverse_sum = 1.0 / sum;
-        for (uint token = 0u; token < sequence_length; token++) {
-            scores[token] *= inverse_sum;
+            precise float total = pc.reduction_lanes == 0u ? 0.0
+                : reduce_f32_dot(dot, pc.reduction_lanes);
+            vec2 wide_total = vec2(0.0);
+            for (uint index = vector_end; index < pc.head_dim; index++) {
+                precise float term = uintBitsToFloat(arena.data[q_base + index])
+                    * uintBitsToFloat(arena.data[k_base + index]);
+                if (pc.reduction_lanes == 0u) wide_total = add_f32_wide(wide_total, term);
+                else total += term;
+            }
+            if (pc.reduction_lanes == 0u) total = wide_total.x + wide_total.y;
+            scores[token] = total * scale;
+        } else {
+            // Match the CPU trunk's `f32::NEG_INFINITY` tail: it keeps the
+            // softmax reduction width fixed without contributing weight.
+            scores[token] = -3.402823466e+38;
         }
     }
     barrier();
 
-    for (uint index = lane; index < pc.head_dim; index += 64u) {
-        precise float value = 0.0;
+    // Softmax over the padded width. The maximum and the normaliser are each
+    // reduced across the lanes so no single invocation walks the whole row.
+    precise float local_max = -3.402823466e+38;
+    for (uint token = lane; token < padded; token += 64u) {
+        local_max = max(local_max, scores[token]);
+    }
+    lane_max[lane] = local_max;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) lane_max[lane] = max(lane_max[lane], lane_max[lane + stride]);
+        barrier();
+    }
+    float maximum = lane_max[0];
+    barrier();
+
+    for (uint token = lane; token < padded; token += 64u) {
+        scores[token] = token < sequence_length ? exp_reference(scores[token] - maximum) : 0.0;
+    }
+    barrier();
+    if (lane == 0u) {
+        precise float sum = 0.0;
+        precise float correction = 0.0;
         for (uint token = 0u; token < sequence_length; token++) {
-            uint v_index = pc.cache_v_word
-                + (pc.layer * pc.capacity + token) * kv_count
-                + kv_head * pc.head_dim + index;
-            value = fma(scores[token], uintBitsToFloat(arena.data[v_index]), value);
+            precise float next = sum + scores[token];
+            correction += sum >= scores[token] ? (sum - next) + scores[token]
+                : (scores[token] - next) + sum;
+            sum = next;
         }
+        lane_sum[0] = reciprocal_positive_sum(sum, correction);
+    }
+    barrier();
+    float inverse_sum = lane_sum[0];
+    for (uint token = lane; token < padded; token += 64u) {
+        scores[token] *= inverse_sum;
+    }
+    barrier();
+
+    // Mirror `dot_f32_avx2`: eight independent lanes, a horizontal sum, then
+    // the scalar tail. Reducing sequentially instead makes the accumulated
+    // error grow with the sequence length and shifts the prompt logits.
+    for (uint index = lane; index < pc.head_dim; index += 64u) {
+        precise float acc[16];
+        for (uint l = 0u; l < 16u; l++) acc[l] = 0.0;
+        uint width = max(pc.reduction_lanes, 1u);
+        precise float value = 0.0;
+        vec2 wide_value = vec2(0.0);
+        for (uint token = 0u; token < sequence_length; token++) {
+            uint v_index = pc.cache_v_word + (pc.layer * pc.capacity + token) * kv_count
+                + kv_head * pc.head_dim + index;
+            float v = uintBitsToFloat(arena.data[v_index]);
+            if (pc.reduction_lanes != 0u) {
+                uint stream = token % width;
+                acc[stream] = fma(scores[token], v, acc[stream]);
+            } else {
+                precise float term = scores[token] * v;
+                wide_value = add_f32_wide(wide_value, term);
+            }
+        }
+        if (pc.reduction_lanes != 0u) value = reduce_f32_dot(acc, pc.reduction_lanes);
+        else value = wide_value.x + wide_value.y;
         float gate = uintBitsToFloat(
             arena.data[pc.gate_word + (row * pc.q_heads + head) * pc.head_dim + index]
         );
-        value *= 1.0 / (1.0 + exp(-gate));
+        value *= divide_finite_normal(1.0, 1.0 + exp_reference(-gate));
         arena.data[pc.output_word + (row * pc.q_heads + head) * pc.head_dim + index] = floatBitsToUint(value);
     }
 }

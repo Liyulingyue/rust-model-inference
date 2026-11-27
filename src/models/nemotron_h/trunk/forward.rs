@@ -1,43 +1,91 @@
 //! Nemotron-3 Nano forward pass.
-//!
-//! This is a **partial** implementation intended to get the model
-//! loading, routing, and tokenization pipeline working end-to-end. The
-//! Mamba2 SSM branch is currently a no-op (the SSM tensors are loaded
-//! but the SSM forward pass is not implemented; SSM output is treated
-//! as zero). Attention and FFN follow the Qwen3 conventions.
-//!
-//! Once a parity test against the pinned llama.cpp commit exists
-//! (see `docs/REFERENCE_IMPLEMENTATIONS.md`), the SSM and any
-//! attention-specific quirks (e.g. partial RoPE dim) should be
-//! implemented to match the reference.
 
-use half::f16;
 use std::sync::Arc;
 
 use super::config::NemotronConfig;
+use super::trace;
 use super::weights::NemotronLayerWeights;
 
-use crate::core::scratchpad::{KvArch, KvCache, KvLifecycle, KvState};
+use crate::core::scratchpad::KvState;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::kernel::{Kernel, Weight};
-use crate::ops::{
-    dot_f32_exact, f16_to_f32, f32_slice_to_f16, quantize_q8_0_into, rms_norm, rope_neox_inplace,
-    softmax_inplace,
-};
-use std::io::{self, Write};
+use crate::ops::{quantize_q8_0_into, rms_norm, sample_llama_cpp, softmax_ggml_inplace};
+
+fn split_mamba2_projection(
+    values: &[f32],
+    inner: usize,
+    groups: usize,
+    state: usize,
+    heads: usize,
+) -> (&[f32], &[f32], &[f32]) {
+    let conv_width = inner + 2 * groups * state;
+    assert_eq!(values.len(), inner + conv_width + heads);
+    let (z, rest) = values.split_at(inner);
+    let (xbc, dt) = rest.split_at(conv_width);
+    (z, xbc, dt)
+}
+
+fn mamba2_conv_step(
+    weights: &[f32],
+    bias: &[f32],
+    history: &mut [f32],
+    current: &[f32],
+    kernel: usize,
+) -> Vec<f32> {
+    let cols = current.len();
+    assert_eq!(weights.len(), cols * kernel);
+    assert_eq!(bias.len(), cols);
+    assert_eq!(history.len(), cols * (kernel - 1));
+    let mut output = vec![0.0; cols];
+    for c in 0..cols {
+        for k in 0..kernel - 1 {
+            output[c] += weights[c * kernel + k] * history[k * cols + c];
+        }
+        output[c] += weights[c * kernel + kernel - 1] * current[c];
+        output[c] += bias[c];
+    }
+    if kernel > 2 {
+        history.copy_within(cols.., 0);
+    }
+    history[(kernel - 2) * cols..].copy_from_slice(current);
+    output
+}
 
 pub struct NemotronModel {
+    _source: Arc<dyn TensorSource>,
     pub config: NemotronConfig,
     pub layers: Vec<NemotronLayerWeights<'static>>,
     pub tok_embd: Weight<'static>,
     pub output_norm: Vec<f32>,
     pub output: Weight<'static>,
+    /// Thread pool used to parallelise every matmul in `prefill` /
+    /// `forward_layer`. Mirrors the `ComputePool` plumbing used by
+    /// `llama::LlamaModel` and `spark::SparkSession` so the user-visible
+    /// `--threads N` flag actually partitions the output rows of each
+    /// matmul across N worker threads instead of forcing single-threaded
+    /// execution (the previous hard-coded `nth=1`).
+    pub pool: Arc<ComputePool>,
+    /// Lazily-initialized Vulkan session. Built when `--compute auto`
+    /// or `--compute vulkan` enables the device; `None` means CPU
+    /// fallback (no eligible GPU or Vulkan init failed).
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu: Option<crate::vulkan::nemotron_h::NemotronHVulkanSession>,
+    /// Whether the attached device session is used for the next call.
+    ///
+    /// The HTTP runtime attaches one session for the whole server
+    /// lifetime, because building it uploads the weights to the device.
+    /// A request whose prompt has more rows than the device arena holds
+    /// cannot use that session -- the row buffers would overflow -- so
+    /// the runtime turns the device off for that request instead of
+    /// dropping the session.
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu_active: bool,
 }
 
 impl NemotronModel {
-    pub fn from_source(source: Arc<dyn TensorSource>) -> Result<Self, String> {
+    pub fn from_source(source: Arc<dyn TensorSource>, n_threads: usize) -> Result<Self, String> {
         let config = NemotronConfig::from_source(source.as_ref())?;
         let layers = super::weights::load_layers(source.as_ref(), &config)?;
         let output_norm = crate::core::tensor::load_f32_tensor(
@@ -45,41 +93,167 @@ impl NemotronModel {
             "output_norm.weight",
             &[config.n_embd as u64],
         )?;
-        let tok_embd_info = source
-            .tensor_info("token_embd.weight")
-            .ok_or_else(|| "Missing tensor: token_embd.weight".to_string())?;
-        let tok_embd_bytes = source
-            .tensor_slice("token_embd.weight")
-            .ok_or_else(|| "Missing tensor: token_embd.weight".to_string())?;
-        let bytes_static: &'static [u8] =
-            unsafe { std::mem::transmute::<&[u8], &'static [u8]>(tok_embd_bytes) };
-        let tok_embd = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-            bytes_static,
-            tok_embd_info.ggml_type,
+        let tok_embd = super::weights::load_weight(
+            source.as_ref(),
+            "token_embd.weight",
             config.n_embd,
             config.vocab_size,
-        ));
-        let output_info = source
-            .tensor_info("output.weight")
-            .ok_or_else(|| "Missing tensor: output.weight".to_string())?;
-        let output_bytes = source
-            .tensor_slice("output.weight")
-            .ok_or_else(|| "Missing tensor: output.weight".to_string())?;
-        let output_static: &'static [u8] =
-            unsafe { std::mem::transmute::<&[u8], &'static [u8]>(output_bytes) };
-        let output = Weight::from_quantized(crate::ops::kernel::QuantizedTensor::from_bytes(
-            output_static,
-            output_info.ggml_type,
+        )?;
+        let output = super::weights::load_weight(
+            source.as_ref(),
+            "output.weight",
             config.n_embd,
             config.vocab_size,
-        ));
+        )?;
+        let pool = Arc::new(ComputePool::new(n_threads.max(1)));
         Ok(Self {
+            _source: source,
             config,
             layers,
             tok_embd,
             output_norm,
             output,
+            pool,
+            #[cfg(feature = "vulkan")]
+            gpu: None,
+            #[cfg(feature = "vulkan")]
+            gpu_active: true,
         })
+    }
+
+    /// Attach a Vulkan session to this model.
+    ///
+    /// `policy` follows the same convention as the other trunks: `Cpu`
+    /// never touches the device, `Auto` falls back to the CPU when the
+    /// device is missing or ineligible, and `Vulkan` is a hard requirement.
+    ///
+    /// `max_rows` is the largest number of tokens one device call may
+    /// process. The arena scales with it, so a caller that feeds the prompt
+    /// in one chunk should pass the prompt length.
+    #[cfg(feature = "vulkan")]
+    pub fn attach_gpu(
+        &mut self,
+        capacity: usize,
+        max_rows: usize,
+        policy: crate::compute::ComputePolicy,
+    ) -> Result<(), String> {
+        policy.check_build()?;
+        if let Some(context) = policy.context().map_err(|e| e.to_string())? {
+            match crate::vulkan::nemotron_h::NemotronHVulkanSession::try_new_rows(
+                self,
+                capacity,
+                max_rows.max(1),
+                context,
+            ) {
+                Ok(gpu) => self.gpu = gpu,
+                Err(error) if policy == crate::compute::ComputePolicy::Auto => {
+                    eprintln!("Nemotron-H Vulkan unavailable: {error}")
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a Vulkan session is attached.
+    #[cfg(feature = "vulkan")]
+    pub fn gpu_available(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    /// Turn the attached device session on or off for the next call.
+    ///
+    /// The session keeps its weights and its arena; only the choice
+    /// between the device path and the CPU path changes. The HTTP
+    /// runtime uses this to run an over-long request on the CPU without
+    /// paying for another weight upload.
+    #[cfg(feature = "vulkan")]
+    pub fn set_gpu_active(&mut self, active: bool) {
+        self.gpu_active = active;
+    }
+
+    /// The number of rows the device arena holds, i.e. the longest
+    /// prompt the device path can take in one call.
+    #[cfg(feature = "vulkan")]
+    pub fn gpu_max_rows(&self) -> Option<usize> {
+        self.gpu.as_ref().map(|gpu| gpu.max_rows())
+    }
+
+    /// Build the model and try to attach a Vulkan session.
+    ///
+    /// `policy` follows the same convention as the other trunks: `Cpu`
+    /// never touches the device, `Auto` falls back to the CPU when the
+    /// device is missing or ineligible, and `Vulkan` is a hard requirement.
+    pub fn from_source_with_compute(
+        source: Arc<dyn TensorSource>,
+        n_threads: usize,
+        capacity: usize,
+        policy: crate::compute::ComputePolicy,
+    ) -> Result<Self, String> {
+        let mut model = Self::from_source(source, n_threads)?;
+        #[cfg(feature = "vulkan")]
+        {
+            policy.check_build()?;
+            if let Some(context) = policy.context().map_err(|e| e.to_string())? {
+                match crate::vulkan::nemotron_h::NemotronHVulkanSession::try_new_rows(
+                    &model,
+                    capacity,
+                    capacity.max(1),
+                    context,
+                ) {
+                    Ok(gpu) => model.gpu = gpu,
+                    Err(error) if policy == crate::compute::ComputePolicy::Auto => {
+                        eprintln!("Nemotron-H Vulkan unavailable: {error}")
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+        }
+        Ok(model)
+    }
+
+    /// Run a single Q8_0 matmul with the kernel's output rows
+    /// `[0, n_out)` partitioned across `self.pool`. Replaces the previous
+    /// hard-coded `kernel.forward_prepared(..., 0, 1)` pattern that
+    /// silently ran every matmul single-threaded regardless of
+    /// `--threads N`. The kernel uses per-row accumulator state only —
+    /// `ith` and `nth` are forwarded so `matmul_q4_0_vs_q8_0_avx2` (and
+    /// friends) can compute their own `[my_start, my_end)` row range.
+    #[inline]
+    pub(crate) fn run_matmul(
+        &self,
+        kernel: &dyn Kernel,
+        input: &[f32],
+        q8: &[u8],
+        sc: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+    ) {
+        debug_assert_eq!(input.len(), n_in);
+        debug_assert_eq!(q8.len(), n_in);
+        debug_assert_eq!(sc.len(), n_in.div_ceil(32));
+        debug_assert_eq!(output.len(), n_out);
+
+        let input_ptr = input.as_ptr();
+        let q8_ptr = q8.as_ptr();
+        let sc_ptr = sc.as_ptr();
+        let out_ptr = output.as_mut_ptr();
+        self.pool.compute(move |ith, nth| {
+            // SAFETY: each thread writes to the disjoint
+            // `[my_start, my_end)` row range computed inside the kernel.
+            // The full output slice is shared by pointer only; no thread
+            // reads another's rows.
+            let my_in = unsafe { std::slice::from_raw_parts(input_ptr, n_in) };
+            let my_q8 = unsafe { std::slice::from_raw_parts(q8_ptr, n_in) };
+            let my_sc = unsafe { std::slice::from_raw_parts(sc_ptr, n_in.div_ceil(32)) };
+            let my_out = unsafe { std::slice::from_raw_parts_mut(out_ptr, n_out) };
+            // Use the ggml-parity entry: F32 (router) and Q8_0 (expert down
+            // projections) need ggml's reduction order to stay bit-exact
+            // with llama.cpp. Every other dtype's default implementation
+            // delegates straight to `forward_prepared`.
+            kernel.forward_prepared_ggml(my_in, my_q8, my_sc, None, my_out, n_in, n_out, ith, nth);
+        });
     }
 }
 
@@ -92,6 +266,8 @@ pub struct NemotronSession {
 }
 
 pub struct NemotronScratch {
+    pub next_position: usize,
+    pub capacity: usize,
     pub hidden: Vec<f32>,
     pub normed: Vec<f32>,
     pub q: Vec<f32>,
@@ -108,9 +284,8 @@ pub struct NemotronScratch {
     /// most recent `kernel-1` input slices so the next token's
     /// causal conv1d can include contributions from past tokens.
     pub ssm_conv_hist: Vec<f32>,
-    /// Per-layer SSM scan state. Layout
-    /// `[layer * n_group * dt_rank + g * dt_rank + r]`.
-    /// Carried across tokens within one prefill, reset per prefill.
+    /// Per-layer SSM scan state, laid out as `[layer, head, channel, state]`.
+    /// Carried across prefill and incremental decoding calls.
     pub ssm_scan_state: Vec<f32>,
     pub scores: Vec<f32>,
     pub logits: Vec<f32>,
@@ -123,24 +298,45 @@ impl NemotronScratch {
         let n_attn_kv = config.n_head_kv * config.n_embd_head_k;
         let n_attn_v = config.n_head_kv * config.n_embd_head_v;
         let n_embd = config.n_embd;
+        let moe_width = config
+            .moe
+            .as_ref()
+            .map_or(0, |moe| moe.n_ff_exp.max(moe.n_ff_shexp));
+        let max_width = n_embd
+            .max(config.n_ff)
+            .max(config.n_head * config.n_embd_head_v)
+            .max(config.ssm_inner_size)
+            // The MoE branch needs room for the expert activation
+            // (`n_ff_exp`) and the shared-expert activation
+            // (`n_ff_shexp`).
+            .max(moe_width);
+        // The MoE branch keeps the quantized *block input* in
+        // `q8_buf[..n_embd]` and quantizes each expert's intermediate
+        // activation in the region after it. The two must not alias: the
+        // 30B's `n_ff_exp` (1856) is narrower than `n_embd` (2688), so
+        // quantizing the intermediate in place would overwrite the input
+        // that the next expert still has to read.
+        let q8_len = n_embd + max_width;
         // Per-layer SSM state. Sized so we can index by
         // [layer * stride + offset]. conv_cols =
         // d_inner + 2*n_group*d_state = 9728 for 4B Nano.
         let conv_cols = config.ssm_inner_size + 2 * config.ssm_group_count * config.ssm_state_size;
         Self {
+            next_position: 0,
+            capacity,
             hidden: vec![0.0; capacity * n_embd],
             normed: vec![0.0; n_embd],
             q: vec![0.0; capacity * n_attn_q],
-            k: vec![0.0; capacity * n_attn_kv],
-            v: vec![0.0; capacity * n_attn_v],
+            k: vec![0.0; config.attention_layers.len() * capacity * n_attn_kv],
+            v: vec![0.0; config.attention_layers.len() * capacity * n_attn_v],
             attn_out: vec![0.0; capacity * n_attn_v],
             ffn_out: vec![0.0; n_embd],
-            q8_buf: vec![0u8; n_embd],
-            scale_buf: vec![0.0; n_embd.div_ceil(32)],
+            q8_buf: vec![0u8; q8_len],
+            scale_buf: vec![0.0; q8_len.div_ceil(32)],
             scores: vec![0.0; capacity * capacity],
             logits: vec![0.0; config.vocab_size],
             ssm_state: vec![0.0; config.ssm_state_size * config.ssm_inner_size],
-            ssm_conv_hist: vec![0.0; config.n_layer * config.ssm_conv_kernel * conv_cols],
+            ssm_conv_hist: vec![0.0; config.n_layer * (config.ssm_conv_kernel - 1) * conv_cols],
             // Per-layer scan state shape: (n_head, headdim, d_state).
             // Total per layer = n_head * headdim * d_state
             //                  = dt_rank * (d_inner / dt_rank) * d_state
@@ -154,8 +350,7 @@ impl NemotronScratch {
         }
     }
 
-    /// Reset per-prefill SSM state (conv1d history and scan state).
-    /// Called at the top of `prefill` so each sequence starts clean.
+    /// Reset SSM state when starting a new sequence.
     pub fn reset_ssm_state(&mut self) {
         for v in &mut self.ssm_conv_hist {
             *v = 0.0;
@@ -164,15 +359,19 @@ impl NemotronScratch {
             *v = 0.0;
         }
     }
+
+    pub fn reset(&mut self) {
+        self.next_position = 0;
+        self.k.fill(0.0);
+        self.v.fill(0.0);
+        self.reset_ssm_state();
+    }
 }
 
 impl NemotronModel {
-    /// One forward pass over a sequence of prefill tokens. Returns logits
-    /// for the last position. Per-layer attention + residual are wired;
-    /// SSM and FFN outputs are zero placeholders until a parity test
-    /// pins the SSM math.
+    /// Evaluate the next tokens and return logits for the last position.
     pub fn prefill(
-        &self,
+        &mut self,
         token_ids: &[u32],
         scratch: &mut NemotronScratch,
     ) -> Result<Vec<f32>, String> {
@@ -180,18 +379,125 @@ impl NemotronModel {
         if n == 0 {
             return Err("Nemotron prefill: empty token sequence".into());
         }
-        if n > scratch.hidden.len() / self.config.n_embd {
+        let base_position = scratch.next_position;
+        if n > scratch.capacity.saturating_sub(base_position)
+            || n > self.config.n_ctx.saturating_sub(base_position)
+        {
             return Err(format!(
-                "Nemotron prefill: need capacity {} but scratch has {}",
-                n,
-                scratch.hidden.len() / self.config.n_embd
+                "Nemotron prefill: need {} positions but scratch has capacity {}",
+                base_position + n,
+                scratch.capacity
             ));
         }
-        // Reset per-prefill SSM state so each sequence starts from a
-        // clean conv1d history and zeroed scan state. Without this,
-        // leftover state from the previous prefill call would
-        // contaminate the next sequence.
-        scratch.reset_ssm_state();
+        // Every layer is recorded on the device, so the chunk runs as one
+        // device submission and the hidden state never leaves the arena.
+        // The layer loop below still splits the stack into runs of
+        // device-recorded layers separated by CPU layers, because the
+        // `RMI_NH_CPU_*` overrides move one branch back to the host for
+        // attribution.
+        #[cfg(feature = "vulkan")]
+        if self.gpu.is_some() && self.gpu_active {
+            // Take the session out so the layer loop can still call
+            // `&self` helpers (`is_ssm_layer`, `forward_layer`) while the
+            // device is borrowed. It goes back before returning.
+            let mut gpu = self.gpu.take().expect("checked above");
+            let hidden_len = n * self.config.n_embd;
+            // `scratch.hidden` is the single source of truth for the layer
+            // loop: the CPU SSM layers read and write it in place, and a
+            // device run reads it as its input and writes its output back
+            // into it. Seeding it here matters because the first layer of
+            // this model is an SSM layer, so the loop can start with a
+            // CPU layer before any device run has happened.
+            for (row, &token) in token_ids.iter().enumerate() {
+                let row_start = row * self.config.n_embd;
+                self.tok_embd.embedding_lookup(
+                    token,
+                    &mut scratch.hidden[row_start..row_start + self.config.n_embd],
+                );
+            }
+            let positions: Vec<usize> = (base_position..base_position + n).collect();
+            // The Mamba-2 recurrence and the KV cache live on the device
+            // now, and the host keeps the same state in the scratch pad.
+            // The two have to describe the same sequence:
+            //
+            // * position zero means the host's state is fresh (a new
+            //   scratch pad, or one that was reset), so the device's
+            //   state is stale and has to be cleared. Without this the
+            //   conv history alone moves every SSM layer's output on the
+            //   first token.
+            // * any other position means the host's state carries the
+            //   recurrence of the tokens before it. The device can only
+            //   agree with it if the device already processed exactly
+            //   those tokens; the host's Mamba-2 state cannot be copied
+            //   into the arena, so a mismatch is an error rather than a
+            //   silent divergence.
+            if base_position == 0 {
+                gpu.reset()?;
+            } else if gpu.committed_position() != base_position {
+                return Err(format!(
+                    "Nemotron Vulkan state is at token {} but the host is at token {}; \
+                     the Mamba-2 recurrence cannot be transferred to the device",
+                    gpu.committed_position(),
+                    base_position
+                ));
+            }
+            let mut layer_start = 0usize;
+            while layer_start < self.config.n_layer {
+                // Find the next run of device-recorded layers.
+                let mut layer_end = layer_start;
+                while layer_end < self.config.n_layer && self.device_layer(layer_end) {
+                    layer_end += 1;
+                }
+                if layer_end > layer_start {
+                    gpu.forward_layers(
+                        &scratch.hidden[..hidden_len],
+                        base_position,
+                        &positions,
+                        n,
+                        layer_start,
+                        layer_end,
+                    )?;
+                    let device_hidden = gpu.read_hidden(n)?;
+                    scratch.hidden[..hidden_len].copy_from_slice(&device_hidden);
+                }
+                // Run the CPU layers one at a time.
+                //
+                // The CPU scope keeps the host's matmuls on the host: the
+                // shared Q4_K offload would otherwise send them to the
+                // device, and the device's Q4_K kernel is not bit-exact
+                // with the host's. A branch that runs on the host has to
+                // reproduce the host's arithmetic, otherwise the
+                // `RMI_NH_CPU_*` overrides cannot attribute a numerical
+                // difference to the branch that moved.
+                let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
+                while layer_end < self.config.n_layer && !self.device_layer(layer_end) {
+                    let lw = &self.layers[layer_end];
+                    self.forward_layer(layer_end, lw, n, base_position, scratch)?;
+                    layer_end += 1;
+                }
+                layer_start = layer_end;
+            }
+            // The CPU SSM layers wrote into `scratch.hidden`; the device
+            // path needs the final hidden state back in its arena.
+            gpu.write_hidden(&scratch.hidden[..hidden_len])?;
+            gpu.finish_logits(n)?;
+            gpu.set_committed_position(base_position + n);
+            let logits = gpu.logits().to_vec();
+            self.gpu = Some(gpu);
+            scratch.next_position += n;
+            return Ok(logits);
+        }
+        // The trace schema is token-major: one record per (name, layer, step).
+        // `step` is the position in the sequence, which is what the oracle's
+        // `trace.step` counts too, so the two join without either side having
+        // to know how the other chunks its batches.
+        //
+        // Deliberately **not** `TokenMajorTrace`: that type buffers the whole
+        // chunk and only flushes on drop, so a caller that splits the prompt
+        // across several `prefill` calls would keep only the first chunk's
+        // records. `trace::checkpoint` writes straight through with an absolute
+        // position, which is what the Dory trunk does
+        // (`src/models/dory/forward.rs::trace`).
         // 1) Embed input tokens.
         for (i, &tid) in token_ids.iter().enumerate() {
             let row_start = i * self.config.n_embd;
@@ -199,10 +505,29 @@ impl NemotronModel {
                 tid,
                 &mut scratch.hidden[row_start..row_start + self.config.n_embd],
             );
+            // The oracle's `embd` node is the token rows straight out of
+            // `ggml_get_rows`; the 30B has no `f_embedding_scale`, so nothing
+            // is applied on top. Emitting it makes the join able to say the
+            // two sides started from the same hidden state rather than
+            // assuming it.
+            //
+            // The checkpoint is written from the token's own row: the
+            // hidden buffer is indexed by the token index *inside this
+            // batch*, while the checkpoint is keyed by the absolute
+            // position. Slicing by the absolute position would read the
+            // wrong row as soon as the prompt is fed one token at a time.
+            #[cfg(feature = "parity-trace")]
+            trace::checkpoint(
+                "embd",
+                None,
+                base_position + i,
+                &[self.config.n_embd],
+                &scratch.hidden[row_start..row_start + self.config.n_embd],
+            );
         }
         // 2) Per-layer forward.
         for (layer_idx, lw) in self.layers.iter().enumerate() {
-            self.forward_layer(layer_idx, lw, n, scratch)?;
+            self.forward_layer(layer_idx, lw, n, base_position, scratch)?;
         }
         // 3) Final norm + logits.
         let last_pos = n - 1;
@@ -213,6 +538,8 @@ impl NemotronModel {
             &mut scratch.normed,
             self.config.norm_eps,
         );
+        #[cfg(feature = "parity-trace")]
+        trace::global("result_norm", base_position + last_pos, &scratch.normed);
         let blocks = (self.config.n_embd + 31) / 32;
         quantize_q8_0_into(
             &scratch.normed,
@@ -220,18 +547,47 @@ impl NemotronModel {
             &mut scratch.q8_buf[..self.config.n_embd],
             &mut scratch.scale_buf[..blocks],
         );
-        self.output.kernel.forward_prepared(
+        self.run_matmul(
+            &*self.output.kernel,
             &scratch.normed,
             &scratch.q8_buf[..self.config.n_embd],
             &scratch.scale_buf[..blocks],
-            None,
             &mut scratch.logits,
             self.config.n_embd,
             self.config.vocab_size,
-            0,
-            1,
         );
+        scratch.next_position += n;
+        #[cfg(feature = "parity-trace")]
+        trace::global("result_output", base_position + last_pos, &scratch.logits);
         Ok(scratch.logits.clone())
+    }
+
+    /// Whether `layer` runs on the device.
+    ///
+    /// Every layer has a device kernel: the FFN and attention layers use
+    /// the shared projections, and the Mamba-2 SSM layers use the
+    /// conv/scan shaders. The three environment overrides exist so a test
+    /// can attribute a numerical difference to one branch:
+    /// `RMI_NH_CPU_ATTENTION`, `RMI_NH_CPU_FFN` and `RMI_NH_CPU_SSM` move
+    /// the respective branch back to the host.
+    ///
+    /// An override is meant for a whole run. The Mamba-2 recurrence lives
+    /// on the host when the SSM branch runs there and on the device when
+    /// it does not, and the two states cannot be exchanged, so switching
+    /// an override in the middle of a sequence leaves them out of step.
+    fn device_layer(&self, layer: usize) -> bool {
+        if self.config.attention_layers.contains(&layer) {
+            std::env::var_os("RMI_NH_CPU_ATTENTION").is_none()
+        } else if self.config.ffn_layers.contains(&layer) {
+            std::env::var_os("RMI_NH_CPU_FFN").is_none()
+        } else {
+            std::env::var_os("RMI_NH_CPU_SSM").is_none()
+        }
+    }
+
+    /// Whether `layer` is an SSM-only layer (neither attention nor FFN).
+    fn is_ssm_layer(&self, layer: usize) -> bool {
+        !self.config.attention_layers.contains(&layer) && !self.config.ffn_layers.contains(&layer)
     }
 
     fn forward_layer(
@@ -239,6 +595,7 @@ impl NemotronModel {
         layer_idx: usize,
         lw: &NemotronLayerWeights,
         length: usize,
+        base_position: usize,
         scratch: &mut NemotronScratch,
     ) -> Result<(), String> {
         let cfg = &self.config;
@@ -254,23 +611,27 @@ impl NemotronModel {
         // GQA each Q head produces its own output; the wo matrix then
         // projects back to n_embd.
         let n_attn_v = n_head * head_dim_v;
+        let n_attn_v_kv = n_head_kv * head_dim_v;
         let kq_scale = 1.0 / (head_dim_k as f32).sqrt();
 
         for t in 0..length {
+            let position = base_position + t;
             let off = t * n_embd;
             let row = &mut scratch.hidden[off..off + n_embd];
-            // DEBUG: per-layer L2 dump for parity vs llama.cpp oracle.
-            // Only printed for the last token in prefill (t == length-1).
-            if t == length.saturating_sub(1) {
-                let l2: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
-                eprintln!("[OURS-LAYER] layer {layer_idx:>2} | l2={l2:.3}");
-            }
             // Pre-attention norm.
             rms_norm(row, &lw.attn_norm, &mut scratch.normed, cfg.norm_eps);
+            // `attn_norm` is the RMS-norm output that feeds whichever branch
+            // this layer runs (`src/models/nemotron-h.cpp:225`). Emitting it
+            // is the cheapest possible bisection: if it matches the oracle
+            // bit-for-bit then the embedding path and the norm are correct
+            // and any divergence is inside the branch, and if it does not
+            // match then the norm is the very first thing that broke.
+            #[cfg(feature = "parity-trace")]
+            trace::layer_1d("attn_norm", layer_idx, position, &scratch.normed);
             // QKV projections (Q8 matmul, SIMD via existing Q8 path).
             let mut q = vec![0.0f32; n_attn_q];
             let mut k = vec![0.0f32; n_attn_kv];
-            let mut v = vec![0.0f32; n_attn_v];
+            let mut v = vec![0.0f32; n_attn_v_kv];
             let blocks = (n_embd + 31) / 32;
             quantize_q8_0_into(
                 &scratch.normed,
@@ -280,51 +641,52 @@ impl NemotronModel {
             );
             let q8 = &scratch.q8_buf[..n_embd];
             let sc = &scratch.scale_buf[..blocks];
-            // Entire attention branch (QKV + QK norm + RoPE + causal attn
+            // Entire attention branch (QKV + QK norm + causal attn
             // + out projection) only runs on attention layers. SSM / FFN
             // layers skip it; their pre-norm `attn_norm` is consumed by the
             // SSM/FFN branch below.
             if let (Some(wq), Some(wk), Some(wv)) = (&lw.wq, &lw.wk, &lw.wv) {
-                wq.kernel.forward_prepared(
+                let attn_slot = cfg
+                    .attention_layers
+                    .iter()
+                    .position(|&layer| layer == layer_idx)
+                    .ok_or_else(|| {
+                        format!("Nemotron attention layer {layer_idx} is absent from metadata")
+                    })?;
+                let k_base = attn_slot * scratch.capacity * n_attn_kv;
+                let v_base = attn_slot * scratch.capacity * n_attn_v_kv;
+                self.run_matmul(
+                    &*wq.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut q,
                     n_embd,
                     n_attn_q,
-                    0,
-                    1,
                 );
-                wk.kernel.forward_prepared(
+                self.run_matmul(
+                    &*wk.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut k,
                     n_embd,
                     n_attn_kv,
-                    0,
-                    1,
                 );
-                wv.kernel.forward_prepared(
+                self.run_matmul(
+                    &*wv.kernel,
                     &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut v,
                     n_embd,
-                    n_attn_v,
-                    0,
-                    1,
+                    n_attn_v_kv,
                 );
                 // Persist per-token K and V into the layer's
                 // scratch cache so the next tokens can attend to
                 // this token. Without this write, the K/V cache
                 // access below reads only the current token (and
                 // panics on out-of-bounds for j > 0).
-                scratch.k[t * n_attn_kv..(t + 1) * n_attn_kv].copy_from_slice(&k);
-                scratch.v[t * n_attn_v..(t + 1) * n_attn_v].copy_from_slice(&v);
                 if let (Some(qn), Some(kn)) = (&lw.attn_q_norm, &lw.attn_k_norm) {
                     for h in 0..n_head {
                         let o = h * head_dim_k;
@@ -335,61 +697,57 @@ impl NemotronModel {
                         crate::ops::rms_norm_inplace(&mut k[o..o + head_dim_k], kn, cfg.norm_eps);
                     }
                 }
-                for h in 0..n_head {
-                    rope_neox_inplace(
-                        &mut q[h * head_dim_k..h * head_dim_k + head_dim_k],
-                        t,
-                        head_dim_k,
-                        cfg.rope_freq_base,
-                    );
-                }
-                for h in 0..n_head_kv {
-                    rope_neox_inplace(
-                        &mut k[h * head_dim_k..h * head_dim_k + head_dim_k],
-                        t,
-                        head_dim_k,
-                        cfg.rope_freq_base,
-                    );
-                }
+                // llama.cpp registers nemotron_h as LLAMA_ROPE_TYPE_NONE.
+                scratch.k[k_base + position * n_attn_kv..k_base + (position + 1) * n_attn_kv]
+                    .copy_from_slice(&k);
+                // The reference harness runs with an F32 KV cache
+                // (`RMI_NEMOTRON_KV=f32`): K and V are copied into the
+                // cache verbatim. Rounding them to F16 here (llama.cpp's
+                // *default* cache type) would diverge from the oracle from
+                // the very first attention layer.
+                scratch.v[v_base + position * n_attn_v_kv..v_base + (position + 1) * n_attn_v_kv]
+                    .copy_from_slice(&v);
                 let mut attn_out = vec![0.0f32; n_attn_v];
-                // q/k/v each hold n_attn_q / n_attn_kv / n_attn_v values for
-                // a single token. Convert ALL of them to f16, not just the
-                // first head — each head reads its own slot.
-                let mut q_f16 = vec![0u16; n_attn_q];
-                f32_slice_to_f16(&q[..n_attn_q], &mut q_f16);
-                // Convert ALL cached K rows to f16 in one shot — they
-                // were written into scratch.k above. (Old code accessed
-                // a freshly-allocated per-token `k` vector, which was
-                // out of bounds for j > 0.)
-                let mut k_f16_storage: Vec<Vec<u16>> =
-                    (0..=t).map(|_| vec![0u16; n_attn_kv]).collect();
-                for j in 0..=t {
-                    f32_slice_to_f16(
-                        &scratch.k[j * n_attn_kv..(j + 1) * n_attn_kv],
-                        &mut k_f16_storage[j],
-                    );
-                }
-                let mut v_storage: Vec<Vec<f32>> =
-                    (0..=t).map(|_| vec![0.0f32; n_attn_v]).collect();
-                for j in 0..=t {
-                    v_storage[j].copy_from_slice(&scratch.v[j * n_attn_v..(j + 1) * n_attn_v]);
-                }
+                // llama.cpp's KV cache view is padded (`GGML_PAD(used, 256)`),
+                // so the softmax and the `V x softmax` product run over the
+                // *padded* key count, not just over the causal prefix. The
+                // masked columns are `-inf` before the softmax and `0`
+                // after it, so they contribute nothing to the sum -- but
+                // they do decide which group of four lanes ggml's
+                // polynomial `exp` treats as "overflowing", and they decide
+                // how many 16-element groups the dot product accumulates.
+                // Both effects are visible in the last mantissa bit, so the
+                // padding has to be reproduced rather than approximated.
+                let n_kv = (position + 1).div_ceil(16) * 16;
                 for h in 0..n_head {
                     let kv_h = h / group_size;
-                    let mut scores = vec![0.0f32; t + 1];
-                    for j in 0..=t {
-                        let k_row = &k_f16_storage[j][kv_h * head_dim_k..(kv_h + 1) * head_dim_k];
-                        let q_row = &q_f16[h * head_dim_k..(h + 1) * head_dim_k];
-                        scores[j] = crate::ops::dot_f16(q_row, k_row, head_dim_k) * kq_scale;
+                    let mut scores = vec![f32::NEG_INFINITY; n_kv];
+                    let q_row = &q[h * head_dim_k..(h + 1) * head_dim_k];
+                    for j in 0..=position {
+                        let k_row = &scratch.k[k_base + j * n_attn_kv + kv_h * head_dim_k
+                            ..k_base + j * n_attn_kv + (kv_h + 1) * head_dim_k];
+                        // `kq = ggml_mul_mat(k, q)` with both sides F32:
+                        // ggml's four-accumulator `ggml_vec_dot_f32`, then
+                        // `ggml_soft_max_ext` scales by `kq_scale`.
+                        scores[j] =
+                            crate::ops::kernel::f32::ggml::dot_f32_ggml(q_row, k_row) * kq_scale;
                     }
-                    softmax_inplace(&mut scores);
+                    // ggml's NEON softmax uses its polynomial `exp`
+                    // (`ggml_v_expf`), not libm's `expf`.
+                    softmax_ggml_inplace(&mut scores);
                     let head_out = &mut attn_out[h * head_dim_v..(h + 1) * head_dim_v];
-                    for j in 0..=t {
-                        let s = scores[j];
-                        let v_row = &v_storage[j][kv_h * head_dim_v..(kv_h + 1) * head_dim_v];
-                        for d in 0..head_dim_v {
-                            head_out[d] += s * v_row[d];
-                        }
+                    // `kqv = ggml_mul_mat(v, kq)`: one dot per output
+                    // channel over the cached keys. The cache stores whole
+                    // K/V rows per token, so consecutive keys are
+                    // `n_attn_v_kv` floats apart.
+                    for (d, out) in head_out.iter_mut().enumerate() {
+                        let base = v_base + kv_h * head_dim_v + d;
+                        *out = crate::ops::kernel::f32::ggml::dot_f32_ggml_stride_padded(
+                            &scratch.v[base..],
+                            n_attn_v_kv,
+                            &scores,
+                            position + 1,
+                        );
                     }
                 }
                 if let Some(wo) = &lw.wo {
@@ -400,46 +758,36 @@ impl NemotronModel {
                         &mut scratch.q8_buf[..n_attn_v],
                         &mut scratch.scale_buf[..blocks2],
                     );
-                    wo.kernel.forward_prepared(
+                    self.run_matmul(
+                        &*wo.kernel,
                         &attn_out,
                         &scratch.q8_buf[..n_attn_v],
                         &scratch.scale_buf[..blocks2],
-                        None,
                         &mut scratch.ffn_out,
                         n_attn_v,
                         n_embd,
-                        0,
-                        1,
                     );
                 }
             }
-            // Residual: hidden += ffn_out (which is attn_proj for attention
-            // layers, zero otherwise). On SSM / FFN layers this still
-            // adds the SSM/FFN output below.
-            for d in 0..n_embd {
-                row[d] += scratch.ffn_out[d];
+            if lw.wo.is_some() {
+                for d in 0..n_embd {
+                    row[d] += scratch.ffn_out[d];
+                }
             }
             // SSM branch: Mamba2 selective-state-space forward.
             //
             // Tensor layout (per Nemotron-3 Nano 4B reference):
-            //   ssm_in.weight         (inner, n_embd)        Q4_0   in_proj
+            //   ssm_in.weight         (n_embd, d_in_proj)   Q8_0   in_proj
             //   ssm_conv1d.weight     (4, 9728)              F32   fused conv + b + c
             //   ssm_conv1d.bias       (9728,)                F32   fused conv + b + c bias
             //   ssm_dt.bias           (dt_rank,)             F32   dt bias
             //   ssm_a                 (1, dt_rank)            F32   A_log
             //   ssm_d                 (1, dt_rank)            F32   D skip
             //   ssm_norm.weight       (per_group, n_groups) F32   group RMSNorm
-            //   ssm_out.weight        (n_embd, inner)        Q5_K  out_proj
+            //   ssm_out.weight        (inner, n_embd)        Q8_0   out_proj
             //
             // 9728 = 7680 (x after conv) + 1024 + 1024 (B, C groupings).
             //
-            // (Historical comment: earlier revisions of this code approximated
-            //  the scan with a scalar state per (group, rank) and per-rank
-            //  dt/a/d broadcast, with a heuristic inner(g,r) channel mapping.
-            //  That was rewritten to the canonical per-head d_state=128 vector
-            //  scan structure in commit 5e970e1. The code below matches
-            //  llama.cpp's ggml_compute_forward_ssm_scan_f32 directly. Stale
-            //  comments above are kept to preserve history.)
             if let (
                 Some(ssm_in),
                 Some(ssm_conv1d_w),
@@ -462,7 +810,7 @@ impl NemotronModel {
                 // Input projection: x = ssm_in @ hidden.
                 let blocks_in = (n_embd + 31) / 32;
                 quantize_q8_0_into(
-                    row,
+                    &scratch.normed,
                     n_embd,
                     &mut scratch.q8_buf[..n_embd],
                     &mut scratch.scale_buf[..blocks_in],
@@ -483,24 +831,19 @@ impl NemotronModel {
                 //   [2*d_inner .. 2*d_inner + 2*n_group*d_state) = [B, C]
                 //   [2*d_inner + 2*n_group*d_state .. end) = dt (per dt_rank)
                 let d_in_proj = 2 * inner_size + 2 * n_group * d_state + dt_rank;
-                let z_offset = inner_size;
-                let b_offset = 2 * inner_size;
-                let dt_offset = 2 * inner_size + 2 * n_group * d_state;
                 // 9728 = d_inner + 2 * n_group * d_state (the conv1d fused
                 // input is just [x, B, C]; z and dt are split out from
                 // ssm_in's larger output).
                 let conv_out_cols = inner_size + 2 * n_group * d_state;
                 let mut ssm_in_out = vec![0.0f32; d_in_proj];
-                ssm_in.kernel.forward_prepared(
-                    row,
+                self.run_matmul(
+                    &*ssm_in.kernel,
+                    &scratch.normed,
                     q8,
                     sc,
-                    None,
                     &mut ssm_in_out,
                     n_embd,
                     d_in_proj,
-                    0,
-                    1,
                 );
                 // Causal depthwise conv1d producing [x_conv, B, C] in the
                 // fused output. The conv1d weight has shape
@@ -512,31 +855,39 @@ impl NemotronModel {
                 // t-k. After the conv1d we shift the buffer so the
                 // current input becomes history[1] for the next token
                 // (and history[0] gets a fresh write).
-                let hist_base = layer_idx * conv_kernel * conv_out_cols;
-                let cur_input = &ssm_in_out[..conv_out_cols];
-                let mut conv_out = ssm_conv1d_b.to_vec();
-                for ki in 0..conv_kernel {
-                    let w_row = ki * conv_out_cols;
-                    let hist_row = hist_base + ki * conv_out_cols;
-                    for c in 0..conv_out_cols {
-                        conv_out[c] +=
-                            ssm_conv1d_w[w_row + c] * scratch.ssm_conv_hist[hist_row + c];
-                    }
-                }
-                // Shift history[1..K] <- history[0..K-1] so the
-                // current input becomes history[1] for the next
-                // token. We do the shift in-place: start from the
-                // oldest tap and move downward.
-                for k in (1..conv_kernel).rev() {
-                    let dst_off = hist_base + k * conv_out_cols;
-                    let src_off = hist_base + (k - 1) * conv_out_cols;
-                    scratch
-                        .ssm_conv_hist
-                        .copy_within(src_off..src_off + conv_out_cols, dst_off);
-                }
-                // Write current input into history[0].
-                let h0 = &mut scratch.ssm_conv_hist[hist_base..hist_base + conv_out_cols];
-                h0.copy_from_slice(cur_input);
+                let (z_slice, cur_input, dt_input) =
+                    split_mamba2_projection(&ssm_in_out, inner_size, n_group, d_state, dt_rank);
+                let hist_len = (conv_kernel - 1) * conv_out_cols;
+                let hist_base = layer_idx * hist_len;
+                let mut conv_out = mamba2_conv_step(
+                    ssm_conv1d_w,
+                    ssm_conv1d_b,
+                    &mut scratch.ssm_conv_hist[hist_base..hist_base + hist_len],
+                    cur_input,
+                    conv_kernel,
+                );
+                // ggml's SiLU, not libm's. Upstream applies `ggml_silu`
+                // (`src/models/mamba-base.cpp:237`), whose vectorized form uses
+                // ggml's polynomial `exp` approximation. The two differ by up
+                // to one ULP, and one ULP here is enough to flip an 8-bit
+                // Q8_K activation level in the Q4_K out projection further
+                // down, which turns a 1e-7 relative difference into a 4e-4
+                // one.
+                crate::ops::activation::silu_ggml_inplace(&mut conv_out);
+                // `mamba2_xbc` is the conv1d output after the SiLU, i.e.
+                // the whole `[d_inner + 2 * n_group * d_state]`-wide fused
+                // tensor that holds `x` (the first `d_inner` channels),
+                // `B` and `C` (the trailing `2 * n_group * d_state`).
+                // Upstream emits the same node right after
+                // `ggml_silu` (`src/models/mamba-base.cpp:237`).
+                //
+                // It is the coarse bisection point of the SSM branch: if it
+                // matches, the in-projection, the conv1d and the SiLU are
+                // all correct and the divergence is in the scan, the z
+                // gate, the group norm or the out projection; if it does
+                // not match, the divergence is in one of the three.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_xbc", layer_idx, position, &conv_out);
                 // The conv_out contains: x_conv (first d_inner channels),
                 // B, C (next 2 * n_group * d_state channels). Per
                 // llama.cpp mamba-base.cpp:
@@ -546,10 +897,7 @@ impl NemotronModel {
                 // D-skip. The z gate is APPLIED AFTER the scan and
                 // D-skip via ggml_swiglu_split(z, y) = silu(z) * y.
                 // So x is NOT gated by z here; gating happens later.
-                let x_pre: Vec<f32> = conv_out[..inner_size]
-                    .iter()
-                    .map(|&v| crate::ops::silu(v))
-                    .collect();
+                let x_pre = &conv_out[..inner_size];
                 // B and C are the trailing 2 * n_group * d_state
                 // channels of the conv1d output, stored as (n_group *
                 // d_state) per token. dt_rank = 96 controls 10
@@ -557,14 +905,6 @@ impl NemotronModel {
                 // 7680 / (8 * 96) = 10).
                 let b: Vec<f32> = conv_out[inner_size..inner_size + n_group * d_state].to_vec();
                 let c: Vec<f32> = conv_out[inner_size + n_group * d_state..].to_vec();
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    let l2_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let l2_c: f32 = c.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    eprintln!("[OURS-M2] layer {layer_idx} b (silu(conv_B)) | l2={l2_b:.3}");
-                    eprintln!("[OURS-M2] layer {layer_idx} c (silu(conv_C)) | l2={l2_c:.3}");
-                    eprintln!("[OURS-M2] layer {layer_idx} b[:8]={:?}", &b[..8]);
-                    eprintln!("[OURS-M2] layer {layer_idx} c[:8]={:?}", &c[..8]);
-                }
                 // Canonical Mamba2 scan (matches llama.cpp's
                 // ggml_compute_forward_ssm_scan_f32 in ggml-cpu/ops.cpp):
                 //
@@ -601,74 +941,36 @@ impl NemotronModel {
                 let state_stride_layer = n_head * headdim * d_state;
                 let state_base = layer_idx * state_stride_layer;
                 let state_end = state_base + state_stride_layer;
-                let mut state: Vec<f32> = scratch.ssm_scan_state[state_base..state_end].to_vec();
+                let state = &mut scratch.ssm_scan_state[state_base..state_end];
                 let mut y_buf = vec![0.0f32; inner_size];
                 // Snapshot dt per head, then apply softplus. dt_base is
                 // a per-head projection of x (size n_head).
-                let mut dt_per_head = [0.0f32; 96];
+                let mut dt_per_head = vec![0.0f32; n_head];
+                // The pre-softplus time step is a checkpoint of its own:
+                // upstream adds the bias and then lets the scan op apply
+                // the softplus (`src/models/mamba-base.cpp:252`), so the
+                // comparable node is the sum *before* the softplus.
+                let mut dt_raw = vec![0.0f32; n_head];
                 for h in 0..n_head {
                     // The GGUF stores ssm_dt.bias as (dt_rank,) but
                     // n_head = dt_rank for this model, so it pairs 1:1
                     // with heads in head order.
                     let dt_bias_h = if h < dt_rank { ssm_dt_bias[h] } else { 0.0 };
-                    let dt_base = ssm_in_out[dt_offset + h];
+                    let dt_base = dt_input[h];
                     let z = dt_base + dt_bias_h;
-                    dt_per_head[h] = if z > 20.0 {
-                        z
-                    } else if z < -20.0 {
-                        z.exp()
-                    } else {
-                        z.exp().ln_1p()
-                    };
+                    dt_raw[h] = z;
+                    dt_per_head[h] = if z > 20.0 { z } else { (1.0 + z.exp()).ln() };
                 }
+                // `mamba2_dt` is the bias-adjusted time step, before the
+                // softplus. Upstream emits the same node right after
+                // `ggml_add(dt, ssm_dt_b)` (`src/models/mamba-base.cpp:252`).
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_dt", layer_idx, position, &dt_raw);
                 // Per-head dA factor (decay): exp(dt_soft_plus * A_log[h]).
                 // A_log stored raw (negative). llama.cpp matches this.
-                let mut dA_per_head = [0.0f32; 96];
+                let mut dA_per_head = vec![0.0f32; n_head];
                 for h in 0..n_head {
                     dA_per_head[h] = (dt_per_head[h] * ssm_a_log[h]).exp();
-                }
-                // DEBUG: dump A_log[:8] for layer 6 to verify what's loaded
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} A_log[:8]={:?}",
-                        &ssm_a_log[..8]
-                    );
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} dt*A_log[:8]={:?}",
-                        &(0..8)
-                            .map(|h| dt_per_head[h] * ssm_a_log[h])
-                            .collect::<Vec<_>>()
-                    );
-                }
-                // DEBUG: dump y_buf for layer 6 last token multiple heads
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    // Print y_buf for first channel of each of heads 0, 1, 2, 3.
-                    for h in 0..4 {
-                        let off = h * headdim;
-                        eprintln!(
-                            "[OURS-Y-BEFORE-NORM] layer {layer_idx} head={h} k=0..15 (last token): {:?}",
-                            &y_buf[off..off+16]
-                        );
-                    }
-                    // Also L2 norm of each head's 80 channels.
-                    for h in 0..4 {
-                        let off = h * headdim;
-                        let l2: f32 = y_buf[off..off + headdim]
-                            .iter()
-                            .map(|x| x * x)
-                            .sum::<f32>()
-                            .sqrt();
-                        eprintln!("[OURS-Y-BEFORE-NORM] layer {layer_idx} head={h} L2={l2:.3}");
-                    }
-                }
-                // DEBUG: dump dt + dA for layer 6 to match oracle m2_ prints.
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    eprintln!("[OURS-M2] layer {layer_idx} dt[:8]={:?}", &dt_per_head[..8]);
-                    eprintln!("[OURS-M2] layer {layer_idx} dA[:8]={:?}", &dA_per_head[..8]);
-                    let l2_x_pre: f32 = x_pre.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} x_pre (silu(conv_x)) | l2={l2_x_pre:.3}"
-                    );
                 }
                 // Scan loop. The canonical layout (see llama.cpp
                 // ggml_compute_forward_ssm_scan_f32):
@@ -695,58 +997,83 @@ impl NemotronModel {
                     for k in 0..headdim {
                         // x_dt uses the post-SiLU conv1d x (no z gate).
                         let x_dt = x_pre[head_x_off + k] * dt_h;
-                        let state_row_off = head_state_off + k * d_state;
-                        let mut sumf = 0.0f32;
-                        for n in 0..d_state {
-                            let state_idx = state_row_off + n;
-                            let b_gn = b[g_b_off + n];
-                            let c_gn = c[g_c_off + n];
-                            let new_state = state[state_idx] * dA + b_gn * x_dt;
-                            state[state_idx] = new_state;
-                            sumf += new_state * c_gn;
-                        }
+                        let state_row = &mut state
+                            [head_state_off + k * d_state..head_state_off + (k + 1) * d_state];
+                        // SSM scan: SIMD-ized via `ssm_scan_row` (AVX2+FMA
+                        // / NEON / scalar fallback). Each d_state lane
+                        // is independent (no carry between iterations),
+                        // so the AVX2 path packs 8 lanes per `_mm256_*`
+                        // and uses two FMA ops per lane — one for the
+                        // state update and one for the c-weighted
+                        // sum. For d_state=128 (Nemotron-3 Nano) the
+                        // inner loop runs 16 vector iterations.
+                        let sumf = ssm_scan_row(
+                            state_row,
+                            &b[g_b_off..g_b_off + d_state],
+                            &c[g_c_off..g_c_off + d_state],
+                            dA,
+                            x_dt,
+                        );
                         // D-skip on post-SiLU conv1d x, NOT gated by z.
                         y_buf[head_x_off + k] = sumf + d_h * x_pre[head_x_off + k];
                     }
                 }
-                // DEBUG: dump y_buf post-scan-D for layer 6 last token
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    eprintln!(
-                        "[OURS-Y-POST-SCAN] layer {layer_idx} heads (k=0): h0={:.4} h1={:.4} h2={:.4} h3={:.4}",
-                        y_buf[0], y_buf[headdim], y_buf[2*headdim], y_buf[3*headdim]
-                    );
-                }
+                // `mamba2_y_cont` is the scan output plus the D skip, before
+                // the z gate (`src/models/mamba-base.cpp:289`). Emitting it
+                // splits the SSM branch at its widest point: everything up
+                // to and including the scan is on one side, the z gate /
+                // group norm / out projection on the other.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_y_add_d", layer_idx, position, &y_buf);
+                // `mamba2_z` is the z gate's input: the first `d_inner`
+                // channels of the in-projection. Upstream emits the same
+                // node right before `ggml_swiglu_split`
+                // (`src/models/mamba-base.cpp:290`).
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_z", layer_idx, position, z_slice);
                 // z-gate applied AFTER the scan+D-skip:
                 //   y_final[h, k] = silu(z[h, k]) * y_buf[h, k]
                 // (equivalent to ggml_swiglu_split(z, y_buf)).
-                let z_slice = &ssm_in_out[z_offset..z_offset + inner_size];
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    let l2_pre_gated: f32 = y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    let l2_z_slice: f32 = z_slice.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    eprintln!(
-                        "[OURS-M2] layer {layer_idx} y_buf (pre-z-gate) | l2={l2_pre_gated:.3}"
-                    );
-                    eprintln!("[OURS-M2] layer {layer_idx} z_slice | l2={l2_z_slice:.3}");
-                }
+                //
+                // The SiLU is ggml's, for the same reason as the conv1d's
+                // above: upstream's `ggml_swiglu_split` uses the polynomial
+                // `exp`, and a one-ULP difference is enough to flip an
+                // 8-bit activation level in the out projection.
+                let mut z_gated = z_slice.to_vec();
+                crate::ops::activation::silu_ggml_inplace(&mut z_gated);
                 for j in 0..inner_size {
-                    y_buf[j] = crate::ops::silu(z_slice[j]) * y_buf[j];
+                    y_buf[j] = z_gated[j] * y_buf[j];
                 }
-                // DEBUG: dump ssm_out input L2 (post-norm y) for parity
-                if layer_idx == 6 && t == length.saturating_sub(1) {
-                    let l2_post_norm: f32 = y_buf.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    eprintln!("[OURS-M2] layer {layer_idx} post-norm y | l2={l2_post_norm:.3}");
-                }
+                // `mamba2_ygated` is the scan output after the z gate but
+                // before the group norm: `silu(z) * (scan + D * x)`.
+                // Upstream emits the same node right after
+                // `ggml_swiglu_split` (`src/models/mamba-base.cpp:288`).
+                //
+                // Together with `mamba2_xbc` this narrows the SSM branch
+                // down to the scan / z gate / group norm / out projection.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_ygated", layer_idx, position, &y_buf);
                 // Group RMSNorm on the scan output.
                 for g in 0..n_group {
                     let group_start = g * per_group;
                     let group_end = group_start + per_group;
                     let group = &mut y_buf[group_start..group_end];
-                    let mean_sq = group.iter().map(|x| x * x).sum::<f32>() / per_group as f32;
+                    let mean_sq = (crate::ops::sum_sq_f32(group) / per_group as f64) as f32;
                     let rstd = 1.0 / (mean_sq + cfg.norm_eps).sqrt();
                     for (j, v) in group.iter_mut().enumerate() {
                         *v = *v * rstd * ssm_norm[g * per_group + j];
                     }
                 }
+                // `mamba2_normed` is the scan output after the group RMS norm and
+                // before the out projection. Upstream emits the same node
+                // right after `ggml_reshape_2d`
+                // (`src/models/mamba-base.cpp:304`).
+                //
+                // It splits the last stage of the SSM branch in two: the
+                // group norm on one side and the Q4_K out projection on
+                // the other.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba2_normed", layer_idx, position, &y_buf);
                 // Output projection: y = ssm_out @ y_buf.
                 let blocks_out = (inner_size + 31) / 32;
                 quantize_q8_0_into(
@@ -755,19 +1082,25 @@ impl NemotronModel {
                     &mut scratch.q8_buf[..inner_size],
                     &mut scratch.scale_buf[..blocks_out],
                 );
-                ssm_out.kernel.forward_prepared(
+                self.run_matmul(
+                    &*ssm_out.kernel,
                     &y_buf,
                     &scratch.q8_buf[..inner_size],
                     &scratch.scale_buf[..blocks_out],
-                    None,
                     &mut scratch.ffn_out,
                     inner_size,
                     n_embd,
-                    0,
-                    1,
                 );
-                // DEBUG: disable SSM residual to isolate attention/FFN
-                // let _ = scratch.ffn_out; // skip residual
+                // `mamba_out` is the SSM branch output **before** the
+                // residual add: upstream emits it at the end of
+                // `build_mamba2_layer` (`src/models/mamba-base.cpp:306`) and
+                // the caller adds the residual afterwards
+                // (`src/models/nemotron-h.cpp:242`). Emitting it here, before
+                // the add, keeps the two sides on the same node; emitting it
+                // after would compare a branch output against a residual
+                // sum.
+                #[cfg(feature = "parity-trace")]
+                trace::layer_1d("mamba_out", layer_idx, position, &scratch.ffn_out);
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }
@@ -789,16 +1122,14 @@ impl NemotronModel {
                 );
                 let q8f = &scratch.q8_buf[..n_embd];
                 let scf = &scratch.scale_buf[..blocks3];
-                w_up.kernel.forward_prepared(
+                self.run_matmul(
+                    &*w_up.kernel,
                     &scratch.normed,
                     q8f,
                     scf,
-                    None,
                     &mut up_buf,
                     n_embd,
                     cfg.n_ff,
-                    0,
-                    1,
                 );
                 // Activation: ReLU(x)^2 (LLM_FFN_RELU_SQR).
                 // llama.cpp's nemotron-h.cpp builds FFN as
@@ -816,22 +1147,55 @@ impl NemotronModel {
                     &mut scratch.q8_buf[..cfg.n_ff],
                     &mut scratch.scale_buf[..cfg.n_ff.div_ceil(32)],
                 );
-                w_down.kernel.forward_prepared(
+                self.run_matmul(
+                    &*w_down.kernel,
                     &up_buf,
                     &scratch.q8_buf[..cfg.n_ff],
                     &scratch.scale_buf[..cfg.n_ff.div_ceil(32)],
-                    None,
                     &mut scratch.ffn_out,
                     cfg.n_ff,
                     n_embd,
-                    0,
-                    1,
                 );
                 for d in 0..n_embd {
                     row[d] += scratch.ffn_out[d];
                 }
             }
-            let _ = layer_idx;
+            // MoE branch (30B-A3B): routed experts plus one shared
+            // expert. The block input is the normalized hidden state
+            // (`scratch.normed`), which llama.cpp's `build_ffn_layer`
+            // receives as `cur` after the layer's `attn_norm`. The
+            // router, the experts and the shared expert all read it.
+            if let Some(moe) = &lw.moe {
+                let moe_cfg = cfg
+                    .moe
+                    .as_ref()
+                    .ok_or_else(|| "Nemotron MoE weights without MoE metadata".to_string())?;
+                super::moe::forward_moe_token(
+                    self,
+                    moe,
+                    moe_cfg,
+                    &scratch.normed,
+                    &mut scratch.ffn_out,
+                    &mut scratch.q8_buf,
+                    &mut scratch.scale_buf,
+                    layer_idx,
+                    position,
+                )?;
+                for d in 0..n_embd {
+                    row[d] += scratch.ffn_out[d];
+                }
+            }
+            // `l_out` is the layer output after the residual add, which is
+            // the last node the oracle emits for a layer. Emitting it makes a
+            // divergence attributable to a layer rather than to "somewhere
+            // in the trunk".
+            //
+            // `row` is this token's `n_embd` values, not a token-major
+            // buffer, so it goes out as a single row: `row_of` would index at
+            // `position * n_embd` and silently write nothing for any position
+            // past the first.
+            #[cfg(feature = "parity-trace")]
+            trace::layer_1d("l_out", layer_idx, position, row);
         }
         Ok(())
     }
@@ -844,12 +1208,16 @@ pub fn run_inference(
     temperature: f32,
     n_threads_arg: usize,
     _kv_format: crate::app::cli::KvFormat,
+    repetition_penalty: f32,
+    chat_template: Option<&str>,
+    thinking: bool,
+    jinja: &crate::prompt::jinja::Options,
 ) -> Result<(), String> {
     use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+    use std::collections::HashMap;
 
-    let _ = (n_threads_arg);
     eprintln!("Loading Nemotron-3 Nano from model");
-    let model = NemotronModel::from_source(source.clone())?;
+    let mut model = NemotronModel::from_source(source.clone(), n_threads_arg)?;
     println!(
         "Model: {} | n_embd={} n_layer={} n_head={} n_head_kv={} vocab={}",
         model.config.architecture,
@@ -862,73 +1230,62 @@ pub fn run_inference(
 
     let tokenizer = BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|e| format!("Failed to initialize tokenizer: {e}"))?;
-    let prompt_ids = tokenizer.encode(
-        prompt,
-        EncodeOptions {
-            add_special: true,
-            parse_special: true,
-        },
-    );
+    // Wrap the prompt with the model's canonical chat template.
+    // `--chat-template <preset>` overrides the per-arch default; an
+    // unknown architecture stays in raw base-model mode so parity
+    // tests against llama.cpp still match byte-for-byte.
+    // `--jinja` renders the GGUF's own template; the preset table below is
+    // the fallback for models that ship none.
+    let jinja_template = jinja.resolve(&|k| source.metadata(k).cloned())?;
+    if jinja_template.is_none() {
+        let preset_name = chat_template.unwrap_or("auto");
+        eprintln!(
+            "Nemotron: chat-template preset = {preset_name} (resolved via {})",
+            model.config.architecture
+        );
+    }
+    // Rendered through `render_tokens` rather than encoding rendered text with
+    // `add_special: true`: that would prepend a BOS to a template that already
+    // emitted `{{ bos_token }}`. `render_tokens` adds BOS only when the
+    // tokenizer asks for one and the ids do not already start with it.
+    let prompt_ids = if let Some(template) = jinja_template.as_ref() {
+        crate::prompt::jinja::render_tokens(
+            &tokenizer,
+            template,
+            &[crate::prompt::jinja::ChatMessage::text("user", prompt)],
+            true,
+            Some(thinking),
+        )?
+    } else {
+        let formatted_prompt =
+            crate::prompt::legacy::format_chat(&model.config.architecture, chat_template, prompt)
+                .unwrap_or_else(|| prompt.to_string());
+        tokenizer.encode(
+            &formatted_prompt,
+            EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    };
     if prompt_ids.is_empty() {
         return Err("Nemotron prompt produced no tokens".into());
     }
 
-    // Scratch sized for the worst-case attention layer (n_head=40, key=128,
-    // value=128). KV cache intentionally skipped for the first cut.
-    let n_attn_q = model.config.n_head * model.config.n_embd_head_k;
-    let n_attn_v = model.config.n_head_kv.max(1) * model.config.n_embd_head_v;
-    let scratch_capacity = (prompt_ids.len() + max_tokens).max(8);
-    let conv_cols = model.config.ssm_inner_size
-        + 2 * model.config.ssm_group_count * model.config.ssm_state_size;
-    let mut scratch = NemotronScratch {
-        hidden: vec![0.0; scratch_capacity * model.config.n_embd],
-        normed: vec![0.0; model.config.n_embd],
-        q: vec![0.0; scratch_capacity * n_attn_q],
-        k: vec![0.0; scratch_capacity * n_attn_v],
-        v: vec![0.0; scratch_capacity * n_attn_v],
-        attn_out: vec![0.0; n_attn_v],
-        ffn_out: vec![0.0; model.config.n_embd],
-        q8_buf: vec![
-            0u8;
-            model
-                .config
-                .n_embd
-                .max(model.config.n_ff)
-                .max(n_attn_v)
-                .max(model.config.n_embd_head_v * model.config.n_head)
-                .max(model.config.ssm_inner_size)
-        ],
-        scale_buf: vec![
-            0.0;
-            model
-                .config
-                .n_embd
-                .max(model.config.n_ff)
-                .max(n_attn_v)
-                .max(model.config.n_embd_head_v * model.config.n_head)
-                .max(model.config.ssm_inner_size)
-                .div_ceil(32)
-        ],
-        scores: vec![0.0; scratch_capacity * scratch_capacity],
-        logits: vec![0.0; model.config.vocab_size],
-        ssm_state: vec![0.0; model.config.ssm_state_size * model.config.ssm_inner_size],
-        ssm_conv_hist: vec![0.0; model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
-        ssm_scan_state: vec![
-            0.0;
-            model.config.n_layer
-                * model.config.ssm_inner_size
-                * model.config.ssm_state_size
-        ],
-    };
+    // Attach the Vulkan session now that the capacity is known. The
+    // session is built lazily so a CPU-only run never pays the device
+    // init cost.
+    #[cfg(feature = "vulkan")]
+    model.attach_gpu(
+        prompt_ids.len() + max_tokens,
+        prompt_ids.len(),
+        crate::compute::ComputePolicy::legacy(),
+    )?;
 
-    // Prefill each prompt token as a separate step (no KV cache yet).
+    let mut scratch = NemotronScratch::new(&model.config, prompt_ids.len() + max_tokens);
+    let infer_started = std::time::Instant::now();
     let started = std::time::Instant::now();
-    let mut logits = Vec::new();
-    for &tid in &prompt_ids {
-        logits = model.prefill(&[tid], &mut scratch)?;
-    }
-    let mut next_token = sample_argmax(&logits, temperature);
-    let mut generated: Vec<u32> = vec![next_token];
+    let mut logits = model.prefill(&prompt_ids, &mut scratch)?;
     let t_prefill = started.elapsed();
     eprintln!(
         "Nemotron: prefill {} tokens in {:.2?}",
@@ -936,78 +1293,52 @@ pub fn run_inference(
         t_prefill
     );
 
-    // Decode one token at a time. Each step reuses the full prefill
-    // scratch (we don't have KV cache yet, so this is O(n²)).
+    let mut generated = Vec::with_capacity(max_tokens);
+    // Track per-token counts so `apply_repetition_penalty` can divide each
+    // repeated token's logit by penalty^count (llama.cpp / HF semantics).
+    let mut token_counts: HashMap<u32, u32> = HashMap::new();
+    let decode_started = std::time::Instant::now();
     for step in 0..max_tokens {
-        let next_logits = model.prefill(&[next_token], &mut scratch)?;
-        // DEBUG: dump logits stats + argmax to stderr for parity diff
-        // against llama.cpp oracle (commit 96013c511).
-        {
-            let mut l2 = 0.0f64;
-            let mut mn = f32::INFINITY;
-            let mut mx = f32::NEG_INFINITY;
-            let mut best = 0usize;
-            let mut best_v = f32::NEG_INFINITY;
-            for (i, &v) in next_logits.iter().enumerate() {
-                let vv = v as f64;
-                l2 += vv * vv;
-                if v < mn {
-                    mn = v;
-                }
-                if v > mx {
-                    mx = v;
-                }
-                if v > best_v {
-                    best_v = v;
-                    best = i;
-                }
-            }
-            eprintln!(
-                "[OURS-LOGITS] step {step}: L2={:.3} min={:.3} max={:.3} argmax={best} (logit={:.3})",
-                l2.sqrt(), mn, mx, best_v
-            );
-        }
-        next_token = sample_argmax(&next_logits, temperature);
-        // DEBUG: dump top-10 logits for first decode step (parity diff
-        // vs llama.cpp oracle). Skip after first step.
-        {
-            let mut idxs: Vec<(usize, f32)> = next_logits
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i, v))
-                .collect();
-            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            eprintln!("  top10 logit:");
-            for (rank, (tid, v)) in idxs.iter().take(10).enumerate() {
-                eprintln!("    [{rank}] token={tid} logit={v:.3}");
-            }
-        }
-        {
-            let mut idxs: Vec<(usize, f32)> = next_logits
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i, v))
-                .collect();
-            idxs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            eprintln!("  top10 logit:");
-            for (rank, (tid, v)) in idxs.iter().take(10).enumerate() {
-                eprintln!("    [{rank}] token={tid} logit={v:.3}");
-            }
-        }
-        if let Some(eos) = tokenizer.eos_id() {
-            if next_token == eos {
-                break;
-            }
+        crate::ops::apply_repetition_penalty(&mut logits, &token_counts, repetition_penalty);
+        let next_token = sample_argmax(&logits, temperature);
+        if Some(next_token) == tokenizer.eos_id() {
+            break;
         }
         generated.push(next_token);
+        *token_counts.entry(next_token).or_insert(0) += 1;
+        if step + 1 < max_tokens {
+            logits = model.prefill(&[next_token], &mut scratch)?;
+        }
     }
+    let t_decode = decode_started.elapsed();
     let piece = tokenizer.decode(&generated, true);
     println!("Output: {}", piece);
+
+    // Throughput summary, matching llama trunk's
+    //   "Prompt: X t/s | Generation: Y t/s | end-to-end: Z tok/s"
+    // so users can compare against llama.cpp numbers without leaving the
+    // Nemotron console output. End-to-end is total wall time from
+    // `infer_started` (before prefill) to here.
+    let infer_ms = infer_started.elapsed().as_millis();
+    let tok_s = if infer_ms > 0 {
+        generated.len() as f64 / infer_ms as f64 * 1000.0
+    } else {
+        0.0
+    };
+    eprintln!(
+        "Prompt: {:.1} t/s | Generation: {:.1} t/s | end-to-end: {:.1} tok/s",
+        crate::app::cli::per_second(prompt_ids.len(), t_prefill),
+        crate::app::cli::per_second(generated.len(), t_decode),
+        tok_s
+    );
     Ok(())
 }
 
+/// Greedy decode if `temperature <= 0.0`; otherwise sample with
+/// llama.cpp's chain (temperature + top-k 0 + top-p 1.0). Uses
+/// `sample_llama_cpp` from `crate::ops::sampling`.
 fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
-    if temperature == 0.0 {
+    if temperature <= 0.0 {
         let mut best = f32::NEG_INFINITY;
         let mut idx = 0u32;
         for (i, &v) in logits.iter().enumerate() {
@@ -1018,7 +1349,9 @@ fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
         }
         idx
     } else {
-        sample_argmax(logits, 0.0)
+        let mut owned = logits.to_vec();
+        let rng_u64 = rand::random::<u64>();
+        sample_llama_cpp(&mut owned, 0, 1.0, temperature, rng_u64) as u32
     }
 }
 
@@ -1026,69 +1359,18 @@ fn sample_argmax(logits: &[f32], temperature: f32) -> u32 {
 /// last-position logits. Used by JEV / classification modes that do
 /// not need autoregressive decoding.
 ///
-/// Wraps `NemotronModel::prefill`, which already operates per-token
-/// without KV cache (Nemotron currently re-prefills each step).
+/// Wraps the same stateful prefill used by text generation.
 pub fn run_forward_logits_nemotron_h(
     source: Arc<dyn TensorSource>,
     prompt_tokens: &[u32],
+    n_threads: usize,
 ) -> Result<(Vec<f32>, std::time::Duration), String> {
-    use crate::core::tokenizer::BPETokenizer;
-
-    let t0 = std::time::Instant::now();
-    let model = NemotronModel::from_source(source.clone())?;
-    let n_attn_q = model.config.n_head * model.config.n_embd_head_k;
-    let n_attn_v = model.config.n_head_kv.max(1) * model.config.n_embd_head_v;
-    let scratch_capacity = prompt_tokens.len().max(8);
-    let conv_cols = model.config.ssm_inner_size
-        + 2 * model.config.ssm_group_count * model.config.ssm_state_size;
-    let mut scratch = NemotronScratch {
-        hidden: vec![0.0; scratch_capacity * model.config.n_embd],
-        normed: vec![0.0; model.config.n_embd],
-        q: vec![0.0; scratch_capacity * n_attn_q],
-        k: vec![0.0; scratch_capacity * n_attn_v],
-        v: vec![0.0; scratch_capacity * n_attn_v],
-        attn_out: vec![0.0; n_attn_v],
-        ffn_out: vec![0.0; model.config.n_embd],
-        q8_buf: vec![
-            0u8;
-            model
-                .config
-                .n_embd
-                .max(model.config.n_ff)
-                .max(n_attn_v)
-                .max(model.config.n_embd_head_v * model.config.n_head)
-                .max(model.config.ssm_inner_size)
-        ],
-        scale_buf: vec![
-            0.0;
-            model
-                .config
-                .n_embd
-                .max(model.config.n_ff)
-                .max(n_attn_v)
-                .max(model.config.n_embd_head_v * model.config.n_head)
-                .max(model.config.ssm_inner_size)
-                .div_ceil(32)
-        ],
-        scores: vec![0.0; scratch_capacity * scratch_capacity],
-        logits: vec![0.0; model.config.vocab_size],
-        ssm_state: vec![0.0; model.config.ssm_state_size * model.config.ssm_inner_size],
-        ssm_conv_hist: vec![0.0; model.config.n_layer * model.config.ssm_conv_kernel * conv_cols],
-        ssm_scan_state: vec![
-            0.0;
-            model.config.n_layer
-                * model.config.ssm_inner_size
-                * model.config.ssm_state_size
-        ],
-    };
+    let mut model = NemotronModel::from_source(source, n_threads)?;
+    let mut scratch = NemotronScratch::new(&model.config, prompt_tokens.len());
 
     let prefill_started = std::time::Instant::now();
-    let mut logits = Vec::new();
-    for &tid in prompt_tokens {
-        logits = model.prefill(&[tid], &mut scratch)?;
-    }
+    let logits = model.prefill(prompt_tokens, &mut scratch)?;
     let prefill_dur = prefill_started.elapsed();
-    let _ = t0;
     Ok((logits, prefill_dur))
 }
 
@@ -1098,4 +1380,327 @@ pub fn run_forward_logits_nemotron_h(
 pub fn load_nemotron_tokenizer(source: &dyn TensorSource) -> Result<BPETokenizer, String> {
     BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
         .map_err(|e| format!("Failed to load Nemotron tokenizer: {e}"))
+}
+
+/// One row of the Mamba2 selective-state-space scan (Nemotron-H SSM
+/// layer). Updates `state_row` in place from
+///   new_state[n] = state[n] * dA + b[n] * x_dt
+/// and returns
+///   sumf = sum_n new_state[n] * c[n]
+/// matching the scalar reference in `forward_layer`. Each `n` is
+/// independent (no carry between iterations), so the loop is fully
+/// vectorizable on AVX2 (8 f32 / iter).
+///
+/// Mirrors `ggml_compute_forward_ssm_scan_f32` in llama.cpp's
+/// ggml-cpu/ops.cpp. On x86_64 + AVX2+FMA this is ~8× the scalar
+/// version; for d_state=128 (Nemotron-3 Nano) the inner loop costs
+/// ~16 vector iterations per (head, k) pair.
+#[inline]
+pub fn ssm_scan_row(
+    state_row: &mut [f32],
+    b_row: &[f32],
+    c_row: &[f32],
+    dA: f32,
+    x_dt: f32,
+) -> f32 {
+    debug_assert_eq!(state_row.len(), b_row.len());
+    debug_assert_eq!(state_row.len(), c_row.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::ops::has_avx2_fma() {
+            unsafe {
+                return ssm_scan_row_avx2(state_row, b_row, c_row, dA, x_dt);
+            }
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::ops::has_neon() {
+            unsafe {
+                return ssm_scan_row_neon(state_row, b_row, c_row, dA, x_dt);
+            }
+        }
+    }
+    ssm_scan_row_scalar(state_row, b_row, c_row, dA, x_dt)
+}
+
+#[cfg_attr(
+    target_arch = "x86_64",
+    target_feature(enable = "avx2", enable = "fma")
+)]
+#[inline]
+unsafe fn ssm_scan_row_avx2(
+    state_row: &mut [f32],
+    b_row: &[f32],
+    c_row: &[f32],
+    dA: f32,
+    x_dt: f32,
+) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        let n = state_row.len();
+        // Mirror ggml's `ggml_compute_forward_ssm_scan_f32` exactly. The
+        // accumulation shape is not a detail: ggml keeps `GGML_F32_ARR` (= 4)
+        // separate 8-lane accumulators over a `GGML_F32_STEP` (= 32) block and
+        // reduces them with a pairwise tree, so a single-accumulator loop
+        // produces a different rounding and the two sides drift apart by
+        // ~1e-5 per SSM layer -- which compounds across 23 layers into a
+        // completely different routing decision.
+        const STEP: usize = 32;
+        const EPR: usize = 8;
+        const ARR: usize = STEP / EPR;
+        let np = n / STEP * STEP;
+        let v_dA = _mm256_set1_ps(dA);
+        let v_x_dt = _mm256_set1_ps(x_dt);
+        let mut acc = [_mm256_setzero_ps(); ARR];
+
+        let mut i = 0;
+        while i < np {
+            for j in 0..ARR {
+                let off = i + j * EPR;
+                let v_state = _mm256_loadu_ps(state_row.as_ptr().add(off));
+                let v_b = _mm256_loadu_ps(b_row.as_ptr().add(off));
+                // ggml: ax = s0 * dA; ay = B * x_dt; ax = ax + ay.
+                // Two separate ops, not an FMA -- the rounding differs.
+                let v_new_state =
+                    _mm256_add_ps(_mm256_mul_ps(v_state, v_dA), _mm256_mul_ps(v_b, v_x_dt));
+                _mm256_storeu_ps(state_row.as_mut_ptr().add(off), v_new_state);
+                let v_c = _mm256_loadu_ps(c_row.as_ptr().add(off));
+                acc[j] = _mm256_fmadd_ps(v_new_state, v_c, acc[j]);
+            }
+            i += STEP;
+        }
+        // GGML_F32x8_REDUCE: pairwise tree over the 4 accumulators, then
+        // low+high 128-bit add and two hadds.
+        acc[0] = _mm256_add_ps(acc[0], acc[2]);
+        acc[1] = _mm256_add_ps(acc[1], acc[3]);
+        acc[0] = _mm256_add_ps(acc[0], acc[1]);
+        let t0 = _mm_add_ps(
+            _mm256_castps256_ps128(acc[0]),
+            _mm256_extractf128_ps(acc[0], 1),
+        );
+        let t1 = _mm_hadd_ps(t0, t0);
+        let mut sumf = _mm_cvtss_f32(_mm_hadd_ps(t1, t1));
+        // Tail: scalar fallback for any leftover lanes.
+        while i < n {
+            let new_state = state_row[i] * dA + b_row[i] * x_dt;
+            state_row[i] = new_state;
+            sumf += new_state * c_row[i];
+            i += 1;
+        }
+        sumf
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // target_feature shim — unreachable on non-x86_64 because the
+        // dispatch above only forwards here under cfg(x86_64).
+        ssm_scan_row_scalar(state_row, b_row, c_row, dA, x_dt)
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn ssm_scan_row_neon(
+    state_row: &mut [f32],
+    b_row: &[f32],
+    c_row: &[f32],
+    dA: f32,
+    x_dt: f32,
+) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        let n = state_row.len();
+        // Same shape as ggml's NEON path: `GGML_F32_STEP` = 16, `EPR` = 4,
+        // so 4 accumulators reduced by a pairwise tree. A single
+        // accumulator rounds differently and drifts across the 23 SSM layers.
+        const STEP: usize = 16;
+        const EPR: usize = 4;
+        const ARR: usize = STEP / EPR;
+        let np = n / STEP * STEP;
+        let v_dA = vdupq_n_f32(dA);
+        let v_x_dt = vdupq_n_f32(x_dt);
+        let mut acc = [vdupq_n_f32(0.0); ARR];
+        let mut i = 0;
+        while i < np {
+            for j in 0..ARR {
+                let off = i + j * EPR;
+                let v_state = vld1q_f32(state_row.as_ptr().add(off));
+                let v_b = vld1q_f32(b_row.as_ptr().add(off));
+                // ggml: ax = s0 * dA; ay = B * x_dt; ax = ax + ay.
+                let v_new_state = vaddq_f32(vmulq_f32(v_state, v_dA), vmulq_f32(v_b, v_x_dt));
+                vst1q_f32(state_row.as_mut_ptr().add(off), v_new_state);
+                let v_c = vld1q_f32(c_row.as_ptr().add(off));
+                acc[j] = vfmaq_f32(acc[j], v_new_state, v_c);
+            }
+            i += STEP;
+        }
+        // GGML_F32x4_REDUCE: pairwise tree, then vaddvq_f32.
+        acc[0] = vaddq_f32(acc[0], acc[2]);
+        acc[1] = vaddq_f32(acc[1], acc[3]);
+        acc[0] = vaddq_f32(acc[0], acc[1]);
+        let mut sumf = vaddvq_f32(acc[0]);
+        while i < n {
+            let new_state = state_row[i] * dA + b_row[i] * x_dt;
+            state_row[i] = new_state;
+            sumf += new_state * c_row[i];
+            i += 1;
+        }
+        sumf
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        ssm_scan_row_scalar(state_row, b_row, c_row, dA, x_dt)
+    }
+}
+
+#[inline]
+fn ssm_scan_row_scalar(
+    state_row: &mut [f32],
+    b_row: &[f32],
+    c_row: &[f32],
+    dA: f32,
+    x_dt: f32,
+) -> f32 {
+    let mut sumf = 0.0f32;
+    for i in 0..state_row.len() {
+        let new_state = state_row[i] * dA + b_row[i] * x_dt;
+        state_row[i] = new_state;
+        sumf += new_state * c_row[i];
+    }
+    sumf
+}
+
+#[cfg(test)]
+mod nemotron_math_tests {
+    use super::*;
+
+    #[test]
+    fn projection_order_matches_mamba2_graph() {
+        let projection = [0., 1., 2., 3., 4., 5., 6.];
+        let (z, xbc, dt) = split_mamba2_projection(&projection, 2, 1, 1, 1);
+        assert_eq!(z, [0., 1.]);
+        assert_eq!(xbc, [2., 3., 4., 5.]);
+        assert_eq!(dt, [6.]);
+    }
+
+    #[test]
+    fn conv_includes_current_token_and_channel_major_weights() {
+        let weights = [1., 2., 3., 4., 5., 6.];
+        let bias = [1., 2.];
+        let mut history = [1., 10., 2., 20.];
+        let output = mamba2_conv_step(&weights, &bias, &mut history, &[3., 30.], 3);
+        assert_eq!(output, [15., 322.]);
+        assert_eq!(history, [2., 20., 3., 30.]);
+    }
+
+    #[test]
+    fn conv_adds_bias_after_dot_product() {
+        let mut history = [1e20, -1e20, 0.0];
+        let output = mamba2_conv_step(&[1.0, 1.0, 0.0, 0.0], &[1.0], &mut history, &[0.0], 4);
+        assert_eq!(output, [1.0]);
+    }
+
+    /// `ssm_scan_row` must match the scalar reference within a few
+    /// ULPs (vector reduction order differs from scalar, so we don't
+    /// expect bit-exact equality, but inference is robust to that
+    /// noise — empirically we still produce identical first-token
+    /// output on Q4_0 Nemotron-3 Nano, see PR #98). The AVX2 / NEON /
+    /// scalar dispatch is exercised by calling the public entry point.
+    /// Allow 16 ULP (≈3.5e-6) at d_state=128; the standalone
+    /// microbench shows worst-case 14.8 ULP at d=200 over random
+    /// inputs.
+    #[test]
+    fn ssm_scan_row_matches_scalar_reference_within_16ulp() {
+        let d_state = 128usize;
+        let state: Vec<f32> = (0..d_state)
+            .map(|i| (i as f32 * 0.013).sin() * 0.5)
+            .collect();
+        let b: Vec<f32> = (0..d_state)
+            .map(|i| (i as f32 * 0.027).cos() * 0.25)
+            .collect();
+        let c: Vec<f32> = (0..d_state)
+            .map(|i| (i as f32 * 0.041).sin() * 0.75)
+            .collect();
+        let dA = 0.987f32;
+        let x_dt = 0.123f32;
+
+        // Scalar reference.
+        let mut state_ref = state.clone();
+        let mut sumf_ref = 0.0f32;
+        for i in 0..d_state {
+            let new_state = state_ref[i] * dA + b[i] * x_dt;
+            state_ref[i] = new_state;
+            sumf_ref += new_state * c[i];
+        }
+
+        // SIMD path (whatever the runtime resolves to).
+        let mut state_simd = state.clone();
+        let sumf_simd = ssm_scan_row(&mut state_simd, &b, &c, dA, x_dt);
+
+        // sumf check: allow 16 ULP relative error.
+        let rel_err = (sumf_simd - sumf_ref).abs() / sumf_ref.abs().max(f32::EPSILON);
+        assert!(
+            rel_err < 16.0 * f32::EPSILON,
+            "ssm_scan_row sumf diverged: ref={sumf_ref} simd={sumf_simd} rel={rel_err}"
+        );
+
+        // state-row check: each lane matches scalar within 16 ULP.
+        let max_lane_rel = state_ref
+            .iter()
+            .zip(&state_simd)
+            .map(|(r, s)| {
+                if r.abs() < f32::EPSILON {
+                    (s - r).abs()
+                } else {
+                    (s - r).abs() / r.abs()
+                }
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_lane_rel < 16.0 * f32::EPSILON,
+            "ssm_scan_row state diverged: max_lane_rel={max_lane_rel}"
+        );
+    }
+
+    /// Non-multiple-of-8 / -4 lengths must not panic — the AVX2 path
+    /// falls back to scalar for the tail (Nemotron-H is d_state=128
+    /// so it never trips this, but other future SSM heads might).
+    #[test]
+    fn ssm_scan_row_handles_non_aligned_lengths() {
+        for &d in &[3usize, 7, 17, 33, 65, 100, 129] {
+            let state: Vec<f32> = (0..d).map(|i| i as f32 * 0.01).collect();
+            let b: Vec<f32> = (0..d).map(|i| 1.0 - i as f32 * 0.001).collect();
+            let c: Vec<f32> = (0..d).map(|i| i as f32 * 0.02 - 0.5).collect();
+
+            let mut state_ref = state.clone();
+            let mut sumf_ref = 0.0f32;
+            for i in 0..d {
+                let new_state = state_ref[i] * 0.9 + b[i] * 0.1;
+                state_ref[i] = new_state;
+                sumf_ref += new_state * c[i];
+            }
+
+            let mut state_simd = state.clone();
+            let sumf_simd = ssm_scan_row(&mut state_simd, &b, &c, 0.9, 0.1);
+
+            let rel = (sumf_simd - sumf_ref).abs() / sumf_ref.abs().max(f32::EPSILON);
+            assert!(
+                rel < 16.0 * f32::EPSILON,
+                "d={d}: ref={sumf_ref} simd={sumf_simd} rel={rel}"
+            );
+            for (i, (&r, &s)) in state_ref.iter().zip(&state_simd).enumerate() {
+                let lane_rel = if r.abs() < f32::EPSILON {
+                    (s - r).abs()
+                } else {
+                    (s - r).abs() / r.abs()
+                };
+                assert!(
+                    lane_rel < 16.0 * f32::EPSILON,
+                    "d={d} i={i}: ref={r} simd={s} rel={lane_rel}"
+                );
+            }
+        }
+    }
 }

@@ -1,0 +1,2642 @@
+pub mod api;
+mod audio;
+mod audio_speech;
+mod auk;
+mod decision;
+mod diffusion;
+mod forecast;
+mod image_generation;
+mod prediction;
+mod rerank;
+mod speech;
+mod video_generation;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    extract::{DefaultBodyLimit, Multipart, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use tower_http::cors::CorsLayer;
+
+use crate::app::cli::{
+    normalize_tts_language, parse_cli_options, resolve_thread_count, validate_cli_options,
+    CliOptions, KvFormat,
+};
+use crate::app::{compute_embedding, open_or_exit};
+use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::thread_pool::ComputePool;
+use crate::core::tokenizer::BPETokenizer;
+use crate::format::ggufrs::ComponentRole;
+use crate::format::wav::encode_wav_pcm16_channels;
+use crate::models::audio8::streaming as audio8_streaming;
+use crate::models::qwen3::asr::model::{
+    open_bundled_audio_source, AsrRuntime, TranscriptionOptions,
+};
+use crate::models::qwen3::tts::codec::{Code2WavDecoder, CodePredictor, WAVEFORM_SAMPLE_RATE};
+use crate::models::qwen3::tts::speaker::{reference_wav_to_mel, Qwen3TtsSpeakerEncoder};
+use crate::models::qwen3::tts::{predictor_top_k, Qwen3TtsTalker, TtsPrompt, TtsSession};
+use crate::models::qwen3::Qwen3Model;
+
+const USAGE: &str = "Usage: rust-model-server --model <path.gguf-or-ggufrs> [--mmproj ...] [--audio ...] [--image ...] [--tts] [--enhance (RE-USE safetensors; POST /v1/audio/enhancements)] [--embedding] [--host 0.0.0.0] [--port 8080] [--threads 4] [--compute cpu|auto|vulkan (default cpu); --gpu aliases auto] [--kv-cache f16|f32] [--prefill-batch-size N (default 64)] [--allow-remote-images] [--vae ... --text-encoder ... selects the AuK audio backend: /v1/audio/speech and /v1/audio/generations] [--model <dit.gguf> --text-encoder <text.gguf> --vae <vae.gguf> selects the image-generation backend (P-JiT, Z-Image, ERNIE-Image): POST /v1/images/generations]\nTHX-02: --model <thx02.gguf> [--decision-thinker thinker.gguf] [--max-context N] selects /v1/decide, /v1/decide/batch and applicable /v1/jev/* routes; generation options are unsupported";
+
+// =============================================================================
+// Backend types
+// =============================================================================
+
+#[derive(Clone)]
+struct AppState {
+    compute: crate::compute::ComputePolicy,
+    model: Arc<Backend>,
+    model_name: String,
+    responses: Arc<Mutex<api::ResponsesStore>>,
+    generation_slot: Arc<tokio::sync::Semaphore>,
+}
+
+fn compute_task<T: Send + 'static>(
+    policy: crate::compute::ComputePolicy,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    tokio::task::spawn_blocking(move || {
+        let _scope = policy.enter_legacy_scope();
+        work()
+    })
+}
+
+fn hy_transcription_task<T: Send + 'static>(
+    policy: crate::compute::ComputePolicy,
+    slot: Arc<tokio::sync::Semaphore>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<tokio::task::JoinHandle<T>, tokio::sync::TryAcquireError> {
+    let permit = slot.try_acquire_owned()?;
+    Ok(compute_task(policy, move || {
+        // Request cancellation must not release a still-running translation's slot.
+        let _permit = permit;
+        work()
+    }))
+}
+
+enum Backend {
+    Text(TextBackend),
+    Pjit(image_generation::PjitBackend),
+    Video(video_generation::VideoBackend),
+    /// The text-to-image diffusion models: Z-Image and ERNIE-Image. They
+    /// share the image-generation route with P-JiT and differ only in the
+    /// pipeline behind it.
+    Diffusion(diffusion::DiffusionBackend),
+    /// A WeVisOne text model: a Qwen3-VL release with a coordinate
+    /// vocabulary and a separate pixel decoder. It serves the ordinary
+    /// text routes and adds the image prediction route.
+    WeVisOne(WeVisOneBackend),
+    UnlimitedOcr(UnlimitedOcrBackend),
+    Embedding(EmbeddingBackend),
+    Asr(AsrBackend),
+    HySimulMt(HySimulMtBackend),
+    Audio8(Audio8Backend),
+    AudioEnhancement(Arc<crate::models::nemotron_reuse::Model>),
+    Tts(TtsBackend),
+    ArkTts(audio_speech::Backend),
+    /// The PiVo-1.4M speech synthesis model: a single GGUF holding the
+    /// text frontend, the acoustic decoder and the bundled vocoder.
+    Pivo(speech::PivoBackend),
+    UnderdogWoof(speech::UnderdogWoofBackend),
+    /// The AuK flow-matching audio DiT: a DiT GGUF, a BigVGANFlow VAE GGUF
+    /// and an optional Qwen2.5-Omni text encoder. It serves the audio
+    /// speech routes.
+    Auk(auk::AukBackend),
+    Rerank(RerankBackend),
+    Clm(ClmBackend),
+    Gliner2(Gliner2Backend),
+    Gliner2Boundary(Gliner2BoundaryBackend),
+    Timestral(TimestralBackend),
+    Decision(crate::models::decision::Engine),
+}
+
+impl Backend {
+    /// The short name of this backend, used in the server's mode label and
+    /// in the error messages that name the loaded model.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Text(_) | Self::WeVisOne(_) => "text",
+            Self::UnlimitedOcr(_) => "unlimited-ocr",
+            Self::Embedding(_) => "embedding",
+            Self::Asr(_) => "asr",
+            Self::HySimulMt(_) => "hy-simulmt",
+            Self::Audio8(_) => "audio8",
+            Self::AudioEnhancement(_) => "audio-enhancement",
+            Self::Tts(_) | Self::Pivo(_) | Self::UnderdogWoof(_) => "tts",
+            Self::ArkTts(_) => "arktts",
+            Self::Auk(_) => "auk",
+            Self::Pjit(_) => "pjit",
+            Self::Video(_) => "video-generation",
+            Self::Diffusion(backend) => backend.label(),
+            Self::Rerank(_) => "rerank",
+            Self::Clm(_) => "clm",
+            Self::Gliner2(_) => "gliner2",
+            Self::Gliner2Boundary(_) => "gliner2-boundary",
+            Self::Timestral(_) => "timestral",
+            Self::Decision(_) => "decision",
+        }
+    }
+
+    /// The generic text payload, for the routes every text-capable
+    /// backend serves (chat, completions, responses, JEV).
+    fn text_backend(&self) -> Option<&TextBackend> {
+        match self {
+            Backend::Text(text) => Some(text),
+            Backend::WeVisOne(wevisone) => Some(&wevisone.text),
+            _ => None,
+        }
+    }
+}
+
+/// WeVisOne backend: the generic text backend plus the components the
+/// image prediction route needs.
+struct WeVisOneBackend {
+    /// Chat, completions and JEV use the generic text backend.
+    text: TextBackend,
+    /// The pixel decoder behind `--wevisone-decoder`, for alpha masks.
+    decoder: Option<Arc<dyn TensorSource>>,
+    /// Generation options for the prediction route.
+    options: crate::models::wevisone_vl::PredictionOptions,
+}
+
+struct UnlimitedOcrBackend {
+    model: Arc<crate::models::unlimited_ocr::Model>,
+    runtime: crate::ops::TextRuntimeHandle,
+}
+
+/// Timestral backend: the 209M time-series forecaster in one GGUF, named
+/// by `--model`.
+///
+/// The model borrows the mapped file, and the device arena it keeps is
+/// worth holding on to: rebuilding it per request would re-upload every
+/// weight to the GPU. So the source and the model are both leaked once
+/// and stay resident, the way the rerank and CLM backends do.
+struct TimestralBackend {
+    model: Arc<&'static crate::models::timestral::TimestralModel<'static>>,
+}
+
+/// GLiNER2.5-Decide backend: a DeBERTa-v3 encoder with the classifier head in
+/// the same GGUF, named by `--model` plus `--gliner2-decide`.  It scores a
+/// caller-supplied label set, so it exposes the JEV score route and nothing
+/// else.  The tokenizer is built once here; the model itself is
+/// zero-copy views over the mapping and is cheap to rebuild per request.
+struct Gliner2Backend {
+    source: Box<dyn TensorSource>,
+    tokenizer: crate::models::gliner::ModelTokenizer,
+    n_threads: usize,
+}
+
+/// GLiNER2.5 BoundaryExtractor backend: the multi-task head (document pool,
+/// pair scorer, classifier, abstention) in one DeBERTa-v3 GGUF, named by
+/// `--model` plus `--gliner2-boundary`.
+///
+/// The mapping is owned here and the model is rebuilt per request from a
+/// borrow of it, the same way the Decide backend does: `BoundaryModel` is
+/// zero-copy views over the mapping plus a settings parse, so there is nothing
+/// to cache, and no `'static` leak is needed.
+struct Gliner2BoundaryBackend {
+    source: Box<dyn TensorSource>,
+    n_threads: usize,
+}
+
+/// CLM backend: a Qwen3 encoder plus the projection-head GGUF named by
+/// `--clm-head`.  Scores candidates by cosine in projection space, so it
+/// exposes the JEV score route and nothing else.
+struct ClmBackend {
+    /// Kept so the JEV plumbing can hand out an `Arc<dyn TensorSource>`
+    /// the same way it does for `TextBackend`.
+    source: Arc<dyn TensorSource>,
+    /// Leaked for the same reason as `RerankBackend::model`:
+    /// `Qwen3Session` wants a `&'static` model.
+    model: Arc<&'static Qwen3Model>,
+    /// Owned, no borrow: the loader copies the weights out.
+    heads: crate::models::clm::ClmHeads,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
+}
+
+/// The two cross-encoder rerank families this server understands.
+///
+/// `Qwen3` reuses the qwen3 trunk (causal prefill + last-token
+/// classification head). `JinaBertV2` reuses the bert-encoder forward loop
+/// (bidirectional CLS token + `cls.weight` linear projection), which is
+/// structurally different: no causal mask, no Qwen3Session.
+enum RerankKind {
+    Qwen3,
+    JinaBertV2,
+}
+
+struct RerankBackend {
+    /// Qwen3 model loaded with the optional `cls.output.weight` rerank
+    /// head. Leaked to `'static` so per-request `Qwen3Session`s can
+    /// borrow from it without re-loading. `None` for `JinaBertV2`.
+    model: Option<Arc<&'static Qwen3Model>>,
+    tokenizer: Arc<BPETokenizer>,
+    prefill_batch_size: usize,
+    context_length: usize,
+    /// jina-bert-v2 backend keeps the raw `TensorSource` and reuses the
+    /// shared `bert_family::compute_rerank_score` for scoring. `None` for
+    /// `Qwen3` (the qwen3 path doesn't need it).
+    jina_source: Option<Arc<dyn TensorSource>>,
+    /// Selects the per-doc scoring path in `rerank::score_one_doc`.
+    kind: RerankKind,
+}
+
+unsafe impl Send for Backend {}
+unsafe impl Sync for Backend {}
+
+struct TextBackend {
+    arch: String,
+    pool: Arc<ComputePool>,
+    tokenizer: Arc<BPETokenizer>,
+    /// `--jinja` / `--chat-template-file` for `/v1/chat/completions`.
+    /// `Options` is `Send + Sync` (bool + PathBuf), so it can live here.
+    chat_template: std::sync::Arc<crate::prompt::jinja::Options>,
+    /// The template `chat_template` resolves to, compiled once at load time.
+    ///
+    /// Resolving per request re-read the GGUF metadata and recompiled the
+    /// Jinja source on every `/v1/chat/completions` call. `None` means Jinja
+    /// is off or the model ships no template, which is also `None` in
+    /// `chat_template`, so this cannot disagree with it.
+    compiled_chat_template: std::sync::Arc<Option<crate::prompt::jinja::JinjaChatTemplate>>,
+    prefill_batch_size: usize,
+    context_length: usize,
+    /// Per-arch generation adapter. `None` = arch has no adapter yet; those
+    /// models still load but `/v1/chat/completions` answers 501.
+    runtime: Option<crate::ops::TextRuntimeHandle>,
+    /// `TensorSource` for the loaded LLM. Used by the JEV scoring
+    /// endpoints (`/v1/jev/score`, `/v1/jev/grouped`) so they can
+    /// run the existing CLI JEV pipeline without re-loading the model
+    /// from disk. The pool and tokenizer above are still derived from
+    /// this source at startup; this is a duplicate handle, not a
+    /// second copy of the model tensors.
+    pub(crate) source: Arc<dyn TensorSource>,
+    /// On-disk path of the LLM GGUF (kept for the multimodal path
+    /// which takes `&Path` for the model).
+    pub(crate) model_path: Option<std::path::PathBuf>,
+    /// Optional multimodal vision encoder (CLIP / Qwen2.5-Omni /
+    /// etc.). Required for `/v1/jev/image` / `/v1/jev/image_grouped`.
+    pub(crate) mmproj: Option<Arc<dyn TensorSource>>,
+    /// On-disk path of the mmproj blob (kept alongside the in-memory
+    /// source because the existing multimodal CLI helper expects
+    /// `&Path` for both the model and the vision encoder).
+    pub(crate) mmproj_path: Option<std::path::PathBuf>,
+}
+
+unsafe impl Send for TextBackend {}
+unsafe impl Sync for TextBackend {}
+
+struct EmbeddingBackend {
+    source: Arc<dyn TensorSource>,
+    mmproj_path: Option<PathBuf>,
+}
+
+struct AsrBackend {
+    runtime: Arc<AsrRuntime>,
+}
+
+struct HySimulMtBackend {
+    runtime: Arc<crate::models::hy_simulmt::HySimulMt>,
+    language: String,
+    prompt: Option<String>,
+    max_tokens: usize,
+    max_context: usize,
+    prefill_batch_size: usize,
+    kv_format: KvFormat,
+}
+
+/// Audio8 ASR backend: a single-model Voxtral-Realtime GGUF that bundles the
+/// audio tower and Qwen2 text decoder. Same wiring as `RerankBackend` —
+/// encoder/decoder are leaked to `'static` so per-request
+/// `StreamingTranscriber`s can borrow from them for the server lifetime.
+struct Audio8Backend {
+    encoder: Arc<&'static crate::models::audio8::Audio8Encoder>,
+    decoder: Arc<&'static crate::models::audio8::text::Audio8TextDecoder>,
+    tokenizer: Arc<BPETokenizer>,
+    specials: crate::models::audio8::streaming::SpecialTokens,
+    language: &'static str,
+    max_tokens: usize,
+    /// The tower and the decoder share one compute pool, and
+    /// `ComputePool::compute` publishes its closure through shared atomics,
+    /// so two concurrent transcriptions would overwrite each other's work.
+    /// The lock serializes them, which is what lets the pool have more than
+    /// one thread.
+    compute_lock: Arc<std::sync::Mutex<()>>,
+}
+
+struct TtsBackend {
+    talker: Arc<Qwen3TtsTalker>,
+    mmproj: Arc<dyn TensorSource>,
+    language: &'static str,
+    temperature: f32,
+    max_tokens: usize,
+}
+
+// =============================================================================
+// HTTP request/response shapes (subset of OpenAI)
+// =============================================================================
+
+#[derive(Serialize)]
+struct ModelsResponse {
+    object: String,
+    data: Vec<ModelInfo>,
+}
+
+#[derive(Serialize)]
+struct ModelInfo {
+    id: String,
+    object: String,
+    created: u64,
+    owned_by: String,
+}
+
+#[derive(Deserialize)]
+struct EmbeddingRequest {
+    #[serde(default)]
+    model: Option<String>,
+    /// Text inputs for the text-only embedding path. Optional when
+    /// `audio`/`image`/`video` is present (multimodal path).
+    #[serde(default)]
+    input: Option<serde_json::Value>,
+    #[serde(default)]
+    encoding_format: Option<String>,
+    /// Optional base64-encoded audio bytes for multimodal embedding
+    /// (jina-v5-omni / qwen3-omni with audio mmproj). When present,
+    /// the server routes through `run_omni_embedding` instead of the
+    /// text-only path. The byte payload may be raw audio (decoded by
+    /// `ffmpeg` via the same WAV/MP3/FLAC/OGG/M4A/OPUS path as the
+    /// CLI `--audio` flag).
+    #[serde(default)]
+    audio: Option<String>,
+    /// Same as `Optional base64-encoded image for multimodal
+    /// embedding. Accepts raw image bytes (jpg/png/webp/...).
+    #[serde(default)]
+    image: Option<String>,
+    /// Optional base64-encoded video bytes. Decoded by ffprobe/ffmpeg.
+    #[serde(default)]
+    video: Option<String>,
+    /// Optional prompt string used as the LLM-side system turn for
+    /// multimodal embedding (e.g. "Query: ..." vs "Respond this
+    /// document ..."). Defaults to "" when omitted.
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EmbeddingResponse {
+    object: String,
+    data: Vec<EmbeddingObject>,
+    model: String,
+    usage: EmbeddingUsage,
+}
+
+#[derive(Serialize)]
+struct EmbeddingObject {
+    object: String,
+    embedding: Vec<f32>,
+    index: usize,
+}
+
+#[derive(Serialize)]
+struct EmbeddingUsage {
+    prompt_tokens: usize,
+    total_tokens: usize,
+}
+
+#[derive(Deserialize)]
+struct TranscriptionRequest {
+    #[serde(default)]
+    model: Option<String>,
+    /// Base64-encoded WAV bytes (for the JSON endpoint).
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    response_format: Option<String>,
+    #[serde(default)]
+    temperature: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct TranscriptionResponse {
+    text: String,
+}
+
+#[derive(Deserialize)]
+struct SpeechRequest {
+    model: String,
+    input: String,
+    #[serde(default)]
+    voice: Option<String>,
+    #[serde(default)]
+    response_format: Option<String>,
+    #[serde(default)]
+    speed: Option<f32>,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+// =============================================================================
+// Routes
+// =============================================================================
+
+async fn health() -> &'static str {
+    "ok"
+}
+
+async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
+    Json(ModelsResponse {
+        object: "list".to_string(),
+        data: vec![ModelInfo {
+            id: state.model_name.clone(),
+            object: "model".to_string(),
+            created: 0,
+            owned_by: "local".to_string(),
+        }],
+    })
+}
+
+async fn embeddings(
+    State(state): State<AppState>,
+    Json(req): Json<EmbeddingRequest>,
+) -> impl IntoResponse {
+    let Backend::Embedding(backend) = state.model.as_ref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server is not running an embedding model".into(),
+            }),
+        )
+            .into_response();
+    };
+    let has_media = req.audio.is_some() || req.image.is_some() || req.video.is_some();
+    if has_media {
+        let bge_visual = crate::models::bge_vl::is_visual(backend.source.as_ref());
+        if bge_visual && (req.audio.is_some() || req.video.is_some()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "BGE visual embedding accepts an image".into(),
+                }),
+            )
+                .into_response();
+        }
+        let mmproj_path = backend.mmproj_path.clone();
+        if !bge_visual && mmproj_path.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Multimodal embedding requires --mmproj on server startup".into(),
+                }),
+            )
+                .into_response();
+        }
+        let media_count = usize::from(req.audio.is_some())
+            + usize::from(req.image.is_some())
+            + usize::from(req.video.is_some());
+        if media_count != 1 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Exactly one of audio/image/video may be set per request".into(),
+                }),
+            )
+                .into_response();
+        }
+        let media_b64 = req
+            .audio
+            .as_ref()
+            .or(req.image.as_ref())
+            .or(req.video.as_ref())
+            .cloned()
+            .unwrap();
+        let ext = if req.audio.is_some() {
+            "wav"
+        } else if req.image.is_some() {
+            "jpg"
+        } else {
+            "mp4"
+        };
+        let prompt = req.prompt.unwrap_or_default();
+        let source = backend.source.clone();
+        let result = match compute_task(state.compute, move || {
+            let temp_path = std::env::temp_dir().join(format!(
+                "rmi-media-{}.{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+                ext
+            ));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(media_b64.trim())
+                .map_err(|error| format!("Invalid base64 media payload: {error}"))?;
+            std::fs::write(&temp_path, &bytes)
+                .map_err(|error| format!("Failed to write media temp file: {error}"))?;
+            let image_path = if req.image.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let video_path = if req.video.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let audio_path = if req.audio.is_some() {
+                Some(temp_path.as_path())
+            } else {
+                None
+            };
+            let result = if bge_visual {
+                crate::models::bge_vl::compute_embedding(source.as_ref(), &prompt, image_path, 0)
+            } else {
+                crate::app::run_omni_embedding(
+                    source.as_ref(),
+                    mmproj_path
+                        .as_deref()
+                        .ok_or("Multimodal embedding requires --mmproj")?,
+                    image_path,
+                    video_path,
+                    audio_path,
+                    &prompt,
+                    0,
+                )
+            };
+            let _ = std::fs::remove_file(&temp_path);
+            let embedding = result?;
+            Ok::<_, String>(EmbeddingObject {
+                object: "embedding".to_string(),
+                embedding,
+                index: 0,
+            })
+        })
+        .await
+        {
+            Ok(Ok(object)) => vec![object],
+            Ok(Err(error)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("embedding worker failed: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let total_tokens: usize = result.len();
+        let response = EmbeddingResponse {
+            object: "list".to_string(),
+            data: result,
+            model: state.model_name.clone(),
+            usage: EmbeddingUsage {
+                prompt_tokens: total_tokens,
+                total_tokens,
+            },
+        };
+        return (StatusCode::OK, Json(response)).into_response();
+    }
+    let inputs: Result<Vec<String>, String> = match req.input {
+        Some(serde_json::Value::String(text)) => Ok(vec![text]),
+        Some(serde_json::Value::Array(items)) => items
+            .into_iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "embedding input must be string or array of strings".to_string())
+            })
+            .collect(),
+        Some(_) => Err("embedding input must be string or array of strings".into()),
+        None => Err("embedding input is required when audio/image/video are not set".into()),
+    };
+    let inputs = match inputs {
+        Ok(value) => value,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
+        }
+    };
+    let source = backend.source.clone();
+    let result = match compute_task(state.compute, move || {
+        let mut data = Vec::with_capacity(inputs.len());
+        for (index, prompt) in inputs.iter().enumerate() {
+            let embedding = compute_embedding(source.as_ref(), prompt, 0)?;
+            data.push(EmbeddingObject {
+                object: "embedding".to_string(),
+                embedding,
+                index,
+            });
+        }
+        Ok::<_, String>(data)
+    })
+    .await
+    {
+        Ok(Ok(data)) => data,
+        Ok(Err(error)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error }),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("embedding worker failed: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let total_tokens: usize = result.len();
+    let response = EmbeddingResponse {
+        object: "list".to_string(),
+        data: result,
+        model: state.model_name.clone(),
+        usage: EmbeddingUsage {
+            prompt_tokens: total_tokens,
+            total_tokens,
+        },
+    };
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+async fn transcriptions(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut language: Option<String> = None;
+    let mut prompt: Option<String> = None;
+    let mut response_format: Option<String> = None;
+    let mut temperature: Option<f32> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(value)) => value,
+            Ok(None) => break,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("multipart error: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => match field.bytes().await {
+                Ok(bytes) => file_bytes = Some(bytes.to_vec()),
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("failed to read upload: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
+            },
+            "language" => match field.text().await {
+                Ok(text) => language = Some(text),
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("multipart error: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
+            },
+            "prompt" => match field.text().await {
+                Ok(text) => prompt = Some(text),
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("multipart error: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
+            },
+            "response_format" | "temperature"
+                if matches!(state.model.as_ref(), Backend::HySimulMt(_)) =>
+            {
+                let text = match field.text().await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("multipart error: {error}"),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+                if name == "response_format" {
+                    response_format = Some(text);
+                } else {
+                    match text.parse() {
+                        Ok(value) => temperature = Some(value),
+                        Err(_) => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(ErrorResponse {
+                                    error: "temperature must be a number".into(),
+                                }),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+    let wav = match file_bytes {
+        Some(bytes) => bytes,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "missing 'file' field".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if matches!(state.model.as_ref(), Backend::HySimulMt(_)) {
+        if let Err(error) = hy_transcription_options(response_format.as_deref(), temperature) {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
+        }
+    }
+    do_transcribe(&state, wav, language, prompt).await
+}
+
+async fn transcriptions_json(
+    State(state): State<AppState>,
+    Json(req): Json<TranscriptionRequest>,
+) -> impl IntoResponse {
+    let input = match req.input.as_deref() {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "JSON transcription requires 'input' (base64 WAV)".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let wav = match base64::engine::general_purpose::STANDARD.decode(input.trim()) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("base64 decode failed: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if matches!(state.model.as_ref(), Backend::HySimulMt(_)) {
+        if let Err(error) =
+            hy_transcription_options(req.response_format.as_deref(), req.temperature)
+        {
+            return (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into_response();
+        }
+    }
+    do_transcribe(&state, wav, req.language, req.prompt).await
+}
+
+fn hy_transcription_options(
+    response_format: Option<&str>,
+    temperature: Option<f32>,
+) -> Result<(), String> {
+    if response_format.is_some_and(|format| format != "json") {
+        return Err("Hy-SimulMT supports response_format=json only".into());
+    }
+    if temperature.is_some_and(|value| value != 0.0) {
+        return Err("Hy-SimulMT requires greedy decoding (temperature 0)".into());
+    }
+    Ok(())
+}
+
+/// Shared transcription worker: branches on backend type so a single
+/// call site covers Qwen3-VL ASR, Voxtral Realtime, and Hy-SimulMT.
+async fn do_transcribe(
+    state: &AppState,
+    wav: Vec<u8>,
+    language: Option<String>,
+    prompt: Option<String>,
+) -> axum::response::Response {
+    match state.model.as_ref() {
+        Backend::Asr(backend) => {
+            let options = TranscriptionOptions {
+                language: language.clone(),
+                prompt: None,
+                max_new_tokens: 256,
+            };
+            let runtime = backend.runtime.clone();
+            let wav = wav;
+            let result = compute_task(state.compute, move || {
+                runtime.transcribe_wav(&wav, &options)
+            })
+            .await;
+            match result {
+                Ok(Ok(value)) => (
+                    StatusCode::OK,
+                    Json(TranscriptionResponse { text: value.text }),
+                )
+                    .into_response(),
+                Ok(Err(error)) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse {
+                        error: error.to_string(),
+                    }),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("asr worker failed: {error}"),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        Backend::HySimulMt(backend) => {
+            let runtime = backend.runtime.clone();
+            let language = language.unwrap_or_else(|| backend.language.clone());
+            let prompt = prompt.or_else(|| backend.prompt.clone());
+            let max_tokens = backend.max_tokens;
+            let max_context = backend.max_context;
+            let batch = backend.prefill_batch_size;
+            let kv_format = backend.kv_format;
+            let result = match hy_transcription_task(
+                state.compute,
+                state.generation_slot.clone(),
+                move || {
+                    let samples = crate::ops::audio::frontend::decode_pcm16_wav(&wav)
+                        .map_err(|error| format!("Hy-SimulMT WAV: {error:?}"))?;
+                    runtime.translate(
+                        &samples,
+                        &language,
+                        prompt.as_deref(),
+                        max_tokens,
+                        max_context,
+                        batch,
+                        kv_format,
+                    )
+                },
+            ) {
+                Ok(task) => task.await,
+                Err(_) => {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(ErrorResponse {
+                            error: "Hy-SimulMT is processing another audio request".into(),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            match result {
+                Ok(Ok(value)) => (
+                    StatusCode::OK,
+                    Json(TranscriptionResponse { text: value.text }),
+                )
+                    .into_response(),
+                Ok(Err(error)) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Hy-SimulMT worker failed: {error}"),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        Backend::Audio8(backend) => {
+            let encoder = backend.encoder.clone();
+            let decoder = backend.decoder.clone();
+            let specials = backend.specials.clone();
+            let tokenizer = backend.tokenizer.clone();
+            let compute_lock = backend.compute_lock.clone();
+            let max_tokens = backend.max_tokens;
+            let default_language = backend.language.to_string();
+            let language = language.unwrap_or(default_language);
+            let result = compute_task(state.compute, move || {
+                let _guard = compute_lock
+                    .lock()
+                    .map_err(|_| "Audio8 compute lock poisoned".to_string())?;
+                let samples = audio8_streaming::decode_samples(&wav)?;
+                let stream = audio8_streaming::Schedule::new().padded_stream(&samples);
+                let language_token = specials.language(&language)?;
+                let mut transcriber = audio8_streaming::StreamingTranscriber::new(
+                    &*encoder,
+                    &*decoder,
+                    stream,
+                    specials,
+                    language_token,
+                    max_tokens,
+                )?;
+                while transcriber.next_chunk()?.is_some() {}
+                let visible = transcriber.finish();
+                Ok::<_, String>(tokenizer.decode(&visible, false))
+            })
+            .await;
+            match result {
+                Ok(Ok(text)) => {
+                    (StatusCode::OK, Json(TranscriptionResponse { text })).into_response()
+                }
+                Ok(Err(error)) => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(ErrorResponse { error }),
+                )
+                    .into_response(),
+                Err(error) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("audio8 worker failed: {error}"),
+                    }),
+                )
+                    .into_response(),
+            }
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server is not running an ASR model".into(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn speech(
+    State(state): State<AppState>,
+    Json(req): Json<SpeechRequest>,
+) -> impl IntoResponse {
+    let Backend::Tts(backend) = state.model.as_ref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Server is not running a TTS model".into(),
+            }),
+        )
+            .into_response();
+    };
+    let ref_wav_bytes: Option<Vec<u8>> = match req.voice.as_deref() {
+        None | Some("") => None,
+        Some(voice) => {
+            if let Some(path) = voice.strip_prefix("file://") {
+                match std::fs::read(path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("failed to read reference voice: {error}"),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            } else if voice.starts_with("data:") {
+                let payload = voice.splitn(2, ',').nth(1).unwrap_or("");
+                match base64::engine::general_purpose::STANDARD.decode(payload) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("voice base64 decode failed: {error}"),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "voice must be file://path or data:audio/wav;base64,...".into(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let talker = backend.talker.clone();
+    let mmproj = backend.mmproj.clone();
+    let language = backend.language;
+    let temperature = backend.temperature;
+    let max_tokens = backend.max_tokens;
+    let input = req.input.clone();
+    let wav_bytes = match compute_task(state.compute, move || -> Result<Vec<u8>, String> {
+        let speaker = if let Some(wav) = ref_wav_bytes.as_deref() {
+            let mel = reference_wav_to_mel(wav)?;
+            Some(Qwen3TtsSpeakerEncoder::from_source(mmproj.as_ref())?.encode(&mel)?)
+        } else {
+            None
+        };
+        let prompt = talker.prepare_prompt(&input, language, speaker.as_deref())?;
+        let predictor = CodePredictor::from_source(mmproj.as_ref())?;
+        let decoder = Code2WavDecoder::from_source(mmproj.as_ref())?;
+        let frames = synthesize_tts_frames(&talker, &predictor, &prompt, max_tokens, temperature)?;
+        let waveform = decoder.decode(&frames)?;
+        encode_wav_pcm16_channels(&waveform, WAVEFORM_SAMPLE_RATE, 1)
+    })
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse { error }),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("tts worker failed: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let content_type = match req.response_format.as_deref() {
+        Some("pcm") => "audio/pcm",
+        _ => "audio/wav",
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        wav_bytes,
+    )
+        .into_response()
+}
+
+fn synthesize_tts_frames(
+    talker: &Qwen3TtsTalker,
+    predictor: &CodePredictor,
+    prompt: &TtsPrompt,
+    max_frames: usize,
+    temperature: f32,
+) -> Result<Vec<[u32; 16]>, String> {
+    let mut session = TtsSession::new(talker)?;
+    session.prefill_prompt(prompt)?;
+    let mut frames = Vec::with_capacity(max_frames);
+    let mut rng = rand::thread_rng();
+    let mut next_semantic = session.sample_semantic(temperature, &mut rng)?;
+    for frame_index in 0..max_frames {
+        let Some(semantic) = next_semantic else {
+            break;
+        };
+        let hidden = session.hidden_state().to_vec();
+        let (frame, mut feedback) =
+            predictor.predict_frame(&hidden, semantic, predictor_top_k(temperature), &mut rng)?;
+        let overlay = &prompt.overlay[frame_index.min(prompt.overlay.len() - 1)];
+        if feedback.len() != overlay.len() {
+            return Err(format!(
+                "TTS feedback length {} != overlay length {}",
+                feedback.len(),
+                overlay.len()
+            ));
+        }
+        for (value, text) in feedback.iter_mut().zip(overlay) {
+            *value += *text;
+        }
+        let position = prompt
+            .positions
+            .len()
+            .checked_add(frame_index)
+            .ok_or_else(|| "TTS frame position overflow".to_string())?;
+        session.forward_step_with_embedding(&feedback, [position; 4])?;
+        next_semantic = session.sample_semantic(temperature, &mut rng)?;
+        frames.push(frame);
+    }
+    Ok(frames)
+}
+
+// =============================================================================
+// Text generation
+// =============================================================================
+
+// =============================================================================
+// Backend construction
+// =============================================================================
+
+fn build_backend(
+    options: &CliOptions,
+    auk_source: Option<Arc<dyn TensorSource>>,
+) -> Result<Arc<Backend>, String> {
+    if options.enhance {
+        return Ok(Arc::new(Backend::AudioEnhancement(Arc::new(
+            crate::models::nemotron_reuse::Model::load(&options.model, options.compute_policy())?,
+        ))));
+    }
+    options.validate_compute_mode()?;
+    options.compute_policy().check_build()?;
+    let _scope = options.compute_policy().enter_legacy_scope();
+    if crate::models::decision::is_model_directory(&options.model) {
+        return Ok(Arc::new(Backend::Decision(
+            crate::app::decision::from_path(
+                options,
+                resolve_thread_count(
+                    options.threads,
+                    std::thread::available_parallelism()
+                        .map(usize::from)
+                        .unwrap_or(1),
+                ),
+            )?,
+        )));
+    }
+    if let Ok(source) = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+    {
+        if crate::models::diffusion::fastframes_l::matches_model(source.as_ref()) {
+            return Ok(Arc::new(Backend::Video(video_generation::build(
+                options,
+                Arc::from(source),
+            )?)));
+        }
+    }
+    let decision_source =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .filter(|source| {
+                crate::models::decision::is_arch(&crate::app::arch_of(source.as_ref()))
+            });
+    let image_source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+        .ok()
+        .filter(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    if let Some(source) = image_source {
+        return Ok(Arc::new(Backend::Pjit(image_generation::build(
+            options,
+            Arc::from(source),
+        )?)));
+    }
+    // The text-to-image diffusion models (Z-Image, ERNIE-Image). They are
+    // recognized by their weights rather than by a flag, because the CLI
+    // recognizes them the same way and the two entry points must agree on
+    // what a file is.
+    let diffusion_source =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .filter(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
+    if let Some(source) = diffusion_source {
+        let kind = diffusion::DiffusionKind::detect(source.as_ref())
+            .ok_or("the diffusion model could not be identified")?;
+        let available = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let threads = resolve_thread_count(options.threads, available);
+        // The pipeline is loaded under the policy it will run with, so a
+        // model pinned to the CPU is not loaded for the device either.
+        let policy = diffusion::policy_for(kind, source.as_ref(), options.compute_policy());
+        let _scope = policy.enter_legacy_scope();
+        return Ok(Arc::new(Backend::Diffusion(
+            diffusion::DiffusionBackend::build(options, kind, Arc::from(source), threads)?,
+        )));
+    }
+    if let Some(source) = decision_source {
+        let available = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let engine = crate::app::decision::from_source(
+            options,
+            Arc::from(source),
+            resolve_thread_count(options.threads, available),
+        )?;
+        return Ok(Arc::new(Backend::Decision(engine)));
+    }
+    if options.decision_thinker.is_some() {
+        return Err("--decision-thinker requires a THX-02 decision model".into());
+    }
+    if crate::models::unlimited_ocr::matches_model(&options.model) {
+        crate::models::unlimited_ocr::validate_options(options)?;
+        let model = Arc::new(crate::models::unlimited_ocr::Model::load(
+            &options.model,
+            options.threads,
+            options.effective_max_context(),
+        )?);
+        let runtime = Mutex::new(
+            Box::new(model.clone()) as Box<dyn crate::ops::generation_runtime::TextRuntime>
+        );
+        return Ok(Arc::new(Backend::UnlimitedOcr(UnlimitedOcrBackend {
+            model,
+            runtime,
+        })));
+    }
+    if options.tts {
+        if crate::app::tts::is_underdog_woof_model(&options.model) {
+            let defaults = crate::app::tts::underdog_woof_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|error| error.to_string())?;
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1);
+            let model = Arc::new(crate::models::underdog_woof::Model::from_source(
+                Arc::from(source),
+                resolve_thread_count(options.threads, available),
+                options.compute_policy(),
+            )?);
+            return Ok(Arc::new(Backend::UnderdogWoof(
+                speech::UnderdogWoofBackend { model, defaults },
+            )));
+        }
+        if crate::models::pivo::matches_model(&options.model) {
+            let defaults = crate::app::tts::pivo_request(options)?;
+            let source =
+                crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+                    .map_err(|e| e.to_string())?;
+            let model = Arc::new(crate::models::pivo::Model::from_source(
+                source.as_ref(),
+                options.compute_policy(),
+            )?);
+            if let Some(notice) = crate::app::tts::pivo_format_notice(model.format) {
+                eprintln!("{notice}");
+            }
+            return Ok(Arc::new(Backend::Pivo(speech::PivoBackend {
+                model,
+                defaults,
+            })));
+        }
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        if source
+            .metadata("general.architecture")
+            .and_then(MetaValue::to_string_val)
+            == Some("arktts")
+        {
+            return Ok(Arc::new(Backend::ArkTts(audio_speech::Backend::load(
+                options, source,
+            )?)));
+        }
+        if options.voice.is_some() || options.speed.is_some() || options.pronunciations.is_some() {
+            return Err("--voice/--speed/--pronunciations require a PiVo TTS model".into());
+        }
+        return Ok(Arc::new(Backend::Tts(build_tts(options)?)));
+    }
+    // AuK is a flow-matching audio DiT with its own VAE GGUF; the probe in
+    // `run_server` already opened and identified the model.
+    if let Some(source) = auk_source {
+        return Ok(Arc::new(Backend::Auk(auk::build_auk(options, source)?)));
+    }
+    if options.audio.is_some() {
+        if is_hy_simulmt_gguf(&options.model) {
+            return Ok(Arc::new(Backend::HySimulMt(build_hy_simulmt(options)?)));
+        }
+        // Bundled audio models are selected by their explicit architecture.
+        if is_audio8_gguf(&options.model) {
+            return Ok(Arc::new(Backend::Audio8(build_audio8(options)?)));
+        }
+        return Ok(Arc::new(Backend::Asr(build_asr(options)?)));
+    }
+    if options.embedding {
+        let source = open_or_exit(&options.model, ComponentRole::Llm);
+        return Ok(Arc::new(Backend::Embedding(EmbeddingBackend {
+            source: Arc::from(source),
+            mmproj_path: options.mmproj.clone(),
+        })));
+    }
+    // Cross-encoder rerank detection: a GGUF that carries
+    // `pooling_type = 4` and a `cls.output.weight` is a Qwen3-style
+    // rerank model; a `jina-bert-v2` arch with `cls.weight` + `cls.bias`
+    // is the jina-bert-v2-style rerank model. Both are detected by
+    // metadata peek BEFORE the full Text build (which would load
+    // unrelated multimodal state).
+    //
+    // Decision/forecast architectures select their own task pipelines; rerank
+    // needs this probe because it shares an architecture with text generation.
+    // See docs/develop/SERVER_BACKEND_SELECTION.md.
+    if is_rerank_gguf(&options.model) || is_jina_rerank_gguf(&options.model) {
+        // The probe outranks the flag-driven backends below, so a caller
+        // who explicitly selected one of them would have it silently
+        // dropped (their flag ignored, the rerank backend served).
+        // Error out instead: the model file and the flag disagree, and
+        // neither resolution is obviously what the caller wanted.
+        if let Some(error) = rerank_probe_flag_conflict(options) {
+            return Err(error);
+        }
+        return Ok(Arc::new(Backend::Rerank(build_rerank(options)?)));
+    }
+    // CLM is opted into rather than detected: the encoder is an ordinary
+    // Qwen3 GGUF, and it is `--clm-head` saying "score with these heads"
+    // that makes it a CLM backend.
+    if is_timestral_gguf(&options.model) {
+        return Ok(Arc::new(Backend::Timestral(build_timestral(options)?)));
+    }
+    if options.clm_head.is_some() {
+        return Ok(Arc::new(Backend::Clm(build_clm(options)?)));
+    }
+    if options.gliner2_decide {
+        return Ok(Arc::new(Backend::Gliner2(build_gliner2(options)?)));
+    }
+    if options.gliner2_boundary {
+        return Ok(Arc::new(Backend::Gliner2Boundary(build_gliner2_boundary(
+            options,
+        )?)));
+    }
+    let (text, wevisone) = build_text(options)?;
+    Ok(Arc::new(match wevisone {
+        Some(extra) => Backend::WeVisOne(WeVisOneBackend {
+            text,
+            decoder: extra.decoder,
+            options: extra.options,
+        }),
+        None => Backend::Text(text),
+    }))
+}
+
+/// Returns `true` if the GGUF at `path` looks like a Qwen3 rerank
+/// model: `general.architecture = "qwen3"` AND
+/// `<arch>.pooling_type = 4` AND a `cls.output.weight` tensor is
+/// present. Done as a quick metadata probe without holding the file
+/// open.
+/// When the rerank metadata probe fires, the caller may still have
+/// explicitly selected a different backend with a flag. The probe
+/// outranks those backends in `build_backend`, so honoring it would
+/// silently drop the flag. Returns the error message to surface
+/// instead, or `None` when the flags are compatible with rerank.
+///
+/// Pure function of `CliOptions` so the dispatch table can be unit
+/// tested without a GGUF on disk. See
+/// `docs/develop/SERVER_BACKEND_SELECTION.md`.
+fn rerank_probe_flag_conflict(options: &CliOptions) -> Option<String> {
+    let model = options.model.display();
+    let reranker =
+        format!("{model} looks like a Qwen3 reranker (pooling_type=4 + cls.output.weight)");
+    if let Some(head) = &options.clm_head {
+        return Some(format!(
+            "--clm-head selects the CLM backend, but {reranker}; the probe wins and {} \
+             would be dropped. Pass a plain Qwen3 encoder as --model instead",
+            head.display()
+        ));
+    }
+    if options.gliner2_decide {
+        return Some(format!(
+            "--gliner2-decide selects the GLiNER2 backend, but {reranker}; the probe wins \
+             and the flag would be dropped. GLiNER2 needs a DeBERTa GGUF as --model"
+        ));
+    }
+    if options.gliner2_boundary {
+        return Some(format!(
+            "--gliner2-boundary selects the GLiNER2 boundary backend, but {reranker}; the \
+             probe wins and the flag would be dropped. It needs a boundary-variant \
+             DeBERTa GGUF as --model"
+        ));
+    }
+    if let Some(mmproj) = &options.mmproj {
+        return Some(format!(
+            "--mmproj selects multimodal chat, but {reranker}; the probe wins and {} would \
+             be dropped. Pass a chat-capable Qwen3 GGUF as --model instead",
+            mmproj.display()
+        ));
+    }
+    None
+}
+
+fn is_rerank_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let loader = match crate::GGUFLoader::from_file(path) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch != "qwen3" {
+        return false;
+    }
+    let pooling = loader
+        .metadata("qwen3.pooling_type")
+        .and_then(MetaValue::to_u64)
+        .unwrap_or(0);
+    if pooling != 4 {
+        return false;
+    }
+    loader.tensor_info("cls.output.weight").is_some()
+}
+
+/// Returns `true` when the GGUF at `path` looks like a jina-bert-v2
+/// reranker: `arch = jina-bert-v2` AND the `cls.weight` + `cls.bias`
+/// classification tensors are present. Parallel probe to
+/// [`is_rerank_gguf`] — used by the same dispatcher to choose
+/// `RerankKind::JinaBertV2` over `RerankKind::Qwen3`.
+fn is_jina_rerank_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let Ok(loader) = crate::GGUFLoader::from_file(path) else {
+        return false;
+    };
+    let arch = loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .unwrap_or_default();
+    if arch != "jina-bert-v2" {
+        return false;
+    }
+    loader.tensor_info("cls.weight").is_some() && loader.tensor_info("cls.bias").is_some()
+}
+
+/// Returns `true` when the GGUF at `name` is an `audio8_asr_infinite`
+/// model (Voxtral Realtime bundled with its Qwen2 text decoder). The
+/// probe fires only inside the `options.audio.is_some()` branch, so it
+/// cannot collide with chat / rerank / GLiNER2 dispatches.
+fn is_audio8_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let Ok(loader) = crate::GGUFLoader::from_file(path) else {
+        return false;
+    };
+    loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .is_some_and(|arch| arch == "audio8_asr_infinite")
+}
+
+/// True when the file holds a Timestral checkpoint.
+fn is_timestral_gguf(path: &std::path::Path) -> bool {
+    use crate::MetaValue;
+    let loader = match crate::GGUFLoader::from_file(path) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    loader
+        .metadata("general.architecture")
+        .and_then(MetaValue::to_string_val)
+        .map(|arch| arch == "timestral")
+        .unwrap_or(false)
+}
+
+/// Build the forecaster and keep it resident.
+///
+/// The model borrows the mapped weights, so the source is leaked to get a
+/// `'static` borrow. The same leak holds the model, which keeps the
+/// device arena alive instead of re-uploading the weights per request.
+fn build_timestral(options: &CliOptions) -> Result<TimestralBackend, String> {
+    use crate::models::timestral::TimestralModel;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let source: &'static Arc<dyn TensorSource> = Box::leak(Box::new(source));
+    let model: TimestralModel<'static> =
+        TimestralModel::from_source_with_compute(source.as_ref(), options.compute_policy())?;
+    // The device path refuses the formats it has no kernel for. A server
+    // that would fail every request is worse than one that refuses to
+    // start, so the check happens here.
+    #[cfg(feature = "vulkan")]
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan {
+        let refused: Vec<String> = model
+            .matrix_types()
+            .iter()
+            .filter(|format| !crate::vulkan::timestral::gpu_supports(**format))
+            .map(|format| format!("{format:?}"))
+            .collect();
+        if !refused.is_empty() {
+            return Err(format!(
+                "the Timestral device path has no kernel for {refused:?}; \
+                 use --compute cpu or --compute auto"
+            ));
+        }
+    }
+    let model: &'static TimestralModel<'static> = Box::leak(Box::new(model));
+    Ok(TimestralBackend {
+        model: Arc::new(model),
+    })
+}
+
+fn build_rerank(options: &CliOptions) -> Result<RerankBackend, String> {
+    if is_jina_rerank_gguf(&options.model) {
+        // jina-bert-v2 cross-encoder reranker. No qwen3 trunk: the forward
+        // loop lives in `bert_family::compute_rerank_score`, which takes
+        // `&dyn TensorSource` directly. The tokenizer here is unused by
+        // the scoring path itself (compute_rerank_score builds tokens
+        // internally) but we still keep one so future endpoints
+        // (e.g. /v1/rerank echoes the input) can decode.
+        let source: Arc<dyn TensorSource> =
+            Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+        let tokenizer = Arc::new(
+            BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+                .map_err(|e| format!("init tokenizer: {e}"))?,
+        );
+        let context_length: usize = source
+            .metadata("jina-bert-v2.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(8192);
+        return Ok(RerankBackend {
+            model: None,
+            tokenizer,
+            prefill_batch_size: 0,
+            context_length,
+            jina_source: Some(source),
+            kind: RerankKind::JinaBertV2,
+        });
+    }
+
+    // Qwen3-style rerank (pooling_type=4 + cls.output.weight).
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+        source.metadata(k).cloned()
+    })?);
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(source, tokenizer.clone(), pool)?;
+    if !model.is_rerank() {
+        return Err(format!(
+            "GGUF looks like qwen3 with pooling_type=4 but has no cls.output.weight — not a rerank model"
+        ));
+    }
+    let context_length = model.config().n_ctx;
+    // Pin the model in a `Box::leak` so the `&'static` lifetime bound
+    // on `Qwen3Session` is satisfied for the server lifetime.
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(RerankBackend {
+        model: Some(Arc::new(model)),
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+        jina_source: None,
+        kind: RerankKind::Qwen3,
+    })
+}
+
+fn build_clm(options: &CliOptions) -> Result<ClmBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(
+        BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|e| format!("init tokenizer: {e}"))?,
+    );
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let model = Qwen3Model::from_source(Arc::clone(&source), Arc::clone(&tokenizer), pool)
+        .map_err(|e| format!("load encoder: {e}"))?;
+    let arch = model.config().architecture.clone();
+    if arch != "qwen3" {
+        return Err(format!(
+            "CLM needs a qwen3 encoder, got {arch:?} (the heads were trained on Qwen3-8B)"
+        ));
+    }
+    // TODO(clm): the heads are encoder-locked, so a quantised base encoder
+    // shifts every score -- functionally fine, but not comparable to the
+    // paper's numbers.  Warn here instead of refusing, since a low-memory
+    // setup may legitimately want a Q4_K_M encoder.
+    let context_length = model.config().n_ctx;
+
+    let head_path = options.clm_head.clone().ok_or("--clm-head is required")?;
+    let head_source: Box<dyn TensorSource> = open_or_exit(&head_path, ComponentRole::Llm);
+    let heads = crate::models::clm::ClmHeads::from_source(head_source.as_ref())
+        .map_err(|e| format!("load CLM heads from {}: {e}", head_path.display()))?;
+    if model.config().n_embd != heads.encoder_dim() {
+        return Err(format!(
+            "encoder hidden size {} does not match the CLM heads (expected {})",
+            model.config().n_embd,
+            heads.encoder_dim()
+        ));
+    }
+
+    let model: &'static Qwen3Model = Box::leak(Box::new(model));
+    Ok(ClmBackend {
+        source,
+        model: Arc::new(model),
+        heads,
+        tokenizer,
+        prefill_batch_size,
+        context_length,
+    })
+}
+
+fn build_gliner2(options: &CliOptions) -> Result<Gliner2Backend, String> {
+    let (source, tokenizer) = crate::app::load_gliner2_source(&options.model)?;
+    // Validate the whole contract once at startup rather than per request.
+    crate::models::gliner::GlinerModel::from_source_with_tokenizer(
+        source.as_ref(),
+        tokenizer.clone(),
+    )
+    .map_err(|e| format!("load GLiNER2 model from {}: {e}", options.model.display()))?;
+    Ok(Gliner2Backend {
+        source,
+        tokenizer,
+        n_threads: crate::app::resolve_thread_count(
+            options.threads,
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
+        ),
+    })
+}
+
+fn build_gliner2_boundary(options: &CliOptions) -> Result<Gliner2BoundaryBackend, String> {
+    let source: Box<dyn TensorSource> = crate::format::ggufrs::open_model_source(
+        &options.model,
+        crate::format::ggufrs::ComponentRole::Llm,
+    )
+    .map_err(|error| {
+        format!(
+            "open GLiNER2 boundary model ({}): {error}",
+            options.model.display()
+        )
+    })?;
+    if !crate::models::gliner_boundary::is_boundary_gguf(source.as_ref()) {
+        return Err(format!(
+            "{} is not a gliner2 boundary variant (gliner2.variant = \"boundary\"); \
+             --gliner2-decide is the classification variant",
+            options.model.display()
+        ));
+    }
+    // Validate the whole contract once at startup rather than per request, the
+    // same way `build_gliner2` does.
+    crate::models::gliner_boundary::BoundaryModel::from_source(source.as_ref()).map_err(
+        |error| {
+            format!(
+                "load GLiNER2 boundary model from {}: {error}",
+                options.model.display()
+            )
+        },
+    )?;
+    Ok(Gliner2BoundaryBackend {
+        source,
+        n_threads: crate::app::resolve_thread_count(
+            options.threads,
+            std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(4),
+        ),
+    })
+}
+
+fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra>), String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let raw_source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let model_path: std::path::PathBuf = options.model.clone();
+    // Snapshot the few metadata fields we need before moving `raw_source`
+    // into the (optional) Phi3Source wrapper. Reading them through `&raw_source`
+    // creates borrows that would otherwise block the move.
+    let arch: String = raw_source
+        .metadata("general.architecture")
+        .and_then(crate::MetaValue::to_string_val)
+        .map(str::to_string)
+        .unwrap_or_default();
+    if crate::models::arktts::is_arktts_arch(&arch) {
+        return Err(
+            "Audio8 TTS requires --tts with its paired --mmproj; text generation and JEV are unsupported".into(),
+        );
+    }
+    let phi3_dims = if arch == "phi3" {
+        Some((
+            raw_source
+                .metadata("phi3.embedding_length")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.embedding_length".to_string())? as usize,
+            raw_source
+                .metadata("phi3.attention.head_count")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.attention.head_count".to_string())?
+                as usize,
+            raw_source
+                .metadata("phi3.attention.head_count_kv")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.attention.head_count_kv".to_string())?
+                as usize,
+            raw_source
+                .metadata("phi3.feed_forward_length")
+                .and_then(|v| v.to_u64())
+                .ok_or_else(|| "missing phi3.feed_forward_length".to_string())?
+                as usize,
+        ))
+    } else {
+        None
+    };
+    crate::app::reject_incomplete_z_image_architecture(&arch)?;
+    // Phi-3 / Phi-4 ships fused `attn_qkv` and `ffn_up` tensors; the llama
+    // trunk reads them as separate `attn_q/k/v` and `ffn_gate/up`. Wrap
+    // the source here once so the runtime AND every JEV endpoint
+    // (`/v1/jev/score`, `/v1/jev/grouped`) see the per-projection views —
+    // mirrors what the CLI does in `app::text::generation`. The wrap must
+    // happen BEFORE building the tokenizer, since `BPETokenizer::from_gguf_metadata`
+    // captures `&source` for the lifetime of the tokenizer.
+    let source: Arc<dyn TensorSource> = if let Some((n_embd, n_head, n_head_kv, n_ff)) = phi3_dims {
+        let head_dim = n_embd / n_head;
+        let n_embd_q = head_dim * n_head;
+        let n_embd_gqa = head_dim * n_head_kv;
+        Arc::new(crate::models::phi3::Phi3Source::new(
+            raw_source, n_embd_q, n_embd_gqa, n_ff,
+        ))
+    } else {
+        raw_source
+    };
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+        source.metadata(k).cloned()
+    })?);
+    let pool = Arc::new(ComputePool::new(options.threads));
+    // Optional CLIP / Omni vision encoder. Only loaded when the user
+    // passed `--mmproj`; the multimodal JEV endpoints
+    // (`/v1/jev/image`, `/v1/jev/image_grouped`) refuse to operate
+    // without it. Held as `Option<Arc<dyn TensorSource>>` rather than
+    // a typed `VisionEncoder` because the encoder shape differs across
+    // qwen3vl-merge / Qwen2.5-Omni / gemma4 and the multimodal
+    // dispatch in `app::text::multimodal` already does the
+    // arch-specific opening for us.
+    // Load the vision projector before the runtime options so image input can
+    // be wired in (the same handle the multimodal JEV endpoints use).
+    let mmp: Option<Arc<dyn TensorSource>> = options
+        .mmproj
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| Arc::from(open_or_exit(path, ComponentRole::Mmproj)));
+    let mmproj = mmp.clone();
+    if arch == "mage_vl" {
+        if let Some(vision) = &mmp {
+            crate::models::mage_vl::validate_components(source.as_ref(), vision.as_ref())?;
+        }
+    }
+    // The DFlash / DSpark sidecar is an LLM-role GGUF: open it once so the
+    // runtime can borrow it per request. A file that is not a DSpark draft
+    // (or a target without the shared embedding table) fails the runtime
+    // constructor — and therefore this startup — instead of the first
+    // request.
+    let dspark: Option<Arc<dyn TensorSource>> = options
+        .dspark_model
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .map(|path| Arc::from(open_or_exit(std::path::Path::new(path), ComponentRole::Llm)));
+    // One dispatch point for every arch (CLI/HTTP unification,
+    // docs/develop/TEXT_RUNTIME_UNIFICATION.md). Returns `None` for archs
+    // without an adapter — those models load but answer 501 at request time.
+    // Canonical constructor + explicit overrides. Defaults (batch 64, KV F16,
+    // context 8K) come from `RuntimeOptions::defaults`, which a unit test pins
+    // to the CLI's own resolution — so this line cannot drift again.
+    let runtime_options = crate::app::text::RuntimeOptions::from_model(
+        source.clone(),
+        pool.clone(),
+        tokenizer.clone(),
+    )
+    .with_compute(options.compute_policy())
+    .with_kv_format(options.kv_format)
+    .with_threads(options.threads)
+    .with_max_context(options.effective_max_context())
+    .with_prefill_batch_size(prefill_batch_size)
+    .with_mtp_draft(options.effective_mtp_draft())
+    .with_dspark_model(dspark)
+    .with_ngram_draft(options.effective_ngram_draft())
+    .with_ngram_lookup(options.effective_ngram_lookup())
+    .with_mmproj(mmp);
+    // A requested-but-unsatisfiable DSpark sidecar is a startup error, not a
+    // log line: the user asked for speculative decoding, and quietly serving
+    // plain text (or 501s) behind the flag would be the silent-drop hole the
+    // runtime gate exists to prevent.
+    let dspark_requested = options
+        .dspark_model
+        .as_deref()
+        .is_some_and(|path| !path.is_empty());
+    // The n-gram draft has no sidecar to open, but the same rule holds: the
+    // user asked for speculative decoding, so a runtime that cannot provide
+    // it is a startup error, not a plain decode behind the flag.
+    let ngram_requested = options.effective_ngram_draft() > 0;
+    let (runtime, context_length) =
+        match crate::app::text::build_text_runtime(&arch, runtime_options) {
+            Ok(runtime) => {
+                let context = runtime.context_length();
+                (Some(std::sync::Mutex::new(runtime)), context)
+            }
+            Err(error)
+                if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+                    || arch == crate::models::sensenova_loop::ARCH
+                    || dspark_requested
+                    || ngram_requested =>
+            {
+                return Err(error)
+            }
+            Err(error) => {
+                log::info!("text runtime unavailable: {error}");
+                (None, 0)
+            }
+        };
+    // Built once: the `Options` and the compiled template below must always
+    // agree, and constructing both from separate literals is how a new flag
+    // would end up on one and not the other.
+    //
+    // Resolving here is why a broken `--chat-template-file` fails startup
+    // instead of every request. That is deliberate: it only happens when the
+    // user explicitly asked for a template, and a config error should surface
+    // at startup rather than on the first request.
+    let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
+        jinja: options.jinja || arch == "mage_vl",
+        file: options.chat_template_file.clone(),
+    });
+    let compiled_chat_template =
+        std::sync::Arc::new(chat_template.resolve(&|k| source.metadata(k).cloned())?);
+    let wevisone_options = if crate::models::qwen3::is_wevisone(source.as_ref()) {
+        Some(crate::models::wevisone_vl::PredictionOptions::from_cli(
+            options,
+        )?)
+    } else {
+        None
+    };
+    let wevisone_decoder: Option<Arc<dyn TensorSource>> = options
+        .wevisone_decoder
+        .as_ref()
+        .map(|path| {
+            crate::format::ggufrs::open_model_source(path, ComponentRole::Llm).map(Arc::from)
+        })
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    if let Some(decoder) = &wevisone_decoder {
+        crate::models::wevisone_vl::validate_components(
+            source.as_ref(),
+            mmproj
+                .as_ref()
+                .ok_or("--wevisone-decoder requires --mmproj")?
+                .as_ref(),
+            Some(decoder.as_ref()),
+        )?;
+        crate::models::wevisone_vl::Decoder::new(decoder.as_ref(), &pool)?;
+    }
+    let text = TextBackend {
+        arch: arch.to_string(),
+        pool,
+        tokenizer,
+        chat_template,
+        compiled_chat_template,
+        prefill_batch_size,
+        context_length,
+        runtime,
+        source,
+        model_path: Some(model_path),
+        mmproj,
+        mmproj_path: options.mmproj.clone().filter(|p| !p.as_os_str().is_empty()),
+    };
+    let wevisone = wevisone_options.map(|options| WeVisOneExtra {
+        options,
+        decoder: wevisone_decoder,
+    });
+    Ok((text, wevisone))
+}
+
+/// The WeVisOne-specific components a text backend carries on top of
+/// the generic one.
+struct WeVisOneExtra {
+    options: crate::models::wevisone_vl::PredictionOptions,
+    decoder: Option<Arc<dyn TensorSource>>,
+}
+
+fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
+    let prefill_batch_size = options.effective_prefill_batch_size()?;
+    let llm_source: Arc<dyn TensorSource> =
+        Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+        llm_source.metadata(k).cloned()
+    })?);
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let decoder = Arc::new(Qwen3Model::from_source(
+        llm_source.clone(),
+        tokenizer,
+        pool,
+    )?);
+    if decoder.config().architecture != "qwen3vl" {
+        return Err("--audio requires a qwen3vl decoder".into());
+    }
+    let audio_source = match options.mmproj.as_deref() {
+        Some(path) => Arc::from(open_or_exit(path, ComponentRole::Mmproj)),
+        None => {
+            open_bundled_audio_source(&options.model)?.ok_or("raw GGUF ASR requires --mmproj")?
+        }
+    };
+    let runtime = AsrRuntime::new(decoder, audio_source, prefill_batch_size)
+        .map_err(|error| error.to_string())?;
+    Ok(AsrBackend {
+        runtime: Arc::new(runtime),
+    })
+}
+
+fn is_hy_simulmt_gguf(path: &std::path::Path) -> bool {
+    crate::format::ggufrs::open_model_source(path, ComponentRole::Llm)
+        .ok()
+        .is_some_and(|source| {
+            source
+                .metadata("general.architecture")
+                .and_then(MetaValue::to_string_val)
+                == Some("hy_v3")
+        })
+}
+
+fn build_hy_simulmt(options: &CliOptions) -> Result<HySimulMtBackend, String> {
+    if options.mmproj.is_some() {
+        return Err("Hy-SimulMT GGUF already contains the audio encoder; omit --mmproj".into());
+    }
+    if options.temperature.is_some_and(|value| value != 0.0) {
+        return Err("Hy-SimulMT requires greedy decoding (--temp 0)".into());
+    }
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let n_threads = crate::app::resolve_thread_count(options.threads, available);
+    let pool = Arc::new(ComputePool::new(n_threads));
+    let runtime = crate::models::hy_simulmt::HySimulMt::from_source_with_compute(
+        source.clone(),
+        pool,
+        options.compute_policy(),
+    )?;
+    Ok(HySimulMtBackend {
+        runtime: Arc::new(runtime),
+        language: options.language.clone().unwrap_or_else(|| "zh".into()),
+        prompt: options.prompt.clone(),
+        max_tokens: options.max_tokens.unwrap_or(512),
+        max_context: options.effective_max_context(),
+        prefill_batch_size: options.effective_prefill_batch_size()?,
+        kv_format: options.kv_format,
+    })
+}
+
+fn build_audio8(options: &CliOptions) -> Result<Audio8Backend, String> {
+    if options.mmproj.is_some() {
+        return Err("Audio8 carries its audio tower in --model; omit --mmproj".into());
+    }
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    // The pool can have more than one thread because the transcriptions take
+    // `compute_lock`, which serializes them: `ComputePool::compute` publishes
+    // its closure through shared atomics, so two concurrent requests would
+    // otherwise overwrite each other's work.
+    let pool = Arc::new(ComputePool::new(resolve_thread_count(
+        options.threads,
+        std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(1),
+    )));
+    let encoder =
+        crate::models::audio8::Audio8Encoder::from_source(Arc::clone(&source), Arc::clone(&pool))?;
+    let decoder_source = Arc::clone(&source);
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
+        source.metadata(key).cloned()
+    })?);
+    let decoder =
+        crate::models::audio8::text::Audio8TextDecoder::from_source(decoder_source, pool)?;
+    // Validate the whole contract once at startup rather than per request.
+    let specials = audio8_streaming::SpecialTokens::lookup(&tokenizer)?;
+    let language = options.language.as_deref().unwrap_or("zh");
+    if !matches!(language, "zh" | "en") {
+        return Err("Audio8 --language must be zh or en".into());
+    }
+    let language: &'static str = if language == "en" { "en" } else { "zh" };
+    let max_tokens = options.max_tokens.unwrap_or(512);
+    // Pin the encoder and decoder in `Box::leak` so per-request
+    // `StreamingTranscriber`s can hold a borrow for the server lifetime.
+    let encoder: &'static crate::models::audio8::Audio8Encoder = Box::leak(Box::new(encoder));
+    let decoder: &'static crate::models::audio8::text::Audio8TextDecoder =
+        Box::leak(Box::new(decoder));
+    Ok(Audio8Backend {
+        encoder: Arc::new(encoder),
+        decoder: Arc::new(decoder),
+        tokenizer,
+        specials,
+        language,
+        max_tokens,
+        compute_lock: Arc::new(std::sync::Mutex::new(())),
+    })
+}
+
+fn build_tts(options: &CliOptions) -> Result<TtsBackend, String> {
+    let source: Arc<dyn TensorSource> = Arc::from(open_or_exit(&options.model, ComponentRole::Llm));
+    let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|k| {
+        source.metadata(k).cloned()
+    })?);
+    let pool = Arc::new(ComputePool::new(options.threads));
+    let talker = Arc::new(Qwen3TtsTalker::from_source(source, tokenizer, pool)?);
+    let mmproj_path = options
+        .mmproj
+        .as_deref()
+        .ok_or_else(|| "--tts requires --mmproj".to_string())?;
+    let mmproj: Arc<dyn TensorSource> = Arc::from(open_or_exit(mmproj_path, ComponentRole::Mmproj));
+    let language = normalize_tts_language(options.language.as_deref())?;
+    Ok(TtsBackend {
+        talker,
+        mmproj,
+        language,
+        temperature: options.temperature.unwrap_or(0.6),
+        max_tokens: options.max_tokens.unwrap_or(128),
+    })
+}
+
+// =============================================================================
+// main
+// =============================================================================
+
+fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeScope, String> {
+    options.validate_compute_mode()?;
+    options.compute_policy().configure_cli()
+}
+
+fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.decision_request.is_some() {
+        return Err("--decision-request is a CLI input; server decisions use /v1/decide".into());
+    }
+    if options.system_one_request.is_some() || options.adapter.is_some() {
+        return Err("--system-one-request is not supported by rust-model-server".into());
+    }
+    if options.yue2 {
+        return Err("--yue2 is not supported by rust-model-server".into());
+    }
+    if options.dreamx {
+        return Err("--dreamx is not supported by rust-model-server".into());
+    }
+    if options.planner.is_some() || options.perception.is_some() {
+        return Err("Qwen-Drive heads are not supported by rust-model-server".into());
+    }
+    Ok(())
+}
+
+pub fn run_server() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,rust_model_inference=info"),
+    )
+    .try_init();
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        println!("{USAGE}");
+        return;
+    }
+
+    // Pre-parse --host/--port (server-only) before passing the rest to the
+    // shared CLI parser so the rest of the surface stays in lockstep with
+    // the main `rust-model-inference` binary.
+    let mut host = "0.0.0.0".to_string();
+    let mut port: u16 = 8080;
+    // Off by default: fetching remote URLs from an inference server is an SSRF
+    // surface (internal-network probing, request amplification). When enabled,
+    // the download still obeys size / timeout / redirect caps and refuses
+    // private addresses.
+    let mut allow_remote_images = false;
+    let mut cli_args: Vec<String> = Vec::with_capacity(raw_args.len());
+    let mut i = 0;
+    while i < raw_args.len() {
+        let arg = raw_args[i].clone();
+        match arg.as_str() {
+            "--allow-remote-images" => {
+                allow_remote_images = true;
+                i += 1;
+                continue;
+            }
+            "--host" => {
+                if i + 1 < raw_args.len() {
+                    host = raw_args[i + 1].clone();
+                    i += 2;
+                    continue;
+                }
+            }
+            "--port" => {
+                if i + 1 < raw_args.len() {
+                    port = raw_args[i + 1].parse().unwrap_or(8080);
+                    i += 2;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        cli_args.push(arg);
+        i += 1;
+    }
+
+    // Apply the parsed flag before any request can be decoded.
+    api::image_input::set_allow_remote(allow_remote_images);
+
+    let mut options = match parse_cli_options(&cli_args) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    options.serve = true;
+    if let Err(error) = reject_unsupported_server_modes(&options) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+    // `--tts` validation requires non-empty `--prompt` and `--out`, but the
+    // server receives both over HTTP. Inject placeholders so validation
+    // passes; the real values come from `/v1/audio/speech` requests.
+    let mut options = options;
+    if options.enhance {
+        options.serve = true;
+    }
+    if options.tts {
+        if options.prompt.as_deref().is_none_or(str::is_empty) {
+            options.prompt = Some("placeholder".to_string());
+        }
+        if options.out.is_none() {
+            options.out = Some(std::path::PathBuf::from("placeholder.wav"));
+        }
+        if options.max_tokens.is_none()
+            && !crate::models::pivo::matches_model(&options.model)
+            && !crate::app::tts::is_underdog_woof_model(&options.model)
+        {
+            options.max_tokens = Some(128);
+        }
+    }
+    // The AuK DiT needs its own VAE GGUF, so the architecture of the
+    // `--model` file identifies the invocation. The diff-model validators
+    // (Z-Image and friends) want `--out` and would reject the AuK
+    // invocation, so they are skipped for it, exactly like the main binary
+    // does.
+    let auk_source = auk::probe_invocation(&options);
+    let pjit_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
+    let video_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|s| crate::models::diffusion::fastframes_l::matches_model(s.as_ref()));
+    // The text-to-image diffusion models are recognized by their weights.
+    // Their CLI validator wants --out and --prompt, both of which the
+    // server takes from the request instead.
+    let diffusion_invocation =
+        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
+            .ok()
+            .is_some_and(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
+    if video_invocation {
+        if let Err(error) = crate::app::video_generation::options(&options, true) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if pjit_invocation {
+        if let Err(error) = crate::app::diffusion::pjit_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if diffusion_invocation {
+        if let Err(error) = diffusion::validate_server_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if auk_source.is_some() {
+        if let Err(error) = auk::validate_server_options(&options) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    } else if let Err(error) = validate_cli_options(&options) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+    if !options.tts
+        && options.audio.is_none()
+        && !options.embedding
+        && options.model.as_os_str().is_empty()
+    {
+        eprintln!("{USAGE}");
+        std::process::exit(1);
+    }
+
+    let _compute_scope = configure_gpu(&options).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2);
+    });
+    // The forecaster's CPU projections run on the rayon global pool, so
+    // the requested thread count has to reach it.
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    crate::app::cli::init_rayon_global_pool(crate::app::resolve_thread_count(
+        options.threads,
+        available,
+    ));
+    let backend = match build_backend(&options, auk_source) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Failed to build model backend: {error}");
+            std::process::exit(1);
+        }
+    };
+    let model_name = options
+        .model
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let mode_label = backend.label();
+    eprintln!(
+        "Model '{}' loaded (mode={}, host={}, port={})",
+        model_name, mode_label, host, port
+    );
+
+    // The backend may narrow the requested policy: a K-quant ERNIE DiT is
+    // slower on the device than on the CPU, so it runs on the CPU the same
+    // way the CLI runs it.
+    let requested = options.compute_policy();
+    let compute = match backend.as_ref() {
+        Backend::Diffusion(backend) => backend.compute_policy(requested),
+        _ => requested,
+    };
+    if compute != requested {
+        eprintln!("compute scope=ernie_image backend=Cpu reason=kquant_weights_slower_on_device");
+    }
+    let state = AppState {
+        compute,
+        model: backend,
+        model_name,
+        responses: Arc::new(Mutex::new(api::ResponsesStore::default())),
+        generation_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+    };
+
+    let mut router = Router::new()
+        .route("/health", get(health))
+        .route("/v1/models", get(list_models));
+    router = match state.model.as_ref() {
+        Backend::Text(_) => router.merge(api::routes()),
+        Backend::Video(_) => router.route(
+            // 256 KiB covers the documented 65,536-byte prompt limit even in
+            // its worst JSON encoding (a prompt of all 4-byte characters
+            // escapes to ~12 bytes per character, ~196 KiB); 128 KiB would
+            // have rejected such prompts with 413 before validation ran.
+            "/v1/videos/generations",
+            post(video_generation::generate).layer(DefaultBodyLimit::max(256 * 1024)),
+        ),
+        Backend::Pjit(_) | Backend::Diffusion(_) => {
+            router.route("/v1/images/generations", post(image_generation::generate))
+        }
+        Backend::WeVisOne(_) => router.merge(api::routes()).route(
+            "/v1/prediction",
+            post(prediction::prediction).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
+        Backend::UnlimitedOcr(_) => router.merge(api::routes()),
+        Backend::Embedding(_) => router.route(
+            "/v1/embeddings",
+            post(embeddings).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
+        Backend::Asr(_) | Backend::Audio8(_) | Backend::HySimulMt(_) => router
+            .route(
+                "/v1/audio/transcriptions",
+                post(transcriptions).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+            )
+            .route("/v1/audio/transcriptions_json", post(transcriptions_json)),
+        Backend::Tts(_) => router.route("/v1/audio/speech", post(speech)),
+        Backend::ArkTts(_) => router.route(
+            "/v1/audio/speech",
+            post(audio_speech::speech).layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        ),
+        Backend::AudioEnhancement(_) => router.route(
+            "/v1/audio/enhancements",
+            post(audio::enhance).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        ),
+        Backend::Pivo(_) => router.route("/v1/audio/speech", post(speech::synthesize)),
+        Backend::UnderdogWoof(_) => {
+            router.route("/v1/audio/speech", post(speech::synthesize_underdog_woof))
+        }
+        Backend::Auk(_) => router
+            .route("/v1/audio/speech", post(auk::speech))
+            .route("/v1/audio/generations", post(auk::generations)),
+        Backend::Rerank(_) => router.route("/v1/rerank", post(rerank::rerank)),
+        // CLM scores by cosine, so only the single-question route applies.
+        // Grouped does a per-group softmax that has no cosine analogue,
+        // and the image routes need a vision encoder the heads never saw.
+        // GLiNER2 and CLM both score a caller-supplied label set on one
+        // encoder pass, so the single-question route covers them; grouped mode
+        // (per-group softmax) and the image routes do not apply.
+        Backend::Clm(_) | Backend::Gliner2(_) => {
+            router.route("/v1/jev/score", post(api::jev_score))
+        }
+        // The boundary variant returns spans and classification groups, which
+        // `JevResult` cannot hold, so it gets its own request/response shape
+        // rather than being bent into the JEV one. Deliberately *not* aliased
+        // onto `/v1/jev/score`: a JEV-shaped body there would fail on a missing
+        // `schema` field, which reads as a malformed request rather than as
+        // "this server does not do that".
+        Backend::Gliner2Boundary(_) => router.route("/v1/jev/boundary", post(api::jev_boundary)),
+        Backend::Timestral(_) => router.route("/v1/forecast", post(forecast::forecast)),
+        Backend::Decision(_) => router.merge(decision::routes()),
+    };
+    if options.compute_policy() == crate::compute::ComputePolicy::Vulkan
+        && matches!(
+            state.model.as_ref(),
+            Backend::Text(_) | Backend::WeVisOne(_) | Backend::Clm(_) | Backend::Gliner2(_)
+        )
+    {
+        // The JEV routes score with the same text forward pass, so they
+        // take the same device path as the chat routes: the projections
+        // move to the device, the rest stays on the host. The model's own
+        // contract gate decides whether its numbers still agree with the
+        // CPU, so there is nothing to refuse here -- but the caller asked
+        // for a device and gets a partial one, so say so once.
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode=jev \
+             note=no complete device path for this mode; any \
+             offloadable parts run on the device"
+        );
+    }
+    let app = router.layer(CorsLayer::permissive()).with_state(state);
+
+    let addr = format!("{}:{}", host, port);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = runtime.block_on(async {
+        tokio::net::TcpListener::bind(&addr)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to bind {addr}: {error}");
+                std::process::exit(1);
+            })
+    });
+    eprintln!("Server listening on http://{}", addr);
+    runtime.block_on(async {
+        axum::serve(listener, app).await.unwrap();
+    });
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod tests {
+    use super::{configure_gpu, CliOptions};
+
+    #[test]
+    fn compute_request_scope_reaches_blocking_workers() {
+        use crate::compute::ComputePolicy;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            super::compute_task(ComputePolicy::Cpu, || {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Cpu);
+                let pool = crate::ComputePool::new(2);
+                pool.compute(|_, _| assert!(crate::core::thread_pool::gpu_matmul_disabled()));
+            })
+            .await
+            .unwrap();
+            super::compute_task(ComputePolicy::Vulkan, || {
+                assert_eq!(ComputePolicy::legacy(), ComputePolicy::Vulkan);
+                assert!(!crate::core::thread_pool::gpu_matmul_disabled());
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn gpu_flag_reaches_shared_switch() {
+        let options = CliOptions {
+            gpu: true,
+            ..CliOptions::default()
+        };
+
+        let _scope = configure_gpu(&options).unwrap();
+
+        assert!(crate::ops::float::gpu_requested());
+    }
+}
+
+#[cfg(test)]
+mod server_mode_tests {
+    use super::{reject_unsupported_server_modes, rerank_probe_flag_conflict, CliOptions};
+    use std::path::PathBuf;
+
+    fn options_with(model: &str) -> CliOptions {
+        CliOptions {
+            model: PathBuf::from(model),
+            ..CliOptions::default()
+        }
+    }
+
+    #[test]
+    fn woof_backend_selects_its_contract_before_projector_tts() {
+        let fixture = crate::app::tts::tests::WoofMetadataFixture::new();
+        let options = CliOptions {
+            model: fixture.0.clone(),
+            tts: true,
+            serve: true,
+            prompt: Some("placeholder".into()),
+            voice: Some("juno".into()),
+            ..Default::default()
+        };
+        let Err(error) = super::build_backend(&options, None) else {
+            panic!("metadata-only Woof fixture should fail the model contract");
+        };
+        assert!(error.contains("underdog_woof.config"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn hy_translation_slot_outlives_a_cancelled_request_until_worker_finishes() {
+        use crate::compute::ComputePolicy;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::sync::{oneshot, Semaphore, TryAcquireError};
+
+        let slot = Arc::new(Semaphore::new(1));
+        let (started, ready) = oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let request_slot = slot.clone();
+        let request = tokio::spawn(async move {
+            super::hy_transcription_task(ComputePolicy::Cpu, request_slot, move || {
+                let _ = started.send(());
+                let _ = blocked.recv();
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            super::hy_transcription_task(ComputePolicy::Cpu, slot.clone(), || ()),
+            Err(TryAcquireError::NoPermits)
+        ));
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            super::hy_transcription_task(ComputePolicy::Cpu, slot.clone(), || ()),
+            Err(TryAcquireError::NoPermits)
+        ));
+
+        release.send(()).unwrap();
+        let permit = tokio::time::timeout(Duration::from_secs(5), slot.clone().acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+        let next = super::hy_transcription_task(ComputePolicy::Cpu, slot, || 42).unwrap();
+        assert_eq!(next.await.unwrap(), 42);
+    }
+
+    #[test]
+    fn hy_transcription_rejects_formats_and_non_greedy_options_it_cannot_honor() {
+        assert!(super::hy_transcription_options(None, None).is_ok());
+        assert!(super::hy_transcription_options(Some("json"), Some(0.0)).is_ok());
+        for format in ["text", "srt", "vtt", "verbose_json", ""] {
+            assert!(super::hy_transcription_options(Some(format), None).is_err());
+        }
+        for temperature in [0.5, f32::NAN, f32::INFINITY] {
+            assert!(super::hy_transcription_options(None, Some(temperature)).is_err());
+        }
+    }
+
+    fn hy_arch_gguf(name: &str) -> PathBuf {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend(1u64.to_le_bytes());
+        let key = "general.architecture";
+        bytes.extend((key.len() as u64).to_le_bytes());
+        bytes.extend(key.bytes());
+        bytes.extend(8u32.to_le_bytes());
+        bytes.extend(5u64.to_le_bytes());
+        bytes.extend(b"hy_v3");
+        bytes.resize(bytes.len().div_ceil(32) * 32, 0);
+        let path =
+            std::env::temp_dir().join(format!("rmi-hy-server-{name}-{}.gguf", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn hy_audio_auto_selects_the_bundled_backend_before_qwen_asr() {
+        let path = hy_arch_gguf("auto");
+        let options = CliOptions {
+            model: path.clone(),
+            audio: Some("unused.wav".into()),
+            mmproj: Some("external.gguf".into()),
+            compute: Some(crate::compute::ComputePolicy::Auto),
+            ..CliOptions::default()
+        };
+        let result = super::build_backend(&options, None);
+        std::fs::remove_file(path).unwrap();
+        let error = result
+            .err()
+            .expect("a bundled model must reject an external audio tower");
+        assert!(error.contains("Hy-SimulMT"), "wrong backend: {error}");
+        assert!(error.contains("omit --mmproj"), "{error}");
+    }
+
+    #[test]
+    fn hy_audio_rejects_full_device_vulkan_before_loading() {
+        let path = hy_arch_gguf("vulkan");
+        let options = CliOptions {
+            audio: Some("unused.wav".into()),
+            compute: Some(crate::compute::ComputePolicy::Vulkan),
+            ..options_with(path.to_str().unwrap())
+        };
+        let result = super::build_backend(&options, None);
+        std::fs::remove_file(path).unwrap();
+        let error = result.err().expect("unsupported compute mode");
+        let expected = if cfg!(feature = "vulkan") {
+            "Hy-SimulMT uses hybrid linear offload"
+        } else {
+            "--features vulkan"
+        };
+        assert!(error.contains(expected), "{error}");
+    }
+
+    #[test]
+    fn dreamx_is_rejected_before_backend_construction() {
+        let options = CliOptions {
+            dreamx: true,
+            ..CliOptions::default()
+        };
+
+        assert!(reject_unsupported_server_modes(&options)
+            .unwrap_err()
+            .contains("--dreamx"));
+    }
+
+    #[test]
+    fn rerank_probe_conflict_is_silent_for_plain_rerank_invocation() {
+        // The documented happy path: no other backend flag, so the probe
+        // owns the dispatch and nothing is dropped.
+        assert!(rerank_probe_flag_conflict(&options_with("Qwen3-Reranker.gguf")).is_none());
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_clm_head() {
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(error.contains("heads.gguf"), "{error}");
+        assert!(error.contains("Qwen3-Reranker.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_gliner2_decide() {
+        let options = CliOptions {
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--gliner2-decide"), "{error}");
+        assert!(error.contains("DeBERTa"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_rejects_mmproj() {
+        let options = CliOptions {
+            mmproj: Some(PathBuf::from("vision.gguf")),
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--mmproj"), "{error}");
+        assert!(error.contains("vision.gguf"), "{error}");
+    }
+
+    #[test]
+    fn rerank_probe_conflict_reports_first_conflicting_flag_only() {
+        // clm_head is checked first; a caller who set both should still
+        // get one actionable message rather than a concatenated wall.
+        let options = CliOptions {
+            clm_head: Some(PathBuf::from("heads.gguf")),
+            gliner2_decide: true,
+            ..options_with("Qwen3-Reranker.gguf")
+        };
+        let error = rerank_probe_flag_conflict(&options).expect("expected conflict");
+        assert!(error.contains("--clm-head"), "{error}");
+        assert!(!error.contains("--gliner2-decide"), "{error}");
+    }
+}

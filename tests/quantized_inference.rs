@@ -5,6 +5,79 @@ use rust_model_inference::ops::kernel::q4_k::Q4_KKernel;
 use rust_model_inference::ops::kernel::q6_k::Q6_KKernel;
 use rust_model_inference::ops::kernel::Kernel;
 
+#[test]
+fn reference_arithmetic_rounds_bf16_input_and_accumulates_widely() {
+    use rust_model_inference::core::tensor::GGMLType;
+    use rust_model_inference::ops::kernel::{QuantizedTensor, Weight};
+    let weight: Vec<u8> = [100_000_000.0f32, 1.0, -100_000_000.0, 0.0, 2.0, 0.0]
+        .into_iter()
+        .flat_map(|x| rust_model_inference::ops::f32_to_bf16(x).to_le_bytes())
+        .collect();
+    let mut weight =
+        Weight::from_quantized(QuantizedTensor::from_bytes(&weight, GGMLType::BF16, 3, 2));
+    weight.kernel.use_scalar_reference();
+    assert!(weight.kernel.rounds_bf16_input());
+    let mut output = [f32::NAN; 2];
+    for thread in 0..2 {
+        weight.kernel.forward_prepared(
+            &[1.0, 1.00390625, 1.0],
+            &[],
+            &[],
+            None,
+            &mut output,
+            3,
+            2,
+            thread,
+            2,
+        );
+    }
+    assert_eq!(output, [1.0, 2.0]);
+}
+
+#[test]
+fn reference_arithmetic_preserves_k_quant_reduction_and_thread_rows() {
+    use rust_model_inference::ops::kernel::q5_k::Q5_KKernel;
+    use rust_model_inference::ops::quant::{
+        quantize_row_q8_k, vec_dot_q5k_q8k_scalar, vec_dot_q6k_q8k_scalar,
+    };
+    let input: Vec<f32> = (0..1024)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 71.0)
+        .collect();
+    let q8 = quantize_row_q8_k(&input);
+    for (block_bytes, dot) in [
+        (176, vec_dot_q5k_q8k_scalar as fn(&[u8], &[_]) -> f32),
+        (210, vec_dot_q6k_q8k_scalar),
+    ] {
+        let mut weight: Vec<u8> = (0..block_bytes * 4 * 3)
+            .map(|i| (i * 17 + 3) as u8)
+            .collect();
+        for (i, block) in weight.chunks_exact_mut(block_bytes).enumerate() {
+            let d = half::f16::from_f32(0.0031 * (i + 1) as f32)
+                .to_bits()
+                .to_le_bytes();
+            if block_bytes == 176 {
+                block[..2].copy_from_slice(&d);
+                block[2..4].copy_from_slice(&d);
+            } else {
+                block[208..].copy_from_slice(&d);
+            }
+        }
+        let mut kernel: Box<dyn Kernel> = if block_bytes == 176 {
+            Box::new(Q5_KKernel::new(&weight, 1024, 3))
+        } else {
+            Box::new(Q6_KKernel::new(&weight, 1024, 3))
+        };
+        kernel.use_scalar_reference();
+        let mut output = [f32::NAN; 3];
+        for thread in 0..2 {
+            kernel.forward_prepared(&input, &[], &[], Some(&q8), &mut output, 1024, 3, thread, 2);
+        }
+        for (row, actual) in weight.chunks_exact(block_bytes * 4).zip(output) {
+            assert_eq!(actual.to_bits(), dot(row, &q8).to_bits());
+        }
+    }
+}
+
 #[cfg(feature = "parity-trace")]
 #[test]
 fn parity_dot_uses_llama_scalar_double_accumulator() {
@@ -50,7 +123,7 @@ fn q4_0_dot_scales_in_llama_scalar_order() {
         1,
     );
 
-    assert_eq!(output[0].to_bits(), 0x4892_44e7);
+    assert_eq!(output[0].to_bits(), 0x4892_44e8);
 }
 
 #[cfg(feature = "parity-trace")]
@@ -261,7 +334,13 @@ fn iq4_nl_embedding_lookup_decodes_canonical_lut_row() {
     let mut weight = vec![0u8; 18];
     weight[0..2].copy_from_slice(&half::f16::from_f32(1.0).to_bits().to_le_bytes());
     for j in 0..16 {
-        weight[2 + j] = (j as u8) | ((15 - j as u8) << 4);
+        // Both nibbles of byte `j` hold `j`, so a single 32-element row
+        // covers the whole 16-entry non-linear LUT: element `j` decodes
+        // `LUT[j]` from the low nibble and element `j + 16` decodes
+        // `LUT[j]` from the high nibble. IQ4_NL packs the low half of a
+        // block in the low nibbles and the high half in the high nibbles
+        // (same convention as `dequantize_row_iq4_nl`).
+        weight[2 + j] = ((j as u8) << 4) | j as u8;
     }
 
     let kernel = IQ4NLKernel::new(&weight, 32, 1);
@@ -272,13 +351,11 @@ fn iq4_nl_embedding_lookup_decodes_canonical_lut_row() {
         -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
     ];
     for (i, &val) in output.iter().enumerate() {
-        let nibble = if i < 16 { i } else { 31 - i };
-        let expected_val = expected_lut[nibble] as f32;
+        let expected_val = expected_lut[i % 16] as f32;
         assert!(
             (val - expected_val).abs() < 1e-6,
-            "output[{i}] = {} != LUT[{nibble}]={}",
-            val,
-            expected_val
+            "output[{i}] = {val} != LUT[{}]={expected_val}",
+            i % 16
         );
     }
 }

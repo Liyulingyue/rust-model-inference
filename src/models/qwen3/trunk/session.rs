@@ -1,5 +1,7 @@
 //! Per-request Qwen3 generation state and prompt/decode orchestration.
 
+use crate::compute::ComputePolicy;
+
 use super::forward::{Qwen3GenerateOptions, Qwen3Generation, Qwen3Input};
 use super::prefill::Qwen3PrefillScratch;
 use super::util::{
@@ -13,20 +15,138 @@ use crate::core::scratchpad::{
 #[cfg(feature = "parity-trace")]
 use crate::parity_trace;
 #[cfg(feature = "vulkan")]
-use crate::vulkan::qwen3::{commit_shadow_kv, Qwen3VulkanSession};
+use crate::vulkan::qwen3::Qwen3VulkanSession;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const MODEL_LOGIT_ABS_TOLERANCE: f32 = 2e-3;
+const MODEL_LOGIT_REL_TOLERANCE: f32 = 2e-3;
+
+pub(super) fn validate_model_logits(gpu: &[f32], cpu: &[f32]) -> Result<(), String> {
+    if gpu.len() != cpu.len() {
+        return Err(format!(
+            "model logit length mismatch: gpu={} cpu={}",
+            gpu.len(),
+            cpu.len()
+        ));
+    }
+    for (index, (&gpu, &cpu)) in gpu.iter().zip(cpu).enumerate() {
+        let absolute = (gpu - cpu).abs();
+        let relative = absolute / cpu.abs().max(f32::MIN_POSITIVE);
+        if !gpu.is_finite()
+            || !cpu.is_finite()
+            || absolute > MODEL_LOGIT_ABS_TOLERANCE + MODEL_LOGIT_REL_TOLERANCE * cpu.abs()
+        {
+            return Err(format!(
+                "model logit mismatch at {index}: gpu={gpu} cpu={cpu} abs={absolute} rel={relative}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_model_kv(gpu: &KvState, cpu: &KvState) -> Result<(), String> {
+    validate_model_kv_range(gpu, cpu, 0, gpu.seq_len)
+}
+
+pub(super) fn validate_model_kv_range(
+    gpu: &KvState,
+    cpu: &KvState,
+    start_position: usize,
+    rows: usize,
+) -> Result<(), String> {
+    if gpu.format != cpu.format
+        || gpu.capacity != cpu.capacity
+        || gpu.seq_len != cpu.seq_len
+        || !gpu.arch.is_compatible_with(&cpu.arch)
+    {
+        return Err(format!(
+            "model KV shape mismatch: gpu={:?}/capacity {}/seq {} cpu={:?}/capacity {}/seq {}",
+            gpu.format, gpu.capacity, gpu.seq_len, cpu.format, cpu.capacity, cpu.seq_len
+        ));
+    }
+    let end_position = start_position
+        .checked_add(rows)
+        .ok_or_else(|| "model KV range overflow".to_string())?;
+    if end_position > gpu.seq_len {
+        return Err(format!(
+            "model KV range {}..{} exceeds sequence length {}",
+            start_position, end_position, gpu.seq_len
+        ));
+    }
+    let stride = gpu.arch.n_head_kv * gpu.arch.n_embd_head_k.max(gpu.arch.n_embd_head_v);
+    for layer in 0..gpu.arch.n_layer {
+        let start = layer * gpu.capacity * stride + start_position * stride;
+        let end = start + rows * stride;
+        match (&gpu.cache, &cpu.cache) {
+            (KvCache::F16(gpu), KvCache::F16(cpu)) => {
+                if let Some(index) = gpu.k[start..end]
+                    .iter()
+                    .zip(&cpu.k[start..end])
+                    .position(|(gpu, cpu)| gpu != cpu)
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} K index {index}: gpu={} cpu={}",
+                        gpu.k[start + index],
+                        cpu.k[start + index]
+                    ));
+                }
+                if let Some(index) = gpu.v[start..end]
+                    .iter()
+                    .zip(&cpu.v[start..end])
+                    .position(|(gpu, cpu)| gpu != cpu)
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} V index {index}: gpu={} cpu={}",
+                        gpu.v[start + index],
+                        cpu.v[start + index]
+                    ));
+                }
+            }
+            (KvCache::F32(gpu), KvCache::F32(cpu)) => {
+                if let Some(index) = gpu.k[start..end]
+                    .iter()
+                    .zip(&cpu.k[start..end])
+                    .position(|(gpu, cpu)| gpu.to_bits() != cpu.to_bits())
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} K index {index}: gpu={} cpu={}",
+                        gpu.k[start + index],
+                        cpu.k[start + index]
+                    ));
+                }
+                if let Some(index) = gpu.v[start..end]
+                    .iter()
+                    .zip(&cpu.v[start..end])
+                    .position(|(gpu, cpu)| gpu.to_bits() != cpu.to_bits())
+                {
+                    return Err(format!(
+                        "model KV mismatch at layer {layer} V index {index}: gpu={} cpu={}",
+                        gpu.v[start + index],
+                        cpu.v[start + index]
+                    ));
+                }
+            }
+            _ => return Err("model KV cache format mismatch".into()),
+        }
+    }
+    Ok(())
+}
+
 pub struct Qwen3Session<'model> {
     pub(crate) model: &'model Qwen3Model,
+    pub(crate) compute_policy: ComputePolicy,
     pub(crate) kv_state: KvState,
     pub(crate) scratch: ExecutionScratchpad,
     pub(super) prefill_scratch: Qwen3PrefillScratch,
+    pub(super) hidden_linear: Option<crate::compute::linear::LinearExecutor<'model, 'static>>,
     pub(crate) capacity: usize,
     #[cfg(feature = "vulkan")]
     pub(crate) gpu: Option<Qwen3VulkanSession>,
     #[cfg(feature = "vulkan")]
     pub(crate) full_model_gpu_failed: bool,
+    #[cfg(feature = "vulkan")]
+    pub(crate) gpu_contract_validated: bool,
     #[cfg(test)]
     pub(super) fail_cpu_prefill_after_layer: Option<usize>,
 }
@@ -42,6 +162,28 @@ impl<'model> Qwen3Session<'model> {
         kv_format: KvFormat,
         lifecycle: KvLifecycle,
     ) -> Result<Self, String> {
+        Self::new_with_compute(
+            model,
+            capacity,
+            kv_format,
+            lifecycle,
+            ComputePolicy::legacy(),
+        )
+    }
+
+    pub fn new_with_compute(
+        model: &'model Qwen3Model,
+        capacity: usize,
+        kv_format: KvFormat,
+        lifecycle: KvLifecycle,
+        compute_policy: ComputePolicy,
+    ) -> Result<Self, String> {
+        let projection_only = model.config.architecture == crate::models::mage_vl::ARCH;
+        if projection_only {
+            compute_policy.validate_text_arch(crate::models::mage_vl::ARCH)?;
+        }
+        compute_policy.check_build()?;
+        let _scope = compute_policy.cpu_scope();
         if capacity == 0 || capacity > model.config.n_ctx {
             return Err(format!(
                 "Session capacity {capacity} must be within 1..={}",
@@ -127,9 +269,35 @@ impl<'model> Qwen3Session<'model> {
         let _ = kv_bytes;
 
         #[cfg(feature = "vulkan")]
-        let (gpu, full_model_gpu_failed) = match crate::ops::get_vulkan_context() {
+        let context = if projection_only {
+            None
+        } else if kv_format == KvFormat::F16 {
+            compute_policy
+                .context()
+                .map_err(|error| error.to_string())?
+        } else if compute_policy == ComputePolicy::Vulkan {
+            return Err("Qwen3 Vulkan currently requires F16 KV".into());
+        } else {
+            if compute_policy != ComputePolicy::Cpu {
+                if crate::models::qwen3::is_wevisone(model.source.as_ref()) {
+                    eprintln!("[GPU] WeVisOne retains F32 KV/attention on CPU; dense projections use Auto offload.");
+                } else {
+                    eprintln!("[GPU] Qwen3 resident Vulkan decode requires F16 KV but got {kv_format:?}; text generation runs on the CPU. Pass --kv-cache f16 to enable the GPU path.");
+                }
+            }
+            None
+        };
+        #[cfg(feature = "vulkan")]
+        let (gpu, full_model_gpu_failed) = match context {
             Some(context) => match Qwen3VulkanSession::try_new(model, capacity, context) {
-                Ok(gpu) => (gpu, false),
+                Ok(None) if compute_policy == ComputePolicy::Vulkan => {
+                    return Err("Qwen3 configuration is unsupported for full-model Vulkan".into());
+                }
+                Ok(Some(gpu)) => (Some(gpu), false),
+                Ok(None) => (None, false),
+                Err(error) if compute_policy == ComputePolicy::Vulkan => {
+                    return Err(error.to_string())
+                }
                 Err(error) => {
                     eprintln!(
                         "[GPU] Qwen3 Vulkan session unavailable: {error}. Falling back to CPU."
@@ -140,8 +308,9 @@ impl<'model> Qwen3Session<'model> {
             None => (None, false),
         };
 
-        Ok(Self {
+        let mut session = Self {
             model,
+            compute_policy,
             kv_state,
             scratch: ExecutionScratchpad {
                 x: vec![0.0; config.n_embd],
@@ -154,6 +323,7 @@ impl<'model> Qwen3Session<'model> {
                 down_buf: vec![0.0; config.n_embd],
                 gate_buf: vec![0.0; config.n_ff],
                 up_buf: vec![0.0; config.n_ff],
+                ffn_fused: vec![0.0; 2 * config.n_ff],
                 logits: vec![0.0; config.vocab],
                 q8_buf: vec![0; max_n_in],
                 scale_buf: vec![0.0; max_n_in / 32],
@@ -163,21 +333,28 @@ impl<'model> Qwen3Session<'model> {
                         qs: [0; 256],
                         bsums: [0; 16],
                     };
-                    max_n_in / 256
+                    max_n_in.div_ceil(256)
                 ],
                 score_stride,
                 scores: vec![0.0; score_values],
-                attention_values: vec![0.0; score_values],
+                max_rows: 1,
             },
             prefill_scratch: Qwen3PrefillScratch::new(1, model),
+            hidden_linear: None,
             capacity,
             #[cfg(feature = "vulkan")]
             gpu,
             #[cfg(feature = "vulkan")]
             full_model_gpu_failed,
+            #[cfg(feature = "vulkan")]
+            gpu_contract_validated: false,
             #[cfg(test)]
             fail_cpu_prefill_after_layer: None,
-        })
+        };
+        if projection_only && compute_policy != ComputePolicy::Cpu {
+            session.enable_projection_offload(compute_policy, 1)?;
+        }
+        Ok(session)
     }
 
     pub fn kv_state(&self) -> &KvState {
@@ -186,20 +363,6 @@ impl<'model> Qwen3Session<'model> {
 
     pub fn last_logits(&self) -> &[f32] {
         &self.scratch.logits
-    }
-
-    pub(crate) fn dspark_position(&self) -> usize {
-        self.kv_state.seq_len
-    }
-
-    pub(crate) fn dspark_hidden_size(&self) -> usize {
-        self.model.config.n_embd
-    }
-
-    pub(crate) fn dspark_restore(&mut self, position: usize) {
-        debug_assert!(position <= self.kv_state.seq_len);
-        self.kv_state.seq_len = position;
-        self.kv_state.update_access();
     }
 
     pub fn reset_kv(&mut self) {
@@ -215,7 +378,7 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
     ) -> Result<Qwen3Generation, String> {
-        self.generate_with_asr_trace(input, options, false)
+        self.generate_with_asr_trace(input, options, false, 1.0)
     }
 
     pub fn generate_streaming(
@@ -255,8 +418,232 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        let duration = self.prefill(&input, prefill_batch_size)?;
+        let duration = self.prefill(&input, prefill_batch_size, true)?;
         Ok((self.scratch.logits.clone(), duration))
+    }
+
+    /// Single forward pass for rerank / cross-encoder models. Runs the
+    /// full prefill then returns the final-token post-RMSNorm hidden
+    /// state (length `n_embd`), which the caller feeds into
+    /// [`Qwen3Model::score_logits`].
+    ///
+    /// Errors if the model is not a rerank model (`cls.output.weight`
+    /// not present).
+    pub fn forward_rerank(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        if self.compute_policy == ComputePolicy::Vulkan {
+            return Err("Vulkan does not export hidden rows for this API".into());
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+            self.full_model_gpu_failed = true;
+        }
+        if !self.model.is_rerank() {
+            return Err("forward_rerank requires cls.output.weight".into());
+        }
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 rerank prompt must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Rerank forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let _duration = self.prefill(&input, prefill_batch_size, true)?;
+        // Ensure the prefill scratch holds at least one row per token
+        // so the post-prefill read of `prefill_scratch.x` below cannot
+        // index out of bounds even when `capacity == prefill_batch_size`.
+        self.prefill_scratch
+            .reset_for(input.token_ids.len(), self.model);
+        // The last prefill row's hidden state lives in `prefill_scratch.x`;
+        // apply final RMSNorm into `scratch.normed` and return a copy.
+        // Mirrors the projection step that runs inside `prefill` for the
+        // lm_head logits branch.
+        let n_embd = self.model.config.n_embd;
+        let last_row = input.token_ids.len() - 1;
+        let base = last_row * n_embd;
+        crate::ops::rms_norm(
+            &self.prefill_scratch.x[base..base + n_embd],
+            &self.model.output_norm,
+            &mut self.scratch.normed,
+            self.model.config.eps,
+        );
+        Ok(self.scratch.normed.clone())
+    }
+
+    /// Prefill `input` and return the final-token post-RMSNorm hidden
+    /// state (length `n_embd`) for ANY Qwen3 checkpoint, not just rerank
+    /// ones.  Identical to [`Self::forward_rerank`] except that it does
+    /// not require `cls.output.weight`.
+    ///
+    /// Used by the CLM projection heads, whose encoder is a plain
+    /// Qwen3-8B: they consume the last-token pooled embedding, so they
+    /// need the hidden state from a base/generative checkpoint.
+    pub fn forward_last_hidden(
+        &mut self,
+        input: Qwen3Input<'_>,
+        prefill_batch_size: usize,
+    ) -> Result<Vec<f32>, String> {
+        if self.compute_policy == ComputePolicy::Vulkan {
+            return Err("Vulkan does not export hidden rows for this API".into());
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+            self.full_model_gpu_failed = true;
+        }
+        if input.token_ids.is_empty() {
+            return Err("Qwen3 forward must contain at least one token".into());
+        }
+        let required = self
+            .kv_state
+            .seq_len
+            .checked_add(input.token_ids.len())
+            .ok_or("Qwen3 prompt length overflow")?;
+        if required > self.capacity {
+            return Err(format!(
+                "Forward pass requires capacity {required}; session has {}",
+                self.capacity
+            ));
+        }
+        let _duration = self.prefill(&input, prefill_batch_size, true)?;
+        self.prefill_scratch
+            .reset_for(input.token_ids.len(), self.model);
+        let n_embd = self.model.config.n_embd;
+        let last_row = input.token_ids.len() - 1;
+        let base = last_row * n_embd;
+        crate::ops::rms_norm(
+            &self.prefill_scratch.x[base..base + n_embd],
+            &self.model.output_norm,
+            &mut self.scratch.normed,
+            self.model.config.eps,
+        );
+        Ok(self.scratch.normed.clone())
+    }
+
+    /// Extract every post-normalization token row, including optional VL DeepStack inputs.
+    /// A fresh F32-KV session preserves conditioning without half-precision KV rounding.
+    pub fn forward_hidden_sequence(&mut self, input: Qwen3Input<'_>) -> Result<Vec<f32>, String> {
+        self.hidden_sequence(input, true)
+    }
+
+    /// Last transformer layer before the output RMSNorm, as used by Qwen-Image-2.1.
+    pub fn forward_hidden_sequence_raw(
+        &mut self,
+        input: Qwen3Input<'_>,
+    ) -> Result<Vec<f32>, String> {
+        self.hidden_sequence(input, false)
+    }
+
+    /// Offload dense projections while retaining F32 KV and every raw hidden row.
+    pub(crate) fn forward_hidden_sequence_raw_with_linear_offload(
+        &mut self,
+        input: Qwen3Input<'_>,
+        projection_policy: ComputePolicy,
+    ) -> Result<Vec<f32>, String> {
+        if self.compute_policy != ComputePolicy::Auto
+            || projection_policy == ComputePolicy::Cpu
+            || self.model.config.moe.is_some()
+        {
+            return Err("Hidden-row projection offload requires an Auto dense host session and Auto or Vulkan projections".into());
+        }
+        self.enable_projection_offload(projection_policy, input.token_ids.len())?;
+        let result = self.hidden_sequence(input, false);
+        self.hidden_linear = None;
+        result
+    }
+
+    pub(super) fn enable_projection_offload(
+        &mut self,
+        projection_policy: ComputePolicy,
+        max_rows: usize,
+    ) -> Result<(), String> {
+        use crate::compute::linear::{LinearBinding, LinearExecutor, LinearMode};
+        let bindings = self
+            .model
+            .layers
+            .iter()
+            .flat_map(|layer| {
+                [
+                    &layer.wq,
+                    &layer.wk,
+                    &layer.wv,
+                    &layer.wo,
+                    &layer.w_gate,
+                    &layer.w_up,
+                    &layer.w_down,
+                ]
+                .map(|weight| LinearBinding {
+                    weight,
+                    mode: LinearMode::Prepared,
+                })
+            })
+            .collect();
+        self.hidden_linear = Some(
+            LinearExecutor::new(
+                projection_policy,
+                bindings,
+                max_rows,
+                self.model.pool.clone(),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        Ok(())
+    }
+
+    fn hidden_sequence(
+        &mut self,
+        input: Qwen3Input<'_>,
+        normalize: bool,
+    ) -> Result<Vec<f32>, String> {
+        if self.compute_policy == ComputePolicy::Vulkan {
+            return Err("Vulkan does not export hidden rows for this API".into());
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+            self.full_model_gpu_failed = true;
+        }
+        if self.kv_state.seq_len != 0
+            || input.token_ids.is_empty()
+            || input.token_ids.len() > self.capacity
+            || !matches!(
+                &self.kv_state.cache,
+                crate::core::scratchpad::KvCache::F32(_)
+            )
+        {
+            return Err("Hidden-sequence extraction requires a fresh F32-KV session and a non-empty input within capacity".into());
+        }
+        // This API reads CPU scratch rows; the Vulkan path only exports final logits.
+        #[cfg(feature = "vulkan")]
+        {
+            self.gpu = None;
+        }
+        self.prefill(&input, input.token_ids.len(), false)?;
+        let width = self.model.config.n_embd;
+        if !normalize {
+            return Ok(self.prefill_scratch.x[..input.token_ids.len() * width].to_vec());
+        }
+        let mut output = vec![0.0; input.token_ids.len() * width];
+        for (row, destination) in output.chunks_exact_mut(width).enumerate() {
+            crate::ops::rms_norm(
+                &self.prefill_scratch.x[row * width..(row + 1) * width],
+                &self.model.output_norm,
+                destination,
+                self.model.config.eps,
+            );
+        }
+        Ok(output)
     }
 
     /// Return false from the callback to stop generation. Empty text callbacks
@@ -294,6 +681,7 @@ impl<'model> Qwen3Session<'model> {
         input: Qwen3Input<'_>,
         options: Qwen3GenerateOptions,
         asr_trace: bool,
+        repetition_penalty: f32,
     ) -> Result<Qwen3Generation, String> {
         validate_generation(self.model, &input, &options)?;
         let required = checked_session_capacity(
@@ -307,7 +695,7 @@ impl<'model> Qwen3Session<'model> {
                 self.capacity
             ));
         }
-        self.generate_inner(input, options, 1.0, asr_trace, None)
+        self.generate_inner(input, options, repetition_penalty, asr_trace, None)
     }
 
     fn generate_inner(
@@ -319,7 +707,7 @@ impl<'model> Qwen3Session<'model> {
         mut on_token: Option<&mut dyn FnMut(&str) -> bool>,
     ) -> Result<Qwen3Generation, String> {
         let model = self.model;
-        let config = &model.config;
+        let _config = &model.config;
         let n_prompt = input.token_ids.len();
 
         #[cfg(feature = "parity-trace")]
@@ -357,7 +745,7 @@ impl<'model> Qwen3Session<'model> {
             || crate::ops::get_vulkan_context().map_or(0, |ctx| ctx.submission_count());
         #[cfg(feature = "vulkan")]
         let before_prompt = submission_count();
-        let prompt_duration = self.prefill(&input, options.prefill_batch_size)?;
+        let prompt_duration = self.prefill(&input, options.prefill_batch_size, true)?;
         #[cfg(feature = "vulkan")]
         let after_prompt = submission_count();
         #[cfg(feature = "parity-trace")]
@@ -365,7 +753,7 @@ impl<'model> Qwen3Session<'model> {
             parity_trace::report(parity_trace::checkpoint(
                 "asr.decoder_first_logits",
                 None,
-                &[config.vocab],
+                &[_config.vocab],
                 &self.scratch.logits,
             ));
         }
@@ -421,56 +809,9 @@ impl<'model> Qwen3Session<'model> {
                 deepstack_embeddings: None,
             };
 
-            #[cfg(feature = "vulkan")]
-            let used_vulkan = {
-                model
-                    .token_embedding
-                    .embedding_lookup(token_id, &mut self.scratch.x);
-                let mut disable_reason = None;
-                let gpu_position = self.kv_state.seq_len;
-                let used = match self.gpu.as_mut() {
-                    Some(gpu) => match gpu.forward_token(&self.scratch.x, gpu_position) {
-                        Ok(result) => {
-                            if let Err(error) = commit_shadow_kv(
-                                &mut self.kv_state,
-                                gpu_position,
-                                result.k_delta,
-                                result.v_delta,
-                            ) {
-                                gpu.abort_token();
-                                disable_reason = Some(error);
-                                false
-                            } else {
-                                self.scratch.logits.copy_from_slice(result.logits);
-                                gpu.commit_token();
-                                true
-                            }
-                        }
-                        Err(error) => {
-                            disable_reason = Some(error.to_string());
-                            false
-                        }
-                    },
-                    None => false,
-                };
-                if let Some(reason) = disable_reason {
-                    eprintln!(
-                        "[GPU] Qwen3 Vulkan session disabled after error: {reason}. Falling back to CPU."
-                    );
-                    self.gpu = None;
-                    self.full_model_gpu_failed = true;
-                }
-                used
-            };
-            #[cfg(not(feature = "vulkan"))]
-            let used_vulkan = false;
-
-            if !used_vulkan {
-                let base = self.kv_state.seq_len;
-                self.forward_cpu_chunk(&decode_input, 0..1, true, true, None)?;
-                self.kv_state.seq_len = base + 1;
-                self.kv_state.update_access();
-            }
+            self.prefill(&decode_input, 1, true)?;
+            #[cfg(all(feature = "parity-trace", feature = "vulkan"))]
+            let used_vulkan = self.gpu.is_some();
             decode_duration += eval_started.elapsed();
 
             #[cfg(all(feature = "parity-trace", feature = "vulkan"))]
@@ -478,7 +819,7 @@ impl<'model> Qwen3Session<'model> {
                 parity_trace::report(parity_trace::checkpoint(
                     "result_output",
                     None,
-                    &[config.vocab],
+                    &[_config.vocab],
                     &self.scratch.logits,
                 ));
             }
@@ -629,7 +970,9 @@ mod vulkan_tests {
             gpu.fail_after_row = Some(row);
             session.gpu = Some(gpu);
             session.full_model_gpu_failed = false;
-            failure_context = Some(context);
+            // The operator contracts that `try_new` validates submit on their
+            // own, so remember where the counters stood before the failure.
+            failure_context = Some((context, context.submission_count()));
         }
         let token_ids: Vec<_> = (0..prompt_len).map(|row| (row % 7) as u32).collect();
         let positions: Vec<_> = (0..prompt_len).map(|row| [row, 0, 0, 0]).collect();
@@ -649,10 +992,9 @@ mod vulkan_tests {
             )
             .unwrap();
         assert!(session.gpu.is_none());
-        if let Some(context) = failure_context {
-            assert_eq!(
-                context.submission_count(),
-                1,
+        if let Some((context, before)) = failure_context {
+            assert!(
+                context.submission_count() > before,
                 "failure must occur after GPU row work"
             );
         }
@@ -676,6 +1018,47 @@ mod vulkan_tests {
 
     #[test]
     #[ignore = "requires a Vulkan device"]
+    fn forced_vulkan_failure_keeps_committed_state_without_cpu_retry() {
+        let model = fixture_model();
+        let mut session = Qwen3Session::new_with_compute(
+            &model,
+            9,
+            KvFormat::F16,
+            KvLifecycle::Ephemeral,
+            crate::compute::ComputePolicy::Vulkan,
+        )
+        .unwrap();
+        session
+            .prefill(
+                &Qwen3Input {
+                    token_ids: &[0, 1],
+                    positions: &[[0, 0, 0, 0], [1, 0, 0, 0]],
+                    embeddings: None,
+                    deepstack_embeddings: None,
+                },
+                4,
+                true,
+            )
+            .unwrap();
+        let committed = snapshot(session.kv_state());
+        session.gpu.as_mut().unwrap().fail_after_row = Some(1);
+        session.fail_cpu_prefill_after_layer = Some(0);
+        let input = Qwen3Input {
+            token_ids: &[2, 3],
+            positions: &[[2, 0, 0, 0], [3, 0, 0, 0]],
+            embeddings: None,
+            deepstack_embeddings: None,
+        };
+        let error = session.prefill(&input, 4, true).unwrap_err();
+        assert!(error.contains("GPU failure after row 1"), "{error}");
+        assert_eq!(session.fail_cpu_prefill_after_layer, Some(0));
+        assert_eq!(snapshot(session.kv_state()), committed);
+        assert!(session.prefill(&input, 4, true).is_err());
+        assert_eq!(session.fail_cpu_prefill_after_layer, Some(0));
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device"]
     fn qwen3_gpu_chunk_failure_recomputes_the_whole_chunk_on_cpu() {
         assert_eq!(run_qwen3_forced_gpu_failure(4, 1), run_qwen3_cpu_only(4));
     }
@@ -687,14 +1070,21 @@ mod vulkan_tests {
         let context = Box::leak(Box::new(VulkanContext::new().unwrap()));
         let mut actual = Qwen3Session::new(&model, 9).unwrap();
         actual.gpu = Qwen3VulkanSession::try_new(&model, 9, context).unwrap();
+        // These assertions count one queue submission per prefill chunk. Two
+        // one-time probes submit on their own: the operator contracts that
+        // `try_new` validates and the model contract that the first prefill
+        // replays through `validate_gpu_prefill`. Neither is what this test is
+        // about, so skip the model probe and measure deltas from a baseline.
+        actual.gpu_contract_validated = true;
+        let before = context.submission_count();
         let prefix = Qwen3Input {
             token_ids: &[0, 1],
             positions: &[[0, 0, 0, 0], [1, 0, 0, 0]],
             embeddings: None,
             deepstack_embeddings: None,
         };
-        actual.prefill(&prefix, 4).unwrap();
-        assert_eq!(context.submission_count(), 1);
+        actual.prefill(&prefix, 4, true).unwrap();
+        assert_eq!(context.submission_count() - before, 1);
         let committed = snapshot(actual.kv_state());
         let mut expected = Qwen3Session::new(&model, 9).unwrap();
         expected.gpu = None;
@@ -715,14 +1105,15 @@ mod vulkan_tests {
             embeddings: None,
             deepstack_embeddings: None,
         };
-        let error = actual.prefill(&input, 4).unwrap_err();
+        let before = context.submission_count();
+        let error = actual.prefill(&input, 4, true).unwrap_err();
         assert!(
             error.contains("CPU prefill failure after layer 0"),
             "{error}"
         );
         assert!(error.contains("GPU failure after row 1"), "{error}");
         assert_eq!(snapshot(actual.kv_state()), committed);
-        assert_eq!(context.submission_count(), 2);
+        assert_eq!(context.submission_count() - before, 1);
         assert!(actual.gpu.is_none());
         let options = Qwen3GenerateOptions {
             max_new_tokens: 3,
@@ -771,6 +1162,10 @@ mod vulkan_tests {
         let positions: Vec<_> = (0..8).map(|row| [row, 0, 0, 0]).collect();
         let mut expected = Qwen3Session::new(&model, 11).unwrap();
         expected.gpu = Qwen3VulkanSession::try_new(&model, 11, context).unwrap();
+        // Skip the one-time model contract replay so the submission count is
+        // the steady-state cost of one prefill chunk.
+        expected.gpu_contract_validated = true;
+        let before = context.submission_count();
         expected
             .prefill(
                 &Qwen3Input {
@@ -780,9 +1175,10 @@ mod vulkan_tests {
                     deepstack_embeddings: None,
                 },
                 4,
+                true,
             )
             .unwrap();
-        assert_eq!(context.submission_count(), 1);
+        assert_eq!(context.submission_count() - before, 1);
         expected.gpu = None;
         expected.full_model_gpu_failed = true;
         let options = Qwen3GenerateOptions {
@@ -804,7 +1200,9 @@ mod vulkan_tests {
             .token_ids;
         let mut actual = Qwen3Session::new(&model, 11).unwrap();
         actual.gpu = Qwen3VulkanSession::try_new(&model, 11, context).unwrap();
+        actual.gpu_contract_validated = true;
         actual.gpu.as_mut().unwrap().fail_after_row = Some(5);
+        let before = context.submission_count();
         let actual_tokens = actual
             .generate(
                 Qwen3Input {
@@ -821,7 +1219,9 @@ mod vulkan_tests {
             actual.gpu.is_none(),
             "failure must target row one of the second chunk"
         );
-        assert_eq!(context.submission_count(), 3);
+        // One submission for the first chunk and one for the chunk that fails
+        // after its row work was recorded.
+        assert_eq!(context.submission_count() - before, 2);
         assert_eq!(actual_tokens, expected_tokens);
         assert_eq!(snapshot(actual.kv_state()), snapshot(expected.kv_state()));
         assert_eq!(
@@ -849,6 +1249,11 @@ mod vulkan_tests {
         for batch in [1, 4, 64, 128] {
             let mut session = Qwen3Session::new(&model, 68).unwrap();
             session.gpu = Qwen3VulkanSession::try_new(&model, 68, context).unwrap();
+            // The first prefill also replays the chunk through
+            // `validate_gpu_prefill`, which submits once per replay chunk and
+            // once per decode probe. This test counts the steady-state cost of
+            // the requested batching, so skip that one-time probe.
+            session.gpu_contract_validated = true;
             let before = context.submission_count();
             let input = Qwen3Input {
                 token_ids: &tokens,
@@ -856,7 +1261,7 @@ mod vulkan_tests {
                 embeddings: None,
                 deepstack_embeddings: None,
             };
-            session.prefill(&input, batch).unwrap();
+            session.prefill(&input, batch, true).unwrap();
             assert!(session.gpu.is_some(), "batch {batch} fell back");
             assert_eq!(
                 context.submission_count() - before,
@@ -932,5 +1337,42 @@ mod cancellation_tests {
             .unwrap();
         assert_eq!(callbacks, 1);
         assert_eq!(generation.token_ids.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod model_contract_tests {
+    use super::{validate_model_kv, validate_model_kv_range, validate_model_logits};
+    use crate::core::scratchpad::{KvArch, KvCache, KvFormat, KvState};
+    use std::sync::Arc;
+
+    #[test]
+    fn model_logit_contract_rejects_reproduced_q8_drift() {
+        let error = validate_model_logits(&[3.1978734], &[3.152948]).unwrap_err();
+        assert!(error.contains("logit mismatch at 0"), "{error}");
+    }
+
+    #[test]
+    fn model_logit_contract_accepts_declared_tolerance() {
+        validate_model_logits(&[3.1535], &[3.152948]).unwrap();
+    }
+
+    #[test]
+    fn model_kv_range_contract_checks_only_new_rows() {
+        let arch = Arc::new(KvArch::new(1, 1, 2, 2, 4));
+        let mut gpu = KvState::new(arch.clone(), KvFormat::F16, 4);
+        let mut cpu = KvState::new(arch, KvFormat::F16, 4);
+        gpu.seq_len = 2;
+        cpu.seq_len = 2;
+        if let (KvCache::F16(gpu), KvCache::F16(cpu)) = (&mut gpu.cache, &mut cpu.cache) {
+            gpu.k[..4].copy_from_slice(&[1, 2, 3, 4]);
+            gpu.v[..4].copy_from_slice(&[5, 6, 7, 8]);
+            cpu.k[..4].copy_from_slice(&[9, 10, 3, 4]);
+            cpu.v[..4].copy_from_slice(&[11, 12, 7, 8]);
+        } else {
+            unreachable!("test states use F16 KV");
+        }
+        validate_model_kv_range(&gpu, &cpu, 1, 1).unwrap();
+        assert!(validate_model_kv(&gpu, &cpu).is_err());
     }
 }

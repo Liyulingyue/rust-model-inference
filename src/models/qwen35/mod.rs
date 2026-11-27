@@ -1,7 +1,7 @@
 //! Qwen3.5 (hybrid Mamba SSM + dense attention) inference.
 //!
-//! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2:
-//! - `trunk/` contains the pure LLM decoder (`Qwen35Model` + `Qwen35Session`).
+//! Per [`MODEL_ORGANIZATION.md`](../../../docs/develop/MODEL_ORGANIZATION.md) §2:
+//! - `trunk/` contains the hybrid attention/SSM decoder shared with Edge0.
 //! - `vision/` is a sibling — vision encoder for VL inputs.
 //!
 //! ## Public surface
@@ -15,6 +15,6 @@ pub mod vision;
 
 pub use crate::models::qwen35::vision::VisionGrid;
 pub use trunk::{
-    build_qwen35_positions, Qwen35Config, Qwen35DenseKvSnapshot, Qwen35LayerWeights, Qwen35Model,
-    Qwen35Scratchpad, Qwen35Session,
+    build_qwen35_positions, run_forward_logits_qwen35_with_batch, Qwen35Config,
+    Qwen35DenseKvSnapshot, Qwen35LayerWeights, Qwen35Model, Qwen35Scratchpad, Qwen35Session,
 };

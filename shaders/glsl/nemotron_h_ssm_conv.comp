@@ -1,0 +1,92 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Nemotron-3 Nano Mamba-2 depthwise causal conv1d, fused with the SiLU
+// that follows it.
+//
+// The CPU path (`mamba2_conv_step` in
+// `src/models/nemotron_h/trunk/forward.rs`) computes, per channel `c`:
+//
+//   out[c] = w[c*4+0] * hist[0][c] + w[c*4+1] * hist[1][c]
+//          + w[c*4+2] * hist[2][c] + w[c*4+3] * cur[c] + bias[c]
+//
+// with the accumulation in that exact order and no fused multiply-add: Rust
+// does not contract `a += b * c` into an FMA, and `precise` keeps GLSL from
+// contracting it either.
+//
+// `hist[0]` holds the input from `t - 1`, `hist[1]` from `t - 2` and
+// `hist[2]` from `t - 3`. The device keeps the history in a three-slot ring
+// per layer instead of shifting it: the token counter selects the slot and
+// the taps read the three other slots.
+//
+// The SiLU is ggml's, so the gate's exponential matches the CPU path's
+// `silu_ggml_inplace` bit for bit. ggml's NEON path works four lanes at a
+// time and picks the exponential's fast or overflow path **per group of
+// four**, so this kernel also gives every invocation four consecutive
+// channels. The fused channel count is
+// `d_inner + 2 * n_group * d_state` = 7680 + 2048 = 9728, which is a
+// multiple of four, so the CPU path has no scalar tail.
+
+#include "exp_ggml.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint input_word;   // the contiguous `[x | B | C]` conv input
+    uint out_word;     // post-SiLU conv output
+    uint weight_word;  // conv weights, `cols * kernel` floats
+    uint bias_word;    // conv bias, `cols` floats
+    uint history_word; // three-slot ring, `3 * cols` floats
+    uint cols;         // 9728
+    uint kernel;       // 4
+    uint slot;         // ring slot the current token is written to
+} pc;
+
+void main() {
+    uint base = gl_GlobalInvocationID.x * 4u;
+    if (base >= pc.cols) return;
+
+    float current[4];
+    float total[4];
+    for (uint lane = 0u; lane < 4u; lane++) {
+        uint column = base + lane;
+        current[lane] = uintBitsToFloat(arena.data[pc.input_word + column]);
+        precise float accumulated = 0.0;
+        for (uint tap = 0u; tap < pc.kernel - 1u; tap++) {
+            // The CPU path shifts its history *after* the convolution, so
+            // at the time of the convolution `history[0]` holds the
+            // oldest tap (`t - 3`), `history[1]` the one before it
+            // (`t - 2`) and `history[2]` the most recent (`t - 1`).
+            // The ring stores the token in the slot it was written to,
+            // which is `t mod 3`, so tap `k` reads slot `(t + k) mod 3`.
+            uint history_slot = (pc.slot + tap) % 3u;
+            float past = uintBitsToFloat(
+                arena.data[pc.history_word + history_slot * pc.cols + column]);
+            float weight = uintBitsToFloat(
+                arena.data[pc.weight_word + column * pc.kernel + tap]);
+            accumulated = accumulated + weight * past;
+        }
+        // The current token is the last tap.
+        float current_weight = uintBitsToFloat(
+            arena.data[pc.weight_word + column * pc.kernel + pc.kernel - 1u]);
+        accumulated = accumulated + current_weight * current[lane];
+        float bias = uintBitsToFloat(arena.data[pc.bias_word + column]);
+        accumulated = accumulated + bias;
+        total[lane] = accumulated;
+    }
+
+    // Publish the current token into the ring. Every lane owns four
+    // columns, so there is no race, and the write happens after the taps
+    // have read the slot that still holds `t - 3`.
+    for (uint lane = 0u; lane < 4u; lane++) {
+        arena.data[pc.history_word + pc.slot * pc.cols + base + lane] =
+            floatBitsToUint(current[lane]);
+    }
+
+    float activated[4];
+    silu_ggml4(total, activated);
+    for (uint lane = 0u; lane < 4u; lane++) {
+        arena.data[pc.out_word + base + lane] = floatBitsToUint(activated[lane]);
+    }
+}

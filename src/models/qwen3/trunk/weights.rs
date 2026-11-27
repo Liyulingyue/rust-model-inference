@@ -13,7 +13,7 @@ use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::BPETokenizer;
 use crate::ops::bf16_to_f32;
-use crate::ops::kernel::{Kernel, QuantizedTensor, Weight};
+use crate::ops::kernel::{QuantizedTensor, Weight};
 use std::sync::Arc;
 
 pub use super::config::Qwen3Config;
@@ -31,6 +31,13 @@ pub struct Qwen3Model {
     pub(crate) output_norm: Vec<f32>,
     pub(crate) token_embedding: Weight<'static>,
     pub(crate) output: Weight<'static>,
+    /// Optional classification / rerank head. Loaded when the GGUF carries a
+    /// `cls.output.weight` tensor (as produced by llama.cpp's rerank packer
+    /// — e.g. `ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`). When `Some`,
+    /// the model is a rerank / cross-encoder; the caller is expected to
+    /// build a `[query, document]` prompt and read `score_logits(last_hidden)`
+    /// rather than sampling tokens from the lm_head.
+    pub(crate) cls_score: Option<Weight<'static>>,
 }
 
 // =============================================================================
@@ -74,14 +81,22 @@ pub fn get_f32_tensor<S: TensorSource + ?Sized>(
         .tensor_slice(name)
         .unwrap_or_else(|| panic!("slice {name} not found"));
     let mut output = vec![0.0; expected_len];
-    if info.ggml_type == GGMLType::F32 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
-            *value = f32::from_le_bytes(chunk.try_into().unwrap());
+    match info.ggml_type {
+        GGMLType::F32 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(4)) {
+                *value = f32::from_le_bytes(chunk.try_into().unwrap());
+            }
         }
-    } else if info.ggml_type == GGMLType::BF16 {
-        for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
-            *value = bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+        GGMLType::BF16 => {
+            for (value, chunk) in output.iter_mut().zip(bytes.chunks_exact(2)) {
+                *value = bf16_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]));
+            }
         }
+        other => panic!(
+            "qwen3::get_f32_tensor {name}: unsupported ggml_type {other:?}; \
+             expected F32/BF16 (F16 is reserved for BitNet-only paths \
+             under crate::models::bitnet::*)"
+        ),
     }
     output
 }
@@ -95,30 +110,28 @@ pub fn load_layers<'a>(
     n_embd_gqa: usize,
     n_ff: usize,
     n_embd_head_k: usize,
-    has_qk_norm: bool,
 ) -> Vec<Qwen3LayerWeights<'a>> {
+    // The qwen3 standard arch always declares qk_norm on every
+    // layer (`blk.{i}.attn_{q,k}_norm.weight`); the legacy
+    // `load_layers` helper predates the BitNet-specific dispatch
+    // and unconditionally loads them. `load_layers_static` is the
+    // modern path that honours `cfg.has_qk_norm` from the GGUF
+    // metadata; new code should use it instead of branching on a
+    // (now-removed) parameter here.
     (0..n_layer)
         .map(|l| Qwen3LayerWeights {
             attn_norm: get_f32_tensor(source, &format!("blk.{}.attn_norm.weight", l), n_embd),
             ffn_norm: get_f32_tensor(source, &format!("blk.{}.ffn_norm.weight", l), n_embd),
-            q_norm: if has_qk_norm {
-                Some(get_f32_tensor(
-                    source,
-                    &format!("blk.{}.attn_q_norm.weight", l),
-                    n_embd_head_k,
-                ))
-            } else {
-                None
-            },
-            k_norm: if has_qk_norm {
-                Some(get_f32_tensor(
-                    source,
-                    &format!("blk.{}.attn_k_norm.weight", l),
-                    n_embd_head_k,
-                ))
-            } else {
-                None
-            },
+            q_norm: Some(get_f32_tensor(
+                source,
+                &format!("blk.{}.attn_q_norm.weight", l),
+                n_embd_head_k,
+            )),
+            k_norm: Some(get_f32_tensor(
+                source,
+                &format!("blk.{}.attn_k_norm.weight", l),
+                n_embd_head_k,
+            )),
             q_bias: None,
             k_bias: None,
             v_bias: None,
@@ -245,9 +258,6 @@ pub fn load_layers_static(
         )?;
         let (w_gate, w_up, w_down, moe_router, moe_gate, moe_up, moe_down) = if let Some(moe) = moe
         {
-            if moe.shared_expert_ffn != 0 {
-                return Err("Qwen3VL-MoE shared experts are not supported".into());
-            }
             let gate_slices = expert_slices(
                 source,
                 &format!("blk.{l}.ffn_gate_exps.weight"),
@@ -316,34 +326,62 @@ pub fn load_layers_static(
                 &format!("blk.{l}.ffn_gate_inp.weight"),
                 &[n_embd as u64, moe.expert_count as u64],
             )?;
+            let (w_gate, w_up, w_down) = if moe.shared_expert_ffn != 0 {
+                (
+                    static_weight(
+                        source,
+                        &format!("blk.{l}.ffn_gate_shexp.weight"),
+                        n_embd,
+                        moe.shared_expert_ffn,
+                    ),
+                    static_weight(
+                        source,
+                        &format!("blk.{l}.ffn_up_shexp.weight"),
+                        n_embd,
+                        moe.shared_expert_ffn,
+                    ),
+                    static_weight(
+                        source,
+                        &format!("blk.{l}.ffn_down_shexp.weight"),
+                        moe.shared_expert_ffn,
+                        n_embd,
+                    ),
+                )
+            } else {
+                (
+                    weight_from_bytes(
+                        gate_slices[0],
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_gate_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        moe.expert_ffn,
+                    ),
+                    weight_from_bytes(
+                        up_slices[0],
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_up_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        n_embd,
+                        moe.expert_ffn,
+                    ),
+                    weight_from_bytes(
+                        down_slices[0],
+                        source
+                            .tensor_info(&format!("blk.{l}.ffn_down_exps.weight"))
+                            .unwrap()
+                            .ggml_type,
+                        moe.expert_ffn,
+                        n_embd,
+                    ),
+                )
+            };
             (
-                weight_from_bytes(
-                    gate_slices[0],
-                    source
-                        .tensor_info(&format!("blk.{l}.ffn_gate_exps.weight"))
-                        .unwrap()
-                        .ggml_type,
-                    n_embd,
-                    moe.expert_ffn,
-                ),
-                weight_from_bytes(
-                    up_slices[0],
-                    source
-                        .tensor_info(&format!("blk.{l}.ffn_up_exps.weight"))
-                        .unwrap()
-                        .ggml_type,
-                    n_embd,
-                    moe.expert_ffn,
-                ),
-                weight_from_bytes(
-                    down_slices[0],
-                    source
-                        .tensor_info(&format!("blk.{l}.ffn_down_exps.weight"))
-                        .unwrap()
-                        .ggml_type,
-                    moe.expert_ffn,
-                    n_embd,
-                ),
+                w_gate,
+                w_up,
+                w_down,
                 Some(router),
                 Some(gate),
                 Some(up),
@@ -493,11 +531,12 @@ impl Qwen3Model {
         tokenizer: Arc<BPETokenizer>,
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
-        use super::util::{
-            check_allocation, checked_product, load_f32_tensor, usize_to_u64, validate_token_ids,
-        };
+        use super::util::{checked_product, load_f32_tensor, usize_to_u64};
 
         let config = Qwen3Config::from_source(source.as_ref())?;
+        if config.architecture == crate::models::mage_vl::ARCH {
+            crate::models::mage_vl::validate_text_tensors(source.as_ref())?;
+        }
         if config.vocab != tokenizer.vocab_size() {
             return Err(format!(
                 "{} vocabulary size {} does not match tokenizer vocab {}",
@@ -542,7 +581,34 @@ impl Qwen3Model {
             config.vocab,
         ));
 
-        let layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
+        // Optional cross-encoder / classification head. GGUF tensors for
+        // these are typically named `cls.output.weight` (sometimes `.bias`)
+        // by llama.cpp's quantizer. We only require the weight tensor;
+        // absent means a plain generative model and `cls_score = None`.
+        let cls_score = match source.tensor_info("cls.output.weight") {
+            Some(info) => {
+                let bytes = source
+                    .tensor_slice("cls.output.weight")
+                    .ok_or_else(|| format!("cls.output.weight data missing"))?;
+                if info.dims.len() != 2 || info.dims[0] as usize != config.n_embd {
+                    return Err(format!(
+                        "cls.output.weight: shape {:?} does not match n_embd {}",
+                        info.dims, config.n_embd
+                    ));
+                }
+                let n_cls = info.dims[1] as usize;
+                let bytes_static: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+                Some(Weight::from_quantized(QuantizedTensor::from_bytes(
+                    bytes_static,
+                    info.ggml_type,
+                    config.n_embd,
+                    n_cls,
+                )))
+            }
+            None => None,
+        };
+
+        let mut layers: Vec<Qwen3LayerWeights<'static>> = load_layers_static(
             Arc::clone(&source),
             config.n_layer,
             config.n_embd,
@@ -554,6 +620,33 @@ impl Qwen3Model {
             config.has_qkv_bias,
             config.moe,
         )?;
+        // Scalar-parity mode needs the raw BF16 bytes for the projections, so
+        // bypass the dequantized kernel and hand BF16 straight to the scalar
+        // kernel. Covers both the plain Qwen3 trunk and the Qwen2.5-VL text
+        // encoder LongCat drives.
+        if matches!(config.architecture.as_str(), "qwen2vl" | "qwen3") && crate::ops::scalar_mode()
+        {
+            for (index, layer) in layers.iter_mut().enumerate() {
+                for (name, weight) in [
+                    ("attn_q", &mut layer.wq),
+                    ("attn_k", &mut layer.wk),
+                    ("attn_v", &mut layer.wv),
+                    ("attn_output", &mut layer.wo),
+                    ("ffn_gate", &mut layer.w_gate),
+                    ("ffn_up", &mut layer.w_up),
+                    ("ffn_down", &mut layer.w_down),
+                ] {
+                    if weight.ggml_type == GGMLType::BF16 {
+                        let tensor = format!("blk.{index}.{name}.weight");
+                        let bytes = source.tensor_slice(&tensor).ok_or(tensor)?;
+                        // SAFETY: Qwen3Model owns `source` for the lifetime of these kernels.
+                        let bytes: &'static [u8] = unsafe { std::mem::transmute(bytes) };
+                        weight.kernel =
+                            Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(bytes));
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             source,
@@ -564,6 +657,7 @@ impl Qwen3Model {
             output_norm,
             token_embedding,
             output,
+            cls_score,
         })
     }
 
@@ -579,12 +673,54 @@ impl Qwen3Model {
         Arc::clone(&self.pool)
     }
 
-    pub fn layers(&self) -> &Vec<Qwen3LayerWeights> {
+    pub fn layers(&self) -> &Vec<Qwen3LayerWeights<'_>> {
         &self.layers
     }
 
     pub fn output_norm(&self) -> &Vec<f32> {
         &self.output_norm
+    }
+
+    /// Returns `true` when the GGUF carried a `cls.output.weight` head.
+    /// Callers should use [`Qwen3Session::forward_rerank`] instead of
+    /// `forward_logits` for such models.
+    pub fn is_rerank(&self) -> bool {
+        self.cls_score.is_some()
+    }
+
+    /// Classify `last_hidden` (length `n_embd`) with the rerank head,
+    /// returning one logit per class. Returns an error if the head
+    /// wasn't loaded.
+    pub fn score_logits(&self, last_hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let weight = self
+            .cls_score
+            .as_ref()
+            .ok_or_else(|| "model is not a rerank / cross-encoder".to_string())?;
+        if last_hidden.len() != self.config.n_embd {
+            return Err(format!(
+                "score_logits: hidden size {} does not match n_embd {}",
+                last_hidden.len(),
+                self.config.n_embd
+            ));
+        }
+        let n_in = self.config.n_embd;
+        let n_cls = weight.n_out;
+        let mut act_q8 = vec![0u8; n_in];
+        let mut act_scales = vec![0.0f32; n_in.div_ceil(32)];
+        crate::ops::quantize_q8_0_into(last_hidden, n_in, &mut act_q8, &mut act_scales);
+        let mut out = vec![0.0f32; n_cls];
+        weight.kernel.forward_prepared(
+            last_hidden,
+            &act_q8,
+            &act_scales,
+            None,
+            &mut out,
+            n_in,
+            n_cls,
+            0,
+            1,
+        );
+        Ok(out)
     }
 
     pub fn embed_tokens(&self, token_ids: &[u32]) -> Result<Vec<f32>, String> {

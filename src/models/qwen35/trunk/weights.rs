@@ -1,6 +1,8 @@
-//! GGUF → Qwen35Model weight loading.
+//! GGUF → shared hybrid trunk weight loading.
 //!
-//! `Qwen35Model::from_source` reads a GGUF `TensorSource` and builds
+//! `Qwen35Model::from_source` accepts Qwen3.5 only. `Edge0Model` loads the
+//! same attention/SSM trunk and keeps its MoE weights in `models::edge0`.
+//! The shared loader reads a GGUF `TensorSource` and builds
 //! `Qwen35LayerWeights` rows, one per layer. Recurrent (Mamba) layers only
 //! fill the SSM field group; dense (attention) layers only fill the
 //! attention field group — see `config.is_recurrent`.
@@ -10,9 +12,9 @@
 //! inside this module's loading path.
 
 use super::config::Qwen35Config;
-use super::util::f16_at;
 use crate::core::tensor::GGMLType;
 use crate::core::tensor::TensorSource;
+use crate::models::edge0::weights::load_affine;
 use crate::ops::kernel::{QuantizedTensor, Weight};
 #[cfg(feature = "vulkan")]
 use crate::vulkan::qwen35::Qwen35VulkanSession;
@@ -45,23 +47,217 @@ pub struct Qwen35LayerWeights<'a> {
     pub ssm_alpha: Option<Weight<'a>>,
     pub ssm_norm: Option<Vec<f32>>,
     pub ssm_out: Option<Weight<'a>>,
-    pub ffn_gate: Weight<'a>,
-    pub ffn_up: Weight<'a>,
-    pub ffn_down: Weight<'a>,
+    /// Dense SwiGLU FFN. Absent on MoE-only towers (`qwen35moe`), where every
+    /// layer routes through experts instead and the weights are unused.
+    pub ffn_gate: Option<Weight<'a>>,
+    pub ffn_up: Option<Weight<'a>>,
+    pub ffn_down: Option<Weight<'a>>,
+    pub moe: Option<Qwen35MoeWeights<'a>>,
 }
 
-/// Loaded Qwen3.5 model weights + parsed config.
+/// The MTP (multi-token prediction) head of a Qwen3.5 checkpoint.
 ///
-/// `from_source` is defined in `weights.rs`. `forward` and friends are
-/// defined in `forward.rs`. This struct is the source of truth shared by
-/// `Qwen35Session` and the existing `app/text.rs` / `bin/server.rs`
-/// call sites.
-pub struct Qwen35Model<'a> {
+/// The block sits right after the main stack (`blk.{n_layer_impl}`) and is a
+/// full-attention decoder block plus the `nextn` tensors that turn it into a
+/// draft head: it takes the main model's last hidden state and the embedding
+/// of the next token, and predicts the token after that.
+///
+/// llama.cpp builds the same graph (`src/models/qwen35.cpp::graph_mtp`):
+///
+/// ```text
+/// concat(RMSNorm(embed(next_token), nextn.enorm), RMSNorm(h_last, nextn.hnorm))
+///     -> nextn.eh_proj -> one attention block -> shared_head(shared_head_norm(.))
+/// ```
+///
+/// `nextn.embed_tokens`, `nextn.shared_head_head` and `nextn.shared_head_norm`
+/// are optional upstream: without them the main model's embedding, output
+/// weight and output norm are used instead.
+pub struct MtpWeights<'a> {
+    /// The block's own attention and FFN weights: a dense Qwen3.5 layer.
+    pub layer: Qwen35LayerWeights<'a>,
+    /// `[n_embd, 2 * n_embd]`: fuses the normalized embedding and the
+    /// normalized hidden state.
+    pub eh_proj: Weight<'a>,
+    /// `[n_embd]`: normalizes the token embedding.
+    pub enorm: Vec<f32>,
+    /// `[n_embd]`: normalizes the hidden state.
+    pub hnorm: Vec<f32>,
+    /// `[n_embd, n_vocab]`: the draft head. `None` means the main model's
+    /// output weight is used.
+    pub shared_head_head: Option<Weight<'a>>,
+    /// `[n_embd]`: the draft head's norm. `None` means the main model's
+    /// output norm is used.
+    pub shared_head_norm: Option<Vec<f32>>,
+}
+
+/// Load the MTP head, if the checkpoint has one.
+///
+/// The head is identified the way upstream's
+/// `common_speculative_types_from_gguf` identifies it: the block after the
+/// main stack carries `nextn.eh_proj`.
+pub(crate) fn load_mtp_weights<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    block: usize,
+) -> Result<Option<MtpWeights<'a>>, String> {
+    let prefix = format!("blk.{block}.nextn.");
+    if source
+        .tensor_info(&format!("{prefix}eh_proj.weight"))
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let need = |name: &str| -> Result<Weight<'a>, String> {
+        load_weight(source, name).ok_or_else(|| format!("Missing {name}"))
+    };
+    let need_f32 = |name: &str| -> Result<Vec<f32>, String> {
+        load_weight_f32(source, name).ok_or_else(|| format!("Missing {name}"))
+    };
+    let layer = Qwen35LayerWeights {
+        attn_norm: need_f32(&format!("blk.{block}.attn_norm.weight"))?,
+        attn_post_norm: need_f32(&format!("blk.{block}.post_attention_norm.weight"))?,
+        wq: Some(need(&format!("blk.{block}.attn_q.weight"))?),
+        wk: Some(need(&format!("blk.{block}.attn_k.weight"))?),
+        wv: Some(need(&format!("blk.{block}.attn_v.weight"))?),
+        wo: Some(need(&format!("blk.{block}.attn_output.weight"))?),
+        attn_q_norm: Some(need_f32(&format!("blk.{block}.attn_q_norm.weight"))?),
+        attn_k_norm: Some(need_f32(&format!("blk.{block}.attn_k_norm.weight"))?),
+        wqkv: None,
+        wqkv_gate: None,
+        ssm_conv1d: None,
+        ssm_dt: None,
+        ssm_a: None,
+        ssm_beta: None,
+        ssm_alpha: None,
+        ssm_norm: None,
+        ssm_out: None,
+        ffn_gate: Some(need(&format!("blk.{block}.ffn_gate.weight"))?),
+        ffn_up: Some(need(&format!("blk.{block}.ffn_up.weight"))?),
+        ffn_down: Some(need(&format!("blk.{block}.ffn_down.weight"))?),
+        moe: None,
+    };
+    let eh_proj = need(&format!("{prefix}eh_proj.weight"))?;
+    // The projection consumes the embedding and the hidden state side by
+    // side, so its input is twice the model width.
+    if eh_proj.n_in != 2 * layer.wq.as_ref().unwrap().n_in {
+        return Err(format!(
+            "{prefix}eh_proj.weight: expected an input of {} columns, got {}",
+            2 * layer.wq.as_ref().unwrap().n_in,
+            eh_proj.n_in
+        ));
+    }
+    Ok(Some(MtpWeights {
+        layer,
+        eh_proj,
+        enorm: need_f32(&format!("{prefix}enorm.weight"))?,
+        hnorm: need_f32(&format!("{prefix}hnorm.weight"))?,
+        shared_head_head: load_weight(source, &format!("{prefix}shared_head_head.weight")),
+        shared_head_norm: load_weight_f32(source, &format!("{prefix}shared_head_norm.weight")),
+    }))
+}
+
+/// MoE weights for `qwen35moe`.
+///
+/// Experts are kept as one borrowed slice per projection rather than 3 *
+/// `n_expert` eager `Weight`s: a 40-layer 256-expert model would otherwise build
+/// 30 720 kernels up front for a path that only ever touches `n_expert_used`
+/// of them per token. Each expert's matrix is a contiguous block inside the 3-D
+/// GGUF tensor, so an expert is a sub-slice at a fixed stride.
+pub struct Qwen35MoeWeights<'a> {
+    /// Router: `[n_expert, n_embd]` (ggml dims `[n_embd, n_expert]`).
+    pub gate_inp: Weight<'a>,
+    pub up_exps: &'a [u8],
+    pub gate_exps: &'a [u8],
+    pub down_exps: &'a [u8],
+    pub up_type: GGMLType,
+    pub gate_type: GGMLType,
+    pub down_type: GGMLType,
+    pub n_expert: usize,
+    pub n_ff_exp: usize,
+    pub n_embd: usize,
+    /// Bytes per expert for each projection.
+    pub stride_up: usize,
+    pub stride_gate: usize,
+    pub stride_down: usize,
+    /// Shared expert; `None` when the checkpoint has none.
+    pub gate_inp_shexp: Option<Vec<f32>>,
+    pub up_shexp: Option<Weight<'a>>,
+    pub gate_shexp: Option<Weight<'a>>,
+    pub down_shexp: Option<Weight<'a>>,
+}
+
+impl<'a> Qwen35MoeWeights<'a> {
+    /// `[n_ff_exp, n_embd]` for expert `e`, matching ggml's
+    /// `ffn_up_exps` (`[n_embd, n_ff_exp, n_expert]`).
+    pub fn up(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.up_exps,
+            self.up_type,
+            self.stride_up,
+            e,
+            self.n_embd,
+            self.n_ff_exp,
+        )
+    }
+
+    pub fn gate(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.gate_exps,
+            self.gate_type,
+            self.stride_gate,
+            e,
+            self.n_embd,
+            self.n_ff_exp,
+        )
+    }
+
+    /// `[n_embd, n_ff_exp]` for expert `e`, matching ggml's
+    /// `ffn_down_exps` (`[n_ff_exp, n_embd, n_expert]`).
+    pub fn down(&self, e: usize) -> Weight<'a> {
+        self.view(
+            self.down_exps,
+            self.down_type,
+            self.stride_down,
+            e,
+            self.n_ff_exp,
+            self.n_embd,
+        )
+    }
+
+    fn view(
+        &self,
+        data: &'a [u8],
+        ggml_type: GGMLType,
+        stride: usize,
+        e: usize,
+        n_in: usize,
+        n_out: usize,
+    ) -> Weight<'a> {
+        let start = e * stride;
+        let slice = data.get(start..start + stride).unwrap_or(&data[..0]);
+        Weight::from_quantized(QuantizedTensor::from_bytes(slice, ggml_type, n_in, n_out))
+    }
+}
+
+/// Shared Qwen3.5/Edge0 attention and SSM weights + parsed config.
+///
+/// Qwen3.5 exposes this as `Qwen35Model`; Edge0 composes it with MoE weights.
+pub struct HybridTrunk<'a> {
     pub config: Qwen35Config,
     pub tok_embd: Weight<'a>,
     pub output_norm: Vec<f32>,
     pub output_weight: Weight<'a>,
     pub layers: Vec<Qwen35LayerWeights<'a>>,
+    /// The MTP (multi-token prediction) head, when the checkpoint carries
+    /// one: the block after the main stack with the `nextn` tensors that
+    /// turn it into a draft head. `None` for a checkpoint without it.
+    pub mtp: Option<MtpWeights<'a>>,
+    /// Optional classification head (cross-encoder / NLI), loaded when the
+    /// GGUF carries `cls.output.weight` (and optionally `cls.output.bias`).
+    /// The shape is `[n_embd, num_labels]` so the same `Weight` matmul used
+    /// by `qwen3::trunk::weights::score_logits` works here; the bias, when
+    /// present, is a separate `Vec<f32>` of length `num_labels`.
+    pub cls_score: Option<Weight<'a>>,
+    pub cls_score_bias: Vec<f32>,
     /// Lazily-initialized Vulkan session. Built on the first decode token
     /// after `--gpu` enables the global Vulkan context. `None` means CPU
     /// fallback (no eligible GPU or Vulkan init failed).
@@ -69,10 +265,26 @@ pub struct Qwen35Model<'a> {
     pub(crate) gpu: Option<Qwen35VulkanSession>,
 }
 
+/// Qwen3.5 uses the shared hybrid trunk without architecture-specific weights.
+pub type Qwen35Model<'a> = HybridTrunk<'a>;
+
 // Convenience alias so that `impl Qwen35Model { fn from_source(...) }` in
 // `weights.rs` and `impl Qwen35Model { fn forward(...) }` in `forward.rs`
 // can refer to a common TensorSource without redundant imports.
 pub(crate) type Source<'a> = &'a dyn TensorSource;
+
+/// The formats a qwen35 matrix tensor ships in.
+const MATRIX_FORMATS: &[GGMLType] = &[
+    GGMLType::F32,
+    GGMLType::F16,
+    GGMLType::BF16,
+    GGMLType::Q8_0,
+    GGMLType::Q4_0,
+    GGMLType::Q4_1,
+    GGMLType::Q4K,
+    GGMLType::Q5K,
+    GGMLType::Q6K,
+];
 
 /// Load a quantized weight (F32/F16/Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K) into a
 /// `Weight` borrowing the GGUF bytes. Returns `None` if the tensor is
@@ -83,42 +295,35 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
 ) -> Option<Weight<'a>> {
     let ti = source.tensor_info(name)?;
     let data = source.tensor_slice(name)?;
-    let n_cols = ti.dims[0] as usize;
-    let n_rows = if ti.dims.len() >= 2 {
-        ti.dims[1] as usize
-    } else {
-        1
-    };
 
-    match ti.ggml_type {
-        GGMLType::F32
-        | GGMLType::F16
-        | GGMLType::BF16
-        | GGMLType::Q8_0
-        | GGMLType::Q4_0
-        | GGMLType::Q4_1
-        | GGMLType::Q4K
-        | GGMLType::Q5K
-        | GGMLType::Q6K => {
-            let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-                data,
-                ti.ggml_type,
-                n_cols,
-                n_rows,
-            ));
-            weight.n_in = n_cols;
-            weight.n_out = n_rows;
+    if ti.ggml_type == GGMLType::I32 {
+        // The affine tensors are not matrices: they carry their own layout.
+        return match load_affine(source, name, None) {
+            Ok(weight) => Some(weight),
+            Err(error) => {
+                eprintln!("WARNING: {error}");
+                None
+            }
+        };
+    }
+
+    // The matrix shape comes from the tensor: the first dimension is the
+    // row length, and the number of rows is the product of the rest.
+    let n_in = ti.dims.first().copied().unwrap_or(0) as usize;
+    let n_out = ti.dims[1..].iter().product::<u64>() as usize;
+
+    match crate::core::tensor::load_weight_any(source, name, n_in, n_out, Some(MATRIX_FORMATS)) {
+        Ok(mut weight) => {
             if ti.ggml_type == GGMLType::BF16 {
+                // The qwen35 family follows llama.cpp's BF16 activation and
+                // accumulation contract, which the default kernel is not.
                 weight.kernel =
                     Box::new(crate::ops::kernel::bf16::BF16Kernel::with_bf16_input(data));
             }
             Some(weight)
         }
-        _ => {
-            eprintln!(
-                "WARNING: unsupported quant type {:?} for tensor {}",
-                ti.ggml_type, name
-            );
+        Err(error) => {
+            eprintln!("WARNING: {error}");
             None
         }
     }
@@ -126,61 +331,187 @@ pub(crate) fn load_weight<'a, S: TensorSource + ?Sized>(
 
 /// Load an F32-or-F16 norm/bias tensor into an owned `Vec<f32>`. Used for
 /// non-matmul tensors (norms, biases, conv1d, dt.bias, A-log).
+/// Bind one layer's MoE tensors.
+///
+/// Each projection is a 3-D GGUF tensor with the expert axis last, so expert
+/// `e` is a contiguous block at `e * bytes_per_expert`.
+fn load_moe_weights<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    layer: usize,
+    moe: super::config::Qwen35Moe,
+    n_embd_cfg: usize,
+) -> Result<Qwen35MoeWeights<'a>, String> {
+    let need = |name: &str| -> Result<&'a [u8], String> {
+        source
+            .tensor_slice(name)
+            .ok_or_else(|| format!("Missing {name}"))
+    };
+    let info = |name: &str| -> Result<&'a crate::core::tensor::TensorInfo, String> {
+        source
+            .tensor_info(name)
+            .ok_or_else(|| format!("Missing {name}"))
+    };
+
+    let up_name = format!("blk.{layer}.ffn_up_exps.weight");
+    let gate_name = format!("blk.{layer}.ffn_gate_exps.weight");
+    let down_name = format!("blk.{layer}.ffn_down_exps.weight");
+
+    let up_info = info(&up_name)?;
+    if up_info.dims.len() != 3 {
+        return Err(format!(
+            "{up_name}: expected [n_embd, n_ff_exp, n_expert], got {:?}",
+            up_info.dims
+        ));
+    }
+    let n_embd = up_info.dims[0] as usize;
+    let n_ff_exp = up_info.dims[1] as usize;
+    let n_expert = up_info.dims[2] as usize;
+    if n_embd != n_embd_cfg || n_ff_exp != moe.n_ff_exp || n_expert != moe.n_expert {
+        return Err(format!(
+            "{up_name}: got [{n_embd}, {n_ff_exp}, {n_expert}], config says \
+             [{n_embd_cfg}, {}, {}]",
+            moe.n_ff_exp, moe.n_expert
+        ));
+    }
+    // ggml stores the expert axis last and contiguous, so a 3-D tensor is
+    // `n_expert` back-to-back copies of one expert's matrix.
+    let gate_info = info(&gate_name)?;
+    let down_info = info(&down_name)?;
+    for (name, tensor, dims) in [
+        (
+            &up_name,
+            up_info,
+            [n_embd as u64, n_ff_exp as u64, n_expert as u64],
+        ),
+        (
+            &gate_name,
+            gate_info,
+            [n_embd as u64, n_ff_exp as u64, n_expert as u64],
+        ),
+        (
+            &down_name,
+            down_info,
+            [n_ff_exp as u64, n_embd as u64, n_expert as u64],
+        ),
+    ] {
+        if tensor.dims != dims || tensor.checked_nbytes() != Some(need(name)?.len() as u64) {
+            return Err(format!(
+                "{name}: invalid expert shape or payload; expected {dims:?}"
+            ));
+        }
+    }
+    let stride_up = up_info.ggml_type.nbytes(n_embd * n_ff_exp);
+    let stride_gate = gate_info.ggml_type.nbytes(n_embd * n_ff_exp);
+    let stride_down = down_info.ggml_type.nbytes(n_ff_exp * n_embd);
+
+    let gate_inp = load_weight(source, &format!("blk.{layer}.ffn_gate_inp.weight"))
+        .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp.weight"))?;
+    if gate_inp.n_in != n_embd || gate_inp.n_out != n_expert {
+        return Err(format!(
+            "blk.{layer}.ffn_gate_inp.weight: got [{}, {}], expected [{n_embd}, {n_expert}]",
+            gate_inp.n_in, gate_inp.n_out
+        ));
+    }
+
+    let has_shexp = moe.n_ff_shexp > 0;
+    let shared_weight = |suffix: &str,
+                         n_in: usize,
+                         n_out: usize|
+     -> Result<Option<Weight<'a>>, String> {
+        if !has_shexp {
+            return Ok(None);
+        }
+        let name = format!("blk.{layer}.ffn_{suffix}_shexp.weight");
+        let tensor = info(&name)?;
+        if tensor.dims != [n_in as u64, n_out as u64]
+            || tensor.checked_nbytes() != Some(need(&name)?.len() as u64)
+        {
+            return Err(format!("Invalid shared expert tensor {name}: expected [{n_in}, {n_out}] with complete payload"));
+        }
+        load_weight(source, &name)
+            .map(Some)
+            .ok_or_else(|| format!("Unsupported shared expert tensor: {name}"))
+    };
+    let gate_inp_shexp = if has_shexp {
+        let name = [
+            format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
+            format!("blk.{layer}.ffn_gate_inp_shexp"),
+        ]
+        .into_iter()
+        .find(|name| source.tensor_info(name).is_some())
+        .ok_or_else(|| format!("Missing blk.{layer}.ffn_gate_inp_shexp.weight"))?;
+        let tensor = info(&name)?;
+        if tensor.dims != [n_embd as u64] && tensor.dims != [n_embd as u64, 1] {
+            return Err(format!(
+                "Invalid shared expert gate {name}: shape {:?}",
+                tensor.dims
+            ));
+        }
+        crate::core::tensor::load_f32_tensor(source, &name, &tensor.dims)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(Qwen35MoeWeights {
+        gate_inp,
+        up_exps: need(&up_name)?,
+        gate_exps: need(&gate_name)?,
+        down_exps: need(&down_name)?,
+        up_type: up_info.ggml_type,
+        gate_type: gate_info.ggml_type,
+        down_type: down_info.ggml_type,
+        n_expert,
+        n_ff_exp,
+        n_embd,
+        stride_up,
+        stride_gate,
+        stride_down,
+        gate_inp_shexp: has_shexp.then_some(gate_inp_shexp),
+        up_shexp: shared_weight("up", n_embd, moe.n_ff_shexp)?,
+        gate_shexp: shared_weight("gate", n_embd, moe.n_ff_shexp)?,
+        down_shexp: shared_weight("down", moe.n_ff_shexp, n_embd)?,
+    })
+}
+
+/// Load a norm or bias tensor into owned F32 values, using the format the
+/// tensor declares.
+///
+/// The formats are the ones a norm or a bias can ship in. A tensor whose
+/// payload does not match its declared format is reported rather than
+/// padded with zeros: a short vector is a broken file, and the padding used
+/// to hide it.
 pub(crate) fn load_weight_f32<S: TensorSource + ?Sized>(
     source: &S,
     name: &str,
 ) -> Option<Vec<f32>> {
-    let ti = source.tensor_info(name)?;
-    let data = source.tensor_slice(name)?;
-    let n_el = ti.n_elements();
-    match ti.ggml_type {
-        GGMLType::F32 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                let off = i * 4;
-                if off + 4 <= data.len() {
-                    out.push(f32::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                        data[off + 2],
-                        data[off + 3],
-                    ]));
-                } else {
-                    out.push(0.0);
-                }
-            }
-            Some(out)
+    match crate::core::tensor::optional_f32_values(source, name) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("WARNING: {error}");
+            None
         }
-        GGMLType::F16 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                out.push(f16_at(data, i));
-            }
-            Some(out)
-        }
-        GGMLType::BF16 => {
-            let mut out = Vec::with_capacity(n_el);
-            for i in 0..n_el {
-                let off = i * 2;
-                if off + 2 <= data.len() {
-                    out.push(crate::ops::bf16_to_f32(u16::from_le_bytes([
-                        data[off],
-                        data[off + 1],
-                    ])));
-                } else {
-                    out.push(0.0);
-                }
-            }
-            Some(out)
-        }
-        _ => None,
     }
 }
 
-impl<'a> Qwen35Model<'a> {
+impl<'a> HybridTrunk<'a> {
     pub fn from_source(source: &'a dyn TensorSource) -> Result<Self, String> {
+        let arch = source
+            .metadata("general.architecture")
+            .and_then(|value| value.to_string_val());
+        if arch == Some("edge0") {
+            return Err("Edge0 architecture requires Edge0Model::from_source".into());
+        }
+        // qwen35moe shares every attention and SSM tensor with qwen35; only the
+        // FFN differs, and the shared trunk carries the experts.
         let config = Qwen35Config::from_source(source)?;
+        Self::load_trunk(source, config, false)
+    }
 
+    pub(crate) fn load_trunk(
+        source: &'a dyn TensorSource,
+        config: Qwen35Config,
+        edge0: bool,
+    ) -> Result<Self, String> {
         let token_info = source
             .tensor_info("token_embd.weight")
             .ok_or("Missing token_embd.weight")?;
@@ -189,7 +520,17 @@ impl<'a> Qwen35Model<'a> {
             .iter()
             .map(|value| *value as usize)
             .collect::<Vec<_>>();
-        let expected = vec![config.n_embd, config.vocab_size];
+        // The lossless export stores packed 4-bit codes, so the embedding is
+        // one eighth as wide; the expanded modes store whole values instead.
+        let expanded = crate::models::edge0::weights::is_expanded(source);
+        let expected = vec![
+            if edge0 && !expanded {
+                config.n_embd / 8
+            } else {
+                config.n_embd
+            },
+            config.vocab_size,
+        ];
         if actual != expected {
             return Err(format!(
                 "token_embd.weight shape mismatch: expected {expected:?}, got {actual:?}, dtype={:?}",
@@ -214,6 +555,40 @@ impl<'a> Qwen35Model<'a> {
             };
             load_weight(source, name).ok_or("Missing output weight")?
         };
+        if edge0
+            && !expanded
+            && (
+                tok_embd.n_in,
+                tok_embd.n_out,
+                output_weight.n_in,
+                output_weight.n_out,
+            ) != (
+                config.n_embd,
+                config.vocab_size,
+                config.n_embd,
+                config.vocab_size,
+            )
+        {
+            return Err("Edge0 embedding or output shape mismatch".into());
+        }
+        // Every mode, packed or expanded, must present the same logical matrix,
+        // so the expanded path checks the widths the kernel will actually use.
+        if edge0
+            && expanded
+            && (
+                tok_embd.n_in,
+                tok_embd.n_out,
+                output_weight.n_in,
+                output_weight.n_out,
+            ) != (
+                config.n_embd,
+                config.vocab_size,
+                config.n_embd,
+                config.vocab_size,
+            )
+        {
+            return Err("Edge0 expanded embedding or output shape mismatch".into());
+        }
 
         let n_layers_impl = config.n_layer_impl();
         let mut layers = Vec::with_capacity(n_layers_impl);
@@ -263,13 +638,33 @@ impl<'a> Qwen35Model<'a> {
             } else {
                 (None, None, None, None, None, None, None, None, None)
             };
+            let mut ssm_a = ssm_a;
+            if edge0 {
+                if let Some(values) = &mut ssm_a {
+                    for value in values {
+                        *value = -value.exp();
+                    }
+                }
+            }
 
-            let ffn_gate = load_weight(source, &format!("blk.{}.ffn_gate.weight", i))
-                .ok_or_else(|| format!("Missing blk.{}.ffn_gate.weight", i))?;
-            let ffn_up = load_weight(source, &format!("blk.{}.ffn_up.weight", i))
-                .ok_or_else(|| format!("Missing blk.{}.ffn_up.weight", i))?;
-            let ffn_down = load_weight(source, &format!("blk.{}.ffn_down.weight", i))
-                .ok_or_else(|| format!("Missing blk.{}.ffn_down.weight", i))?;
+            let moe = match config.moe {
+                None => None,
+                Some(moe) => Some(load_moe_weights(source, i, moe, config.n_embd)?),
+            };
+            let dense = |name: &str| -> Result<Option<Weight<'a>>, String> {
+                if config.moe.is_some() {
+                    // qwen35moe carries no dense FFN; the per-expert tensors
+                    // stand in for it. Absent rather than mis-bound, so the
+                    // dispatch cannot silently run a dense block on a MoE model.
+                    return Ok(None);
+                }
+                load_weight(source, name)
+                    .map(Some)
+                    .ok_or_else(|| format!("Missing {name}"))
+            };
+            let ffn_gate = dense(&format!("blk.{i}.ffn_gate.weight"))?;
+            let ffn_up = dense(&format!("blk.{i}.ffn_up.weight"))?;
+            let ffn_down = dense(&format!("blk.{i}.ffn_down.weight"))?;
             layers.push(Qwen35LayerWeights {
                 attn_norm,
                 attn_post_norm,
@@ -291,8 +686,18 @@ impl<'a> Qwen35Model<'a> {
                 ffn_gate,
                 ffn_up,
                 ffn_down,
+                moe,
             });
         }
+
+        // The MTP head is the block right after the main stack. Only the
+        // dense arch is wired up: a MoE tower's nextn block routes through
+        // experts, which is a different graph.
+        let mtp = if config.n_nextn > 0 && config.moe.is_none() {
+            load_mtp_weights(source, n_layers_impl)?
+        } else {
+            None
+        };
 
         Ok(Self {
             config,
@@ -300,6 +705,9 @@ impl<'a> Qwen35Model<'a> {
             output_norm,
             output_weight,
             layers,
+            mtp,
+            cls_score: load_weight(source, "cls.output.weight"),
+            cls_score_bias: load_weight_f32(source, "cls.output.bias").unwrap_or_default(),
             #[cfg(feature = "vulkan")]
             gpu: None,
         })
@@ -327,5 +735,144 @@ impl<'a> Qwen35Model<'a> {
             self.tok_embd.embedding_lookup(token_id, row);
         }
         Ok(embeddings)
+    }
+
+    /// True when the GGUF carried a `cls.output.weight` head. Mirrors
+    /// `Qwen3Model::is_rerank` so callers (server / rerank CLI) can probe
+    /// the model the same way for both backbones.
+    pub fn is_classifier(&self) -> bool {
+        self.cls_score.is_some()
+    }
+
+    /// Project `last_hidden` (length `n_embd`) through the classification
+    /// head, returning one logit per class plus the optional bias. Returns
+    /// an error if the head wasn't loaded.
+    ///
+    /// Same contract as `Qwen3Model::score_logits` but with a `cls_score_bias`
+    /// added on top of the matmul output. The HF `score.weight` is stored
+    /// as `[num_labels, n_embd]` in safetensors; the converter transposes
+    /// it to `[n_embd, num_labels]` for the llama.cpp rerank-packer layout,
+    /// and we add a zero bias when the HF head had no bias (`openjev` does
+    /// not have one; `jina-bert-v2` does).
+    pub fn score_logits(&self, last_hidden: &[f32]) -> Result<Vec<f32>, String> {
+        let weight = self
+            .cls_score
+            .as_ref()
+            .ok_or_else(|| "Qwen3.5 model has no cls.output.weight head".to_string())?;
+        if last_hidden.len() != self.config.n_embd {
+            return Err(format!(
+                "score_logits: hidden size {} does not match n_embd {}",
+                last_hidden.len(),
+                self.config.n_embd
+            ));
+        }
+        let n_in = self.config.n_embd;
+        let n_cls = weight.n_out;
+        let mut out = vec![0.0f32; n_cls];
+        weight
+            .kernel
+            .forward_prepared(last_hidden, &[], &[], None, &mut out, n_in, n_cls, 0, 1);
+        if !self.cls_score_bias.is_empty() {
+            if self.cls_score_bias.len() != n_cls {
+                return Err(format!(
+                    "cls.output.bias length {} does not match num_labels {}",
+                    self.cls_score_bias.len(),
+                    n_cls
+                ));
+            }
+            for (slot, bias) in out.iter_mut().zip(self.cls_score_bias.iter()) {
+                *slot += *bias;
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod moe_tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo};
+    use std::collections::HashMap;
+
+    struct Source(HashMap<String, (TensorInfo, Vec<u8>)>);
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            self.0.get(name).map(|v| &v.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            self.0.get(name).map(|v| v.1.as_slice())
+        }
+    }
+
+    fn source() -> (Source, super::super::config::Qwen35Moe) {
+        let mut tensors = HashMap::new();
+        for (name, dims, ggml_type) in [
+            ("ffn_up_exps.weight", vec![512, 256, 2], GGMLType::Q4K),
+            ("ffn_gate_exps.weight", vec![512, 256, 2], GGMLType::Q5K),
+            ("ffn_down_exps.weight", vec![256, 512, 2], GGMLType::Q6K),
+            ("ffn_gate_inp.weight", vec![512, 2], GGMLType::F32),
+        ] {
+            let name = format!("blk.0.{name}");
+            let bytes = vec![0; ggml_type.nbytes(dims.iter().product::<u64>() as usize)];
+            tensors.insert(
+                name.clone(),
+                (
+                    TensorInfo {
+                        name,
+                        dims,
+                        ggml_type,
+                        offset: 0,
+                    },
+                    bytes,
+                ),
+            );
+        }
+        (
+            Source(tensors),
+            super::super::config::Qwen35Moe {
+                n_expert: 2,
+                n_expert_used: 1,
+                n_ff_exp: 256,
+                n_ff_shexp: 0,
+                weights_scale: 1.0,
+            },
+        )
+    }
+
+    #[test]
+    fn qwen35moe_preserves_each_expert_projection_type() {
+        let (source, config) = source();
+        let weights = load_moe_weights(&source, 0, config, 512).unwrap();
+        for expert in 0..2 {
+            assert_eq!(weights.up(expert).ggml_type, GGMLType::Q4K);
+            assert_eq!(weights.gate(expert).ggml_type, GGMLType::Q5K);
+            assert_eq!(weights.down(expert).ggml_type, GGMLType::Q6K);
+        }
+    }
+
+    #[test]
+    fn qwen35moe_rejects_invalid_expert_shapes_and_payloads() {
+        for name in [
+            "ffn_up_exps.weight",
+            "ffn_gate_exps.weight",
+            "ffn_down_exps.weight",
+        ] {
+            for bad_shape in [true, false] {
+                let (mut source, config) = source();
+                let tensor = source.0.get_mut(&format!("blk.0.{name}")).unwrap();
+                if bad_shape {
+                    tensor.0.dims[2] = 1;
+                } else {
+                    tensor.1.pop();
+                }
+                assert!(
+                    load_moe_weights(&source, 0, config, 512).is_err(),
+                    "{name}, bad_shape={bad_shape}"
+                );
+            }
+        }
     }
 }

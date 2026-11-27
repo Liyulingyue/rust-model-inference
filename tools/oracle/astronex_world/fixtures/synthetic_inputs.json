@@ -1,0 +1,13 @@
+{
+  "kind": "official-operator-and-small-graph-fixture",
+  "prompt": "A camera moves through a quiet room.",
+  "seed": 7,
+  "latent_shape": [1, 48, 8, 2, 2],
+  "pixel_shape": [1, 3, 8, 32, 32],
+  "camera": "identity 4x4 per frame",
+  "actions": "64 F32 values; first component is frame index",
+  "tokens": [0, 17, 3],
+  "stages": ["text/token_ids", "denoiser/bidirectional", "denoiser/cache0", "denoiser/cache1", "vae", "unipc"],
+  "arithmetic": "CPU scalar C F32; official F64 complex RoPE only",
+  "weights": "none; this fixture is not real-weight e2e evidence"
+}

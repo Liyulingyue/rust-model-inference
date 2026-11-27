@@ -22,21 +22,29 @@
 pub mod bf16;
 pub mod f16;
 pub mod f32;
+pub mod i2_s;
 pub mod iq4_nl;
 pub mod iq4_xs;
+pub mod mlx_affine;
+pub mod q1_0;
 pub mod q2_k;
 pub mod q3_k;
 pub mod q4_0;
 pub mod q4_1;
 pub mod q4_k;
+pub mod q5_0;
+pub mod q5_1;
 pub mod q5_k;
 pub mod q6_k;
 pub mod q8_0;
 pub mod simd_avx2;
+pub mod simd_avx512;
 
 mod qtensor_owned;
 mod quantized_tensor;
 mod trait_;
+#[cfg(feature = "vulkan")]
+pub(crate) mod vulkan;
 
 pub(crate) struct PreparedRows {
     max_rows: usize,
@@ -63,6 +71,11 @@ impl PreparedRows {
             scales: Vec::new(),
             q8k: Vec::new(),
         }
+    }
+
+    /// Largest `rows` chunk the buffer can hold.
+    pub(crate) fn max_rows(&self) -> usize {
+        self.max_rows
     }
 
     pub(crate) fn prepare(
@@ -183,17 +196,45 @@ impl PreparedRows {
             }
         }
 
-        let projections = projections.map(|(weight, output)| (weight, output.as_mut_ptr()));
+        let blocks = self.n_in.div_ceil(32);
+        let q8k_blocks = self.n_in / crate::ops::quant::QK_K;
+        let projections = projections.map(|(weight, output)| {
+            #[cfg(feature = "vulkan")]
+            let gpu_done = weight.try_vulkan_rows(input, output, self.rows);
+            #[cfg(not(feature = "vulkan"))]
+            let gpu_done = false;
+            (weight, output.as_mut_ptr(), gpu_done)
+        });
+        if projections.iter().all(|(_, _, done)| *done) {
+            return Ok(());
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         // ARM Q4_0 uses the scalar dot contract. Other kernels, including the
         // x86 AVX2 contract, retain their original per-row execution.
         let batched_q4 = self.rows >= 4
             && self.need_q8
             && projections
                 .iter()
-                .all(|(weight, _)| weight.kernel.scalar_q4_0_bytes().is_some());
+                .filter(|(_, _, done)| !done)
+                .all(|(weight, _, _)| weight.kernel.scalar_q4_0_bytes().is_some());
+        // The Q8_0 weights can share their reads between the activation
+        // rows of a batch. Without that a batched forward pass reads the
+        // whole weight matrix once per token, which is what makes a batch
+        // cost as much traffic as that many token-at-a-time passes.
+        let batched_q8 = !batched_q4
+            && self.rows >= 2
+            && self.need_q8
+            && projections
+                .iter()
+                .filter(|(_, _, done)| !done)
+                .all(|(weight, _, _)| weight.kernel.batchable_q8_0_bytes().is_some());
         pool.compute(|ith, nth| {
             if batched_q4 {
-                for (weight, output_ptr) in projections {
+                for (weight, output_ptr, gpu_done) in projections {
+                    if gpu_done {
+                        continue;
+                    }
                     // SAFETY: output lengths were checked above. Each worker
                     // owns disjoint columns in every row; no full-output
                     // mutable slice is constructed while workers are active.
@@ -213,29 +254,125 @@ impl PreparedRows {
                 }
                 return;
             }
-            let q8 = self.need_q8.then_some(self.q8.as_slice()).unwrap_or(&[]);
-            let scales = self
-                .need_q8
-                .then_some(self.scales.as_slice())
-                .unwrap_or(&[]);
-            for (weight, output_ptr) in projections {
-                let q8k = weight.uses_q8_k().then_some(self.q8k.as_slice());
-                // SAFETY: output lengths were checked above. The kernel
-                // contract assigns each worker disjoint output columns.
-                let output =
-                    unsafe { std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out) };
-                weight.kernel.forward_prepared_rows(
-                    input,
-                    q8,
-                    scales,
-                    q8k,
-                    output,
-                    self.rows,
-                    self.n_in,
-                    weight.n_out,
-                    ith,
-                    nth,
-                );
+            if batched_q8 {
+                for (weight, output_ptr, gpu_done) in projections {
+                    if gpu_done {
+                        continue;
+                    }
+                    // SAFETY: the output lengths were checked above (the
+                    // buffer holds `rows * n_out` values) and each worker
+                    // owns a disjoint column range of every row.
+                    unsafe {
+                        q8_0::dispatch::matmul_q8_0_quantized_batched_range(
+                            weight.kernel.batchable_q8_0_bytes().unwrap(),
+                            &self.q8,
+                            &self.scales,
+                            std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out),
+                            self.n_in,
+                            weight.n_out,
+                            self.rows,
+                            ith,
+                            nth,
+                        );
+                    }
+                }
+                return;
+            }
+            // Token-tiled batching: kernels that opt in process their whole
+            // row range for ALL activation rows in one call, keeping the
+            // weight panel and the input panel resident in L2 instead of
+            // re-streaming the weight matrix once per token. The per-(row,
+            // token) values are bit-identical to the per-token loop below —
+            // only the loop order changes. Single-token calls (decode) keep
+            // the generic loop.
+            let tiled_batched = !batched_q4
+                && !batched_q8
+                && self.rows >= 2
+                && projections
+                    .iter()
+                    .filter(|(_, _, done)| !done)
+                    .all(|(weight, _, _)| weight.kernel.supports_token_tiled_batching(self.n_in));
+            if tiled_batched {
+                // Already inside the pool.compute worker closure: (ith, nth)
+                // is this worker's row partition. Calling pool.compute here
+                // again would deadlock against the pool we are occupying.
+                for (weight, output_ptr, gpu_done) in projections {
+                    if gpu_done {
+                        continue;
+                    }
+                    let per_thread = (weight.n_out + nth - 1) / nth;
+                    let row_start = ith * per_thread;
+                    let row_end = (row_start + per_thread).min(weight.n_out);
+                    if row_start >= row_end {
+                        continue;
+                    }
+                    // SAFETY: output lengths were checked above (the
+                    // buffer holds `rows * n_out` values) and each worker
+                    // owns a disjoint row range of every token row — the
+                    // audited alias pattern of
+                    // docs/develop/PARALLEL_MATMUL_SAFETY.md §4.
+                    let out = unsafe {
+                        std::slice::from_raw_parts_mut(output_ptr, self.rows * weight.n_out)
+                    };
+                    let tiled = weight.kernel.forward_batched_rows(
+                        input,
+                        out,
+                        self.n_in,
+                        weight.n_out,
+                        self.rows,
+                        row_start,
+                        row_end,
+                    );
+                    debug_assert!(tiled, "tiled_batched group members must opt in");
+                }
+                return;
+            }
+            let mut output_ptrs = projections.map(|(_, output_ptr, _)| output_ptr);
+            for row in 0..self.rows {
+                let input_row = &input[row * self.n_in..(row + 1) * self.n_in];
+                let q8 = if self.need_q8 {
+                    &self.q8[row * self.n_in..(row + 1) * self.n_in]
+                } else {
+                    &[]
+                };
+                let scales = if self.need_q8 {
+                    &self.scales[row * blocks..(row + 1) * blocks]
+                } else {
+                    &[]
+                };
+                for ((weight, _, gpu_done), output_ptr) in projections.iter().zip(&mut output_ptrs)
+                {
+                    if *gpu_done {
+                        continue;
+                    }
+                    let q8k = weight
+                        .uses_q8_k()
+                        .then(|| &self.q8k[row * q8k_blocks..(row + 1) * q8k_blocks]);
+                    // SAFETY: `*output_ptr` is shared across workers via the
+                    // closure capture, but each worker iterates `self.rows`
+                    // serially within its own stack frame and only constructs
+                    // a per-row `&mut [f32]` here. The kernel writes to its
+                    // `[start, end)` partition via `(ith, nth)`, so the actual
+                    // writes are disjoint across workers. Audited alias
+                    // pattern — see
+                    // `docs/develop/PARALLEL_MATMUL_SAFETY.md` §4.
+                    let output_row =
+                        unsafe { std::slice::from_raw_parts_mut(*output_ptr, weight.n_out) };
+                    weight.kernel.forward_prepared(
+                        input_row,
+                        q8,
+                        scales,
+                        q8k,
+                        output_row,
+                        self.n_in,
+                        weight.n_out,
+                        ith,
+                        nth,
+                    );
+                    // SAFETY: output lengths were checked above, so advancing
+                    // one row stays within each output allocation.
+                    *output_ptr = unsafe { output_ptr.add(weight.n_out) };
+                }
             }
         });
         Ok(())
@@ -277,12 +414,29 @@ pub struct Weight<'a> {
 }
 
 impl<'a> Weight<'a> {
+    pub fn from_f32_bytes(bytes: &'a [u8], n_in: usize, n_out: usize) -> Option<Self> {
+        let kernel: Box<dyn Kernel + 'a> =
+            Box::new(f32::F32Kernel::from_le_bytes(bytes, n_in, n_out)?);
+        let ggml_type = crate::core::tensor::GGMLType::F32;
+        #[cfg(feature = "vulkan")]
+        let kernel = vulkan::VulkanKernel::wrap(kernel, ggml_type);
+        Some(Self {
+            kernel,
+            ggml_type,
+            n_in,
+            n_out,
+        })
+    }
+
     pub fn from_quantized(tensor: QuantizedTensor<'a>) -> Self {
         let ggml_type = tensor.ggml_type();
         let n_in = tensor.n_in();
         let n_out = tensor.n_rows();
+        let kernel = tensor.into_kernel();
+        #[cfg(feature = "vulkan")]
+        let kernel = vulkan::VulkanKernel::wrap(kernel, ggml_type);
         Self {
-            kernel: tensor.into_kernel(),
+            kernel,
             ggml_type,
             n_in,
             n_out,
@@ -316,7 +470,10 @@ impl<'a> Weight<'a> {
             self.ggml_type,
             crate::core::tensor::GGMLType::Q4_0
                 | crate::core::tensor::GGMLType::Q4_1
+                | crate::core::tensor::GGMLType::Q5_0
+                | crate::core::tensor::GGMLType::Q5_1
                 | crate::core::tensor::GGMLType::Q8_0
+                | crate::core::tensor::GGMLType::Q1_0
         )
     }
 
@@ -344,9 +501,17 @@ impl<'a> Weight<'a> {
 
         let n_in = input.len();
         let n_out = self.n_out;
+        #[cfg(feature = "vulkan")]
+        if self.try_vulkan_rows(input, output, 1) {
+            return;
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
         let (input_q8, input_scales, q8_k) = match self.ggml_type {
-            GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 => (&[][..], &[][..], None),
-            GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q8_0 => {
+            GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::I32 => {
+                (&[][..], &[][..], None)
+            }
+            GGMLType::Q4_0 | GGMLType::Q4_1 | GGMLType::Q8_0 | GGMLType::Q1_0 => {
                 let blocks = n_in.div_ceil(32);
                 crate::ops::quantize_q8_0_into(
                     input,
@@ -399,6 +564,46 @@ impl<'a> Weight<'a> {
         let mut output = vec![0.0; n_out];
         self.kernel.forward(input, &mut output, input.len(), n_out);
         output
+    }
+
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn try_vulkan_rows(&self, input: &[f32], output: &mut [f32], rows: usize) -> bool {
+        self.kernel
+            .try_forward_vulkan_rows(input, output, self.n_in, self.n_out, rows)
+    }
+
+    /// Finish a whole projection before callers apply activations or residuals.
+    pub(crate) fn matmul_prepared(
+        &self,
+        input: &[f32],
+        q8: &[u8],
+        scales: &[f32],
+        q8k: Option<&[crate::ops::quant::BlockQ8K]>,
+        output: &mut [f32],
+        pool: &crate::core::thread_pool::ComputePool,
+    ) {
+        #[cfg(feature = "vulkan")]
+        if self.try_vulkan_rows(input, output, 1) {
+            return;
+        }
+        #[cfg(feature = "vulkan")]
+        let _cpu_scope = crate::core::thread_pool::ComputePool::disable_gpu_matmul_for_scope();
+        let output_ptr = output.as_mut_ptr();
+        let n_out = output.len();
+        pool.compute(|ith, nth| {
+            let output = unsafe { std::slice::from_raw_parts_mut(output_ptr, n_out) };
+            self.kernel.forward_prepared(
+                input,
+                q8,
+                scales,
+                q8k,
+                output,
+                input.len(),
+                n_out,
+                ith,
+                nth,
+            );
+        });
     }
 
     pub fn embedding_lookup(&self, token_id: u32, out: &mut [f32]) {

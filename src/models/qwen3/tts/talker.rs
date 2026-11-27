@@ -566,7 +566,7 @@ impl<'model> TtsSession<'model> {
         let n_embd_q = checked_product("query width", config.n_head, config.n_embd_head_k)?;
         let n_embd_k = checked_product("key width", config.n_head_kv, config.n_embd_head_k)?;
         let n_embd_v = checked_product("value width", config.n_head_kv, config.n_embd_head_v)?;
-        let n_attn = checked_product(
+        let _n_attn = checked_product(
             "attention output width",
             config.n_head,
             config.n_embd_head_v,

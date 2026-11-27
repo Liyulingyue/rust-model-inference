@@ -1,0 +1,1057 @@
+[
+ {
+  "text": "(",
+  "pieces": [
+   "▁("
+  ],
+  "ids": [
+   287
+  ]
+ },
+ {
+  "text": ")",
+  "pieces": [
+   "▁)"
+  ],
+  "ids": [
+   1263
+  ]
+ },
+ {
+  "text": ",",
+  "pieces": [
+   "▁,"
+  ],
+  "ids": [
+   366
+  ]
+ },
+ {
+  "text": "|",
+  "pieces": [
+   "▁|"
+  ],
+  "ids": [
+   1540
+  ]
+ },
+ {
+  "text": "intent",
+  "pieces": [
+   "▁intent"
+  ],
+  "ids": [
+   5875
+  ]
+ },
+ {
+  "text": "answer: Did the treaty enter into force in 1992?",
+  "pieces": [
+   "▁answer",
+   ":",
+   "▁Did",
+   "▁the",
+   "▁treaty",
+   "▁enter",
+   "▁into",
+   "▁force",
+   "▁in",
+   "▁1992",
+   "?"
+  ],
+  "ids": [
+   1330,
+   294,
+   2709,
+   262,
+   13281,
+   1916,
+   352,
+   1711,
+   267,
+   5762,
+   302
+  ]
+ },
+ {
+  "text": "order_status",
+  "pieces": [
+   "▁order",
+   "_",
+   "status"
+  ],
+  "ids": [
+   556,
+   616,
+   35124
+  ]
+ },
+ {
+  "text": "refund_request",
+  "pieces": [
+   "▁refund",
+   "_",
+   "request"
+  ],
+  "ids": [
+   6257,
+   616,
+   40952
+  ]
+ },
+ {
+  "text": "cancel_subscription",
+  "pieces": [
+   "▁cancel",
+   "_",
+   "subscription"
+  ],
+  "ids": [
+   6788,
+   616,
+   76824
+  ]
+ },
+ {
+  "text": "card_pin_change: The customer wants a new PIN or the current PIN replaced",
+  "pieces": [
+   "▁card",
+   "_",
+   "pin",
+   "_",
+   "change",
+   ":",
+   "▁The",
+   "▁customer",
+   "▁wants",
+   "▁a",
+   "▁new",
+   "▁PIN",
+   "▁or",
+   "▁the",
+   "▁current",
+   "▁PIN",
+   "▁replaced"
+  ],
+  "ids": [
+   1081,
+   616,
+   10161,
+   616,
+   18982,
+   294,
+   279,
+   1099,
+   1654,
+   266,
+   353,
+   20280,
+   289,
+   262,
+   763,
+   20280,
+   3473
+  ]
+ },
+ {
+  "text": "Did the treaty enter into force in 1992?",
+  "pieces": [
+   "▁Did",
+   "▁the",
+   "▁treaty",
+   "▁enter",
+   "▁into",
+   "▁force",
+   "▁in",
+   "▁1992",
+   "?"
+  ],
+  "ids": [
+   2709,
+   262,
+   13281,
+   1916,
+   352,
+   1711,
+   267,
+   5762,
+   302
+  ]
+ },
+ {
+  "text": "Guest in room 1408 says the AC has been out since yesterday",
+  "pieces": [
+   "▁Guest",
+   "▁in",
+   "▁room",
+   "▁14",
+   "08",
+   "▁says",
+   "▁the",
+   "▁AC",
+   "▁has",
+   "▁been",
+   "▁out",
+   "▁since",
+   "▁yesterday"
+  ],
+  "ids": [
+   9848,
+   267,
+   629,
+   936,
+   4425,
+   652,
+   262,
+   5816,
+   303,
+   331,
+   321,
+   515,
+   2807
+  ]
+ },
+ {
+  "text": "my",
+  "pieces": [
+   "▁my"
+  ],
+  "ids": [
+   312
+  ]
+ },
+ {
+  "text": "subscription",
+  "pieces": [
+   "▁subscription"
+  ],
+  "ids": [
+   5534
+  ]
+ },
+ {
+  "text": "renewed",
+  "pieces": [
+   "▁renewed"
+  ],
+  "ids": [
+   9504
+  ]
+ },
+ {
+  "text": "on",
+  "pieces": [
+   "▁on"
+  ],
+  "ids": [
+   277
+  ]
+ },
+ {
+  "text": "april",
+  "pieces": [
+   "▁april"
+  ],
+  "ids": [
+   47756
+  ]
+ },
+ {
+  "text": "15",
+  "pieces": [
+   "▁15"
+  ],
+  "ids": [
+   706
+  ]
+ },
+ {
+  "text": "for",
+  "pieces": [
+   "▁for"
+  ],
+  "ids": [
+   270
+  ]
+ },
+ {
+  "text": "5,400",
+  "pieces": [
+   "▁5",
+   ",",
+   "400"
+  ],
+  "ids": [
+   456,
+   261,
+   4895
+  ]
+ },
+ {
+  "text": ".",
+  "pieces": [
+   "▁."
+  ],
+  "ids": [
+   323
+  ]
+ },
+ {
+  "text": "?",
+  "pieces": [
+   "▁?"
+  ],
+  "ids": [
+   1102
+  ]
+ },
+ {
+  "text": "!",
+  "pieces": [
+   "▁!"
+  ],
+  "ids": [
+   1084
+  ]
+ },
+ {
+  "text": "¥5,400",
+  "pieces": [
+   "▁¥",
+   "5",
+   ",",
+   "400"
+  ],
+  "ids": [
+   56478,
+   524,
+   261,
+   4895
+  ]
+ },
+ {
+  "text": "e-mail",
+  "pieces": [
+   "▁e",
+   "-",
+   "mail"
+  ],
+  "ids": [
+   865,
+   271,
+   3410
+  ]
+ },
+ {
+  "text": "user_name",
+  "pieces": [
+   "▁user",
+   "_",
+   "name"
+  ],
+  "ids": [
+   1143,
+   616,
+   8982
+  ]
+ },
+ {
+  "text": "https://example.com/a?b=c",
+  "pieces": [
+   "▁https",
+   ":",
+   "/",
+   "/",
+   "example",
+   ".",
+   "com",
+   "/",
+   "a",
+   "?",
+   "b",
+   "=",
+   "c"
+  ],
+  "ids": [
+   3597,
+   294,
+   320,
+   320,
+   28748,
+   260,
+   549,
+   320,
+   452,
+   302,
+   1285,
+   1510,
+   1207
+  ]
+ },
+ {
+  "text": "www.example.com",
+  "pieces": [
+   "▁www",
+   ".",
+   "example",
+   ".",
+   "com"
+  ],
+  "ids": [
+   2454,
+   260,
+   28748,
+   260,
+   549
+  ]
+ },
+ {
+  "text": "a@b.co",
+  "pieces": [
+   "▁a",
+   "@",
+   "b",
+   ".",
+   "co"
+  ],
+  "ids": [
+   266,
+   1683,
+   1285,
+   260,
+   1902
+  ]
+ },
+ {
+  "text": "@handle",
+  "pieces": [
+   "▁@",
+   "handle"
+  ],
+  "ids": [
+   1944,
+   33982
+  ]
+ },
+ {
+  "text": "don't",
+  "pieces": [
+   "▁don",
+   "'",
+   "t"
+  ],
+  "ids": [
+   418,
+   280,
+   297
+  ]
+ },
+ {
+  "text": "U.S.A.",
+  "pieces": [
+   "▁U",
+   ".",
+   "S",
+   ".",
+   "A",
+   "."
+  ],
+  "ids": [
+   543,
+   260,
+   430,
+   260,
+   558,
+   260
+  ]
+ },
+ {
+  "text": "AC",
+  "pieces": [
+   "▁AC"
+  ],
+  "ids": [
+   5816
+  ]
+ },
+ {
+  "text": "0",
+  "pieces": [
+   "▁0"
+  ],
+  "ids": [
+   767
+  ]
+ },
+ {
+  "text": "10",
+  "pieces": [
+   "▁10"
+  ],
+  "ids": [
+   466
+  ]
+ },
+ {
+  "text": "3.14",
+  "pieces": [
+   "▁3",
+   ".",
+   "14"
+  ],
+  "ids": [
+   404,
+   260,
+   2160
+  ]
+ },
+ {
+  "text": "-42",
+  "pieces": [
+   "▁-",
+   "42"
+  ],
+  "ids": [
+   341,
+   5304
+  ]
+ },
+ {
+  "text": "Hello",
+  "pieces": [
+   "▁Hello"
+  ],
+  "ids": [
+   5365
+  ]
+ },
+ {
+  "text": "HELLO",
+  "pieces": [
+   "▁HELLO"
+  ],
+  "ids": [
+   84173
+  ]
+ },
+ {
+  "text": "café",
+  "pieces": [
+   "▁café"
+  ],
+  "ids": [
+   15924
+  ]
+ },
+ {
+  "text": "CAFÉ",
+  "pieces": [
+   "▁CAF",
+   "É"
+  ],
+  "ids": [
+   46927,
+   27313
+  ]
+ },
+ {
+  "text": "naïve",
+  "pieces": [
+   "▁naïve"
+  ],
+  "ids": [
+   34972
+  ]
+ },
+ {
+  "text": "  leading and   inner  spaces  ",
+  "pieces": [
+   "▁leading",
+   "▁and",
+   "▁inner",
+   "▁spaces"
+  ],
+  "ids": [
+   1249,
+   263,
+   3774,
+   3654
+  ]
+ },
+ {
+  "text": "tab\there",
+  "pieces": [
+   "▁tab",
+   "▁here"
+  ],
+  "ids": [
+   5006,
+   422
+  ]
+ },
+ {
+  "text": "line\nbreak",
+  "pieces": [
+   "▁line",
+   "▁break"
+  ],
+  "ids": [
+   683,
+   1464
+  ]
+ },
+ {
+  "text": "full-width　space",
+  "pieces": [
+   "▁full",
+   "-",
+   "width",
+   "▁space"
+  ],
+  "ids": [
+   540,
+   271,
+   29978,
+   754
+  ]
+ },
+ {
+  "text": "a b",
+  "pieces": [
+   "▁a",
+   "▁b"
+  ],
+  "ids": [
+   266,
+   2165
+  ]
+ },
+ {
+  "text": "— dash",
+  "pieces": [
+   "▁—",
+   "▁dash"
+  ],
+  "ids": [
+   533,
+   11439
+  ]
+ },
+ {
+  "text": "quote’s",
+  "pieces": [
+   "▁quote",
+   "’",
+   "s"
+  ],
+  "ids": [
+   3554,
+   276,
+   268
+  ]
+ },
+ {
+  "text": "…ellipsis",
+  "pieces": [
+   "▁.",
+   ".",
+   ".",
+   "elli",
+   "psi",
+   "s"
+  ],
+  "ids": [
+   323,
+   260,
+   260,
+   14300,
+   33160,
+   268
+  ]
+ },
+ {
+  "text": "① circled",
+  "pieces": [
+   "▁1",
+   "▁circled"
+  ],
+  "ids": [
+   376,
+   37930
+  ]
+ },
+ {
+  "text": "Ⅷ roman",
+  "pieces": [
+   "▁VIII",
+   "▁roman"
+  ],
+  "ids": [
+   22636,
+   27757
+  ]
+ },
+ {
+  "text": "™ trademark",
+  "pieces": [
+   "▁TM",
+   "▁trademark"
+  ],
+  "ids": [
+   15043,
+   8266
+  ]
+ },
+ {
+  "text": "１２３ fullwidth digits",
+  "pieces": [
+   "▁123",
+   "▁full",
+   "width",
+   "▁digits"
+  ],
+  "ids": [
+   13661,
+   540,
+   29978,
+   14805
+  ]
+ },
+ {
+  "text": "emoji 😀 here",
+  "pieces": [
+   "▁emoji",
+   "▁😀",
+   "▁here"
+  ],
+  "ids": [
+   30151,
+   54783,
+   422
+  ]
+ },
+ {
+  "text": "rare: ꓐ ꓱ ꓲ",
+  "pieces": [
+   "▁rare",
+   ":",
+   "▁",
+   "<0xEA>",
+   "<0x93>",
+   "<0x90>",
+   "▁",
+   "<0xEA>",
+   "<0x93>",
+   "<0xB1>",
+   "▁",
+   "<0xEA>",
+   "<0x93>",
+   "<0xB2>"
+  ],
+  "ids": [
+   2942,
+   294,
+   507,
+   238,
+   151,
+   148,
+   507,
+   238,
+   151,
+   181,
+   507,
+   238,
+   151,
+   182
+  ]
+ },
+ {
+  "text": "cjk: 日本語のテキスト",
+  "pieces": [
+   "▁cj",
+   "k",
+   ":",
+   "▁",
+   "日本",
+   "語",
+   "の",
+   "テ",
+   "キ",
+   "スト"
+  ],
+  "ids": [
+   102263,
+   1165,
+   294,
+   507,
+   100868,
+   89387,
+   9456,
+   62105,
+   73878,
+   88237
+  ]
+ },
+ {
+  "text": "mixed café 😀 123",
+  "pieces": [
+   "▁mixed",
+   "▁café",
+   "▁😀",
+   "▁123"
+  ],
+  "ids": [
+   3230,
+   15924,
+   54783,
+   13661
+  ]
+ },
+ {
+  "text": "zero\u0000width",
+  "pieces": [
+   "▁zero",
+   "<0x00>",
+   "width"
+  ],
+  "ids": [
+   3911,
+   4,
+   29978
+  ]
+ },
+ {
+  "text": "combining áè",
+  "pieces": [
+   "▁combining",
+   "▁á",
+   "è"
+  ],
+  "ids": [
+   8208,
+   42688,
+   19831
+  ]
+ },
+ {
+  "text": "My subscription renewed on April 15 for 5,400 after the service was already down.",
+  "pieces": [
+   "▁My",
+   "▁subscription",
+   "▁renewed",
+   "▁on",
+   "▁April",
+   "▁15",
+   "▁for",
+   "▁5",
+   ",",
+   "400",
+   "▁after",
+   "▁the",
+   "▁service",
+   "▁was",
+   "▁already",
+   "▁down",
+   "."
+  ],
+  "ids": [
+   573,
+   5534,
+   9504,
+   277,
+   1217,
+   706,
+   270,
+   456,
+   261,
+   4895,
+   385,
+   262,
+   506,
+   284,
+   637,
+   444,
+   260
+  ]
+ },
+ {
+  "text": "Battery dies before lunch, but the keyboard and the screen are the best I have used.",
+  "pieces": [
+   "▁Battery",
+   "▁dies",
+   "▁before",
+   "▁lunch",
+   ",",
+   "▁but",
+   "▁the",
+   "▁keyboard",
+   "▁and",
+   "▁the",
+   "▁screen",
+   "▁are",
+   "▁the",
+   "▁best",
+   "▁I",
+   "▁have",
+   "▁used",
+   "."
+  ],
+  "ids": [
+   11999,
+   9745,
+   416,
+   2657,
+   261,
+   304,
+   262,
+   6125,
+   263,
+   262,
+   1531,
+   281,
+   262,
+   410,
+   273,
+   286,
+   427,
+   260
+  ]
+ },
+ {
+  "text": "The central bank held rates and said inflation is still above target.",
+  "pieces": [
+   "▁The",
+   "▁central",
+   "▁bank",
+   "▁held",
+   "▁rates",
+   "▁and",
+   "▁said",
+   "▁inflation",
+   "▁is",
+   "▁still",
+   "▁above",
+   "▁target",
+   "."
+  ],
+  "ids": [
+   279,
+   2124,
+   1831,
+   968,
+   1624,
+   263,
+   357,
+   6645,
+   269,
+   449,
+   764,
+   1782,
+   260
+  ]
+ },
+ {
+  "text": "She closed the ledger, blew out the lamp, and listened for the stair.",
+  "pieces": [
+   "▁She",
+   "▁closed",
+   "▁the",
+   "▁ledger",
+   ",",
+   "▁blew",
+   "▁out",
+   "▁the",
+   "▁lamp",
+   ",",
+   "▁and",
+   "▁listened",
+   "▁for",
+   "▁the",
+   "▁stair",
+   "."
+  ],
+  "ids": [
+   503,
+   2100,
+   262,
+   25002,
+   261,
+   12081,
+   321,
+   262,
+   6693,
+   261,
+   263,
+   7961,
+   270,
+   262,
+   20786,
+   260
+  ]
+ },
+ {
+  "text": "The treaty was signed in Paris in 1992. It entered into force the following year.",
+  "pieces": [
+   "▁The",
+   "▁treaty",
+   "▁was",
+   "▁signed",
+   "▁in",
+   "▁Paris",
+   "▁in",
+   "▁1992",
+   ".",
+   "▁It",
+   "▁entered",
+   "▁into",
+   "▁force",
+   "▁the",
+   "▁following",
+   "▁year",
+   "."
+  ],
+  "ids": [
+   279,
+   13281,
+   284,
+   2346,
+   267,
+   3045,
+   267,
+   5762,
+   260,
+   325,
+   3040,
+   352,
+   1711,
+   262,
+   776,
+   395,
+   260
+  ]
+ },
+ {
+  "text": "",
+  "pieces": [],
+  "ids": []
+ },
+ {
+  "text": " ",
+  "pieces": [],
+  "ids": []
+ },
+ {
+  "text": "   ",
+  "pieces": [],
+  "ids": []
+ },
+ {
+  "text": ".",
+  "pieces": [
+   "▁."
+  ],
+  "ids": [
+   323
+  ]
+ }
+]

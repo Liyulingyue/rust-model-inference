@@ -1,0 +1,2260 @@
+{
+  "date": "2026-11-20",
+  "status": "Experimental / partial; full 54-transport matrix completed on replacement host with fixed gates",
+  "scope": "FastFrames-L nine formats × CPU/Auto/strict Vulkan × CLI/HTTP at 16x16 / 5 frames; corrected oracle wrapper and remote-only weights",
+  "host_label": "2026-11-20 replacement Linux instance, AMD gfx1100/RADV Vulkan device",
+  "repo": {
+    "head": "e2b08ccc67c96b7d6151dd58d31f4ed34e40648f",
+    "tree": "bf06a336bac7fb77af592a6caaabbcb0690f95fe",
+    "branch": "",
+    "status": ""
+  },
+  "matrix": {
+    "expected_transports": 54,
+    "completed_transports": 54,
+    "numeric_comparison_transports": 54,
+    "passed_transports": 12,
+    "failed_transports": 42,
+    "pending_transports": 0,
+    "all_transport_results_have_fixed_gates": true
+  },
+  "weights_remote_only": true,
+  "source_downloads": [
+    {
+      "path": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L/fastframes-l/dit.safetensors",
+      "bytes": 28577096680,
+      "sha256": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+      "expected_sha256": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+      "passed": true
+    },
+    {
+      "path": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L/fastframes-l/kv_refiner.safetensors",
+      "bytes": 1780342784,
+      "sha256": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+      "expected_sha256": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+      "passed": true
+    },
+    {
+      "path": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L/fastframes-l/pixel_decoder.safetensors",
+      "bytes": 286952688,
+      "sha256": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+      "expected_sha256": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+      "passed": true
+    },
+    {
+      "path": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B/models_t5_umt5-xxl-enc-bf16.pth",
+      "bytes": 11361920418,
+      "sha256": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+      "expected_sha256": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+      "passed": true
+    },
+    {
+      "path": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B/google/umt5-xxl/tokenizer.json",
+      "bytes": 16837417,
+      "sha256": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+      "expected_sha256": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+      "passed": true
+    }
+  ],
+  "reference_files": [
+    {
+      "path": "LICENSE",
+      "sha256": "b7efb90fd4e5037659937da8cd6a931b5a7c07a83098e417651bbfffb8a139fa",
+      "expected_sha256": "b7efb90fd4e5037659937da8cd6a931b5a7c07a83098e417651bbfffb8a139fa",
+      "passed": true
+    },
+    {
+      "path": "evaluation/latency/decoders.py",
+      "sha256": "e1e25192ea027e7a4c353b873a077d216656592083dee10e3de41add020a0207",
+      "expected_sha256": "e1e25192ea027e7a4c353b873a077d216656592083dee10e3de41add020a0207",
+      "passed": true
+    },
+    {
+      "path": "evaluation/latency/dit.py",
+      "sha256": "7ba050c89d0f3616edc6ceea74e51100a845a151cdb71f4b7ec9b7d7292a6e7c",
+      "expected_sha256": "7ba050c89d0f3616edc6ceea74e51100a845a151cdb71f4b7ec9b7d7292a6e7c",
+      "passed": true
+    },
+    {
+      "path": "evaluation/latency/kv_refine.py",
+      "sha256": "00df8775014c1025f36e4f92e7f5f05c566c7614a5b6ad4370df60bf8bbee743",
+      "expected_sha256": "00df8775014c1025f36e4f92e7f5f05c566c7614a5b6ad4370df60bf8bbee743",
+      "passed": true
+    },
+    {
+      "path": "evaluation/latency/models.py",
+      "sha256": "1acfae36b39f435341a404621a45db21589cef00527be92d822ae99706822bab",
+      "expected_sha256": "1acfae36b39f435341a404621a45db21589cef00527be92d822ae99706822bab",
+      "passed": true
+    },
+    {
+      "path": "fastframes/__init__.py",
+      "sha256": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+      "expected_sha256": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+      "passed": true
+    },
+    {
+      "path": "fastframes/checkpoints.py",
+      "sha256": "9f13081763d46c648e9849bd8eede392b7ab77c0ffd6e2dbbc74e04ea0a5e90c",
+      "expected_sha256": "9f13081763d46c648e9849bd8eede392b7ab77c0ffd6e2dbbc74e04ea0a5e90c",
+      "passed": true
+    },
+    {
+      "path": "fastframes/models/__init__.py",
+      "sha256": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+      "expected_sha256": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+      "passed": true
+    },
+    {
+      "path": "fastframes/models/kv_refinement.py",
+      "sha256": "ba1f2160da4fb5148c4a981397d947103a9e1c2053b6096c2c885b96a0cb5529",
+      "expected_sha256": "ba1f2160da4fb5148c4a981397d947103a9e1c2053b6096c2c885b96a0cb5529",
+      "passed": true
+    },
+    {
+      "path": "fastframes/models/pixel_decoder.py",
+      "sha256": "63fb4340a0e817bf1e8b27491ee6c44d97f1d1bd7e71b51d03638d1af4a7bd8e",
+      "expected_sha256": "63fb4340a0e817bf1e8b27491ee6c44d97f1d1bd7e71b51d03638d1af4a7bd8e",
+      "passed": true
+    },
+    {
+      "path": "fastframes/pipeline.py",
+      "sha256": "34431441ae52b45006daed3b356703de99b4f920fb787ccfa05961bece699ed8",
+      "expected_sha256": "34431441ae52b45006daed3b356703de99b4f920fb787ccfa05961bece699ed8",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/__init__.py",
+      "sha256": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+      "expected_sha256": "8ca8ed7f11eb9ee6d627843d7e4610d0d679c7ecccc6a0e426645e6040982eba",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/attention.py",
+      "sha256": "7d6a6674adf035146c61eb7e958a9fd2dd4db6ad60e33190b338419a5db64de5",
+      "expected_sha256": "7d6a6674adf035146c61eb7e958a9fd2dd4db6ad60e33190b338419a5db64de5",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/causal_model.py",
+      "sha256": "19f223c04b78ee48084a693cf4ddd896fc753a7a835b5ffdff42f511cd4ee6c3",
+      "expected_sha256": "19f223c04b78ee48084a693cf4ddd896fc753a7a835b5ffdff42f511cd4ee6c3",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/model.py",
+      "sha256": "6e5c630c4bc6015ba1619a87331e5124f882882c8bbdf7619716e38dc4aaebde",
+      "expected_sha256": "6e5c630c4bc6015ba1619a87331e5124f882882c8bbdf7619716e38dc4aaebde",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/scheduler.py",
+      "sha256": "3190ede0cd592ef5ad577deedd94f44257ab9aba8dc8f648ae47f8c393ea3ccc",
+      "expected_sha256": "3190ede0cd592ef5ad577deedd94f44257ab9aba8dc8f648ae47f8c393ea3ccc",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/t5.py",
+      "sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "expected_sha256": "b06b8fd98ec8c59e2986a574bed1f51227a9c152ab19f6a15e91fe165a56f2d7",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/text_encoder.py",
+      "sha256": "050e69fa654ef3c3cb9f578cc63e12ed137984c28abd8e935578beb61e753702",
+      "expected_sha256": "050e69fa654ef3c3cb9f578cc63e12ed137984c28abd8e935578beb61e753702",
+      "passed": true
+    },
+    {
+      "path": "fastframes/wan/tokenizers.py",
+      "sha256": "cf5b189c1ae017326efadab2fc6380ba223fa7a59d0be6464bd264db53c76934",
+      "expected_sha256": "cf5b189c1ae017326efadab2fc6380ba223fa7a59d0be6464bd264db53c76934",
+      "passed": true
+    },
+    {
+      "path": "scripts/generate.py",
+      "sha256": "27389975c2c8fb60e8a16e1f69c6a488cbe0eda5d70735875282a0e7629ef85e",
+      "expected_sha256": "27389975c2c8fb60e8a16e1f69c6a488cbe0eda5d70735875282a0e7629ef85e",
+      "passed": true
+    }
+  ],
+  "wrapper_sha256": {
+    "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4",
+    "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+    "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243"
+  },
+  "gguf_manifests": {
+    "f32": {
+      "format": "f32",
+      "size": 83742203200,
+      "sha256": "59a25d64eee0d6981a9f57db479291f31329d745f644d32c77d09d69938c2735",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "f16": {
+      "format": "f16",
+      "size": 41892093248,
+      "sha256": "ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "bf16": {
+      "format": "bf16",
+      "size": 41892093248,
+      "sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "q8_0": {
+      "format": "q8_0",
+      "size": 22274854208,
+      "sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "q4_0": {
+      "format": "q4_0",
+      "size": 11812326720,
+      "sha256": "4fb5d484abc09f19b26bcece217c30dbb05227bf3384d65ee12a911aad3baa60",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "q4_1": {
+      "format": "q4_1",
+      "size": 13120142656,
+      "sha256": "f8f236c6fbf92e75cc9bbc3a6a74d4bb139f7e23a2eddfcbd3e0b542cf7eea17",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "q4_k": {
+      "format": "q4_k",
+      "size": 11813453120,
+      "sha256": "541c03d997e76cbb48579c8071a3990dc2fd850975344b32ef0e09ab3140f07a",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "q5_k": {
+      "format": "q5_k",
+      "size": 14429044032,
+      "sha256": "2d8190faca35ae9ed37126d51efdcefbf39aae94228b7b789944a371d3e10455",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    },
+    "q6_k": {
+      "format": "q6_k",
+      "size": 17208109376,
+      "sha256": "c8fc66953258f6869cd32b58b291398f58cab8dde671fb4218992e83f0ed94f8",
+      "contract_sha256": "3514555dea149506cf2ddf4b769cd64980303526172bbdf8d3e4e4fc756ba18b"
+    }
+  },
+  "reference_provenance": {
+    "f32": {
+      "manifest_sha256": "15448281aeecb57b6706bc338516db98842e2faa51e7a0a266227125f2acb910",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "59a25d64eee0d6981a9f57db479291f31329d745f644d32c77d09d69938c2735",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 130.8990107420832,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-f32",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-f32.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-f32-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "f16": {
+      "manifest_sha256": "295d6556ae49e7a7787ce681fa38db7930328b53e38532511985e5dd4bf9c4e1",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "ab3ab0ca8e1294255a249d68fbfae2d1c59c00d34e8274aa1349dd829383fd39",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 334.831903077662,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-f16",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-f16.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-f16-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "bf16": {
+      "manifest_sha256": "34f044144d178d170c7ac84379e9179cc0bc2e606648f43dbeac88ca8c3276e8",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "d0619fed092f8d33a15a5e3cb69827a131cfe3d32d253f768fc128242837cea9",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 156.2258059475571,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-bf16",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-bf16.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-bf16-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "q8_0": {
+      "manifest_sha256": "038e014bd2a38d195400cfc7659c744f48889dadeefe0f005c0a1fc335f9af23",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "6847ea25e0b4883b3754fc14376a0ce33f8fb216a139e89a4e81e698ce02c6d4",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 192.57051600143313,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-q8_0",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-q8_0.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-q8_0-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "q4_0": {
+      "manifest_sha256": "bf791b30a7f8fdfdf2f767dc29e677160d405f00f7bd53c3706f2c243cce3777",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "4fb5d484abc09f19b26bcece217c30dbb05227bf3384d65ee12a911aad3baa60",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 280.9153411258012,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-q4_0",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-q4_0.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-q4_0-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "q4_1": {
+      "manifest_sha256": "ca28222fbd9e7468a3bc9b99fd8283b49baa6b9b29cee6d358fb55b4866d9a3e",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "f8f236c6fbf92e75cc9bbc3a6a74d4bb139f7e23a2eddfcbd3e0b542cf7eea17",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 353.9493800960481,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-q4_1",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-q4_1.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-q4_1-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "q4_k": {
+      "manifest_sha256": "6b38ad8c1b42853a5200f1e7be33c0cf7cc2d17b745f2f7f657b1ad013919ecf",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "541c03d997e76cbb48579c8071a3990dc2fd850975344b32ef0e09ab3140f07a",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 373.20405226387084,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-q4_k",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-q4_k.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-q4_k-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "q5_k": {
+      "manifest_sha256": "a5dc694f2cd7ea4820661c3375aa4ae617aac27325e023334173ea4a66685474",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "2d8190faca35ae9ed37126d51efdcefbf39aae94228b7b789944a371d3e10455",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 444.565287001431,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-q5_k",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-q5_k.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-q5_k-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    },
+    "q6_k": {
+      "manifest_sha256": "1d396ad7bc780abcf04ceed9b4eb4e088f4ba83817c8a2692fdec46ed5a38b49",
+      "checkpoint_count": 412,
+      "oracle_commit": "6044a56f44bffec500d04f2c21be3c5066891431",
+      "reference_files_verified": true,
+      "wrapper_sha256": {
+        "run_reference.py": "1bc58a4bc2aa9101f01f789ea30092236f4e8576b3e6797738a2a7cb8731ef5b",
+        "streaming_weights.py": "eec6998d8296d1916f9d2499676c4938c049505a4b45cfec5889c49c12536243",
+        "effective_weights.py": "0d0772dff4c2be97d39547f99301a41ce946034d41a9f7ef8fa2e10efb1e88a4"
+      },
+      "tokenizer_sha256": {
+        "tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "tokenizer_config.json": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "special_tokens_map.json": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "spiece.model": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458"
+      },
+      "checkpoint_sha256": {
+        "fastframes-l/dit.safetensors": "cd0ec8980516663d623186fafe4b2a3ca9398e7ed29ccce1c65581640bef15de",
+        "fastframes-l/kv_refiner.safetensors": "841047b9226cf770ca19f99ef718edcb57db29c29ee58a64f9ae5dc1d6fbdf74",
+        "fastframes-l/pixel_decoder.safetensors": "75e6c99c358a3d8b87476add2c732b0853aef76279bae4c807a6157e95555f55",
+        "models_t5_umt5-xxl-enc-bf16.pth": "7cace0da2b446bbbbc57d031ab6cf163a3d59b366da94e5afe36745b746fd81d",
+        "google/umt5-xxl/tokenizer.json": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b"
+      },
+      "gguf_sha256": "c8fc66953258f6869cd32b58b291398f58cab8dde671fb4218992e83f0ed94f8",
+      "noise_sha256": "969e266d9ddd8b8a60683316ab1e78cd1d78a8421e3351c34339a0f367022ead",
+      "timing_kind": "traced_including_checkpoint_io_and_streamed_weights",
+      "weight_loading": "on-demand text/DiT blocks; release to meta after each call",
+      "recipe": "controlled",
+      "device": "cuda",
+      "torch": "2.9.1+gitff65f5b",
+      "numpy": "2.1.2",
+      "ftfy": "6.3.1",
+      "dependencies": {
+        "transformers": "4.57.6",
+        "tokenizers": "0.22.2",
+        "gguf": "0.18.0",
+        "safetensors": "0.7.0"
+      },
+      "elapsed_seconds": 329.80926956795156,
+      "args": {
+        "reference": "/root/rust-model-inference-fastframes/repo/target/fastframes/reference",
+        "model_dir": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L",
+        "text_dir": "/root/rust-model-inference-fastframes/repo/models/Wan2.1-T2V-14B",
+        "output": "/root/rust-model-inference-fastframes/repo/target/fastframes/final-reference-q6_k",
+        "gguf": "/root/rust-model-inference-fastframes/repo/models/FastFrames-L-q6_k.gguf",
+        "noise": "/root/rust-model-inference-fastframes/repo/target/fastframes/matrix-q6_k-cpu-cli.jsonl.fastframes.noise.f32",
+        "width": 16,
+        "height": 16,
+        "frames": 5,
+        "prompt": "A red ball rolls on a table.",
+        "seed": 17,
+        "threads": 8,
+        "recipe": "controlled",
+        "device": "cuda",
+        "benchmark": false
+      }
+    }
+  },
+  "results": [
+    {
+      "format": "bf16",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 86.22572089545429,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.794884733482099e-05,
+      "min_cosine": 0.9999999997176138,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 0.9999999999999999,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-bf16-cpu-replacement-final.json"
+    },
+    {
+      "format": "bf16",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 32.18783507309854,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.794884733482099e-05,
+      "min_cosine": 0.9999999997176138,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 0.9999999999999999,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-bf16-cpu-replacement-final.json"
+    },
+    {
+      "format": "bf16",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 93.37858072668314,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.5236295358634716e-05,
+      "min_cosine": 0.9999999997347359,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 0.9999999999999999,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      },
+      "result_file": "acceptance-bf16-gpu-replacement.json"
+    },
+    {
+      "format": "bf16",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 67.07521666772664,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.5236295358634716e-05,
+      "min_cosine": 0.9999999997347359,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 0.9999999999999999,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      },
+      "result_file": "acceptance-bf16-gpu-replacement.json"
+    },
+    {
+      "format": "bf16",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 524.9238026831299,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.5552589342221195e-05,
+      "min_cosine": 0.9999999998047929,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 0.9999999999999999,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      },
+      "result_file": "acceptance-bf16-gpu-replacement.json"
+    },
+    {
+      "format": "bf16",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 555.8687771800905,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.5552589342221195e-05,
+      "min_cosine": 0.9999999998047929,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 0.9999999999999999,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      },
+      "result_file": "acceptance-bf16-gpu-replacement.json"
+    },
+    {
+      "format": "f16",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 52.112813675776124,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.001728212584007973,
+      "min_cosine": 0.9999988745859908,
+      "first_failure": null,
+      "video_passed": false,
+      "video_rmse": 0.014410152859932579,
+      "video_cosine": 0.9995483949878057,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "f16",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 44.98034646362066,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.001728212584007973,
+      "min_cosine": 0.9999988745859908,
+      "first_failure": null,
+      "video_passed": false,
+      "video_rmse": 0.014410152859932579,
+      "video_cosine": 0.9995483949878057,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q8_0",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 34.00651337020099,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.07609434268844385,
+      "min_cosine": 0.9971288417629252,
+      "first_failure": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 0.01500336080789566,
+        "rmse": 0.00027173067235464497,
+        "relative_rmse": 0.027697485017157433,
+        "cosine": 0.9996163526862273
+      },
+      "video_passed": false,
+      "video_rmse": 0.02451650235264669,
+      "video_cosine": 0.9987163813940811,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q8_0",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 23.615960171446204,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.07609434268844385,
+      "min_cosine": 0.9971288417629252,
+      "first_failure": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 0.01500336080789566,
+        "rmse": 0.00027173067235464497,
+        "relative_rmse": 0.027697485017157433,
+        "cosine": 0.9996163526862273
+      },
+      "video_passed": false,
+      "video_rmse": 0.02451650235264669,
+      "video_cosine": 0.9987163813940811,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "f16",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 72.89991426467896,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.001529806115542585,
+      "min_cosine": 0.999998837988569,
+      "first_failure": null,
+      "video_passed": false,
+      "video_rmse": 0.011841220411469965,
+      "video_cosine": 0.9996970913106722,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "f16",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 43.31889058277011,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.001529806115542585,
+      "min_cosine": 0.999998837988569,
+      "first_failure": null,
+      "video_passed": false,
+      "video_rmse": 0.011841220411469965,
+      "video_cosine": 0.9996970913106722,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 13864272960, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 14407897008, peak_allocation_bytes: 14722469824 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "f16",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 119.83837051130831,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.0013954515093433373,
+      "min_cosine": 0.999999026515345,
+      "first_failure": null,
+      "video_passed": false,
+      "video_rmse": 0.013809123119434285,
+      "video_cosine": 0.9995855408053679,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "f16",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 132.3129280116409,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.0013954515093433373,
+      "min_cosine": 0.999999026515345,
+      "first_failure": null,
+      "video_passed": false,
+      "video_rmse": 0.013809123119434285,
+      "video_cosine": 0.9995855408053679,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 183203529792, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 7269104176, peak_allocation_bytes: 15003422672 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q8_0",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 50.45333414338529,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.07595114780690536,
+      "min_cosine": 0.9971462238733795,
+      "first_failure": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 0.01500336080789566,
+        "rmse": 0.00027173067235464497,
+        "relative_rmse": 0.027697485017157433,
+        "cosine": 0.9996163526862273
+      },
+      "video_passed": false,
+      "video_rmse": 0.02258105496465285,
+      "video_cosine": 0.9989021577995845,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 7365395520, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 7909019568, peak_allocation_bytes: 8076136384 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q8_0",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 32.394837129861116,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.07595114780690536,
+      "min_cosine": 0.9971462238733795,
+      "first_failure": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 0.01500336080789566,
+        "rmse": 0.00027173067235464497,
+        "relative_rmse": 0.027697485017157433,
+        "cosine": 0.9996163526862273
+      },
+      "video_passed": false,
+      "video_rmse": 0.02258105496465285,
+      "video_cosine": 0.9989021577995845,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 7365395520, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 7909019568, peak_allocation_bytes: 8076136384 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q8_0",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 77.93091266043484,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.07595114780690536,
+      "min_cosine": 0.9971462238733795,
+      "first_failure": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 0.01500336080789566,
+        "rmse": 0.00027173067235464497,
+        "relative_rmse": 0.027697485017157433,
+        "cosine": 0.9996163526862273
+      },
+      "video_passed": false,
+      "video_rmse": 0.02258105496465285,
+      "video_cosine": 0.9989021577995845,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 97326875712, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 4126386736, peak_allocation_bytes: 8478740432 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q8_0",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 75.13564212806523,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.07595114780690536,
+      "min_cosine": 0.9971462238733795,
+      "first_failure": {
+        "name": "fastframes.text",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 0.01500336080789566,
+        "rmse": 0.00027173067235464497,
+        "relative_rmse": 0.027697485017157433,
+        "cosine": 0.9996163526862273
+      },
+      "video_passed": false,
+      "video_rmse": 0.02258105496465285,
+      "video_cosine": 0.9989021577995845,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 97326875712, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 4126386736, peak_allocation_bytes: 8478740432 }"
+      },
+      "result_file": "acceptance-gpu-f16-q8-replacement.json"
+    },
+    {
+      "format": "q4_0",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 38.22431252896786,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.09260645541860717,
+      "min_cosine": 0.9957167919116635,
+      "first_failure": {
+        "name": "fastframes.text.21",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 142.3743896484375,
+        "rmse": 3.376397866326899,
+        "relative_rmse": 0.005889667100286806,
+        "cosine": 0.9999829541591347
+      },
+      "video_passed": false,
+      "video_rmse": 0.02418286852990122,
+      "video_cosine": 0.9986978450506923,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q4s-replacement.json"
+    },
+    {
+      "format": "q4_0",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 29.460934046655893,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.09260645541860717,
+      "min_cosine": 0.9957167919116635,
+      "first_failure": {
+        "name": "fastframes.text.21",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 142.3743896484375,
+        "rmse": 3.376397866326899,
+        "relative_rmse": 0.005889667100286806,
+        "cosine": 0.9999829541591347
+      },
+      "video_passed": false,
+      "video_rmse": 0.02418286852990122,
+      "video_cosine": 0.9986978450506923,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q4s-replacement.json"
+    },
+    {
+      "format": "q4_1",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 28.929568061605096,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.16533635610405975,
+      "min_cosine": 0.9932666659639271,
+      "first_failure": {
+        "name": "fastframes.text.19",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 78.7470703125,
+        "rmse": 1.8924386157170332,
+        "relative_rmse": 0.005255712264266263,
+        "cosine": 0.999986579087486
+      },
+      "video_passed": false,
+      "video_rmse": 0.030538468187119115,
+      "video_cosine": 0.9981432697246503,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q4s-replacement.json"
+    },
+    {
+      "format": "q4_1",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 19.48935648612678,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.16533635610405975,
+      "min_cosine": 0.9932666659639271,
+      "first_failure": {
+        "name": "fastframes.text.19",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 78.7470703125,
+        "rmse": 1.8924386157170332,
+        "relative_rmse": 0.005255712264266263,
+        "cosine": 0.999986579087486
+      },
+      "video_passed": false,
+      "video_rmse": 0.030538468187119115,
+      "video_cosine": 0.9981432697246503,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q4s-replacement.json"
+    },
+    {
+      "format": "q4_k",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 33.420268189162016,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.7261106067183452,
+      "min_cosine": 0.7789452100415947,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.9315185546875,
+        "rmse": 2.9605739777124866,
+        "relative_rmse": 0.00887624172592323,
+        "cosine": 0.9999618341514804
+      },
+      "video_passed": false,
+      "video_rmse": 0.036481095629536824,
+      "video_cosine": 0.9971126669201665,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q4s-replacement.json"
+    },
+    {
+      "format": "q4_k",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 24.800987159833312,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.7261106067183452,
+      "min_cosine": 0.7789452100415947,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.9315185546875,
+        "rmse": 2.9605739777124866,
+        "relative_rmse": 0.00887624172592323,
+        "cosine": 0.9999618341514804
+      },
+      "video_passed": false,
+      "video_rmse": 0.036481095629536824,
+      "video_cosine": 0.9971126669201665,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q4s-replacement.json"
+    },
+    {
+      "format": "q5_k",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 37.46367706358433,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.1203104952971928,
+      "min_cosine": 0.99281530567533,
+      "first_failure": {
+        "name": "fastframes.text.23",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 174.22607421875,
+        "rmse": 5.061316843126562,
+        "relative_rmse": 0.006447126490073082,
+        "cosine": 0.9999800256371137
+      },
+      "video_passed": false,
+      "video_rmse": 0.03015137595955218,
+      "video_cosine": 0.9979678787806181,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q5-replacement.json"
+    },
+    {
+      "format": "q5_k",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 24.028678400442004,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.1203104952971928,
+      "min_cosine": 0.99281530567533,
+      "first_failure": {
+        "name": "fastframes.text.23",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 174.22607421875,
+        "rmse": 5.061316843126562,
+        "relative_rmse": 0.006447126490073082,
+        "cosine": 0.9999800256371137
+      },
+      "video_passed": false,
+      "video_rmse": 0.03015137595955218,
+      "video_cosine": 0.9979678787806181,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q5-replacement.json"
+    },
+    {
+      "format": "q6_k",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 17.23907139338553,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.12133814715524262,
+      "min_cosine": 0.9926867930126161,
+      "first_failure": {
+        "name": "fastframes.text.20",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.912109375,
+        "rmse": 2.871779322066137,
+        "relative_rmse": 0.0055797742681697,
+        "cosine": 0.9999886713221613
+      },
+      "video_passed": false,
+      "video_rmse": 0.03179882981089159,
+      "video_cosine": 0.9977144802273542,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q6-replacement.json"
+    },
+    {
+      "format": "q6_k",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 14.988603591918945,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.12133814715524262,
+      "min_cosine": 0.9926867930126161,
+      "first_failure": {
+        "name": "fastframes.text.20",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.912109375,
+        "rmse": 2.871779322066137,
+        "relative_rmse": 0.0055797742681697,
+        "cosine": 0.9999886713221613
+      },
+      "video_passed": false,
+      "video_rmse": 0.03179882981089159,
+      "video_cosine": 0.9977144802273542,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-cpu-q6-replacement.json"
+    },
+    {
+      "format": "q4_0",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 29.20977677963674,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.06453846588450426,
+      "min_cosine": 0.9979344952376843,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 87.93438720703125,
+        "rmse": 1.9186947854045653,
+        "relative_rmse": 0.005746975195669869,
+        "cosine": 0.9999838906869737
+      },
+      "video_passed": false,
+      "video_rmse": 0.026356492791912677,
+      "video_cosine": 0.998453152084119,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_0",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 25.162703532725573,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.06453846588450426,
+      "min_cosine": 0.9979344952376843,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 87.93438720703125,
+        "rmse": 1.9186947854045653,
+        "relative_rmse": 0.005746975195669869,
+        "cosine": 0.9999838906869737
+      },
+      "video_passed": false,
+      "video_rmse": 0.026356492791912677,
+      "video_cosine": 0.998453152084119,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_0",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 43.52843105234206,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.06118401539639507,
+      "min_cosine": 0.9981319777595226,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 87.93438720703125,
+        "rmse": 1.9186947854045653,
+        "relative_rmse": 0.005746975195669869,
+        "cosine": 0.9999838906869737
+      },
+      "video_passed": false,
+      "video_rmse": 0.027631148947462585,
+      "video_cosine": 0.9982997388275621,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51525993536, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2450270768, peak_allocation_bytes: 4998909904 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_0",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 40.59617490693927,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.06118401539639507,
+      "min_cosine": 0.9981319777595226,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 87.93438720703125,
+        "rmse": 1.9186947854045653,
+        "relative_rmse": 0.005746975195669869,
+        "cosine": 0.9999838906869737
+      },
+      "video_passed": false,
+      "video_rmse": 0.027631148947462585,
+      "video_cosine": 0.9982997388275621,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51525993536, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2450270768, peak_allocation_bytes: 4998909904 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_1",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 61.52237646467984,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.14945349948919084,
+      "min_cosine": 0.9946044914822587,
+      "first_failure": {
+        "name": "fastframes.text.19",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 78.7470703125,
+        "rmse": 1.8924386157170332,
+        "relative_rmse": 0.005255712264266263,
+        "cosine": 0.999986579087486
+      },
+      "video_passed": false,
+      "video_rmse": 0.024339522868086595,
+      "video_cosine": 0.998831901882011,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4332586048, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4876210096, peak_allocation_bytes: 4974514112 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_1",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 53.21783609688282,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.14945349948919084,
+      "min_cosine": 0.9946044914822587,
+      "first_failure": {
+        "name": "fastframes.text.19",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 78.7470703125,
+        "rmse": 1.8924386157170332,
+        "relative_rmse": 0.005255712264266263,
+        "cosine": 0.999986579087486
+      },
+      "video_passed": false,
+      "video_rmse": 0.024339522868086595,
+      "video_cosine": 0.998831901882011,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4332586048, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4876210096, peak_allocation_bytes: 4974514112 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_1",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 77.62999046966434,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.14945349948919084,
+      "min_cosine": 0.9946044914822587,
+      "first_failure": {
+        "name": "fastframes.text.19",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 78.7470703125,
+        "rmse": 1.8924386157170332,
+        "relative_rmse": 0.005255712264266263,
+        "cosine": 0.999986579087486
+      },
+      "video_passed": false,
+      "video_rmse": 0.024339522868086595,
+      "video_cosine": 0.998831901882011,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 57251103808, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2659785264, peak_allocation_bytes: 5433888720 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_1",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 70.28300774656236,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.14945349948919084,
+      "min_cosine": 0.9946044914822587,
+      "first_failure": {
+        "name": "fastframes.text.19",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 78.7470703125,
+        "rmse": 1.8924386157170332,
+        "relative_rmse": 0.005255712264266263,
+        "cosine": 0.999986579087486
+      },
+      "video_passed": false,
+      "video_rmse": 0.024339522868086595,
+      "video_cosine": 0.998831901882011,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 57251103808, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2659785264, peak_allocation_bytes: 5433888720 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_k",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 40.864996794611216,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.7261106067183452,
+      "min_cosine": 0.7789452100415947,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.9315185546875,
+        "rmse": 2.9605739777124866,
+        "relative_rmse": 0.00887624172592323,
+        "cosine": 0.9999618341514804
+      },
+      "video_passed": false,
+      "video_rmse": 0.03698312027724941,
+      "video_cosine": 0.997024371703937,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_k",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 33.57782839797437,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.7261106067183452,
+      "min_cosine": 0.7789452100415947,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.9315185546875,
+        "rmse": 2.9605739777124866,
+        "relative_rmse": 0.00887624172592323,
+        "cosine": 0.9999618341514804
+      },
+      "video_passed": false,
+      "video_rmse": 0.03698312027724941,
+      "video_cosine": 0.997024371703937,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 3899327552, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 4442951600, peak_allocation_bytes: 4531425216 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_k",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 56.65004640817642,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.7261106067183452,
+      "min_cosine": 0.7789452100415947,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.9315185546875,
+        "rmse": 2.9605739777124866,
+        "relative_rmse": 0.00887624172592323,
+        "cosine": 0.9999618341514804
+      },
+      "video_passed": false,
+      "video_rmse": 0.034685486141408206,
+      "video_cosine": 0.9973788517103997,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51535004736, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2451397168, peak_allocation_bytes: 4998909904 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q4_k",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 50.222612265497446,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.7261106067183452,
+      "min_cosine": 0.7789452100415947,
+      "first_failure": {
+        "name": "fastframes.text.18",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.9315185546875,
+        "rmse": 2.9605739777124866,
+        "relative_rmse": 0.00887624172592323,
+        "cosine": 0.9999618341514804
+      },
+      "video_passed": false,
+      "video_rmse": 0.034685486141408206,
+      "video_cosine": 0.9973788517103997,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 51535004736, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2451397168, peak_allocation_bytes: 4998909904 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q5_k",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 106.78278125822544,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.11665638533812417,
+      "min_cosine": 0.9932023427316624,
+      "first_failure": {
+        "name": "fastframes.text.23",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 174.22607421875,
+        "rmse": 5.061316843126562,
+        "relative_rmse": 0.006447126490073082,
+        "cosine": 0.9999800256371137
+      },
+      "video_passed": false,
+      "video_rmse": 0.03025969976233279,
+      "video_cosine": 0.9979465531018036,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4765844544, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 5309468592, peak_allocation_bytes: 5417603008 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q5_k",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 97.82339114136994,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.11665638533812417,
+      "min_cosine": 0.9932023427316624,
+      "first_failure": {
+        "name": "fastframes.text.23",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 174.22607421875,
+        "rmse": 5.061316843126562,
+        "relative_rmse": 0.006447126490073082,
+        "cosine": 0.9999800256371137
+      },
+      "video_passed": false,
+      "video_rmse": 0.03025969976233279,
+      "video_cosine": 0.9979465531018036,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 4765844544, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 5309468592, peak_allocation_bytes: 5417603008 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q5_k",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 122.99616997130215,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.12491039849371934,
+      "min_cosine": 0.9922163601528875,
+      "first_failure": {
+        "name": "fastframes.text.23",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 174.22607421875,
+        "rmse": 5.061316843126562,
+        "relative_rmse": 0.006447126490073082,
+        "cosine": 0.9999800256371137
+      },
+      "video_passed": false,
+      "video_rmse": 0.028561511936806942,
+      "video_cosine": 0.9981624610829972,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 62984897600, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2870385200, peak_allocation_bytes: 5868867536 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q5_k",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 121.46410067938268,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.12491039849371934,
+      "min_cosine": 0.9922163601528875,
+      "first_failure": {
+        "name": "fastframes.text.23",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 174.22607421875,
+        "rmse": 5.061316843126562,
+        "relative_rmse": 0.006447126490073082,
+        "cosine": 0.9999800256371137
+      },
+      "video_passed": false,
+      "video_rmse": 0.028561511936806942,
+      "video_cosine": 0.9981624610829972,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 62984897600, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 2870385200, peak_allocation_bytes: 5868867536 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q6_k",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 44.75608333200216,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.11655930904372552,
+      "min_cosine": 0.9932259749741505,
+      "first_failure": {
+        "name": "fastframes.text.20",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.912109375,
+        "rmse": 2.871779322066137,
+        "relative_rmse": 0.0055797742681697,
+        "cosine": 0.9999886713221613
+      },
+      "video_passed": false,
+      "video_rmse": 0.029219551659020564,
+      "video_cosine": 0.9980324277103846,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 5686518848, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 6230142896, peak_allocation_bytes: 6359166912 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q6_k",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 33.827220518141985,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.11655930904372552,
+      "min_cosine": 0.9932259749741505,
+      "first_failure": {
+        "name": "fastframes.text.20",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.912109375,
+        "rmse": 2.871779322066137,
+        "relative_rmse": 0.0055797742681697,
+        "cosine": 0.9999886713221613
+      },
+      "video_passed": false,
+      "video_rmse": 0.029219551659020564,
+      "video_cosine": 0.9980324277103846,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 5686518848, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 6230142896, peak_allocation_bytes: 6359166912 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q6_k",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 61.75483305566013,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.1311408783484386,
+      "min_cosine": 0.9913816245125543,
+      "first_failure": {
+        "name": "fastframes.text.20",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.912109375,
+        "rmse": 2.871779322066137,
+        "relative_rmse": 0.0055797742681697,
+        "cosine": 0.9999886713221613
+      },
+      "video_passed": false,
+      "video_rmse": 0.02963795108140023,
+      "video_cosine": 0.9979952473258874,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 75150408768, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 3315559984, peak_allocation_bytes: 6793197520 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "q6_k",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 58.46909647062421,
+      "numeric_passed": false,
+      "checkpoints": 411,
+      "max_relative_rmse": 0.1311408783484386,
+      "min_cosine": 0.9913816245125543,
+      "first_failure": {
+        "name": "fastframes.text.20",
+        "occurrence": 0,
+        "passed": false,
+        "max_abs": 108.912109375,
+        "rmse": 2.871779322066137,
+        "relative_rmse": 0.0055797742681697,
+        "cosine": 0.9999886713221613
+      },
+      "video_passed": false,
+      "video_rmse": 0.02963795108140023,
+      "video_cosine": 0.9979952473258874,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 75150408768, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 3315559984, peak_allocation_bytes: 6793197520 }"
+      },
+      "result_file": "acceptance-gpu-k-replacement.json"
+    },
+    {
+      "format": "f32",
+      "backend": "cpu",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 76.69845156557858,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.794884733482099e-05,
+      "min_cosine": 0.9999999997176138,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 1.0,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-f32-all-replacement.json"
+    },
+    {
+      "format": "f32",
+      "backend": "cpu",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 85.62815416790545,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 2.794884733482099e-05,
+      "min_cosine": 0.9999999997176138,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 1.0,
+      "backend_evidence": {
+        "vulkan_operator_records": 0,
+        "cpu_operator_records": 2202,
+        "last_device_counters": null
+      },
+      "result_file": "acceptance-f32-all-replacement.json"
+    },
+    {
+      "format": "f32",
+      "backend": "auto",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 135.33736795932055,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 4.775628860976526e-05,
+      "min_cosine": 0.9999999988828286,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 1.0,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 27728544832, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 28272168880, peak_allocation_bytes: 28901314496 }"
+      },
+      "result_file": "acceptance-f32-all-replacement.json"
+    },
+    {
+      "format": "f32",
+      "backend": "auto",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 139.27529734931886,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 4.775628860976526e-05,
+      "min_cosine": 0.9999999988828286,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 1.0,
+      "backend_evidence": {
+        "vulkan_operator_records": 143,
+        "cpu_operator_records": 2059,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 395, static_uploads: 252, static_upload_bytes: 27728544832, host_write_bytes: 460034084, host_read_bytes: 899768448, transfer_submissions: 251, live_allocation_bytes: 28272168880, peak_allocation_bytes: 28901314496 }"
+      },
+      "result_file": "acceptance-f32-all-replacement.json"
+    },
+    {
+      "format": "f32",
+      "backend": "vulkan",
+      "transport": "cli",
+      "exit_code": 0,
+      "status": null,
+      "elapsed_seconds": 768.7226306516677,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 4.0885956235754525e-05,
+      "min_cosine": 0.9999999991869644,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 1.0,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 366407058496, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 13973568048, peak_allocation_bytes: 29011415008 }"
+      },
+      "result_file": "acceptance-f32-all-replacement.json"
+    },
+    {
+      "format": "f32",
+      "backend": "vulkan",
+      "transport": "http",
+      "exit_code": null,
+      "status": 200,
+      "elapsed_seconds": 738.9101601056755,
+      "numeric_passed": true,
+      "checkpoints": 411,
+      "max_relative_rmse": 4.0885956235754525e-05,
+      "min_cosine": 0.9999999991869644,
+      "first_failure": null,
+      "video_passed": true,
+      "video_rmse": 0.0,
+      "video_cosine": 1.0,
+      "backend_evidence": {
+        "vulkan_operator_records": 2202,
+        "cpu_operator_records": 0,
+        "last_device_counters": "compute counters=device_cumulative ComputeStats { submissions: 5628, static_uploads: 2862, static_upload_bytes: 366407058496, host_write_bytes: 6405879844, host_read_bytes: 970307456, transfer_submissions: 2861, live_allocation_bytes: 13973568048, peak_allocation_bytes: 29011415008 }"
+      },
+      "result_file": "acceptance-f32-all-replacement.json"
+    }
+  ],
+  "environment": {
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "torch": "2.9.1+gitff65f5b",
+    "python": "Python 3.12.3",
+    "amd_smi_process": "[\n    {\n        \"gpu\": 0,\n        \"process_list\": [\n            {\n                \"process_info\": \"No running processes detected\"\n            }\n        ]\n    }\n]",
+    "amd_smi_metric": "{\n    \"gpu_data\": [\n        {\n            \"gpu\": 0,\n            \"usage\": {\n                \"gfx_activity\": {\n                    \"value\": 0,\n                    \"unit\": \"%\"\n                },\n                \"umc_activity\": {\n                    \"value\": 0,\n                    \"unit\": \"%\"\n                },\n                \"mm_activity\": {\n                    \"value\": 0,\n                    \"unit\": \"%\"\n                },\n                \"vcn_activity\": [\n                    {\n                        \"value\": 0,\n                        \"unit\": \"%\"\n                    },\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\"\n                ],\n                \"jpeg_activity\": [\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\",\n                    \"N/A\"\n                ],\n                \"gfx_busy_inst\": \"N/A\",\n                \"jpeg_busy\": \"N/A\",\n                \"vcn_busy\": \"N/A\"\n            },\n            \"mem_usage\": {\n                \"total_vram\": {\n                    \"value\": 49136,\n                    \"unit\": \"MB\"\n                },\n                \"used_vram\": {\n                    \"value\": 26,\n                    \"unit\": \"MB\"\n                },\n                \"free_vram\": {\n                    \"value\": 49110,\n                    \"unit\": \"MB\"\n                },\n                \"total_visible_vram\": {\n                    \"value\": 49136,\n                    \"unit\": \"MB\"\n                },\n                \"used_visible_vram\": {\n                    \"value\": 26,\n                    \"unit\": \"MB\"\n                },\n                \"free_visible_vram\": {\n                    \"value\": 49110,\n                    \"unit\": \"MB\"\n                },\n                \"total_gtt\": {\n                    \"value\": 257824,\n                    \"unit\": \"MB\"\n                },\n                \"used_gtt\": {\n                    \"value\": 15,\n                    \"unit\": \"MB\"\n                },\n                \"free_gtt\": {\n                    \"value\": 257809,\n                    \"unit\": \"MB\"\n                }\n            }\n        }\n    ]\n}",
+    "memory_events": "low 0\nhigh 0\nmax 7\noom 0\noom_kill 0\noom_group_kill 0\n"
+  },
+  "binary_sha256": {
+    "rust-model-inference": "5321e08cbcda7f7e498d544987da2e3066e6aea2a68c106054e5d6bdecc167fd",
+    "rust-model-server": "34e63ae958e304ca6ad1dbdfaedbc76dd10f57893808c710098864b4eef404a8"
+  },
+  "checks": {
+    "converter_oracle_tests": "12 passed",
+    "source_hashes": true,
+    "reference_hashes": true,
+    "clean_isolated_worktree": true,
+    "no_device_execution_failures_in_matrix": true
+  },
+  "limits": [
+    "Fixed numeric and decoded-video gates were retained; lossy formats use tolerance metrics rather than bitwise equality.",
+    "BF16/F32 complete transports pass; F16 checkpoints pass but decoded-video gates fail; all six quantized formats retain numeric/video failures.",
+    "F32 model and all inference ran under a shared cgroup/GPU with another task; isolated performance claims are not established.",
+    "Default 832x480/81-frame generation was not run; this matrix is the fixed 16x16/5-frame acceptance scope."
+  ]
+}

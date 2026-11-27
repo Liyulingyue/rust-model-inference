@@ -1,6 +1,9 @@
 //! Validated mmap-backed matrices shared by dots.tts components.
 use crate::core::tensor::{GGMLType, TensorSource};
-use crate::ops::kernel::{QuantizedTensor, Weight};
+use crate::ops::kernel::Weight;
+
+/// The formats the dots tensors ship in.
+const ALLOWED: &[GGMLType] = &[GGMLType::F32, GGMLType::F16, GGMLType::BF16, GGMLType::Q8_0];
 
 pub(crate) fn load_weight<'a>(
     source: &'a dyn TensorSource,
@@ -10,6 +13,8 @@ pub(crate) fn load_weight<'a>(
     if dims.len() < 2 || dims.contains(&0) {
         return Err(format!("Invalid matrix dimensions for {name}: {dims:?}"));
     }
+    // The vocoder stores its convolution weights as `[.., n_in, n_out]`, so
+    // everything but the last dimension is the input width.
     let n_out = usize::try_from(*dims.last().unwrap())
         .map_err(|_| format!("{name} output width overflow"))?;
     let n_in = dims[..dims.len() - 1]
@@ -26,44 +31,7 @@ pub(crate) fn load_weight<'a>(
             info.dims
         ));
     }
-    if !matches!(
-        info.ggml_type,
-        GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 | GGMLType::Q8_0
-    ) || (info.ggml_type == GGMLType::Q8_0 && n_in % 32 != 0)
-    {
-        return Err(format!(
-            "Unsupported matrix {name}: {:?}, row width {n_in}",
-            info.ggml_type
-        ));
-    }
-    let expected = n_in
-        .checked_mul(n_out)
-        .and_then(|count| match info.ggml_type {
-            GGMLType::F32 => count.checked_mul(4),
-            GGMLType::F16 | GGMLType::BF16 => count.checked_mul(2),
-            GGMLType::Q8_0 => (count / 32).checked_mul(34),
-            _ => None,
-        })
-        .ok_or_else(|| format!("Tensor byte size overflow: {name}"))?;
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Invalid tensor data length for {name}: {}; expected {expected}",
-            bytes.len()
-        ));
-    }
-    let mut weight = Weight::from_quantized(QuantizedTensor::from_bytes(
-        bytes,
-        info.ggml_type,
-        n_in,
-        n_out,
-    ));
-    // The existing F32 enum does not retain matrix shape.
-    weight.n_out = n_out;
-    weight.n_in = n_in;
-    Ok(weight)
+    crate::core::tensor::load_weight_any(source, name, n_in, n_out, Some(ALLOWED))
 }
 
 pub(crate) fn linear_forward(

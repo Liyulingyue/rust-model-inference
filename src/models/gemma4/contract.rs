@@ -1,8 +1,7 @@
 use crate::core::tensor::{GGMLType, MetaValue, MetaValueType, TensorSource};
-#[cfg(not(test))]
-const GEMMA4_TOKEN_TABLE_DIGEST: u128 = 0xda70_6e66_3141_68dc_84fd_09da_fee1_4466;
+const GEMMA4_TOKEN_TABLE_DIGESTS: &[u128] = &[0xda70_6e66_3141_68dc_84fd_09da_fee1_4466];
 #[cfg(test)]
-const GEMMA4_TOKEN_TABLE_DIGEST: u128 = 0x2055_26be_4c3c_b1e6_cf1a_4a8a_00b7_7831;
+const GEMMA4_TEST_TOKEN_TABLE_DIGEST: u128 = 0x2055_26be_4c3c_b1e6_cf1a_4a8a_00b7_7831;
 pub(super) fn require_clip(source: &dyn TensorSource) -> Result<(), String> {
     require_string(source, "general.architecture", "clip")?;
     require_string(source, "general.type", "mmproj")
@@ -87,9 +86,12 @@ pub(super) fn require_gemma4_token_table(source: &dyn TensorSource) -> Result<()
     match source.metadata("tokenizer.ggml.tokens") {
         Some(MetaValue::Array(MetaValueType::String, tokens)) if tokens.len() == 262_144 => {
             let actual = gemma4_token_table_digest(tokens)?;
-            if actual != GEMMA4_TOKEN_TABLE_DIGEST {
+            let allowed = GEMMA4_TOKEN_TABLE_DIGESTS.contains(&actual);
+            #[cfg(test)]
+            let allowed = allowed || actual == GEMMA4_TEST_TOKEN_TABLE_DIGEST;
+            if !allowed {
                 return Err(format!(
-                    "Invalid metadata tokenizer.ggml.tokens digest: expected {GEMMA4_TOKEN_TABLE_DIGEST:#034x}, got {actual:#034x}"
+                    "Invalid metadata tokenizer.ggml.tokens digest: expected one of {GEMMA4_TOKEN_TABLE_DIGESTS:#034x?}, got {actual:#034x}"
                 ));
             }
             Ok(())
@@ -131,16 +133,9 @@ pub(super) fn require_tensor(
     expected_dims: &[u64],
     expected_type: GGMLType,
 ) -> Result<(), String> {
-    let tensor = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if tensor.dims != expected_dims || tensor.ggml_type != expected_type {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} {:?}",
-            tensor.dims, tensor.ggml_type, expected_dims, expected_type
-        ));
-    }
-    Ok(())
+    // Metadata only: the contracts are validated before any payload is read.
+    crate::core::tensor::require_tensor_meta(source, name, expected_dims, &[expected_type])
+        .map(|_| ())
 }
 
 pub(super) fn require_tensor_any(
@@ -149,16 +144,7 @@ pub(super) fn require_tensor_any(
     expected_dims: &[u64],
     expected_types: &[GGMLType],
 ) -> Result<GGMLType, String> {
-    let tensor = source
-        .tensor_info(name)
-        .ok_or_else(|| format!("Missing tensor: {name}"))?;
-    if tensor.dims != expected_dims || !expected_types.contains(&tensor.ggml_type) {
-        return Err(format!(
-            "Invalid tensor {name}: shape {:?} type {:?}; expected {:?} one of {expected_types:?}",
-            tensor.dims, tensor.ggml_type, expected_dims
-        ));
-    }
-    Ok(tensor.ggml_type)
+    crate::core::tensor::require_tensor_meta(source, name, expected_dims, expected_types)
 }
 
 pub(super) fn require_clippable(
@@ -170,4 +156,17 @@ pub(super) fn require_clippable(
         require_tensor(source, &format!("{prefix}.{suffix}"), &[1], GGMLType::F32)?;
     }
     require_tensor(source, &format!("{prefix}.weight"), dims, GGMLType::F16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GEMMA4_TOKEN_TABLE_DIGESTS;
+
+    #[test]
+    fn production_digest_allowlist_excludes_synthetic_fixture() {
+        assert_eq!(
+            GEMMA4_TOKEN_TABLE_DIGESTS,
+            &[0xda70_6e66_3141_68dc_84fd_09da_fee1_4466]
+        );
+    }
 }

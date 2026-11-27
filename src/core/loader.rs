@@ -271,6 +271,30 @@ impl GGUFLoader {
             });
         }
 
+        // audio.cpp stores long tensor names as _audiocpp.N and records the
+        // original names in this parallel array. Restore names without copying data.
+        if let Some((_, value)) = metadata
+            .iter()
+            .find(|(key, _)| key == "audiocpp.tensor_names")
+        {
+            let MetaValue::Array(MetaValueType::String, names) = value else {
+                return Err("audiocpp.tensor_names must be a string array".into());
+            };
+            if names.len() != tensors.len() {
+                return Err("audiocpp.tensor_names count must match tensor count".into());
+            }
+            let mut unique = std::collections::HashSet::new();
+            for (tensor, name) in tensors.iter_mut().zip(names) {
+                let MetaValue::String(name) = name else {
+                    return Err("audiocpp.tensor_names must contain strings".into());
+                };
+                if name.is_empty() || !unique.insert(name) {
+                    return Err("audiocpp.tensor_names must be nonempty and unique".into());
+                }
+                tensor.name.clone_from(name);
+            }
+        }
+
         let alignment = metadata
             .iter()
             .find(|(k, _)| k == "general.alignment")
@@ -392,21 +416,47 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     if !matches!(
         prefix,
         "qwen2"
+            | "mage_vl"
             | "qwen2vl"
             | "qwen3"
+            | "qwen3moe"
+            | "minimind2moe"
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "qwen35moe"
+            | "thx02"
+            | "edge0"
+            | "sensenova_loop"
             | "qwen3tts"
             | "llama"
+            | "exaone"
             | "k2-horizon"
             | "granite"
             | "hunyuan-dense"
+            | "hy_v3"
             | "pig"
             | "lfm2"
             | "lfm2moe"
+            | "lfm3"
+            | "xing4_0"
             | "nanbeige"
             | "nemotron_h"
+            | "nemotron_h_moe"
+            | "falcon-h1"
+            | "phi3"
+            | "glm4"
+            | "gemma-embedding"
+            | "gemma2"
+            | "bert"
+            | "jina-bert-v2"
+            | "nomic-bert"
+            | "nomic-bert-moe"
+            | "mistral3"
+            | "ernie_image"
+            | "audiocpp"
+            | "mellum"
+            | "dory"
     ) {
         return Err(format!("Unsupported architecture: {arch}"));
     }
@@ -426,19 +476,77 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             norm_eps: 1e-5,
         });
     }
+    // ERNIE-Image / ERNIE-Image-Turbo DiT uses default config too: it's a
+    // diffusion model whose GGUF metadata only carries general.architecture
+    // = "ernie_image" (see stable-diffusion.cpp @ de298c2). The pipeline
+    // loads its own config from the tensor inventory.
+    // Note: the unsloth GGUF export mis-tags architecture as "wan", so we
+    // fall back to tensor-name detection when the arch key is missing or
+    // mismatched.
+    let ernie_image_by_arch = arch == "ernie_image";
+    let ernie_image_by_tensor = source
+        .tensor_info("layers.0.self_attention.to_q.weight")
+        .is_some()
+        && source.tensor_info("text_proj.weight").is_some();
+    if ernie_image_by_arch || ernie_image_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 4096,
+            n_layer: 36,
+            n_head: 32,
+            n_head_kv: 32,
+            n_embd_head: 128,
+            n_ff: 12288,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
+    // AuK / audiocpp arch (1.5B Flux2Edit audio DiT). Detection is by
+    // tensor-name presence since the GGUF mis-tags arch as "audiocpp".
+    let auk_by_arch = arch == "audiocpp";
+    let auk_by_tensor = source
+        .tensor_info("transformer.transformer_blocks.0.attn_norm_x.linear.weight")
+        .is_some()
+        && source
+            .tensor_info("transformer.single_transformer_blocks.0.attn_norm.linear.weight")
+            .is_some()
+        && source
+            .tensor_info("transformer.audio_embed.linear.weight")
+            .is_some();
+    if auk_by_arch || auk_by_tensor {
+        return Ok(ModelConfig {
+            n_embd: 1536,
+            n_layer: 10,
+            n_head: 24,
+            n_head_kv: 24,
+            n_embd_head: 64,
+            // n_ff = packed gate+up (6144) + down (3072) summed = 9216
+            n_ff: 9216,
+            n_ctx: 0,
+            vocab_size: 0,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
     // Nemotron-3 Nano is a hybrid Mamba-Transformer; n_head / n_ff /
     // n_head_kv are per-layer arrays that the trunk reads directly. We
     // hand back a placeholder ModelConfig so the generic loader can pass
     // through; the trunk's own config loader (see models::nemotron_h)
     // re-reads the metadata with array awareness.
-    if arch == "nemotron_h" {
+    //
+    // `nemotron_h_moe` is the 30B-A3B mixture-of-experts variant; it
+    // shares the trunk and only differs in the metadata prefix (GGUF
+    // namespaces every architecture-specific key under the architecture
+    // name) and in the expert metadata the trunk reads separately.
+    if arch == "nemotron_h" || arch == "nemotron_h_moe" {
         let n_embd = source
-            .metadata("nemotron_h.embedding_length")
+            .metadata(&format!("{arch}.embedding_length"))
             .and_then(MetaValue::to_u64)
             .map(|v| v as usize)
             .unwrap_or(0);
         let n_layer = source
-            .metadata("nemotron_h.block_count")
+            .metadata(&format!("{arch}.block_count"))
             .and_then(MetaValue::to_u64)
             .map(|v| v as usize)
             .unwrap_or(0);
@@ -448,7 +556,7 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             .map(Vec::len)
             .unwrap_or(0);
         let n_ctx = source
-            .metadata("nemotron_h.context_length")
+            .metadata(&format!("{arch}.context_length"))
             .and_then(MetaValue::to_u64)
             .map(|v| v as usize)
             .unwrap_or(0);
@@ -463,6 +571,78 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             vocab_size,
             rope_freq_base: 0.0,
             norm_eps: 1e-5,
+        });
+    }
+    if arch == "dory" {
+        let n_embd = source
+            .metadata("dory.embedding_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let n_layer = source
+            .metadata("dory.block_count")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        let vocab_size = source
+            .metadata("tokenizer.ggml.tokens")
+            .and_then(MetaValue::to_arr)
+            .map(Vec::len)
+            .unwrap_or(0);
+        let n_ctx = source
+            .metadata("dory.context_length")
+            .and_then(MetaValue::to_u64)
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        return Ok(ModelConfig {
+            n_embd,
+            n_layer,
+            n_head: 0,
+            n_head_kv: 0,
+            n_embd_head: 0,
+            n_ff: 0,
+            n_ctx,
+            vocab_size,
+            rope_freq_base: 0.0,
+            norm_eps: 1e-6,
+        });
+    }
+    // Falcon-H1 declares key/value lengths (128) that differ from
+    // n_embd / n_head (which would give 256); the trunk re-reads the
+    // metadata via `models::falcon_h1::FalconH1Config`, but the generic
+    // ModelConfig must still carry the true head dims.
+    if arch == "falcon-h1" {
+        let meta_usize = |key: &str| -> usize {
+            source
+                .metadata(key)
+                .and_then(MetaValue::to_u64)
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or(0)
+        };
+        let n_embd = meta_usize("falcon-h1.embedding_length");
+        return Ok(ModelConfig {
+            n_embd,
+            n_layer: meta_usize("falcon-h1.block_count"),
+            n_head: meta_usize("falcon-h1.attention.head_count"),
+            n_head_kv: meta_usize("falcon-h1.attention.head_count_kv"),
+            n_embd_head: meta_usize("falcon-h1.attention.key_length"),
+            n_ff: meta_usize("falcon-h1.feed_forward_length"),
+            n_ctx: meta_usize("falcon-h1.context_length"),
+            vocab_size: source
+                .metadata("tokenizer.ggml.tokens")
+                .and_then(MetaValue::to_arr)
+                .map(Vec::len)
+                .unwrap_or(0),
+            rope_freq_base: source
+                .metadata("falcon-h1.rope.freq_base")
+                .and_then(MetaValue::to_f64)
+                .map(|v| v as f32)
+                .unwrap_or(10_000.0),
+            norm_eps: source
+                .metadata("falcon-h1.attention.layer_norm_rms_epsilon")
+                .and_then(MetaValue::to_f64)
+                .map(|v| v as f32)
+                .unwrap_or(1e-5),
         });
     }
     let get_u64 = |key: &str| -> Result<u64, String> {
@@ -490,13 +670,25 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
     let as_usize = |key: String| -> Result<usize, String> {
         usize::try_from(get_u64(&key)?).map_err(|_| format!("{key} does not fit usize"))
     };
-    let n_embd_head = if arch == "qwen35" {
+    let n_embd_head = if arch == "qwen35"
+        || arch == "qwen35moe"
+        || arch == "thx02"
+        || arch == "edge0"
+        || arch == "sensenova_loop"
+        || arch == "nanbeige"
+        || arch == "mellum"
+        || arch == "hy_v3"
+    {
         if n_head == 0 {
             return Err(format!(
                 "Invalid {prefix} head shape: embedding_length={n_embd}, head_count={n_head}"
             ));
         }
-        as_usize(format!("{prefix}.attention.key_length"))?
+        let head_dim = as_usize(format!("{prefix}.attention.key_length"))?;
+        if head_dim == 0 {
+            return Err(format!("Invalid {prefix}.attention.key_length: 0"));
+        }
+        head_dim
     } else {
         if n_head == 0 || n_embd % n_head != 0 {
             return Err(format!(
@@ -516,6 +708,20 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
             // ModelConfig defaults. The model trunks read their own
             // head_count_kv array for per-layer dispatch.
             8
+        } else if arch == "lfm3" {
+            // LFM3 stores a per-layer array; use the first attention entry
+            // for the generic config while the LFM3 trunk keeps the full
+            // array for recurrent/attention dispatch.
+            source
+                .metadata("lfm3.attention.head_count_kv")
+                .and_then(MetaValue::to_arr)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .filter_map(MetaValue::to_u64)
+                        .find(|&value| value > 0)
+                })
+                .unwrap_or(0) as usize
         } else if arch == "granite" {
             // Granite stores head_count_kv as a per-layer array (all values
             // are identical for the dense variant). Read the first entry.
@@ -531,11 +737,31 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                     None => 0,
                 },
             }
+        } else if arch == "bert"
+            || arch == "jina-bert-v2"
+            || arch == "nomic-bert"
+            || arch == "nomic-bert-moe"
+        {
+            // Standard BERT is plain multi-head attention with no GQA, so the
+            // converted GGUF omits `attention.head_count_kv` entirely
+            // (`references/llama.cpp/src/models/bert.cpp` reads n_embd_gqa as
+            // n_embd). Fall back to head_count when the key is absent.
+            as_usize(format!("{prefix}.attention.head_count_kv")).unwrap_or_else(|_| n_head)
         } else {
             as_usize(format!("{prefix}.attention.head_count_kv"))?
         },
         n_embd_head,
-        n_ff: as_usize(format!("{prefix}.feed_forward_length"))?,
+        // A MoE tower has no dense FFN, so `feed_forward_length` is absent and
+        // the width lives in `expert_feed_forward_length` instead. Fall back to
+        // that so the shared config struct stays usable for the MoE arch; the
+        // dense path never reads it.
+        n_ff: match as_usize(format!("{prefix}.feed_forward_length")) {
+            Ok(value) => value,
+            Err(error) => match as_usize(format!("{prefix}.expert_feed_forward_length")) {
+                Ok(value) => value,
+                Err(_) => return Err(error),
+            },
+        },
         n_ctx: as_usize(format!("{prefix}.context_length"))?,
         vocab_size: match get_u64(&format!("{prefix}.vocab_size")) {
             Ok(value) => usize::try_from(value)
@@ -546,8 +772,25 @@ pub fn model_config_from_source<S: TensorSource + ?Sized>(
                 .map(Vec::len)
                 .unwrap_or(0),
         },
-        rope_freq_base: get_f64_opt(&format!("{prefix}.rope.freq_base"), 1_000_000.0)? as f32,
-        norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon"))? as f32,
+        rope_freq_base: {
+            // Per-arch rope.freq_base defaults. The loader uses 1e6
+            // as a fallback for any arch that omits the metadata,
+            // but Gemma-2 actually trains with `freq_base = 10000.0`
+            // (HF `google/gemma-2-2b` config) and ships no
+            // `*.rope.freq_base` key in the GGUF — using 1e6 would
+            // silently produce garbage rotations. Hardcode the
+            // Gemma-2 default here; every other arch falls through
+            // to 1e6 unchanged.
+            let default = if prefix == "gemma2" {
+                10_000.0
+            } else {
+                1_000_000.0
+            };
+            get_f64_opt(&format!("{prefix}.rope.freq_base"), default)? as f32
+        },
+        norm_eps: get_f64(&format!("{prefix}.attention.layer_norm_epsilon"))
+            .or_else(|_| get_f64(&format!("{prefix}.attention.layer_norm_rms_epsilon")))
+            .unwrap_or(1e-12) as f32,
     })
 }
 
@@ -587,7 +830,7 @@ pub struct Qwen3ArchKnobs {
     /// `None` means any configuration derived from `model_config_from_source`
     /// is accepted (e.g. Qwen3 base).
     pub allowed_dimensions: Option<Qwen3AllowedDimensions>,
-    /// Optional routed FFN configuration for the Qwen3-VL MoE variant.
+    /// Optional routed FFN configuration for MoE variants sharing this trunk.
     pub moe: Option<Qwen3MoeConfig>,
 }
 
@@ -647,6 +890,41 @@ const KNOWN_QWEN3VL_2B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensio
     freq_base_bits: 5_000_000_f32.to_bits(),
 };
 
+/// `qwen3vl`-arch GGUF for `Qwen3-VL-4B-Instruct` (Qwen/Qwen3-VL-4B-Instruct-GGUF
+/// Q4_K_M, SHA-256 not yet pinned). LLM backbone is the Qwen3-4B dense trunk
+/// (`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8, head_dim=128, n_ff=9728`),
+/// frequency base `5_000_000.0`, norm epsilon `1e-6`, M-RoPE sections
+/// `[24, 20, 20, 0]`. Note: Qwen3 deliberately has `n_embd_head != n_embd /
+/// n_head` (here `32 * 128 = 4096 != 2560`) — there is an explicit output
+/// projection that compresses back. Verified end-to-end 2026-10-01 (see
+/// `tests/qwen3_vl_4b.rs`).
+const KNOWN_QWEN3VL_4B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 2560,
+    n_layer: 36,
+    n_head: 32,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 9728,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
+/// Released Qwen3-VL-8B text backbone used by Qwen-Image-2.1.
+const KNOWN_QWEN3VL_8B_DIMENSIONS: Qwen3AllowedDimensions = Qwen3AllowedDimensions {
+    n_embd: 4096,
+    n_layer: 36,
+    n_head: 32,
+    n_head_kv: 8,
+    n_embd_head_k: 128,
+    n_embd_head_v: 128,
+    n_ff: 12288,
+    n_ctx: 262_144,
+    norm_eps_bits: 1e-6_f32.to_bits(),
+    freq_base_bits: 5_000_000_f32.to_bits(),
+};
+
 /// Resolve the Qwen3-family knobs from `general.architecture`.
 ///
 /// This is the **single** place where architecture dispatch happens. It is
@@ -663,11 +941,15 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
     if !matches!(
         arch.as_str(),
         "qwen2"
+            | "mage_vl"
             | "qwen2vl"
             | "qwen3"
+            | "qwen3moe"
+            | "minimind2moe"
             | "qwen3vl"
             | "qwen3vlmoe"
             | "qwen35"
+            | "qwen35moe"
             | "qwen3tts"
             | "llama"
             | "hunyuan-dense"
@@ -678,7 +960,7 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let has_qk_norm = matches!(
         arch.as_str(),
-        "qwen3" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
+        "qwen3" | "qwen3moe" | "mage_vl" | "qwen3vl" | "qwen3vlmoe" | "hunyuan-dense" | "lfm2"
     );
     let has_qkv_bias = arch == "qwen2vl";
 
@@ -700,11 +982,13 @@ pub fn qwen3_arch_knobs<S: TensorSource + ?Sized>(source: &S) -> Result<Qwen3Arc
 
     let allowed_dimensions = if arch == "qwen3vl" {
         Some(KNOWN_QWEN3VL_DIMENSIONS)
+    } else if arch == "mage_vl" {
+        Some(KNOWN_QWEN3VL_4B_DIMENSIONS)
     } else {
         None
     };
 
-    let moe = if arch == "qwen3vlmoe" {
+    let moe = if matches!(arch.as_str(), "qwen3moe" | "minimind2moe" | "qwen3vlmoe") {
         let get = |name: &str| -> Result<usize, String> {
             let key = format!("{arch}.{name}");
             source
@@ -820,6 +1104,9 @@ pub(crate) fn check_qwen3_allowed_dimensions(
     };
     if matches(allowed)
         || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_2B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_2B_DIMENSIONS && matches(KNOWN_QWEN3VL_4B_DIMENSIONS))
+        || (allowed == KNOWN_QWEN3VL_DIMENSIONS && matches(KNOWN_QWEN3VL_8B_DIMENSIONS))
     {
         Ok(())
     } else {
@@ -1040,6 +1327,54 @@ mod tests {
     }
 
     #[test]
+    fn audiocpp_logical_names_preserve_tensor_offsets_and_reject_bad_maps() {
+        let encoded = |names: &[&str]| {
+            let mut b = Vec::new();
+            push_u32(&mut b, u32::from_le_bytes(*b"GGUF"));
+            push_u32(&mut b, 3);
+            push_u64(&mut b, 2);
+            push_u64(&mut b, 1);
+            push_kv(&mut b, "audiocpp.tensor_names", MetaValueType::Array, |b| {
+                push_i32(b, MetaValueType::String as i32);
+                push_u64(b, names.len() as u64);
+                for name in names {
+                    push_str(b, name);
+                }
+            });
+            for (name, offset) in [("_audiocpp.0", 0), ("short", 4)] {
+                push_str(&mut b, name);
+                push_u32(&mut b, 1);
+                push_u64(&mut b, 1);
+                push_i32(&mut b, GGMLType::F32 as i32);
+                push_u64(&mut b, offset);
+            }
+            while b.len() % 32 != 0 {
+                b.push(0);
+            }
+            push_f32(&mut b, 1.25);
+            push_f32(&mut b, -2.5);
+            b
+        };
+        let long = "transformer.single_transformer_blocks.19.attn_norm.linear.weight";
+        let loader = parse_temp(&encoded(&[long, "short"])).unwrap();
+        assert_eq!(loader.tensor_info(long).unwrap().offset, 0);
+        assert_eq!(loader.tensor_info("short").unwrap().offset, 4);
+        assert_eq!(loader.tensor_slice(long).unwrap(), &1.25f32.to_le_bytes());
+        assert_eq!(
+            loader.tensor_slice("short").unwrap(),
+            &(-2.5f32).to_le_bytes()
+        );
+        assert_eq!(loader.tensor_slice(long).unwrap().as_ptr(), unsafe {
+            loader.mmap.as_ptr().add(loader.data_offset)
+        });
+        for names in [&["short"][..], &["short", "short"][..], &["", "short"][..]] {
+            assert!(parse_temp(&encoded(names))
+                .unwrap_err()
+                .contains("audiocpp.tensor_names"));
+        }
+    }
+
+    #[test]
     fn test_gguf_parse_minimal() {
         let data = build_minimal_gguf();
         let loader = parse_temp(&data).expect("parse minimal GGUF");
@@ -1102,7 +1437,7 @@ mod tests {
         let loader = parse_temp(&build_minimal_gguf()).unwrap();
         let source = DelegatingSource(&loader);
         assert_eq!(source.model_config().unwrap().n_embd, 1024);
-        assert!(crate::core::model::QuantizedLinear::from_source(
+        assert!(crate::ops::linear::QuantizedLinear::from_source(
             &source,
             "blk.0.attn_q.weight",
             None,
@@ -1399,6 +1734,156 @@ mod tests {
             (2048, 48, 32, 4)
         );
         assert_eq!(qwen3_arch_knobs(&qwen3moe).unwrap().arch, "qwen3vlmoe");
+    }
+
+    #[test]
+    fn qwen3moe_text_arch_reads_its_own_metadata_prefix() {
+        let source = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("qwen3moe".into()),
+                ),
+                ("qwen3moe.embedding_length".into(), MetaValue::Uint32(768)),
+                ("qwen3moe.block_count".into(), MetaValue::Uint32(8)),
+                ("qwen3moe.attention.head_count".into(), MetaValue::Uint32(8)),
+                (
+                    "qwen3moe.attention.head_count_kv".into(),
+                    MetaValue::Uint32(4),
+                ),
+                (
+                    "qwen3moe.attention.key_length".into(),
+                    MetaValue::Uint32(96),
+                ),
+                (
+                    "qwen3moe.feed_forward_length".into(),
+                    MetaValue::Uint32(2432),
+                ),
+                ("qwen3moe.context_length".into(), MetaValue::Uint32(32768)),
+                (
+                    "qwen3moe.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "qwen3moe.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-6),
+                ),
+                ("qwen3moe.expert_count".into(), MetaValue::Uint32(4)),
+                ("qwen3moe.expert_used_count".into(), MetaValue::Uint32(1)),
+                (
+                    "qwen3moe.expert_feed_forward_length".into(),
+                    MetaValue::Uint32(2432),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        let config = model_config_from_source(&source).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (768, 8, 8, 4)
+        );
+        let knobs = qwen3_arch_knobs(&source).unwrap();
+        assert_eq!(knobs.arch, "qwen3moe");
+        assert!(knobs.has_qk_norm);
+        assert_eq!(
+            knobs.moe,
+            Some(Qwen3MoeConfig {
+                expert_count: 4,
+                expert_used_count: 1,
+                expert_ffn: 2432,
+                shared_expert_ffn: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn minimind2moe_reads_ungated_shared_expert_metadata() {
+        let source = MapTensorSource {
+            metadata: std::collections::HashMap::from([
+                (
+                    "general.architecture".into(),
+                    MetaValue::String("minimind2moe".into()),
+                ),
+                (
+                    "minimind2moe.embedding_length".into(),
+                    MetaValue::Uint32(640),
+                ),
+                ("minimind2moe.block_count".into(), MetaValue::Uint32(8)),
+                (
+                    "minimind2moe.attention.head_count".into(),
+                    MetaValue::Uint32(8),
+                ),
+                (
+                    "minimind2moe.attention.head_count_kv".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "minimind2moe.attention.key_length".into(),
+                    MetaValue::Uint32(80),
+                ),
+                (
+                    "minimind2moe.attention.value_length".into(),
+                    MetaValue::Uint32(80),
+                ),
+                (
+                    "minimind2moe.feed_forward_length".into(),
+                    MetaValue::Uint32(1728),
+                ),
+                (
+                    "minimind2moe.context_length".into(),
+                    MetaValue::Uint32(32768),
+                ),
+                (
+                    "minimind2moe.rope.freq_base".into(),
+                    MetaValue::Float32(1_000_000.0),
+                ),
+                (
+                    "minimind2moe.attention.layer_norm_rms_epsilon".into(),
+                    MetaValue::Float32(1e-5),
+                ),
+                ("minimind2moe.expert_count".into(), MetaValue::Uint32(4)),
+                (
+                    "minimind2moe.expert_used_count".into(),
+                    MetaValue::Uint32(2),
+                ),
+                (
+                    "minimind2moe.expert_feed_forward_length".into(),
+                    MetaValue::Uint32(1728),
+                ),
+                (
+                    "minimind2moe.expert_shared_feed_forward_length".into(),
+                    MetaValue::Uint32(1728),
+                ),
+            ]),
+            tensors: std::collections::HashMap::new(),
+        };
+        let config = model_config_from_source(&source).unwrap();
+        assert_eq!(
+            (
+                config.n_embd,
+                config.n_layer,
+                config.n_head,
+                config.n_head_kv
+            ),
+            (640, 8, 8, 2)
+        );
+        let knobs = qwen3_arch_knobs(&source).unwrap();
+        assert_eq!(knobs.arch, "minimind2moe");
+        assert!(!knobs.has_qk_norm);
+        assert_eq!(
+            knobs.moe,
+            Some(Qwen3MoeConfig {
+                expert_count: 4,
+                expert_used_count: 2,
+                expert_ffn: 1728,
+                shared_expert_ffn: 1728,
+            })
+        );
     }
 
     #[test]

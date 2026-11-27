@@ -20,6 +20,7 @@ mod transformer;
 use crate::core::tensor::{load_f32_tensor, GGMLType, MetaValue, TensorSource};
 use crate::ops::kernel::{Kernel, Weight};
 pub use codec::BreezeCodec;
+pub(crate) use codec::Conv as CausalConv;
 use rand::{Rng, SeedableRng};
 use serde_json::Value;
 use transformer::{linear, matrix, Cache, Kind, Transformer};
@@ -48,6 +49,17 @@ pub struct BreezeModel<'a> {
     pool: rayon::ThreadPool,
 }
 
+fn require_f32_compatible(source: &dyn TensorSource, name: &str) -> Result<(), String> {
+    match source.tensor_info(name) {
+        None => Err(format!("Missing tensor: {name}")),
+        Some(info) if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) => Err(format!(
+            "{name}: Breeze loader accepts F32 or BF16, got {:?}",
+            info.ggml_type
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 impl<'a> BreezeModel<'a> {
     pub fn from_source(source: &'a dyn TensorSource, threads: usize) -> Result<Self, String> {
         // These tensors use the shared F32/BF16 loader (`load_f32_tensor`).
@@ -55,20 +67,8 @@ impl<'a> BreezeModel<'a> {
         // keep this list in lockstep with `load_f32_tensor`'s accepted types
         // and remove the preflight entirely once every norm tensor is also
         // routed through a multi-precision loader.
-        let require_f32_compatible = |name: &str| -> Result<(), String> {
-            match source.tensor_info(name) {
-                None => Err(format!("Missing tensor: {name}")),
-                Some(info) if !matches!(info.ggml_type, GGMLType::F32 | GGMLType::BF16) => {
-                    Err(format!(
-                        "{name}: Breeze loader accepts F32 or BF16, got {:?}",
-                        info.ggml_type
-                    ))
-                }
-                Some(_) => Ok(()),
-            }
-        };
-        require_f32_compatible("depth_decoder.codebooks_head.weight")?;
-        require_f32_compatible("text_encoder.embed_tokens.eoi_embedding")?;
+        require_f32_compatible(source, "depth_decoder.codebooks_head.weight")?;
+        require_f32_compatible(source, "text_encoder.embed_tokens.eoi_embedding")?;
         for (prefix, count, norms) in [
             (
                 "text_encoder",
@@ -98,10 +98,13 @@ impl<'a> BreezeModel<'a> {
                 &["input_layernorm", "post_attention_layernorm"][..],
             ),
         ] {
-            require_f32_compatible(&format!("{prefix}.norm.weight"))?;
+            require_f32_compatible(source, &format!("{prefix}.norm.weight"))?;
             for index in 0..count {
                 for norm in norms {
-                    require_f32_compatible(&format!("{prefix}.layers.{index}.{norm}.weight"))?;
+                    require_f32_compatible(
+                        source,
+                        &format!("{prefix}.layers.{index}.{norm}.weight"),
+                    )?;
                 }
             }
         }

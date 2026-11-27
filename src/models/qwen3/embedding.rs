@@ -4,14 +4,14 @@
 
 use crate::app::cli::EmbeddingOutput;
 use crate::core::loader::model_config_from_source;
-use crate::core::tensor::{GGMLType, TensorSource};
+use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
 use crate::models::qwen3::{get_f32_tensor, load_layers, Qwen3LayerWeights};
 use crate::ops::kernel::Weight;
 use crate::ops::quant::BlockQ8K;
 use crate::ops::{
-    dot_f32, embedding_lookup, f32_slice_to_f16, rms_norm, rms_norm_inplace, rope_neox_inplace,
+    dot_f32, embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace,
     silu_mul_approx_inplace, softmax_inplace,
 };
 use std::sync::Arc;
@@ -27,6 +27,7 @@ enum EmbeddingPooling {
 struct EmbeddingConfig {
     causal_attn: bool,
     pooling: EmbeddingPooling,
+    padded_dot: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -96,10 +97,20 @@ fn embedding_config(
             ));
         }
     };
+    let padded_dot = arch == "qwen3"
+        && matches!(
+            get_meta("general.basename"),
+            Some(crate::core::tensor::MetaValue::String(value)) if value == "omni"
+        )
+        && matches!(
+            get_meta("general.finetune"),
+            Some(crate::core::tensor::MetaValue::String(value)) if value == "retrieval-text-hf"
+        );
 
     Ok(EmbeddingConfig {
         causal_attn,
         pooling,
+        padded_dot,
     })
 }
 
@@ -220,7 +231,7 @@ fn pool_embedding_rows(
     }
 }
 
-fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
+pub(crate) fn l2_normalize_embedding(values: &mut [f32]) -> Result<(), String> {
     if values.iter().any(|value| !value.is_finite()) {
         return Err("Embedding contains a non-finite value".into());
     }
@@ -315,6 +326,10 @@ pub fn run_embedding_tokens(
         .ok_or("missing token_embd.weight")?;
     let embd_type = embd_info.ggml_type;
 
+    // Note: BitNet models (file_type=40 + per-projection
+    // `*_norm_in` tensors) are dispatched to
+    // [`crate::models::bitnet::qwen3_arch`] in `app::run_embedding`
+    // before reaching this function, so this path is BitNet-free.
     let layers: Vec<Qwen3LayerWeights> = load_layers(
         source,
         n_layer,
@@ -323,7 +338,6 @@ pub fn run_embedding_tokens(
         n_embd_gqa,
         n_ff,
         n_embd_head_k,
-        is_qwen3,
     );
 
     let n_tokens = token_ids.len();
@@ -464,6 +478,13 @@ pub fn run_embedding_tokens(
                 let out_base = h * n_embd_head_v;
                 let n_cached = attention_key_end(t, n_tokens, embedding_cfg.causal_attn);
                 let n_padded = (n_cached + 255) / 256 * 256;
+                // Jina Omni's pinned ggml oracle reduces the zero-padded row.
+                // Other Qwen3 embedding models retain their established reduction order.
+                let n_value = if embedding_cfg.padded_dot {
+                    n_padded
+                } else {
+                    n_cached
+                };
                 for s in 0..n_cached {
                     let k_row = &k_buf[s * n_embd_gqa..(s + 1) * n_embd_gqa];
                     scores[s] = dot_f32(
@@ -480,7 +501,7 @@ pub fn run_embedding_tokens(
                     }
                     values[n_cached..n_padded].fill(0.0);
                     attn_row[out_base + d] =
-                        dot_f32(&values[..n_padded], &scores[..n_padded], n_cached);
+                        dot_f32(&values[..n_padded], &scores[..n_padded], n_value);
                 }
             }
         }
@@ -546,6 +567,13 @@ pub fn run_embedding_tokens(
     }
 
     let mut pooled = pool_embedding_rows(&hidden, n_tokens, n_embd, embedding_cfg.pooling)?;
+    #[cfg(feature = "parity-trace")]
+    crate::parity_trace::report(crate::parity_trace::checkpoint(
+        "embedding.pooled",
+        None,
+        &[n_embd],
+        &pooled,
+    ));
     l2_normalize_embedding(&mut pooled)?;
     #[cfg(feature = "parity-trace")]
     crate::parity_trace::report(crate::parity_trace::checkpoint(
@@ -656,6 +684,42 @@ mod tests {
     fn explicit_embedding_tokens_reject_empty_input_before_model_loading() {
         let error = run_embedding_tokens(&EmptySource, &[], None, 1).unwrap_err();
         assert_eq!(error, "Embedding input produced no tokens");
+    }
+
+    #[test]
+    fn padded_dot_is_scoped_to_jina_omni() {
+        let metadata = |key: &str| match key {
+            "qwen3.pooling_type" => Some(crate::core::tensor::MetaValue::Uint32(3)),
+            "qwen3.attention.causal" => Some(crate::core::tensor::MetaValue::Bool(true)),
+            "general.basename" => Some(crate::core::tensor::MetaValue::String("omni".into())),
+            "general.finetune" => Some(crate::core::tensor::MetaValue::String(
+                "retrieval-text-hf".into(),
+            )),
+            _ => None,
+        };
+        assert!(embedding_config("qwen3", metadata).unwrap().padded_dot);
+
+        let other_arch = |key: &str| match key {
+            "qwen35.pooling_type" => Some(crate::core::tensor::MetaValue::Uint32(3)),
+            "qwen35.attention.causal" => Some(crate::core::tensor::MetaValue::Bool(true)),
+            "general.basename" => Some(crate::core::tensor::MetaValue::String("omni".into())),
+            "general.finetune" => Some(crate::core::tensor::MetaValue::String(
+                "retrieval-text-hf".into(),
+            )),
+            _ => None,
+        };
+        assert!(!embedding_config("qwen35", other_arch).unwrap().padded_dot);
+
+        let ordinary_qwen3 = |key: &str| match key {
+            "qwen3.pooling_type" => Some(crate::core::tensor::MetaValue::Uint32(3)),
+            "qwen3.attention.causal" => Some(crate::core::tensor::MetaValue::Bool(true)),
+            _ => None,
+        };
+        assert!(
+            !embedding_config("qwen3", ordinary_qwen3)
+                .unwrap()
+                .padded_dot
+        );
     }
 
     #[test]

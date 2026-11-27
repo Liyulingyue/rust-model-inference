@@ -90,23 +90,124 @@ macro_rules! avx2_matmul_packed {
                     let w_lo128 = $unpack_4(w_ptr, row_byte, i);
                     let zero = _mm256_setzero_ps();
                     let w_f = _mm256_insertf128_ps(zero, w_lo128, 0);
-                    let x_f = _mm256_loadu_ps(i_ptr.add(i));
+                    let x_f = _mm256_insertf128_ps(zero, _mm_loadu_ps(i_ptr.add(i)), 0);
                     acc0 = _mm256_fmadd_ps(w_f, x_f, acc0);
                     i += 4;
                 }
+                // Scalar tail: a lane-wide FMA into the accumulator would be
+                // counted once per lane by the horizontal sum, so the tail
+                // keeps its own accumulator instead.
+                let mut tail_sum = 0.0f32;
                 while i < n_in {
                     let w_val = $scalar_unpack(w_ptr, row_byte, i);
                     let x_val = *i_ptr.add(i);
-                    acc0 = _mm256_fmadd_ps(_mm256_set1_ps(w_val), _mm256_set1_ps(x_val), acc0);
+                    tail_sum = w_val.mul_add(x_val, tail_sum);
                     i += 1;
                 }
 
                 let total = unsafe {
                     $crate::ops::kernel::simd_avx2::hsum256(acc0)
                         + $crate::ops::kernel::simd_avx2::hsum256(acc1)
-                };
+                } + tail_sum;
                 *out_ptr.add(out_local) = total;
                 out_local += 1;
+            }
+        }
+    };
+}
+
+/// Emit the token-tiled sibling of [`avx2_matmul_packed`]: same per-(row,
+/// token) dot body, verbatim, nested inside `(row-tile × token-tile)` blocking
+/// so the weight panel and the input panel stay resident in L2 across the
+/// inner loops. Each weight byte is fetched from DRAM once per token tile
+/// instead of once per token; the per-(row, token) values are bit-identical
+/// to the per-token kernel.
+#[macro_export]
+macro_rules! avx2_matmul_packed_tiled {
+    (
+        $fn_name:ident,
+        $bytes_per_element:expr,
+        $unpack_8:path,
+        $unpack_4:path,
+        $scalar_unpack:path
+    ) => {
+        /// Row-partitioned, token-tiled batched matmul over `n_tokens`
+        /// activation rows. See [`avx2_matmul_packed`] for the dot contract.
+        #[target_feature(enable = "avx2", enable = "fma")]
+        pub unsafe fn $fn_name(
+            weight: &[u8],
+            input: &[f32],
+            output: &mut [f32],
+            n_in: usize,
+            n_out: usize,
+            n_tokens: usize,
+            row_start: usize,
+            row_end: usize,
+        ) {
+            use ::std::arch::x86_64::*;
+            const ROW_TILE: usize = 32;
+            const TOKEN_TILE: usize = 32;
+            let w_ptr = weight.as_ptr();
+            let out_ptr = output.as_mut_ptr();
+
+            let mut row_tile = row_start;
+            while row_tile < row_end {
+                let row_stop = (row_tile + ROW_TILE).min(row_end);
+                let mut token_tile = 0usize;
+                while token_tile < n_tokens {
+                    let token_stop = (token_tile + TOKEN_TILE).min(n_tokens);
+                    for row in row_tile..row_stop {
+                        let row_byte = row * n_in * $bytes_per_element;
+                        let out_row = out_ptr.add(row);
+                        for token in token_tile..token_stop {
+                            let i_ptr = input.as_ptr().add(token * n_in);
+                            let mut acc0 = _mm256_setzero_ps();
+                            let mut acc1 = _mm256_setzero_ps();
+
+                            let mut i = 0;
+                            while i + 16 <= n_in {
+                                let w_lo = $unpack_8(w_ptr, row_byte, i);
+                                let w_hi = $unpack_8(w_ptr, row_byte, i + 8);
+                                let x_lo = _mm256_loadu_ps(i_ptr.add(i));
+                                let x_hi = _mm256_loadu_ps(i_ptr.add(i + 8));
+                                acc0 = _mm256_fmadd_ps(w_lo, x_lo, acc0);
+                                acc1 = _mm256_fmadd_ps(w_hi, x_hi, acc1);
+                                i += 16;
+                            }
+                            while i + 8 <= n_in {
+                                let w_f = $unpack_8(w_ptr, row_byte, i);
+                                let x_f = _mm256_loadu_ps(i_ptr.add(i));
+                                acc0 = _mm256_fmadd_ps(w_f, x_f, acc0);
+                                i += 8;
+                            }
+                            while i + 4 <= n_in {
+                                let w_lo128 = $unpack_4(w_ptr, row_byte, i);
+                                let zero = _mm256_setzero_ps();
+                                let w_f = _mm256_insertf128_ps(zero, w_lo128, 0);
+                                let x_f = _mm256_insertf128_ps(zero, _mm_loadu_ps(i_ptr.add(i)), 0);
+                                acc0 = _mm256_fmadd_ps(w_f, x_f, acc0);
+                                i += 4;
+                            }
+                            // Scalar tail: same separate accumulator as the
+                            // per-token kernel (see the comment there).
+                            let mut tail_sum = 0.0f32;
+                            while i < n_in {
+                                let w_val = $scalar_unpack(w_ptr, row_byte, i);
+                                let x_val = *i_ptr.add(i);
+                                tail_sum = w_val.mul_add(x_val, tail_sum);
+                                i += 1;
+                            }
+
+                            let total = unsafe {
+                                $crate::ops::kernel::simd_avx2::hsum256(acc0)
+                                    + $crate::ops::kernel::simd_avx2::hsum256(acc1)
+                            } + tail_sum;
+                            *out_row.add(token * n_out) = total;
+                        }
+                    }
+                    token_tile = token_stop;
+                }
+                row_tile = row_stop;
             }
         }
     };

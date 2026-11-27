@@ -79,6 +79,49 @@ impl Drop for GpuMatmulScope {
 //   Cargo.toml.
 // ============================================================================
 
+/// How many times a waiter spins before it lets the core go.
+///
+/// The spin covers the hand-off inside one `compute()` call, where the
+/// worker's turn is microseconds away. After that the waiter yields, because a
+/// hot spin keeps every participant runnable: a pool with as many
+/// participants as the machine has cores then starves the thread that is
+/// actually doing the work, and on a shared box it starves the other tenants
+/// too. Measured on a 20-core aarch64 box with `--threads 20`, hot spinning cost
+/// 29x: 2.4 tok/s against 69 tok/s at 19 threads.
+const WAIT_SPINS: usize = 256;
+
+/// How long a worker must stay idle before it parks.
+///
+/// Waking a parked worker costs tens of microseconds, which would dominate
+/// the back-to-back compute calls of an LLM decode step. The workers
+/// therefore keep yielding while the pool is only briefly idle and park
+/// once the idle period is long enough for the wake-up to be amortized --
+/// the AuK device path, for example, leaves the pool untouched for the
+/// whole denoise and would otherwise starve its own attention loop of
+/// cores.
+const PARK_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Upper bound on how long a parked worker sleeps before it re-checks the
+/// epoch. The dispatcher always signals the condition variable, so this is
+/// only a safety net against a lost notification.
+const PARK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How many times an idle worker yields before it reads the clock again.
+const WAIT_YIELDS: usize = 64;
+
+/// Wait while `condition` holds, spinning briefly and then yielding the core.
+fn wait_while(mut condition: impl FnMut() -> bool) {
+    let mut spins = 0;
+    while condition() {
+        if spins < WAIT_SPINS {
+            spins += 1;
+            std::hint::spin_loop();
+        } else {
+            std::thread::yield_now();
+        }
+    }
+}
+
 pub struct ComputePool {
     n_threads: usize,
     inner: Arc<Inner>,
@@ -94,10 +137,42 @@ struct Inner {
     chunk_counter: AtomicI32,
     chunk_barrier: std::sync::atomic::AtomicUsize,
     chunk_n_chunks: std::sync::atomic::AtomicI32,
+    /// Parking primitive for idle workers.
+    ///
+    /// The dispatcher publishes a new epoch and then signals this condition
+    /// variable; a worker that has nothing to do parks on it instead of
+    /// spinning, so an idle pool does not steal cores from the thread that
+    /// is doing the real work.
+    park: std::sync::Mutex<()>,
+    park_signal: std::sync::Condvar,
+    /// Number of workers that are parking or about to park.
+    ///
+    /// The dispatcher only takes the parking lock when this is nonzero, so
+    /// the common case -- a pool that is used back to back -- does not pay
+    /// for the parking machinery at all.
+    parked: AtomicUsize,
     #[cfg(feature = "vulkan")]
     gpu_matmul_disabled: AtomicBool,
     #[cfg(all(test, feature = "vulkan"))]
     gpu_disabled_workers: AtomicUsize,
+}
+
+impl Inner {
+    /// Wake the workers that parked while idle.
+    ///
+    /// The lock is taken before the notification so a worker that is about
+    /// to sleep cannot miss it: the worker re-checks the epoch while
+    /// holding this lock, and the dispatcher increments the epoch before it
+    /// takes the lock.
+    /// The lock is only taken when a worker is parking, so a pool that is
+    /// used back to back does not pay for the parking machinery.
+    fn wake_parked(&self) {
+        if self.parked.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let _guard = self.park.lock().unwrap_or_else(|error| error.into_inner());
+        self.park_signal.notify_all();
+    }
 }
 
 type CallFn = unsafe fn(usize, usize, usize);
@@ -116,6 +191,9 @@ impl ComputePool {
                     chunk_counter: AtomicI32::new(0),
                     chunk_barrier: AtomicUsize::new(0),
                     chunk_n_chunks: AtomicI32::new(0),
+                    park: std::sync::Mutex::new(()),
+                    park_signal: std::sync::Condvar::new(),
+                    parked: AtomicUsize::new(0),
                     #[cfg(feature = "vulkan")]
                     gpu_matmul_disabled: AtomicBool::new(false),
                     #[cfg(all(test, feature = "vulkan"))]
@@ -134,6 +212,9 @@ impl ComputePool {
             chunk_counter: AtomicI32::new(0),
             chunk_barrier: AtomicUsize::new(0),
             chunk_n_chunks: AtomicI32::new(0),
+            park: std::sync::Mutex::new(()),
+            park_signal: std::sync::Condvar::new(),
+            parked: AtomicUsize::new(0),
             #[cfg(feature = "vulkan")]
             gpu_matmul_disabled: AtomicBool::new(false),
             #[cfg(all(test, feature = "vulkan"))]
@@ -199,6 +280,14 @@ impl ComputePool {
     /// `docs/develop/PARALLEL_MATMUL_SAFETY.md` §1 for the audited
     /// pattern.
     pub fn compute<F: Fn(usize, usize)>(&self, f: F) {
+        let scalar = crate::ops::scalar_mode();
+        self.compute_dispatch(|ith, nth| {
+            let _numerics = crate::ops::ScalarDispatchScope::new(scalar);
+            f(ith, nth);
+        });
+    }
+
+    fn compute_dispatch<F: Fn(usize, usize)>(&self, f: F) {
         if self.n_threads <= 1 {
             #[cfg(all(test, feature = "vulkan"))]
             if gpu_matmul_disabled() {
@@ -221,9 +310,7 @@ impl ComputePool {
         let call_fn = call_closure::<F> as *const () as usize;
 
         // Wait for all workers to be idle from previous compute
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         // Reset completion counter before publishing new work
@@ -238,6 +325,7 @@ impl ComputePool {
 
         // Publish: epoch increment signals workers to start
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+        self.inner.wake_parked();
 
         // Main thread does its share
         #[cfg(all(test, feature = "vulkan"))]
@@ -252,9 +340,7 @@ impl ComputePool {
         self.inner.n_complete.fetch_add(1, Ordering::SeqCst);
 
         // Wait for all threads to finish
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         unsafe {
@@ -267,7 +353,11 @@ impl ComputePool {
         n_chunks: i32,
         f: F,
     ) {
-        let f = Arc::new(f);
+        let scalar = crate::ops::scalar_mode();
+        let f = Arc::new(move |ith, chunk| {
+            let _numerics = crate::ops::ScalarDispatchScope::new(scalar);
+            f(ith, chunk);
+        });
         if self.n_threads <= 1 {
             let mut chunk_id = 0;
             while chunk_id < n_chunks {
@@ -277,9 +367,7 @@ impl ComputePool {
             return;
         }
 
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         self.inner.n_complete.store(0, Ordering::Relaxed);
@@ -314,10 +402,9 @@ impl ComputePool {
         std::sync::atomic::fence(Ordering::SeqCst);
 
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+        self.inner.wake_parked();
 
-        while self.inner.n_complete.load(Ordering::Acquire) < (self.n_threads - 1) as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < (self.n_threads - 1) as i32);
 
         barrier.wait();
 
@@ -332,9 +419,7 @@ impl ComputePool {
 
         self.inner.n_complete.fetch_add(1, Ordering::SeqCst);
 
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         std::sync::atomic::fence(Ordering::SeqCst);
 
         self.inner.call_fn.store(0, Ordering::Relaxed);
@@ -354,13 +439,12 @@ impl ComputePool {
 
 impl Drop for ComputePool {
     fn drop(&mut self) {
-        while self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32 {
-            std::hint::spin_loop();
-        }
+        wait_while(|| self.inner.n_complete.load(Ordering::Acquire) < self.n_threads as i32);
         self.inner.n_complete.store(0, Ordering::Relaxed);
         self.inner.shutdown.store(true, Ordering::Relaxed);
         std::sync::atomic::fence(Ordering::SeqCst);
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+        self.inner.wake_parked();
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -370,16 +454,56 @@ impl Drop for ComputePool {
 fn worker_loop(tid: usize, n_threads: usize, inner: &Inner) {
     let mut my_epoch: u32 = 0;
     loop {
+        // An idle worker must not hold a core. The chunked path spawns
+        // `n_threads - 1` fresh threads per call, so a hot-spinning worker
+        // competes with the very threads the call is waiting for. The spin
+        // covers the hand-off inside one `compute()` call; past the yield
+        // window the worker parks, so a pool that is not being used (the AuK
+        // device path runs its projections on the GPU) does not steal cores
+        // from the thread that is actually computing.
+        let mut spins = 0;
+        let mut yields = 0;
+        let idle_since = std::time::Instant::now();
         while inner.epoch.load(Ordering::Acquire) == my_epoch {
             if inner.shutdown.load(Ordering::Acquire) {
                 return;
             }
-            // While the GPU matmul path is active the CPU workers have no
-            // hot-path role (one fenced GPU dispatch covers all rows), so the
-            // idle spin here only competes with the driver's submission
-            // threads — observed to hang ANV/Meteor Lake. Despin when GPU is
-            // on; the pure-CPU path keeps the tight spin.
-            std::hint::spin_loop();
+            if spins < WAIT_SPINS {
+                spins += 1;
+                std::hint::spin_loop();
+                continue;
+            }
+            // Yield while the pool is only briefly idle: the next compute
+            // call is usually microseconds away and a parked worker would
+            // cost more to wake than the yield does. The clock is only read
+            // once every `WAIT_YIELDS` rounds, so the yield loop itself
+            // stays cheap.
+            if yields == 0 {
+                if idle_since.elapsed() < PARK_AFTER {
+                    yields = WAIT_YIELDS;
+                }
+            }
+            if yields > 0 {
+                yields -= 1;
+                std::thread::yield_now();
+                continue;
+            }
+            // Park until the dispatcher publishes a new epoch. The epoch is
+            // re-checked under the lock, so a notification cannot be lost.
+            inner.parked.fetch_add(1, Ordering::Relaxed);
+            let guard = inner.park.lock().unwrap_or_else(|error| error.into_inner());
+            if inner.epoch.load(Ordering::Acquire) != my_epoch
+                || inner.shutdown.load(Ordering::Acquire)
+            {
+                drop(guard);
+                inner.parked.fetch_sub(1, Ordering::Relaxed);
+                break;
+            }
+            let _ = inner
+                .park_signal
+                .wait_timeout(guard, PARK_TIMEOUT)
+                .unwrap_or_else(|error| error.into_inner());
+            inner.parked.fetch_sub(1, Ordering::Relaxed);
         }
         my_epoch = inner.epoch.load(Ordering::Acquire);
         if inner.shutdown.load(Ordering::Acquire) {

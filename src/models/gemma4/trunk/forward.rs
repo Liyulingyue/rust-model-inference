@@ -1,4 +1,4 @@
-use super::config::{CONTEXT, EPS, HEADS, PER_LAYER, VOCAB};
+use super::config::{EPS, PER_LAYER, VOCAB};
 use super::session::{Gemma4PrefillLinear, Gemma4Session, KvLayer};
 use super::weights::{kv_source_layer, Gemma4Model};
 use crate::core::prefill::prefill_chunks;
@@ -6,8 +6,7 @@ use crate::core::tensor::GGMLType;
 use crate::core::thread_pool::ComputePool;
 use crate::ops::kernel::{PreparedRows, Weight};
 use crate::ops::{
-    bf16_to_f32, dot_f32, f16_to_f32, f32_to_bf16, f32_to_f16, quantize_q8_0_into, rms_norm,
-    rms_norm_inplace, rms_unit_inplace, rope_neox_inplace, softmax_inplace,
+    dot_f32, quantize_q8_0_into, rms_norm, rms_norm_inplace, rms_unit_inplace, softmax_inplace,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,14 +33,13 @@ pub(super) struct AssembledInputRow {
 
 impl Gemma4Session<'_> {
     pub fn forward_rows(&mut self, rows: &[Gemma4InputRow]) -> Result<Vec<f32>, String> {
+        let n_ctx = self.model.config.n_ctx;
         let end = self
             .seq_len
             .checked_add(rows.len())
             .ok_or_else(|| "Gemma4 input length overflow".to_string())?;
-        if end > CONTEXT {
-            return Err(format!(
-                "Gemma4 input length {end} exceeds context {CONTEXT}"
-            ));
+        if end > n_ctx {
+            return Err(format!("Gemma4 input length {end} exceeds context {n_ctx}"));
         }
         validate_input_rows(rows, self.model.config.embd)?;
 
@@ -113,6 +111,8 @@ impl Gemma4Session<'_> {
         let per_layer_all = cfg.per_layer_all();
         let per_layer_len = row_count * per_layer_all;
 
+        let use_per_layer = cfg.use_per_layer_projection();
+        let per_layer_width = if use_per_layer { PER_LAYER } else { 0 };
         for (index, row) in rows.iter().enumerate() {
             let x = &mut scratch.x[index * embd..(index + 1) * embd];
             match &row.values {
@@ -125,58 +125,85 @@ impl Gemma4Session<'_> {
                     *value *= scale;
                 }
             }
-            model.per_layer_token_embedding.embedding_lookup(
-                row.per_layer_token,
-                &mut scratch.per_layer[index * per_layer_all..(index + 1) * per_layer_all],
-            );
-        }
-        ensure_finite("gemma4.input", &scratch.x[..x_len])?;
-
-        let token_scale = (PER_LAYER as f32).sqrt();
-        for value in &mut scratch.per_layer[..per_layer_len] {
-            *value *= token_scale;
-        }
-        prefill_matmul_rows(
-            "per_layer_model_proj.weight",
-            &model.per_layer_model_proj,
-            &scratch.x[..x_len],
-            &mut scratch.per_layer_projected[..per_layer_len],
-            row_count,
-            model,
-            linear,
-            model.pool(),
-            &mut scratch.prepared,
-            &mut scratch.q8,
-            &mut scratch.scales,
-        )?;
-        let projection_scale = 1.0 / (embd as f32).sqrt();
-        let merge_scale = 1.0 / 2.0_f32.sqrt();
-        for row in 0..row_count {
-            for layer in 0..cfg.layers {
-                let start = row * per_layer_all + layer * PER_LAYER;
-                let end = start + PER_LAYER;
-                let projected = &mut scratch.per_layer_projected[start..end];
-                for value in projected.iter_mut() {
-                    *value *= projection_scale;
-                }
-                rms_norm_inplace(projected, &model.per_layer_proj_norm, EPS);
-                for (target, projected) in scratch.per_layer[start..end].iter_mut().zip(projected) {
-                    *target = (*target + *projected) * merge_scale;
-                }
+            if use_per_layer {
+                let pe = model
+                    .per_layer_token_embedding
+                    .as_ref()
+                    .expect("per-layer projection enabled but tensor missing");
+                pe.embedding_lookup(
+                    row.per_layer_token,
+                    &mut scratch.per_layer[index * per_layer_all..(index + 1) * per_layer_all],
+                );
             }
         }
-        ensure_finite(
-            "gemma4.per_layer_input",
-            &scratch.per_layer[..per_layer_len],
-        )?;
+        ensure_finite("gemma4.input", &scratch.x[..x_len])?;
+        trace_rows("gemma4.input", None, &scratch.x[..x_len], row_count, embd);
+
+        if use_per_layer {
+            let token_scale = (PER_LAYER as f32).sqrt();
+            for value in &mut scratch.per_layer[..per_layer_len] {
+                *value *= token_scale;
+            }
+            let pm = model
+                .per_layer_model_proj
+                .as_ref()
+                .expect("per-layer projection enabled but tensor missing");
+            // The projection runs the repository's own BF16 kernel: the F32
+            // activation stays in F32 and the products accumulate in F32.
+            // llama.cpp instead rounds the activation to BF16 and accumulates
+            // in F64, which is ggml's implementation detail rather than a
+            // precision optimum, so the repository does not copy it (see the
+            // operator-internal-dispatch skill). The two differ by about 1e-3
+            // of the summands; `tests.rs` pins our values and records the
+            // llama.cpp ones next to them.
+            prefill_matmul_rows(
+                "per_layer_model_proj.weight",
+                pm,
+                &scratch.x[..x_len],
+                &mut scratch.per_layer_projected[..per_layer_len],
+                row_count,
+                model,
+                linear,
+                model.pool(),
+                &mut scratch.prepared,
+                &mut scratch.q8,
+                &mut scratch.scales,
+            )?;
+            let projection_scale = 1.0 / (embd as f32).sqrt();
+            let merge_scale = 1.0 / 2.0_f32.sqrt();
+            let pn = model
+                .per_layer_proj_norm
+                .as_ref()
+                .expect("per-layer projection enabled but norm missing");
+            for row in 0..row_count {
+                for layer in 0..cfg.layers {
+                    let start = row * per_layer_all + layer * PER_LAYER;
+                    let end = start + PER_LAYER;
+                    let projected = &mut scratch.per_layer_projected[start..end];
+                    for value in projected.iter_mut() {
+                        *value *= projection_scale;
+                    }
+                    rms_norm_inplace(projected, pn, EPS);
+                    for (target, projected) in
+                        scratch.per_layer[start..end].iter_mut().zip(projected)
+                    {
+                        *target = (*target + *projected) * merge_scale;
+                    }
+                }
+            }
+            ensure_finite(
+                "gemma4.per_layer_input",
+                &scratch.per_layer[..per_layer_len],
+            )?;
+        }
 
         let base_position = self.seq_len;
         let base_kv = cfg.base_kv_layers();
         for layer_index in 0..cfg.layers {
             let layer = &model.layers[layer_index];
             let dim = layer.head_dim;
-            let kv_width = cfg.kv_heads * dim;
-            let q_width = HEADS * dim;
+            let kv_width = layer.kv_heads * dim;
+            let q_width = layer.q_heads * dim;
             let ffn = layer.ffn_gate.n_out;
 
             for (input, output) in scratch.x[..x_len]
@@ -190,36 +217,80 @@ impl Gemma4Session<'_> {
                     output,
                 )?;
             }
+            trace_layer_rows(
+                "attn_norm",
+                layer_index,
+                &scratch.normed[..x_len],
+                row_count,
+                embd,
+            );
             let q_len = row_count * q_width;
             let kv_len = row_count * kv_width;
             if layer_index < base_kv {
-                matmul_group_rows(
-                    [
-                        (
-                            &format!("blk.{layer_index}.attn_q.weight"),
-                            &layer.attn_q,
-                            &mut scratch.q[..q_len],
-                        ),
-                        (
-                            &format!("blk.{layer_index}.attn_k.weight"),
-                            &layer.attn_k,
-                            &mut scratch.k[..kv_len],
-                        ),
-                        (
-                            &format!("blk.{layer_index}.attn_v.weight"),
-                            &layer.attn_v,
-                            &mut scratch.v[..kv_len],
-                        ),
-                    ],
-                    &scratch.normed[..x_len],
-                    row_count,
-                    model,
-                    linear,
-                    model.pool(),
-                    &mut scratch.prepared,
-                    &mut scratch.q8,
-                    &mut scratch.scales,
-                )?;
+                if layer.kv_shared_with_k {
+                    // 12B MQA fallback: V is shared with K. Compute Q
+                    // and K in parallel, then copy K into V.
+                    matmul_group_rows(
+                        [
+                            (
+                                &format!("blk.{layer_index}.attn_q.weight"),
+                                &layer.attn_q,
+                                &mut scratch.q[..q_len],
+                            ),
+                            (
+                                &format!("blk.{layer_index}.attn_k.weight"),
+                                layer
+                                    .attn_k
+                                    .as_ref()
+                                    .expect("attn_k present for base kv layer"),
+                                &mut scratch.k[..kv_len],
+                            ),
+                        ],
+                        &scratch.normed[..x_len],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                    scratch.v[..kv_len].copy_from_slice(&scratch.k[..kv_len]);
+                } else {
+                    matmul_group_rows(
+                        [
+                            (
+                                &format!("blk.{layer_index}.attn_q.weight"),
+                                &layer.attn_q,
+                                &mut scratch.q[..q_len],
+                            ),
+                            (
+                                &format!("blk.{layer_index}.attn_k.weight"),
+                                layer
+                                    .attn_k
+                                    .as_ref()
+                                    .expect("attn_k present for base kv layer"),
+                                &mut scratch.k[..kv_len],
+                            ),
+                            (
+                                &format!("blk.{layer_index}.attn_v.weight"),
+                                layer
+                                    .attn_v
+                                    .as_ref()
+                                    .expect("attn_v present when not shared"),
+                                &mut scratch.v[..kv_len],
+                            ),
+                        ],
+                        &scratch.normed[..x_len],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                }
                 ensure_finite(
                     &format!("blk.{layer_index}.attn_q.weight"),
                     &scratch.q[..q_len],
@@ -247,41 +318,58 @@ impl Gemma4Session<'_> {
                     &mut scratch.scales,
                 )?;
             }
-
             for row in 0..row_count {
                 let position = base_position + row;
                 let query = &mut scratch.q[row * q_width..(row + 1) * q_width];
+                trace_layer(row, "q", layer_index, query);
                 for head in query.chunks_exact_mut(dim) {
                     rms_norm_inplace(head, &layer.attn_q_norm, EPS);
                 }
+                trace_layer(row, "q_norm", layer_index, query);
                 apply_rope(
                     query,
                     position,
                     dim,
                     layer_index,
                     cfg.is_swa(layer_index),
+                    cfg.rope_freq_base_swa,
+                    cfg.rope_freq_base,
                     &model.rope_freqs,
                 )?;
+                trace_layer(row, "q_rope", layer_index, query);
             }
 
             if layer_index < base_kv {
+                let k_norm = layer.attn_k_norm.as_deref();
                 for row in 0..row_count {
                     let position = base_position + row;
                     let key = &mut scratch.k[row * kv_width..(row + 1) * kv_width];
                     let value = &mut scratch.v[row * kv_width..(row + 1) * kv_width];
-                    for kv_head in 0..cfg.kv_heads {
+                    trace_layer(row, "k", layer_index, key);
+                    for kv_head in 0..layer.kv_heads {
                         let offset = kv_head * dim;
-                        rms_norm_inplace(&mut key[offset..offset + dim], &layer.attn_k_norm, EPS);
-                        rms_unit_inplace(&mut value[offset..offset + dim], EPS);
+                        if let Some(kn) = k_norm {
+                            rms_norm_inplace(&mut key[offset..offset + dim], kn, EPS);
+                        }
                     }
+                    trace_layer(row, "k_norm", layer_index, key);
                     apply_rope(
                         key,
                         position,
                         dim,
                         layer_index,
                         cfg.is_swa(layer_index),
+                        cfg.rope_freq_base_swa,
+                        cfg.rope_freq_base,
                         &model.rope_freqs,
                     )?;
+                    trace_layer(row, "k_rope", layer_index, key);
+                    trace_layer(row, "v", layer_index, value);
+                    for kv_head in 0..layer.kv_heads {
+                        let offset = kv_head * dim;
+                        rms_unit_inplace(&mut value[offset..offset + dim], EPS);
+                    }
+                    trace_layer(row, "v_norm", layer_index, value);
                     self.kv[layer_index].append(layer_index, position, key, value)?;
                 }
             }
@@ -295,12 +383,20 @@ impl Gemma4Session<'_> {
                     &scratch.q[row * q_width..(row + 1) * q_width],
                     &self.kv[cache_layer],
                     cfg.is_swa(layer_index),
+                    cfg.sliding_window,
                     &mut scratch.attn[row * q_width..(row + 1) * q_width],
                     &mut scratch.scores,
                     &mut scratch.attention_values,
                     model.pool(),
                 )?;
             }
+            trace_layer_rows(
+                "attention",
+                layer_index,
+                &scratch.attn[..q_len],
+                row_count,
+                q_width,
+            );
             prefill_matmul_rows(
                 &format!("blk.{layer_index}.attn_output.weight"),
                 &layer.attn_output,
@@ -314,6 +410,13 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
+            trace_layer_rows(
+                "attention_projected",
+                layer_index,
+                &scratch.projected[..x_len],
+                row_count,
+                embd,
+            );
             for row in 0..row_count {
                 let projected = &scratch.projected[row * embd..(row + 1) * embd];
                 let down = &mut scratch.down[row * embd..(row + 1) * embd];
@@ -331,6 +434,10 @@ impl Gemma4Session<'_> {
                 trace_layer(row, "attn_out", layer_index, hidden);
             }
 
+            // ---- FFN branch ----
+            // Dense models (E2B/E4B): ffn_norm → gate/up → geglu → down → post_ffw_norm → residual
+            // MoE models (26B): shared expert (same dense path) + MoE experts, summed.
+            let is_moe = layer.moe.is_some();
             for (input, output) in scratch.x[..x_len]
                 .chunks_exact(embd)
                 .zip(scratch.normed[..x_len].chunks_exact_mut(embd))
@@ -365,14 +472,6 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            ensure_finite(
-                &format!("blk.{layer_index}.ffn_gate.weight"),
-                &scratch.gate[..ffn_len],
-            )?;
-            ensure_finite(
-                &format!("blk.{layer_index}.ffn_up.weight"),
-                &scratch.up[..ffn_len],
-            )?;
             for (gate, up) in scratch.gate[..ffn_len]
                 .chunks_exact_mut(ffn)
                 .zip(scratch.up[..ffn_len].chunks_exact(ffn))
@@ -392,72 +491,193 @@ impl Gemma4Session<'_> {
                 &mut scratch.q8,
                 &mut scratch.scales,
             )?;
-            for row in 0..row_count {
-                let down = &scratch.down[row * embd..(row + 1) * embd];
-                let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
-                checked_rms_norm(
-                    &format!("blk.{layer_index}.post_ffw_norm.weight"),
-                    down,
-                    &layer.post_ffw_norm,
-                    projected,
-                )?;
-                let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
-                for (hidden, ffn) in hidden.iter_mut().zip(projected) {
-                    *hidden += *ffn;
+            // Shared expert post-norm (post_ffw_norm_1).
+            if is_moe {
+                let moe = layer.moe.as_ref().unwrap();
+                for row in 0..row_count {
+                    let down = &scratch.down[row * embd..(row + 1) * embd];
+                    let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm_1.weight"),
+                        down,
+                        &moe.post_ffw_norm_1,
+                        projected,
+                    )?;
                 }
-                ensure_finite(&format!("gemma4.layer.{layer_index}.ffn_out"), hidden)?;
-                trace_layer(row, "ffn_out", layer_index, hidden);
-            }
 
-            prefill_matmul_rows(
-                &format!("blk.{layer_index}.inp_gate.weight"),
-                &layer.inp_gate,
-                &scratch.x[..x_len],
-                &mut scratch.per_layer_gate[..row_count * PER_LAYER],
-                row_count,
-                model,
-                linear,
-                model.pool(),
-                &mut scratch.prepared,
-                &mut scratch.q8,
-                &mut scratch.scales,
-            )?;
-            for row in 0..row_count {
-                let start = row * per_layer_all + layer_index * PER_LAYER;
-                ggml_geglu_fp16_inplace(
-                    &mut scratch.per_layer_gate[row * PER_LAYER..(row + 1) * PER_LAYER],
-                    &scratch.per_layer[start..start + PER_LAYER],
-                );
-            }
-            prefill_matmul_rows(
-                &format!("blk.{layer_index}.proj.weight"),
-                &layer.proj,
-                &scratch.per_layer_gate[..row_count * PER_LAYER],
-                &mut scratch.down[..x_len],
-                row_count,
-                model,
-                linear,
-                model.pool(),
-                &mut scratch.prepared,
-                &mut scratch.q8,
-                &mut scratch.scales,
-            )?;
-            for row in 0..row_count {
-                let down = &scratch.down[row * embd..(row + 1) * embd];
-                let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
-                checked_rms_norm(
-                    &format!("blk.{layer_index}.post_norm.weight"),
-                    down,
-                    &layer.post_norm,
-                    projected,
-                )?;
-                let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
-                for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
-                    *hidden = (*hidden + *per_layer) * layer.output_scale;
+                // ---- MoE expert branch ----
+                // Router operates on attn_out (residual stream), not on
+                // pre_ffw_norm_2 output. The expert input is pre_ffw_norm_2(attn_out).
+                for row in 0..row_count {
+                    let attn_out = &scratch.x[row * embd..(row + 1) * embd];
+                    let normed = &mut scratch.moe_normed[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.pre_ffw_norm_2.weight"),
+                        attn_out,
+                        &moe.pre_ffw_norm_2,
+                        normed,
+                    )?;
                 }
-                ensure_finite(&format!("gemma4.layer.{layer_index}.per_layer_out"), hidden)?;
-                trace_layer(row, "per_layer_out", layer_index, hidden);
+                let moe_down = &mut scratch.moe_down[..x_len];
+                for row in 0..row_count {
+                    let router_input = &scratch.x[row * embd..(row + 1) * embd];
+                    let expert_input = &scratch.moe_normed[row * embd..(row + 1) * embd];
+                    let moe_out = &mut moe_down[row * embd..(row + 1) * embd];
+                    forward_moe_expert(
+                        moe,
+                        cfg,
+                        router_input,
+                        expert_input,
+                        moe_out,
+                        model.pool(),
+                        &mut scratch.moe_gate_up,
+                        &mut scratch.moe_q8,
+                        &mut scratch.moe_scales,
+                        row,
+                        row_count,
+                        &format!("blk.{layer_index}"),
+                    )?;
+                }
+                // MoE post-norm (post_ffw_norm_2).
+                for row in 0..row_count {
+                    let moe_out = &moe_down[row * embd..(row + 1) * embd];
+                    let normed_moe = &mut scratch.normed[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm_2.weight"),
+                        moe_out,
+                        &moe.post_ffw_norm_2,
+                        normed_moe,
+                    )?;
+                }
+                // Combine: shared + moe → post_ffw_norm → residual + output_scale.
+                for row in 0..row_count {
+                    let shared = &scratch.projected[row * embd..(row + 1) * embd];
+                    let moe = &scratch.normed[row * embd..(row + 1) * embd];
+                    let combined = &mut scratch.down[row * embd..(row + 1) * embd];
+                    for i in 0..embd {
+                        combined[i] = shared[i] + moe[i];
+                    }
+                    let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm.weight"),
+                        combined,
+                        &layer.post_ffw_norm,
+                        projected,
+                    )?;
+                    let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                    for (h, &p) in hidden.iter_mut().zip(projected.iter()) {
+                        *h = (*h + p) * layer.output_scale;
+                    }
+                    ensure_finite(
+                        &format!("gemma4.layer.{layer_index}.ffn_out"),
+                        &scratch.x[row * embd..(row + 1) * embd],
+                    )?;
+                }
+            } else {
+                for row in 0..row_count {
+                    let down = &scratch.down[row * embd..(row + 1) * embd];
+                    let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                    checked_rms_norm(
+                        &format!("blk.{layer_index}.post_ffw_norm.weight"),
+                        down,
+                        &layer.post_ffw_norm,
+                        projected,
+                    )?;
+                    let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                    for (hidden, ffn) in hidden.iter_mut().zip(projected) {
+                        *hidden += *ffn;
+                    }
+                    ensure_finite(
+                        &format!("gemma4.layer.{layer_index}.ffn_out"),
+                        &scratch.x[row * embd..(row + 1) * embd],
+                    )?;
+                }
+
+                if use_per_layer {
+                    let ig = layer
+                        .inp_gate
+                        .as_ref()
+                        .expect("per-layer projection enabled but inp_gate missing");
+                    let pj = layer
+                        .proj
+                        .as_ref()
+                        .expect("per-layer projection enabled but proj missing");
+                    let pn = layer
+                        .post_norm
+                        .as_ref()
+                        .expect("per-layer projection enabled but post_norm missing");
+                    prefill_matmul_rows(
+                        &format!("blk.{layer_index}.inp_gate.weight"),
+                        ig,
+                        &scratch.x[..x_len],
+                        &mut scratch.per_layer_gate[..row_count * per_layer_width],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                    for row in 0..row_count {
+                        let start = row * per_layer_all + layer_index * per_layer_width;
+                        ggml_geglu_fp16_inplace(
+                            &mut scratch.per_layer_gate
+                                [row * per_layer_width..(row + 1) * per_layer_width],
+                            &scratch.per_layer[start..start + per_layer_width],
+                        );
+                    }
+                    prefill_matmul_rows(
+                        &format!("blk.{layer_index}.proj.weight"),
+                        pj,
+                        &scratch.per_layer_gate[..row_count * per_layer_width],
+                        &mut scratch.down[..x_len],
+                        row_count,
+                        model,
+                        linear,
+                        model.pool(),
+                        &mut scratch.prepared,
+                        &mut scratch.q8,
+                        &mut scratch.scales,
+                    )?;
+                    for row in 0..row_count {
+                        let down = &scratch.down[row * embd..(row + 1) * embd];
+                        let projected = &mut scratch.projected[row * embd..(row + 1) * embd];
+                        checked_rms_norm(
+                            &format!("blk.{layer_index}.post_norm.weight"),
+                            down,
+                            pn,
+                            projected,
+                        )?;
+                        let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                        for (hidden, per_layer) in hidden.iter_mut().zip(projected) {
+                            *hidden = (*hidden + *per_layer) * layer.output_scale;
+                        }
+                        ensure_finite(
+                            &format!("gemma4.layer.{layer_index}.per_layer_out"),
+                            &scratch.x[row * embd..(row + 1) * embd],
+                        )?;
+                    }
+                } else {
+                    for row in 0..row_count {
+                        let hidden = &mut scratch.x[row * embd..(row + 1) * embd];
+                        for value in hidden.iter_mut() {
+                            *value *= layer.output_scale;
+                        }
+                        ensure_finite(
+                            &format!("gemma4.layer.{layer_index}.residual_out"),
+                            &scratch.x[row * embd..(row + 1) * embd],
+                        )?;
+                    }
+                }
             }
+            trace_layer_rows(
+                "layer_output",
+                layer_index,
+                &scratch.x[..x_len],
+                row_count,
+                embd,
+            );
         }
 
         #[cfg(feature = "parity-trace")]
@@ -480,6 +700,11 @@ impl Gemma4Session<'_> {
                 )?;
                 ensure_finite("gemma4.final.norm", &scratch.normed[..embd])?;
                 trace(row, "gemma4.final.norm", None, &scratch.normed[..embd]);
+                let _t_lm = if std::env::var_os("GEMMA4_PROF").is_some() && row_count == 1 {
+                    Some(std::time::Instant::now())
+                } else {
+                    None
+                };
                 matmul(
                     "token_embd.weight (tied output)",
                     &model.token_embedding,
@@ -489,6 +714,13 @@ impl Gemma4Session<'_> {
                     &mut scratch.q8,
                     &mut scratch.scales,
                 )?;
+                if let Some(t) = _t_lm {
+                    eprintln!(
+                        "[prof] lm_head: {:.1}ms",
+                        t.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                trace(row, "gemma4.logits.raw", None, &scratch.logits);
                 for logit in &mut scratch.logits {
                     *logit = softcap(*logit, model.config.logit_softcap);
                 }
@@ -500,49 +732,46 @@ impl Gemma4Session<'_> {
     }
 }
 
-#[cfg(feature = "vulkan")]
 #[allow(clippy::too_many_arguments)]
-fn try_vulkan_rows(
-    linear: &mut Gemma4PrefillLinear,
-    model: &Gemma4Model,
-    name: &str,
+fn try_linear_rows(
+    linear: &mut Gemma4PrefillLinear<'_>,
+    _model: &Gemma4Model,
+    _name: &str,
     weight: &Weight<'_>,
     input: &[f32],
     output: &mut [f32],
     rows: usize,
 ) -> bool {
-    use crate::vulkan::ops::GpuWeightFormat;
-    if crate::vulkan::gpu_broken() {
-        linear.runtime = None;
-    }
-    if !linear.active() {
+    #[cfg(feature = "vulkan")]
+    if crate::core::thread_pool::gpu_matmul_disabled() {
         return false;
     }
-    let Ok(format) = GpuWeightFormat::from_ggml_type(weight.ggml_type) else {
-        return false;
-    };
-    #[cfg(test)]
+    #[cfg(all(test, feature = "vulkan"))]
     if let Some(dispatcher) = &linear.dispatcher {
-        let result = dispatcher.lock().unwrap().dispatch(name, rows);
+        let result = dispatcher.lock().unwrap().dispatch(_name, rows);
         return linear.finish_dispatch(result);
     }
-    let Some(bytes) = model._source.tensor_slice(name) else {
+    // Preserve Gemma4's native F32 dot reduction below.
+    if weight.kernel.f32_slice().is_some() {
+        return false;
+    }
+    let Some(executor) = linear.runtime.as_mut() else {
         return false;
     };
-    let result = linear.runtime.as_mut().unwrap().matmul_rows(
-        bytes,
-        format,
-        input,
-        rows,
-        weight.n_in,
-        weight.n_out,
-        output,
-    );
-    linear.finish_dispatch(result)
+    match executor
+        .id_for(weight)
+        .and_then(|id| executor.run(id, input, rows, output))
+    {
+        Ok(_) => true,
+        Err(error) => {
+            log::debug!("Gemma4 linear: {error}");
+            false
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prefill_matmul_rows(
+pub(super) fn prefill_matmul_rows(
     name: &str,
     weight: &Weight<'_>,
     input: &[f32],
@@ -558,15 +787,12 @@ fn prefill_matmul_rows(
     if input.len() != rows * weight.n_in || output.len() != rows * weight.n_out {
         return Err(format!("Invalid {name} batched matmul lengths"));
     }
-    #[cfg(feature = "vulkan")]
-    if try_vulkan_rows(linear, model, name, weight, input, output, rows) {
+    if try_linear_rows(linear, model, name, weight, input, output, rows) {
         return ensure_finite(name, output);
     }
-    #[cfg(not(feature = "vulkan"))]
-    let _ = (model, linear);
     #[cfg(feature = "vulkan")]
     let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
-    if name == "per_layer_model_proj.weight" || weight.ggml_type == GGMLType::F32 {
+    if weight.ggml_type == GGMLType::F32 {
         for (input, output) in input
             .chunks_exact(weight.n_in)
             .zip(output.chunks_exact_mut(weight.n_out))
@@ -612,6 +838,22 @@ fn matmul_group_rows<const N: usize>(
     }
     #[cfg(feature = "vulkan")]
     let _cpu_scope = ComputePool::disable_gpu_matmul_for_scope();
+    if let Some(executor) = linear.runtime.as_mut() {
+        let ids = projections
+            .each_ref()
+            .map(|(_, weight, _)| executor.id_for(weight));
+        if ids.iter().all(Result::is_ok) {
+            return executor
+                .run_group(
+                    ids.map(Result::unwrap),
+                    input,
+                    rows,
+                    projections.map(|(_, _, output)| output),
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+    }
     let need_q8 = projections
         .iter()
         .any(|(_, weight, _)| weight.needs_q8_0_activation());
@@ -716,16 +958,7 @@ pub(super) fn matmul(
             weight.n_out
         ));
     }
-    if name == "per_layer_model_proj.weight" {
-        if weight.ggml_type != GGMLType::BF16 {
-            return Err(format!("{name} requires BF16 weight"));
-        }
-        let bytes = weight
-            .kernel
-            .bf16_bytes()
-            .ok_or_else(|| format!("Invalid {name} BF16 kernel"))?;
-        gemma4_bf16_projection_matmul(bytes, input, output, pool, q8)?;
-    } else if weight.ggml_type == GGMLType::F32 {
+    if weight.ggml_type == GGMLType::F32 {
         let values = weight
             .kernel
             .f32_slice()
@@ -775,62 +1008,160 @@ pub(super) fn matmul(
     ensure_finite(name, output)
 }
 
-fn gemma4_bf16_projection_matmul(
-    weight: &[u8],
-    input: &[f32],
+#[allow(clippy::too_many_arguments)]
+fn forward_moe_expert(
+    moe: &super::weights::Gemma4MoELayer,
+    cfg: &super::config::Gemma4Config,
+    router_input: &[f32],
+    expert_input: &[f32],
     output: &mut [f32],
     pool: &ComputePool,
-    input_bf16: &mut [u8],
+    gate_up_buf: &mut [f32],
+    q8: &mut [u8],
+    scales: &mut [f32],
+    _row: usize,
+    _row_count: usize,
+    name: &str,
 ) -> Result<(), String> {
-    let input_bytes = input
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| "Gemma4 BF16 projection input byte size overflow".to_owned())?;
-    let weight_bytes = input_bytes
-        .checked_mul(output.len())
-        .ok_or_else(|| "Gemma4 BF16 projection weight byte size overflow".to_owned())?;
-    if input_bf16.len() < input_bytes {
-        return Err("Invalid Gemma4 BF16 projection storage length".to_owned());
-    }
-    if weight.len() != weight_bytes {
-        return Err(format!(
-            "Invalid Gemma4 BF16 projection weight storage length: expected {weight_bytes} bytes, got {}",
-            weight.len()
-        ));
-    }
+    let embd = cfg.embd;
+    let n_expert = cfg.n_expert;
+    let n_used = cfg.n_expert_used;
+    let n_ff_exp = cfg.n_ff_exp;
+    output.fill(0.0);
 
-    for (bytes, value) in input_bf16[..input_bytes].chunks_exact_mut(2).zip(input) {
-        bytes.copy_from_slice(&f32_to_bf16(*value).to_le_bytes());
-    }
-
-    let n_in = input.len();
-    let n_out = output.len();
-    let weight_ptr = weight.as_ptr();
-    let input_ptr = input_bf16.as_ptr();
-    let output_ptr = output.as_mut_ptr();
-    pool.compute(|thread, threads| unsafe {
-        let start = n_out * thread / threads;
-        let end = n_out * (thread + 1) / threads;
-        for row in start..end {
-            let mut sum = 0.0f64;
-            for column in 0..n_in {
-                let weight_offset = (row * n_in + column) * 2;
-                let input_offset = column * 2;
-                let weight_bits = u16::from_le_bytes([
-                    *weight_ptr.add(weight_offset),
-                    *weight_ptr.add(weight_offset + 1),
-                ]);
-                let input_bits = u16::from_le_bytes([
-                    *input_ptr.add(input_offset),
-                    *input_ptr.add(input_offset + 1),
-                ]);
-                let product = bf16_to_f32(weight_bits) * bf16_to_f32(input_bits);
-                sum += f64::from(product);
-            }
-            *output_ptr.add(row) = sum as f32;
+    // ---- Router: unweighted RMS norm(attn_out) → scale 1/√n_embd → mul router_scale → matmul → softmax ----
+    // llama.cpp: tmp = rms_norm(attn_out, eps)  [no weight/affine]
+    //            tmp *= 1/sqrt(n_embd); tmp *= router_scale
+    //            logits = router.weight @ tmp
+    let scale = 1.0 / (embd as f32).sqrt();
+    let mut router_normed = vec![0.0f32; embd];
+    {
+        let sq_sum: f64 = router_input
+            .iter()
+            .map(|&v| f64::from(v) * f64::from(v))
+            .sum();
+        let inv_rms = (1.0 / (sq_sum / embd as f64).max(f64::from(1e-6 * 1e-6))).sqrt() as f32;
+        for i in 0..embd {
+            router_normed[i] = router_input[i] * inv_rms * scale * moe.router_scale[i];
         }
-    });
-    Ok(())
+    }
+    let mut logits = vec![0.0f32; n_expert];
+    for e in 0..n_expert {
+        let router_row = &moe.router[e * embd..(e + 1) * embd];
+        logits[e] = dot_f32(router_row, &router_normed, embd);
+    }
+    softmax_inplace(&mut logits);
+
+    // ---- Top-k selection ----
+    let mut selection: Vec<(usize, f32)> =
+        logits.iter().enumerate().map(|(e, &p)| (e, p)).collect();
+    selection.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    selection.truncate(n_used);
+
+    // Normalize weights to sum=1.
+    let mut weights: Vec<f32> = selection.iter().map(|&(_, p)| p).collect();
+    let w_sum: f32 = weights.iter().sum::<f32>().max(6.103515625e-5);
+    for w in weights.iter_mut() {
+        *w /= w_sum;
+    }
+
+    let selected: Vec<usize> = selection.iter().map(|&(e, _)| e).collect();
+
+    // ---- Expert dispatch: gate_up_exps → split → geglu → down_exps → weighted sum ----
+    let input_ptr = expert_input.as_ptr();
+    let gate_up_ptr = gate_up_buf.as_mut_ptr();
+    let q8_ptr = q8.as_ptr();
+    let scales_ptr = scales.as_ptr();
+    let mut down_tmp = vec![0.0f32; embd];
+    let prof = std::env::var_os("GEMMA4_PROF").is_some();
+    let t_router = std::time::Instant::now();
+    let mut t_gu = std::time::Duration::ZERO;
+    let mut t_geglu = std::time::Duration::ZERO;
+    let mut t_down = std::time::Duration::ZERO;
+
+    for (k, &e) in selected.iter().enumerate() {
+        let gate_up_weight = &moe.experts_gate_up[e];
+        let down_weight = &moe.experts_down[e];
+
+        // Quantize expert_input for gate_up.
+        let blocks = embd.div_ceil(32);
+        quantize_q8_0_into(expert_input, embd, &mut q8[..embd], &mut scales[..blocks]);
+
+        // gate_up matmul.
+        let gu_out = k * n_ff_exp * 2;
+        let t0 = std::time::Instant::now();
+        pool.compute(move |thread, threads| unsafe {
+            gate_up_weight.kernel.forward_prepared(
+                std::slice::from_raw_parts(input_ptr, embd),
+                std::slice::from_raw_parts(q8_ptr, embd),
+                std::slice::from_raw_parts(scales_ptr, blocks),
+                None,
+                std::slice::from_raw_parts_mut(gate_up_ptr.add(gu_out), n_ff_exp * 2),
+                embd,
+                n_ff_exp * 2,
+                thread,
+                threads,
+            );
+        });
+        if prof {
+            t_gu += t0.elapsed();
+        }
+
+        // Split fused output: gate [n_ff_exp] + up [n_ff_exp] → geglu.
+        let t1 = std::time::Instant::now();
+        unsafe {
+            let gate = std::slice::from_raw_parts_mut(gate_up_ptr.add(gu_out), n_ff_exp);
+            let up = std::slice::from_raw_parts(gate_up_ptr.add(gu_out + n_ff_exp), n_ff_exp);
+            ggml_geglu_fp16_inplace(gate, up);
+        }
+        if prof {
+            t_geglu += t1.elapsed();
+        }
+
+        // Down projection into down_tmp.
+        let h_blocks = n_ff_exp.div_ceil(32);
+        let gate_slice = unsafe { std::slice::from_raw_parts(gate_up_ptr.add(gu_out), n_ff_exp) };
+        quantize_q8_0_into(
+            gate_slice,
+            n_ff_exp,
+            &mut q8[..n_ff_exp],
+            &mut scales[..h_blocks],
+        );
+        let down_tmp_ptr = down_tmp.as_mut_ptr();
+        let t2 = std::time::Instant::now();
+        pool.compute(move |thread, threads| unsafe {
+            down_weight.kernel.forward_prepared(
+                std::slice::from_raw_parts(gate_up_ptr.add(gu_out), n_ff_exp),
+                std::slice::from_raw_parts(q8_ptr, n_ff_exp),
+                std::slice::from_raw_parts(scales_ptr, h_blocks),
+                None,
+                std::slice::from_raw_parts_mut(down_tmp_ptr, embd),
+                n_ff_exp,
+                embd,
+                thread,
+                threads,
+            );
+        });
+
+        // Weighted accumulate into output.
+        for (o, &v) in output.iter_mut().zip(down_tmp.iter()) {
+            *o += v * weights[k];
+        }
+        if prof {
+            t_down += t2.elapsed();
+        }
+    }
+    if prof {
+        eprintln!(
+            "[prof-moe] router={:.2}ms gate_up={:.2}ms geglu={:.2}ms down={:.2}ms ({} experts)",
+            t_router.elapsed().as_secs_f64() * 1000.0,
+            t_gu.as_secs_f64() * 1000.0,
+            t_geglu.as_secs_f64() * 1000.0,
+            t_down.as_secs_f64() * 1000.0,
+            selected.len(),
+        );
+    }
+    ensure_finite(name, output)
 }
 
 fn checked_rms_norm(
@@ -857,6 +1188,8 @@ fn apply_rope(
     dim: usize,
     layer: usize,
     sliding: bool,
+    swa_freq_base: f32,
+    full_freq_base: f32,
     full_freq_factors: &[f32],
 ) -> Result<(), String> {
     if values.len() % dim != 0 {
@@ -866,41 +1199,60 @@ fn apply_rope(
         ));
     }
     if sliding {
-        // `rope_neox_inplace` internally loops over `n_heads = x.len() / dim`
-        // with one cached sin/cos table, so passing the full buffer is
-        // strictly cheaper than calling it once per head (which would
-        // rebuild the same table 8 times for E2B/E4B).
-        rope_neox_inplace(values, position, dim, 10_000.0);
+        apply_rope_ggml(values, position, dim, swa_freq_base, None);
         return Ok(());
     }
     if full_freq_factors.len() != dim / 2 {
         return Err(format!(
-            "rope_freqs.weight length {}; expected {} for blk.{layer}",
+            "rope_freqs.weight length {}; expected {} for blk.{layer} (freq_base={full_freq_base})",
             full_freq_factors.len(),
             dim / 2
         ));
     }
-    apply_rope_full(values, position, dim, full_freq_factors);
+    apply_rope_ggml(
+        values,
+        position,
+        dim,
+        full_freq_base,
+        Some(full_freq_factors),
+    );
     Ok(())
 }
 
-/// Full-attention RoPE: pre-compute the sin/cos table once from
-/// `factors` (which already encodes `θ_i = 1 / freq_base^(2i/dim)`)
-/// and apply the standard neox rotation to every head in one pass.
-fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f32]) {
+/// Gemma 4 RoPE matching ggml's `ggml_rope_cache_init` and fused rotation.
+///
+/// The per-pair factor formula here — `angle_i = theta_i / factors[i]` with
+/// `theta_i = pos * freq_base^(-2i/d)` — is the GGUF `rope_freqs.weight`
+/// convention, and it now also lives in
+/// `src/ops/rope/neox.rs::rope_neox_inplace_with_freqs`.
+///
+/// This copy stays because its rotation uses `mul_add` (an explicit FMA),
+/// while the shared helper's scalar and SIMD paths deliberately avoid FMA so
+/// they match the pinned ggml reference bit for bit. Switching one for the
+/// other changes the last bit of every rotated channel, so the two cannot be
+/// merged without re-running Gemma 4's raw-bit parity evidence.
+fn apply_rope_ggml(
+    values: &mut [f32],
+    position: usize,
+    dim: usize,
+    freq_base: f32,
+    factors: Option<&[f32]>,
+) {
     let half = dim / 2;
     let n_heads = values.len() / dim;
     if half == 0 || n_heads == 0 {
         return;
     }
-    let pos_f = position as f32;
+    let theta_scale = freq_base.powf(-2.0 / dim as f32);
+    let mut theta = position as f32;
     let mut cos_table = vec![0.0f32; half];
     let mut sin_table = vec![0.0f32; half];
-    for (i, factor) in factors[..half].iter().enumerate() {
-        let angle = pos_f / factor;
+    for i in 0..half {
+        let angle = theta / factors.map_or(1.0, |values| values[i]);
         let (c, s) = crate::ops::rope::rope_sin_cos(angle);
         cos_table[i] = c;
         sin_table[i] = s;
+        theta *= theta_scale;
     }
     // Same rotation formula as the scalar path; AVX2-equivalent of the
     // inner FMA pattern will be picked up by the compiler when
@@ -922,6 +1274,217 @@ fn apply_rope_full(values: &mut [f32], position: usize, dim: usize, factors: &[f
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(super) fn ggml_attention_dot(left: &[f32], right: &[f32], len: usize) -> f32 {
+    use std::arch::x86_64::*;
+
+    debug_assert!(left.len() >= len && right.len() >= len);
+    let mut sums = unsafe { [_mm_setzero_ps(); 8] };
+    let use_fma = std::is_x86_feature_detected!("fma");
+    let aligned = len & !31;
+    let mut index = 0;
+    while index < aligned {
+        for lane in 0..8 {
+            let offset = index + lane * 4;
+            unsafe {
+                sums[lane] = if use_fma {
+                    _mm_fmadd_ps(
+                        _mm_loadu_ps(left.as_ptr().add(offset)),
+                        _mm_loadu_ps(right.as_ptr().add(offset)),
+                        sums[lane],
+                    )
+                } else {
+                    _mm_add_ps(
+                        sums[lane],
+                        _mm_mul_ps(
+                            _mm_loadu_ps(left.as_ptr().add(offset)),
+                            _mm_loadu_ps(right.as_ptr().add(offset)),
+                        ),
+                    )
+                };
+            }
+        }
+        index += 32;
+    }
+    for lane in 0..4 {
+        unsafe { sums[lane] = _mm_add_ps(sums[lane], sums[lane + 4]) };
+    }
+    for lane in 0..2 {
+        unsafe { sums[lane] = _mm_add_ps(sums[lane], sums[lane + 2]) };
+    }
+    unsafe { sums[0] = _mm_add_ps(sums[0], sums[1]) };
+    let mut lanes = [0.0f32; 4];
+    unsafe { _mm_storeu_ps(lanes.as_mut_ptr(), sums[0]) };
+    let mut sum = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    while index < len {
+        sum += left[index] * right[index];
+        index += 1;
+    }
+    sum
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub(super) fn ggml_attention_dot(left: &[f32], right: &[f32], len: usize) -> f32 {
+    crate::ops::dot_f32(left, right, len)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn ggml_exp_sse2(x: std::arch::x86_64::__m128, use_fma: bool) -> std::arch::x86_64::__m128 {
+    use std::arch::x86_64::*;
+
+    let magic = _mm_set1_ps(f32::from_bits(0x4b40_0000));
+    let z = if use_fma {
+        _mm_fmadd_ps(x, _mm_set1_ps(f32::from_bits(0x3fb8_aa3b)), magic)
+    } else {
+        _mm_add_ps(
+            _mm_mul_ps(x, _mm_set1_ps(f32::from_bits(0x3fb8_aa3b))),
+            magic,
+        )
+    };
+    let n = _mm_sub_ps(z, magic);
+    let b = if use_fma {
+        _mm_fnmadd_ps(
+            n,
+            _mm_set1_ps(f32::from_bits(0x35bf_be8e)),
+            _mm_fnmadd_ps(n, _mm_set1_ps(f32::from_bits(0x3f31_7200)), x),
+        )
+    } else {
+        _mm_sub_ps(
+            _mm_sub_ps(x, _mm_mul_ps(n, _mm_set1_ps(f32::from_bits(0x3f31_7200)))),
+            _mm_mul_ps(n, _mm_set1_ps(f32::from_bits(0x35bf_be8e))),
+        )
+    };
+    let exponent = _mm_slli_epi32(_mm_castps_si128(z), 23);
+    let scale = _mm_castsi128_ps(_mm_add_epi32(exponent, _mm_set1_epi32(0x3f80_0000)));
+    let out_of_range = _mm_castps_si128(_mm_cmpgt_ps(
+        _mm_andnot_ps(_mm_set1_ps(-0.0), n),
+        _mm_set1_ps(126.0),
+    ));
+    let squared = _mm_mul_ps(b, b);
+    let (low, high) = if use_fma {
+        (
+            _mm_fmadd_ps(
+                _mm_set1_ps(f32::from_bits(0x3c07_2010)),
+                b,
+                _mm_set1_ps(f32::from_bits(0x3d2b_9f17)),
+            ),
+            _mm_fmadd_ps(
+                _mm_set1_ps(f32::from_bits(0x3e2a_af33)),
+                b,
+                _mm_set1_ps(f32::from_bits(0x3eff_fedb)),
+            ),
+        )
+    } else {
+        (
+            _mm_add_ps(
+                _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3c07_2010)), b),
+                _mm_set1_ps(f32::from_bits(0x3d2b_9f17)),
+            ),
+            _mm_add_ps(
+                _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3e2a_af33)), b),
+                _mm_set1_ps(f32::from_bits(0x3eff_fedb)),
+            ),
+        )
+    };
+    let linear = _mm_mul_ps(_mm_set1_ps(f32::from_bits(0x3f7f_fff6)), b);
+    let polynomial = if use_fma {
+        _mm_fmadd_ps(_mm_fmadd_ps(low, squared, high), squared, linear)
+    } else {
+        _mm_add_ps(
+            _mm_mul_ps(_mm_add_ps(_mm_mul_ps(low, squared), high), squared),
+            linear,
+        )
+    };
+    if _mm_movemask_epi8(out_of_range) == 0 {
+        return if use_fma {
+            _mm_fmadd_ps(polynomial, scale, scale)
+        } else {
+            _mm_add_ps(_mm_mul_ps(polynomial, scale), scale)
+        };
+    }
+
+    let adjustment = _mm_and_si128(
+        _mm_castps_si128(_mm_cmple_ps(n, _mm_setzero_ps())),
+        _mm_set1_epi32(0x8200_0000u32 as i32),
+    );
+    let scale1 = _mm_castsi128_ps(_mm_add_epi32(adjustment, _mm_set1_epi32(0x7f00_0000)));
+    let scale2 = _mm_castsi128_ps(_mm_sub_epi32(exponent, adjustment));
+    let extreme = _mm_castps_si128(_mm_cmpgt_ps(
+        _mm_andnot_ps(_mm_set1_ps(-0.0), n),
+        _mm_set1_ps(192.0),
+    ));
+    let scaled = if use_fma {
+        _mm_fmadd_ps(scale, polynomial, scale)
+    } else {
+        _mm_add_ps(_mm_mul_ps(scale, polynomial), scale)
+    };
+    let ranged_scaled = if use_fma {
+        _mm_mul_ps(_mm_fmadd_ps(scale2, polynomial, scale2), scale1)
+    } else {
+        _mm_mul_ps(_mm_add_ps(_mm_mul_ps(scale2, polynomial), scale2), scale1)
+    };
+    let ranged = _mm_or_ps(
+        _mm_and_ps(_mm_castsi128_ps(out_of_range), ranged_scaled),
+        _mm_andnot_ps(_mm_castsi128_ps(out_of_range), scaled),
+    );
+    _mm_or_ps(
+        _mm_and_ps(_mm_castsi128_ps(extreme), _mm_mul_ps(scale1, scale1)),
+        _mm_andnot_ps(_mm_castsi128_ps(extreme), ranged),
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn ggml_attention_softmax(values: &mut [f32]) {
+    use std::arch::x86_64::*;
+
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let use_fma = std::is_x86_feature_detected!("fma");
+    let mut sum = 0.0f64;
+    let mut index = 0;
+    while index + 8 <= values.len() {
+        unsafe {
+            let low = ggml_exp_sse2(
+                _mm_sub_ps(_mm_loadu_ps(values.as_ptr().add(index)), _mm_set1_ps(max)),
+                use_fma,
+            );
+            let high = ggml_exp_sse2(
+                _mm_sub_ps(
+                    _mm_loadu_ps(values.as_ptr().add(index + 4)),
+                    _mm_set1_ps(max),
+                ),
+                use_fma,
+            );
+            _mm_storeu_ps(values.as_mut_ptr().add(index), low);
+            _mm_storeu_ps(values.as_mut_ptr().add(index + 4), high);
+            let mut reduced = _mm_add_ps(high, low);
+            reduced = _mm_add_ps(reduced, _mm_movehl_ps(reduced, reduced));
+            reduced = _mm_add_ss(reduced, _mm_shuffle_ps(reduced, reduced, 0xf5));
+            sum += f64::from(_mm_cvtss_f32(reduced));
+        }
+        index += 8;
+    }
+    while index < values.len() {
+        values[index] = (values[index] - max).exp();
+        sum += f64::from(values[index]);
+        index += 1;
+    }
+
+    let scale = (1.0 / sum) as f32;
+    for value in values {
+        *value *= scale;
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn ggml_attention_softmax(values: &mut [f32]) {
+    crate::ops::softmax_approx_inplace(values);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attend(
     layer: usize,
@@ -929,6 +1492,7 @@ pub(super) fn attend(
     query: &[f32],
     cache: &KvLayer,
     sliding: bool,
+    sliding_window: usize,
     output: &mut [f32],
     scores: &mut Vec<f32>,
     values: &mut Vec<f32>,
@@ -937,7 +1501,13 @@ pub(super) fn attend(
     let dim = cache.head_dim;
     let row_width = cache.row_width;
     let group_size = cache.group_size;
-    let q_width = HEADS * dim;
+    // `cache.q_heads` is `group_size * cache.kv_heads`. We derive
+    // q_heads from `row_width` and `group_size` indirectly: the
+    // largest head index we visit is `q_heads - 1` where
+    // `q_heads = group_size * kv_heads`. Easiest: compute q_heads as
+    // `query.len() / dim`, since the caller sized the buffer exactly.
+    let q_heads = query.len() / dim;
+    let q_width = q_heads * dim;
     if query.len() != q_width || output.len() != q_width {
         return Err(format!(
             "blk.{layer} attention length mismatch: query {}, output {}, expected {}",
@@ -960,27 +1530,33 @@ pub(super) fn attend(
             cache.values.len()
         ));
     }
-    let first = if sliding { rows.saturating_sub(512) } else { 0 };
+    let first = if sliding {
+        rows.saturating_sub(sliding_window)
+    } else {
+        0
+    };
     let cached = rows - first;
     let padded = cached.div_ceil(256) * 256;
-    scores.resize(padded, f32::NEG_INFINITY);
-    values.resize(padded, 0.0);
-
-    // Parallelize per-head over the compute pool. The V pass iterates
-    // `token` outer / `dimension` inner: V at fixed token is contiguous in
-    // memory (stride 1 in `dim`), so each token-load is cache-friendly, and
-    // the inner dim loop is FMA-fused (AVX2 `_mm256_fmadd_ps`) over
-    // `score[token] * V[token, dim]`. This drops the per-dim `head_values`
-    // gather + `dot_f32` and avoids the strided V reads of the old code.
+    let workspace = padded
+        .checked_mul(pool.n_threads())
+        .ok_or_else(|| format!("blk.{layer} attention scratch length overflow"))?;
+    scores.resize(workspace, f32::NEG_INFINITY);
+    values.resize(workspace, 0.0);
+    values.fill(0.0);
     let query_ptr = query.as_ptr();
     let keys_ptr = cache.keys.as_ptr();
     let values_ptr = cache.values.as_ptr();
     let output_ptr = output.as_mut_ptr();
+    let scores_ptr = scores.as_mut_ptr();
+    let scratch_values_ptr = values.as_mut_ptr();
     pool.compute(move |ith, nth| {
-        let h_step = (HEADS + nth - 1) / nth;
-        let h_start = (ith * h_step).min(HEADS);
-        let h_end = (h_start + h_step).min(HEADS);
-        let mut head_scores = vec![f32::NEG_INFINITY; padded];
+        let h_step = (q_heads + nth - 1) / nth;
+        let h_start = (ith * h_step).min(q_heads);
+        let h_end = (h_start + h_step).min(q_heads);
+        let head_scores =
+            unsafe { std::slice::from_raw_parts_mut(scores_ptr.add(ith * padded), padded) };
+        let head_values =
+            unsafe { std::slice::from_raw_parts_mut(scratch_values_ptr.add(ith * padded), padded) };
         for head in h_start..h_end {
             let query_head = unsafe { std::slice::from_raw_parts(query_ptr.add(head * dim), dim) };
             let kv_head = head / group_size;
@@ -989,9 +1565,9 @@ pub(super) fn attend(
             for (score, token) in head_scores[..cached].iter_mut().zip(first..rows) {
                 let offset = token * row_width + kv_offset;
                 let key = unsafe { std::slice::from_raw_parts(keys_ptr.add(offset), dim) };
-                *score = dot_f32(query_head, key, dim);
+                *score = ggml_attention_dot(query_head, key, dim);
             }
-            softmax_inplace(&mut head_scores);
+            ggml_attention_softmax(head_scores);
             let head_output =
                 unsafe { std::slice::from_raw_parts_mut(output_ptr.add(head * dim), dim) };
             unsafe {
@@ -1003,6 +1579,7 @@ pub(super) fn attend(
                     first,
                     cached,
                     dim,
+                    head_values,
                     head_output,
                 );
             }
@@ -1011,10 +1588,8 @@ pub(super) fn attend(
     ensure_finite(&format!("blk.{layer} attention"), output)
 }
 
-/// Fused `output[d] += Σ_t scores[t] * V[t, d]` over `[first, first+cached)`.
-/// Outer loop iterates `t` so each V load is a contiguous `dim`-length chunk
-/// (stride 1 in `dim`). Inner loop uses the SIMD FMA of the host to fuse
-/// `output[d] += score * V[t, d]`.
+/// Match ggml's dimension-major `MUL_MAT` by gathering each V column and using
+/// the same padded SIMD dot reduction as the Q·K pass.
 #[inline]
 unsafe fn attend_v(
     values_ptr: *const f32,
@@ -1024,137 +1599,16 @@ unsafe fn attend_v(
     first: usize,
     cached: usize,
     dim: usize,
+    head_values: &mut [f32],
     head_output: &mut [f32],
 ) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            return attend_v_avx2(
-                values_ptr,
-                scores_ptr,
-                row_width,
-                kv_offset,
-                first,
-                cached,
-                dim,
-                head_output,
-            );
+    let padded = cached.div_ceil(256) * 256;
+    let scores = std::slice::from_raw_parts(scores_ptr, padded);
+    for (d, output) in head_output[..dim].iter_mut().enumerate() {
+        for (value, token) in head_values[..cached].iter_mut().zip(first..) {
+            *value = *values_ptr.add(token * row_width + kv_offset + d);
         }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            return attend_v_neon(
-                values_ptr,
-                scores_ptr,
-                row_width,
-                kv_offset,
-                first,
-                cached,
-                dim,
-                head_output,
-            );
-        }
-    }
-    attend_v_scalar(
-        values_ptr,
-        scores_ptr,
-        row_width,
-        kv_offset,
-        first,
-        cached,
-        dim,
-        head_output,
-    )
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2", enable = "fma")]
-unsafe fn attend_v_avx2(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    use std::arch::x86_64::*;
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        let vscore = _mm256_set1_ps(score);
-        let mut d = 0;
-        while d + 8 <= dim {
-            let vo = _mm256_loadu_ps(head_output.as_ptr().add(d));
-            let vd = _mm256_loadu_ps(v_base.add(d));
-            _mm256_storeu_ps(
-                head_output.as_mut_ptr().add(d),
-                _mm256_fmadd_ps(vscore, vd, vo),
-            );
-            d += 8;
-        }
-        while d < dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-            d += 1;
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn attend_v_neon(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    use std::arch::aarch64::*;
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        let vscore = vdupq_n_f32(score);
-        let mut d = 0;
-        while d + 4 <= dim {
-            let vo = vld1q_f32(head_output.as_ptr().add(d));
-            let vd = vld1q_f32(v_base.add(d));
-            vst1q_f32(head_output.as_mut_ptr().add(d), vfmaq_f32(vo, vscore, vd));
-            d += 4;
-        }
-        while d < dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-            d += 1;
-        }
-    }
-}
-
-unsafe fn attend_v_scalar(
-    values_ptr: *const f32,
-    scores_ptr: *const f32,
-    row_width: usize,
-    kv_offset: usize,
-    first: usize,
-    cached: usize,
-    dim: usize,
-    head_output: &mut [f32],
-) {
-    head_output.fill(0.0);
-    for i in 0..cached {
-        let token = first + i;
-        let v_base = values_ptr.add(token * row_width + kv_offset);
-        let score = *scores_ptr.add(i);
-        for d in 0..dim {
-            *head_output.as_mut_ptr().add(d) += score * *v_base.add(d);
-        }
+        *output = ggml_attention_dot(scores, &head_values, padded);
     }
 }
 
@@ -1163,7 +1617,7 @@ pub(super) fn softcap(value: f32, cap: f32) -> f32 {
 }
 
 pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
-    // Scalar reference; matches llama.cpp GEGLU with f16 intermediate.
+    // Scalar reference; matches llama.cpp GEGLU with f16 GELU table entries.
     //
     // === TODO-002: SIMD GeGLU (`tanh_approx`) ===
     //
@@ -1189,21 +1643,13 @@ pub(super) fn ggml_geglu_fp16_inplace(gate: &mut [f32], up: &[f32]) {
     // recovery plan (likely a `[7/6]` padé + per-call opt-in feature
     // flag once precision is characterised against the llama.cpp
     // pinned Oracle).
-    const GELU_COEF_A: f32 = 0.044715;
-    const SQRT_2_OVER_PI: f32 = 0.79788456080286535587989211986876;
-
     assert_eq!(gate.len(), up.len());
     for (gate, up) in gate.iter_mut().zip(up) {
         let x = *gate;
         *gate = if x <= -10.0 {
             0.0
-        } else if x >= 10.0 {
-            x * up
         } else {
-            let x = f16_to_f32(f32_to_f16(x));
-            let gelu =
-                0.5 * x * (1.0 + (SQRT_2_OVER_PI * x * x.mul_add(GELU_COEF_A * x, 1.0)).tanh());
-            f16_to_f32(f32_to_f16(gelu)) * up
+            crate::ops::gelu_ggml_f16(x) * up
         };
     }
 }
@@ -1230,6 +1676,7 @@ fn ensure_finite(name: &str, values: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "parity-trace")]
 fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
     trace(
         row,
@@ -1238,6 +1685,29 @@ fn trace_layer(row: usize, stage: &str, layer: usize, values: &[f32]) {
         values,
     );
 }
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_layer(_row: usize, _stage: &str, _layer: usize, _values: &[f32]) {}
+
+#[cfg(feature = "parity-trace")]
+fn trace_layer_rows(stage: &str, layer: usize, values: &[f32], rows: usize, width: usize) {
+    let name = format!("gemma4.layer.{layer}.{stage}");
+    let _ = crate::parity_trace::checkpoint_rows(&name, Some(layer), &[rows, width], values);
+}
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_layer_rows(_stage: &str, _layer: usize, _values: &[f32], _rows: usize, _width: usize) {}
+
+#[cfg(feature = "parity-trace")]
+fn trace_rows(name: &str, layer: Option<usize>, values: &[f32], rows: usize, width: usize) {
+    let _ = crate::parity_trace::checkpoint_rows(name, layer, &[rows, width], values);
+}
+
+#[cfg(not(feature = "parity-trace"))]
+#[inline(always)]
+fn trace_rows(_name: &str, _layer: Option<usize>, _values: &[f32], _rows: usize, _width: usize) {}
 
 #[cfg(feature = "parity-trace")]
 fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
@@ -1252,3 +1722,156 @@ fn trace(row: usize, name: &str, layer: Option<usize>, values: &[f32]) {
 
 #[cfg(not(feature = "parity-trace"))]
 fn trace(_row: usize, _name: &str, _layer: Option<usize>, _values: &[f32]) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_rope, attend, attend_v, ggml_attention_softmax, KvLayer};
+    use crate::core::thread_pool::ComputePool;
+
+    #[test]
+    fn full_attention_rope_applies_base_before_frequency_factors() {
+        let mut values = [1.25, -2.0, 0.75, 3.5];
+
+        apply_rope(&mut values, 1, 4, 0, false, 10_000.0, 16.0, &[1.0, 2.0]).unwrap();
+
+        assert_eq!(
+            values.map(f32::to_bits),
+            [0x3d35_5950, 0xc01a_edae, 0x3fba_811e, 0x404e_4b3f]
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn attention_softmax_matches_llama_avx2_raw_bits() {
+        let mut scores = vec![f32::NEG_INFINITY; 256];
+        scores[..3].copy_from_slice(&[0x3fcd_edd6, 0x40e4_80e5, 0x4150_be72].map(f32::from_bits));
+
+        ggml_attention_softmax(&mut scores);
+
+        assert_eq!(
+            scores[..3]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![0x3734_641c, 0x3b32_039e, 0x3f7f_4d49],
+        );
+
+        let mut scores = vec![f32::NEG_INFINITY; 256];
+        scores[..5].copy_from_slice(
+            &[
+                0x3fd0_6948,
+                0xc003_7c6a,
+                0xbf45_a7b2,
+                0x4118_5013,
+                0x4015_ff08,
+            ]
+            .map(f32::from_bits),
+        );
+        ggml_attention_softmax(&mut scores);
+        assert_eq!(
+            scores[..5]
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![
+                0x39c3_d611,
+                0x371d_a495,
+                0x380e_1575,
+                0x3f7f_b29f,
+                0x3a48_4231
+            ],
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn attention_softmax_matches_llama_neon_raw_bits() {
+        let cache = KvLayer {
+            head_dim: 1,
+            row_width: 1,
+            group_size: 1,
+            keys: [0x410d_e8ceu32, 0x410e_45e2, 0x4110_5392]
+                .map(f32::from_bits)
+                .to_vec(),
+            values: vec![1.0, 0.0, 0.0],
+        };
+        let mut output = [0.0];
+
+        attend(
+            16,
+            2,
+            &[1.0],
+            &cache,
+            false,
+            0,
+            &mut output,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &ComputePool::new(1),
+        )
+        .unwrap();
+
+        assert_eq!(output[0].to_bits(), 0x3ea0_b33e);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn attention_values_match_llama_neon_dot_reduction() {
+        let mut scores = [0.0; 256];
+        scores[0] = f32::from_bits(0x3efa_b5d9);
+        scores[1] = f32::from_bits(0x3f02_a513);
+        let mut values = [0.0; 8];
+        values[0] = f32::from_bits(0x3cb9_1aee);
+        values[4] = f32::from_bits(0x3c9f_4180);
+        let mut output = [0.0; 4];
+        let mut scratch = [0.0; 256];
+
+        unsafe {
+            attend_v(
+                values.as_ptr(),
+                scores.as_ptr(),
+                4,
+                0,
+                0,
+                2,
+                4,
+                &mut scratch,
+                &mut output,
+            );
+        }
+
+        assert_eq!(output[0].to_bits(), 0x3cab_e9d8);
+    }
+
+    #[test]
+    fn attention_reuses_worker_partitioned_scratch() {
+        let cache = KvLayer {
+            head_dim: 1,
+            row_width: 1,
+            group_size: 2,
+            keys: vec![0.0, 1.0],
+            values: vec![1.0, 2.0],
+        };
+        let mut output = [0.0; 2];
+        let mut scores = Vec::new();
+        let mut values = Vec::new();
+
+        attend(
+            0,
+            1,
+            &[1.0; 2],
+            &cache,
+            false,
+            0,
+            &mut output,
+            &mut scores,
+            &mut values,
+            &ComputePool::new(2),
+        )
+        .unwrap();
+
+        assert_eq!(scores.len(), 2 * 256);
+        assert_eq!(values.len(), 2 * 256);
+        assert_eq!(output[0].to_bits(), output[1].to_bits());
+    }
+}

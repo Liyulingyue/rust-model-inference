@@ -182,6 +182,7 @@ src/models/{model_name}/
 | 函数 | 当前所在 | 应去 |
 |------|----------|------|
 | `load_f32_tensor`（F32/BF16 norm 加载） | qwen3/trunk/weights.rs:65、llama/trunk/weights.rs、lfm2/trunk/weights.rs、lfm25/trunk/weights.rs | `core::tensor::load_f32_tensor`（§8 Step 1 已抽离） ✅ |
+| `typed_tensor_bytes` / `f32_tensor_bytes` / `optional_f32_tensor_bytes`（校验后借用张量原始字节） | models/gemma4/vision/mod.rs、models/gemma4/asr/mod.rs、models/qwen3/vision/mod.rs、models/qwen35/vision/mod.rs、models/qwen3/asr/mel_encoder.rs、models/qwen3/trunk/util.rs | `core::tensor`（同一组三个 helper）✅ |
 | `static_q8_matrix` / `static_q8_tensor` / `static_tensor` | qwen3/trunk/util.rs:209-240 | `core::loader`（建议抽离 — §9 待迁移） |
 | `expect_supported_embedding` / `is_supported_embedding` | `ops/embedding.rs`（已统一） | — ✅ |
 | `SUPPORTED_EMBEDDING_TYPES` | `ops/embedding.rs`（已统一） | — ✅ |
@@ -404,6 +405,16 @@ for _n in 0..(QK_K / 128) {
 | T-3 | qwen3/asr/audio_processor `log_mel_windows` / `compute_log_mel` / `HOP` | qwen3/asr/audio_processor.rs（被 omni.rs 复用） | 与 T-2 同处理 |
 | T-4 | lfm2 / lfm25 / lfm2moe 共享的 shortconv state 类型 + buffer 分配 | 各模型 `forward.rs` | 若 S-4 选 A：抽到 `core/scratchpad` 或各模型 `trunk/scratch.rs` |
 
+已完成的下沉（保留在此作为约定，新模型直接复用，不要再写一份）：
+
+| 工具 | 位置 | 说明 |
+|------|------|------|
+| `require_tensor_meta` | `core::tensor` | 只读 header：存在 / shape / 类型。模型在“先校验整个契约、再读 payload”时用它 |
+| `require_tensor_data` | `core::tensor` | 只校验 payload 长度，按 `GGMLType::type_traits` 的 block 布局计算，量化格式不会被按元素数算错 |
+| `require_tensor_type` | `core::tensor` | 前两者组合，返回实际类型，供“校验即读取”的加载路径使用 |
+
+各模型的 `require_tensor` / `check_tensor` 包装一律委托给上面三个函数，只保留自己的类型白名单（例如 omni 容忍 F16/BF16）。`audio8`、`gemma4`、`diffusion/common`、`qwen3`（omni / asr mel_encoder / trunk util）、`diffusion/flux3` 已迁移。
+
 ### 9.4 尺寸警戒（§2.2 新规则触发）
 
 | # | 文件 | 行数 | 评估 | 建议 |
@@ -433,3 +444,12 @@ for _n in 0..(QK_K / 128) {
 6. **Step 6.6**（Z-1、Z-5）：`qwen35/vision/mod.rs` 与 `qwen3/vision/mod.rs` 按职责拆分。风险：中（多 import 站点）。
 
 每步均按 §7 验收标准执行（`cargo build --lib` 零 error、`cargo test --lib` 不退化、至少 1 个真实模型推理冒烟通过、§8 已完成清单追加本次 step）。
+
+### 9.6 长期方向：架构数增长的系统性解
+
+§9.1–9.5 都是「单目录级」的存量偏差修复；但 `src/models/` 的架构数本身仍在
+线性增长（2026-09-22 时 10 个，2026-11-19 已 57 个条目 / 22 万行）。目录规范
+只治「每个模型放哪儿」，不治「每接入一个新架构就要手写 ~1500 行 forward」。
+半步图组装器（layer_template）、组件级组装、按需编译（feature gate）三个
+方向的论证见 [`ARCHITECTURE_EVOLUTION.md`](ARCHITECTURE_EVOLUTION.md)——
+本规范管形态，该文档管演进。

@@ -21,28 +21,27 @@ unsafe extern "C" {
     fn powf(base: f32, exponent: f32) -> f32;
 }
 
-#[cfg(target_vendor = "apple")]
-#[repr(C)]
-struct SinCos {
-    sin: f32,
-    cos: f32,
-}
-
-#[cfg(target_vendor = "apple")]
-unsafe extern "C" {
-    #[link_name = "__sincosf_stret"]
-    fn sincosf(value: f32) -> SinCos;
+#[inline]
+pub(crate) fn sin_cos(value: f32) -> (f32, f32) {
+    if crate::ops::scalar_mode() {
+        return sin_cos_precise(value);
+    }
+    value.sin_cos()
 }
 
 #[inline]
-fn sin_cos(value: f32) -> (f32, f32) {
-    #[cfg(target_vendor = "apple")]
-    {
-        let result = unsafe { sincosf(value) };
-        (result.sin, result.cos)
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    value.sin_cos()
+pub(super) fn sin_cos_precise(value: f32) -> (f32, f32) {
+    (scalar_sin(value), scalar_cos(value))
+}
+
+// Separate libm calls: LLVM's sincos fusion changes scalar rounding on macOS.
+#[inline(never)]
+fn scalar_sin(value: f32) -> f32 {
+    value.sin()
+}
+#[inline(never)]
+fn scalar_cos(value: f32) -> f32 {
+    value.cos()
 }
 
 pub fn rope_mrope(
@@ -83,8 +82,15 @@ pub fn rope_mrope(
             let idx1 = idx0 + half;
             let x0 = x[idx0];
             let x1 = x[idx1];
-            x[idx0] = x0.mul_add(cos_a, -(x1 * sin_a));
-            x[idx1] = x0.mul_add(sin_a, x1 * cos_a);
+            if crate::ops::scalar_mode() {
+                // Keep each product rounded before the addition for bitwise
+                // scalar comparisons; mul_add contracts both operations.
+                x[idx0] = std::hint::black_box(x0 * cos_a) - std::hint::black_box(x1 * sin_a);
+                x[idx1] = std::hint::black_box(x0 * sin_a) + std::hint::black_box(x1 * cos_a);
+            } else {
+                x[idx0] = x0.mul_add(cos_a, -(x1 * sin_a));
+                x[idx1] = x0.mul_add(sin_a, x1 * cos_a);
+            }
             for value in &mut theta {
                 *value *= theta_scale;
             }
@@ -161,16 +167,19 @@ pub fn rope_mrope_interleaved(
                 1
             } else if sector % 3 == 2 && sector < 3 * sections[2] as usize {
                 2
-            } else if sector % 3 == 0 && sector < 3 * sections[0] as usize {
-                0
             } else {
-                3
+                0
             };
-            let (sin, cos) = theta[axis].sin_cos();
+            let (sin, cos) = sin_cos(theta[axis]);
             let x0 = head[pair];
             let x1 = head[pair + pair_count];
-            head[pair] = x0.mul_add(cos, -(x1 * sin));
-            head[pair + pair_count] = x0.mul_add(sin, x1 * cos);
+            if crate::ops::scalar_mode() {
+                head[pair] = x0 * cos - x1 * sin;
+                head[pair + pair_count] = x0 * sin + x1 * cos;
+            } else {
+                head[pair] = x0.mul_add(cos, -(x1 * sin));
+                head[pair + pair_count] = x0.mul_add(sin, x1 * cos);
+            }
             for value in &mut theta {
                 *value *= theta_scale;
             }

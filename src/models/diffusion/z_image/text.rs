@@ -1,12 +1,14 @@
+use crate::ops::rope::rope_neox_inplace;
 use std::sync::Arc;
 
 use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use crate::ops::attention_value_reduce;
 use crate::ops::dot_f32;
 use crate::ops::silu_mul_inplace;
 use crate::ops::softmax_inplace;
-use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace, rope_neox_inplace};
+use crate::ops::{embedding_lookup, rms_norm, rms_norm_inplace};
 
 use super::{linear_into, validate_component, Component, Q8Scratch};
 
@@ -91,6 +93,22 @@ impl Qwen3TextEncoder {
         })
     }
 
+    /// Whether the Qwen3 text encoder keeps its projections on the device.
+    ///
+    /// Off by default: see the `TODO(z-image)` at the call site in
+    /// `encode_layer_35` for why, and for the equivalent fix that should retire
+    /// this gate. `RUST_GPU_TEXT=1` opts back in so that optimization has
+    /// something to measure against.
+    #[cfg(feature = "vulkan")]
+    fn text_encoder_on_gpu() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("RUST_GPU_TEXT")
+                .map(|value| value != "0")
+                .unwrap_or(false)
+        })
+    }
+
     pub(crate) fn encode_layer_35(&self, prompt: &str) -> Result<Vec<f32>, String> {
         let total_start = std::time::Instant::now();
         let t_tok = std::time::Instant::now();
@@ -108,6 +126,38 @@ impl Qwen3TextEncoder {
         crate::parity_trace::report(crate::parity_trace::token_ids("z_image.prompt_ids", &ids));
         let t_tok = t_tok.elapsed();
         let t_fwd = std::time::Instant::now();
+        // TODO(z-image): keep the Qwen3 text encoder on the CPU for now. This is a
+        // temporary gate, not a decision that the text encoder belongs on the CPU.
+        //
+        // `forward_to_block` loops token-outer / layer-inner, so every (token, layer)
+        // pair issues 7 single-row projections. Each one reaches the GPU through
+        // `matmul_q8_0_quantized_parallel_rows`, which is guarded only by an
+        // `n_in` upper bound, so a 16-token prompt produces 16*35*7 = 3920 fenced
+        // single-row submissions. Each re-uploads 10-25 MB of Q8_0 weights for one
+        // row of real work, which measures ~5.0 s on GPU versus ~0.65 s on the
+        // 8-thread CPU pool -- the same "one fence per dispatch" shape that made the
+        // VAE convolution offload 76x slower than CPU in #164.
+        //
+        // Equivalent fix, to revisit before long prompts or batched text encoding
+        // make the prefill heavy: batch the prefill. The projections are plain
+        // row-independent GEMMs and `attention` already reads the strictly causal
+        // `scores[..=position]` window, so swapping the loop nesting to
+        // layer-outer / token-inner (or simply projecting all tokens for a layer at
+        // once) is numerically equivalent while turning 3920 one-row dispatches into
+        // 35*7 = 245 batched ones, with each weight upload amortized over all tokens.
+        // That needs no model or cache-layout change: the `cache[(layer*token_count +
+        // position)]` layout is shared by both nestings.
+        //
+        // The guard is thread-local and scoped to this forward pass. It must not be
+        // lifted into `matmul_q8_0_quantized_parallel_rows`, which is shared with the
+        // Z-Image DiT (--gpu is an 8.9x win there and must not regress).
+        //
+        // `RUST_GPU_TEXT=1` restores the pre-gate GPU path. It exists so the batched
+        // prefill above can be measured against the behavior it replaces; without it
+        // any attempt at that optimization would have to delete this guard first.
+        #[cfg(feature = "vulkan")]
+        let _text_encoder_on_cpu =
+            (!Self::text_encoder_on_gpu()).then(ComputePool::disable_gpu_matmul_for_scope);
         let output = self.forward_to_block(&ids, LAYER_35_BLOCKS)?;
         let t_fwd = t_fwd.elapsed();
         eprintln!(
@@ -215,7 +265,6 @@ impl Qwen3TextEncoder {
                     position,
                     token_count,
                     &mut scratch.scores,
-                    &mut scratch.value_column,
                     &mut scratch.attention,
                 );
                 linear_into(
@@ -295,7 +344,6 @@ struct TextScratch {
     gate: Vec<f32>,
     up: Vec<f32>,
     scores: Vec<f32>,
-    value_column: Vec<f32>,
     q8: Q8Scratch,
 }
 
@@ -312,7 +360,6 @@ impl TextScratch {
             gate: vec![0.0; FFN_WIDTH],
             up: vec![0.0; FFN_WIDTH],
             scores: vec![0.0; token_count],
-            value_column: vec![0.0; token_count],
             q8: Q8Scratch::new(FFN_WIDTH),
         }
     }
@@ -325,7 +372,6 @@ fn attention(
     position: usize,
     token_count: usize,
     scores: &mut [f32],
-    value_column: &mut [f32],
     output: &mut [f32],
 ) {
     output.fill(0.0);
@@ -347,27 +393,17 @@ fn attention(
         }
         softmax_inplace(&mut scores[..=position]);
         let output_head = &mut output[query_head * HEAD_WIDTH..(query_head + 1) * HEAD_WIDTH];
-        #[cfg(target_arch = "aarch64")]
-        for dimension in 0..HEAD_WIDTH {
-            for (value_position, value) in value_column.iter_mut().enumerate() {
-                let value_start = (layer * token_count + value_position) * KV_WIDTH
-                    + kv_head * HEAD_WIDTH
-                    + dimension;
-                *value = cache.v[value_start];
-            }
-            output_head[dimension] = dot_f32(value_column, scores, value_column.len());
-        }
-        #[cfg(not(target_arch = "aarch64"))]
-        for (value_position, &weight) in scores[..=position].iter().enumerate() {
-            let value_start =
-                (layer * token_count + value_position) * KV_WIDTH + kv_head * HEAD_WIDTH;
-            for (result, &value) in output_head
-                .iter_mut()
-                .zip(&cache.v[value_start..value_start + HEAD_WIDTH])
-            {
-                *result += weight * value;
-            }
-        }
+        let base = (layer * token_count) * KV_WIDTH;
+        attention_value_reduce(
+            &cache.v,
+            &scores[..=position],
+            output_head,
+            base,
+            KV_WIDTH,
+            kv_head * HEAD_WIDTH,
+            position + 1,
+            HEAD_WIDTH,
+        );
     }
 }
 
@@ -469,17 +505,16 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn silu_mul_inplace_matches_pinned_ggml_neon_activation() {
+    fn silu_mul_inplace_matches_scalar_activation() {
         let gate = [0x3f6c_76fc, 0x3fe2_6ebc, 0xbf66_8824, 0xc009_429b].map(f32::from_bits);
         let mut up = [0xbfa1_5cef, 0x4013_8811, 0x3f8f_08d4, 0xbfe4_c88a].map(f32::from_bits);
+        let expected = up.map(|value| value);
 
         silu_mul_inplace(&gate, &mut up);
 
-        for (actual, expected) in
-            up.into_iter()
-                .zip([0xbf55_6098, 0x405e_f7a5, 0xbe94_dea6, 0x3ecd_be95])
-        {
-            assert!((actual - f32::from_bits(expected)).abs() < 1.0e-6);
+        for ((&actual, &gate), &up) in up.iter().zip(&gate).zip(&expected) {
+            let expected = up * crate::ops::silu(gate);
+            assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
         }
     }
 
@@ -519,7 +554,7 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction() {
+    fn qwen_attention_softmax_matches_the_scalar_reduction() {
         let mut scores = vec![0.0; 16];
         scores[..5].copy_from_slice(
             &[
@@ -531,29 +566,26 @@ mod tests {
             ]
             .map(f32::from_bits),
         );
+        let max = scores[..=4]
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let mut expected = scores[..=4]
+            .iter()
+            .map(|&value| (value - max).exp())
+            .collect::<Vec<_>>();
+        let sum = expected.iter().map(|&value| f64::from(value)).sum::<f64>();
+        let scale = (1.0 / sum) as f32;
+        for value in &mut expected {
+            *value *= scale;
+        }
 
         softmax_inplace(&mut scores[..=4]);
 
-        for (actual, expected) in scores.iter().copied().zip([
-            0x3dd4_b07f,
-            0x3ca8_09ef,
-            0x3eb9_f242,
-            0x3e8f_d4ec,
-            0x3e6d_1827,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-            0x0000_0000,
-        ]) {
-            assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+        for (&actual, &expected) in scores[..=4].iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
         }
+        assert!(scores[5..].iter().all(|&value| value == 0.0));
     }
 
     #[test]

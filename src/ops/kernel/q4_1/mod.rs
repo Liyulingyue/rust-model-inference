@@ -6,7 +6,7 @@
 //! Module structure:
 //! - `scalar.rs` — scalar fallback (`matmul_q4_1_scalar_range`)
 //! - `avx2.rs`    — AVX2 SIMD kernel (mirrors `q4_0::avx2` strategy)
-//! - `neon.rs`    — NEON `vdotq_u32` SIMD kernel (aarch64)
+//! - `neon.rs`    — ARMv8.4-A dot-product fast path (aarch64)
 
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
@@ -32,6 +32,10 @@ impl<'a> Q4_1Kernel<'a> {
 }
 
 impl<'a> Kernel for Q4_1Kernel<'a> {
+    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+        crate::ops::embedding::embedding_lookup_q4_1(self.weight, token_id, n_embd, out);
+    }
+
     fn weight_bytes(&self) -> Option<&[u8]> {
         Some(self.weight)
     }
@@ -72,27 +76,24 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                let per_thread = (n_out + nth - 1) / nth;
-                let my_start = ith * per_thread;
-                let my_end = (my_start + per_thread).min(n_out);
-                if my_start >= my_end {
-                    return;
-                }
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let per_thread = (n_out + nth - 1) / nth;
+            let my_start = ith * per_thread;
+            let my_end = (my_start + per_thread).min(n_out);
+            if my_start < my_end {
                 unsafe {
                     neon::matmul_q4_1_vs_q8_0_neon(
                         self.weight,
                         input_q8,
                         input_scales,
                         None,
-                        output,
+                        &mut output[my_start..my_end],
                         n_in,
                         my_start,
                         my_end,
                     );
-                    return;
                 }
+                return;
             }
         }
         matmul_q4_1_scalar_range(
@@ -162,27 +163,24 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                let per_thread = (n_out + nth - 1) / nth;
-                let my_start = ith * per_thread;
-                let my_end = (my_start + per_thread).min(n_out);
-                if my_start >= my_end {
-                    return;
-                }
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let per_thread = (n_out + nth - 1) / nth;
+            let my_start = ith * per_thread;
+            let my_end = (my_start + per_thread).min(n_out);
+            if my_start < my_end {
                 unsafe {
                     neon::matmul_q4_1_vs_q8_0_neon(
                         self.weight,
                         input_q8,
                         input_scales,
                         Some(&input_sums),
-                        output,
+                        &mut output[my_start..my_end],
                         n_in,
                         my_start,
                         my_end,
                     );
-                    return;
                 }
+                return;
             }
         }
         matmul_q4_1_scalar_range(
@@ -198,6 +196,10 @@ impl<'a> Kernel for Q4_1Kernel<'a> {
         );
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+#[path = "tests_neon.rs"]
+mod tests_neon;
 
 #[cfg(test)]
 mod tests {
@@ -229,6 +231,33 @@ mod tests {
     }
 
     #[test]
+    fn q4_1_embedding_row_reads_the_scale_and_the_minimum() {
+        // Two blocks: the first carries a nibble pattern, the second a
+        // constant one. The lookup dequantizes as `d * q + m`.
+        let mut weight = Vec::new();
+        weight.extend_from_slice(&crate::ops::f32_to_f16(0.5).to_le_bytes());
+        weight.extend_from_slice(&crate::ops::f32_to_f16(-1.0).to_le_bytes());
+        for index in 0..16u8 {
+            weight.push(index | ((15 - index) << 4));
+        }
+        weight.extend_from_slice(&crate::ops::f32_to_f16(0.0).to_le_bytes());
+        weight.extend_from_slice(&crate::ops::f32_to_f16(2.0).to_le_bytes());
+        for _ in 0..16 {
+            weight.push(0x33);
+        }
+
+        let mut out = vec![0.0f32; 64];
+        crate::ops::embedding::embedding_lookup_q4_1(&weight, 0, 64, &mut out);
+        for index in 0..16usize {
+            assert_eq!(out[index], index as f32 * 0.5 - 1.0);
+            assert_eq!(out[index + 16], (15 - index) as f32 * 0.5 - 1.0);
+        }
+        for index in 32..64 {
+            assert_eq!(out[index], 2.0);
+        }
+    }
+
+    #[test]
     fn q4_1_kernel_dot_product_only() {
         let weight = q4_1_uniform_block(1.0, 0.0, 1);
         let input_q8 = vec![1i8 as u8; 32];
@@ -241,7 +270,3 @@ mod tests {
         assert_eq!(output, [32.0]);
     }
 }
-
-#[cfg(target_arch = "aarch64")]
-#[path = "tests_neon.rs"]
-mod tests_neon;

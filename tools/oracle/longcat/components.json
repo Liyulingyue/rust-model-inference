@@ -1,0 +1,123 @@
+{
+  "scope": "Local component audit for the full LongCat Image Edit contract; Rust parity remains Transformer-only",
+  "weight_hash_source": "SHA256 computed from the local files under /Users/gouzi/Documents/git/rust-model-inference/models",
+  "repos": {
+    "edit": {
+      "repo": "meituan-longcat/LongCat-Image-Edit",
+      "revision": "7b54ef423aa7854be7861600024be5c56ab7875a"
+    },
+    "turbo": {
+      "repo": "meituan-longcat/LongCat-Image-Edit-Turbo",
+      "revision": "6a7262de5549f0bf0ec54c08ef7d283ef41f3214"
+    }
+  },
+  "shared_weights": {
+    "text_encoder/model-00001-of-00005.safetensors": {
+      "bytes": 3900233256,
+      "sha256": "e97b877e47fde53a6c6e77aafb36e58e91ee9d95c4a3eeac6f1b5c0e6a1c986e"
+    },
+    "text_encoder/model-00002-of-00005.safetensors": {
+      "bytes": 3864726320,
+      "sha256": "a9a300a43b4724eee2abe7c18ceb26768d0ab011eb0cad19d9bfd2476a24d024"
+    },
+    "text_encoder/model-00003-of-00005.safetensors": {
+      "bytes": 3864726424,
+      "sha256": "111223d173e00bbee81cba1216fad28668df3476706b7fd26f4d5b50f8b3a507"
+    },
+    "text_encoder/model-00004-of-00005.safetensors": {
+      "bytes": 3864733680,
+      "sha256": "ef47f634fa57d46ee134edcc09f34085a47da1e16c12a2abe0d67118be6d72ed"
+    },
+    "text_encoder/model-00005-of-00005.safetensors": {
+      "bytes": 1089994880,
+      "sha256": "0c859795ad3a627a9b95bcb762e059d5b768a4a36fdd4affeff269d93fdecc67"
+    },
+    "vae/diffusion_pytorch_model.safetensors": {
+      "bytes": 167666902,
+      "sha256": "f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3"
+    }
+  },
+  "required_sidecars": [
+    "text_encoder/config.json",
+    "text_encoder/model.safetensors.index.json",
+    "text_processor/*",
+    "tokenizer/*",
+    "vae/config.json",
+    "scheduler/scheduler_config.json"
+  ],
+  "local_component_audit": {
+    "edit_root": "models/LongCat-Image-Edit",
+    "edit": {
+      "text_encoder_shards": 5,
+      "text_encoder_tensor_count": 729,
+      "text_encoder_dtype": "BF16",
+      "vae_tensor_count": 244,
+      "vae_dtype": "BF16",
+      "tokenizer_and_processor": "present",
+      "scheduler": "present",
+      "sha256_verified_against_shared_weights": true
+    },
+    "turbo_root": "models/LongCat-Image-Edit-Turbo",
+    "turbo": {
+      "transformer_weights": "provided separately as LongCat-Image-Edit-Turbo-GGUF",
+      "text_encoder": "reuse ../LongCat-Image-Edit/text_encoder",
+      "vae": "reuse ../LongCat-Image-Edit/vae",
+      "tokenizer_and_processor": "reuse ../LongCat-Image-Edit/{tokenizer,text_processor}",
+      "scheduler": "present",
+      "own_text_encoder_or_vae_files": false
+    },
+    "scheduler_sha256": {
+      "edit": "63b6d2fa93579e383a308009bfd5ae12e61f8950017dd749302f8d54bb3520b6",
+      "turbo": "7c00c7e8a1c34c0b62a6e6f52b3cc2aa6ca255f8a519341779367f61c6447dde"
+    }
+  },
+  "text_encoder_contract": {
+    "architecture": "Qwen2_5_VLForConditionalGeneration",
+    "hidden_size": 3584,
+    "layers": 28,
+    "heads": 28,
+    "kv_heads": 4,
+    "vocab_size": 152064,
+    "vision_hidden_size": 1280,
+    "vision_layers": 32,
+    "vision_output_size": 3584
+  },
+  "vae_contract": {
+    "architecture": "AutoencoderKL",
+    "latent_channels": 16,
+    "block_out_channels": [
+      128,
+      256,
+      512,
+      512
+    ],
+    "scaling_factor": 0.3611,
+    "shift_factor": 0.1159,
+    "use_quant_conv": false,
+    "use_post_quant_conv": false
+  },
+  "scheduler_configs": {
+    "edit": {
+      "_class_name": "FlowMatchEulerDiscreteScheduler",
+      "_diffusers_version": "0.30.0.dev0",
+      "base_image_seq_len": 256,
+      "base_shift": 0.5,
+      "max_image_seq_len": 4096,
+      "max_shift": 1.15,
+      "num_train_timesteps": 1000,
+      "shift": 3.0,
+      "use_dynamic_shifting": true
+    },
+    "turbo": {
+      "_class_name": "FlowMatchEulerDiscreteScheduler",
+      "_diffusers_version": "0.30.0.dev0",
+      "base_image_seq_len": 256,
+      "base_shift": 1.15,
+      "max_image_seq_len": 4096,
+      "max_shift": 1.15,
+      "num_train_timesteps": 1000,
+      "shift": 1.0,
+      "use_dynamic_shifting": true
+    }
+  }
+}

@@ -1,0 +1,33 @@
+#version 450
+
+// SnakeBeta activation for the AuK VAE: `x + sin(alpha * x)^2 / (beta + 1e-9)`.
+//
+// Layout: input `[rows][row_stride]`, per-row `alpha` and `beta`, output with
+// the same layout. The row is the channel, so the parameters are read once
+// per channel instead of once per frame.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+
+layout(push_constant) uniform PC {
+    uint input_word; uint output_word; uint alpha_word; uint beta_word;
+    uint count; uint rows; uint row_stride;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.z;
+    if (row >= pc.rows) return;
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint index = group * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.count) return;
+
+    uint offset = row * pc.row_stride + index;
+    float x = uintBitsToFloat(arena.data[pc.input_word + offset]);
+    float alpha = uintBitsToFloat(arena.data[pc.alpha_word + row]);
+    float beta = uintBitsToFloat(arena.data[pc.beta_word + row]);
+    float wave = sin(alpha * x);
+    float squared = wave * wave;
+    float value = x + (1.0 / (beta + 1e-9)) * squared;
+    arena.data[pc.output_word + offset] = floatBitsToUint(value);
+}

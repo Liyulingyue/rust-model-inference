@@ -1,7 +1,9 @@
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 struct RowCheckpoint {
     name: String,
@@ -124,17 +126,35 @@ fn append(value: &serde_json::Value) -> io::Result<()> {
     file.write_all(b"\n")
 }
 
-fn occurrence(name: &str) -> io::Result<usize> {
+struct OccurrenceState {
+    path: PathBuf,
+    counts: HashMap<String, usize>,
+}
+
+fn next_occurrence(name: &str) -> io::Result<usize> {
     let path = trace_path()?;
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
-    };
-    contents.lines().try_fold(0usize, |count, line| {
-        let value: serde_json::Value = serde_json::from_str(line)?;
-        Ok(count + usize::from(value["name"] == name))
-    })
+    static STATE: OnceLock<Mutex<Option<OccurrenceState>>> = OnceLock::new();
+    let state = STATE.get_or_init(|| Mutex::new(None));
+    let mut state = state
+        .lock()
+        .map_err(|_| io::Error::other("parity trace occurrence state poisoned"))?;
+    if state.as_ref().is_none_or(|current| current.path != path) {
+        let mut counts = HashMap::new();
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let value: serde_json::Value = serde_json::from_str(line)?;
+                if let Some(name) = value["name"].as_str() {
+                    *counts.entry(name.to_owned()).or_insert(0) += 1;
+                }
+            }
+        }
+        *state = Some(OccurrenceState { path, counts });
+    }
+    let current = state.as_mut().unwrap();
+    let occurrence = current.counts.entry(name.to_owned()).or_insert(0);
+    let result = *occurrence;
+    *occurrence += 1;
+    Ok(result)
 }
 
 fn full_f32(name: &str, occurrence: usize, values: &[f32]) -> io::Result<PathBuf> {
@@ -190,7 +210,7 @@ pub fn checkpoint_at(
     let head: Vec<f32> = values.iter().copied().take(8).collect();
     let mut tail: Vec<f32> = values.iter().rev().copied().take(8).collect();
     tail.reverse();
-    let occurrence = occurrence(name)?;
+    let occurrence = next_occurrence(name)?;
     let binary_path = full_f32(name, occurrence, values)?;
     append(&json!({
         "name": name,

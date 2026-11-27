@@ -1,5 +1,5 @@
-use crate::models::dots::speaker::exp::torch28_exp;
 use crate::models::qwen35::Qwen35DenseKvSnapshot;
+use crate::ops::math::torch28_exp;
 use crate::ops::{bf16_to_f32, f32_to_bf16, rope_sin_cos_sleef};
 use crate::{core::tensor::GGMLType, core::tensor::TensorSource};
 

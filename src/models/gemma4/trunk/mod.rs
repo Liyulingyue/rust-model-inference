@@ -12,7 +12,7 @@ pub use session::Gemma4Session;
 pub use weights::Gemma4Model;
 
 #[cfg(test)]
-use config::{FULL_HEAD_DIM, HEADS, PER_LAYER, SWA_HEAD_DIM, VOCAB};
+use config::{CONTEXT, EPS, PER_LAYER, VOCAB};
 #[cfg(test)]
 use forward::{assemble_input_rows, attend, ggml_geglu_fp16_inplace, matmul, softcap};
 #[cfg(test)]

@@ -1,0 +1,13 @@
+{
+  "cleanup": {
+    "reason": "Discard superseded aborted 167-token run before the final 169-token run; retain current sidecar paths and checkpoint order",
+    "removed_lines": 144,
+    "remaining_lines": 126,
+    "pause_timing": "brief administrative pause, not measured; exclude this run from performance comparisons"
+  },
+  "original_retained_prefix_exact": true,
+  "backup_manifest_lines": 270,
+  "final_manifest_lines": 233,
+  "final_manifest_sha256": "38265c1f535ab80a3e525463ce9d29ed90d7b096b7c29222c639282660bab8c3",
+  "note": "remaining_lines describes the paused manifest. Inference subsequently appended the remaining checkpoints. Payload paths in the retained prefix were unchanged."
+}

@@ -1,0 +1,496 @@
+use std::path::PathBuf;
+
+pub use crate::core::scratchpad::KvFormat;
+pub use crate::models::diffusion::dreamx::{
+    DreamXOptions, DreamXRefinerOptions, LatentUpsampleKind, RefinerDecoderKind,
+};
+pub use crate::models::dots::XVectorMode;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EmbeddingOutput {
+    #[default]
+    Summary,
+    Raw,
+}
+
+#[derive(Debug, Default)]
+pub struct CliOptions {
+    /// Parsed option names, excluding their values, for capability-specific validation.
+    pub supplied_flags: Vec<String>,
+    pub yue2: bool,
+    pub dreamx: bool,
+    pub astronex: bool,
+    pub planner: Option<PathBuf>,
+    pub perception: Option<PathBuf>,
+    pub scenes: Option<PathBuf>,
+    pub image_root: Option<PathBuf>,
+    pub frames: Option<PathBuf>,
+    pub planning_mode: Option<String>,
+    pub num_samples: Option<usize>,
+    pub num_steps: Option<usize>,
+    pub output: Option<PathBuf>,
+    pub model: PathBuf,
+    pub mmproj: Option<PathBuf>,
+    /// CLM projection-head GGUF. Pairs with `--model` (the encoder) and
+    /// only means anything together with `--jev`.
+    pub clm_head: Option<PathBuf>,
+    /// Score with a GLiNER2.5-Decide encoder+head model instead of a
+    /// label-logit scorer. Pairs with `--model` and `--jev`; the model
+    /// itself carries the classifier, so there is no side-car flag.
+    pub gliner2_decide: bool,
+    /// Score with a GLiNER2.5 BoundaryExtractor model (span extraction)
+    /// instead of the Decide classification head. Same `--model` /
+    /// `--jev-context` / `--gliner2-schema` surface as `--gliner2-decide`;
+    /// the GGUF variant selects the head, so this flag only picks the mode.
+    pub gliner2_boundary: bool,
+    /// `classify_text`-shaped task mapping, e.g.
+    /// `{"intent":["a","b"],"aspects":{"labels":[...],"multi_label":true}}`.
+    /// Defaults to one task built from `--jev-question` + `--jev-option`.
+    pub gliner2_schema: Option<String>,
+    pub audio: Option<PathBuf>,
+    pub enhance: bool,
+    pub ref_audio: Option<PathBuf>,
+    pub ref_text: Option<String>,
+    pub image: Option<PathBuf>,
+    pub video: Option<PathBuf>,
+    pub vae: Option<PathBuf>,
+    pub text_encoder: Option<PathBuf>,
+    pub prompt: Option<String>,
+    pub lyrics: Option<String>,
+    pub negative_prompt: Option<String>,
+    pub chat_template: Option<String>,
+    /// Render the GGUF's own `tokenizer.chat_template` with minijinja
+    /// instead of the hand-written per-arch builder. Mirrors llama.cpp's
+    /// `--jinja`.
+    pub jinja: bool,
+    /// Override the chat template with a Jinja2 file. Implies `--jinja`.
+    pub chat_template_file: Option<PathBuf>,
+    pub language: Option<String>,
+    pub max_tokens: Option<usize>,
+    pub max_context: Option<usize>,
+    pub prefill_batch_size: Option<usize>,
+    /// Number of tokens the MTP draft head proposes per speculative
+    /// decoding round. `None` (or zero) keeps the plain one-token-at-a-time
+    /// decode.
+    pub mtp_draft: Option<usize>,
+    /// A DFlash / DSpark sidecar GGUF: when set, the decode becomes a
+    /// speculative one with the sidecar drafting (`--dspark-model`).
+    pub dspark_model: Option<String>,
+    /// The n-gram self-speculative draft (llama.cpp's `ngram-simple`): the
+    /// committed token history drafts (`--ngram-draft N`, the per-round
+    /// draft length; `None` or zero keeps the plain decode).
+    pub ngram_draft: Option<usize>,
+    /// The lookup n-gram size for `--ngram-draft` (`--ngram-lookup N`;
+    /// `None` rides the upstream default of 12).
+    pub ngram_lookup: Option<usize>,
+    pub repetition_penalty: Option<f32>,
+    pub steps: Option<usize>,
+    /// Astronex output latent-frame count. `--frames` remains reserved for
+    /// Qwen-Drive's frame manifest, so the video path uses `--video-frames`.
+    pub astronex_frames: Option<usize>,
+    pub resolution: Option<usize>,
+    pub width: Option<usize>,
+    pub height: Option<usize>,
+    pub cfg: Option<f32>,
+    pub noise: Option<PathBuf>,
+    pub references: Vec<PathBuf>,
+    /// LongCat Image Edit: which published checkpoint to load. The two differ
+    /// in their Flux schedule, so this is not a plain weight swap.
+    pub longcat_kind: Option<String>,
+    /// LongCat Image Edit: directory holding `text_encoder/`, `vae/` and
+    /// `tokenizer/`. These are safetensors, not GGUF, so they do not fit the
+    /// `--text-encoder` / `--vae` pair the other image models use.
+    pub components: Option<PathBuf>,
+    /// LongCat Image Edit: the image being edited.
+    pub input: Option<PathBuf>,
+    /// LongCat Image Edit: square canvas side, must be a multiple of 16.
+    pub side: Option<usize>,
+    /// LongCat Image Edit: classifier-free guidance scale.
+    pub guidance: Option<f32>,
+    pub seed: Option<i64>,
+    pub duration_seconds: Option<f32>,
+    pub fps: Option<usize>,
+    pub target_spatial_tokens: Option<usize>,
+    pub refine: Option<bool>,
+    pub refiner_kv_len: Option<usize>,
+    pub latent_upsample: Option<LatentUpsampleKind>,
+    pub refiner_decoder: Option<RefinerDecoderKind>,
+    pub dry_run: bool,
+    pub overwrite: bool,
+    pub allow_memory_overcommit: bool,
+    pub temperature: Option<f32>,
+    pub cfg_scale: Option<f32>,
+    /// Sway sampling coefficient for the AuK flow-matching time grid.
+    /// `None` (the default) uses the official `-1.0` warp.
+    pub auk_sway: Option<f32>,
+    /// Pin the AuK-Flash distilled recipe: 4 steps, CFG off.
+    pub auk_flash: bool,
+    pub top_k: Option<usize>,
+    pub top_p: Option<f32>,
+    pub threads: usize,
+    /// Tri-state: `--thinking` / `--no-thinking`, `None` when neither was
+    /// passed. `None` reaches the chat template as an *undefined* variable,
+    /// so the model's own training default applies there. The hand-written
+    /// builders keep their historical `false` default: the *closed* empty
+    /// think block is what makes a thinking model answer directly.
+    pub thinking: Option<bool>,
+    pub embedding: bool,
+    pub embedding_output: EmbeddingOutput,
+    pub dump_logits: bool,
+    pub bench: bool,
+    pub profile: bool,
+    pub kv_format: KvFormat,
+    /// True when `--kv-cache` was passed on the command line. The
+    /// `KvFormat` default is F32, but the Qwen3-VL text path always runs
+    /// with F16 KV, so an F32 request is only a conflict when the user
+    /// asked for it. Without this flag the guard would also reject the
+    /// default and block plain-text Qwen3-VL entirely.
+    pub kv_format_explicit: bool,
+    /// True when `--serve` was passed. The server owns the WeVisOne
+    /// prediction route, so it accepts `--wevisone-decoder` without a
+    /// `--wevisone-request` file.
+    pub serve: bool,
+    pub gpu: bool,
+    pub compute: Option<crate::compute::ComputePolicy>,
+    pub tts: bool,
+    pub voice: Option<String>,
+    pub speed: Option<f32>,
+    pub pronunciations: Option<String>,
+    pub edit: bool,
+    pub source_audio: Option<PathBuf>,
+    pub source_text: Option<String>,
+    pub target_text: Option<String>,
+    pub instruction: Option<String>,
+    pub use_xvector: XVectorMode,
+    pub use_xvector_supplied: bool,
+    pub out: Option<PathBuf>,
+    pub tts_model: Option<PathBuf>,
+    pub tts_mmproj: Option<PathBuf>,
+    pub qwen_omni_bf16: Option<PathBuf>,
+    pub jev: bool,
+    pub laya_request: Option<PathBuf>,
+    pub wevisone_request: Option<PathBuf>,
+    pub wevisone_decoder: Option<PathBuf>,
+    pub timestral_request: Option<PathBuf>,
+    pub system_one_request: Option<PathBuf>,
+    pub decision_request: Option<PathBuf>,
+    pub decision_thinker: Option<PathBuf>,
+    /// Vela3 adapter package (LoRA + heads + config). `--model` is the base
+    /// weights; the d3 variants need both.
+    pub adapter: Option<PathBuf>,
+    pub jev_context: Option<String>,
+    pub jev_questions: Vec<JevQuestion>,
+    pub jev_positive: Option<String>,
+    pub jev_output_json: bool,
+    pub jev_multi: bool,
+    pub jev_blocks: Vec<JevBlockInput>,
+    pub chunk_seconds: Option<f64>,
+    pub srt: bool,
+    pub vad: Option<PathBuf>,
+    pub vad_maxseg: usize,
+    pub qwen_context_file: Option<PathBuf>,
+    pub qwen_latent_file: Option<PathBuf>,
+    pub qwen_latent_width: Option<usize>,
+    pub qwen_latent_height: Option<usize>,
+    pub qwen_timestep: Option<f32>,
+    /// Select the checkpoint's fixed eight-step schedule; GGUF has no variant tag.
+    pub qwen_image_turbo: bool,
+    /// Cross-encoder rerank: rank a query against a list of documents.
+    /// Backend chosen by the loaded GGUF's architecture
+    /// (`jina-bert-v2` + `cls.weight`/`cls.bias` → bert_family forward,
+    /// `qwen3` + `cls.output.weight` + `pooling_type=4` → qwen3 trunk).
+    pub rerank: bool,
+    /// Rerank query (mandatory when `rerank = true`).
+    pub rerank_query: Option<String>,
+    /// Inline documents (repeatable `--rerank-doc`).
+    pub rerank_documents: Vec<String>,
+    /// Newline-separated documents file (alternative to `--rerank-doc *`).
+    pub rerank_documents_file: Option<PathBuf>,
+    /// Optional instruction / system prompt (qwen3 path only).
+    pub rerank_instruction: Option<String>,
+    /// Soft word-based cap on per-doc length (0 = unlimited; default 512).
+    pub rerank_max_tokens: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JevQuestion {
+    pub text: String,
+    pub options: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct JevBlockInput {
+    pub label: String,
+    pub options: Vec<String>,
+}
+
+impl CliOptions {
+    pub fn compute_policy(&self) -> crate::compute::ComputePolicy {
+        self.compute.unwrap_or(if self.gpu {
+            crate::compute::ComputePolicy::Auto
+        } else {
+            crate::compute::ComputePolicy::Cpu
+        })
+    }
+
+    pub fn validate_compute_mode(&self) -> Result<(), String> {
+        use crate::compute::ComputePolicy;
+        if self.gpu && self.compute.is_some() {
+            return Err("--gpu and --compute cannot be combined".into());
+        }
+        if self.compute_policy() == ComputePolicy::Vulkan {
+            // `--tts` is decided per model: some archs (Audio8) put the
+            // whole graph on the device, so the frontend reports the path
+            // once it has read the architecture.
+            if let Some(mode) = self.vulkan_partial_mode().filter(|mode| *mode != "tts") {
+                warn_partial_device_mode(mode);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `--tts` on `arch` runs a partial device path.
+    pub fn tts_device_path_is_partial(&self, arch: &str) -> bool {
+        self.tts
+            && self.compute_policy() == crate::compute::ComputePolicy::Vulkan
+            && !crate::compute::ComputePolicy::has_complete_device_path(arch)
+    }
+
+    /// Report the `--tts` device path now that the architecture is known.
+    pub fn report_tts_device_path(&self, arch: &str) {
+        if self.tts_device_path_is_partial(arch) {
+            warn_partial_device_mode("tts");
+        }
+    }
+
+    /// The mode whose device path is partial, if the request names one.
+    ///
+    /// `--compute vulkan` asks for a real device. A mode that cannot put
+    /// its whole graph there still runs, and the caller is told which
+    /// mode it asked for. `--bench`, `--profile` and `--dump-logits` are
+    /// not modes: they decorate the text path, which reports its own
+    /// device path. The OCR family is left out as well, because its
+    /// loader reports the path it took.
+    pub(super) fn vulkan_partial_mode(&self) -> Option<&'static str> {
+        if self.embedding {
+            Some("embedding")
+        } else if self.jev {
+            Some("jev")
+        } else if self.rerank {
+            Some("rerank")
+        } else if self.tts {
+            Some("tts")
+        } else if self.yue2 {
+            Some("yue2")
+        } else if self.dreamx {
+            Some("dreamx")
+        } else if self.audio.is_some() {
+            Some("audio")
+        } else if self.video.is_some() {
+            Some("video")
+        } else if self.mmproj.is_some() {
+            Some("mmproj")
+        } else if self.vae.is_some() {
+            Some("vae")
+        } else if self.text_encoder.is_some() {
+            Some("text-encoder")
+        } else if self.planner.is_some() {
+            Some("planner")
+        } else if self.perception.is_some() {
+            Some("perception")
+        } else if self.laya_request.is_some() {
+            Some("laya")
+        } else if self.longcat_kind.is_some() {
+            Some("longcat")
+        } else if self.image.is_some() && !self.is_ocr_model() {
+            Some("image")
+        } else {
+            None
+        }
+    }
+
+    /// Whether the model is one of the OCR family, whose loader reports
+    /// its own device path.
+    fn is_ocr_model(&self) -> bool {
+        crate::models::unlimited_ocr::matches_model(&self.model)
+    }
+
+    pub fn validate_compute_model(&self, arch: &str) -> Result<(), String> {
+        self.validate_compute_mode()?;
+        self.compute_policy().validate_text_arch(arch)
+    }
+    pub fn effective_prefill_batch_size(&self) -> Result<usize, String> {
+        crate::core::prefill::checked_prefill_batch_size(self.prefill_batch_size)
+    }
+
+    /// How many tokens the MTP draft head may propose per round.
+    ///
+    /// Zero means "no speculative decoding": the draft head is then not
+    /// used at all.
+    pub fn effective_mtp_draft(&self) -> usize {
+        self.mtp_draft.unwrap_or(0)
+    }
+
+    /// How many tokens the n-gram lookup may draft per round (`size_m`).
+    ///
+    /// Zero means the decode stays plain / MTP / DSpark.
+    pub fn effective_ngram_draft(&self) -> usize {
+        self.ngram_draft.unwrap_or(0)
+    }
+
+    /// The lookup n-gram size (`size_n`), upstream's default of 12 when the
+    /// flag is absent.
+    pub fn effective_ngram_lookup(&self) -> usize {
+        self.ngram_lookup
+            .unwrap_or(crate::core::ngram::NGRAM_SIMPLE_SIZE_N)
+    }
+
+    /// Default max-context cap. Most chat workloads fit in 8K; this
+    /// guards against models that declare an over-large
+    /// `context_length` (e.g. K2-Horizon-4B claims 524288, which would
+    /// require ~77 GB of F32 KV cache).
+    pub const DEFAULT_MAX_CONTEXT: usize = 8192;
+
+    pub fn effective_max_context(&self) -> usize {
+        self.max_context.unwrap_or(Self::DEFAULT_MAX_CONTEXT)
+    }
+
+    /// Effective repetition penalty for sampling. `None` / `Some(1.0)` means
+    /// disabled; values > 1.0 suppress already-generated tokens (Hugging Face
+    /// / llama.cpp definition), values < 1.0 encourage repeats.  We don't
+    /// validate against `< 1.0` because users may intentionally want
+    /// repetition in some prompts.
+    pub fn effective_repetition_penalty(&self) -> f32 {
+        self.repetition_penalty.unwrap_or(1.0)
+    }
+}
+
+#[derive(Debug)]
+pub struct ZImageCliOptions {
+    pub steps: usize,
+    pub resolution: usize,
+    pub seed: i64,
+    pub out: PathBuf,
+}
+
+/// LongCat Image Edit / Edit Turbo. Unlike the other image models the text
+/// encoder and VAE arrive as a safetensors directory rather than GGUF, so
+/// `components` names a directory instead of a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LongCatCliOptions {
+    pub kind: crate::models::diffusion::longcat::LongCatKind,
+    pub model: PathBuf,
+    pub components: PathBuf,
+    pub input: PathBuf,
+    pub out: PathBuf,
+    pub instruction: String,
+    pub side: usize,
+    pub steps: usize,
+    pub guidance: f32,
+    pub seed: u64,
+    pub overwrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct YuE2CliOptions {
+    pub model: PathBuf,
+    pub vae: PathBuf,
+    pub style: String,
+    pub lyrics: String,
+    pub out: PathBuf,
+    pub seed: u64,
+    pub semantic: crate::models::yue2::SamplingConfig,
+    pub steps: usize,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct DreamXCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub image: PathBuf,
+    pub prompt: String,
+    pub negative_prompt: Option<String>,
+    pub out: PathBuf,
+    pub options: DreamXOptions,
+    pub dry_run: bool,
+    pub overwrite: bool,
+    pub allow_memory_overcommit: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AstronexCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub image: Option<PathBuf>,
+    pub prompt: String,
+    pub out: PathBuf,
+    pub options: crate::models::diffusion::astronex_world::AstronexOptions,
+    pub overwrite: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum QwenDriveHead {
+    Planner(PathBuf),
+    Perception(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanningMode {
+    Direct,
+    Reasoning,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct QwenDriveCliOptions {
+    pub model: PathBuf,
+    pub mmproj: PathBuf,
+    pub head: QwenDriveHead,
+    pub mode: PlanningMode,
+    pub scenes: Option<PathBuf>,
+    pub image_root: Option<PathBuf>,
+    pub frames: Option<PathBuf>,
+    pub output: PathBuf,
+    pub samples: usize,
+    pub steps: usize,
+    pub seed: i64,
+}
+
+pub fn parse_embedding_output(value: Option<&str>) -> Result<EmbeddingOutput, String> {
+    match value {
+        Some("summary") => Ok(EmbeddingOutput::Summary),
+        Some("raw") => Ok(EmbeddingOutput::Raw),
+        Some(value) => Err(format!(
+            "Invalid --embedding-output {value:?}; expected summary or raw"
+        )),
+        None => Err("Missing value for --embedding-output".into()),
+    }
+}
+
+/// One line per request: the mode is checked at more than one layer, and
+/// the caller would otherwise see the same line twice.
+fn warn_partial_device_mode(mode: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "compute requested=Vulkan backend=partial mode={mode} \
+             note=no complete device path for this mode; any \
+             offloadable parts run on the device"
+        );
+    }
+}
+
+pub fn normalize_tts_language(language: Option<&str>) -> Result<&'static str, String> {
+    match language.unwrap_or("en").to_ascii_lowercase().as_str() {
+        "cn" | "zh" | "chinese" => Ok("chinese"),
+        "en" | "english" => Ok("english"),
+        "ge" | "de" | "german" => Ok("german"),
+        "it" | "italian" => Ok("italian"),
+        "po" | "pt" | "portuguese" => Ok("portuguese"),
+        "sp" | "es" | "spanish" => Ok("spanish"),
+        "ja" | "japanese" => Ok("japanese"),
+        "ko" | "korean" => Ok("korean"),
+        "fr" | "french" => Ok("french"),
+        "ru" | "russian" => Ok("russian"),
+        value => Err(format!("Unsupported TTS language {value:?}")),
+    }
+}

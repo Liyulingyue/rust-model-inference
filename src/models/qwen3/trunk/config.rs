@@ -9,6 +9,7 @@ use crate::core::tensor::TensorSource;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Qwen3Rope {
     Neox,
+    Mrope { sections: [i32; 4] },
     Interleaved { sections: [i32; 4], n_dims: usize },
 }
 
@@ -56,6 +57,7 @@ impl Qwen3Config {
         }
 
         let rope = match knobs.rope_sections {
+            Some(sections) if knobs.arch == "qwen2vl" => Qwen3Rope::Mrope { sections },
             Some(sections) => Qwen3Rope::Interleaved {
                 sections,
                 n_dims: n_embd_head_k,
@@ -64,6 +66,16 @@ impl Qwen3Config {
         };
         let n_deepstack_layers =
             optional_usize(source, &format!("{}.n_deepstack_layers", knobs.arch))?.unwrap_or(0);
+        if knobs.arch == "mage_vl"
+            && (config.vocab_size != 151936
+                || n_deepstack_layers != 0
+                || source
+                    .metadata("mage_vl.source_revision")
+                    .and_then(|v| v.to_string_val())
+                    != Some(crate::models::mage_vl::REVISION))
+        {
+            return Err("invalid released Mage-VL-Cowork text contract".into());
+        }
 
         Ok(Self {
             architecture: knobs.arch,

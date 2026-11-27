@@ -1,0 +1,758 @@
+//! Shared media utilities: types, validation, decoding.
+//!
+//! Consumed by `text/multimodal.rs`, `omni.rs`, and `qwen_drive.rs`.
+//! Eliminates the circular dependency between omni.rs and text/.
+
+use crate::core::tensor::{MetaValue, TensorSource};
+use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+use std::path::Path;
+use std::process::Command;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+}
+
+impl MediaKind {
+    /// The `type` a chat template branches on for this kind of attachment.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+
+    /// `(start, pad, end)` special-token names wrapping the placeholder run.
+    pub fn placeholder_tokens(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Audio => ("audio_start", "audio_pad", "audio_end"),
+            Self::Image => ("vision_start", "image_pad", "vision_end"),
+            Self::Video => ("vision_start", "video_pad", "vision_end"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectorFamily {
+    Qwen3VlMerger,
+    Qwen25Omni,
+    /// RADIOv4-H tower plus a ReLU-squared MLP head, as shipped by
+    /// ZDTaichu5.0-9B. See `models::zdt::vision`.
+    NemotronV2Vl,
+    /// MiniCPM-V 4.7: a SigLIP tower whose `vit_merger` is spliced in at
+    /// `wa_layer_indexes[0]`, plus two 2x2 merges and per-tile separator rows
+    /// from `v.tok_embd_sep`.
+    MiniCpmV47,
+}
+
+pub fn validate_mmproj_capabilities(
+    llm_arch: &str,
+    mmproj: &dyn TensorSource,
+    media: MediaKind,
+) -> Result<ProjectorFamily, String> {
+    if llm_arch == "sensenova_loop" {
+        if media != MediaKind::Image {
+            return Err("SenseNova Loop currently supports one image, without audio/video".into());
+        }
+        crate::models::sensenova_loop::validate_projector(mmproj)?;
+        return Ok(ProjectorFamily::Qwen3VlMerger);
+    }
+    // Which projector family to use is decided by `clip.projector_type` when
+    // the mmproj declares one, not by the language tower's architecture.
+    //
+    // They are not the same axis. LensVLM-9B pairs a `qwen35` language tower
+    // with a `qwen3vl_merger` projector, so deriving the family from the arch
+    // alone rejected a pairing that the engine actually runs. The arch is still
+    // checked, because an unknown tower has no text path to fall back to.
+    let declared = mmproj
+        .metadata("clip.projector_type")
+        .and_then(|v| v.to_string_val());
+    let family = match declared.as_deref() {
+        Some("qwen3vl_merger") => ProjectorFamily::Qwen3VlMerger,
+        Some("qwen2.5o" | "qwen2.5vl_merger") => ProjectorFamily::Qwen25Omni,
+        Some("nemotron_v2_vl") => ProjectorFamily::NemotronV2Vl,
+        Some(other) if other == crate::models::minicpmv::PROJECTOR_TYPE => {
+            ProjectorFamily::MiniCpmV47
+        }
+        Some(other) => {
+            return Err(format!("Unsupported clip.projector_type: {other}"));
+        }
+        // No declared type: fall back to the architecture, which is what the
+        // pre-existing GGUF shapes rely on.
+        None => match llm_arch {
+            "qwen3vl" | "qwen3vlmoe" => ProjectorFamily::Qwen3VlMerger,
+            "qwen2vl" | "qwen35" | "qwen35moe" => ProjectorFamily::Qwen25Omni,
+            other => return Err(format!("Unsupported multimodal architecture: {other}")),
+        },
+    };
+    // The RADIO projector is only wired to the Qwen3.5 tower it was
+    // converted with; do not let it attach to an unrelated one.
+    if family == ProjectorFamily::NemotronV2Vl && llm_arch != "qwen35" {
+        return Err(format!(
+            "clip.projector_type nemotron_v2_vl is not supported with architecture {llm_arch}"
+        ));
+    }
+    if !matches!(
+        llm_arch,
+        "qwen3vl" | "qwen3vlmoe" | "qwen2vl" | "qwen35" | "qwen35moe"
+    ) {
+        return Err(format!("Unsupported multimodal architecture: {llm_arch}"));
+    }
+    if family == ProjectorFamily::NemotronV2Vl && media != MediaKind::Image {
+        return Err(format!(
+            "clip.projector_type nemotron_v2_vl does not support {media:?} input"
+        ));
+    }
+    if llm_arch == "qwen3vl" && media == MediaKind::Audio {
+        return Err("Qwen3-VL does not support audio input".into());
+    }
+    let has_encoder = match media {
+        MediaKind::Audio => "clip.has_audio_encoder",
+        MediaKind::Image | MediaKind::Video => "clip.has_vision_encoder",
+    };
+    if let Some(MetaValue::Bool(false)) = mmproj.metadata(has_encoder) {
+        return Err(format!("mmproj does not provide {has_encoder}"));
+    }
+    Ok(family)
+}
+
+pub fn marker_names(kind: MediaKind) -> (&'static str, &'static str, &'static str) {
+    match kind {
+        MediaKind::Image => ("vision_start", "image_pad", "vision_end"),
+        MediaKind::Video => ("vision_start", "video_pad", "vision_end"),
+        MediaKind::Audio => ("audio_start", "audio_pad", "audio_end"),
+    }
+}
+
+pub fn frame_pairs(count: usize) -> Vec<(usize, usize)> {
+    (0..count)
+        .step_by(2)
+        .map(|index| (index, (index + 1).min(count.saturating_sub(1))))
+        .collect()
+}
+
+pub fn vision_markers(start: u32, pad: u32, end: u32, rows: usize) -> Vec<u32> {
+    let mut tokens = Vec::with_capacity(rows.saturating_add(2));
+    tokens.push(start);
+    tokens.extend(std::iter::repeat_n(pad, rows));
+    tokens.push(end);
+    tokens
+}
+
+pub fn append_media_markers(
+    tokens: &mut Vec<u32>,
+    tokenizer: &BPETokenizer,
+    kind: MediaKind,
+    start: u32,
+    pad: u32,
+    end: u32,
+    block_rows: &[usize],
+) {
+    for (index, &rows) in block_rows.iter().enumerate() {
+        if kind == MediaKind::Video {
+            tokens.extend(tokenizer.encode(
+                &format!("<{:.1} seconds>", index as f32 + 0.25),
+                EncodeOptions {
+                    add_special: false,
+                    parse_special: false,
+                },
+            ));
+        }
+        tokens.extend(vision_markers(start, pad, end, rows));
+    }
+}
+
+pub fn decode_video(path: &Path) -> Result<Vec<image::DynamicImage>, String> {
+    let probe = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Failed to run ffprobe; install FFmpeg: {error}"))?;
+    if !probe.status.success() {
+        return Err(format!(
+            "ffprobe failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&probe.stderr).trim()
+        ));
+    }
+    let dimensions = String::from_utf8(probe.stdout)
+        .map_err(|error| format!("ffprobe returned invalid UTF-8: {error}"))?;
+    let (width, height) = dimensions
+        .trim()
+        .split_once('x')
+        .ok_or_else(|| format!("ffprobe returned invalid dimensions: {dimensions:?}"))?;
+    let width = width
+        .parse::<usize>()
+        .map_err(|error| format!("Invalid video width: {error}"))?;
+    let height = height
+        .parse::<usize>()
+        .map_err(|error| format!("Invalid video height: {error}"))?;
+    let frame_bytes = width
+        .checked_mul(height)
+        .and_then(|value| value.checked_mul(3))
+        .ok_or("Video frame size overflow")?;
+    if frame_bytes == 0 {
+        return Err("Video dimensions must be nonzero".into());
+    }
+
+    let decoded = Command::new("ffmpeg")
+        .args(["-v", "error", "-noautorotate", "-i"])
+        .arg(path)
+        .args([
+            "-vf",
+            "fps=2",
+            "-frames:v",
+            "32",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|error| format!("Failed to run ffmpeg; install FFmpeg: {error}"))?;
+    if !decoded.status.success() {
+        return Err(format!(
+            "ffmpeg failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&decoded.stderr).trim()
+        ));
+    }
+    if decoded.stdout.len() % frame_bytes != 0 {
+        return Err("ffmpeg returned a partial RGB frame".into());
+    }
+    let width_u32 = u32::try_from(width).map_err(|_| "Video width exceeds u32")?;
+    let height_u32 = u32::try_from(height).map_err(|_| "Video height exceeds u32")?;
+    let mut frames = decoded
+        .stdout
+        .chunks_exact(frame_bytes)
+        .map(|bytes| {
+            image::RgbImage::from_raw(width_u32, height_u32, bytes.to_vec())
+                .map(image::DynamicImage::ImageRgb8)
+                .ok_or_else(|| "Failed to construct decoded RGB frame".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if frames.is_empty() {
+        return Err(format!("Video {} produced no frames", path.display()));
+    }
+    while frames.len() < 4 {
+        frames.push(frames.last().expect("nonempty frames").clone());
+    }
+    Ok(frames)
+}
+
+pub fn decode_audio(path: &Path) -> Result<Vec<f32>, String> {
+    if let Ok(decoded) = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
+        .output()
+    {
+        if decoded.status.success() {
+            if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
+                return Err("ffmpeg returned invalid F32 audio".into());
+            }
+            let samples = decoded
+                .stdout
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
+                .collect::<Vec<_>>();
+            if samples.iter().any(|sample| !sample.is_finite()) {
+                return Err("ffmpeg returned non-finite audio".into());
+            }
+            return Ok(samples);
+        }
+        return Err(format!(
+            "ffmpeg failed for {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&decoded.stderr).trim()
+        ));
+    }
+
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Failed to read audio {}: {error}", path.display()))?;
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(&bytes).map_err(|error| {
+        format!(
+            "Pure-Rust audio decode failed for {}: {:?}",
+            path.display(),
+            error
+        )
+    })?;
+    if decoded.channels != 1 {
+        return Err(format!(
+            "Audio {} has {} channels; Omni requires mono. Install ffmpeg to mix-down.",
+            path.display(),
+            decoded.channels
+        ));
+    }
+    if decoded.sample_rate != 16_000 {
+        return Err(format!(
+            "Audio {} has {} Hz; Omni requires 16000 Hz. Install ffmpeg to resample.",
+            path.display(),
+            decoded.sample_rate
+        ));
+    }
+    Ok(decoded.samples)
+}
+
+/// Decode audio that is already in memory (HTTP uploads), mirroring
+/// [`decode_audio`] for callers that hold the encoded bytes instead of a
+/// path.
+///
+/// ffmpeg reads the upload from stdin, so the same mix-down and resample
+/// applies; without ffmpeg the pure-Rust WAV decoder handles 16 kHz mono
+/// PCM16 input.
+pub fn decode_audio_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return decode_audio_bytes_pure_rust(bytes);
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(bytes) {
+            let _ = child.kill();
+            return Err(format!("failed to pipe the upload to ffmpeg: {error}"));
+        }
+    }
+    let decoded = child
+        .wait_with_output()
+        .map_err(|error| format!("ffmpeg failed for the upload: {error}"))?;
+    if !decoded.status.success() {
+        return Err(format!(
+            "ffmpeg failed for the upload: {}",
+            String::from_utf8_lossy(&decoded.stderr).trim()
+        ));
+    }
+    if decoded.stdout.is_empty() || decoded.stdout.len() % 4 != 0 {
+        return Err("ffmpeg returned invalid F32 audio".into());
+    }
+    let samples = decoded
+        .stdout
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect::<Vec<_>>();
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        return Err("ffmpeg returned non-finite audio".into());
+    }
+    Ok(samples)
+}
+
+/// The pure-Rust half of [`decode_audio_bytes`]: 16 kHz mono PCM16 WAV only.
+fn decode_audio_bytes_pure_rust(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    let decoded = crate::ops::audio::frontend::decode_pcm16_wav_any(bytes)
+        .map_err(|error| format!("Pure-Rust audio decode failed for the upload: {error:?}"))?;
+    if decoded.channels != 1 {
+        return Err(format!(
+            "The uploaded audio has {} channels; AuK requires mono. Install ffmpeg to mix-down.",
+            decoded.channels
+        ));
+    }
+    if decoded.sample_rate != 16_000 {
+        return Err(format!(
+            "The uploaded audio has {} Hz; AuK requires 16000 Hz. Install ffmpeg to resample.",
+            decoded.sample_rate
+        ));
+    }
+    Ok(decoded.samples)
+}
+
+pub fn decode_image(path: &Path) -> Result<image::DynamicImage, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Failed to read image {}: {error}", path.display()))?;
+    image::load_from_memory(&bytes)
+        .map_err(|error| format!("Failed to decode image {}: {error}", path.display()))
+}
+/// Decode an image from bytes (base64 / uploads), mirroring [`decode_image`]
+/// for callers that already hold the encoded data instead of a path.
+pub fn decode_image_bytes(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    image::load_from_memory(bytes).map_err(|error| format!("Failed to decode image: {error}"))
+}
+
+pub fn normalize_resized_image(
+    image: &image::DynamicImage,
+    target_w: usize,
+    target_h: usize,
+    mean: &[f32; 3],
+    std: &[f32; 3],
+) -> Result<Vec<f32>, String> {
+    if std.iter().any(|value| *value == 0.0) {
+        return Err("Vision normalization std must be nonzero".into());
+    }
+    let source = image.to_rgb8();
+    let resized = crate::models::gemma4::vision::resize_bicubic_pillow(
+        source.as_raw(),
+        source.width() as usize,
+        source.height() as usize,
+        target_w,
+        target_h,
+    )?;
+    let output_len = target_w
+        .checked_mul(target_h)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or("Normalized image length overflow")?;
+    let mut output = vec![0.0f32; output_len];
+    for y in 0..target_h {
+        for x in 0..target_w {
+            let offset = (y * target_w + x) * 3;
+            for channel in 0..3 {
+                output[offset + channel] =
+                    (f32::from(resized[offset + channel]) / 255.0 - mean[channel]) / std[channel];
+            }
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tensor::{MetaValue, TensorInfo, TensorSource};
+    use std::sync::Arc;
+
+    /// A 16 kHz PCM16 WAV with the given samples.
+    fn pcm16_wav(samples: &[i16], channels: u16) -> Vec<u8> {
+        let data = samples.len() * 2;
+        let block_align = channels * 2;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&(16_000 * u32::from(block_align)).to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data as u32).to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// An uploaded WAV must decode to the same samples as the file path
+    /// variant, because the AuK reference audio takes both. The decoder
+    /// returns the samples normalized to `[-1, 1]`.
+    #[test]
+    fn uploaded_audio_bytes_decode_to_mono_16k() {
+        let samples: Vec<i16> = (0..160).map(|index| index as i16 * 100).collect();
+        let wav = pcm16_wav(&samples, 1);
+        let decoded = decode_audio_bytes(&wav).expect("decode the upload");
+        assert_eq!(decoded.len(), samples.len());
+        for (got, want) in decoded.iter().zip(samples.iter()) {
+            let want = *want as f32 / 32_768.0;
+            assert!((got - want).abs() < 1e-6, "{got} != {want}");
+        }
+    }
+
+    /// A stereo upload is refused with a message that names the reason.
+    #[test]
+    fn pure_rust_stereo_uploads_are_refused() {
+        let wav = pcm16_wav(&[0; 16], 2);
+        let error = decode_audio_bytes_pure_rust(&wav).expect_err("stereo must be refused");
+        assert!(error.contains("mono"), "{error}");
+    }
+
+    /// A mmproj stub exposing only the metadata and tensors a test names.
+    struct Stub {
+        meta: Vec<(String, MetaValue)>,
+        #[allow(dead_code)]
+        tensors: Vec<String>,
+    }
+
+    impl Stub {
+        fn with(meta: Vec<(&str, MetaValue)>, tensors: &[&str]) -> Arc<dyn TensorSource> {
+            Arc::new(Stub {
+                meta: meta.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                tensors: tensors.iter().map(|s| s.to_string()).collect(),
+            })
+        }
+
+        fn merger() -> Arc<dyn TensorSource> {
+            Stub::with(
+                vec![
+                    (
+                        "clip.projector_type",
+                        MetaValue::String("qwen3vl_merger".into()),
+                    ),
+                    ("clip.has_vision_encoder", MetaValue::Bool(true)),
+                ],
+                &["mm.2.weight", "v.patch_embd.weight"],
+            )
+        }
+
+        fn minicpmv() -> Arc<dyn TensorSource> {
+            Stub::with(
+                vec![
+                    (
+                        "clip.projector_type",
+                        MetaValue::String(crate::models::minicpmv::PROJECTOR_TYPE.into()),
+                    ),
+                    ("clip.has_vision_encoder", MetaValue::Bool(true)),
+                ],
+                &["mm.0.weight", "v.patch_embd.weight"],
+            )
+        }
+
+        fn omni() -> Arc<dyn TensorSource> {
+            Stub::with(
+                vec![
+                    (
+                        "clip.projector_type",
+                        MetaValue::String("qwen2.5vl_merger".into()),
+                    ),
+                    ("clip.has_vision_encoder", MetaValue::Bool(true)),
+                ],
+                &["mm.2.weight"],
+            )
+        }
+    }
+
+    impl TensorSource for Stub {
+        fn metadata(&self, key: &str) -> Option<&MetaValue> {
+            self.meta.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            None
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    /// LensVLM-9B pairs a `qwen35` language tower with a `qwen3vl_merger`
+    /// projector. `qwen35` was hardcoded to the Omni family, so this pairing
+    /// would be rejected -- while the qwen35 multimodal path bypasses this
+    /// check entirely and ran the merger encoder anyway. That is exactly the
+    /// silent fallback this function exists to prevent.
+    #[test]
+    fn qwen35_accepts_the_qwen3vl_merger_projector() {
+        let family =
+            validate_mmproj_capabilities("qwen35", Stub::merger().as_ref(), MediaKind::Image)
+                .expect("LensVLM-9B pairing must be accepted");
+        assert_eq!(family, ProjectorFamily::Qwen3VlMerger);
+    }
+
+    #[test]
+    fn sensenova_requires_its_own_image_projector() {
+        let matching = Stub::with(
+            vec![
+                ("general.architecture", MetaValue::String("clip".into())),
+                (
+                    "clip.projector_type",
+                    MetaValue::String("qwen3vl_merger".into()),
+                ),
+                ("clip.vision.projection_dim", MetaValue::Uint32(4096)),
+                (
+                    "sensenova_loop.source_config_sha256",
+                    MetaValue::String(crate::models::sensenova_loop::SOURCE_CONFIG_SHA256.into()),
+                ),
+            ],
+            &["mm.2.weight"],
+        );
+        assert_eq!(
+            validate_mmproj_capabilities("sensenova_loop", matching.as_ref(), MediaKind::Image)
+                .unwrap(),
+            ProjectorFamily::Qwen3VlMerger
+        );
+        assert!(validate_mmproj_capabilities(
+            "sensenova_loop",
+            matching.as_ref(),
+            MediaKind::Video
+        )
+        .is_err());
+        assert!(validate_mmproj_capabilities(
+            "sensenova_loop",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .unwrap_err()
+        .contains("matching"));
+    }
+
+    /// MiniCPM-V 4.7 ships as two towers: 1B is `qwen35`, 35B-A3B is
+    /// `qwen35moe`. Both carry the same `minicpmv4_7` mmproj, and the projector
+    /// resolves from `clip.projector_type` regardless -- so the arch allowlist
+    /// has to know about `qwen35moe` or the 35B pairing is refused even though
+    /// the family was already decided correctly.
+    #[test]
+    fn qwen35moe_accepts_the_minicpmv_projector() {
+        let family =
+            validate_mmproj_capabilities("qwen35moe", Stub::minicpmv().as_ref(), MediaKind::Image)
+                .expect("MiniCPM-V 4.7 35B-A3B pairing must be accepted");
+        assert_eq!(family, ProjectorFamily::MiniCpmV47);
+    }
+
+    /// The reverse pairing is a genuine mismatch and must stay an error: a
+    /// `qwen3vl` language tower cannot consume an Omni projector.
+    /// qwen3vl with an Omni projector is a legal pairing that the repo already
+    /// routes (Qwen3-VL drives the Omni encoder), so it must keep working.
+    #[test]
+    fn qwen3vl_with_the_omni_projector_still_works() {
+        let family =
+            validate_mmproj_capabilities("qwen3vl", Stub::omni().as_ref(), MediaKind::Image)
+                .expect("this pairing already worked before");
+        assert_eq!(family, ProjectorFamily::Qwen25Omni);
+    }
+
+    /// An unrecognised projector type is refused rather than guessed at, which
+    /// is the whole point of the check.
+    #[test]
+    fn an_unknown_projector_type_is_rejected() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("mystery_proj".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        let error =
+            validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Image).unwrap_err();
+        assert!(error.contains("mystery_proj"), "{error}");
+    }
+
+    /// The architecture is still gated even though the projector decides the
+    /// family: an unknown tower has no text path to fall back on.
+    #[test]
+    fn a_known_projector_does_not_admit_an_unknown_tower() {
+        assert!(validate_mmproj_capabilities(
+            "mystery-tower",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unknown_architecture_is_rejected() {
+        assert!(validate_mmproj_capabilities(
+            "not-a-model",
+            Stub::merger().as_ref(),
+            MediaKind::Image
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_mmproj_without_a_vision_encoder_is_rejected_for_images() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("qwen3vl_merger".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(false)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
+
+    /// ZDTaichu5.0-9B pairs a `qwen3_5_text` tower with a `nemotron_v2_vl`
+    /// projector (a RADIOv4-H vision tower plus a ReLU-squared MLP head).
+    #[test]
+    fn nemotron_v2_vl_is_its_own_projector_family() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert_eq!(
+            validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Image).unwrap(),
+            ProjectorFamily::NemotronV2Vl
+        );
+    }
+
+    /// The pairing has to be checked, not inferred from the tower: a
+    /// `qwen3vl` tower with the RADIO projector is not a combination either
+    /// side supports.
+    #[test]
+    fn nemotron_v2_vl_does_not_pair_with_an_unrelated_tower() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_vision_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen3vl", stub.as_ref(), MediaKind::Image).is_err());
+    }
+
+    /// `nemotron_v2_vl` is an image projector; audio is a different path.
+    #[test]
+    fn nemotron_v2_vl_is_not_an_audio_projector() {
+        let stub = Stub::with(
+            vec![
+                (
+                    "clip.projector_type",
+                    MetaValue::String("nemotron_v2_vl".into()),
+                ),
+                ("clip.has_audio_encoder", MetaValue::Bool(true)),
+            ],
+            &[],
+        );
+        assert!(validate_mmproj_capabilities("qwen35", stub.as_ref(), MediaKind::Audio).is_err());
+    }
+}

@@ -1,12 +1,25 @@
 //! LLaMA transformer trunk
 //!
 //! Per [`MODEL_ORGANIZATION.md`](../../../../docs/MODEL_ORGANIZATION.md) §2.
-//! LLaMA has no explicit `Config`/`Session` struct — config is parsed via
-//! [`crate::core::loader::model_config_from_source`] and the forward loop
-//! runs as a single function call.
+//! LLaMA has no explicit `Config` struct — config is parsed via
+//! [`crate::core::loader::model_config_from_source`]. The forward loop
+//! is wrapped by `LlamaSession` (see `session.rs`), which implements
+//! [`crate::core::prefill::ChunkedPrefill`]. The legacy free-function
+//! entry points (`run_forward_logits_llama_with_batch`, `run_inference`,
+//! `run_inference_tokens`) are kept for callers that haven't migrated.
 
 pub mod forward;
+pub mod session;
 pub mod weights;
 
-pub use forward::{run_forward_logits_llama, run_inference, run_inference_tokens};
+pub use forward::{
+    apply_attn_pre_softmax_inplace, build_prompt_tokens, build_prompt_tokens_from_turns,
+    run_forward_logits_llama_with_batch, run_inference, run_inference_tokens, sample_defaults,
+    softcap_inplace,
+};
+pub use session::{LlamaSession, LlamaSessionConfig, LlamaWeights};
 pub use weights::{get_f32_tensor, load_layers, load_layers_static, LlamaLayerWeights};
+
+#[cfg(test)]
+mod compute_tests;
+mod dense;

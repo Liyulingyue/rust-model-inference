@@ -5,9 +5,9 @@
 > 通用前置：构建 `cargo build --release --bin rust-model-inference`。所有命令均以
 > 工作目录为仓库根目录为前提；GGUF / 音频 / 图像路径请按本地调整。
 > KV cache 默认 F16；与 llama.cpp 做位级对比时显式传 `--kv-cache f16`。
->
+> 
 > 常用生成参数（适用于所有 Qwen3 路径）：
->
+> 
 > - `--max-context N`：KV cache 容量上限，默认 8192。超过此值的输入会触发预
 >   警告或分配错误；显式调小可避免大上下文模型（如 Qwen3.5-27B 128k、
 >   K2-Horizon-4B/7B 524k）一次性占用 GB~TB 级 KV 内存。
@@ -65,6 +65,118 @@ cargo run --release --bin rust-model-inference -- \
   --prompt "描述这张图片"
 ```
 
+**Qwen3.8-27B**（`qwen35` 架构，52 层里的 64 个主干 block + 1 个 MTP block，
+`qwen35.nextn_predict_layers = 1`）：
+
+```bash
+# 权重来自 ModelScope：原始权重 Qwen/Qwen3.8-27B，
+# 推理权重 unsloth/Qwen3.8-27B-GGUF（27 个量化档 + mmproj + MTP/DFlash 头）
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf \
+  --mmproj models/Qwen3.8-27B-GGUF/mmproj-F16.gguf \
+  --image path/to/image.jpg \
+  --prompt "描述这张图片"
+```
+
+注意这一档自带 **MTP 头**（`blk.64.nextn.*`）：主栈是 block 0-63，block 64
+是 MTP block。本仓库的 `qwen35` trunk 按 `n_layer_impl = n_layer - n_nextn`
+把它排除在主栈之外，也就是说**这枚 MTP 头目前不参与推理**
+（见 [投机解码调研](../../docs/develop/SPECULATIVE_DECODING.md) 与 TODO-064）。
+
+`Qwen3-VL-4B-Instruct`（Qwen/Qwen3-VL-4B-Instruct-GGUF Q4_K_M，~2.5 GB）
+在 `src/core/loader.rs:715` 的 `KNOWN_QWEN3VL_4B_DIMENSIONS` 白名单里，
+LLM backbone 是 Qwen3-4B（`n_embd=2560, n_layer=36, n_head=32, n_head_kv=8,
+n_ff=9728, head_dim=128, n_ctx=262144, freq_base=5e6, M-RoPE [24,20,20,0]`）。
+
+**现状（2026-10-01 修通后）**：
+
+- 4 核 CPU + 7.5 GiB RAM 下端到端跑通：128/256/384/512/1024 PNG
+  都能产出准确的图像描述（"This image is a simple, abstract
+  composition of two overlapping circular shapes..."）。
+- **修复（2026-11-01 复核并更正）**：根因不是 text token 的位置向量，而是
+  M-RoPE 的**轴分配**。HF 的 Qwen3-VL 用 interleaved 轴分配
+  (`apply_interleaved_mrope`：频率槽 `i` 的归属规则是
+  `i%3==1 && i<3*sections[1]` → H 轴、`i%3==2 && i<3*sections[2]` → W 轴、
+  其余 → T 轴)；本仓库的 `rope_mrope_interleaved` 曾把最后 3 个槽
+  (`i=61,62,63`) 落到 E 轴（位置恒为 0），而这几个正是最高频的槽位，
+  位置偏差随 `next = base + max(grid_h, grid_w)` 增大而放大，
+  于是 ≥256×256 时 LLM 在最后位置的 logits 偏向控制 token、可见文本为空。
+  现在 `rope_mrope_interleaved` 的轴分配与 HF 逐槽一致，text token 的
+  位置也恢复为 HF `get_rope_index` 的 `[next, next, next, 0]`
+  （HF 在图后按 `max(grid_h, grid_w)//merge` 推进 `current_pos`，
+  与本仓库 `build_qwen3_media_positions` 的 `next` 推进方式一致）。
+- 复核方式（2026-11-01，Linux/x86，Qwen3-VL-4B-Instruct Q4_K_M +
+  F16 mmproj，浅青蓝底两个交叠黄圆）：修正后 128/256/512 的描述都连贯
+  完整；对照旧实现（槽 61–63 落 E 轴 + text 位置 `[next,0,0,0]`）在
+  256×256 仍然输出退化（可见文本被截断，只剩 400 字节）。
+  结论：把 text 位置改成 `[next,0,0,0]` 只是掩盖症状，并没有修掉
+  ≥256×256 退化；text 位置应当跟随 HF 的 `[next,next,next,0]`。
+  详见 `tools/oracle/wevisone_vl/validation.md`。
+- **小遗留**：greedy decode 首 token 偶尔会是 ``（被 streaming decoder
+  静默跳过），实际可见输出从第二个 token 开始。若用 sampling (temp=0.7)
+  这个偏置不明显，输出正常。
+- 文本-only 路径在 4 核上约 4 tok/s，与 multimodal 完全无关。
+
+**Qwen3-VL 其它尺寸 (`-2B` / `-8B` / `-32B` / `-30B-A3B` / `-235B-A22B`) 状态**：
+
+- **`-2B`——根因重新定位（2026-11-04 更正此前的结论）；官方 `-Instruct` / `-Thinking` GGUF 本身未复测。**
+  此前记录的症状（文本-only 首 token = EOS、多模态退化为重复 token、高温采样出乱码）
+  与 `qwen3vl` 2B 尺寸无关，也不是 chat template 的问题。
+
+  **原结论**：根因是 `exp_approx_avx2` 的 clamp 越界（`88.376_26` 让 `n` 达到 `-128`，
+  指数位溢出成 `-inf`，`silu` 变成 `-0`，FFN 通道被整个丢掉）。
+
+  **为什么被推翻**：`481ec939`（#186，2026-10-27，已在 main）给 AVX2 路径补了
+  `_mm256_andnot_ps(cmp(n, -126), …)` 掩码，把 `n < -126` 的 lane **清成 0**。
+  逐位模拟该指令序列：`-131.219` → clamp 到 `-88.376_26` → `z = 12582784.0`
+  → `n = -128` → `scale = -inf` → **被掩码清零** → `silu(131.219) = 131.219`
+  → `silu(gate)*up = -19893.98`，正是当年记下的「正确值」，**不是 `0.0`**。
+  也就是说负侧的 `-inf` 在 #186 之后就被中和了；而 oracle 的记录主机是
+  Apple Silicon（NEON 路径，用的是上游 `|n| > 126` 慢结构，从未受影响），
+  在从未中招的机器上模型是好的——AVX2 的 clamp 不可能是根因。
+
+  **新结论（实测）**：clamp 改动修的是**正侧**的溢出。`exp_approx_avx2` 用位移
+  构造 `2**n`，结果落在指数位 `n + 127` 上；`n = 128` 让指数位溢出成 `0xFF`，
+  函数对 `x ∈ (88.0999, 88.376_26]` 返回 `+inf`，而真值（`x = 88.376` 时
+  `2.4e38`）是能表示成 f32 的。唯一会把大正数喂进 `exp` 的调用方是 `silu`
+  （softmax 传的是 `v - max ≤ 0`，tanh 先钳到 ±10），对应 gate ∈ [-88.376, -88.1]，
+  真值约 `-3.7e-37`，所以新旧结果都是 ≈0——**溢出成 `+inf` 本身是错的，
+  但它不是当年 2B 症状的成因**。clamp 现为 `±88.0`（`n ≤ 127`），
+  并由 `fast_exp_clamp_keeps_the_exponent_inside_the_f32_exponent_field` 守住。
+
+  **图像路径另有一个独立根因**（PR #179 修掉）：`qwen3vl` 视觉塔此前用
+  `rope_mrope_interleaved` 旋转 Q/K，而它带的是**文本塔**的**交错轴分配**
+  （HF `apply_interleaved_mrope` / llama.cpp 的 `GGML_ROPE_TYPE_IMROPE`）。
+  视觉塔要的是**连续扇区**的轴分配（llama.cpp 的 `GGML_ROPE_TYPE_VISION`，
+  本仓库 `qwen35` 视觉塔一直是对的）。**两者的旋转配对都是 split-half（NeoX），
+  差的是轴分配**——配对没错，轴错了。轴分配错了以后，图像 embedding 的几何
+  关系是乱的，但模型照样能吐出一句通顺的描述——**幻觉而非报错**，比崩溃难查得多。
+
+  > 实测证据：官方 `Qwen3-VL-2B`（真实权重）喂一张「红圆 + 蓝方块」的图，
+  > 修复前的引擎答 “Two stylized, **overlapping ellipses**, one red and one blue”
+  > （形状与空间关系都错），修复后答
+  > “A red **circle** and a blue **square** are placed **side by side**”
+  > （完全正确）。对 llama.cpp 的跨实现对照：视觉投影 relative L2 从
+  > **0.5600**（交错轴）降到 **0.1635**（连续扇区轴，残差是 ViT 权重
+  > Q8_0 量化的包络）；F32 权重下是 **0.0034**。
+  > 详见 `tools/oracle/physbrain/README.md`。
+
+  官方 `-2B` GGUF 建议在升级后重测；`PhysBrain1.5-2B` 已端到端验证（文本 + 图像）。
+
+- **`-8B` / `-32B` / `-30B-A3B` / `-235B-A22B` 等更大尺寸**：Q4_K_M 量化后 ≥ 5 GB，
+  在 4 核 + 7.5 GiB RAM 环境下未做端到端验证。需要更大机器才能跑。
+- 文本-only `-0.6B`（同 `-2B` 等 Instruct 模型）不在 ModelScope 上能找到 GGUF，本仓库未尝试。
+
+> **大图显存注意**：视觉塔对全部 patch 做全注意力，注意力分数缓冲是
+> `n_head * n_tokens^2 * 4B`。`PhysBrain1.5-2B` 的 2594×1557 原图会产生
+> 15876 个 patch，分数缓冲约 16 GB，直接把内存打满。缩到 768×461
+> （384 个 patch，约 9 MB）即可正常跑完。
+
+限制：
+
+- 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
+- 音频必须是 16 kHz PCM16 WAV。
+
 限制：
 
 - 当前每种媒体最多一份；同一轮同时给图像和音频时顺序固定为图像、音频、提示词。
@@ -102,7 +214,7 @@ cargo run --release --bin rust-model-inference -- \
 `--ref-audio` / `--ref-text` 用于声音克隆；不传则使用 Base 模型的默认音色。
 
 Pinned llama.cpp Oracle：`201e50c2076a20adc460c41598593c7cd7b0813`，
-通过 `tests/qwen3_tts_reference.rs` 与 `tools/tts/build_qwen3_tts_oracle.sh` 覆盖。
+通过 `tests/qwen3_tts_reference.rs` 与 `tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh` 覆盖。
 
 ### 5.1 TTS 作为多模态回复后处理（`--tts-model` / `--tts-mmproj`）
 
@@ -156,7 +268,57 @@ TTS 帧预算自动按 `max(max_tokens * 4, 128).min(1024)` 计算 — 用户传
 
 完整输出验证参考 `models/omni_apple_reply.wav` 等。
 
-## 6. 与 llama.cpp 的数值对齐
+## 6. 跨编码器 Rerank（Qwen3-Reranker 0.6B）
+
+CLI 与 server 都通过 `--rerank` 一站式入口（不再有独立的 `qwen3_rerank` 二进制，
+主 binary 内置 `app::run_rerank`，按 arch 分发）。模型需要是带 `cls.output.weight`
++ `pooling_type = 4` 的 Qwen3 GGUF（即 `ggml-org/Qwen3-Reranker-*-Q8_0-GGUF` 的官方包）。
+本仓库 `models/Qwen3-Reranker-0.6B-GGUF/` 的 unsloth 转换文件没有 cls head，会直接拒绝。
+
+```bash
+# CLI（--rerank-doc 重复多次，或 --rerank-documents <newline-separated FILE>）
+cargo run --release --bin rust-model-inference -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --rerank --rerank-query "What is the capital of France?" \
+  --rerank-doc "Paris is the capital of France." \
+  --rerank-doc "Berlin is the capital of Germany." \
+  --rerank-doc "Tokyo is the capital of Japan."
+
+# 服务端：自动检测 cls.output.weight + qwen3.pooling_type=4 → POST /v1/rerank
+cargo run --release --bin server -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --port 8080 --threads 4
+
+curl -s -X POST http://127.0.0.1:8080/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is the capital of France?",
+    "documents": [
+      "Paris is the capital of France.",
+      "Berlin is the capital of Germany.",
+      "Tokyo is the capital of Japan."
+    ],
+    "top_n": 3
+  }'
+```
+
+ChatML prompt（system + `<Instruct>/<Query>/<Document>`）在
+`src/models/qwen3/trunk/rerank.rs` 内置；2 分类头输出 `yes` logit + softmax
+后的 `yes_prob`（`[0, 1]`）。CLI 输出格式与 `/v1/rerank` 响应的
+`relevance_score` 字段对齐：
+
+```
+rank  idx  relevance_score
+0     0     0.938243
+1     1     0.001332
+2     2     0.001107
+```
+
+相关/不相关文档的得分间隔通常 >1000×（Paris vs Berlin 0.938 / 0.001）。详细
+集成测试 `tests/qwen3_rerank.rs`（单元）+ `tests/qwen3_rerank_http.rs`
+（HTTP, 3/3），用合成 cls head GGUF。
+
+## 7. 与 llama.cpp 的数值对齐
 
 ### 通用 scalar 位级对比（Qwen3-0.6B）
 
@@ -177,8 +339,8 @@ cargo run --release --features parity-trace --bin rust-model-inference -- \
 
 构建 / 测试脚本：
 
-- `tools/parity/build_qwen35_oracle.sh`、`tests/qwen35_reference.rs`
-- `tools/tts/build_qwen3_tts_oracle.sh`、`tests/qwen3_tts_reference.rs`
+- `tools/oracle/qwen35/build_qwen35_oracle.sh`、`tests/qwen35_reference.rs`
+- `tools/oracle/qwen3_tts/build_qwen3_tts_oracle.sh`、`tests/qwen3_tts_reference.rs`
 
 ### CPU 性能基准
 
@@ -197,7 +359,7 @@ llama-bench -ngl 0 -t 8 -m models/Qwen3-0.6B-Q8_0.gguf
 
 复现脚本与机器固定方法见 `docs/OPTIMIZATION.md#rust-与-llamacpp-固定机器对比2026-08-10`。
 
-## 7. 服务端模式（OpenAI 兼容）
+## 8. 服务端模式（OpenAI 兼容）
 
 ```bash
 # 文本
@@ -208,6 +370,11 @@ cargo run --release --bin server -- \
 # Embedding
 cargo run --release --bin server -- \
   --model models/Qwen3-Embedding-0.6B-Q8_0.gguf --embedding
+
+# Rerank（自动检测 cls.output.weight + qwen3.pooling_type=4 → POST /v1/rerank）
+cargo run --release --bin server -- \
+  --model models/Qwen3-Reranker-0.6B-QGUF/qwen3-reranker-0.6b-q8_0.gguf \
+  --port 8080 --threads 4
 
 # ASR
 cargo run --release --bin server -- \
@@ -222,7 +389,7 @@ cargo run --release --bin server -- \
   --tts --language cn
 ```
 
-## 8. 已确认的限制 / 边界
+## 9. 已确认的限制 / 边界
 
 | 范围 | 行为 |
 |------|------|
@@ -231,16 +398,31 @@ cargo run --release --bin server -- \
 | Qwen3-VL 不匹配的维度（除 1024-dim 与 2048-dim 两组白名单外） | 配置阶段拒绝 |
 | GPU 后端（`--features vulkan`） | 可跑，但当前不提供 GPU 位级 Oracle 保证 |
 
-## 9. 相关源码索引
+### 9.1 Vulkan（GPU）后端的适用范围
+
+`--compute vulkan` 目前覆盖 Qwen3 家族的**文本**解码，以及 Qwen3-VL 的**图像**路径：
+
+- **文本塔**：整段 resident decoder 走 GPU。启动时会做一次 GPU↔CPU 契约校验（logits + KV cache + 16 步 greedy 必须逐位一致），不通过就回落到 CPU。
+- **图像路径**：视觉塔的**注意力在设备上**（融合双向 kernel，无 mask，单位 scale 之外的常规 `1/sqrt(head_dim)`），投影、norm、FFN、rope 仍在主机；投影出的 embedding 与 DeepStack 平面交给 GPU 解码器。Qwen3-VL 的 M-RoPE 用 4D 位置（图像 token 共享 T、H/W 递增），GPU 侧按调用方给的逐行位置旋转，不按 cache slot 猜。视觉塔的注意力占整层成本的 94%（实测 5.08 s / 5.38 s），上设备后一张 768×768 图的视觉塔从 131 s 降到 11 s。
+- **DeepStack**：只在**带 DeepStack 平面**的分块里注入（prefill 有、decode 没有）。若 decode 步也注入，arena 里上一分块残留的平面会被加到生成 token 的残差流上，结果与 CPU 不一致。
+- **分块上限**：GPU 路径固定按 64 行分块。arena 按分块行数分配并有一份等大的 staging 缓冲，再叠加已上传的权重；更大的 `--prefill-batch-size` 会让共享显存的设备直接丢设备（device lost）。
+- **只有 qwen3vl / qwen3vlmoe / qwen2vl 放行图像**，其余 arch 仍是"仅文本"。
+- CLI 与 HTTP 都可用：CLI 图像路径走 `run_qwen3_family_multimodal`（直接驱动 session），HTTP 走 `Qwen3TextRuntime::generate`（经过 runtime 包装）。两边的 Vulkan 门禁是**分开**的，改一处不会自动改另一处 —— 服务端另有一道 gate 挡在 runtime 里。
+- 2B 级别模型上 GPU 未必更快（28 层 dispatch 开销摊不开），大模型才划算。
+- 服务端起 Vulkan 后端必须带 `--kv-cache f16`（Qwen3 的 Vulkan 路径只接受 F16 KV）。
+
+## 10. 相关源码索引
 
 - `src/models/qwen3/` — 文本 / Embedding / VL / ASR / TTS trunk
+- `src/models/qwen3/trunk/rerank.rs` — Rerank 评分循环（`app::run_rerank` 的 qwen3 分支）
 - `src/app/audio.rs` — ASR 路由
 - `src/app/text.rs` — 文本、Embedding、多模态 CLI 入口
 - `src/app/tts.rs` — TTS CLI 入口
+- `src/app/server/rerank.rs` — `/v1/rerank` HTTP handler（CLI 与 server 共用 rerank.rs 的 per-doc scoring 实现）
 - `src/format/ggufrs.rs` — GGUF / GGUFRS 等价测试
 - `docs/REFERENCE_IMPLEMENTATIONS.md` — Pinned Oracle 与构建脚本
 
-## 10. JEV 决策评分（Qwen3 用法）
+## 11. JEV 决策评分（Qwen3 用法）
 
 `--jev` 是 OpenJEV 风格的 single-forward-pass 决策评分模式 —— 完整协议、
 跨 trunk 实现现状、chat template 差异、限制等全局性内容见
@@ -268,6 +450,20 @@ rust-model-inference --model models/qwen3-0.6b-gguf/Qwen3-0.6B-IQ4_NL.gguf \
   --jev-option "极度乐观:5" --jev-option "乐观:4" --jev-option "中性:3" \
   --jev-option "悲观:2" --jev-option "极度悲观:1"
 ```
+
+Qwen3.5 图片 JEV 二选一评分：
+
+```bash
+cargo run --profile release-fast --bin rust-model-inference -- \
+  --model models/qwen3.5-0.8B/Qwen3.5-0.8B-UD-Q8_K_XL.gguf \
+  --mmproj models/qwen3.5-0.8B/mmproj-F16.gguf \
+  --image /绝对路径/天气照片.jpg \
+  --jev --jev-context "天空乌云密布，能听到远处雷声" \
+  --jev-question "现在在下雨吗？" \
+  --jev-option "是的" --jev-option "没有" --jev-positive A
+```
+
+图片 JEV 当前支持 Qwen3.5 单题模式；图片参与预填充，结果是 A/B 标签的概率评分。
 
 Qwen3 使用的 chat template 是标准 `<|im_start|>system\n...\n<|im_end|>\n<|im_start|>user\n...\n<|im_end|>\n<|im_start|>assistant\n`，
 由 `src/prompt.rs::append_qwen_message_tokens` / `append_qwen_assistant_prefix`

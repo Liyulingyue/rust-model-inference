@@ -1,0 +1,112 @@
+{
+  "state": {
+    "user": "Alice works at Acme. Email a@b.org.",
+    "context": "Alice joined Acme in 2025.",
+    "answer": "Alice works at Acme."
+  },
+  "questions": {
+    "choice": {
+      "type": "choice",
+      "instructions": "Who is named?",
+      "criteria": {
+        "person": "a human",
+        "company": null
+      }
+    },
+    "noul": {
+      "type": "noul",
+      "instructions": "Is a person mentioned?"
+    },
+    "score": {
+      "type": "score",
+      "instructions": "How detailed is the text?",
+      "criteria": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "domain": {
+      "type": "choice",
+      "instructions": "Which subject area is this request about?",
+      "criteria": {
+        "business": "companies",
+        "other": null
+      }
+    },
+    "ner": {
+      "type": "span",
+      "criteria": [
+        "PERSON",
+        "ORGANIZATION"
+      ],
+      "definitions": null,
+      "threshold": 0.0
+    },
+    "relation": {
+      "type": "span",
+      "instructions": "Which spans are related to Alice by these relations?",
+      "criteria": [
+        "employer"
+      ],
+      "definitions": null,
+      "threshold": 0.0
+    },
+    "evidence": {
+      "type": "span",
+      "criteria": [
+        "evidence"
+      ],
+      "target": "context",
+      "threshold": 0.0
+    },
+    "pii": {
+      "type": "span",
+      "criteria": [
+        "EMAIL_ADDRESS"
+      ],
+      "target": "user",
+      "threshold": 0.0
+    },
+    "bad": {
+      "type": "unknown"
+    },
+    "open": {
+      "type": "span",
+      "criteria": [
+        "person",
+        "company"
+      ],
+      "threshold": 0.0
+    },
+    "default_open": {
+      "type": "span",
+      "criteria": [
+        "person",
+        "company"
+      ]
+    },
+    "default_relation": {
+      "type": "span",
+      "instructions": "Which spans are related to Alice by these relations?",
+      "criteria": [
+        "employer"
+      ],
+      "definitions": null
+    },
+    "default_evidence": {
+      "type": "span",
+      "criteria": [
+        "evidence"
+      ],
+      "target": "context"
+    },
+    "default_pii": {
+      "type": "span",
+      "criteria": [
+        "EMAIL_ADDRESS"
+      ],
+      "target": "user"
+    }
+  }
+}

@@ -1,0 +1,64 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word; uint unused_scales_word; uint n_in; uint groups_per_row;
+    uint output0_word; uint rows0; uint output0_stride;
+    uint output1_word; uint rows1; uint output1_stride;
+    uint output2_word; uint rows2; uint output2_stride;
+    uint group_count; uint unused_sum_word; uint input_stride; uint bits;
+    uint unused0; uint unused1; uint unused2; uint unused3; uint token_rows;
+} pc;
+
+uint weight_word(uint slot, uint word) {
+    if (slot == 0u) return w0.data[word];
+    if (slot == 1u) return w1.data[word];
+    return w2.data[word];
+}
+
+float bf16_at(uint slot, uint plane_byte, uint index) {
+    uint byte = plane_byte + index * 2u;
+    uint value = (weight_word(slot, byte >> 2u) >> ((byte & 3u) * 8u)) & 65535u;
+    return uintBitsToFloat(value << 16u);
+}
+
+shared float partial[64];
+void main() {
+    uint token = gl_WorkGroupID.z / pc.group_count;
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    if (row >= rows) return;
+    uint lane = gl_LocalInvocationID.x;
+    // Payload planes: packed codes, BF16 scales, BF16 biases (MLX group size 64).
+    uint packed_bytes = rows * (pc.n_in / (8u / pc.bits));
+    uint bias_byte = packed_bytes + rows * pc.groups_per_row * 2u;
+    precise float sum = 0.0;
+    for (uint col = lane; col < pc.n_in; col += 64u) {
+        uint code_index = row * pc.n_in + col;
+        uint byte = code_index / (8u / pc.bits);
+        uint packed = weight_word(slot, byte >> 2u) >> ((byte & 3u) * 8u);
+        uint shift = pc.bits == 4u ? (col & 1u) * 4u : 0u;
+        uint code = (packed >> shift) & ((1u << pc.bits) - 1u);
+        uint group = row * pc.groups_per_row + col / 64u;
+        precise float scaled = bf16_at(slot, packed_bytes, group) * float(code);
+        precise float weight = scaled + bf16_at(slot, bias_byte, group);
+        precise float term = weight * uintBitsToFloat(arena.data[pc.input_word + token * pc.input_stride + col]);
+        sum += term;
+    }
+    partial[lane] = sum;
+    barrier();
+    for (uint stride = 32u; stride != 0u; stride >>= 1u) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        barrier();
+    }
+    if (lane == 0u) {
+        uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+        uint output_stride = slot == 0u ? pc.output0_stride : (slot == 1u ? pc.output1_stride : pc.output2_stride);
+        arena.data[output_word + token * output_stride + row] = floatBitsToUint(partial[0]);
+    }
+}

@@ -1,0 +1,32 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "host_libm.glsl"
+#include "f32_divide.glsl"
+
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(push_constant) uniform PC {
+    uint target; uint routed; uint weights; uint shared_out; uint shared_gate;
+    uint width; uint used; uint has_shared;
+} pc;
+
+void main() {
+    uint token = gl_WorkGroupID.z;
+    uint index = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 64u + gl_LocalInvocationID.x;
+    if (index >= pc.width) return;
+    precise float sum = 0.0;
+    for (uint slot = 0u; slot < pc.used; slot++) {
+        float value = uintBitsToFloat(arena.data[pc.routed + (token * pc.used + slot) * pc.width + index]);
+        float weight = uintBitsToFloat(arena.data[pc.weights + token * pc.used + slot]);
+        precise float term = weight * value;
+        sum += term;
+    }
+    if (pc.has_shared != 0u) {
+        float logit = uintBitsToFloat(arena.data[pc.shared_gate + token]);
+        float gate = divide_finite_normal(1.0, 1.0 + exp_reference(-logit));
+        precise float term = gate * uintBitsToFloat(arena.data[pc.shared_out + token * pc.width + index]);
+        sum += term;
+    }
+    uint output_index = pc.target + token * pc.width + index;
+    arena.data[output_index] = floatBitsToUint(uintBitsToFloat(arena.data[output_index]) + sum);
+}

@@ -1,7 +1,9 @@
+use super::dit::TorchMt19937;
 use super::{validate_component, Component, ZImageRgb};
-use crate::core::tensor::TensorSource;
+use crate::core::tensor::{GGMLType, TensorSource};
 use crate::core::thread_pool::ComputePool;
 use crate::ops::{dot_f16_f16_bytes, f32_to_f16, silu_inplace, softmax_inplace};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const LATENT_CHANNELS: usize = 16;
@@ -14,6 +16,9 @@ struct VaeConv {
     input_channels: usize,
     output_channels: usize,
     kernel: usize,
+    #[cfg(feature = "vulkan")]
+    gpu: crate::ops::kernel::vulkan::GpuLinear,
+    linear: Option<Vec<f32>>,
 }
 
 impl VaeConv {
@@ -24,12 +29,24 @@ impl VaeConv {
         output_channels: usize,
         kernel: usize,
     ) -> Result<Self, String> {
+        let weight = format!("{prefix}.weight");
+        let linear = if source
+            .tensor_info(&weight)
+            .is_some_and(|info| info.ggml_type == crate::core::tensor::GGMLType::F32)
+        {
+            Some(load_f32(source, &weight, input_channels * output_channels)?)
+        } else {
+            None
+        };
         Ok(Self {
-            weight: format!("{prefix}.weight"),
+            weight,
             bias: load_f32(source, &format!("{prefix}.bias"), output_channels)?,
             input_channels,
             output_channels,
             kernel,
+            #[cfg(feature = "vulkan")]
+            gpu: crate::ops::kernel::vulkan::GpuLinear::default(),
+            linear,
         })
     }
 }
@@ -126,6 +143,63 @@ struct DecoderStage {
     upsample: Option<VaeConv>,
 }
 
+struct EncoderStage {
+    blocks: Vec<VaeResidualBlock>,
+    downsample: Option<VaeConv>,
+    output_channels: usize,
+}
+
+struct FluxVaeEncoder {
+    conv_in: VaeConv,
+    stages: Vec<EncoderStage>,
+    mid_block_1: VaeResidualBlock,
+    mid_attention: VaeAttention,
+    mid_block_2: VaeResidualBlock,
+    norm_out: VaeNorm,
+    conv_out: VaeConv,
+}
+
+impl FluxVaeEncoder {
+    fn load(source: &dyn TensorSource, channels: usize) -> Result<Self, String> {
+        let mut stages = Vec::with_capacity(4);
+        for (stage, input, output) in [(0, 128, 128), (1, 128, 256), (2, 256, 512), (3, 512, 512)] {
+            let mut blocks = Vec::with_capacity(2);
+            for block in 0..2 {
+                blocks.push(VaeResidualBlock::load(
+                    source,
+                    &format!("encoder.down.{stage}.block.{block}"),
+                    if block == 0 { input } else { output },
+                    output,
+                )?);
+            }
+            stages.push(EncoderStage {
+                blocks,
+                downsample: (stage != 3)
+                    .then(|| {
+                        VaeConv::load(
+                            source,
+                            &format!("encoder.down.{stage}.downsample.conv"),
+                            output,
+                            output,
+                            3,
+                        )
+                    })
+                    .transpose()?,
+                output_channels: output,
+            });
+        }
+        Ok(Self {
+            conv_in: VaeConv::load(source, "encoder.conv_in", 3, 128, 3)?,
+            stages,
+            mid_block_1: VaeResidualBlock::load(source, "encoder.mid.block_1", 512, 512)?,
+            mid_attention: VaeAttention::load(source, "encoder.mid.attn_1", 512)?,
+            mid_block_2: VaeResidualBlock::load(source, "encoder.mid.block_2", 512, 512)?,
+            norm_out: VaeNorm::load(source, "encoder.norm_out", 512)?,
+            conv_out: VaeConv::load(source, "encoder.conv_out", 512, 2 * channels, 3)?,
+        })
+    }
+}
+
 struct VaeScratch {
     first: Vec<f32>,
     second: Vec<f32>,
@@ -163,6 +237,8 @@ impl VaeScratch {
 pub(crate) struct FluxVae {
     source: Arc<dyn TensorSource>,
     pool: Arc<ComputePool>,
+    #[cfg(feature = "vulkan")]
+    gpu_conv: crate::ops::kernel::vulkan::GpuConv,
     conv_in: VaeConv,
     mid_block_1: VaeResidualBlock,
     mid_attention: VaeAttention,
@@ -170,6 +246,8 @@ pub(crate) struct FluxVae {
     stages: Vec<DecoderStage>,
     norm_out: VaeNorm,
     conv_out: VaeConv,
+    encoder: Option<FluxVaeEncoder>,
+    post_quant_conv: Option<VaeConv>,
 }
 
 impl FluxVae {
@@ -178,7 +256,64 @@ impl FluxVae {
         pool: Arc<ComputePool>,
     ) -> Result<Self, String> {
         validate_component(source.as_ref(), Component::Vae)?;
-        let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", 16, 512, 3)?;
+        Self::load_decoder(source, pool, 16, None)
+    }
+
+    pub(crate) fn load_longcat(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let encoder = FluxVaeEncoder::load(source.as_ref(), 16)?;
+        let mut vae = Self::load_decoder(source, pool, 16, None)?;
+        vae.encoder = Some(encoder);
+        Ok(vae)
+    }
+
+    pub(crate) fn load_flux2(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        super::validate_flux2_vae(source.as_ref())?;
+        let post_quant_conv = VaeConv::load(source.as_ref(), "post_quant_conv", 32, 32, 1)?;
+        Self::load_decoder(source, pool, 32, Some(post_quant_conv))
+    }
+
+    pub(crate) fn load_flux3(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+    ) -> Result<Self, String> {
+        let encoder = FluxVaeEncoder::load(source.as_ref(), 32)?;
+        let post = VaeConv::load(source.as_ref(), "post_quant_conv", 32, 32, 1)?;
+        let mut vae = Self::load_decoder(source, pool, 32, Some(post))?;
+        vae.encoder = Some(encoder);
+        Ok(vae)
+    }
+
+    pub(crate) fn encode_flux3_mean(&self, rgb: &[u8], side: usize) -> Result<Vec<f32>, String> {
+        let moments = self.encode_moments(rgb, side)?;
+        let conv = VaeConv::load(self.source.as_ref(), "encoder.quant_conv", 64, 64, 1)?;
+        let mut projected = vec![0.0; moments.len()];
+        run_conv(
+            self.source.as_ref(),
+            &self.pool,
+            &conv,
+            &moments,
+            side / 8,
+            &mut projected,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
+        )?;
+        projected.truncate(projected.len() / 2);
+        Ok(projected)
+    }
+
+    fn load_decoder(
+        source: Arc<dyn TensorSource>,
+        pool: Arc<ComputePool>,
+        channels: usize,
+        post_quant_conv: Option<VaeConv>,
+    ) -> Result<Self, String> {
+        let conv_in = VaeConv::load(source.as_ref(), "decoder.conv_in", channels, 512, 3)?;
         let mid_block_1 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_1", 512, 512)?;
         let mid_attention = VaeAttention::load(source.as_ref(), "decoder.mid.attn_1", 512)?;
         let mid_block_2 = VaeResidualBlock::load(source.as_ref(), "decoder.mid.block_2", 512, 512)?;
@@ -221,6 +356,8 @@ impl FluxVae {
         Ok(Self {
             source,
             pool,
+            #[cfg(feature = "vulkan")]
+            gpu_conv: crate::ops::kernel::vulkan::GpuConv::default(),
             conv_in,
             mid_block_1,
             mid_attention,
@@ -228,7 +365,139 @@ impl FluxVae {
             stages,
             norm_out,
             conv_out,
+            encoder: None,
+            post_quant_conv,
         })
+    }
+
+    pub(crate) fn encode_rgb(
+        &self,
+        rgb: &[u8],
+        side: usize,
+        seed: u64,
+    ) -> Result<Vec<f32>, String> {
+        let moments = self.encode_moments(rgb, side)?;
+        let latent_spatial = checked_spatial(side / 8, "LongCat VAE latent")?;
+        let mut noise = vec![0.0; 16 * latent_spatial];
+        TorchMt19937::new(seed).fill_normal(&mut noise);
+        let latent = (0..noise.len())
+            .map(|index| {
+                let mean = moments[index];
+                let logvar = moments[index + noise.len()].clamp(-30.0, 20.0);
+                let sampled = mean + (0.5 * logvar).exp() * noise[index];
+                (sampled - 0.1159) * 0.3611
+            })
+            .collect();
+        Ok(latent)
+    }
+
+    fn encode_moments(&self, rgb: &[u8], side: usize) -> Result<Vec<f32>, String> {
+        let encoder = self
+            .encoder
+            .as_ref()
+            .ok_or("This VAE has no image encoder")?;
+        if side == 0 || side % 16 != 0 {
+            return Err("LongCat VAE image side must be a positive multiple of 16".into());
+        }
+        let spatial = checked_spatial(side, "LongCat VAE image")?;
+        if rgb.len() != checked_feature_len(3, spatial, "LongCat RGB input")? {
+            return Err("Invalid LongCat RGB image length".into());
+        }
+        let mut current = reserve_f32("LongCat VAE RGB input", rgb.len())?;
+        for pixel in 0..spatial {
+            for channel in 0..3 {
+                current[channel * spatial + pixel] = rgb[pixel * 3 + channel] as f32 / 127.5 - 1.0;
+            }
+        }
+        let mut scratch = VaeScratch::new();
+        resize_f32(&mut scratch.first, "LongCat VAE conv input", 128 * spatial)?;
+        run_conv(
+            self.source.as_ref(),
+            &self.pool,
+            &encoder.conv_in,
+            &current,
+            side,
+            &mut scratch.first,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
+        )?;
+        std::mem::swap(&mut current, &mut scratch.first);
+        let mut feature_side = side;
+        for stage in &encoder.stages {
+            for block in &stage.blocks {
+                self.run_residual_block(block, &mut current, feature_side, &mut scratch)?;
+            }
+            if let Some(downsample) = &stage.downsample {
+                let next_side = feature_side / 2;
+                let next_len = checked_feature_len(
+                    stage.output_channels,
+                    checked_spatial(next_side, "LongCat VAE downsample")?,
+                    "LongCat VAE downsample",
+                )?;
+                resize_f32(&mut scratch.first, "LongCat VAE downsample", next_len)?;
+                run_bf16_downsample(
+                    self.source.as_ref(),
+                    &self.pool,
+                    downsample,
+                    &current,
+                    feature_side,
+                    &mut scratch.first,
+                )?;
+                std::mem::swap(&mut current, &mut scratch.first);
+                feature_side = next_side;
+            }
+        }
+        let mid_len = checked_feature_len(
+            512,
+            checked_spatial(feature_side, "LongCat VAE mid")?,
+            "LongCat VAE mid",
+        )?;
+        scratch.prepare_features(mid_len)?;
+        self.run_residual_block(
+            &encoder.mid_block_1,
+            &mut current,
+            feature_side,
+            &mut scratch,
+        )?;
+        scratch.prepare_attention(mid_len, feature_side * feature_side)?;
+        self.run_attention(
+            &encoder.mid_attention,
+            &mut current,
+            feature_side,
+            &mut scratch,
+        )?;
+        self.run_residual_block(
+            &encoder.mid_block_2,
+            &mut current,
+            feature_side,
+            &mut scratch,
+        )?;
+        resize_f32(&mut scratch.first, "LongCat VAE output norm", mid_len)?;
+        group_norm_32_into(
+            &current,
+            512,
+            feature_side,
+            &encoder.norm_out.weight,
+            &encoder.norm_out.bias,
+            &mut scratch.first,
+        )?;
+        silu_inplace_checked(&mut scratch.first)?;
+        let latent_spatial = checked_spatial(feature_side, "LongCat VAE latent")?;
+        let mut moments = reserve_f32(
+            "VAE moments",
+            encoder.conv_out.output_channels * latent_spatial,
+        )?;
+        run_conv(
+            self.source.as_ref(),
+            &self.pool,
+            &encoder.conv_out,
+            &scratch.first,
+            feature_side,
+            &mut moments,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
+        )?;
+        Ok(moments)
     }
 
     pub(crate) fn decode_rgb(
@@ -236,18 +505,32 @@ impl FluxVae {
         diffusion_latent: &[f32],
         latent_side: usize,
     ) -> Result<ZImageRgb, String> {
+        let mapped: Vec<f32> = diffusion_latent
+            .iter()
+            .copied()
+            .map(diffusion_to_vae)
+            .collect();
+        self.decode_mapped_rgb(&mapped, latent_side)
+    }
+
+    pub(crate) fn decode_mapped_rgb(
+        &self,
+        mapped_latent: &[f32],
+        latent_side: usize,
+    ) -> Result<ZImageRgb, String> {
         if latent_side == 0 {
             return Err("Z-Image VAE latent side must be positive".into());
         }
         let latent_spatial = checked_spatial(latent_side, "VAE latent")?;
-        let expected_latent = checked_feature_len(LATENT_CHANNELS, latent_spatial, "VAE latent")?;
-        if diffusion_latent.len() != expected_latent {
+        let expected_latent =
+            checked_feature_len(self.conv_in.input_channels, latent_spatial, "VAE latent")?;
+        if mapped_latent.len() != expected_latent {
             return Err(format!(
                 "Invalid Z-Image VAE latent length: expected {expected_latent}, got {}",
-                diffusion_latent.len()
+                mapped_latent.len()
             ));
         }
-        if diffusion_latent.iter().any(|value| !value.is_finite()) {
+        if mapped_latent.iter().any(|value| !value.is_finite()) {
             return Err("Z-Image VAE latent contains NaN or infinity".into());
         }
         let output_side = latent_side
@@ -259,8 +542,8 @@ impl FluxVae {
         checked_feature_len(3, output_spatial, "VAE RGB output")?;
 
         let mut current = reserve_f32("VAE mapped latent", expected_latent)?;
-        for (output, input) in current.iter_mut().zip(diffusion_latent) {
-            *output = diffusion_to_vae(*input);
+        for (output, input) in current.iter_mut().zip(mapped_latent) {
+            *output = *input;
             if !output.is_finite() {
                 return Err("Z-Image VAE mapped latent contains NaN or infinity".into());
             }
@@ -269,12 +552,37 @@ impl FluxVae {
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.vae.mapped_latent",
             None,
-            &[latent_side, latent_side, LATENT_CHANNELS],
+            &[latent_side, latent_side, self.conv_in.input_channels],
             &current,
         ));
         let mut scratch = VaeScratch::new();
+        if let Some(conv) = &self.post_quant_conv {
+            resize_f32(
+                &mut scratch.first,
+                "Flux2 post-quant output",
+                expected_latent,
+            )?;
+            run_conv(
+                self.source.as_ref(),
+                &self.pool,
+                conv,
+                &current,
+                latent_side,
+                &mut scratch.first,
+                #[cfg(feature = "vulkan")]
+                Some(&self.gpu_conv),
+            )?;
+            std::mem::swap(&mut current, &mut scratch.first);
+            #[cfg(feature = "parity-trace")]
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                "z_image.vae.post_quant",
+                None,
+                &[latent_side, latent_side, self.conv_in.input_channels],
+                &current,
+            ));
+        }
         let t_vae_total = std::time::Instant::now();
-        let t_vae_map = std::time::Instant::now().elapsed();
+        let _t_vae_map = std::time::Instant::now().elapsed();
         let mid_len = checked_feature_len(512, latent_spatial, "VAE middle feature")?;
         resize_f32(&mut scratch.first, "VAE convolution input output", mid_len)?;
         let t_conv_in = std::time::Instant::now();
@@ -285,6 +593,8 @@ impl FluxVae {
             &current,
             latent_side,
             &mut scratch.first,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         std::mem::swap(&mut current, &mut scratch.first);
         #[cfg(feature = "parity-trace")]
@@ -307,7 +617,7 @@ impl FluxVae {
             &current,
         ));
         scratch.prepare_attention(mid_len, latent_spatial)?;
-        self.run_attention(&mut current, latent_side, &mut scratch)?;
+        self.run_attention(&self.mid_attention, &mut current, latent_side, &mut scratch)?;
         #[cfg(feature = "parity-trace")]
         crate::parity_trace::report(crate::parity_trace::checkpoint(
             "z_image.vae.mid.attention",
@@ -359,6 +669,8 @@ impl FluxVae {
                     &scratch.first,
                     next_side,
                     &mut scratch.second,
+                    #[cfg(feature = "vulkan")]
+                    Some(&self.gpu_conv),
                 )?;
                 std::mem::swap(&mut current, &mut scratch.second);
                 side = next_side;
@@ -397,6 +709,8 @@ impl FluxVae {
             &scratch.first,
             output_side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         std::mem::swap(&mut current, &mut scratch.second);
         if current.len() != rgb_len || current.iter().any(|value| !value.is_finite()) {
@@ -464,6 +778,8 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         resize_f32(
             &mut scratch.first,
@@ -486,25 +802,28 @@ impl FluxVae {
             &scratch.first,
             side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
 
         if let Some(shortcut) = &block.shortcut {
-            resize_f32(&mut scratch.first, "VAE projected shortcut", output_len)?;
-            let weights = self
-                .source
-                .tensor_slice(&shortcut.weight)
-                .ok_or_else(|| format!("Missing tensor data: {}", shortcut.weight))?;
-            add_shortcut_residual_into(
-                current,
-                &scratch.second,
-                block.input_channels,
-                block.output_channels,
-                side,
-                weights,
-                Some(&shortcut.bias),
-                &mut scratch.first,
+            resize_f32(&mut scratch.first, "VAE shortcut", output_len)?;
+            run_conv(
+                self.source.as_ref(),
                 &self.pool,
+                shortcut,
+                current,
+                side,
+                &mut scratch.first,
+                #[cfg(feature = "vulkan")]
+                Some(&self.gpu_conv),
             )?;
+            for (output, branch) in scratch.first.iter_mut().zip(&scratch.second) {
+                *output += branch;
+                if !output.is_finite() {
+                    return Err("Non-finite VAE shortcut residual".into());
+                }
+            }
             std::mem::swap(current, &mut scratch.first);
         } else {
             if current.len() != scratch.second.len() {
@@ -523,6 +842,7 @@ impl FluxVae {
 
     fn run_attention(
         &self,
+        attention: &VaeAttention,
         current: &mut Vec<f32>,
         side: usize,
         scratch: &mut VaeScratch,
@@ -536,35 +856,55 @@ impl FluxVae {
             current,
             512,
             side,
-            &self.mid_attention.norm.weight,
-            &self.mid_attention.norm.bias,
+            &attention.norm.weight,
+            &attention.norm.bias,
             &mut scratch.first,
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.q,
+            &attention.q,
             &scratch.first,
             side,
             &mut scratch.q,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.k,
+            &attention.k,
             &scratch.first,
             side,
             &mut scratch.k,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
-        run_conv(
+        run_attention_projection(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.v,
+            &attention.v,
             &scratch.first,
             side,
             &mut scratch.v,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
-        one_head_spatial_attention_into(
+        #[cfg(feature = "parity-trace")]
+        for (name, values) in [
+            ("norm", &scratch.first),
+            ("q", &scratch.q),
+            ("k", &scratch.k),
+            ("v", &scratch.v),
+        ] {
+            crate::parity_trace::report(crate::parity_trace::checkpoint(
+                &format!("z_image.vae.{name}"),
+                None,
+                &[side, side, 512],
+                values,
+            ));
+        }
+        one_head_spatial_attention_parallel_into(
             &scratch.q,
             &scratch.k,
             &scratch.v,
@@ -572,14 +912,24 @@ impl FluxVae {
             spatial,
             &mut scratch.first,
             &mut scratch.scores,
+            &self.pool,
         )?;
+        #[cfg(feature = "parity-trace")]
+        crate::parity_trace::report(crate::parity_trace::checkpoint(
+            "z_image.vae.attention_values",
+            None,
+            &[side, side, 512],
+            &scratch.first,
+        ));
         run_conv(
             self.source.as_ref(),
             &self.pool,
-            &self.mid_attention.proj_out,
+            &attention.proj_out,
             &scratch.first,
             side,
             &mut scratch.second,
+            #[cfg(feature = "vulkan")]
+            Some(&self.gpu_conv),
         )?;
         for (projected, residual) in scratch.second.iter_mut().zip(current.iter()) {
             *projected += residual;
@@ -634,20 +984,11 @@ fn resize_f32(values: &mut Vec<f32>, name: &str, len: usize) -> Result<(), Strin
 }
 
 fn load_f32(source: &dyn TensorSource, name: &str, len: usize) -> Result<Vec<f32>, String> {
-    let bytes = source
-        .tensor_slice(name)
-        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
-    if bytes.len()
-        != len
-            .checked_mul(4)
-            .ok_or_else(|| format!("Invalid {name} byte size"))?
-    {
-        return Err(format!("Invalid {name} byte length"));
-    }
-    let mut values = reserve_f32(name, len)?;
-    for (output, bytes) in values.iter_mut().zip(bytes.chunks_exact(4)) {
-        *output = f32::from_le_bytes(bytes.try_into().expect("four-byte chunk"));
-    }
+    // The element count is the contract, not the shape: the Flux2 VAE that
+    // ERNIE-Image uses keeps its attention projections as two-dimensional
+    // matrices, and the payload and the element order are the same either
+    // way.
+    let values = crate::core::tensor::load_f32_tensor_flat(source, name, len)?;
     if values.iter().any(|value| !value.is_finite()) {
         return Err(format!("Non-finite tensor: {name}"));
     }
@@ -661,21 +1002,347 @@ fn run_conv(
     input: &[f32],
     side: usize,
     output: &mut [f32],
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuConv>,
 ) -> Result<(), String> {
+    if let Some(linear) = &conv.linear {
+        let spatial = checked_spatial(side, "VAE linear")?;
+        if side == 0
+            || input.len() != conv.input_channels * spatial
+            || output.len() != conv.output_channels * spatial
+        {
+            return Err("Invalid VAE linear shape".into());
+        }
+        let output_ptr = output.as_mut_ptr() as usize;
+        pool.compute(move |ith, nth| {
+            let mut row = vec![0.; conv.input_channels];
+            for pixel in (ith..spatial).step_by(nth) {
+                for channel in 0..conv.input_channels {
+                    row[channel] = input[channel * spatial + pixel];
+                }
+                for channel in 0..conv.output_channels {
+                    let start = channel * conv.input_channels;
+                    let projected = crate::ops::dot_f32(
+                        &row,
+                        &linear[start..start + conv.input_channels],
+                        conv.input_channels,
+                    );
+                    // Workers own disjoint pixels across every output channel.
+                    unsafe {
+                        *(output_ptr as *mut f32).add(channel * spatial + pixel) =
+                            projected + conv.bias[channel];
+                    }
+                }
+            }
+        });
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err("Non-finite VAE linear output".into());
+        }
+        return Ok(());
+    }
     let weights = source
         .tensor_slice(&conv.weight)
         .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
-    conv_f16_parallel_into(
+    let dtype = source
+        .tensor_info(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor info: {}", conv.weight))?
+        .ggml_type;
+    match dtype {
+        GGMLType::F16 => {
+            #[cfg(feature = "vulkan")]
+            if gpu.is_some_and(|gpu| {
+                gpu.try_conv_f16(
+                    weights,
+                    input,
+                    output,
+                    conv.input_channels,
+                    conv.output_channels,
+                    side,
+                    conv.kernel,
+                    Some(&conv.bias),
+                )
+            }) {
+                return Ok(());
+            }
+            conv_f16_parallel_into(
+                input,
+                conv.input_channels,
+                side,
+                weights,
+                conv.output_channels,
+                conv.kernel,
+                Some(&conv.bias),
+                output,
+                pool,
+                #[cfg(feature = "vulkan")]
+                Some(&conv.gpu),
+            )
+        }
+        GGMLType::BF16 => conv_bf16_parallel_into(
+            input,
+            conv.input_channels,
+            side,
+            weights,
+            conv.output_channels,
+            conv.kernel,
+            &conv.bias,
+            output,
+            pool,
+            false,
+        ),
+        other => Err(format!("Unsupported VAE convolution dtype: {other:?}")),
+    }
+}
+
+fn run_attention_projection(
+    source: &dyn TensorSource,
+    pool: &Arc<ComputePool>,
+    conv: &VaeConv,
+    input: &[f32],
+    side: usize,
+    output: &mut [f32],
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuConv>,
+) -> Result<(), String> {
+    if conv.kernel != 1 {
+        return Err("Invalid VAE attention projection kernel".into());
+    }
+    if source.tensor_info(&conv.weight).map(|info| info.ggml_type) != Some(GGMLType::BF16) {
+        return run_conv(
+            source,
+            pool,
+            conv,
+            input,
+            side,
+            output,
+            #[cfg(feature = "vulkan")]
+            gpu,
+        );
+    }
+    let weights = source
+        .tensor_slice(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
+    conv_bf16_parallel_into(
         input,
         conv.input_channels,
         side,
         weights,
         conv.output_channels,
-        conv.kernel,
-        Some(&conv.bias),
+        1,
+        &conv.bias,
         output,
         pool,
+        true,
     )
+}
+
+fn run_bf16_downsample(
+    source: &dyn TensorSource,
+    pool: &Arc<ComputePool>,
+    conv: &VaeConv,
+    input: &[f32],
+    side: usize,
+    output: &mut [f32],
+) -> Result<(), String> {
+    if side == 0 || side % 2 != 0 || conv.kernel != 3 || conv.input_channels != conv.output_channels
+    {
+        return Err("Invalid BF16 VAE downsample shape".into());
+    }
+    let input_spatial = checked_spatial(side, "VAE downsample input")?;
+    let output_side = side / 2;
+    let output_spatial = checked_spatial(output_side, "VAE downsample output")?;
+    let patch_len = checked_feature_len(conv.input_channels, 9, "VAE downsample patch")?;
+    let input_len =
+        checked_feature_len(conv.input_channels, input_spatial, "VAE downsample input")?;
+    let output_len = checked_feature_len(
+        conv.output_channels,
+        output_spatial,
+        "VAE downsample output",
+    )?;
+    let weight_len =
+        checked_feature_len(conv.output_channels, patch_len * 2, "VAE downsample weight")?;
+    let info = source
+        .tensor_info(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor info: {}", conv.weight))?;
+    let weights = source
+        .tensor_slice(&conv.weight)
+        .ok_or_else(|| format!("Missing tensor data: {}", conv.weight))?;
+    if !matches!(info.ggml_type, GGMLType::BF16 | GGMLType::F16)
+        || weights.len() != weight_len
+        || input.len() != input_len
+        || output.len() != output_len
+        || input.iter().any(|value| !value.is_finite())
+    {
+        return Err("Invalid BF16 VAE downsample buffer".into());
+    }
+    let is_f16 = info.ggml_type == GGMLType::F16;
+    if is_f16 && weights.as_ptr().align_offset(std::mem::align_of::<u16>()) != 0 {
+        return Err("Unaligned F16 VAE downsample weights".into());
+    }
+    let input_ptr = input.as_ptr() as usize;
+    let weights_ptr = weights.as_ptr() as usize;
+    let bias_ptr = conv.bias.as_ptr() as usize;
+    let output_ptr = output.as_mut_ptr() as usize;
+    pool.compute(move |thread, threads| {
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, input_len) };
+        let weights = unsafe { std::slice::from_raw_parts(weights_ptr as *const u8, weight_len) };
+        let bias =
+            unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, conv.output_channels) };
+        let output = output_ptr as *mut f32;
+        let mut patch = vec![0.0f32; patch_len];
+        for pixel in (thread..output_spatial).step_by(threads) {
+            patch.fill(0.0);
+            let y = pixel / output_side;
+            let x = pixel % output_side;
+            for channel in 0..conv.input_channels {
+                for ky in 0..3 {
+                    for kx in 0..3 {
+                        let iy = 2 * y as isize + ky as isize;
+                        let ix = 2 * x as isize + kx as isize;
+                        if iy >= 0 && ix >= 0 && iy < side as isize && ix < side as isize {
+                            patch[(channel * 3 + ky) * 3 + kx] =
+                                input[channel * input_spatial + iy as usize * side + ix as usize];
+                        }
+                    }
+                }
+            }
+            if !is_f16 && crate::ops::scalar_mode() {
+                // The Oracle loads BF16 VAE weights as F16 and builds F16 im2col patches.
+                for value in &mut patch {
+                    *value = crate::ops::f16_to_f32(crate::ops::f32_to_f16(*value));
+                }
+            }
+            for channel in 0..conv.output_channels {
+                let start = channel * patch_len * 2;
+                // Workers own disjoint pixels, including across channels.
+                unsafe {
+                    let weight = &weights[start..start + patch_len * 2];
+                    let value = if is_f16 {
+                        let halves =
+                            std::slice::from_raw_parts(weight.as_ptr().cast::<u16>(), patch_len);
+                        crate::ops::dot_f16_f32(&patch, halves, patch_len)
+                    } else if crate::ops::scalar_mode() {
+                        dot_vae_f16_scalar(&patch, weight)
+                    } else {
+                        crate::ops::dot_bf16_f32(&patch, weight, patch_len)
+                    };
+                    *output.add(channel * output_spatial + pixel) = value + bias[channel];
+                }
+            }
+        }
+    });
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite BF16 VAE downsample output".into());
+    }
+    Ok(())
+}
+
+fn conv_bf16_parallel_into(
+    input: &[f32],
+    input_channels: usize,
+    side: usize,
+    weights: &[u8],
+    output_channels: usize,
+    kernel: usize,
+    bias: &[f32],
+    output: &mut [f32],
+    pool: &Arc<ComputePool>,
+    bf16_matmul: bool,
+) -> Result<(), String> {
+    if side == 0 || !matches!(kernel, 1 | 3) || bias.len() != output_channels {
+        return Err("Invalid BF16 VAE convolution shape".into());
+    }
+    let spatial = checked_spatial(side, "BF16 VAE convolution")?;
+    let patch_len = checked_feature_len(input_channels, kernel * kernel, "VAE patch")?;
+    let expected_input = checked_feature_len(input_channels, spatial, "VAE input")?;
+    let expected_output = checked_feature_len(output_channels, spatial, "VAE output")?;
+    let expected_weight = checked_feature_len(output_channels, patch_len * 2, "VAE weight")?;
+    if input.len() != expected_input
+        || output.len() != expected_output
+        || weights.len() != expected_weight
+        || input.iter().chain(bias).any(|value| !value.is_finite())
+    {
+        return Err("Invalid BF16 VAE convolution buffer".into());
+    }
+    let input_ptr = input.as_ptr() as usize;
+    let weights_ptr = weights.as_ptr() as usize;
+    let bias_ptr = bias.as_ptr() as usize;
+    let output_ptr = output.as_mut_ptr() as usize;
+    pool.compute(move |thread, threads| {
+        let input = unsafe { std::slice::from_raw_parts(input_ptr as *const f32, expected_input) };
+        let weights =
+            unsafe { std::slice::from_raw_parts(weights_ptr as *const u8, expected_weight) };
+        let bias = unsafe { std::slice::from_raw_parts(bias_ptr as *const f32, output_channels) };
+        let output = output_ptr as *mut f32;
+        let mut patch = vec![0.0f32; patch_len];
+        for pixel in (thread..spatial).step_by(threads) {
+            patch.fill(0.0);
+            let y = pixel / side;
+            let x = pixel % side;
+            for channel in 0..input_channels {
+                for ky in 0..kernel {
+                    for kx in 0..kernel {
+                        let iy = y as isize + ky as isize - (kernel / 2) as isize;
+                        let ix = x as isize + kx as isize - (kernel / 2) as isize;
+                        if iy >= 0 && ix >= 0 && iy < side as isize && ix < side as isize {
+                            patch[(channel * kernel + ky) * kernel + kx] =
+                                input[channel * spatial + iy as usize * side + ix as usize];
+                        }
+                    }
+                }
+            }
+            if crate::ops::scalar_mode() {
+                // Convolutions use F16 im2col; the VAE attention linears use BF16.
+                for value in &mut patch {
+                    *value = if bf16_matmul {
+                        crate::ops::bf16_to_f32(crate::ops::f32_to_bf16(*value))
+                    } else {
+                        crate::ops::f16_to_f32(crate::ops::f32_to_f16(*value))
+                    };
+                }
+            }
+            for channel in 0..output_channels {
+                let start = channel * patch_len * 2;
+                // Workers own disjoint pixels, including across channels.
+                unsafe {
+                    let weight = &weights[start..start + patch_len * 2];
+                    let value = if crate::ops::scalar_mode() {
+                        if bf16_matmul {
+                            dot_vae_bf16_scalar(&patch, weight)
+                        } else {
+                            dot_vae_f16_scalar(&patch, weight)
+                        }
+                    } else {
+                        crate::ops::dot_bf16_f32(&patch, weight, patch_len)
+                    };
+                    *output.add(channel * spatial + pixel) = value + bias[channel];
+                }
+            }
+        }
+    });
+    if output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite BF16 VAE convolution output".into());
+    }
+    Ok(())
+}
+
+// The Oracle's scalar ggml_vec_dot_f16 sums F32 products in double precision.
+fn dot_vae_f16_scalar(patch: &[f32], weights: &[u8]) -> f32 {
+    let mut sum = 0.0f64;
+    for (&input, bytes) in patch.iter().zip(weights.chunks_exact(2)) {
+        let bf16 = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let weight = crate::ops::bf16_to_f32(bf16);
+        let weight = crate::ops::f16_to_f32(crate::ops::f32_to_f16(weight));
+        sum += (weight * input) as f64;
+    }
+    sum as f32
+}
+
+fn dot_vae_bf16_scalar(patch: &[f32], weights: &[u8]) -> f32 {
+    let mut sum = 0.0f64;
+    for (&input, bytes) in patch.iter().zip(weights.chunks_exact(2)) {
+        let weight = crate::ops::bf16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+        sum += (weight * input) as f64;
+    }
+    sum as f32
 }
 
 /// Per-pixel F16 dot convolution, parallelized by output pixel.
@@ -695,6 +1362,7 @@ fn conv_f16_parallel_into(
     bias: Option<&[f32]>,
     output: &mut [f32],
     pool: &Arc<ComputePool>,
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuLinear>,
 ) -> Result<(), String> {
     if side == 0 || !matches!(kernel, 1 | 3) {
         return Err("Invalid VAE convolution shape".into());
@@ -729,6 +1397,23 @@ fn conv_f16_parallel_into(
     let pixel_count = side
         .checked_mul(side)
         .ok_or_else(|| "VAE pixel count overflow".to_string())?;
+    #[cfg(feature = "vulkan")]
+    if gpu.is_some_and(|gpu| {
+        try_conv_f16(
+            gpu,
+            input,
+            side,
+            weights,
+            output_channels,
+            kernel,
+            bias,
+            output,
+            patch_len,
+            pool,
+        )
+    }) {
+        return Ok(());
+    }
 
     let weight_rows: Vec<&[u8]> = (0..output_channels)
         .map(|oc| {
@@ -746,7 +1431,6 @@ fn conv_f16_parallel_into(
     let bias_values_usize = bias_values.as_ptr() as usize;
     let bias_values_len = bias_values.len();
     let output_usize = output.as_mut_ptr() as usize;
-    let output_len = output.len();
     let padding = kernel / 2;
     let padding_signed = padding as isize;
     let side_signed = side as isize;
@@ -765,13 +1449,12 @@ fn conv_f16_parallel_into(
         };
         let bias_values_local =
             unsafe { std::slice::from_raw_parts(bias_values_usize as *const f32, bias_values_len) };
-        let output_local =
-            unsafe { std::slice::from_raw_parts_mut(output_usize as *mut f32, output_len) };
+        let output_ptr = output_usize as *mut f32;
         let mut patch = vec![0u16; patch_len];
         for pixel in start..end {
-            patch.fill(0);
             let output_y = pixel / side;
             let output_x = pixel % side;
+            patch.fill(0);
             // Build patch (kernel_x, kernel_y, ic) -> patch_index
             for kernel_y in 0..kernel {
                 let input_y_signed = output_y as isize + kernel_y as isize - padding_signed;
@@ -791,12 +1474,21 @@ fn conv_f16_parallel_into(
                                 kernel_x + kernel * (kernel_y + kernel * input_channel);
                             patch[patch_index] = f32_to_f16(value);
                         }
+                    } else {
+                        for input_channel in 0..input_channels {
+                            let patch_index =
+                                kernel_x + kernel * (kernel_y + kernel * input_channel);
+                            patch[patch_index] = 0;
+                        }
                     }
                 }
             }
             for oc in 0..output_channels {
                 let dot = dot_f16_f16_bytes(&patch, weight_rows_local[oc], patch_len);
-                output_local[oc * spatial + pixel] = dot + bias_values_local[oc];
+                // Workers own disjoint pixels across every output channel.
+                unsafe {
+                    *output_ptr.add(oc * spatial + pixel) = dot + bias_values_local[oc];
+                }
             }
         }
     });
@@ -805,6 +1497,109 @@ fn conv_f16_parallel_into(
         return Err("Non-finite VAE convolution output".into());
     }
     Ok(())
+}
+
+#[cfg(any(feature = "vulkan", test))]
+fn conv_patch_into(input: &[f32], side: usize, kernel: usize, pixel: usize, patch: &mut [f32]) {
+    patch.fill(0.0);
+    let spatial = side * side;
+    let padding = (kernel / 2) as isize;
+    let top = (pixel / side) as isize - padding;
+    let left = (pixel % side) as isize - padding;
+    let start_x = left.max(0) as usize;
+    let end_x = (left + kernel as isize).min(side as isize) as usize;
+    for (channel, patch) in patch.chunks_exact_mut(kernel * kernel).enumerate() {
+        for ky in 0..kernel {
+            let y = top + ky as isize;
+            if y >= 0 && y < side as isize {
+                let source = channel * spatial + y as usize * side;
+                let destination = ky * kernel + (start_x as isize - left) as usize;
+                patch[destination..destination + end_x - start_x]
+                    .copy_from_slice(&input[source + start_x..source + end_x]);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn try_conv_f16(
+    gpu: &crate::ops::kernel::vulkan::GpuLinear,
+    input: &[f32],
+    side: usize,
+    weights: &[u8],
+    output_channels: usize,
+    kernel: usize,
+    bias: Option<&[f32]>,
+    output: &mut [f32],
+    patch_len: usize,
+    pool: &ComputePool,
+) -> bool {
+    if !crate::ops::kernel::vulkan::offload_enabled() {
+        return false;
+    }
+    let spatial = side * side;
+    let tile_rows = crate::ops::kernel::vulkan::GpuLinear::tile_rows(
+        crate::vulkan::ops::GpuWeightFormat::F16
+            .with_mode(crate::vulkan::ops::GpuMatmulMode::RoundedInputF32),
+        patch_len,
+        output_channels,
+        spatial,
+    );
+    let mut patches = vec![0.0; tile_rows * patch_len];
+    let mut projected = vec![0.0; tile_rows * output_channels];
+    for start in (0..spatial).step_by(tile_rows) {
+        let rows = tile_rows.min(spatial - start);
+        let patches_ptr = patches.as_mut_ptr() as usize;
+        pool.compute(move |ith, nth| {
+            let per_thread = rows.div_ceil(nth);
+            let first = ith * per_thread;
+            let end = (first + per_thread).min(rows);
+            if first >= end {
+                return;
+            }
+            // Each worker owns disjoint pixel rows; compute joins before the GPU upload.
+            let patches = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (patches_ptr as *mut f32).add(first * patch_len),
+                    (end - first) * patch_len,
+                )
+            };
+            for (row, patch) in patches.chunks_exact_mut(patch_len).enumerate() {
+                conv_patch_into(input, side, kernel, start + first + row, patch);
+            }
+        });
+        if !gpu.try_matmul(
+            weights,
+            crate::vulkan::ops::GpuWeightFormat::F16
+                .with_mode(crate::vulkan::ops::GpuMatmulMode::RoundedInputF32),
+            &patches[..rows * patch_len],
+            &mut projected[..rows * output_channels],
+            patch_len,
+            output_channels,
+            rows,
+        ) {
+            return false;
+        }
+        let output_ptr = output.as_mut_ptr() as usize;
+        let projected = &projected[..rows * output_channels];
+        pool.compute(move |ith, nth| {
+            let per_thread = output_channels.div_ceil(nth);
+            for channel in ith * per_thread..((ith + 1) * per_thread).min(output_channels) {
+                // Each worker owns separate channel planes; only this completed tile is written.
+                let output = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (output_ptr as *mut f32).add(channel * spatial + start),
+                        rows,
+                    )
+                };
+                let bias = bias.map_or(0.0, |bias| bias[channel]);
+                for (row, value) in output.iter_mut().enumerate() {
+                    *value = projected[row * output_channels + channel] + bias;
+                }
+            }
+        });
+    }
+    output.iter().all(|value| value.is_finite())
 }
 
 fn padded_conv_f16_into(
@@ -827,6 +1622,8 @@ fn padded_conv_f16_into(
         bias,
         output,
         pool,
+        #[cfg(feature = "vulkan")]
+        None,
     )
 }
 
@@ -926,6 +1723,7 @@ fn silu_inplace_checked(values: &mut [f32]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn add_shortcut_residual_into(
     input: &[f32],
     residual_branch: &[f32],
@@ -936,6 +1734,7 @@ fn add_shortcut_residual_into(
     bias: Option<&[f32]>,
     output: &mut [f32],
     pool: &Arc<ComputePool>,
+    #[cfg(feature = "vulkan")] gpu: Option<&crate::ops::kernel::vulkan::GpuLinear>,
 ) -> Result<(), String> {
     conv_f16_parallel_into(
         input,
@@ -947,6 +1746,8 @@ fn add_shortcut_residual_into(
         bias,
         output,
         pool,
+        #[cfg(feature = "vulkan")]
+        gpu,
     )?;
     if residual_branch.len() != output.len() {
         return Err("Invalid VAE shortcut residual length".into());
@@ -985,14 +1786,27 @@ fn one_head_spatial_attention_into(
     }
     output.fill(0.0);
     let scale = 1.0 / (channels as f32).sqrt();
+    let scalar = crate::ops::scalar_mode();
+    let mut query = vec![0.; channels];
+    let mut key = vec![0.; channels];
     for query_position in 0..spatial {
+        for channel in 0..channels {
+            query[channel] = q[channel * spatial + query_position];
+        }
         for key_position in 0..spatial {
-            let mut score = 0.0f32;
             for channel in 0..channels {
-                score +=
-                    q[channel * spatial + query_position] * k[channel * spatial + key_position];
+                key[channel] = k[channel * spatial + key_position];
             }
-            score *= scale;
+            let score = if scalar {
+                let mut sum = 0.0f64;
+                for channel in 0..channels {
+                    sum += (q[channel * spatial + query_position]
+                        * k[channel * spatial + key_position]) as f64;
+                }
+                sum as f32 * scale
+            } else {
+                crate::ops::dot_f32(&query, &key, channels) * scale
+            };
             if !score.is_finite() {
                 return Err("Non-finite VAE attention score".into());
             }
@@ -1003,15 +1817,123 @@ fn one_head_spatial_attention_into(
             return Err("Non-finite VAE attention probability".into());
         }
         for channel in 0..channels {
-            let mut value = 0.0f32;
-            for key_position in 0..spatial {
-                value += scores[key_position] * v[channel * spatial + key_position];
-            }
+            let value = if scalar {
+                let mut sum = 0.0f64;
+                for key_position in 0..spatial {
+                    sum += (scores[key_position] * v[channel * spatial + key_position]) as f64;
+                }
+                sum as f32
+            } else {
+                crate::ops::dot_f32(
+                    scores,
+                    &v[channel * spatial..(channel + 1) * spatial],
+                    spatial,
+                )
+            };
             if !value.is_finite() {
                 return Err("Non-finite VAE attention output".into());
             }
             output[channel * spatial + query_position] = value;
         }
+    }
+    Ok(())
+}
+
+/// Runs the VAE's single-head spatial attention by partitioning query rows.
+///
+/// A query row only reads Q/K/V and writes its own spatial positions in the
+/// output, so query rows are independent. Keeping the dot-product and softmax
+/// loops unchanged preserves the scalar result for each row while allowing
+/// the existing inference pool to process rows concurrently.
+fn one_head_spatial_attention_parallel_into(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    channels: usize,
+    spatial: usize,
+    output: &mut [f32],
+    scores: &mut [f32],
+    pool: &Arc<ComputePool>,
+) -> Result<(), String> {
+    if pool.n_threads() <= 1 {
+        return one_head_spatial_attention_into(q, k, v, channels, spatial, output, scores);
+    }
+    let feature_len = checked_feature_len(channels, spatial, "VAE attention")?;
+    if channels == 0
+        || spatial == 0
+        || q.len() != feature_len
+        || k.len() != feature_len
+        || v.len() != feature_len
+        || output.len() != feature_len
+        || scores.len() != spatial
+    {
+        return Err("Invalid VAE attention buffer length".into());
+    }
+    if q.iter().chain(k).chain(v).any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE attention input".into());
+    }
+    output.fill(0.0);
+    let scale = 1.0 / (channels as f32).sqrt();
+    let output_ptr = output.as_mut_ptr() as usize;
+    let failure = AtomicBool::new(false);
+    let worker_failure = &failure;
+
+    // SAFETY: each worker receives a disjoint query-position range. It only
+    // reads q/k/v and writes output[channel * spatial + query_position] for
+    // positions in that range. The source slices and output outlive compute.
+    pool.compute(move |ith, nth| {
+        let per_thread = spatial.div_ceil(nth);
+        let start = ith * per_thread;
+        let end = (start + per_thread).min(spatial);
+        if start >= end {
+            return;
+        }
+        let mut local_scores = vec![0.0f32; spatial];
+        let mut query = vec![0.; channels];
+        let mut key = vec![0.; channels];
+
+        for query_position in start..end {
+            for channel in 0..channels {
+                query[channel] = q[channel * spatial + query_position];
+            }
+            for key_position in 0..spatial {
+                for channel in 0..channels {
+                    key[channel] = k[channel * spatial + key_position];
+                }
+                let score = crate::ops::dot_f32(&query, &key, channels) * scale;
+                if !score.is_finite() {
+                    worker_failure.store(true, Ordering::Relaxed);
+                    return;
+                }
+                local_scores[key_position] = score;
+            }
+            vae_softmax_inplace(&mut local_scores);
+            if local_scores.iter().any(|value| !value.is_finite()) {
+                worker_failure.store(true, Ordering::Relaxed);
+                return;
+            }
+            for channel in 0..channels {
+                let value = crate::ops::dot_f32(
+                    &local_scores,
+                    &v[channel * spatial..(channel + 1) * spatial],
+                    spatial,
+                );
+                if !value.is_finite() {
+                    worker_failure.store(true, Ordering::Relaxed);
+                    return;
+                }
+                // Write the query element directly so each worker creates no
+                // mutable slice that aliases another worker's disjoint
+                // strided query range.
+                unsafe {
+                    *(output_ptr as *mut f32).add(channel * spatial + query_position) = value;
+                }
+            }
+        }
+    });
+
+    if failure.load(Ordering::Relaxed) || output.iter().any(|value| !value.is_finite()) {
+        return Err("Non-finite VAE attention output".into());
     }
     Ok(())
 }
@@ -1108,9 +2030,221 @@ fn rgb_bytes_from_channels(values: &[f32], side: usize) -> Result<Vec<u8>, Strin
 mod tests {
     use super::*;
     use crate::core::tensor::{GGMLType, MetaValue, TensorInfo, TensorSource};
+    #[cfg(feature = "vulkan")]
+    use crate::ops::f16_to_f32;
     use half::f16;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device and Z_IMAGE_VAE pointing to the real F16 decoder"]
+    fn vulkan_vae_real_weights_decode_matches_cpu() {
+        let source = Arc::new(
+            crate::core::loader::GGUFLoader::from_file(
+                std::env::var("Z_IMAGE_VAE").expect("missing Z_IMAGE_VAE"),
+            )
+            .unwrap(),
+        );
+        let vae = FluxVae::load(source, Arc::new(ComputePool::new(8))).unwrap();
+        let mut latent = vec![0.0; 16 * 64 * 64];
+        TorchMt19937::new(42).fill_normal(&mut latent);
+        let start = std::time::Instant::now();
+        let cpu = {
+            let _disabled = ComputePool::disable_gpu_matmul_for_scope();
+            vae.decode_rgb(&latent, 64).unwrap()
+        };
+        eprintln!(
+            "[vae-bench] cpu_cold={:.6}s threads=8",
+            start.elapsed().as_secs_f64()
+        );
+        assert_eq!(
+            (cpu.width, cpu.height, cpu.bytes.len()),
+            (512, 512, 512 * 512 * 3)
+        );
+        eprintln!(
+            "[vae-bench] cpu_gpu_requested={}",
+            crate::ops::gpu_requested()
+        );
+        let mut cpu_times = Vec::new();
+        for run in 0..3 {
+            let _disabled = ComputePool::disable_gpu_matmul_for_scope();
+            let start = std::time::Instant::now();
+            let actual = vae.decode_rgb(&latent, 64).unwrap();
+            let seconds = start.elapsed().as_secs_f64();
+            assert_eq!(actual.bytes, cpu.bytes);
+            eprintln!("[vae-bench] cpu_warm_run={run} seconds={seconds:.6}");
+            cpu_times.push(seconds);
+        }
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let mut gpu_times = Vec::new();
+        for run in 0..4 {
+            let before = context.submission_count();
+            let start = std::time::Instant::now();
+            let actual = vae.decode_rgb(&latent, 64).unwrap();
+            let seconds = start.elapsed().as_secs_f64();
+            assert!(!crate::vulkan::gpu_broken());
+            assert!(context.submission_count() > before);
+            assert_eq!(actual.bytes.len(), cpu.bytes.len());
+            let mut maximum = 0.0f64;
+            let mut absolute = 0.0;
+            let mut squared = 0.0;
+            for (&a, &b) in actual.bytes.iter().zip(&cpu.bytes) {
+                let error = (a as f64 - b as f64).abs();
+                maximum = maximum.max(error);
+                absolute += error;
+                squared += error * error;
+            }
+            let mae = absolute / cpu.bytes.len() as f64;
+            let psnr = 10.0 * (255.0 * 255.0 / (squared / cpu.bytes.len() as f64)).log10();
+            eprintln!("[vae-bench] gpu_run={run} seconds={seconds:.6} submissions={} max_byte_error={maximum} mae={mae:.6} psnr={psnr:.3}dB", context.submission_count() - before);
+            assert!(psnr > 40.0, "VAE CPU/GPU PSNR={psnr}dB");
+            if run > 0 {
+                gpu_times.push(seconds);
+            }
+        }
+        cpu_times.sort_by(f64::total_cmp);
+        gpu_times.sort_by(f64::total_cmp);
+        eprintln!(
+            "[vae-bench] warm_median cpu={:.6}s gpu={:.6}s",
+            cpu_times[1], gpu_times[1]
+        );
+        crate::vulkan::dump_submit_trace();
+        crate::vulkan::ops::dump_dispatch_trace();
+    }
+    #[test]
+    fn vae_f16_dot_uses_double_accumulator() {
+        let weights: Vec<u8> = [1.0, 2.0f32.powi(-24), 2.0f32.powi(-24)]
+            .into_iter()
+            .flat_map(|value| crate::ops::f32_to_bf16(value).to_le_bytes())
+            .collect();
+        assert_eq!(
+            dot_vae_f16_scalar(&[1.0; 3], &weights).to_bits(),
+            (1.0f32 + 2.0f32.powi(-23)).to_bits()
+        );
+        assert_eq!(
+            dot_vae_bf16_scalar(&[1.0; 3], &weights).to_bits(),
+            (1.0f32 + 2.0f32.powi(-23)).to_bits()
+        );
+        if crate::ops::scalar_mode() {
+            let mut output = [0.0];
+            conv_bf16_parallel_into(
+                &[1.0 + 1.0 / 256.0],
+                1,
+                1,
+                &weights[..2],
+                1,
+                1,
+                &[0.0],
+                &mut output,
+                &Arc::new(ComputePool::new(1)),
+                true,
+            )
+            .unwrap();
+            assert_eq!(output[0], 1.0);
+        }
+    }
+
+    #[test]
+    fn bf16_downsample_uses_asymmetric_right_bottom_padding() {
+        struct OneConv {
+            info: TensorInfo,
+            weights: Vec<u8>,
+        }
+        impl TensorSource for OneConv {
+            fn metadata(&self, _: &str) -> Option<&MetaValue> {
+                None
+            }
+            fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+                (name == "weight").then_some(&self.info)
+            }
+            fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+                (name == "weight").then_some(&self.weights)
+            }
+        }
+        let source = OneConv {
+            info: TensorInfo {
+                name: "weight".into(),
+                dims: vec![3, 3, 1, 1],
+                ggml_type: GGMLType::BF16,
+                offset: 0,
+            },
+            weights: [1.0f32; 9]
+                .iter()
+                .flat_map(|value| crate::ops::f32_to_bf16(*value).to_le_bytes())
+                .collect(),
+        };
+        let conv = VaeConv {
+            weight: "weight".into(),
+            bias: vec![0.0],
+            input_channels: 1,
+            output_channels: 1,
+            kernel: 3,
+            #[cfg(feature = "vulkan")]
+            gpu: crate::ops::kernel::vulkan::GpuLinear::default(),
+            linear: None,
+        };
+        let mut output = [0.0; 4];
+        run_bf16_downsample(
+            &source,
+            &Arc::new(ComputePool::new(1)),
+            &conv,
+            &[1.0; 16],
+            4,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+        let f16_source = OneConv {
+            info: TensorInfo {
+                ggml_type: GGMLType::F16,
+                ..source.info.clone()
+            },
+            weights: [1.0f32; 9]
+                .into_iter()
+                .flat_map(|v| crate::ops::f32_to_f16(v).to_le_bytes())
+                .collect(),
+        };
+        run_bf16_downsample(
+            &f16_source,
+            &Arc::new(ComputePool::new(1)),
+            &conv,
+            &[1.0; 16],
+            4,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+        if crate::ops::scalar_mode() {
+            run_bf16_downsample(
+                &source,
+                &Arc::new(ComputePool::new(1)),
+                &conv,
+                &[1.0 + 1.0 / 4096.0; 16],
+                4,
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(output, [9.0, 6.0, 6.0, 4.0]);
+            let mut full = [0.0; 16];
+            conv_bf16_parallel_into(
+                &[1.0 + 1.0 / 4096.0; 16],
+                1,
+                4,
+                &source.weights,
+                1,
+                3,
+                &[0.0],
+                &mut full,
+                &Arc::new(ComputePool::new(1)),
+                false,
+            )
+            .unwrap();
+            assert_eq!(full[0], 4.0);
+            assert_eq!(full[5], 9.0);
+        }
+    }
 
     struct DecoderSource {
         tensors: HashMap<String, TensorInfo>,
@@ -1282,13 +2416,280 @@ mod tests {
     }
 
     #[test]
+    fn convolution_zero_padding_is_reset_between_pixels() {
+        let mut output = [0.0; 4];
+        conv_f16_parallel_into(
+            &[1.0, 2.0, 3.0, 4.0],
+            1,
+            2,
+            &f16_bytes(&[1.0; 9]),
+            1,
+            3,
+            None,
+            &mut output,
+            &Arc::new(ComputePool::new(1)),
+            #[cfg(feature = "vulkan")]
+            None,
+        )
+        .unwrap();
+        assert_eq!(output, [10.0; 4]);
+    }
+
+    #[test]
+    fn convolution_patch_keeps_channel_and_kernel_order() {
+        let mut patch = [99.0; 18];
+        conv_patch_into(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            2,
+            3,
+            0,
+            &mut patch,
+        );
+        assert_eq!(
+            patch,
+            [
+                0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0,
+                7.0, 8.0
+            ]
+        );
+        conv_patch_into(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            2,
+            3,
+            3,
+            &mut patch,
+        );
+        assert_eq!(
+            patch,
+            [
+                1.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 0.0, 7.0, 8.0, 0.0, 0.0,
+                0.0, 0.0
+            ]
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a Vulkan device; fails if offload is unavailable"]
+    fn vulkan_vae_convolution_matches_cpu_across_tiles() {
+        crate::ops::enable_gpu();
+        let context = crate::ops::get_vulkan_context().expect("Vulkan device required");
+        let pool = Arc::new(ComputePool::new(8));
+        assert!(matches!(
+            crate::vulkan::ops::Conv2dRuntime::new(context, (u32::MAX as usize / 4 + 1, 1, 1)),
+            Err(crate::vulkan::VulkanError::UnsupportedShape(_))
+        ));
+        let shapes = [(9, 2, 3), (65, 32, 65), (65, 1, 3)];
+        let weight_storage: Vec<Vec<u8>> = shapes
+            .iter()
+            .flat_map(|&(_, input_channels, output_channels)| {
+                [1, 3].map(move |kernel| {
+                    let patch_len = input_channels * kernel * kernel;
+                    (0..patch_len * output_channels)
+                        .flat_map(|i| f32_to_f16((i as f32 % 11.0 - 5.0) / 16.0).to_le_bytes())
+                        .collect()
+                })
+            })
+            .collect();
+        let direct = crate::ops::kernel::vulkan::GpuConv::default();
+        // Keep immutable weights alive while the shared arena grows, then reuse the first weights.
+        for shape_index in [0, 1, 2, 0] {
+            let (side, input_channels, output_channels) = shapes[shape_index];
+            let spatial = side * side;
+            let input: Vec<_> = (0..spatial * input_channels)
+                .map(|i| ((i * 29 % 251) as f32 - 125.0) / 97.0)
+                .collect();
+            let bias: Vec<_> = (0..output_channels)
+                .map(|i| (i as f32 - 1.0) / 8.0)
+                .collect();
+            for (kernel_index, kernel) in [1, 3].into_iter().enumerate() {
+                let patch_len = input_channels * kernel * kernel;
+                let weights = &weight_storage[shape_index * 2 + kernel_index];
+                let mut expected = vec![0.0; spatial * output_channels];
+                conv_f16_parallel_into(
+                    &input,
+                    input_channels,
+                    side,
+                    &weights,
+                    output_channels,
+                    kernel,
+                    Some(&bias),
+                    &mut expected,
+                    &pool,
+                    None,
+                )
+                .unwrap();
+                // AArch64's CPU kernel accumulates in FP16; check GPU FP32 against an independent sum.
+                let mut reference = vec![0.0; expected.len()];
+                let mut patch = vec![0.0; patch_len];
+                for pixel in 0..spatial {
+                    conv_patch_into(&input, side, kernel, pixel, &mut patch);
+                    for (channel, weight) in weights.chunks_exact(patch_len * 2).enumerate() {
+                        let sum: f64 = patch
+                            .iter()
+                            .zip(weight.chunks_exact(2))
+                            .map(|(&x, w)| {
+                                f64::from(f16_to_f32(f32_to_f16(x)))
+                                    * f64::from(f16_to_f32(u16::from_le_bytes([w[0], w[1]])))
+                            })
+                            .sum();
+                        reference[channel * spatial + pixel] = sum as f32 + bias[channel];
+                    }
+                }
+                let gpu = crate::ops::kernel::vulkan::GpuLinear::default();
+                let submissions = context.submission_count();
+                let mut actual = vec![f32::NAN; expected.len()];
+                assert!(try_conv_f16(
+                    &gpu,
+                    &input,
+                    side,
+                    &weights,
+                    output_channels,
+                    kernel,
+                    Some(&bias),
+                    &mut actual,
+                    patch_len,
+                    &pool,
+                ));
+                assert_eq!(
+                    context.submission_count() - submissions,
+                    spatial.div_ceil(4096) as u64
+                );
+                for (actual, expected) in actual.iter().zip(&reference) {
+                    assert!(
+                        (actual - expected).abs() <= 3e-4 + 3e-4 * expected.abs(),
+                        "side={side} kernel={kernel} channels={input_channels}/{output_channels} gpu={actual} reference={expected}"
+                    );
+                }
+                let submissions = context.submission_count();
+                let mut direct_output = vec![f32::NAN; actual.len()];
+                assert!(direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias),
+                ));
+                assert_eq!(
+                    context.submission_count() - submissions,
+                    1,
+                    "a convolution must finish in one submission without host im2col tiles"
+                );
+                for (direct, tiled) in direct_output.iter().zip(&actual) {
+                    assert_eq!(
+                        direct.to_bits(),
+                        tiled.to_bits(),
+                        "direct convolution must retain the tiled GPU arithmetic"
+                    );
+                }
+                let submissions = context.submission_count();
+                assert!(direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    None,
+                ));
+                assert_eq!(context.submission_count() - submissions, 1);
+                for (i, &value) in direct_output.iter().enumerate() {
+                    assert!(
+                        (value - (reference[i] - bias[i / spatial])).abs()
+                            <= 3e-4 + 3e-4 * reference[i].abs()
+                    );
+                }
+                let submissions = context.submission_count();
+                let unchanged: Vec<_> = direct_output.iter().map(|v| v.to_bits()).collect();
+                assert!(!direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias[..bias.len() - 1]),
+                ));
+                assert!(!direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    usize::MAX,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias),
+                ));
+                assert_eq!(context.submission_count(), submissions);
+                assert_eq!(
+                    direct_output
+                        .iter()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>(),
+                    unchanged
+                );
+                assert!(!crate::vulkan::gpu_broken());
+                let _disabled = ComputePool::disable_gpu_matmul_for_scope();
+                let submissions = context.submission_count();
+                assert!(!direct.try_conv_f16(
+                    &weights,
+                    &input,
+                    &mut direct_output,
+                    input_channels,
+                    output_channels,
+                    side,
+                    kernel,
+                    Some(&bias),
+                ));
+                actual.fill(f32::NAN);
+                conv_f16_parallel_into(
+                    &input,
+                    input_channels,
+                    side,
+                    &weights,
+                    output_channels,
+                    kernel,
+                    Some(&bias),
+                    &mut actual,
+                    &pool,
+                    Some(&gpu),
+                )
+                .unwrap();
+                assert_eq!(context.submission_count(), submissions);
+                assert!(actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, e)| a.to_bits() == e.to_bits()));
+            }
+        }
+    }
+
+    #[test]
     fn conv_f16_parallel_runs() {
         let input = [1.0, 2.0, 3.0, 4.0];
         let weights = f16_bytes(&[1.0]);
         let mut output = [0.0; 4];
         let pool = Arc::new(ComputePool::new(1));
 
-        conv_f16_parallel_into(&input, 1, 2, &weights, 1, 1, None, &mut output, &pool).unwrap();
+        conv_f16_parallel_into(
+            &input,
+            1,
+            2,
+            &weights,
+            1,
+            1,
+            None,
+            &mut output,
+            &pool,
+            #[cfg(feature = "vulkan")]
+            None,
+        )
+        .unwrap();
         // Verify output values are non-zero (regression check on parallelism).
         assert!(output.iter().any(|&v| v.is_finite()));
     }
@@ -1394,11 +2795,27 @@ mod tests {
             Some(&[f32::from_bits(0xbd69_17db)]),
             &mut output,
             &Arc::new(ComputePool::new(1)),
+            #[cfg(feature = "vulkan")]
+            None,
         )
         .unwrap();
 
-        assert_eq!(output[0].to_bits(), 0xbeb5_c582);
-        assert_eq!(output[1].to_bits(), 0x3e7d_324b);
+        // This test existed to pin ggml's f16-accumulating im2col dot. The
+        // default build now accumulates that dot in f32 (`FMLAL`), so the pinned
+        // values move; accuracy is proven one level down by
+        // `neon_f16_attention_dot_accumulates_in_f32` and
+        // `f16_dot_dispatch_matches_platform_reduction_contract`, both of which
+        // compare against an f64 reference rather than against ggml. TODO-025.
+        #[cfg(feature = "ggml-f16-dot-parity")]
+        {
+            assert_eq!(output[0].to_bits(), 0xbeb5_c582);
+            assert_eq!(output[1].to_bits(), 0x3e7d_324b);
+        }
+        #[cfg(not(feature = "ggml-f16-dot-parity"))]
+        {
+            assert_eq!(output[0].to_bits(), 0xbeb5_be0d);
+            assert_eq!(output[1].to_bits(), 0x3e7c_d47f);
+        }
     }
 
     #[test]
@@ -1526,7 +2943,7 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
-    fn silu_matches_pinned_ggml_neon_vector_path() {
+    fn silu_matches_scalar_reference() {
         let mut values = [
             0xbf0e_9a5c,
             0x3fa1_c256,
@@ -1538,20 +2955,12 @@ mod tests {
             0xbedd_6d7b,
         ]
         .map(f32::from_bits);
+        let expected = values.map(crate::ops::silu);
 
         silu_inplace_checked(&mut values).unwrap();
 
-        for (actual, expected) in values.into_iter().zip([
-            0xbe4f_c323,
-            0x3f7c_3cc7,
-            0xba79_4131,
-            0xbe58_1bc2,
-            0xbe84_c615,
-            0x3ec8_8d48,
-            0x3f97_e2aa,
-            0xbe2e_4779,
-        ]) {
-            assert!((actual - f32::from_bits(expected)).abs() < 1e-6);
+        for (&actual, &expected) in values.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
         }
     }
 
@@ -1583,6 +2992,8 @@ mod tests {
             Some(&[5.0]),
             &mut output,
             &Arc::new(ComputePool::new(1)),
+            #[cfg(feature = "vulkan")]
+            None,
         )
         .unwrap();
         assert_eq!(output, [20.0]);
@@ -1599,6 +3010,85 @@ mod tests {
         assert!((output[0] - 4.0757656).abs() < 1e-6);
         assert!((output[1] - 3.4768117).abs() < 1e-6);
         assert_eq!(&output[2..], &[0.0; 6]);
+    }
+
+    #[test]
+    fn mid_attention_parallel_matches_scalar_query_partitioning() {
+        for (channels, spatial) in [(1, 1), (4, 5), (7, 17), (512, 33)] {
+            let q = (0..channels * spatial)
+                .map(|index| ((index * 17 % 143) as f32 - 71.0) * 0.03125)
+                .collect::<Vec<_>>();
+            let k = (0..channels * spatial)
+                .map(|index| ((index * 13 % 137) as f32 - 68.0) * -0.046875)
+                .collect::<Vec<_>>();
+            let v = (0..channels * spatial)
+                .map(|index| ((index * 7 % 131) as f32 - 65.0) * 0.0625)
+                .collect::<Vec<_>>();
+            let mut expected = vec![0.0; channels * spatial];
+            let mut scalar_scores = vec![0.0; spatial];
+            one_head_spatial_attention_into(
+                &q,
+                &k,
+                &v,
+                channels,
+                spatial,
+                &mut expected,
+                &mut scalar_scores,
+            )
+            .unwrap();
+            let expected_bits = expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>();
+            for threads in [1, 2, 4, 8] {
+                // NaNs make missing query writes fail, including an empty
+                // worker range when there are more threads than queries.
+                let mut actual = vec![f32::NAN; channels * spatial];
+                let mut parallel_scores = vec![0.0; spatial];
+                one_head_spatial_attention_parallel_into(
+                    &q,
+                    &k,
+                    &v,
+                    channels,
+                    spatial,
+                    &mut actual,
+                    &mut parallel_scores,
+                    &Arc::new(ComputePool::new(threads)),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected_bits,
+                    "channels={channels}, spatial={spatial}, threads={threads}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mid_attention_parallel_rejects_invalid_and_non_finite_buffers() {
+        let pool = Arc::new(ComputePool::new(4));
+        let mut output = [0.0; 2];
+        let mut scores = [0.0; 2];
+        let mut run = |q: &[f32], k: &[f32], v: &[f32]| {
+            one_head_spatial_attention_parallel_into(q, k, v, 1, 2, &mut output, &mut scores, &pool)
+        };
+        assert_eq!(
+            run(&[0.0], &[0.0; 2], &[0.0; 2]).unwrap_err(),
+            "Invalid VAE attention buffer length"
+        );
+        assert_eq!(
+            run(&[0.0, f32::NAN], &[0.0; 2], &[0.0; 2]).unwrap_err(),
+            "Non-finite VAE attention input"
+        );
+        // Finite inputs can still overflow inside a worker. Reuse the same
+        // pool afterwards to verify the error does not leave workers busy.
+        assert!(run(&[0.0, f32::MAX], &[2.0; 2], &[1.0; 2]).is_err());
+        run(&[0.0; 2], &[0.0; 2], &[1.0, 3.0]).unwrap();
+        assert_eq!(output, [2.0; 2]);
     }
 
     #[test]
@@ -1678,6 +3168,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output, [17.0, 39.0]);
+    }
+
+    #[test]
+    fn convolution_clears_padding_when_reusing_a_patch() {
+        let weights: Vec<u8> = [1.0f32; 9]
+            .iter()
+            .flat_map(|value| f16::from_f32(*value).to_bits().to_le_bytes())
+            .collect();
+        for threads in [1, 2, 4] {
+            let mut output = [0.; 4];
+            padded_conv_f16_into(
+                &[1., 2., 3., 4.],
+                1,
+                2,
+                &weights,
+                1,
+                None,
+                &mut output,
+                &Arc::new(ComputePool::new(threads)),
+            )
+            .unwrap();
+            assert_eq!(output, [10.; 4]);
+        }
     }
 
     #[test]

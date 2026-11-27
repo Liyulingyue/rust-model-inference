@@ -1,0 +1,635 @@
+{
+  "oracle": "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff",
+  "source_sha256": "1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa",
+  "tensor_count": 203,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "8465b79ae25762ffe3049407543a5791d4347ab89819acb50c1b1d660ae6c146",
+  "torch": "2.9.1",
+  "atol": 3e-05,
+  "rtol": 0.0003,
+  "rmse_rtol": 5e-05,
+  "cases": {
+    "missing_default": {
+      "vulkan": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_raw",
+          "max_abs": 3.4332275390625e-05,
+          "rmse": 1.1345224726635066e-05,
+          "nrmse": 2.9728279670410646e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.430511474609375e-06,
+          "rmse": 4.246106182952323e-07,
+          "nrmse": 2.681087906467099e-07
+        },
+        "max_abs": 0.00244140625,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9648, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 19260, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_raw",
+          "max_abs": 3.4332275390625e-05,
+          "rmse": 1.1345224726635066e-05,
+          "nrmse": 2.9728279670410646e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.430511474609375e-06,
+          "rmse": 4.246106182952323e-07,
+          "nrmse": 2.681087906467099e-07
+        },
+        "max_abs": 0.00244140625,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9648, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 19260, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      }
+    },
+    "multivariate": {
+      "vulkan": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.refined",
+          "max_abs": 4.71875,
+          "rmse": 0.1442953649977816,
+          "nrmse": 7.440569633632055e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.000171661376953125,
+          "rmse": 8.207178234444257e-06,
+          "nrmse": 1.2626015631306267e-06
+        },
+        "max_abs": 4.71875,
+        "gpu_execution": {
+          "blocks": 1,
+          "dispatches": [
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 56148, host_read_bytes: 9676928, transfer_submissions: 0, live_allocation_bytes: 811085296, peak_allocation_bytes: 811085296 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.refined",
+          "max_abs": 4.71875,
+          "rmse": 0.1442953649977816,
+          "nrmse": 7.440569633632055e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.000171661376953125,
+          "rmse": 8.207178234444257e-06,
+          "nrmse": 1.2626015631306267e-06
+        },
+        "max_abs": 4.71875,
+        "gpu_execution": {
+          "blocks": 1,
+          "dispatches": [
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 56148, host_read_bytes: 9676928, transfer_submissions: 0, live_allocation_bytes: 811085296, peak_allocation_bytes: 811085296 }"
+          ]
+        }
+      }
+    },
+    "numeric_covariates": {
+      "vulkan": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.4.attn.0.output",
+          "max_abs": 0.0001239776611328125,
+          "rmse": 6.156919840276996e-06,
+          "nrmse": 2.296535874676182e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.049041748046875e-05,
+          "rmse": 1.243239200918701e-06,
+          "nrmse": 7.980121424919616e-07
+        },
+        "max_abs": 0.00146484375,
+        "gpu_execution": {
+          "blocks": 1,
+          "dispatches": [
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 124292, host_read_bytes: 21504128, transfer_submissions: 0, live_allocation_bytes: 812169632, peak_allocation_bytes: 812169632 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.4.attn.0.output",
+          "max_abs": 0.0001239776611328125,
+          "rmse": 6.156919840276996e-06,
+          "nrmse": 2.296535874676182e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.049041748046875e-05,
+          "rmse": 1.243239200918701e-06,
+          "nrmse": 7.980121424919616e-07
+        },
+        "max_abs": 0.00146484375,
+        "gpu_execution": {
+          "blocks": 1,
+          "dispatches": [
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 124292, host_read_bytes: 21504128, transfer_submissions: 0, live_allocation_bytes: 812169632, peak_allocation_bytes: 812169632 }"
+          ]
+        }
+      }
+    },
+    "constant": {
+      "vulkan": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 5.793571472167969e-05,
+          "rmse": 4.198169430694023e-06,
+          "nrmse": 4.555276011901196e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        },
+        "max_abs": 0.0025634765625,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9644, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 19252, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 5.793571472167969e-05,
+          "rmse": 4.198169430694023e-06,
+          "nrmse": 4.555276011901196e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        },
+        "max_abs": 0.0025634765625,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9644, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 19252, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      }
+    },
+    "all_missing": {
+      "vulkan": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.block_quantiles",
+          "max_abs": 1696.0,
+          "rmse": 139.3775010115242,
+          "nrmse": 1.3867838349945747e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 2.1187588572502136e-08,
+          "rmse": 3.970353831327959e-09,
+          "nrmse": 9.295941039459305e-07
+        },
+        "max_abs": 1696.0,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9648, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 19260, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.block_quantiles",
+          "max_abs": 1696.0,
+          "rmse": 139.3775010115242,
+          "nrmse": 1.3867838349945747e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 2.1187588572502136e-08,
+          "rmse": 3.970353831327959e-09,
+          "nrmse": 9.295941039459305e-07
+        },
+        "max_abs": 1696.0,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9648, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 19260, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      }
+    },
+    "feedback_window": {
+      "vulkan": {
+        "checkpoints": 565,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.v",
+          "max_abs": 9.274482727050781e-05,
+          "rmse": 1.3686482184918085e-05,
+          "nrmse": 9.901274968589209e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 7.009506225585938e-05,
+          "rmse": 5.6764360855013655e-06,
+          "nrmse": 3.1852336482555995e-06
+        },
+        "max_abs": 0.00537109375,
+        "gpu_execution": {
+          "blocks": 3,
+          "dispatches": [
+            252,
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 18876, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810493840, peak_allocation_bytes: 810493840 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 37716, host_read_bytes: 6451328, transfer_submissions: 0, live_allocation_bytes: 810493840, peak_allocation_bytes: 810493840 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 598, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 56556, host_read_bytes: 9676928, transfer_submissions: 0, live_allocation_bytes: 810493840, peak_allocation_bytes: 810493840 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 565,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.v",
+          "max_abs": 9.274482727050781e-05,
+          "rmse": 1.3686482184918085e-05,
+          "nrmse": 9.901274968589209e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 7.009506225585938e-05,
+          "rmse": 5.6764360855013655e-06,
+          "nrmse": 3.1852336482555995e-06
+        },
+        "max_abs": 0.00537109375,
+        "gpu_execution": {
+          "blocks": 3,
+          "dispatches": [
+            252,
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 18876, host_read_bytes: 3225728, transfer_submissions: 0, live_allocation_bytes: 810493840, peak_allocation_bytes: 810493840 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 37716, host_read_bytes: 6451328, transfer_submissions: 0, live_allocation_bytes: 810493840, peak_allocation_bytes: 810493840 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 598, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 56556, host_read_bytes: 9676928, transfer_submissions: 0, live_allocation_bytes: 810493840, peak_allocation_bytes: 810493840 }"
+          ]
+        }
+      }
+    },
+    "covariate_feedback": {
+      "vulkan": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.4.attn.0.output",
+          "max_abs": 0.0004520416259765625,
+          "rmse": 2.276165694911838e-05,
+          "nrmse": 9.62387794531598e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.1026859283447266e-06,
+          "rmse": 4.051418313172964e-07,
+          "nrmse": 4.0192652669994064e-07
+        },
+        "max_abs": 0.002197265625,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 56148, host_read_bytes: 9676928, transfer_submissions: 0, live_allocation_bytes: 811085296, peak_allocation_bytes: 811085296 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 387, static_upload_bytes: 1614097472, host_write_bytes: 130960, host_read_bytes: 22579328, transfer_submissions: 0, live_allocation_bytes: 811381024, peak_allocation_bytes: 811381024 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.4.attn.0.output",
+          "max_abs": 0.0004520416259765625,
+          "rmse": 2.276165694911838e-05,
+          "nrmse": 9.62387794531598e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.1026859283447266e-06,
+          "rmse": 4.051418313172964e-07,
+          "nrmse": 4.0192652669994064e-07
+        },
+        "max_abs": 0.002197265625,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 56148, host_read_bytes: 9676928, transfer_submissions: 0, live_allocation_bytes: 811085296, peak_allocation_bytes: 811085296 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 387, static_upload_bytes: 1614097472, host_write_bytes: 130960, host_read_bytes: 22579328, transfer_submissions: 0, live_allocation_bytes: 811381024, peak_allocation_bytes: 811381024 }"
+          ]
+        }
+      }
+    },
+    "long_horizon": {
+      "vulkan": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.10.attn.0.output",
+          "max_abs": 0.0003497600555419922,
+          "rmse": 3.611440800910001e-05,
+          "nrmse": 1.2643175197206381e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.07275390625,
+          "rmse": 0.004165390716648764,
+          "nrmse": 2.8490668081691663e-06
+        },
+        "max_abs": 3136.0,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 105644, host_read_bytes: 17740928, transfer_submissions: 0, live_allocation_bytes: 811824616, peak_allocation_bytes: 811824616 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 387, static_upload_bytes: 1614097472, host_write_bytes: 214580, host_read_bytes: 36019328, transfer_submissions: 0, live_allocation_bytes: 811873904, peak_allocation_bytes: 811873904 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.layer.10.attn.0.output",
+          "max_abs": 0.0003497600555419922,
+          "rmse": 3.611440800910001e-05,
+          "nrmse": 1.2643175197206381e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 0.07275390625,
+          "rmse": 0.004165390716648764,
+          "nrmse": 2.8490668081691663e-06
+        },
+        "max_abs": 3136.0,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 105644, host_read_bytes: 17740928, transfer_submissions: 0, live_allocation_bytes: 811824616, peak_allocation_bytes: 811824616 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 387, static_upload_bytes: 1614097472, host_write_bytes: 214580, host_read_bytes: 36019328, transfer_submissions: 0, live_allocation_bytes: 811873904, peak_allocation_bytes: 811873904 }"
+          ]
+        }
+      }
+    },
+    "explicit_mask": {
+      "vulkan": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.output",
+          "max_abs": 3.24249267578125e-05,
+          "rmse": 5.6239107210813125e-06,
+          "nrmse": 2.0537833490054902e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.430511474609375e-06,
+          "rmse": 4.123074908542433e-07,
+          "nrmse": 7.208165505450367e-07
+        },
+        "max_abs": 0.005126953125,
+        "gpu_execution": {
+          "blocks": 1,
+          "dispatches": [
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9648, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 189,
+        "worst_nrmse": {
+          "name": "timestral.layer.18.attn.0.output",
+          "max_abs": 3.24249267578125e-05,
+          "rmse": 5.6239107210813125e-06,
+          "nrmse": 2.0537833490054902e-06
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 1.430511474609375e-06,
+          "rmse": 4.123074908542433e-07,
+          "nrmse": 7.208165505450367e-07
+        },
+        "max_abs": 0.005126953125,
+        "gpu_execution": {
+          "blocks": 1,
+          "dispatches": [
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 9648, host_read_bytes: 1612928, transfer_submissions: 0, live_allocation_bytes: 810345976, peak_allocation_bytes: 810345976 }"
+          ]
+        }
+      }
+    },
+    "clipping_window": {
+      "vulkan": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 1.0195071808993816e-07,
+          "rmse": 3.537068489873034e-08,
+          "nrmse": 7.049007477946379e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 9.43689570931383e-16,
+          "rmse": 3.2550448371344827e-16,
+          "nrmse": 3.255044837134483e-10
+        },
+        "max_abs": 0.00225830078125,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 6444, host_read_bytes: 1075328, transfer_submissions: 0, live_allocation_bytes: 810296688, peak_allocation_bytes: 810296688 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 12852, host_read_bytes: 2150528, transfer_submissions: 0, live_allocation_bytes: 810296688, peak_allocation_bytes: 810296688 }"
+          ]
+        }
+      },
+      "auto": {
+        "checkpoints": 377,
+        "worst_nrmse": {
+          "name": "timestral.head_monotone",
+          "max_abs": 1.0195071808993816e-07,
+          "rmse": 3.537068489873034e-08,
+          "nrmse": 7.049007477946379e-05
+        },
+        "forecast": {
+          "name": "timestral.forecast",
+          "max_abs": 9.43689570931383e-16,
+          "rmse": 3.2550448371344827e-16,
+          "nrmse": 3.255044837134483e-10
+        },
+        "max_abs": 0.00225830078125,
+        "gpu_execution": {
+          "blocks": 2,
+          "dispatches": [
+            252,
+            252
+          ],
+          "counters": [
+            "compute counters=device_cumulative ComputeStats { submissions: 200, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 6444, host_read_bytes: 1075328, transfer_submissions: 0, live_allocation_bytes: 810296688, peak_allocation_bytes: 810296688 }",
+            "compute counters=device_cumulative ComputeStats { submissions: 399, static_uploads: 194, static_upload_bytes: 807049280, host_write_bytes: 12852, host_read_bytes: 2150528, transfer_submissions: 0, live_allocation_bytes: 810296688, peak_allocation_bytes: 810296688 }"
+          ]
+        }
+      }
+    }
+  },
+  "validation_summary": {
+    "cases": 10,
+    "gpu_cli_runs": 20,
+    "checkpoints": 6788,
+    "worst_final_nrmse": 3.1852336482555995e-06,
+    "maximum_final_absolute_error": 0.07275390625,
+    "maximum_intermediate_absolute_error": 3136.0,
+    "vulkan_auto_equal": {
+      "missing_default": true,
+      "multivariate": true,
+      "numeric_covariates": true,
+      "constant": true,
+      "all_missing": true,
+      "feedback_window": true,
+      "covariate_feedback": true,
+      "long_horizon": true,
+      "explicit_mask": true,
+      "clipping_window": true
+    },
+    "ordinary_runtime_trace_disabled": [
+      {
+        "case": "numeric_covariates",
+        "mode": "vulkan",
+        "runtime_trace": false,
+        "equal_to_traced_output": true,
+        "stdout_sha256": "92b54ee1bb2cf9a6e58dd2fe97d4373155deee5764a5264b6c7b707ed1c4b910",
+        "stdout_bytes_equal_to_traced_output": true
+      },
+      {
+        "case": "missing_default",
+        "mode": "auto",
+        "runtime_trace": false,
+        "equal_to_traced_output": true,
+        "stdout_sha256": "88cc3d80525f19a90d55080094784b3e030dc4b0081e781bd10499fc1bc768d5",
+        "stdout_bytes_equal_to_traced_output": true
+      }
+    ],
+    "gpu_operator_checks": {
+      "passed": 3,
+      "device": "Apple M3 Max / MoltenVK",
+      "coverage": [
+        "raw-bit-preserving F32 packing and invalid shapes",
+        "device-local strided F32 projections: rows 1/5/19/32/33, 130 input and 65 output dimensions, padded strides, independent F64 reference",
+        "high-range F32/BF16 projections with 19 rows and partial tiles, independent F64 reference"
+      ]
+    },
+    "unchanged_cpu_model_checks": {
+      "passed": 8,
+      "log": "target/timestral-gpu-small/model-unit.log"
+    },
+    "python_checks": 5,
+    "format_and_diff_check": true,
+    "shader_check": {
+      "passed": true,
+      "compiler": "glslang 15.1.0"
+    },
+    "source_sha256": {
+      "src/models/timestral/gpu.rs": "50fb9bf58409b80e264e8a1e9be3655df1114b90acd0e3bd712ced57bea33102",
+      "src/vulkan/dense.rs": "6b92de02bc9351d1962ad97d6038ce0d9cc50a7e511020029ba42f7cd7eaab6c",
+      "src/vulkan/ops.rs": "876d1f5f80c1604a35c8c8e02ad1022651b691e1939c4b9348a8e704a125c611",
+      "shaders/glsl/float_matmul_small.comp": "c2189a2f16ae335368fb57f747040ca532654fdba753770175e2c2603f45870d",
+      "shaders/bin/float_matmul_small.spv": "b0b2540c7e24cc862ec36b86a29eb3cfa769cf3a1bb382ffda727cd8e5bc0488"
+    },
+    "limits": [
+      "Intermediate Oracle checkpoints run on M3 Max / MoltenVK; NAVI31 release validation compares final forecasts only.",
+      "Floating reductions use the original numerical bounds; no reduced precision.",
+      "Full repository suite, official dataset quality and concurrent service throughput were not rerun."
+    ],
+    "vulkan_auto_stdout_bytes_equal": true
+  }
+}

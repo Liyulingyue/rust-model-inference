@@ -1,0 +1,3326 @@
+{
+  "schema_version": 1,
+  "source_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+  "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+  "hardware": {
+    "cpu": "2 x AMD EPYC 9334 32-Core Processor",
+    "logical_cpus": 128,
+    "cpu_quota_cores": 16,
+    "memory_limit_bytes": 59055800320,
+    "gpu": "AMD Radeon Graphics (RADV NAVI31)",
+    "gpu_architecture": "gfx1100",
+    "vram_bytes": 51522830336,
+    "vulkan_devices": [
+      {
+        "name": "AMD Radeon Graphics (RADV NAVI31)",
+        "api_version": 4211006,
+        "driver_version": 104865800,
+        "vendor_id": 4098,
+        "device_id": 29771,
+        "device_type": 2
+      },
+      {
+        "name": "llvmpipe (LLVM 20.1.2, 256 bits)",
+        "api_version": 4211006,
+        "driver_version": 104865800,
+        "vendor_id": 65541,
+        "device_id": 0,
+        "device_type": 4
+      }
+    ],
+    "drivers": [
+      "libvulkan1:amd64\t1.3.275.0-1build1",
+      "mesa-vulkan-drivers:amd64\t25.2.8-0ubuntu0.24.04.1"
+    ]
+  },
+  "build": {
+    "command": "cargo build --locked --offline --release --features vulkan --bin rust-model-inference --example timestral_bench --jobs 16",
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "rustflags": [
+      "-C",
+      "target-cpu=native"
+    ],
+    "parity_trace": false,
+    "release_lto": "fat",
+    "release_codegen_units": 1,
+    "build_seconds": 452
+  },
+  "environment": {
+    "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99,
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109,
+      110,
+      111,
+      112,
+      113,
+      114,
+      115,
+      116,
+      117,
+      118,
+      119,
+      120,
+      121,
+      122,
+      123,
+      124,
+      125,
+      126,
+      127
+    ],
+    "cpu_max": "1600000 100000",
+    "memory_max": "59055800320",
+    "benchmark_sha256": "14c8604c0f17b305d1c08e77b15b815dddb2f0bee8c17151bfcf714fd1879991",
+    "source_archive_sha256": "6e468f4c727b16119563842ba2b0aac42731492c834d600db259f80080046b37"
+  },
+  "methodology": {
+    "main_warm_repeats": 5,
+    "main_cli_processes": 3,
+    "scaling_warm_repeats": 3,
+    "scaling_cli_processes": 1,
+    "max_context_warm_repeats": 1,
+    "max_context_cli_processes": 1,
+    "wall_clock": "resident forecast: Rust Instant, GPU synchronized/read back; CLI: child process lifetime via wait4 wrapper",
+    "rss": "wait4 peak process RSS; device allocation counters are separate and must not be blindly added",
+    "cache": "OS file and driver caches retained; fresh process is not a disk-cache-cold run",
+    "default_behavior": "F32, symmetric averaging and nonnegative clipping; without_symmetry is the explicit control",
+    "load": "all jobs sequential; no sampled Rust compiler/linker overlaps; another model upload existed in this container, so this is not an exclusive host benchmark",
+    "numeric_acceptance": {
+      "max_abs_atol": 3e-05,
+      "max_abs_rtol": 0.0003,
+      "rmse_atol": 3e-05,
+      "rmse_rtol": 5e-05
+    }
+  },
+  "validation": {
+    "process_measurements": 75,
+    "forecast_calls": 168,
+    "all_repeated_outputs_exact": true,
+    "all_cli_outputs_equal_resident": true,
+    "all_gpu_jobs_on_real_navi31": true,
+    "no_observed_compiler_overlap": true,
+    "all_eight_cpu_gpu_forecast_comparisons_passed": true,
+    "auto_equals_vulkan_exactly": true,
+    "cpu_thread_comparisons": {
+      "1": {
+        "standard": {
+          "exact": true,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        },
+        "long_context": {
+          "exact": true,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        }
+      },
+      "8": {
+        "standard": {
+          "exact": true,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        },
+        "long_context": {
+          "exact": true,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        }
+      },
+      "16": {
+        "standard": {
+          "exact": true,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        },
+        "long_context": {
+          "exact": true,
+          "passed": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "nrmse": 0.0
+        }
+      }
+    }
+  },
+  "raw_archive": {
+    "path": "target/timestral-remote/results.tar.gz",
+    "sha256": "84f55f3236e27d8edc0aa95738d6d1d754c161c94cc3365ac1c82ab4d8ca5372"
+  },
+  "excluded_local_sources": [
+    {
+      "path": "target/timestral-performance-main/report.json",
+      "reason": "concurrent compilation; exploratory shared-load measurements"
+    },
+    {
+      "path": "target/timestral-performance-quiet/report.json",
+      "reason": "compilation restarted during later samples; use remote run for conclusions"
+    }
+  ],
+  "limits": [
+    "Synthetic latency/capacity workloads, not dataset forecast-quality evaluation",
+    "No official Oracle intermediate-checkpoint comparison on NAVI31 in this performance run",
+    "Maximum context has one warm and one CLI sample per backend, not a latency distribution",
+    "No concurrent request throughput or kernel-level GPU profiling",
+    "CPU/GPU hybrid entry: scaling, patch/head projection and postprocessing remain CPU"
+  ],
+  "runs": {
+    "timestral-performance-remote": {
+      "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+      "started_at_utc": "2026-10-22T08:15:54.491932+00:00",
+      "load_average_before": [
+        16.9423828125,
+        18.7060546875,
+        19.12744140625
+      ],
+      "git_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+      "threads": 4,
+      "warm_repeats": 5,
+      "cli_repeats": 3,
+      "model": "/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M/Timestral-209M-F32.gguf",
+      "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+      "model_bytes": 837265632,
+      "binaries": {
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/rust-model-inference": "03b9bd09ecfeaae2c466bac882aac62b17d60265ab9970068bc0564712805baa",
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/examples/timestral_bench": "fc33dcafd4fafdefbeef4677489bcc0d0cf8caff13dad97521c00e7108985f17"
+      },
+      "cases": {
+        "short": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.45609500000000003,
+                "source_open_ms": 0.070579,
+                "tensor_validation_ms": 147.144171,
+                "first_forecast_ms": 147.872593,
+                "warm_forecast_ms": [
+                  146.073293,
+                  150.440446,
+                  143.616119,
+                  124.182538,
+                  124.520755
+                ],
+                "serialize_ms": [
+                  0.01472,
+                  0.014209999999999999,
+                  0.015189,
+                  0.01678,
+                  0.0193,
+                  0.019559999999999998
+                ],
+                "output_bytes": 5798,
+                "output_sha256": "9148b604e25b720a52d59d48b116e94089d97c51d3948d79e41b733f27ca4f53",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 1029.838165268302,
+                "max_rss_bytes": 839909376,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 359.4568185508251,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 378.9991047233343,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 378.8523059338331,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 143.616119,
+              "warm_min_ms": 124.182538,
+              "warm_max_ms": 150.440446,
+              "cli_median_ms": 378.8523059338331,
+              "horizon_points_per_second": 167.11216099635723,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 0.428146,
+                "source_open_ms": 0.080749,
+                "tensor_validation_ms": 147.588151,
+                "first_forecast_ms": 1746.2803629999999,
+                "warm_forecast_ms": [
+                  211.26448200000002,
+                  211.819376,
+                  211.590758,
+                  211.15467299999997,
+                  211.953154
+                ],
+                "serialize_ms": [
+                  0.01653,
+                  0.017408999999999997,
+                  0.01662,
+                  0.015359999999999999,
+                  0.015400000000000002,
+                  0.01666
+                ],
+                "output_bytes": 5832,
+                "output_sha256": "5e9d2849b722e995211e37cd3e4b4439ab87daba81332cfbb61505dd9cd79ce2",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 3022.1407432109118,
+                "max_rss_bytes": 990208000,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {
+                    "submissions": 301,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 153828,
+                    "host_read_bytes": 147584,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 810395264,
+                    "peak_allocation_bytes": 810395264
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 25668,
+                      "host_read_bytes": 24704,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 51300,
+                      "host_read_bytes": 49280,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 76932,
+                      "host_read_bytes": 73856,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 102564,
+                      "host_read_bytes": 98432,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    {
+                      "submissions": 251,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 128196,
+                      "host_read_bytes": 123008,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    {
+                      "submissions": 301,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 153828,
+                      "host_read_bytes": 147584,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1039.6305862814188,
+                  "max_rss_bytes": 914358272,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 25668,
+                      "host_read_bytes": 24704,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1054.6987224370241,
+                  "max_rss_bytes": 916455424,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 25668,
+                      "host_read_bytes": 24704,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 978.9554439485073,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/short-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 25668,
+                      "host_read_bytes": 24704,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 810395264,
+                      "peak_allocation_bytes": 810395264
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 211.590758,
+              "warm_min_ms": 211.15467299999997,
+              "warm_max_ms": 211.953154,
+              "cli_median_ms": 1039.6305862814188,
+              "horizon_points_per_second": 113.42650419542427,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 7.152557373046875e-07,
+                "rmse": 2.057982402917023e-07,
+                "nrmse": 4.849925315322774e-07
+              },
+              "warm_speedup_vs_cpu": 0.6787447635118354
+            }
+          }
+        },
+        "standard": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.453786,
+                "source_open_ms": 0.062719,
+                "tensor_validation_ms": 146.789959,
+                "first_forecast_ms": 244.883717,
+                "warm_forecast_ms": [
+                  235.136163,
+                  225.433657,
+                  242.428373,
+                  251.10585000000003,
+                  255.191595
+                ],
+                "serialize_ms": [
+                  0.073619,
+                  0.068659,
+                  0.04614,
+                  0.055139,
+                  0.056129,
+                  0.060859
+                ],
+                "output_bytes": 22164,
+                "output_sha256": "ed7318dbc6ce3c5befb2dce848b1c99f7477648eb417e2606e99be92f50120b8",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 1647.7735694497824,
+                "max_rss_bytes": 839909376,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 497.2048606723547,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 496.71545997262,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 461.00181341171265,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 242.428373,
+              "warm_min_ms": 225.433657,
+              "warm_max_ms": 255.191595,
+              "cli_median_ms": 496.71545997262,
+              "horizon_points_per_second": 395.99325281946267,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 0.480475,
+                "source_open_ms": 0.065479,
+                "tensor_validation_ms": 149.606399,
+                "first_forecast_ms": 1478.3364,
+                "warm_forecast_ms": [
+                  842.149404,
+                  843.141753,
+                  842.921656,
+                  842.4430309999999,
+                  842.275012
+                ],
+                "serialize_ms": [
+                  0.04725,
+                  0.051499,
+                  0.056779,
+                  0.049279,
+                  0.048239,
+                  0.051879999999999996
+                ],
+                "output_bytes": 22179,
+                "output_sha256": "060a4881e5f4b6083bca179fecb292a6e0f06f90ce15553f7a127c519f18320b",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 5903.64876575768,
+                "max_rss_bytes": 909115392,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {
+                    "submissions": 301,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 730452,
+                    "host_read_bytes": 700544,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 811134592,
+                    "peak_allocation_bytes": 811134592
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 243508,
+                      "host_read_bytes": 233600,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 365244,
+                      "host_read_bytes": 350336,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 486980,
+                      "host_read_bytes": 467072,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 251,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 608716,
+                      "host_read_bytes": 583808,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 301,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 730452,
+                      "host_read_bytes": 700544,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1441.6421055793762,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1438.2253922522068,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1439.6280571818352,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/standard-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 842.4430309999999,
+              "warm_min_ms": 842.149404,
+              "warm_max_ms": 843.141753,
+              "cli_median_ms": 1439.6280571818352,
+              "horizon_points_per_second": 113.95429301141671,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 1.6167759895324707e-06,
+                "rmse": 2.3991613016888496e-07,
+                "nrmse": 3.315331105434247e-07
+              },
+              "warm_speedup_vs_cpu": 0.28776826928253146
+            }
+          }
+        },
+        "without_symmetry": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.49237499999999995,
+                "source_open_ms": 0.061399,
+                "tensor_validation_ms": 146.280605,
+                "first_forecast_ms": 123.752879,
+                "warm_forecast_ms": [
+                  119.715423,
+                  120.920159,
+                  127.261391,
+                  128.478828,
+                  128.53780700000002
+                ],
+                "serialize_ms": [
+                  0.047279,
+                  0.06884900000000001,
+                  0.0618,
+                  0.061549000000000006,
+                  0.06973900000000001,
+                  0.061649
+                ],
+                "output_bytes": 22223,
+                "output_sha256": "9529a560ebb5d07d5077e886b5a1268db8dd4308919dc15164ca53c6b6adc050",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 940.9415610134602,
+                "max_rss_bytes": 839909376,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 6,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 360.23111641407013,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 1,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 326.47556252777576,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 1,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 339.413421228528,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 1,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 127.261391,
+              "warm_min_ms": 119.715423,
+              "warm_max_ms": 128.53780700000002,
+              "cli_median_ms": 339.413421228528,
+              "horizon_points_per_second": 754.3529050377895,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 0.454305,
+                "source_open_ms": 0.06274,
+                "tensor_validation_ms": 146.440192,
+                "first_forecast_ms": 758.26243,
+                "warm_forecast_ms": [
+                  423.137022,
+                  422.519489,
+                  422.214043,
+                  421.766458,
+                  422.745528
+                ],
+                "serialize_ms": [
+                  0.04702,
+                  0.04632,
+                  0.04575,
+                  0.044489,
+                  0.044320000000000005,
+                  0.045509
+                ],
+                "output_bytes": 22215,
+                "output_sha256": "e98278db76df65bcd51bb21b9bfa209cfb9d84f2eb5d405f54b068c359cbf4db",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 3080.1224689930677,
+                "max_rss_bytes": 909115392,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 6,
+                  "final_counters": {
+                    "submissions": 151,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 365244,
+                    "host_read_bytes": 350336,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 811134592,
+                    "peak_allocation_bytes": 811134592
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 26,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 60904,
+                      "host_read_bytes": 58496,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 76,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 182640,
+                      "host_read_bytes": 175232,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 243508,
+                      "host_read_bytes": 233600,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 126,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 304376,
+                      "host_read_bytes": 291968,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 365244,
+                      "host_read_bytes": 350336,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1007.7588055282831,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 1,
+                    "final_counters": {
+                      "submissions": 26,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 60904,
+                      "host_read_bytes": 58496,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1010.4906223714352,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 1,
+                    "final_counters": {
+                      "submissions": 26,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 60904,
+                      "host_read_bytes": 58496,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1020.3385651111603,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/without_symmetry-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 1,
+                    "final_counters": {
+                      "submissions": 26,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 60904,
+                      "host_read_bytes": 58496,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 422.519489,
+              "warm_min_ms": 421.766458,
+              "warm_max_ms": 423.137022,
+              "cli_median_ms": 1010.4906223714352,
+              "horizon_points_per_second": 227.20845428268515,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 1.1920928955078125e-06,
+                "rmse": 2.8568353861314314e-07,
+                "nrmse": 3.963475567785215e-07
+              },
+              "warm_speedup_vs_cpu": 0.3011964993643169
+            }
+          }
+        },
+        "long_context": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.642574,
+                "source_open_ms": 0.061759,
+                "tensor_validation_ms": 146.981086,
+                "first_forecast_ms": 1150.8329820000001,
+                "warm_forecast_ms": [
+                  1168.0127659999998,
+                  1152.902889,
+                  1132.970556,
+                  1159.107422,
+                  1131.711658
+                ],
+                "serialize_ms": [
+                  0.05126,
+                  0.042629999999999994,
+                  0.04333,
+                  0.042669,
+                  0.05014,
+                  0.053489999999999996
+                ],
+                "output_bytes": 21760,
+                "output_sha256": "192ab5894ea43763714f95ebfa89fdf2c2b69205d521bddc54c451de9bbeb8ae",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 7089.708836749196,
+                "max_rss_bytes": 842940416,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1351.9614208489656,
+                  "max_rss_bytes": 847990784,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1307.9448081552982,
+                  "max_rss_bytes": 847536128,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1397.1956968307495,
+                  "max_rss_bytes": 848588800,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 1152.902889,
+              "warm_min_ms": 1131.711658,
+              "warm_max_ms": 1168.0127659999998,
+              "cli_median_ms": 1351.9614208489656,
+              "horizon_points_per_second": 83.26807133189516,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 0.785852,
+                "source_open_ms": 0.053999000000000005,
+                "tensor_validation_ms": 147.45455099999998,
+                "first_forecast_ms": 6113.574988,
+                "warm_forecast_ms": [
+                  5757.256139,
+                  5754.480066,
+                  5758.760967,
+                  5757.686056,
+                  5760.561702
+                ],
+                "serialize_ms": [
+                  0.04415,
+                  0.043980000000000005,
+                  0.043019999999999996,
+                  0.043689,
+                  0.042969,
+                  0.043498999999999996
+                ],
+                "output_bytes": 21771,
+                "output_sha256": "d1c323edee79be97821ec2a9ad3f3a823c75d832a77bd1e0e5efbba7d5765cc4",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 35112.751265987754,
+                "max_rss_bytes": 909807616,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {
+                    "submissions": 301,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 5036628,
+                    "host_read_bytes": 4829312,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 816654848,
+                    "peak_allocation_bytes": 816654848
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 839468,
+                      "host_read_bytes": 804992,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 1678900,
+                      "host_read_bytes": 1609856,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 2518332,
+                      "host_read_bytes": 2414720,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 3357764,
+                      "host_read_bytes": 3219584,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    {
+                      "submissions": 251,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 4197196,
+                      "host_read_bytes": 4024448,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    {
+                      "submissions": 301,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 5036628,
+                      "host_read_bytes": 4829312,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 6281.416445970535,
+                  "max_rss_bytes": 914878464,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 839468,
+                      "host_read_bytes": 804992,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 6335.892129689455,
+                  "max_rss_bytes": 915226624,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 839468,
+                      "host_read_bytes": 804992,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 6320.367772132158,
+                  "max_rss_bytes": 915365888,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_context-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 839468,
+                      "host_read_bytes": 804992,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 816654848,
+                      "peak_allocation_bytes": 816654848
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 5757.686056,
+              "warm_min_ms": 5754.480066,
+              "warm_max_ms": 5760.561702,
+              "cli_median_ms": 6320.367772132158,
+              "horizon_points_per_second": 16.673364797297314,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 4.76837158203125e-07,
+                "rmse": 1.3355865260562522e-07,
+                "nrmse": 1.2679021986110056e-07
+              },
+              "warm_speedup_vs_cpu": 0.20023719212661428
+            }
+          }
+        },
+        "multivariate8": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.769181,
+                "source_open_ms": 0.0606,
+                "tensor_validation_ms": 147.74246699999998,
+                "first_forecast_ms": 1168.679849,
+                "warm_forecast_ms": [
+                  1176.8726199999999,
+                  1173.7743130000001,
+                  1180.772987,
+                  1171.5216580000001,
+                  1187.87085
+                ],
+                "serialize_ms": [
+                  0.372716,
+                  0.42617499999999997,
+                  0.401046,
+                  0.429055,
+                  0.29692599999999997,
+                  0.402146
+                ],
+                "output_bytes": 165684,
+                "output_sha256": "e983fa8b0c8505a23cec8444d96fbc38db0d82fd3b6501df4c1d36552b635974",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 7256.634438410401,
+                "max_rss_bytes": 843698176,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1435.9521381556988,
+                  "max_rss_bytes": 849485824,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1426.4974985271692,
+                  "max_rss_bytes": 848535552,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1416.9846996665,
+                  "max_rss_bytes": 849264640,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 1176.8726199999999,
+              "warm_min_ms": 1171.5216580000001,
+              "warm_max_ms": 1187.87085,
+              "cli_median_ms": 1426.4974985271692,
+              "horizon_points_per_second": 652.5769968206075,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 0.667993,
+                "source_open_ms": 0.05849,
+                "tensor_validation_ms": 148.997883,
+                "first_forecast_ms": 6982.094314,
+                "warm_forecast_ms": [
+                  6629.088481,
+                  6628.308606,
+                  6626.121427,
+                  6626.083682,
+                  6626.851664
+                ],
+                "serialize_ms": [
+                  0.354236,
+                  0.298787,
+                  0.33579600000000004,
+                  0.336706,
+                  0.321677,
+                  0.29350699999999996
+                ],
+                "output_bytes": 165712,
+                "output_sha256": "7f975469bab97e5a9f17855f6d2e5fc17fe071823270fbea90159976feba2da9",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 40332.147385925055,
+                "max_rss_bytes": 909758464,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {
+                    "submissions": 301,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 5639076,
+                    "host_read_bytes": 5603456,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 817689888,
+                    "peak_allocation_bytes": 817689888
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 939876,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 1879716,
+                      "host_read_bytes": 1867904,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 2819556,
+                      "host_read_bytes": 2801792,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 3759396,
+                      "host_read_bytes": 3735680,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 251,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 4699236,
+                      "host_read_bytes": 4669568,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 301,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 5639076,
+                      "host_read_bytes": 5603456,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 7191.088581457734,
+                  "max_rss_bytes": 916361216,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 939876,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 7211.659144610167,
+                  "max_rss_bytes": 915644416,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 939876,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 7237.138452008367,
+                  "max_rss_bytes": 913760256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/multivariate8-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 939876,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 6626.851664,
+              "warm_min_ms": 6626.083682,
+              "warm_max_ms": 6629.088481,
+              "cli_median_ms": 7211.659144610167,
+              "horizon_points_per_second": 115.89213686072331,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 1.5348196029663086e-06,
+                "rmse": 2.3742209957458986e-07,
+                "nrmse": 1.346788775315649e-07
+              },
+              "warm_speedup_vs_cpu": 0.17759151399046616
+            }
+          }
+        },
+        "covariates": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.593474,
+                "source_open_ms": 0.067559,
+                "tensor_validation_ms": 127.778844,
+                "first_forecast_ms": 1261.152378,
+                "warm_forecast_ms": [
+                  1201.610746,
+                  1236.284574,
+                  1236.710729,
+                  1212.8087970000001,
+                  1206.680677
+                ],
+                "serialize_ms": [
+                  0.048289,
+                  0.04779,
+                  0.04782,
+                  0.047719000000000004,
+                  0.047499,
+                  0.048129
+                ],
+                "output_bytes": 22183,
+                "output_sha256": "9d01b453bbccd68100eca0955049f0248d908e2eb3d186e12d3780a9a2e561ad",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 7520.5199755728245,
+                "max_rss_bytes": 843644928,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1417.261315509677,
+                  "max_rss_bytes": 847474688,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1407.9233091324568,
+                  "max_rss_bytes": 848191488,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1451.9185982644558,
+                  "max_rss_bytes": 847478784,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 1212.8087970000001,
+              "warm_min_ms": 1201.610746,
+              "warm_max_ms": 1236.710729,
+              "cli_median_ms": 1417.261315509677,
+              "horizon_points_per_second": 79.15509867463469,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 3.928361,
+                "source_open_ms": 0.056219,
+                "tensor_validation_ms": 148.160853,
+                "first_forecast_ms": 6959.163248000001,
+                "warm_forecast_ms": [
+                  6610.8507,
+                  6610.422037,
+                  6615.203032,
+                  6614.458853,
+                  6616.080451
+                ],
+                "serialize_ms": [
+                  0.047339,
+                  0.047499,
+                  0.047379000000000004,
+                  0.047009999999999996,
+                  0.046740000000000004,
+                  0.046879000000000004
+                ],
+                "output_bytes": 22212,
+                "output_sha256": "7234591a9dcf129eb6e3a7373be9f85e6306515b2016e6177c109f403ef481e7",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 40241.41457118094,
+                "max_rss_bytes": 911650816,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 12,
+                  "final_counters": {
+                    "submissions": 301,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 5665572,
+                    "host_read_bytes": 5603456,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 817689888,
+                    "peak_allocation_bytes": 817689888
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 944292,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 1888548,
+                      "host_read_bytes": 1867904,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 2832804,
+                      "host_read_bytes": 2801792,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 3777060,
+                      "host_read_bytes": 3735680,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 251,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 4721316,
+                      "host_read_bytes": 4669568,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    {
+                      "submissions": 301,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 5665572,
+                      "host_read_bytes": 5603456,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 7186.079973354936,
+                  "max_rss_bytes": 913223680,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 944292,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 7239.542808383703,
+                  "max_rss_bytes": 915320832,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 944292,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 7201.637396588922,
+                  "max_rss_bytes": 915320832,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/covariates-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 944292,
+                      "host_read_bytes": 934016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 817689888,
+                      "peak_allocation_bytes": 817689888
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 6614.458853,
+              "warm_min_ms": 6610.422037,
+              "warm_max_ms": 6616.080451,
+              "cli_median_ms": 7201.637396588922,
+              "horizon_points_per_second": 14.513658960393869,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 8.344650268554688e-07,
+                "rmse": 2.765061887658328e-07,
+                "nrmse": 3.942480889113055e-07
+              },
+              "warm_speedup_vs_cpu": 0.18335722149816208
+            }
+          }
+        },
+        "long_horizon": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 0.488905,
+                "source_open_ms": 0.061259,
+                "tensor_validation_ms": 147.67539399999998,
+                "first_forecast_ms": 963.185817,
+                "warm_forecast_ms": [
+                  971.232514,
+                  983.667735,
+                  982.672765,
+                  981.9809710000001,
+                  999.113554
+                ],
+                "serialize_ms": [
+                  0.622003,
+                  0.641043,
+                  0.6165240000000001,
+                  0.5101749999999999,
+                  0.461995,
+                  0.661864
+                ],
+                "output_bytes": 235498,
+                "output_sha256": "7d1901fc54000b81e0aafc9763e8b36fb6a1241ce11be16e59953bb6c5ebe009",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 6071.394860744476,
+                "max_rss_bytes": 840957952,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 24,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1234.2875078320503,
+                  "max_rss_bytes": 845651968,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 4,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1173.1659267097712,
+                  "max_rss_bytes": 844103680,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-cpu.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 4,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 992.8143545985222,
+                  "max_rss_bytes": 843055104,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-cpu.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 4,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 982.672765,
+              "warm_min_ms": 971.232514,
+              "warm_max_ms": 999.113554,
+              "cli_median_ms": 1173.1659267097712,
+              "horizon_points_per_second": 1043.0735810613414,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 0.47588600000000003,
+                "source_open_ms": 0.065319,
+                "tensor_validation_ms": 147.92307699999998,
+                "first_forecast_ms": 4932.054983999999,
+                "warm_forecast_ms": [
+                  4265.964003,
+                  4267.4319479999995,
+                  4271.195209,
+                  4265.193451,
+                  4270.743294
+                ],
+                "serialize_ms": [
+                  0.49735399999999996,
+                  0.48895500000000003,
+                  0.492285,
+                  0.49416499999999997,
+                  0.49667500000000003,
+                  0.49026500000000006
+                ],
+                "output_bytes": 235454,
+                "output_sha256": "62da8ec96c6a15d89b7cf9af8a927bb4d15d260316d44e7e7a8249fc0022c97b",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 26486.037792637944,
+                "max_rss_bytes": 908066816,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 24,
+                  "final_counters": {
+                    "submissions": 601,
+                    "static_uploads": 387,
+                    "static_upload_bytes": 1614097472,
+                    "host_write_bytes": 3728004,
+                    "host_read_bytes": 3575936,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 812613232,
+                    "peak_allocation_bytes": 812613232
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 101,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 621364,
+                      "host_read_bytes": 596096,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 1242692,
+                      "host_read_bytes": 1192064,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    {
+                      "submissions": 301,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 1864020,
+                      "host_read_bytes": 1788032,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    {
+                      "submissions": 401,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 2485348,
+                      "host_read_bytes": 2384000,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    {
+                      "submissions": 501,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 3106676,
+                      "host_read_bytes": 2979968,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    {
+                      "submissions": 601,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 3728004,
+                      "host_read_bytes": 3575936,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 5182.255398482084,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 4,
+                    "final_counters": {
+                      "submissions": 101,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 621364,
+                      "host_read_bytes": 596096,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 5167.430642992258,
+                  "max_rss_bytes": 916455424,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-vulkan.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 4,
+                    "final_counters": {
+                      "submissions": 101,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 621364,
+                      "host_read_bytes": 596096,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 5194.284811615944,
+                  "max_rss_bytes": 914358272,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-performance-remote/long_horizon-vulkan.cli-2.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 4,
+                    "final_counters": {
+                      "submissions": 101,
+                      "static_uploads": 387,
+                      "static_upload_bytes": 1614097472,
+                      "host_write_bytes": 621364,
+                      "host_read_bytes": 596096,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 812613232,
+                      "peak_allocation_bytes": 812613232
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 4267.4319479999995,
+              "warm_min_ms": 4265.193451,
+              "warm_max_ms": 4271.195209,
+              "cli_median_ms": 5182.255398482084,
+              "horizon_points_per_second": 240.1912936140394,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.00017547607421875,
+                "rmse": 7.341110164504648e-06,
+                "nrmse": 3.061600353249367e-06
+              },
+              "warm_speedup_vs_cpu": 0.23027262695086337
+            }
+          }
+        }
+      },
+      "finished_at_utc": "2026-10-22T08:27:01.669796+00:00",
+      "load_average_after": [
+        18.1357421875,
+        19.96044921875,
+        20.1435546875
+      ]
+    },
+    "timestral-scaling-1": {
+      "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+      "started_at_utc": "2026-10-22T08:27:02.434115+00:00",
+      "load_average_before": [
+        18.1357421875,
+        19.96044921875,
+        20.1435546875
+      ],
+      "git_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+      "threads": 1,
+      "warm_repeats": 3,
+      "cli_repeats": 1,
+      "model": "/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M/Timestral-209M-F32.gguf",
+      "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+      "model_bytes": 837265632,
+      "binaries": {
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/rust-model-inference": "03b9bd09ecfeaae2c466bac882aac62b17d60265ab9970068bc0564712805baa",
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/examples/timestral_bench": "fc33dcafd4fafdefbeef4677489bcc0d0cf8caff13dad97521c00e7108985f17"
+      },
+      "cases": {
+        "standard": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/standard.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 1,
+                "setup_ms": 0.298197,
+                "source_open_ms": 0.061239,
+                "tensor_validation_ms": 147.87648000000002,
+                "first_forecast_ms": 507.845188,
+                "warm_forecast_ms": [
+                  505.01665699999995,
+                  502.27189400000003,
+                  500.830059
+                ],
+                "serialize_ms": [
+                  0.046900000000000004,
+                  0.04792999999999999,
+                  0.072919,
+                  0.05539
+                ],
+                "output_bytes": 22164,
+                "output_sha256": "ed7318dbc6ce3c5befb2dce848b1c99f7477648eb417e2606e99be92f50120b8",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/standard-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 2212.3288605362177,
+                "max_rss_bytes": 840957952,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/standard-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 729.1695009917021,
+                  "max_rss_bytes": 844103680,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/standard-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 502.27189400000003,
+              "warm_min_ms": 500.830059,
+              "warm_max_ms": 505.01665699999995,
+              "cli_median_ms": 729.1695009917021,
+              "horizon_points_per_second": 191.13153880754473,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            }
+          }
+        },
+        "long_context": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/long_context.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 1,
+                "setup_ms": 0.512694,
+                "source_open_ms": 0.05701,
+                "tensor_validation_ms": 147.935237,
+                "first_forecast_ms": 3476.720872,
+                "warm_forecast_ms": [
+                  3469.829042,
+                  3392.7767630000003,
+                  3417.778115
+                ],
+                "serialize_ms": [
+                  0.04314,
+                  0.0424,
+                  0.042889000000000004,
+                  0.042619
+                ],
+                "output_bytes": 21760,
+                "output_sha256": "192ab5894ea43763714f95ebfa89fdf2c2b69205d521bddc54c451de9bbeb8ae",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/long_context-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 13952.655546367168,
+                "max_rss_bytes": 845037568,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/long_context-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 3604.1966006159782,
+                  "max_rss_bytes": 849727488,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-1/long_context-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 3417.778115,
+              "warm_min_ms": 3392.7767630000003,
+              "warm_max_ms": 3469.829042,
+              "cli_median_ms": 3604.1966006159782,
+              "horizon_points_per_second": 28.088423756555066,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            }
+          }
+        }
+      },
+      "finished_at_utc": "2026-10-22T08:27:35.763829+00:00",
+      "load_average_after": [
+        17.49853515625,
+        19.599609375,
+        20.0146484375
+      ]
+    },
+    "timestral-scaling-8": {
+      "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+      "started_at_utc": "2026-10-22T08:27:36.494791+00:00",
+      "load_average_before": [
+        17.49853515625,
+        19.599609375,
+        20.0146484375
+      ],
+      "git_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+      "threads": 8,
+      "warm_repeats": 3,
+      "cli_repeats": 1,
+      "model": "/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M/Timestral-209M-F32.gguf",
+      "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+      "model_bytes": 837265632,
+      "binaries": {
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/rust-model-inference": "03b9bd09ecfeaae2c466bac882aac62b17d60265ab9970068bc0564712805baa",
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/examples/timestral_bench": "fc33dcafd4fafdefbeef4677489bcc0d0cf8caff13dad97521c00e7108985f17"
+      },
+      "cases": {
+        "standard": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/standard.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 8,
+                "setup_ms": 0.710913,
+                "source_open_ms": 0.058329,
+                "tensor_validation_ms": 147.55395800000002,
+                "first_forecast_ms": 204.01129500000002,
+                "warm_forecast_ms": [
+                  229.195816,
+                  217.11849999999998,
+                  207.948835
+                ],
+                "serialize_ms": [
+                  0.06190999999999999,
+                  0.061109000000000004,
+                  0.0696,
+                  0.068959
+                ],
+                "output_bytes": 22164,
+                "output_sha256": "ed7318dbc6ce3c5befb2dce848b1c99f7477648eb417e2606e99be92f50120b8",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/standard-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 1052.5345522910357,
+                "max_rss_bytes": 839909376,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/standard-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 433.7974451482296,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/standard-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 217.11849999999998,
+              "warm_min_ms": 207.948835,
+              "warm_max_ms": 229.195816,
+              "cli_median_ms": 433.7974451482296,
+              "horizon_points_per_second": 442.15486013398214,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            }
+          }
+        },
+        "long_context": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/long_context.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 8,
+                "setup_ms": 0.96475,
+                "source_open_ms": 3.8989599999999998,
+                "tensor_validation_ms": 127.18938699999998,
+                "first_forecast_ms": 776.475224,
+                "warm_forecast_ms": [
+                  741.701333,
+                  740.8825909999999,
+                  742.7605510000001
+                ],
+                "serialize_ms": [
+                  0.044559,
+                  0.047409,
+                  0.043319,
+                  0.043469
+                ],
+                "output_bytes": 21760,
+                "output_sha256": "192ab5894ea43763714f95ebfa89fdf2c2b69205d521bddc54c451de9bbeb8ae",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/long_context-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 3170.795563608408,
+                "max_rss_bytes": 840077312,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/long_context-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 987.2504938393831,
+                  "max_rss_bytes": 845377536,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-8/long_context-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 741.701333,
+              "warm_min_ms": 740.8825909999999,
+              "warm_max_ms": 742.7605510000001,
+              "cli_median_ms": 987.2504938393831,
+              "horizon_points_per_second": 129.43215244295644,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            }
+          }
+        }
+      },
+      "finished_at_utc": "2026-10-22T08:27:54.988089+00:00",
+      "load_average_after": [
+        17.60546875,
+        19.48095703125,
+        19.96630859375
+      ]
+    },
+    "timestral-scaling-16": {
+      "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+      "started_at_utc": "2026-10-22T08:27:55.699704+00:00",
+      "load_average_before": [
+        17.60546875,
+        19.48095703125,
+        19.96630859375
+      ],
+      "git_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+      "threads": 16,
+      "warm_repeats": 3,
+      "cli_repeats": 1,
+      "model": "/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M/Timestral-209M-F32.gguf",
+      "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+      "model_bytes": 837265632,
+      "binaries": {
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/rust-model-inference": "03b9bd09ecfeaae2c466bac882aac62b17d60265ab9970068bc0564712805baa",
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/examples/timestral_bench": "fc33dcafd4fafdefbeef4677489bcc0d0cf8caff13dad97521c00e7108985f17"
+      },
+      "cases": {
+        "standard": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/standard.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 16,
+                "setup_ms": 1.342596,
+                "source_open_ms": 0.078429,
+                "tensor_validation_ms": 128.264595,
+                "first_forecast_ms": 203.123311,
+                "warm_forecast_ms": [
+                  194.38829099999998,
+                  193.991006,
+                  193.54973
+                ],
+                "serialize_ms": [
+                  0.073949,
+                  0.075459,
+                  0.056569,
+                  0.062329
+                ],
+                "output_bytes": 22164,
+                "output_sha256": "ed7318dbc6ce3c5befb2dce848b1c99f7477648eb417e2606e99be92f50120b8",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/standard-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 961.4391941577196,
+                "max_rss_bytes": 839909376,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/standard-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 444.20724734663963,
+                  "max_rss_bytes": 845152256,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/standard-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 193.991006,
+              "warm_min_ms": 193.54973,
+              "warm_max_ms": 194.38829099999998,
+              "cli_median_ms": 444.20724734663963,
+              "horizon_points_per_second": 494.86830332742335,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            }
+          }
+        },
+        "long_context": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/long_context.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 16,
+                "setup_ms": 1.465555,
+                "source_open_ms": 0.058379,
+                "tensor_validation_ms": 148.570344,
+                "first_forecast_ms": 579.330339,
+                "warm_forecast_ms": [
+                  588.733572,
+                  592.2614349999999,
+                  580.830093
+                ],
+                "serialize_ms": [
+                  0.04362,
+                  0.042629,
+                  0.049669000000000005,
+                  0.0427
+                ],
+                "output_bytes": 21760,
+                "output_sha256": "192ab5894ea43763714f95ebfa89fdf2c2b69205d521bddc54c451de9bbeb8ae",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/long_context-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 2537.5448875129223,
+                "max_rss_bytes": 840740864,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/long_context-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {},
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 829.1396200656891,
+                  "max_rss_bytes": 845582336,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-scaling-16/long_context-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 588.733572,
+              "warm_min_ms": 580.830093,
+              "warm_max_ms": 592.2614349999999,
+              "cli_median_ms": 829.1396200656891,
+              "horizon_points_per_second": 163.06187478637622,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            }
+          }
+        }
+      },
+      "finished_at_utc": "2026-10-22T08:28:13.350352+00:00",
+      "load_average_after": [
+        18.43310546875,
+        19.53369140625,
+        19.97216796875
+      ]
+    },
+    "timestral-auto": {
+      "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+      "started_at_utc": "2026-10-22T08:28:14.100117+00:00",
+      "load_average_before": [
+        18.43310546875,
+        19.53369140625,
+        19.97216796875
+      ],
+      "git_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+      "threads": 4,
+      "warm_repeats": 3,
+      "cli_repeats": 2,
+      "model": "/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M/Timestral-209M-F32.gguf",
+      "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+      "model_bytes": 837265632,
+      "binaries": {
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/rust-model-inference": "03b9bd09ecfeaae2c466bac882aac62b17d60265ab9970068bc0564712805baa",
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/examples/timestral_bench": "fc33dcafd4fafdefbeef4677489bcc0d0cf8caff13dad97521c00e7108985f17"
+      },
+      "cases": {
+        "standard": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-auto/standard.json",
+          "modes": {
+            "auto": {
+              "resident": {
+                "policy": "auto",
+                "threads": 4,
+                "setup_ms": 0.467665,
+                "source_open_ms": 0.06333000000000001,
+                "tensor_validation_ms": 147.245736,
+                "first_forecast_ms": 1186.2595019999999,
+                "warm_forecast_ms": [
+                  848.582406,
+                  847.2733089999999,
+                  846.583896
+                ],
+                "serialize_ms": [
+                  0.04752,
+                  0.063769,
+                  0.056549999999999996,
+                  0.06305899999999999
+                ],
+                "output_bytes": 22179,
+                "output_sha256": "060a4881e5f4b6083bca179fecb292a6e0f06f90ce15553f7a127c519f18320b",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-auto/standard-auto.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 3938.2267128676176,
+                "max_rss_bytes": 909115392,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-auto/standard-auto.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 8,
+                  "final_counters": {
+                    "submissions": 201,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 486980,
+                    "host_read_bytes": 467072,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 811134592,
+                    "peak_allocation_bytes": 811134592
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 243508,
+                      "host_read_bytes": 233600,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 151,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 365244,
+                      "host_read_bytes": 350336,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    {
+                      "submissions": 201,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 486980,
+                      "host_read_bytes": 467072,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 1436.917070299387,
+                  "max_rss_bytes": 915406848,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-auto/standard-auto.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                },
+                {
+                  "wall_ms": 1436.0745623707771,
+                  "max_rss_bytes": 914358272,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-auto/standard-auto.cli-1.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 121772,
+                      "host_read_bytes": 116864,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 811134592,
+                      "peak_allocation_bytes": 811134592
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 847.2733089999999,
+              "warm_min_ms": 846.583896,
+              "warm_max_ms": 848.582406,
+              "cli_median_ms": 1436.495816335082,
+              "horizon_points_per_second": 113.30464323643648
+            }
+          }
+        }
+      },
+      "finished_at_utc": "2026-10-22T08:28:30.574655+00:00",
+      "load_average_after": [
+        17.74560546875,
+        19.3271484375,
+        19.89697265625
+      ]
+    },
+    "timestral-max-context": {
+      "platform": "Linux-6.8.0-79-generic-x86_64-with-glibc2.39",
+      "started_at_utc": "2026-10-22T08:28:31.373942+00:00",
+      "load_average_before": [
+        17.74560546875,
+        19.3271484375,
+        19.89697265625
+      ],
+      "git_commit": "cc72a61fcd0c4314479291bd189555f5718ca85e",
+      "threads": 4,
+      "warm_repeats": 1,
+      "cli_repeats": 1,
+      "model": "/Users/gouzi/Documents/git/rust-model-inference/models/Timestral-209M/Timestral-209M-F32.gguf",
+      "model_sha256": "7628bcbfe43c8fec82bfbeace0ebbeb7dcd49facec6a785a51f430995d704e10",
+      "model_bytes": 837265632,
+      "binaries": {
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/rust-model-inference": "03b9bd09ecfeaae2c466bac882aac62b17d60265ab9970068bc0564712805baa",
+        "/workspace/rust-model-inference-timestral-cc72a61/target/release/examples/timestral_bench": "fc33dcafd4fafdefbeef4677489bcc0d0cf8caff13dad97521c00e7108985f17"
+      },
+      "cases": {
+        "max_context": {
+          "request": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context.json",
+          "modes": {
+            "cpu": {
+              "resident": {
+                "policy": "cpu",
+                "threads": 4,
+                "setup_ms": 2.525124,
+                "source_open_ms": 0.063669,
+                "tensor_validation_ms": 148.096445,
+                "first_forecast_ms": 16163.099819,
+                "warm_forecast_ms": [
+                  15891.20516
+                ],
+                "serialize_ms": [
+                  0.03824,
+                  0.033139999999999996
+                ],
+                "output_bytes": 18873,
+                "output_sha256": "4eb914a47efc7b0662c52c7988ff002b91f61e8198dfb68214f7407e938f4171",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context-cpu.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 32251.455564051867,
+                "max_rss_bytes": 878571520,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context-cpu.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Cpu"
+                  ],
+                  "transformer_blocks": 4,
+                  "final_counters": {},
+                  "resident_run_counters": [
+                    {},
+                    {}
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 16014.184452593327,
+                  "max_rss_bytes": 885092352,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context-cpu.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Cpu"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {},
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 15891.20516,
+              "warm_min_ms": 15891.20516,
+              "warm_max_ms": 15891.20516,
+              "cli_median_ms": 16014.184452593327,
+              "horizon_points_per_second": 6.041077377922418,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 0.0,
+                "rmse": 0.0,
+                "nrmse": 0.0
+              }
+            },
+            "vulkan": {
+              "resident": {
+                "policy": "vulkan",
+                "threads": 4,
+                "setup_ms": 2.637483,
+                "source_open_ms": 0.065789,
+                "tensor_validation_ms": 149.619473,
+                "first_forecast_ms": 45209.464142000004,
+                "warm_forecast_ms": [
+                  44857.502101
+                ],
+                "serialize_ms": [
+                  0.034548999999999996,
+                  0.034678999999999995
+                ],
+                "output_bytes": 18932,
+                "output_sha256": "3bfdce7ee079e811dac10dfc31e58a9b2cc0db329d5a6609dbce595a2bb7f443",
+                "output_path": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context-vulkan.forecast.json",
+                "stable_repeated_output": true,
+                "wall_ms": 90284.62668135762,
+                "max_rss_bytes": 929304576,
+                "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context-vulkan.resident.log",
+                "observed_compilers": [],
+                "backend_evidence": {
+                  "backends": [
+                    "Vulkan"
+                  ],
+                  "transformer_blocks": 4,
+                  "final_counters": {
+                    "submissions": 101,
+                    "static_uploads": 194,
+                    "static_upload_bytes": 807049280,
+                    "host_write_bytes": 13162036,
+                    "host_read_bytes": 12619904,
+                    "transfer_submissions": 0,
+                    "live_allocation_bytes": 860816896,
+                    "peak_allocation_bytes": 860816896
+                  },
+                  "resident_run_counters": [
+                    {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 6581036,
+                      "host_read_bytes": 6310016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 860816896,
+                      "peak_allocation_bytes": 860816896
+                    },
+                    {
+                      "submissions": 101,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 13162036,
+                      "host_read_bytes": 12619904,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 860816896,
+                      "peak_allocation_bytes": 860816896
+                    }
+                  ]
+                }
+              },
+              "cli": [
+                {
+                  "wall_ms": 45562.852557748556,
+                  "max_rss_bytes": 934277120,
+                  "log": "/workspace/rust-model-inference-timestral-cc72a61/target/timestral-max-context/max_context-vulkan.cli-0.log",
+                  "observed_compilers": [],
+                  "backend_evidence": {
+                    "backends": [
+                      "Vulkan"
+                    ],
+                    "transformer_blocks": 2,
+                    "final_counters": {
+                      "submissions": 51,
+                      "static_uploads": 194,
+                      "static_upload_bytes": 807049280,
+                      "host_write_bytes": 6581036,
+                      "host_read_bytes": 6310016,
+                      "transfer_submissions": 0,
+                      "live_allocation_bytes": 860816896,
+                      "peak_allocation_bytes": 860816896
+                    },
+                    "resident_run_counters": []
+                  }
+                }
+              ],
+              "warm_median_ms": 44857.502101,
+              "warm_min_ms": 44857.502101,
+              "warm_max_ms": 44857.502101,
+              "cli_median_ms": 45562.852557748556,
+              "horizon_points_per_second": 2.140110249203107,
+              "numeric_vs_cpu": {
+                "passed": true,
+                "max_abs": 2.86102294921875e-06,
+                "rmse": 8.525161069314022e-07,
+                "nrmse": 1.076506130255937e-07
+              },
+              "warm_speedup_vs_cpu": 0.3542596982823469
+            }
+          }
+        }
+      },
+      "finished_at_utc": "2026-10-22T08:31:48.378939+00:00",
+      "load_average_after": [
+        19.7685546875,
+        19.9033203125,
+        20.02978515625
+      ]
+    }
+  }
+}

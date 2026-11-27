@@ -1,0 +1,957 @@
+{
+  "date": "2026-10-23",
+  "baseline_commit": "45223d60e1197e9dba9f129c984af65357be5c97",
+  "platform": "Linux x86_64, AMD EPYC 9334, glibc 2.39, Rust 1.98.1, release-fast, features=vulkan,parity-trace",
+  "gpu": {
+    "device": "AMD Radeon Graphics (RADV NAVI31)",
+    "hardware_icd": true,
+    "required_feature": "shaderFloat64",
+    "icd": "/usr/share/vulkan/icd.d/radeon_icd.json",
+    "mesa_vulkan_drivers": "25.2.8-0ubuntu0.24.04.1",
+    "vulkan_loader": "1.3.275.0-1build1",
+    "pci": "0000:c3:00.0",
+    "render_node": "/dev/dri/renderD134",
+    "exclusive_access": false
+  },
+  "artifact": {
+    "file": "NVIDIA-Nemotron-Labs-Dory1.0-4B-Q5_K_M.gguf",
+    "bytes": 3673288864,
+    "sha256": "96080be49ffd67b916018b7bdef8c484762576fb52780e10ab98ac4978a660e0",
+    "hash_rechecked_after_final_execution": true
+  },
+  "oracle": {
+    "commit": "98a74c97ea09ac72f6ceda1559808fc0a2f447ce",
+    "mode": "Pinned scalar CPU Oracle; same existing Linux traces used for CPU validation",
+    "oracle_binary_sha256": "abeb7c7d8d27b952f91338f6492c10678c52ff07327d86ad87788637862b80da",
+    "oracle_trace_sha256": {
+      "math-f16": "9483ed44e0c1c96c4519f8e96f112191d60417b11897d7c54610bf36d7f254d3",
+      "hello-f32": "1bf9a681bcc624c18efb5e1ca367a6f4ba0c37ea481c8294057a52d6b7813a46",
+      "window2-f16": "d7ced1be35d95ae59436a9e1b9396184c32b306eacf1b0c5851c80ca3aacfb87",
+      "window2-f32": "f8e2d38c405ad7094617a63d7f4aced6a95621f4337d82e3773762a2458a608c",
+      "hello-f16": "3f1f8730268b5979457c46f271d2280c21378a5b41bd64e1704b08fe241a16c6",
+      "unicode-f32": "4f9441e9c46ede9ff328aaa8593637ad0ff699b99c635e35ed77021efcf59032",
+      "math-f32": "d56fb859a896aeabf7bad3bd7f48708340f451c068c2a5ac84b752e541ce30c4"
+    }
+  },
+  "gates": {
+    "relative_l2": 0.01,
+    "scaled_max_abs": 0.01,
+    "exact_checks": [
+      "prompt/generated IDs",
+      "checkpoint names/order/layers/steps/count/shapes",
+      "embedding bytes"
+    ],
+    "bitwise_gate_on_lossy_values": false
+  },
+  "source_sha256": {
+    "src/vulkan/dory.rs": "c88d1f1169022e97759b01be349887b70421f25fad2b8ea861c08afba83e1d6e",
+    "src/vulkan/ops.rs": "e69fb4c1bfd629eabb1f013072a64d0d1a2043701691dd73f0dc83ff3b37acff",
+    "src/vulkan.rs": "8e6e626ce558cf87d08e3101ebb07cad59053563381b9ab6d1c9a156cf7c590b",
+    "src/models/dory/forward.rs": "788b57359517763e7c5f38512ee338c3e6d8a01a855cebc5c609a579bdb62c96",
+    "shaders/glsl/dory.comp": "8c74020ac7b76719498c7d1bd470cc5d37d2bdb07f1b7bd5c01b2adbb25780e6",
+    "shaders/glsl/dory_matmul.comp": "5fc356a3c8ab46f52e62ea1e35d01f8a754be387e5f9b0331afc3162d914b8d2",
+    "shaders/bin/dory.spv": "fcccd07ccd61da6741d39f73e122e0b282147b8ca1e1589e894ce01d27907473",
+    "shaders/bin/dory_matmul.spv": "5a0221bfd876663551f7b73083640f49ae733cbf254e5f7ba3f95b8a011158ce",
+    "shaders/manifest.sha256": "5359789331632c786908ab66a6ef2d258b70534fdb26ff236de7431f7446280b",
+    "tools/oracle/dory/gpu_bench.rs": "3f2c5209dc1a9311201f5eac1823ee170fc764399d4dfb35a8e7e2315c1bb018",
+    "tools/oracle/dory/gpu_probe.rs": "324a287a9da2313cf39e2d2f0fd3206cac33d6418ca510ee1ea60ca2fd7caa15",
+    "tests/dory_q5_k_m.rs": "76ee4d581083eff2728c7f953e437a36c6743baf4eff8d2b9d1c42548abc3b61"
+  },
+  "baseline_source_sha256": {
+    "src/vulkan/dory.rs": "60e5ec9c5bec32390b560471c350ce0e9c0732336854c7d8b91a0e09a0823d79",
+    "src/vulkan/ops.rs": "e69fb4c1bfd629eabb1f013072a64d0d1a2043701691dd73f0dc83ff3b37acff",
+    "src/vulkan.rs": "8e6e626ce558cf87d08e3101ebb07cad59053563381b9ab6d1c9a156cf7c590b",
+    "src/models/dory/forward.rs": "788b57359517763e7c5f38512ee338c3e6d8a01a855cebc5c609a579bdb62c96",
+    "shaders/glsl/dory.comp": "4100f15a8b9b28a79c34a4829c817be99a704569e9a604b36c62f03ae1f2c3a5",
+    "shaders/glsl/dory_matmul.comp": "0b8bab16fb4c376c0981daf9255edebb991add7892e47f742330bceadd005971",
+    "shaders/bin/dory.spv": "ca5327fadb06198f5fae6a018e0cd29ab912a91cee54bcaa154434f0670b01b4",
+    "shaders/bin/dory_matmul.spv": "689fa0bcfbfd6e058ebda572957df68763bdd1e5c2eb4e06ca0df4272deb7b9f",
+    "shaders/manifest.sha256": "b61287d2cb4b83ff89412b55e8a489d6f87963f92601887b6d12826b30fc9b0d"
+  },
+  "binary_sha256": {
+    "bench-before-real": "d4a0a52e626a9a27ccd8a3fedd5c82931a587dba146efe35692adf71ef4435a8",
+    "bench-final": "6aba635423ddcfdf467179e0f0dd62365e0b5f4fe2e43af931c654ad7288a4ee",
+    "librmi-before-real.rlib": "a51fcc0acbef47ddf35767e7e81b6fff3083f9372e0a1c12cfbb1574d191b0ed",
+    "librmi-final.rlib": "6827d9680ef50c4b962531ad79bd04753168fcd5955dfe154614be6da6ab27c0",
+    "integration-final": "f79bbb447dba7dd242bf894617830bfb4286c7819dbb02c64ae322744f774b3a",
+    "probe-final": "c02e15e1a20fa68a28020c3fe1c5da4d0fc0b6fbbfedbb3f4295bea02e4eb1ae"
+  },
+  "shader_bytes_verified_in_binaries": true,
+  "method": "Same gpu_bench.rs, release-fast, vulkan+parity-trace, four CPU threads, capacity 9; initialization and first nine-call warmup excluded; three measured nine-call rounds per KV/build. No tracing. All samples retained.",
+  "benchmark": {
+    "f32": {
+      "baseline": {
+        "rounds": [
+          {
+            "round": 0,
+            "warmup": true,
+            "seconds": [
+              3.012098961,
+              2.767854794,
+              2.789217032,
+              3.021348934,
+              3.115934471,
+              2.9969610920000003,
+              3.035704547,
+              3.03209756,
+              3.3992381529999998
+            ],
+            "total_seconds": 27.170455543999996,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 1,
+            "warmup": false,
+            "seconds": [
+              2.775561483,
+              2.9475182269999998,
+              3.055443883,
+              2.8008772779999997,
+              3.077111205,
+              2.7962057209999998,
+              2.809403789,
+              2.869349987,
+              2.999923278
+            ],
+            "total_seconds": 26.131394851,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 2,
+            "warmup": false,
+            "seconds": [
+              2.798782989,
+              2.790849235,
+              19.682771246,
+              3.811296151,
+              4.195602849,
+              3.762751453,
+              3.8337643310000002,
+              4.656302325,
+              4.20730415
+            ],
+            "total_seconds": 49.739424729,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 3,
+            "warmup": false,
+            "seconds": [
+              3.852494406,
+              3.763540032,
+              4.673089285,
+              3.752241357,
+              3.9435991660000003,
+              4.702624303,
+              4.013102284,
+              3.907110137,
+              3.843348494
+            ],
+            "total_seconds": 36.451149464,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          }
+        ],
+        "measured_calls": 27,
+        "median_call_seconds": 3.763540032,
+        "call_min_seconds": 2.775561483,
+        "call_max_seconds": 19.682771246,
+        "median_nine_calls_seconds": 36.451149464,
+        "log_sha256": "71d21300d79490b194bc23c09d4fbb99afe68bd5f7b272c9383988cd3baea8e8"
+      },
+      "optimized": {
+        "rounds": [
+          {
+            "round": 0,
+            "warmup": true,
+            "seconds": [
+              2.151031103,
+              1.461709624,
+              1.467250219,
+              1.462296338,
+              1.4657473429999999,
+              2.365363819,
+              1.450218517,
+              1.478762183,
+              1.467579764
+            ],
+            "total_seconds": 14.769958910000001,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 1,
+            "warmup": false,
+            "seconds": [
+              1.5575560529999999,
+              1.467162597,
+              2.134787849,
+              1.443451402,
+              1.469282985,
+              1.671439344,
+              1.471731761,
+              1.471644312,
+              2.116831774
+            ],
+            "total_seconds": 14.803888077,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 2,
+            "warmup": false,
+            "seconds": [
+              1.426621006,
+              0.725656865,
+              0.504715004,
+              0.50097242,
+              0.503899441,
+              0.581278125,
+              0.479294365,
+              0.492369725,
+              0.505322597
+            ],
+            "total_seconds": 5.720129548,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 3,
+            "warmup": false,
+            "seconds": [
+              0.49892565,
+              0.587979629,
+              0.503471615,
+              0.502315397,
+              0.50400783,
+              0.505802732,
+              0.708597674,
+              0.500899291,
+              0.505891971
+            ],
+            "total_seconds": 4.817891788999999,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          }
+        ],
+        "measured_calls": 27,
+        "median_call_seconds": 0.581278125,
+        "call_min_seconds": 0.479294365,
+        "call_max_seconds": 2.134787849,
+        "median_nine_calls_seconds": 5.720129548,
+        "log_sha256": "52c9268f4f373a39e3d18b3c54450766ba93699393e5ce5068f647239a67ead3"
+      },
+      "observed_speedup_median_call": 6.474594295114753,
+      "observed_speedup_median_round": 6.372434253127163
+    },
+    "f16": {
+      "baseline": {
+        "rounds": [
+          {
+            "round": 0,
+            "warmup": true,
+            "seconds": [
+              4.215621245,
+              3.8649665730000002,
+              4.212201173,
+              4.703523908,
+              3.996249259,
+              4.012406547,
+              4.004084176,
+              4.908140204,
+              4.013534556
+            ],
+            "total_seconds": 37.930727641000004,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 1,
+            "warmup": false,
+            "seconds": [
+              3.9942298149999997,
+              3.996924786,
+              4.843146743,
+              4.016042152,
+              3.991384092,
+              4.015620641,
+              4.573238087,
+              4.239810239,
+              3.999804019
+            ],
+            "total_seconds": 37.670200574000006,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 2,
+            "warmup": false,
+            "seconds": [
+              4.619537141,
+              3.986585454,
+              3.8625648889999997,
+              4.219652845,
+              4.003767918,
+              4.661222435,
+              4.015310779,
+              4.122635754,
+              4.549437532
+            ],
+            "total_seconds": 38.040714746999996,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 3,
+            "warmup": false,
+            "seconds": [
+              3.995634366,
+              4.020512927,
+              4.006214147,
+              4.836460232,
+              3.986346759,
+              4.03652866,
+              4.008283767,
+              4.908474389,
+              4.037589433
+            ],
+            "total_seconds": 37.83604468,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          }
+        ],
+        "measured_calls": 27,
+        "median_call_seconds": 4.016042152,
+        "call_min_seconds": 3.8625648889999997,
+        "call_max_seconds": 4.908474389,
+        "median_nine_calls_seconds": 37.83604468,
+        "log_sha256": "9f536988ff09e95c241b234600b6ffd218bed1e79734bcb12eee94ab309cdce0"
+      },
+      "optimized": {
+        "rounds": [
+          {
+            "round": 0,
+            "warmup": true,
+            "seconds": [
+              0.501252257,
+              0.503103189,
+              0.500342606,
+              0.504657463,
+              0.706376376,
+              0.500477574,
+              0.506317837,
+              0.50291949,
+              0.504696202
+            ],
+            "total_seconds": 4.730142994,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 1,
+            "warmup": false,
+            "seconds": [
+              0.581602191,
+              0.502491105,
+              0.503725512,
+              0.502679942,
+              0.504612764,
+              0.704572394,
+              0.502331976,
+              0.503511865,
+              0.503604524
+            ],
+            "total_seconds": 4.809132273,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 2,
+            "warmup": false,
+            "seconds": [
+              0.593729851,
+              0.502510194,
+              0.502306566,
+              0.503189997,
+              0.50593786,
+              0.706230246,
+              0.502616923,
+              0.503601173,
+              0.502944409
+            ],
+            "total_seconds": 4.823067219000001,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          },
+          {
+            "round": 3,
+            "warmup": false,
+            "seconds": [
+              0.501278866,
+              0.696078357,
+              0.500713152,
+              0.503366045,
+              0.503760951,
+              0.503729081,
+              0.706435424,
+              0.504712912,
+              0.503718672
+            ],
+            "total_seconds": 4.923793459999999,
+            "counters": {
+              "submissions": 486,
+              "static_uploads": 0,
+              "static_upload_bytes": 0,
+              "host_write_bytes": 110592,
+              "host_read_bytes": 4718592,
+              "transfer_submissions": 36,
+              "live_allocation_bytes": 3016838736,
+              "peak_allocation_bytes": 3016838736
+            }
+          }
+        ],
+        "measured_calls": 27,
+        "median_call_seconds": 0.503604524,
+        "call_min_seconds": 0.500713152,
+        "call_max_seconds": 0.706435424,
+        "median_nine_calls_seconds": 4.823067219000001,
+        "log_sha256": "0fb09ba21957aa312f420de4c173f1dff7decbb24e5179d42fdae93ddcbd8fe3"
+      },
+      "observed_speedup_median_call": 7.974595065393018,
+      "observed_speedup_median_round": 7.8448097366233265
+    }
+  },
+  "graph_replays": {
+    "passed": true,
+    "checked": 15795,
+    "cases": [
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            5325,
+            1897,
+            1429,
+            22177,
+            5325
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-hello-f32",
+        "kv": "f32",
+        "sliding_window": 1024,
+        "seconds": 95.19040435180068,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            5325,
+            1897,
+            1429,
+            22177,
+            5325
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-hello-f16",
+        "kv": "f16",
+        "sliding_window": 1024,
+        "seconds": 45.173462711274624,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 2925,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            7493,
+            1395,
+            1032,
+            1050,
+            1043,
+            1050,
+            1063
+          ],
+          "generated_ids": [
+            1032,
+            1052,
+            1046,
+            5675,
+            1395,
+            1032,
+            1050,
+            1120
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-math-f32",
+        "kv": "f32",
+        "sliding_window": 1024,
+        "seconds": 67.42480159550905,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 2925,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            124108,
+            1010,
+            1032,
+            35858,
+            1009,
+            1240,
+            1159,
+            1153,
+            1130,
+            1032,
+            1,
+            1032,
+            3
+          ],
+          "generated_ids": [
+            1010,
+            1032
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-unicode-f32",
+        "kv": "f32",
+        "sliding_window": 1024,
+        "seconds": 72.90619081072509,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 2925,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            7493,
+            1395,
+            1032,
+            1050,
+            1043,
+            1050,
+            1063
+          ],
+          "generated_ids": [
+            1032,
+            1052,
+            1046,
+            5675,
+            1395,
+            1032,
+            1050,
+            1120
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-math-f16",
+        "kv": "f16",
+        "sliding_window": 1024,
+        "seconds": 62.03164079040289,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            1897,
+            1429,
+            22177,
+            1897,
+            1429
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-window2-f32",
+        "kv": "f32",
+        "sliding_window": 2,
+        "seconds": 45.10517194122076,
+        "failures": []
+      },
+      {
+        "passed": true,
+        "checked": 1755,
+        "first_step": 0,
+        "tokens": {
+          "prompt_ids": [
+            22177
+          ],
+          "generated_ids": [
+            1897,
+            1429,
+            22177,
+            1897,
+            1429,
+            22177,
+            1897,
+            1429
+          ]
+        },
+        "limits": {
+          "relative_l2": 0.01,
+          "scaled_max_abs": 0.01
+        },
+        "worst_relative_l2": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "worst_max_abs": {
+          "name": "embd",
+          "layer": null,
+          "step": 0,
+          "relative_l2": 0.0,
+          "max_abs": 0.0,
+          "scaled_max_abs": 0.0,
+          "exact": true,
+          "passed": true
+        },
+        "case": "default-window2-f16",
+        "kv": "f16",
+        "sliding_window": 2,
+        "seconds": 41.550427136942744,
+        "failures": []
+      }
+    ],
+    "observed_max_error": {
+      "relative_l2": 0.0,
+      "scaled_max_abs": 0.0
+    }
+  },
+  "execution_probe": [
+    "kv=F32 initialization=ComputeStats { submissions: 1, static_uploads: 362, static_upload_bytes: 2996551680, host_write_bytes: 0, host_read_bytes: 0, transfer_submissions: 1, live_allocation_bytes: 3016838736, peak_allocation_bytes: 3016838736 } gpu_seconds=4.472057641 cpu_seconds=8.405829684 inference=ComputeStats { submissions: 486, static_uploads: 0, static_upload_bytes: 0, host_write_bytes: 110592, host_read_bytes: 4718592, transfer_submissions: 36, live_allocation_bytes: 3016838736, peak_allocation_bytes: 3016838736 }",
+    "kv=F32 generated=[1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325] max_relative_l2=0 max_scaled_max_abs=0 bit_mismatches=0 stats=ComputeStats { submissions: 487, static_uploads: 362, static_upload_bytes: 2996551680, host_write_bytes: 110592, host_read_bytes: 4718592, transfer_submissions: 37, live_allocation_bytes: 3016838736, peak_allocation_bytes: 3016838736 }",
+    "kv=F16 initialization=ComputeStats { submissions: 1, static_uploads: 362, static_upload_bytes: 2996551680, host_write_bytes: 0, host_read_bytes: 0, transfer_submissions: 1, live_allocation_bytes: 3016838736, peak_allocation_bytes: 3016838736 } gpu_seconds=4.822469787 cpu_seconds=7.774146128 inference=ComputeStats { submissions: 486, static_uploads: 0, static_upload_bytes: 0, host_write_bytes: 110592, host_read_bytes: 4718592, transfer_submissions: 36, live_allocation_bytes: 3016838736, peak_allocation_bytes: 3016838736 }",
+    "kv=F16 generated=[1897, 1429, 22177, 5325, 1897, 1429, 22177, 5325] max_relative_l2=0 max_scaled_max_abs=0 bit_mismatches=0 stats=ComputeStats { submissions: 487, static_uploads: 362, static_upload_bytes: 2996551680, host_write_bytes: 110592, host_read_bytes: 4718592, transfer_submissions: 37, live_allocation_bytes: 3016838736, peak_allocation_bytes: 3016838736 }"
+  ],
+  "checks": {
+    "hardware_integration": true,
+    "full_oracle_replay": true,
+    "model_and_oracle_trace_hashes_rechecked": true,
+    "cli_forced_vulkan_f32": true,
+    "cli_auto_f16": true,
+    "shader_manifest_and_rebuild": true,
+    "rustfmt": true,
+    "checker_unit_tests": 4
+  },
+  "measurement_scope": "Shared host with concurrent independent tasks. Baseline had a 19.68-second outlier; median is reported without deleting samples. These are observed timings, not an isolated throughput guarantee. The accessible container exposes only /dev/dri/card7 and renderD134 (PCI 0000:c3:00.0); other idle host GPUs were not accessible. Load decreased during the optimized F32 run, so the measured ratio includes shared-load effects.",
+  "discarded_runs": "Initial before/after attempt used the same Cargo rlib after cache overwrite. Those logs are excluded. Final binaries were fixed, SHA256 checked, and original/optimized embedded SPIR-V verified.",
+  "limitations": [
+    "GPU arithmetic qualified only on this AMD RADV device/driver and Q5_K_M artifact",
+    "Full 1024-token SWA eviction and 262144-token context not tested; capacity additionally bounded by storage-buffer range",
+    "F16 KV uses rounded F32 storage and saves no cache memory",
+    "Prefill remains sequential; performance measured only on nine single-token forwards",
+    "Other quantizations, GPU/drivers and last_loop KV unverified; last_loop rejected",
+    "Full repository/shared operator suites not rerun; prior shared convolution/SiLU 1 ULP failure remains unresolved"
+  ],
+  "log_sha256": {
+    "cli-auto-f16.log": "abc4c4be980b252e350e9481bd532eb8b3983086090670ca03a5268bdf60dfae",
+    "final-f32.log": "52c9268f4f373a39e3d18b3c54450766ba93699393e5ce5068f647239a67ead3",
+    "baseline-f32.log": "71d21300d79490b194bc23c09d4fbb99afe68bd5f7b272c9383988cd3baea8e8",
+    "shader-final.log": "36f39a43cde1d58a49088503bd56476a565cc6eb43a3b5bcf7089789ca6526fa",
+    "kernel-before.log": "85df2eaa6a131f68fb6e553976412eafd5f06b963064eb949e4391a57a9d2238",
+    "probe-final.log": "550fc0fa7e20e3783ff016b61230aaecf8bd107d2601bc8a56079e05f9e9ba1c",
+    "baseline-f16.log": "9f536988ff09e95c241b234600b6ffd218bed1e79734bcb12eee94ab309cdce0",
+    "kernel-after.log": "0dc4163f449f20b6b1ef2b08348f0a8294a5e7522bc457ba55c2d3ef379cac1c",
+    "cli-vulkan-f32.log": "3905e944aa4abadc541d93c391567ebbb034314d698807b518d6c1c1e068dc9d",
+    "integration-final.log": "d6fa7027590fa3817f613615ca525de40ea6b26656e338d8587e1227f5695d68",
+    "final-f16.log": "0fb09ba21957aa312f420de4c173f1dff7decbb24e5179d42fdae93ddcbd8fe3"
+  }
+}

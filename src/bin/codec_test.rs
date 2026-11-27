@@ -3,7 +3,7 @@
 //! through the codec decoder.
 
 use rust_model_inference::format::ggufrs::{open_model_source, ComponentRole};
-use rust_model_inference::models::qwen3::tts::codec::write_wav_f32;
+use rust_model_inference::format::wav::write_wav_f32_channels;
 use rust_model_inference::models::qwen3::tts::codec::{DacDecoder, RvqDecoder};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ fn main() -> Result<(), String> {
         &waveform[waveform.len() / 2..waveform.len() / 2 + 5]
     );
 
-    write_wav_f32(&out_path, &waveform, 24000).map_err(|e| e.to_string())?;
+    write_wav_f32_channels(&out_path, &waveform, 24000, 1)?;
     eprintln!("wrote {}", out_path.display());
     Ok(())
 }

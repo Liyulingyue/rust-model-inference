@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use super::kernels::{conv2d, conv3d_with_options, load_float_values, Conv3dSpec};
 use super::video_vae::VideoLatent;
 use super::LatentUpsampleKind;
 use crate::core::tensor::TensorSource;
 use crate::core::thread_pool::ComputePool;
-use crate::ops::silu_inplace;
+use crate::ops::nn::{conv2d, conv3d_with_options, load_float_values, Conv3dSpec};
+use crate::ops::{relu_inplace, silu_inplace};
 
 const FLASH_PREFIX: &str = "dreamx.refiner.upsampler.flash";
 const CAUSAL_PREFIX: &str = "dreamx.refiner.upsampler.causal2d";
@@ -664,12 +664,6 @@ fn bilinear_feature(input: &Feature, scale: usize) -> Result<Feature, String> {
         }
     }
     Feature::new(output, [channels, frames, output_height, output_width])
-}
-
-fn relu_inplace(values: &mut [f32]) {
-    for value in values {
-        *value = value.max(0.0);
-    }
 }
 
 fn load(source: &dyn TensorSource, name: &str, source_shape: &[usize]) -> Result<Vec<f32>, String> {

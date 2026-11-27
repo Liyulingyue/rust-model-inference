@@ -1,0 +1,216 @@
+[
+  {
+    "file": "pjit-21k/pjit-f32.gguf",
+    "size": 8736398848,
+    "sha256": "dfadd63f1f9426fc2407ac4fe6322bb878d8495207ef7fbc5f6c0c6e90e9c54b",
+    "architecture": "pjit",
+    "file_type": 0,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 538
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-f16.gguf",
+    "size": 4370408448,
+    "sha256": "39059ad51653a9cb11ba2b5f7f2f3cef674328df8c0664a909648e40b8498139",
+    "architecture": "pjit",
+    "file_type": 1,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 321,
+      "1": 217
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-bf16.gguf",
+    "size": 4370408448,
+    "sha256": "a8a0db8f74dc2aacbff615abe32b01554e423123fe608f83f3d8833e277ce680",
+    "architecture": "pjit",
+    "file_type": 32,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 321,
+      "30": 217
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-q8_0.gguf",
+    "size": 2323851072,
+    "sha256": "c258e34d0b0fceb12d3325beaf2d25c71bad9a8d7797c65b03c05050c39c32d7",
+    "architecture": "pjit",
+    "file_type": 7,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 321,
+      "8": 217
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-q4_0.gguf",
+    "size": 1232353472,
+    "sha256": "a984b70a084202fb0d5fe6dbc095de145f46b7a3925c54685c590fa18faba86e",
+    "architecture": "pjit",
+    "file_type": 2,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 321,
+      "2": 217
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-q4_1.gguf",
+    "size": 1368790464,
+    "sha256": "2c0d2f28e96a542fc3e15f62a830efa126c89bb1b76381e34f1290397b2bce06",
+    "architecture": "pjit",
+    "file_type": 3,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 321,
+      "3": 217
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-q4_k.gguf",
+    "size": 7054571008,
+    "sha256": "df089afebc69c01607c22ae39d84084cb70e5bc03adb025be01559945cf10622",
+    "architecture": "pjit",
+    "file_type": 14,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 482,
+      "12": 56
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-q5_k.gguf",
+    "size": 7115728384,
+    "sha256": "faf0de29e0429bd72c1833041b6949c1aa4b5cfaa645bacdef6352bc8694a04c",
+    "architecture": "pjit",
+    "file_type": 16,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 482,
+      "13": 56
+    }
+  },
+  {
+    "file": "pjit-21k/pjit-q6_k.gguf",
+    "size": 7180708096,
+    "sha256": "9e0c803dbaee17369e3a4c62ae5258461de63c394358e05ad31811b88c2c3502",
+    "architecture": "pjit",
+    "file_type": 18,
+    "tensor_count": 538,
+    "tensor_types": {
+      "0": 482,
+      "14": 56
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-f32.gguf",
+    "size": 16833971520,
+    "sha256": "09e480cb68003934a40681e9822b9dae28d530a8aa2bd1e8417cbd4a5f22588d",
+    "architecture": "qwen35",
+    "file_type": 0,
+    "tensor_count": 426,
+    "tensor_types": {
+      "0": 426
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-f16.gguf",
+    "size": 8424392000,
+    "sha256": "a46408179ee917ee98d84d869df85ace4e1a3673c7c5a4e810e8d067366fa17f",
+    "architecture": "qwen35",
+    "file_type": 1,
+    "tensor_count": 426,
+    "tensor_types": {
+      "1": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-bf16.gguf",
+    "size": 8424392000,
+    "sha256": "406548f770e90a982c821f67262bbdb6261d3266a259d9967ee7753588bac8e4",
+    "architecture": "qwen35",
+    "file_type": 32,
+    "tensor_count": 426,
+    "tensor_types": {
+      "30": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-q8_0.gguf",
+    "size": 4482401696,
+    "sha256": "b5c5ca1e25824084186e57d2409ad6e6f6fd0d392682a3a8fbadd40eedbf59c3",
+    "architecture": "qwen35",
+    "file_type": 7,
+    "tensor_count": 426,
+    "tensor_types": {
+      "8": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-q4_0.gguf",
+    "size": 2380006816,
+    "sha256": "e06c03efcac503869bec6a3d64759392e80266e98bc23eab83a22e482dd7dbe4",
+    "architecture": "qwen35",
+    "file_type": 2,
+    "tensor_count": 426,
+    "tensor_types": {
+      "2": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-q4_1.gguf",
+    "size": 2642806176,
+    "sha256": "6cfe8ea60c33555e85f012d281b2d34329a9b85289f413b047182c80862e7ce9",
+    "architecture": "qwen35",
+    "file_type": 3,
+    "tensor_count": 426,
+    "tensor_types": {
+      "3": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-q4_k.gguf",
+    "size": 2380006816,
+    "sha256": "a2359c81c3b4c15d8d2985115624d73b1f7c69704c6d47ff19d13eb9e1dcd4de",
+    "architecture": "qwen35",
+    "file_type": 14,
+    "tensor_count": 426,
+    "tensor_types": {
+      "12": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-q5_k.gguf",
+    "size": 2905605536,
+    "sha256": "1a8c9910bc2aa3a8dac76edf4927b3e8992fa18cb181bfce14735898c077bb1e",
+    "architecture": "qwen35",
+    "file_type": 16,
+    "tensor_count": 426,
+    "tensor_types": {
+      "13": 249,
+      "0": 177
+    }
+  },
+  {
+    "file": "Qwen3.5-4B/text-q6_k.gguf",
+    "size": 3464054176,
+    "sha256": "78bc2ee6a0d39322a3d1c2722b1a2da8570b3e0d17d0d1479289bba9067c2140",
+    "architecture": "qwen35",
+    "file_type": 18,
+    "tensor_count": 426,
+    "tensor_types": {
+      "14": 249,
+      "0": 177
+    }
+  }
+]

@@ -1,0 +1,462 @@
+pub mod jinja;
+pub(crate) mod jinja_compat;
+pub mod legacy;
+
+/// Single-user Nanbeige4.2 chat template, including the embedded default system turn.
+pub fn build_nanbeige_chat_prompt(prompt: &str, thinking: bool) -> String {
+    let suffix = if thinking {
+        "<think>\n"
+    } else {
+        "<think>\n\n</think>\n\n"
+    };
+    format!("<|im_start|>system\n你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{suffix}")
+}
+
+use crate::{BPETokenizer, EncodeOptions};
+
+pub struct QwenMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
+pub struct HunyuanMessage<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
+pub struct Lfm2Message<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+}
+
+const PLAIN_TEXT: EncodeOptions = EncodeOptions {
+    add_special: false,
+    parse_special: false,
+};
+
+const WITH_SPECIAL: EncodeOptions = EncodeOptions {
+    add_special: false,
+    parse_special: true,
+};
+
+/// Render the Nemotron-3 Nano chat prompt (`nemotron_h`, `nemotron_h_moe`).
+///
+/// The family is ChatML, but the server must render it the way the CLI
+/// does, and the two differ in two ways that change the token ids:
+///
+/// * the CLI encodes the rendered text with `add_special: true`, so the
+///   prompt starts with the BOS that the GGUF's pre-tokenizer asks for
+///   (the 30B GGUF has `pre = "pixtral"` and no `add_bos_token` key, so
+///   llama.cpp adds one);
+/// * the CLI's built-in ChatML preset has no think block, while
+///   [`build_qwen_chat_prompt`] appends an empty `<think>\n</think>`.
+///
+/// Rendering the turns as text and encoding them once keeps the server
+/// and the CLI on the same ids: the same message is 15 tokens through
+/// both, instead of 15 (CLI) against 19 (server).
+pub fn build_nemotron_chat_prompt(
+    tokenizer: &BPETokenizer,
+    turns: &[(&str, &str)],
+) -> Result<Vec<u32>, String> {
+    let mut text = String::new();
+    for (role, content) in turns {
+        // `developer` is the OpenAI name for a system turn.
+        let role = if *role == "developer" {
+            "system"
+        } else {
+            *role
+        };
+        text.push_str("<|im_start|>");
+        text.push_str(role);
+        text.push('\n');
+        text.push_str(content);
+        text.push_str("<|im_end|>\n");
+    }
+    text.push_str("<|im_start|>assistant\n");
+    Ok(tokenizer.encode(
+        &text,
+        EncodeOptions {
+            add_special: true,
+            parse_special: true,
+        },
+    ))
+}
+
+/// K2-Horizon chat prompt template (used by `llama` trunk).
+///
+/// Default (`enable_thinking = true`): emits `\n` after
+/// `<|ifm|im_start|>assistant\n`, which triggers the model's thinking
+/// block (`<ifm|think>`). Pass `enable_thinking = false` (via
+/// `--no-thinking`) to emit `\n\n` instead so the model skips straight
+/// to the assistant answer.
+pub fn format_k2_horizon_chat_prompt_with_thinking(prompt: &str, enable_thinking: bool) -> String {
+    if enable_thinking {
+        format!(
+            "<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
+        )
+    } else {
+        format!("<|ifm|im_start|>user\n{prompt}<|ifm|im_end|><|ifm|im_start|>assistant\n\n\n")
+    }
+}
+
+pub fn build_simple_prompt(tokenizer: &BPETokenizer, text: &str) -> Vec<u32> {
+    let mut tokens = Vec::new();
+    if let Some(bos_id) = tokenizer.bos_id() {
+        tokens.push(bos_id);
+    }
+    tokens.extend(tokenizer.encode(text, PLAIN_TEXT));
+    tokens
+}
+
+pub fn build_hunyuan_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[HunyuanMessage<'_>],
+    add_generation_prompt: bool,
+) -> Result<Vec<u32>, String> {
+    // The 1.8B GGUF uses Hy-MT's official `<|hy_*|>` control tokens, so
+    // we wrap the message in `<|hy_User|>{content}<|hy_Assistant|>`. The
+    // 7B GGUF (a separately distributed quantisation) does not use
+    // those tokens; its embedded `tokenizer.chat_template` describes a
+    // Qwen2-style header but in practice the model was trained on raw
+    // text (`--no-conversation` in llama.cpp gives clean translation,
+    // `--jinja` produces repetitive output).  Match llama.cpp's actual
+    // behaviour: prepend a BOS token (if any) and pass the prompt
+    // through unchanged.
+    if tokenizer.special_token_id("hy_user").is_some() {
+        build_hunyuan_v1_prompt(tokenizer, messages, add_generation_prompt)
+    } else {
+        build_hunyuan_v2_prompt(tokenizer, messages, add_generation_prompt)
+    }
+}
+
+fn build_hunyuan_v1_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[HunyuanMessage<'_>],
+    add_generation_prompt: bool,
+) -> Result<Vec<u32>, String> {
+    let hy_user = required_control(tokenizer, "hy_user", "<｜hy_User｜>")?;
+    let hy_assistant = required_control(tokenizer, "hy_assistant", "<｜hy_Assistant｜>")?;
+    let hy_placeholder_2 =
+        required_control(tokenizer, "hy_placeholder_2", "<｜hy_place▁holder▁no▁2｜>")?;
+    let hy_placeholder_3 =
+        required_control(tokenizer, "hy_placeholder_3", "<｜hy_place▁holder▁no▁3｜>")?;
+    let hy_placeholder_8 =
+        required_control(tokenizer, "hy_placeholder_8", "<｜hy_place▁holder▁no▁8｜>")?;
+
+    let mut output = Vec::new();
+    for (i, message) in messages.iter().enumerate() {
+        if i == 0 && message.role == "system" {
+            output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+            output.push(hy_placeholder_3);
+        }
+        if message.role == "user" {
+            output.push(hy_user);
+            output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+            output.push(hy_assistant);
+        } else if message.role == "assistant" {
+            output.push(hy_assistant);
+            output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+            output.push(hy_placeholder_2);
+        }
+    }
+    if add_generation_prompt {
+        output.push(hy_assistant);
+    } else {
+        output.push(hy_placeholder_8);
+    }
+    Ok(output)
+}
+
+/// 7B-style Hunyuan prompt. The 7B GGUF was trained with raw-text
+/// prompts (no chat template, no BOS), confirmed against llama.cpp
+/// where `--no-conversation` produces correct translations while
+/// `--jinja` repeats itself. The tokenizer GGUF sets
+/// `add_bos_token = false`, so we likewise emit the prompt verbatim.
+fn build_hunyuan_v2_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[HunyuanMessage<'_>],
+    _add_generation_prompt: bool,
+) -> Result<Vec<u32>, String> {
+    let mut output = Vec::new();
+    for message in messages {
+        output.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+    }
+    Ok(output)
+}
+
+fn required_control(tokenizer: &BPETokenizer, name: &str, literal: &str) -> Result<u32, String> {
+    tokenizer
+        .special_token_id(name)
+        .ok_or_else(|| format!("Required ChatML token missing: {literal}"))
+}
+
+pub fn build_lfm2_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+) -> Result<Vec<u32>, String> {
+    build_lfm2_chat_prompt_with_thinking(tokenizer, messages, true)
+}
+
+/// LFM2 / LFM2.5 chat prompt builder with explicit thinking-mode toggle.
+///
+/// When `enable_thinking = false` the generation tail is prefixed with
+/// `\n\n` (mirroring the Qwen3 ChatML convention) so reasoning models
+/// like `LFM2.5-1.2B-Thinking` skip straight to the assistant answer.
+pub fn build_lfm2_chat_prompt_with_thinking(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+    enable_thinking: bool,
+) -> Result<Vec<u32>, String> {
+    // LFM2 / LFM2.5 chat format is a literal "role\n{content}\n" sequence
+    // (no ChatML control tokens). The official Jinja template starts with
+    // `bos_token` and ends each turn with a newline, followed by an
+    // "assistant\n" prompt for generation. The tokenizer should treat
+    // "system", "user", "assistant" as regular tokens (no special tokens).
+    let mut out = Vec::new();
+    if let Some(bos) = tokenizer.bos_id() {
+        out.push(bos);
+    }
+    let has_system = messages.iter().any(|m| m.role == "system");
+    if !has_system {
+        // LFM2.5 official template requires a system turn. The README / HF
+        // chat template starts with `system\nYou are a helpful assistant
+        // trained by Liquid AI.\n` before the user turn. Inject the default
+        // so instruct/thinking models don't have to be told to introduce
+        // themselves via the user prompt.
+        out.extend(tokenizer.encode(
+            "system\nYou are a helpful assistant trained by Liquid AI.\n",
+            PLAIN_TEXT,
+        ));
+    }
+    for message in messages {
+        // The role itself can include a trailing newline so that the role
+        // name and the content are separated by a single `\n`. We use
+        // `parse_special: false` so the literal "system" / "user" /
+        // "assistant" strings get tokenized as ordinary tokens.
+        out.extend(tokenizer.encode(&format!("{}\n", message.role), PLAIN_TEXT));
+        out.extend(tokenizer.encode(message.content, PLAIN_TEXT));
+        out.extend(tokenizer.encode("\n", PLAIN_TEXT));
+    }
+    // Generation prompt: append "assistant\n" + (for --no-thinking)
+    // a literal `\n\n` so reasoning models emit the answer directly.
+    out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
+    if !enable_thinking {
+        out.extend(tokenizer.encode("\n\n", PLAIN_TEXT));
+    }
+    Ok(out)
+}
+
+pub fn build_lfm25_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+) -> Result<Vec<u32>, String> {
+    build_lfm25_chat_prompt_with_thinking(tokenizer, messages, true)
+}
+
+/// LFM2.5 ChatML prompt builder with thinking-mode toggle. Same convention
+/// as [`append_qwen_assistant_prefix`]: `enable_thinking = false` appends
+/// `\n\n` so reasoning models (`LFM2.5-1.2B-Thinking`) skip straight to
+/// the assistant answer instead of emitting a `\n…\n` block first.
+pub fn build_lfm25_chat_prompt_with_thinking(
+    tokenizer: &BPETokenizer,
+    messages: &[Lfm2Message<'_>],
+    enable_thinking: bool,
+) -> Result<Vec<u32>, String> {
+    let mut prompt_text = String::new();
+    for message in messages {
+        prompt_text.push_str("<|im_start|>");
+        prompt_text.push_str(message.role);
+        prompt_text.push('\n');
+        prompt_text.push_str(message.content);
+        prompt_text.push('\n');
+    }
+    prompt_text.push_str("<|im_start|>assistant\n");
+    if !enable_thinking {
+        prompt_text.push('\n');
+        prompt_text.push('\n');
+    }
+    let mut tokens = tokenizer.encode(&prompt_text, WITH_SPECIAL);
+    if let Some(bos) = tokenizer.bos_id() {
+        tokens.insert(0, bos);
+    }
+    Ok(tokens)
+}
+
+pub fn build_qwen_chat_prompt(
+    tokenizer: &BPETokenizer,
+    messages: &[QwenMessage<'_>],
+    enable_thinking: bool,
+) -> Result<Vec<u32>, String> {
+    let mut output = Vec::new();
+    for message in messages {
+        let content = tokenizer.encode(message.content, PLAIN_TEXT);
+        append_qwen_message_tokens(&mut output, tokenizer, message.role, &content)?;
+    }
+    append_qwen_assistant_prefix(&mut output, tokenizer, enable_thinking)?;
+    Ok(output)
+}
+
+pub fn append_qwen_message_tokens(
+    out: &mut Vec<u32>,
+    tokenizer: &BPETokenizer,
+    role: &str,
+    content_tokens: &[u32],
+) -> Result<(), String> {
+    let im_start = required_control(tokenizer, "im_start", "<|im_start|>")?;
+    let im_end = required_control(tokenizer, "im_end", "<|im_end|>")?;
+    out.push(im_start);
+    out.extend(tokenizer.encode(&format!("{role}\n"), PLAIN_TEXT));
+    out.extend_from_slice(content_tokens);
+    out.push(im_end);
+    out.extend(tokenizer.encode("\n", PLAIN_TEXT));
+    Ok(())
+}
+
+pub fn append_qwen_assistant_prefix(
+    out: &mut Vec<u32>,
+    tokenizer: &BPETokenizer,
+    enable_thinking: bool,
+) -> Result<(), String> {
+    out.push(required_control(tokenizer, "im_start", "<|im_start|>")?);
+    out.extend(tokenizer.encode("assistant\n", PLAIN_TEXT));
+    if !enable_thinking {
+        // Only emit the empty think/close markers when the tokenizer actually
+        // treats `<think>` / `</think>` as a single special token. For models
+        // without native thinking (Qwen2 / Qwen2.5 / most chat-tuned GGUF
+        // files), `encode("<think>", …)` falls through to plain `<` + `think`
+        // and the markers become random garbage in the prompt — measured at
+        // the JEV argmax position that garbage shifts the model from its
+        // trained distribution toward a positional bias (Qwen2.5-1.5B starts
+        // preferring `B` over `A` regardless of context). The intent of the
+        // skip-thinking path is preserved for models that *do* expose the
+        // tokens (Qwen3 hybrid-thinking); for everyone else we just emit a
+        // clean `<|im_start|>assistant\n` and let the model answer.
+        let think_ids = tokenizer.encode("<think>", WITH_SPECIAL);
+        if think_ids.len() == 1 {
+            out.extend(think_ids);
+            out.extend(tokenizer.encode("\n\n", PLAIN_TEXT));
+            out.extend(tokenizer.encode("</think>", WITH_SPECIAL));
+            out.extend(tokenizer.encode("\n\n", PLAIN_TEXT));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MetaValue, MetaValueType};
+    use std::collections::HashMap;
+
+    fn prompt_tokenizer(include_im_end: bool) -> BPETokenizer {
+        let mut tokens = vec!["u", "s", "e", "r", "Ċ", "H", "i", "<|im_start|>"];
+        let mut types = vec![1u32; tokens.len()];
+        types[7] = 3;
+        if include_im_end {
+            tokens.push("<|im_end|>");
+            types.push(3);
+        }
+        tokens.extend(["<think>", "</think>"]);
+        types.extend([3, 4]);
+        // The letters "assistant" and "system" need, so a ChatML prompt
+        // can be decoded back into text. Appended last, so the ids the
+        // other tests pin do not move.
+        tokens.extend(["a", "n", "t", "y", "m"]);
+        types.extend([1, 1, 1, 1, 1]);
+        let metadata: HashMap<String, MetaValue> = HashMap::from([
+            (
+                "tokenizer.ggml.model".into(),
+                MetaValue::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.pre".into(),
+                MetaValue::String("qwen2".into()),
+            ),
+            (
+                "tokenizer.ggml.tokens".into(),
+                MetaValue::Array(
+                    MetaValueType::String,
+                    tokens
+                        .into_iter()
+                        .map(|value| MetaValue::String(value.into()))
+                        .collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".into(),
+                MetaValue::Array(
+                    MetaValueType::Uint32,
+                    types.into_iter().map(MetaValue::Uint32).collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.merges".into(),
+                MetaValue::Array(MetaValueType::String, vec![]),
+            ),
+        ]);
+        BPETokenizer::from_gguf_metadata(|key| metadata.get(key).cloned()).unwrap()
+    }
+
+    #[test]
+    fn token_content_uses_the_same_message_envelope() {
+        let tokenizer = prompt_tokenizer(true);
+        let mut output = Vec::new();
+        append_qwen_message_tokens(&mut output, &tokenizer, "user", &[5, 6]).unwrap();
+        assert_eq!(output, vec![7, 0, 1, 2, 3, 4, 5, 6, 8, 4]);
+    }
+
+    #[test]
+    fn nemotron_prompt_is_the_cli_chatml_without_a_think_block() {
+        let tokenizer = prompt_tokenizer(true);
+        let ids = build_nemotron_chat_prompt(&tokenizer, &[("user", "Hi")]).unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.starts_with("<|im_start|>user\n"), "{text}");
+        assert!(text.ends_with("<|im_start|>assistant\n"), "{text}");
+        assert!(text.contains("<|im_end|>"), "{text}");
+        // The qwen builder appends an empty think block, which is what
+        // used to make the server's prompt four tokens longer than the
+        // CLI's for the same message.
+        assert!(!text.contains("<think>"), "{text}");
+    }
+
+    #[test]
+    fn nemotron_prompt_maps_the_developer_role_to_system() {
+        let tokenizer = prompt_tokenizer(true);
+        let ids =
+            build_nemotron_chat_prompt(&tokenizer, &[("developer", "Hi"), ("user", "Hi")]).unwrap();
+        let text = tokenizer.decode(&ids, true);
+        assert!(text.starts_with("<|im_start|>system\nHi"), "{text}");
+        assert!(text.contains("<|im_start|>user\nHi"), "{text}");
+    }
+
+    #[test]
+    fn missing_chatml_literal_is_an_error() {
+        let tokenizer = prompt_tokenizer(false);
+        let error = build_qwen_chat_prompt(
+            &tokenizer,
+            &[QwenMessage {
+                role: "user",
+                content: "Hi",
+            }],
+            false,
+        )
+        .unwrap_err();
+        assert!(error.contains("<|im_end|>"), "{error}");
+    }
+
+    #[test]
+    fn qwen_generation_prefix_parses_think_control_token() {
+        let tokenizer = prompt_tokenizer(true);
+        let mut output = Vec::new();
+        append_qwen_assistant_prefix(&mut output, &tokenizer, false).unwrap();
+        assert!(output.ends_with(&[9, 4, 4, 10, 4, 4]), "{output:?}");
+    }
+
+    #[test]
+    fn k2_horizon_prompt_matches_reference_template() {
+        assert_eq!(
+            format_k2_horizon_chat_prompt_with_thinking("Hello", true),
+            "<|ifm|im_start|>user\nHello<|ifm|im_end|><|ifm|im_start|>assistant\n<ifm|think>\n"
+        );
+    }
+}

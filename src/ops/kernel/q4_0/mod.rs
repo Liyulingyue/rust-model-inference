@@ -8,7 +8,7 @@
 //! Module structure:
 //! - `scalar.rs` — scalar fallback (`matmul_q4_0_scalar_range`).
 //! - `avx2.rs`   — AVX2 + `_mm256_maddubs_epi16` fast path (x86_64).
-//! - `neon.rs`   — NEON + `vdotq_u32` fast path (aarch64).
+//! - `neon.rs`   — ARMv8.4-A dot-product fast path (aarch64).
 
 use super::Kernel;
 #[cfg(target_arch = "x86_64")]
@@ -53,19 +53,16 @@ impl<'a> Kernel for Q4_0Kernel<'a> {
         ith: usize,
         nth: usize,
     ) {
-        // Thread partition (matches scalar: each thread writes to its own
-        // contiguous slice of `output`).
-        let per_thread = (n_out + nth - 1) / nth;
-        let my_start = ith * per_thread;
-        let my_end = (my_start + per_thread).min(n_out);
-        if my_start >= my_end {
-            return;
-        }
-        let my_out = &mut output[my_start..my_end];
-
         #[cfg(target_arch = "x86_64")]
         {
             if crate::ops::has_avx2_fma() {
+                let per_thread = (n_out + nth - 1) / nth;
+                let my_start = ith * per_thread;
+                let my_end = (my_start + per_thread).min(n_out);
+                if my_start >= my_end {
+                    return;
+                }
+                let my_out = &mut output[my_start..my_end];
                 unsafe {
                     avx2::matmul_q4_0_vs_q8_0_avx2(
                         self.weight,
@@ -81,24 +78,23 @@ impl<'a> Kernel for Q4_0Kernel<'a> {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        {
-            // `vdotq_u32` (ARMv8.4-A "UDOT") is in the `dotprod` feature
-            // extension. Modern aarch64 cores (M1/M2, Graviton 3+,
-            // Ampere Altra, Apple A14+) implement it; older cores fall
-            // through to the scalar baseline below.
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let per_thread = (n_out + nth - 1) / nth;
+            let my_start = ith * per_thread;
+            let my_end = (my_start + per_thread).min(n_out);
+            if my_start < my_end {
                 unsafe {
                     neon::matmul_q4_0_vs_q8_0_neon(
                         self.weight,
                         input_q8,
                         input_scales,
-                        output,
+                        &mut output[my_start..my_end],
                         n_in,
                         my_start,
                         my_end,
                     );
-                    return;
                 }
+                return;
             }
         }
         matmul_q4_0_scalar_range(
@@ -117,6 +113,10 @@ impl<'a> Kernel for Q4_0Kernel<'a> {
         crate::ops::embedding::embedding_lookup_q4_0(self.weight, token_id, n_embd, out);
     }
 }
+
+#[cfg(target_arch = "aarch64")]
+#[path = "tests_neon.rs"]
+mod tests_neon;
 
 #[cfg(test)]
 mod tests {
@@ -160,7 +160,3 @@ mod tests {
         assert_eq!(output, [32.0]);
     }
 }
-
-#[cfg(target_arch = "aarch64")]
-#[path = "tests_neon.rs"]
-mod tests_neon;

@@ -13,6 +13,33 @@
 //! retain the Q8_0 path.
 
 pub trait Kernel: Send + Sync {
+    /// Opt in to the scalar reference's activation rounding and reduction order.
+    /// Kernels without a separate reference contract retain their normal path.
+    fn use_scalar_reference(&mut self) {}
+
+    /// Prepared BF16 kernels may also round activations before their wide dot.
+    fn rounds_bf16_input(&self) -> bool {
+        false
+    }
+    /// Capability query before a strict group can modify any output.
+    fn supports_f16_strict(&self) -> bool {
+        false
+    }
+
+    /// Opt in to synchronous projection offload before entering ComputePool.
+    /// A false result requires the caller to recompute the entire output on CPU.
+    #[cfg(feature = "vulkan")]
+    fn try_forward_vulkan_rows(
+        &self,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_in: usize,
+        _n_out: usize,
+        _rows: usize,
+    ) -> bool {
+        false
+    }
+
     /// Returns the backing F32 values for model-local native-F32 contracts.
     fn f32_slice(&self) -> Option<&[f32]> {
         None
@@ -33,6 +60,16 @@ pub trait Kernel: Send + Sync {
     /// Opt in to shared-weight row batching with the canonical scalar Q4_0
     /// arithmetic contract. Raw storage access alone does not imply this.
     fn scalar_q4_0_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// Opt in to shared-weight row batching with the canonical Q8_0
+    /// arithmetic contract.
+    ///
+    /// The batched kernel computes the same values as the per-row one --
+    /// only the weight reads are shared between the activation rows -- so
+    /// opting in changes the traffic, not the numbers.
+    fn batchable_q8_0_bytes(&self) -> Option<&[u8]> {
         None
     }
 
@@ -76,48 +113,53 @@ pub trait Kernel: Send + Sync {
         self.forward_prequantized(input_q8, input_scales, output, n_in, n_out, ith, nth);
     }
 
-    /// Multi-row prepared matmul. Kernels may override this to reuse one
-    /// weight row across several activations while preserving each dot
-    /// product's arithmetic order.
-    fn forward_prepared_rows(
+    /// ggml-parity variant of `forward_prepared`.
+    ///
+    /// Defaults to the ordinary path. Kernels whose ggml reference kernel
+    /// uses a different reduction order (F32, Q8_0) override this so a
+    /// model that wants bit-exact oracle parity can opt in without changing
+    /// the arithmetic contract for every other model.
+    fn forward_prepared_ggml(
         &self,
         input_f32: &[f32],
         input_q8: &[u8],
         input_scales: &[f32],
         q8_k: Option<&[crate::ops::quant::BlockQ8K]>,
         output: &mut [f32],
-        rows: usize,
         n_in: usize,
         n_out: usize,
         ith: usize,
         nth: usize,
     ) {
-        let q8_blocks = n_in.div_ceil(32);
-        let q8k_blocks = n_in / crate::ops::quant::QK_K;
-        for row in 0..rows {
-            let input_q8 = if input_q8.is_empty() {
-                &[][..]
-            } else {
-                &input_q8[row * n_in..(row + 1) * n_in]
-            };
-            let input_scales = if input_scales.is_empty() {
-                &[][..]
-            } else {
-                &input_scales[row * q8_blocks..(row + 1) * q8_blocks]
-            };
-            let q8_k = q8_k.map(|values| &values[row * q8k_blocks..(row + 1) * q8k_blocks]);
-            self.forward_prepared(
-                &input_f32[row * n_in..(row + 1) * n_in],
-                input_q8,
-                input_scales,
-                q8_k,
-                &mut output[row * n_out..(row + 1) * n_out],
-                n_in,
-                n_out,
-                ith,
-                nth,
-            );
-        }
+        self.forward_prepared(
+            input_f32,
+            input_q8,
+            input_scales,
+            q8_k,
+            output,
+            n_in,
+            n_out,
+            ith,
+            nth,
+        );
+    }
+
+    /// Strict F16×F16 single-row matmul: caller passes f32 activations and
+    /// receives f32 output. The kernel internally quantises activations to
+    /// F16 and accumulates in f64 (matches llama.cpp's mtmd-audio embedding
+    /// path bit-exactly). `forward()` is the faster F16×F32 SIMD path which
+    /// drifts by a few ULP at the last mantissa bit.
+    ///
+    /// Default returns `false`: callers fall back to `forward()`. F16 weight
+    /// kernels opt in by overriding this to perform the strict dot per row.
+    fn forward_f16_strict(
+        &self,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_in: usize,
+        _n_out: usize,
+    ) -> bool {
+        false
     }
 
     /// Convenience: f32 input, single-thread. Default impl quantizes the
@@ -138,6 +180,36 @@ pub trait Kernel: Send + Sync {
             0,
             1,
         );
+    }
+
+    /// Capability query for [`Kernel::forward_batched_rows`]: true when the
+    /// kernel has a token-tiled batched path for this input width. Checked
+    /// for the whole projection group before any output is written; a group
+    /// with any false member keeps the per-token loop.
+    fn supports_token_tiled_batching(&self, _n_in: usize) -> bool {
+        false
+    }
+
+    /// Opt in to token-tiled batched matmul over f32 activations: the kernel
+    /// processes all `n_tokens` rows for its weight-row range
+    /// `[row_start, row_end)` in ONE call, reusing each weight row across
+    /// tokens (L2 panel blocking) instead of re-streaming the weight matrix
+    /// once per token. `input` is token-major `n_tokens × n_in`; `output` is
+    /// `n_tokens × n_out`. The per-(row, token) values must be bit-identical
+    /// to the per-token path — only the loop order changes. Returns false
+    /// when the kernel has no tiled path; the caller keeps its per-token
+    /// loop.
+    fn forward_batched_rows(
+        &self,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_in: usize,
+        _n_out: usize,
+        _n_tokens: usize,
+        _row_start: usize,
+        _row_end: usize,
+    ) -> bool {
+        false
     }
 
     /// Batched matmul: `input[n_tokens * n_in] → output[n_tokens * n_out]`.
@@ -169,7 +241,7 @@ pub trait Kernel: Send + Sync {
         }
     }
 
-    fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
+    fn embedding_lookup(&self, _token_id: u32, _n_embd: usize, _out: &mut [f32]) {
         panic!("embedding_lookup not implemented for this kernel type");
     }
 }

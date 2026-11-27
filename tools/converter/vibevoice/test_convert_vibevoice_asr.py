@@ -25,7 +25,7 @@ from tools.converter.vibevoice.convert_vibevoice_asr import (
     output_paths,
     require_tensor,
 )
-from tools.vibevoice.vibevoice_llm_oracle import (
+from tools.oracle.vibevoice.vibevoice_llm_oracle import (
     assemble_input_rows,
     safetensors_name,
     tensor_to_f32,
