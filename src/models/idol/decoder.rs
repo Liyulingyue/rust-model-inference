@@ -121,7 +121,7 @@ impl Attention {
         self.rms(&mut k, &self.k_gamma);
         finite(&q, "decoder attention queries")?;
         finite(&k, "decoder attention keys")?;
-        if let Some(mut attended) = super::gpu::attention(&q, &k, &v, c, self.heads) {
+        if let Some(mut attended) = super::gpu::attention(&q, &k, &v, c, self.heads)? {
             round_f16_checked(&mut attended, "FP16 decoder attention")?;
             return half_linear(&self.out, &attended);
         }

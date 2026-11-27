@@ -24,7 +24,24 @@ pub(super) fn check_failure() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the run asked for the device and refuses a CPU fallback.
+///
+/// A device result that disagrees with the CPU kernel is a numerical
+/// difference, not a device failure, so it is handled inside the call that
+/// produced it: a strict run is told that the numbers could not be trusted,
+/// and an automatic run recomputes them on the CPU. The device stays usable
+/// either way, and only a real device fault sets the process-wide
+/// `GPU_BROKEN`.
+fn strict_device() -> bool {
+    crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan
+}
+
 impl Projection {
+    /// A projection on the device, or `false` when the device did not take it.
+    ///
+    /// `Err` means the device produced a result that disagreed with the CPU
+    /// kernel and stayed wrong after the retries, on a run that refuses a
+    /// CPU fallback.
     pub fn linear(
         &self,
         weight: &[f32],
@@ -32,7 +49,7 @@ impl Projection {
         output: &mut [f32],
         n_in: usize,
         n_out: usize,
-    ) -> bool {
+    ) -> Result<bool, String> {
         #[cfg(feature = "vulkan")]
         if n_in == 0
             || !self.inner.try_matmul(
@@ -45,7 +62,7 @@ impl Projection {
                 input.len() / n_in,
             )
         {
-            return false;
+            return Ok(false);
         }
         #[cfg(feature = "vulkan")]
         {
@@ -63,20 +80,35 @@ impl Projection {
                         input.len() / n_in,
                     )
                 {
+                    // A projection that stays wrong is a numerical difference,
+                    // not a device failure: the device ran, its reduction
+                    // order just differs. The shared path repairs the same way
+                    // (`ops::nn::Linear::forward_verified`): the CPU kernel
+                    // recomputes the value and the device stays usable.
+                    // Marking the device broken here would turn one wrong
+                    // projection into a process-wide CPU fallback and fail
+                    // every later request.
+                    if strict_device() {
+                        return Err(format!(
+                            "Idol projection disagrees with the CPU kernel after {attempts} retries; \
+                             refusing a silent CPU fallback"
+                        ));
+                    }
                     eprintln!(
-                        "[GPU] Idol projection failed CPU verification after {attempts} retries; using CPU result"
+                        "compute arch=idol scope=projection backend=Cpu reason=Idol projection \
+                         disagrees with the CPU kernel after {attempts} retries; recomputed on the CPU"
                     );
                     linear_on_cpu(weight, input, output, n_in, n_out);
-                    return true;
+                    return Ok(true);
                 }
             }
         }
         #[cfg(feature = "vulkan")]
-        return true;
+        return Ok(true);
         #[cfg(not(feature = "vulkan"))]
         {
             let _ = (weight, input, output, n_in, n_out);
-            false
+            Ok(false)
         }
     }
 
@@ -94,22 +126,22 @@ impl Projection {
         stride: usize,
         padding: usize,
         channel_first_kernel: bool,
-    ) -> bool {
+    ) -> Result<bool, String> {
         if !enabled() {
-            return false;
+            return Ok(false);
         }
         let [n_in, n_out] = channels;
         let [height, width] = input_hw;
         let [out_h, out_w] = output_hw;
         let Some(patch_width) = n_in.checked_mul(kernel).and_then(|n| n.checked_mul(kernel)) else {
-            return false;
+            return Ok(false);
         };
         if [n_in, n_out, height, width, out_h, out_w, kernel, stride].contains(&0)
             || height.checked_mul(width).and_then(|n| n.checked_mul(n_in)) != Some(input.len())
             || out_h.checked_mul(out_w).and_then(|n| n.checked_mul(n_out)) != Some(output.len())
             || patch_width.checked_mul(n_out) != Some(weight.len())
         {
-            return false;
+            return Ok(false);
         }
         let mut patches = vec![0.; 256 * patch_width];
         for (tile, result) in output.chunks_mut(256 * n_out).enumerate() {
@@ -139,11 +171,11 @@ impl Projection {
                         };
                     }
                 });
-            if !self.linear(weight, patches, result, patch_width, n_out) {
-                return false;
+            if !self.linear(weight, patches, result, patch_width, n_out)? {
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
     }
 }
 
@@ -248,14 +280,21 @@ pub(super) fn attention(
     v: &[f32],
     width: usize,
     heads: usize,
-) -> Option<Vec<f32>> {
+) -> Result<Option<Vec<f32>>, String> {
     #[cfg(feature = "vulkan")]
     {
         if !enabled() || width == 0 || heads == 0 || width % heads != 0 {
-            return None;
+            return Ok(None);
+        }
+        // The escape hatch the shared attention path honours
+        // (`ops::kernel::vulkan::GpuAttention::try_forward`). Idol dispatches
+        // its own attention, so it has to read the switch itself; without it
+        // the only way to take the attention off the device is `--compute cpu`.
+        if std::env::var_os("RMI_GPU_ATTENTION_OFF").is_some() {
+            return Ok(None);
         }
         if q.len() % width != 0 || k.len() % width != 0 {
-            return None;
+            return Ok(None);
         }
         let spec = crate::ops::nn::AttentionSpec {
             query_tokens: q.len() / width,
@@ -279,7 +318,7 @@ pub(super) fn attention(
     #[cfg(not(feature = "vulkan"))]
     {
         let _ = (q, k, v, width, heads);
-        None
+        Ok(None)
     }
 }
 
@@ -299,6 +338,10 @@ fn sample_rows(tokens: usize) -> Vec<usize> {
 }
 
 /// The device attention with the sampled CPU cross-check and the retry.
+///
+/// `Err` means the device result disagreed with the CPU kernel and stayed
+/// wrong after the retries, on a run that refuses a CPU fallback. `Ok(None)`
+/// means the caller has to compute the attention on the CPU.
 #[cfg(feature = "vulkan")]
 fn attention_on_device(
     q: &[f32],
@@ -306,12 +349,16 @@ fn attention_on_device(
     v: &[f32],
     spec: crate::ops::nn::AttentionSpec,
     rows: &[usize],
-) -> Option<Vec<f32>> {
+) -> Result<Option<Vec<f32>>, String> {
     use crate::vulkan::ops::AttentionRuntime;
     use std::sync::{Mutex, OnceLock};
-    let context = crate::ops::get_vulkan_context()?;
+    let Some(context) = crate::ops::get_vulkan_context() else {
+        return Ok(None);
+    };
     static RUNTIME: OnceLock<Mutex<Option<AttentionRuntime>>> = OnceLock::new();
-    let mut state = RUNTIME.get_or_init(Mutex::default).lock().ok()?;
+    let Ok(mut state) = RUNTIME.get_or_init(Mutex::default).lock() else {
+        return Ok(None);
+    };
     let mut output = vec![0.; q.len()];
     let mut attempts = 0;
     loop {
@@ -332,7 +379,7 @@ fn attention_on_device(
         match result {
             Ok(()) if output.iter().all(|v| v.is_finite()) => {
                 if crate::ops::nn::attention_matches_cpu_sampled(q, k, v, &output, spec, rows) {
-                    return Some(output);
+                    return Ok(Some(output));
                 }
                 // The device disagrees with the CPU kernel, so the call is
                 // retried: a retry usually returns the right numbers.
@@ -343,7 +390,7 @@ fn attention_on_device(
                 );
                 crate::vulkan::mark_gpu_broken("non-finite Idol attention");
                 *state = None;
-                return None;
+                return Ok(None);
             }
             Err(error) => {
                 eprintln!("compute arch=idol scope=attention backend=Cpu reason={error}");
@@ -351,14 +398,30 @@ fn attention_on_device(
                     crate::vulkan::mark_gpu_broken(&error.to_string());
                 }
                 *state = None;
-                return None;
+                return Ok(None);
             }
         }
         attempts += 1;
         if attempts >= 3 {
-            crate::vulkan::mark_gpu_broken("Idol attention disagrees with the CPU kernel");
+            // An attention that stays wrong is a numerical difference, not a
+            // device failure: the device ran, its reduction order just
+            // differs. The shared path repairs the same way
+            // (`ops::nn::Linear::forward_verified`): the CPU kernel recomputes
+            // the value and the device stays usable. Marking the device
+            // broken here would turn one wrong attention into a process-wide
+            // CPU fallback and fail every later request.
+            if strict_device() {
+                return Err(format!(
+                    "Idol attention disagrees with the CPU kernel after {attempts} retries; \
+                     refusing a silent CPU fallback"
+                ));
+            }
+            eprintln!(
+                "compute arch=idol scope=attention backend=Cpu reason=Idol attention disagrees \
+                 with the CPU kernel after {attempts} retries; recomputed on the CPU"
+            );
             *state = None;
-            return None;
+            return Ok(None);
         }
     }
 }
@@ -387,7 +450,9 @@ mod tests {
         for (phase, rows) in [(0.1, 128), (0.7, 257), (-0.3, 129)] {
             let input: Vec<_> = (0..rows * 96).map(|i| (i as f32 * phase).cos()).collect();
             let mut output = vec![0.; rows * 192];
-            assert!(projection.linear(&weight, &input, &mut output, 96, 192));
+            assert!(projection
+                .linear(&weight, &input, &mut output, 96, 192)
+                .unwrap());
             for (row, result) in input.chunks_exact(96).zip(output.chunks_exact(192)) {
                 for (w, &actual) in weight.chunks_exact(96).zip(result) {
                     let expected = crate::ops::dot_f32(row, w, 96);
@@ -404,7 +469,9 @@ mod tests {
                     .map(|i| (i as f32 * phase).cos())
                     .collect();
                 let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
-                let actual = attention(&q, &k, &v, width, heads).expect("device attention");
+                let actual = attention(&q, &k, &v, width, heads)
+                    .expect("device attention")
+                    .expect("device attention result");
                 let expected = crate::ops::nn::attention_on_cpu(
                     &q,
                     &k,
@@ -429,14 +496,18 @@ mod tests {
         assert!(context.submission_count() > before);
         let before_cpu = context.submission_count();
         let _cpu = crate::compute::ComputePolicy::Cpu.enter_legacy_scope();
-        assert!(!projection.linear(
-            &weight,
-            &vec![0.; 128 * 96],
-            &mut vec![0.; 128 * 192],
-            96,
-            192
-        ));
-        assert!(attention(&[0.; 64], &[0.; 64], &[0.; 64], 64, 1).is_none());
+        assert!(!projection
+            .linear(
+                &weight,
+                &vec![0.; 128 * 96],
+                &mut vec![0.; 128 * 192],
+                96,
+                192
+            )
+            .unwrap());
+        assert!(attention(&[0.; 64], &[0.; 64], &[0.; 64], 64, 1)
+            .unwrap()
+            .is_none());
         assert_eq!(context.submission_count(), before_cpu);
     }
     #[test]
@@ -454,7 +525,9 @@ mod tests {
                 .collect();
             let k: Vec<_> = (0..keys * width).map(|i| (i as f32 * 0.23).cos()).collect();
             let v: Vec<_> = k.iter().map(|v| v * 0.7).collect();
-            let actual = attention(&q, &k, &v, width, heads).expect("full-shape device attention");
+            let actual = attention(&q, &k, &v, width, heads)
+                .expect("full-shape device attention")
+                .expect("full-shape device attention result");
             let indices = [0, 31, 32, queries / 2, queries - 1];
             let sampled: Vec<_> = indices
                 .iter()
@@ -498,18 +571,20 @@ mod tests {
                     .collect();
                 let input: Vec<_> = (0..32 * 32 * 3).map(|i| (i as f32 * 0.23).cos()).collect();
                 let mut output = vec![0.; next * next * 64];
-                assert!(projection.convolution(
-                    &weight,
-                    &input,
-                    &mut output,
-                    [3, 64],
-                    [32, 32],
-                    [next, next],
-                    3,
-                    stride,
-                    padding,
-                    channel_first
-                ));
+                assert!(projection
+                    .convolution(
+                        &weight,
+                        &input,
+                        &mut output,
+                        [3, 64],
+                        [32, 32],
+                        [next, next],
+                        3,
+                        stride,
+                        padding,
+                        channel_first
+                    )
+                    .unwrap());
                 for y in 0..next {
                     for x in 0..next {
                         for oc in 0..64 {

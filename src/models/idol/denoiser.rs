@@ -148,7 +148,7 @@ fn attention(qkv: &[f32], width: usize, heads: usize) -> Result<Vec<f32>, String
             k.extend_from_slice(&row[width..2 * width]);
             v.extend_from_slice(&row[2 * width..]);
         }
-        if let Some(mut output) = super::gpu::attention(&q, &k, &v, width, heads) {
+        if let Some(mut output) = super::gpu::attention(&q, &k, &v, width, heads)? {
             round_f16_checked(&mut output, "FP16 denoiser attention")?;
             return Ok(output);
         }

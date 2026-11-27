@@ -232,7 +232,7 @@ pub(super) fn attention(
     width: usize,
     heads: usize,
 ) -> Result<Vec<f32>, String> {
-    if let Some(output) = super::gpu::attention(q, k, v, width, heads) {
+    if let Some(output) = super::gpu::attention(q, k, v, width, heads)? {
         return Ok(output);
     }
     super::gpu::check_failure()?;

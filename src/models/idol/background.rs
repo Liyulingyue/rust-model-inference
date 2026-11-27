@@ -154,7 +154,7 @@ impl Conv {
             self.stride,
             self.padding,
             false,
-        ) {
+        )? {
             for row in out.chunks_exact_mut(self.output) {
                 for (value, bias) in row.iter_mut().zip(&self.bias) {
                     *value += bias;

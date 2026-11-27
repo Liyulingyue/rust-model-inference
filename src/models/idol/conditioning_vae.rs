@@ -61,7 +61,7 @@ impl Conv {
             stride,
             if stride == 1 { self.kernel / 2 } else { 0 },
             true,
-        ) {
+        )? {
             for row in out.chunks_exact_mut(self.output) {
                 for (value, bias) in row.iter_mut().zip(&self.bias) {
                     *value = b(*value + bias);

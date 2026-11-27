@@ -72,6 +72,17 @@ pub(super) fn tensor(
                 });
             values
         }
+        // The bundle carries the integer tensors of the released weights —
+        // BiRefNet's `relative_position_index` and the VAE's
+        // `bn.num_batches_tracked` — and the graph reads neither of them.
+        // A read of one is a graph that wants an integer, which this F32
+        // graph does not have, so it is named instead of falling into the
+        // generic "unsupported type" arm.
+        GGMLType::I64 => {
+            return Err(format!(
+                "Idol tensor {name} is I64; the graph reads no integer tensor"
+            ))
+        }
         _ => {
             return Err(format!(
                 "Unsupported Idol tensor type {:?} for {name}",
@@ -168,7 +179,7 @@ impl Linear {
         let mut y = vec![0.; size];
         if self
             .gpu
-            .linear(&self.weight, x, &mut y, self.input, self.output)
+            .linear(&self.weight, x, &mut y, self.input, self.output)?
         {
             for row in y.chunks_exact_mut(self.output) {
                 for (value, bias) in row.iter_mut().zip(&self.bias) {
