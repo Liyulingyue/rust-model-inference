@@ -82,6 +82,15 @@ const TEMPLATE_NAME: &str = "chat";
 impl JinjaChatTemplate {
     /// Compile a Jinja2 template source string.
     pub fn compile(source: &str, origin: &str) -> Result<Self, String> {
+        Self::compile_with_dialect(source, origin, false)
+    }
+
+    /// Transformers enables Jinja's automatic whitespace trimming.
+    pub fn compile_huggingface(source: &str, origin: &str) -> Result<Self, String> {
+        Self::compile_with_dialect(source, origin, true)
+    }
+
+    fn compile_with_dialect(source: &str, origin: &str, huggingface: bool) -> Result<Self, String> {
         let mut env = Environment::new();
         // Templates in the wild test `is defined` before touching optional
         // fields, so lenient undefined is the behaviour they expect.
@@ -89,7 +98,25 @@ impl JinjaChatTemplate {
         // `fuel` is enabled in Cargo.toml; bound template work so a
         // pathological template cannot hang a server request.
         env.set_fuel(Some(2_000_000));
-        env.set_keep_trailing_newline(true);
+        env.set_keep_trailing_newline(!huggingface);
+        if huggingface {
+            env.set_trim_blocks(true);
+            env.set_lstrip_blocks(true);
+            env.add_function("strftime_now", |format: String| {
+                jiff::fmt::strtime::format(&format, &jiff::Zoned::now()).map_err(|error| {
+                    minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, error.to_string())
+                })
+            });
+            env.add_function(
+                "raise_exception",
+                |message: String| -> Result<String, minijinja::Error> {
+                    Err(minijinja::Error::new(
+                        minijinja::ErrorKind::InvalidOperation,
+                        message,
+                    ))
+                },
+            );
+        }
         // Python method compatibility. minijinja has no `add_method`, but it
         // does have this callback, which fires whenever a method call on a map
         // or string would otherwise raise UnknownMethod. Handling the methods
@@ -1047,6 +1074,18 @@ mod tests {
         // Template is silent: only added when the tokenizer asks.
         assert_eq!(count_bos(&silent, &plain), 0);
         assert_eq!(count_bos(&asks, &plain), 1);
+    }
+
+    #[test]
+    fn huggingface_template_trims_tool_close_and_propagates_reserved_token_errors() {
+        let source = "{% if valid %}reply{% if close %}\n<|end|>{% endif %}{% else %}{{ raise_exception('reserved token') }}{% endif %}";
+        let hf = JinjaChatTemplate::compile_huggingface(source, "hf").unwrap();
+        let context = json!({"valid":true,"close":true});
+        assert_eq!(hf.render_context(&context).unwrap(), "reply<|end|>");
+        let legacy = JinjaChatTemplate::compile(source, "legacy").unwrap();
+        assert_eq!(legacy.render_context(&context).unwrap(), "reply\n<|end|>");
+        let error = hf.render_context(&json!({"valid":false})).unwrap_err();
+        assert!(error.contains("reserved token"), "{error}");
     }
 
     #[test]

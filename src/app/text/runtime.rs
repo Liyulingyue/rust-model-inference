@@ -303,6 +303,8 @@ pub fn build_text_runtime(
         Box::new(HybridTextRuntime::new(options)?)
     } else if arch == "lfm2moe" {
         Box::new(Lfm2MoeTextRuntime::new(options)?)
+    } else if arch == "aion_instruct" {
+        Box::new(crate::models::aion::runtime::AionTextRuntime::new(options)?)
     } else if arch == "lfm3" {
         Box::new(crate::models::lfm3::runtime::Lfm3TextRuntime::new(options)?)
     } else if arch == "falcon-h1" {

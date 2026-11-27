@@ -45,6 +45,7 @@ mod quantized_tensor;
 mod trait_;
 #[cfg(feature = "vulkan")]
 pub(crate) mod vulkan;
+mod weight_only;
 
 pub(crate) struct PreparedRows {
     max_rows: usize,

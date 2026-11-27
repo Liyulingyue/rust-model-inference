@@ -1,0 +1,110 @@
+#version 450
+
+// Each workgroup decodes one GGUF weight row against up to four F32 tokens.
+// Keep weights packed across the upload, cache and dispatch.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Arena { uint data[]; } arena;
+layout(std430, binding = 1) readonly buffer W0 { uint data[]; } w0;
+layout(std430, binding = 2) readonly buffer W1 { uint data[]; } w1;
+layout(std430, binding = 3) readonly buffer W2 { uint data[]; } w2;
+layout(push_constant) uniform PC {
+    uint input_word; uint block_bytes; uint n_in; uint blocks_per_row;
+    uint output0_word; uint rows0; uint stride0;
+    uint output1_word; uint rows1; uint stride1;
+    uint output2_word; uint rows2; uint stride2;
+    uint group_count; uint unused; uint input_stride;
+    uint reserved[5]; uint token_rows;
+} pc;
+
+uint weight_word(uint slot, uint word) {
+    if (slot == 0u) return w0.data[word];
+    if (slot == 1u) return w1.data[word];
+    return w2.data[word];
+}
+
+uint byte_at(uint slot, uint offset) {
+    return bitfieldExtract(weight_word(slot, offset / 4u), int(offset % 4u) * 8, 8);
+}
+
+float half_at(uint slot, uint offset) {
+    // All GGUF block scales start on a 2-byte boundary.
+    vec2 pair = unpackHalf2x16(weight_word(slot, offset / 4u));
+    return pair[(offset / 2u) % 2u];
+}
+
+int signed_byte(uint b) {
+    return bitfieldExtract(int(b), 0, 8);
+}
+
+float decode(uint slot, uint base, uint i) {
+    uint size = pc.block_bytes;
+    if (size == 34u) { // Q8_0
+        return half_at(slot, base) * float(signed_byte(byte_at(slot, base + 2u + i)));
+    }
+    if (size == 18u || size == 20u) { // Q4_0, Q4_1
+        uint qs = base + size - 16u;
+        int code = int((byte_at(slot, qs + i % 16u) >> (4u * (i / 16u))) & 15u);
+        if (size == 18u) return half_at(slot, base) * float(code - 8);
+        return half_at(slot, base) * float(code) + half_at(slot, base + 2u);
+    }
+    uint group = i / 32u, lane = i % 32u;
+    if (size == 210u) { // Q6_K
+        uint quarter = group % 4u;
+        uint section = group / 4u;
+        uint low = byte_at(slot, base + section * 64u + (quarter % 2u) * 32u + lane);
+        uint high = byte_at(slot, base + 128u + section * 32u + lane);
+        int code = int(((low >> (4u * (quarter / 2u))) & 15u)
+                     | (((high >> (2u * quarter)) & 3u) << 4u)) - 32;
+        int scale = signed_byte(byte_at(slot, base + 192u + i / 16u));
+        return half_at(slot, base + 208u) * float(scale * code);
+    }
+    // Q4_K and Q5_K share the same packed six-bit group scales/minima.
+    uint scale = byte_at(slot, base + 4u + group % 4u);
+    uint minimum = byte_at(slot, base + 8u + group % 4u);
+    if (group < 4u) {
+        scale &= 63u;
+        minimum &= 63u;
+    } else {
+        uint hi = byte_at(slot, base + 12u + group % 4u);
+        scale = (hi & 15u) | ((scale >> 6u) << 4u);
+        minimum = (hi >> 4u) | ((minimum >> 6u) << 4u);
+    }
+    uint qs = base + size - 128u;
+    uint code = (byte_at(slot, qs + (group / 2u) * 32u + lane) >> (4u * (group % 2u))) & 15u;
+    if (size == 176u) code |= ((byte_at(slot, base + 16u + lane) >> group) & 1u) << 4u;
+    return half_at(slot, base) * float(scale * code) - half_at(slot, base + 2u) * float(minimum);
+}
+
+shared vec4 partial[64];
+
+void main() {
+    uint slot = gl_WorkGroupID.z % pc.group_count;
+    uint token = 4u * (gl_WorkGroupID.z / pc.group_count);
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rows = slot == 0u ? pc.rows0 : (slot == 1u ? pc.rows1 : pc.rows2);
+    if (row >= rows) return;
+    uint lane = gl_LocalInvocationID.x;
+    uint inputs = min(4u, pc.token_rows - token);
+    uint width = pc.block_bytes <= 34u ? 32u : 256u;
+    vec4 sum = vec4(0.0);
+    for (uint k = lane; k < pc.n_in; k += 64u) {
+        uint base = (row * pc.blocks_per_row + k / width) * pc.block_bytes;
+        float w = decode(slot, base, k % width);
+        for (uint t = 0u; t < inputs; ++t) {
+            float x = uintBitsToFloat(arena.data[pc.input_word + (token + t) * pc.input_stride + k]);
+            sum[t] = fma(w, x, sum[t]);
+        }
+    }
+    partial[lane] = sum;
+    barrier();
+    for (uint step = 32u; step > 0u; step /= 2u) {
+        if (lane < step) partial[lane] += partial[lane + step];
+        barrier();
+    }
+    if (lane == 0u) {
+        uint output_word = slot == 0u ? pc.output0_word : (slot == 1u ? pc.output1_word : pc.output2_word);
+        uint stride = slot == 0u ? pc.stride0 : (slot == 1u ? pc.stride1 : pc.stride2);
+        for (uint t = 0u; t < inputs; ++t)
+            arena.data[output_word + (token + t) * stride + row] = floatBitsToUint(partial[0][t]);
+    }
+}

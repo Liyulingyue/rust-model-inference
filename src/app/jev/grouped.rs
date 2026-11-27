@@ -184,7 +184,7 @@ pub fn build_grouped_payload(context: &str, q: &PreparedGroupedQuestion) -> Resu
     Ok(payload)
 }
 
-fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
+pub(super) fn allocate_group_labels(q: &PreparedGroupedQuestion) -> Vec<Vec<char>> {
     let mut all = Vec::with_capacity(q.groups.len());
     let mut next = b'A';
     for group in &q.groups {
@@ -662,6 +662,16 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
+        "aion_instruct" => {
+            let mut scorer = super::aion::AionScorer::new(
+                source.clone(),
+                n_threads_arg,
+                prefill_batch_size,
+                max_context,
+                &jinja,
+            )?;
+            run_jev_grouped_core(source.clone(), context, &prepared, false, &mut scorer)?
+        }
         "lfm3" => lfm3::run_jev_grouped_lfm3(
             source.clone(),
             context,

@@ -17,6 +17,9 @@ const MARKERS: &[&str] = &[
     "<parameter=",
     "</parameter>",
 ];
+const AION_OPEN: &str = "<|tool_call|>";
+const AION_CLOSE: &str = "<|/tool_call|>";
+const AION_MARKERS: &[&str] = &["<|tool_call", "<|/tool_call"];
 const MAX_CALL_BYTES: usize = 1024 * 1024;
 
 // Text-only portions of the official Qwen/Qwen3-0.6B and Qwen/Qwen3.5-0.8B
@@ -48,6 +51,7 @@ fn is_qwen35(arch: &str) -> Result<bool, String> {
         // LFM3 has its own Jinja input template and the same plain-text
         // output parser. Neither architecture has a tool-call or vision path.
         "dory" | "lfm3" => Ok(false),
+        "aion_instruct" => Ok(false),
         // Nemotron-3 Nano is ChatML too, but it has its own renderer: the
         // CLI encodes the built-in ChatML text with `add_special: true` and
         // without the empty think block, so the qwen renderer would give
@@ -116,6 +120,80 @@ pub fn build_prompt(
     // re-resolving keeps a server request from recompiling the template.
     compiled_jinja: Option<&crate::prompt::jinja::JinjaChatTemplate>,
 ) -> Result<(Vec<u32>, Vec<Vec<u8>>), String> {
+    if arch == "aion_instruct" {
+        validate_tools(tools, choice)?;
+        if messages.is_empty() {
+            return Err("No messages provided".into());
+        }
+        let mut turns = Vec::with_capacity(messages.len() + 1);
+        for message in messages {
+            if !message.images.is_empty() {
+                return Err("Aion supports text input only".into());
+            }
+            let role = match message.role.as_str() {
+                "developer" => "system",
+                role @ ("system" | "user" | "assistant" | "tool") => role,
+                other => return Err(format!("Unsupported message role: {other}")),
+            };
+            if (role == "tool") != message.call_id.is_some() {
+                return Err("Only tool result messages must carry a call ID".into());
+            }
+            if role != "assistant" && !message.calls.is_empty() {
+                return Err("Only assistant messages may contain tool calls".into());
+            }
+            let calls = message.calls.iter().map(|call| {
+                tag_name(&call.name)?;
+                if !call.arguments.is_object() {
+                    return Err("Tool call arguments must be a JSON object".into());
+                }
+                Ok(json!({"type":"function","function":{"name":call.name,"arguments":call.arguments}}))
+            }).collect::<Result<Vec<_>, String>>()?;
+            turns.push(json!({"role":role,"content":message.text,"tool_calls":calls}));
+        }
+        if matches!(choice, ToolChoice::Required | ToolChoice::Named(_)) {
+            let instruction = "You must call at least one of the provided tools.";
+            if turns[0]["role"] == "system" {
+                let content = turns[0]["content"].as_str().unwrap_or_default();
+                turns[0]["content"] = json!(format!("{content}\n\n{instruction}"));
+            } else {
+                turns.insert(0, json!({"role":"system","content":instruction}));
+            }
+        }
+        let tools: Vec<_> = tools
+            .iter()
+            .filter(|tool| match choice {
+                ToolChoice::None => false,
+                ToolChoice::Named(name) => &tool.name == name,
+                _ => true,
+            })
+            .map(|tool| {
+                let mut function = json!({"name":tool.name});
+                if let Some(description) = &tool.description {
+                    function["description"] = json!(description);
+                }
+                function["parameters"] = tool.parameters.clone();
+                json!({"type":"function","function":function})
+            })
+            .collect();
+        let owned;
+        let template = if let Some(template) = compiled_jinja {
+            template
+        } else {
+            owned = crate::models::aion::prompt::load_template(source, jinja)?;
+            &owned
+        };
+        let text = template.render_context(&json!({
+            "messages":turns, "tools":tools, "add_generation_prompt":true
+        }))?;
+        let ids = tokenizer.encode(
+            &text,
+            crate::core::tokenizer::EncodeOptions {
+                add_special: false,
+                parse_special: true,
+            },
+        );
+        return Ok((ids, Vec::new()));
+    }
     if arch == "mage_vl" {
         validate_tools(tools, choice)?;
         if messages.is_empty() {
@@ -718,6 +796,9 @@ pub fn build_prompt(
 
 pub struct OutputParser {
     plain_text: bool,
+    open: &'static str,
+    close: &'static str,
+    markers: &'static [&'static str],
     qwen35: bool,
     tools: HashMap<String, Value>,
     choice: ToolChoice,
@@ -736,6 +817,11 @@ pub struct OutputParser {
 impl OutputParser {
     pub fn new(arch: &str, tools: &[Tool], choice: &ToolChoice) -> Self {
         let plain_text = arch == crate::models::unlimited_ocr::MODEL_TYPE;
+        let (open, close, markers) = if arch == "aion_instruct" {
+            (AION_OPEN, AION_CLOSE, AION_MARKERS)
+        } else {
+            (OPEN, CLOSE, MARKERS)
+        };
         let arch = if plain_text {
             Ok(false)
         } else {
@@ -753,6 +839,9 @@ impl OutputParser {
         });
         Self {
             plain_text,
+            open,
+            close,
+            markers,
             qwen35: arch.unwrap_or(false),
             tools: tools
                 .iter()
@@ -803,7 +892,8 @@ impl OutputParser {
             let mut deltas = self.drain()?;
             if self.in_call
                 || (self.pending.len() > 1
-                    && MARKERS
+                    && self
+                        .markers
                         .iter()
                         .any(|tag| tag.starts_with(self.pending.as_str())))
             {
@@ -885,7 +975,7 @@ impl OutputParser {
                         name,
                         arguments: Value::Object(arguments),
                     });
-                    self.pending.drain(..end + CLOSE.len());
+                    self.pending.drain(..end + self.close.len());
                     self.in_call = false;
                     self.scan = 0;
                     self.quoted = false;
@@ -897,7 +987,8 @@ impl OutputParser {
                 }
                 break;
             }
-            let marker = MARKERS
+            let marker = self
+                .markers
                 .iter()
                 .filter_map(|tag| self.pending.find(tag).map(|i| (i, *tag)))
                 .min_by_key(|(i, _)| *i);
@@ -906,26 +997,27 @@ impl OutputParser {
                     let text = self.pending.drain(..position).collect();
                     self.emit_text(text, &mut deltas)?;
                 }
-                if self.pending.starts_with(OPEN) {
+                if self.pending.starts_with(self.open) {
                     if self.tools.is_empty() || matches!(self.choice, ToolChoice::None) {
                         return Err("Model generated a tool call while tools are disabled".into());
                     }
-                    self.pending.drain(..OPEN.len());
+                    self.pending.drain(..self.open.len());
                     self.post_call_whitespace.clear();
                     self.in_call = true;
                     continue;
                 }
-                if OPEN.starts_with(self.pending.as_str()) {
+                if self.open.starts_with(self.pending.as_str()) {
                     break;
                 }
                 return Err("Malformed or unexpected tool delimiter outside a tool call".into());
             }
-            let hold = (1..=self.pending.len().min(OPEN.len()))
+            let hold = (1..=self.pending.len().min(self.open.len()))
                 .rev()
                 .find(|&n| {
                     let start = self.pending.len() - n;
                     self.pending.is_char_boundary(start)
-                        && MARKERS
+                        && self
+                            .markers
                             .iter()
                             .any(|tag| tag.starts_with(&self.pending[start..]))
                 })
@@ -955,10 +1047,10 @@ impl OutputParser {
                 self.quoted = true;
             } else if bytes[i] == b'<' {
                 let suffix = &bytes[i..];
-                if suffix.starts_with(CLOSE.as_bytes()) {
+                if suffix.starts_with(self.close.as_bytes()) {
                     return Some(i);
                 }
-                if CLOSE.as_bytes().starts_with(suffix) {
+                if self.close.as_bytes().starts_with(suffix) {
                     return None;
                 }
             }
@@ -1008,12 +1100,10 @@ impl OutputParser {
             (name.to_owned(), arguments)
         } else {
             let value: Value = serde_json::from_str(body)
-                .map_err(|error| format!("Malformed Qwen3 tool JSON: {error}"))?;
-            let call = value
-                .as_object()
-                .ok_or("Qwen3 tool call must be a JSON object")?;
+                .map_err(|error| format!("Malformed tool JSON: {error}"))?;
+            let call = value.as_object().ok_or("Tool call must be a JSON object")?;
             if call.len() != 2 {
-                return Err("Qwen3 tool call must contain only name and arguments".into());
+                return Err("Tool call must contain only name and arguments".into());
             }
             let name = call
                 .get("name")
@@ -1242,6 +1332,17 @@ mod tests {
             missing, disabled,
             "an explicit false must still be able to turn the reasoning block off"
         );
+    }
+
+    #[test]
+    fn aion_tool_markers_survive_streaming_and_json_quotes() {
+        let raw = r#"<|tool_call|>{"name":"lookup","arguments":{"city":"杭州 <|/tool_call|>"}}<|/tool_call|>"#;
+        for (position, _) in raw.char_indices() {
+            let (text, calls) = replay("aion_instruct", raw, position);
+            assert!(text.is_empty());
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].arguments["city"], "杭州 <|/tool_call|>");
+        }
     }
 
     #[test]

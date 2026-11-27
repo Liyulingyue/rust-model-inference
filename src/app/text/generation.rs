@@ -135,6 +135,49 @@ pub fn run_inference(
             thinking,
             jinja,
         )
+    } else if arch == "aion_instruct" {
+        use crate::core::tokenizer::{BPETokenizer, EncodeOptions};
+        use crate::models::aion::{prompt::load_template, runtime::AionTextRuntime};
+        use crate::ops::generation_runtime::{GenerationRequest, StdoutSink};
+        if chat_template.is_some() {
+            return Err(
+                "Aion uses its GGUF chat template; use --chat-template-file to override it".into(),
+            );
+        }
+        let tokenizer = Arc::new(BPETokenizer::from_gguf_metadata(|key| {
+            source.metadata(key).cloned()
+        })?);
+        let tokens = if bench {
+            tokenizer.encode(prompt, EncodeOptions::default())
+        } else {
+            let template = load_template(source.as_ref(), jinja)?;
+            crate::prompt::jinja::render_text_conversation(
+                tokenizer.as_ref(),
+                &template,
+                None,
+                prompt,
+                Some(thinking),
+            )?
+        };
+        let threads = crate::app::cli::resolve_thread_count(
+            n_threads_arg,
+            std::thread::available_parallelism().map_or(1, usize::from),
+        );
+        let options = super::RuntimeOptions::from_model(
+            source,
+            Arc::new(crate::core::thread_pool::ComputePool::new(threads)),
+            tokenizer,
+        )
+        .with_compute(crate::compute::ComputePolicy::legacy())
+        .with_kv_format(kv_format)
+        .with_prefill_batch_size(prefill_batch_size)
+        .with_max_context(max_context);
+        let mut request = GenerationRequest::new(tokens, max_tokens);
+        request.sampling.temperature = temperature;
+        request.sampling.repetition_penalty = repetition_penalty;
+        AionTextRuntime::new(options)?.generate_text(&request, &mut StdoutSink, bench, profile)?;
+        println!();
+        Ok(())
     } else if arch == "lfm3" {
         crate::models::lfm3::run_inference(
             source.as_ref(),
