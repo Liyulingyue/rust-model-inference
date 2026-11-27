@@ -5,7 +5,12 @@ factor 2. The explicit `sensenova_loop` model reuses shared Qwen3.5 CPU SIMD and
 Vulkan kernels, retaining independent state for all 56 visits of 32 physical layers.
 See the [pinned contract and reproduction commands](../../tools/oracle/sensenova_loop/README.md).
 
-Status on 2026-11-19: **Experimental / partial adaptation**. The
+Status on 2026-11-19: **Experimental / partial adaptation**, cross-checked on
+2026-11-27 from an aarch64 + NVIDIA GB10 host
+([arm64-validation.md](../../tools/oracle/sensenova_loop/arm64-validation.md)):
+the passing set (F32/F16/BF16 text and image, HTTP/JEV interfaces) and the
+failing set (F32 image intermediates, quantized full-model gates) reproduce
+with the same shape on the NEON CPU and GB10 Vulkan paths. The
 [108-row matrix](../../tools/oracle/sensenova_loop/release-matrix.csv) records
 30 passed, 78 failed and 0 pending
 combinations across nine text storage formats, three backends, text/image
