@@ -36,6 +36,9 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
             "--mode" => {
                 options.planning_mode = Some(required_string_value(args, &mut i, "--mode")?);
             }
+            "--preview-dir" => {
+                options.preview_dir = Some(required_path_value(args, &mut i, "--preview-dir")?);
+            }
             "--num-samples" => {
                 options.num_samples = Some(required_usize_value(args, &mut i, "--num-samples")?);
             }

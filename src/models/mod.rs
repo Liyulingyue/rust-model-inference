@@ -53,6 +53,7 @@ pub mod qwen35;
 pub mod qwen_drive;
 pub mod sensenova_loop;
 pub mod spark;
+pub mod tessera;
 pub mod thx02;
 pub mod timestral;
 pub mod underdog_woof;

@@ -85,7 +85,7 @@ enum Backend {
     Text(TextBackend),
     Pjit(image_generation::PjitBackend),
     Video(video_generation::VideoBackend),
-    /// The text-to-image diffusion models: Z-Image and ERNIE-Image. They
+    /// The text-to-image diffusion models: Z-Image, ERNIE-Image and Tessera. They
     /// share the image-generation route with P-JiT and differ only in the
     /// pipeline behind it.
     Diffusion(diffusion::DiffusionBackend),
@@ -1216,17 +1216,13 @@ fn build_backend(
             Arc::from(source),
         )?)));
     }
-    // The text-to-image diffusion models (Z-Image, ERNIE-Image). They are
-    // recognized by their weights rather than by a flag, because the CLI
-    // recognizes them the same way and the two entry points must agree on
-    // what a file is.
     let diffusion_source =
         crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
             .ok()
-            .filter(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
-    if let Some(source) = diffusion_source {
-        let kind = diffusion::DiffusionKind::detect(source.as_ref())
-            .ok_or("the diffusion model could not be identified")?;
+            .and_then(|source| {
+                diffusion::DiffusionKind::detect(source.as_ref()).map(|kind| (source, kind))
+            });
+    if let Some((source, kind)) = diffusion_source {
         let available = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1);
@@ -2069,6 +2065,9 @@ fn configure_gpu(options: &CliOptions) -> Result<crate::compute::LegacyComputeSc
 }
 
 fn reject_unsupported_server_modes(options: &CliOptions) -> Result<(), String> {
+    if options.preview_dir.is_some() {
+        return Err("HTTP previews are returned with stream=true".into());
+    }
     if options.decision_request.is_some() {
         return Err("--decision-request is a CLI input; server decisions use /v1/decide".into());
     }
@@ -2183,33 +2182,25 @@ pub fn run_server() {
     // invocation, so they are skipped for it, exactly like the main binary
     // does.
     let auk_source = auk::probe_invocation(&options);
-    let pjit_invocation =
-        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-            .ok()
-            .is_some_and(|s| crate::app::arch_of(s.as_ref()) == "pjit");
-    let video_invocation =
-        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-            .ok()
-            .is_some_and(|s| crate::models::diffusion::fastframes_l::matches_model(s.as_ref()));
-    // The text-to-image diffusion models are recognized by their weights.
-    // Their CLI validator wants --out and --prompt, both of which the
-    // server takes from the request instead.
-    let diffusion_invocation =
-        crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm)
-            .ok()
-            .is_some_and(|source| diffusion::DiffusionKind::detect(source.as_ref()).is_some());
+    let source = crate::format::ggufrs::open_model_source(&options.model, ComponentRole::Llm).ok();
+    let image_arch = source.as_deref().map(crate::app::arch_of);
+    let video_invocation = source
+        .as_deref()
+        .is_some_and(crate::models::diffusion::fastframes_l::matches_model);
+    let diffusion_kind = source.as_deref().and_then(diffusion::DiffusionKind::detect);
+    drop(source);
     if video_invocation {
         if let Err(error) = crate::app::video_generation::options(&options, true) {
             eprintln!("{error}");
             std::process::exit(2);
         }
-    } else if pjit_invocation {
+    } else if image_arch.as_deref() == Some("pjit") {
         if let Err(error) = crate::app::diffusion::pjit_options(&options) {
             eprintln!("{error}");
             std::process::exit(2);
         }
-    } else if diffusion_invocation {
-        if let Err(error) = diffusion::validate_server_options(&options) {
+    } else if let Some(kind) = diffusion_kind {
+        if let Err(error) = diffusion::validate_server_options(kind, &options) {
             eprintln!("{error}");
             std::process::exit(2);
         }

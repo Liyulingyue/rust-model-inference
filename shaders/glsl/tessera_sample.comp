@@ -1,0 +1,112 @@
+#version 450
+// One workgroup samples the 512 palette colors for a pixel. The input race
+// denominators are generated in CPU PyTorch order for reproducible batches.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) buffer Arena { float data[]; };
+layout(push_constant) uniform Params {
+    uint cond, uncond, noise, probs, triplets;
+    float guidance, temperature;
+    uint top_k;
+    float top_p, min_p;
+} p;
+
+shared float logits[512], sorted[512], weights[512], total, peak, cutoff;
+shared uint order[512], best;
+shared bool valid;
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint pixel = gl_WorkGroupID.x;
+    uint offset = pixel * 512;
+    for (uint j = lane; j < 512; j += 64) {
+        float c = data[p.cond + offset + j];
+        float u = data[p.uncond + offset + j];
+        logits[j] = p.cond == p.uncond ? c : u + p.guidance * (c - u);
+    }
+    barrier();
+    if (lane == 0) {
+        best = 0;
+        valid = true;
+        for (uint j = 0; j < 512; ++j) {
+            valid = valid && !isnan(logits[j]) && !isinf(logits[j]);
+            if (logits[j] > logits[best]) best = j;
+        }
+        peak = logits[best];
+    }
+    barrier();
+    for (uint j = lane; j < 512; j += 64) weights[j] = exp(logits[j] - peak);
+    barrier();
+    if (lane == 0) {
+        total = 0.;
+        for (uint j = 0; j < 512; ++j) total += weights[j];
+    }
+    barrier();
+    for (uint j = lane; j < 512; j += 64)
+        data[p.probs + offset + j] = weights[j] / total;
+
+    // The unfiltered distribution is retained for self-conditioning. Sort
+    // only when a rank-based cutoff was requested.
+    if (p.temperature > 0. && (p.temperature != 1. || p.top_k > 0 || p.top_p < 1. || p.min_p > 0.)) {
+        for (uint j = lane; j < 512; j += 64) {
+            sorted[j] = (logits[j] - peak) / p.temperature;
+            order[j] = j;
+        }
+        barrier();
+        bool ranked = (p.top_k > 0 && p.top_k < 512) || p.top_p < 1.;
+        if (ranked) {
+            for (uint k = 2; k <= 512; k *= 2) {
+                for (uint stride = k / 2; stride > 0; stride /= 2) {
+                    for (uint j = lane; j < 512; j += 64) {
+                        uint other = j ^ stride;
+                        if (j >= other) continue;
+                        float a = sorted[j], b = sorted[other];
+                        uint ia = order[j], ib = order[other];
+                        bool first = a > b || (a == b && ia < ib);
+                        if (first != ((j & k) == 0)) {
+                            sorted[j] = b; sorted[other] = a;
+                            order[j] = ib; order[other] = ia;
+                        }
+                    }
+                    barrier();
+                }
+            }
+        }
+        if (lane == 0) {
+            cutoff = uintBitsToFloat(0xff800000u);
+            if (p.top_k > 0 && p.top_k < 512) cutoff = sorted[p.top_k - 1];
+            if (p.min_p > 0.) cutoff = max(cutoff, log(p.min_p));
+        }
+        barrier();
+        for (uint j = lane; j < 512; j += 64)
+            weights[order[j]] = sorted[j] < cutoff ? 0. : exp(sorted[j]);
+        barrier();
+        if (lane == 0) {
+            total = 0.;
+            for (uint j = 0; j < 512; ++j) total += weights[order[j]];
+            if (p.top_p < 1.) {
+                float mass = 0., kept = 0.;
+                for (uint j = 0; j < 512; ++j) {
+                    uint id = order[j];
+                    if (mass > p.top_p) weights[id] = 0.;
+                    else { mass += weights[id] / total; kept += weights[id]; }
+                }
+                total = kept;
+            }
+        }
+        barrier();
+    }
+    if (lane == 0) {
+        uint id = best;
+        if (p.temperature > 0.) {
+            float high = -1.;
+            for (uint j = 0; j < 512; ++j) {
+                float score = (weights[j] / total) / data[p.noise + offset + j];
+                if (score > high) { high = score; id = j; }
+            }
+        }
+        data[p.triplets + pixel * 3] = float(best);
+        data[p.triplets + pixel * 3 + 1] = float(id);
+        // A finite CFG parameter can still overflow when applied to logits.
+        // The host validates the triplet before committing any pixels.
+        data[p.triplets + pixel * 3 + 2] = valid ? weights[id] / total : uintBitsToFloat(0x7fc00000u);
+    }
+}

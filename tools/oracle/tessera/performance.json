@@ -1,0 +1,32 @@
+{
+  "host": "Apple M3 Max, MoltenVK 1.4.2",
+  "torch_version": "2.9.1",
+  "date": "2026-11-25",
+  "prompt": "golden crown with blue gems",
+  "seed": 0,
+  "steps": 16,
+  "threads": 8,
+  "weight": "tessera-small-f16.gguf",
+  "official_pytorch_cpu_seconds": [
+    15.663,
+    15.816,
+    15.686
+  ],
+  "rust_cli_seconds": {
+    "cpu": [
+      4.484,
+      4.475,
+      4.455
+    ],
+    "auto": [
+      3.066,
+      3.065,
+      3.065
+    ],
+    "vulkan": [
+      3.085,
+      3.089,
+      3.073
+    ]
+  }
+}

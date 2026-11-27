@@ -1889,6 +1889,15 @@ impl TorchMt19937 {
         (value & ((1u64 << 53) - 1)) as f64 * (1.0f64 / (1u64 << 53) as f64)
     }
 
+    /// Uniform draws used by PyTorch CPU's rand and multinomial kernels.
+    pub(crate) fn sample_uniform_f32(&mut self) -> f32 {
+        Self::uniform_f32(self.rand_u32())
+    }
+
+    pub(crate) fn sample_uniform_f64(&mut self) -> f64 {
+        Self::uniform_f64(self.rand_u64())
+    }
+
     fn normal_double(&mut self) -> f64 {
         if self.has_next_gauss {
             self.has_next_gauss = false;

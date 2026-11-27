@@ -19,6 +19,7 @@ use crate::models::diffusion::qwen_image_2_1::{
 use crate::models::diffusion::z_image::dit::TorchMt19937;
 use crate::models::diffusion::z_image::vae::FluxVae;
 use crate::models::diffusion::z_image::{ZImageOptions, ZImagePipeline, ZImageRgb};
+use crate::models::diffusion::DiffusionPipeline;
 use crate::models::qwen3::Qwen3Model;
 use crate::models::qwen35::vision::{qwen_smart_resize, VisionEncoder, VisionScratchpad};
 use image::ImageEncoder;
@@ -732,42 +733,98 @@ pub fn run_mage_flow_cli(
     Ok(())
 }
 
-/// Generic CLI dispatcher for any [`crate::models::diffusion::DiffusionPipeline`].
-///
-/// Opens the three model components via `P::load`, runs `P::generate_rgb`,
-/// writes the PNG atomically, and prints stage timings. Callers (e.g.
-/// `run_z_image_cli`, `run_ernie_image_cli`) are now thin wrappers that
-/// translate their CLI option struct into `P::Options` and forward here.
-///
-/// `name` is printed in log messages (e.g. `"Z-Image"`, `"ERNIE-Image"`).
-pub fn run_diffusion_cli<P>(
+/// Load a text-to-image pipeline, render its native RGB or RGBA image and
+/// atomically publish the PNG. Each model supplies its component layout.
+fn run_diffusion_cli<P>(
     name: &str,
-    diffusion: Arc<dyn TensorSource>,
-    text: Arc<dyn TensorSource>,
-    vae: Arc<dyn TensorSource>,
-    prompt: &str,
-    pipeline_options: &P::Options,
-    out: &std::path::Path,
+    outputs: &[PathBuf],
     overwrite: bool,
-    n_threads: usize,
-) -> Result<(), String>
-where
-    P: crate::models::diffusion::DiffusionPipeline,
-{
+    load: impl FnOnce() -> Result<P, String>,
+    generate: impl FnOnce(P) -> Result<Vec<image::DynamicImage>, String>,
+) -> Result<(), String> {
+    for out in outputs {
+        if !overwrite && out.exists() {
+            return Err(format!("Output already exists: {}", out.display()));
+        }
+    }
     let started = Instant::now();
-    let pipeline = P::load(diffusion, text, vae, n_threads)?;
+    let pipeline = load()?;
     println!(
         "{name} components loaded in {}ms",
         started.elapsed().as_millis()
     );
-    let rgb = pipeline.generate_rgb(prompt, pipeline_options)?;
-    write_png_atomically(out, &rgb, overwrite)?;
-    println!(
-        "{name} PNG saved to {} in {}ms",
-        out.display(),
-        started.elapsed().as_millis()
-    );
+    let images = generate(pipeline)?;
+    if images.len() != outputs.len() {
+        return Err("unexpected image batch size".into());
+    }
+    for (out, image) in outputs.iter().zip(images) {
+        write_output_atomically(out, &encode_image_png(&image)?, overwrite)?;
+        println!(
+            "{name} PNG saved to {} in {}ms",
+            out.display(),
+            started.elapsed().as_millis()
+        );
+    }
     Ok(())
+}
+
+fn image_filename(out: &Path, suffix: &str) -> Result<OsString, String> {
+    let mut name = out
+        .file_stem()
+        .ok_or("expected an output filename")?
+        .to_os_string();
+    name.push(suffix);
+    name.push(".png");
+    Ok(name)
+}
+
+pub fn run_tessera_cli(
+    source: Arc<dyn TensorSource>,
+    cli: &crate::app::CliOptions,
+    threads: usize,
+) -> Result<(), String> {
+    use crate::models::tessera;
+    let options = crate::app::cli::tessera_options(cli, false)?;
+    let prompt =
+        tessera::validate_prompt(cli.prompt.as_deref().ok_or("Tessera requires --prompt")?)?;
+    let out = cli.out.as_deref().ok_or("Tessera requires --out")?;
+    let count = cli.num_samples.unwrap_or(1);
+    tessera::validate_batch_size(count)?;
+    let outputs = if count == 1 {
+        vec![out.to_owned()]
+    } else {
+        (0..count)
+            .map(|i| Ok(out.with_file_name(image_filename(out, &format!("-{i:03}"))?)))
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    if let Some(dir) = &cli.preview_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("create preview directory {}: {e}", dir.display()))?;
+    }
+    run_diffusion_cli(
+        "Tessera",
+        &outputs,
+        cli.overwrite,
+        || tessera::Pipeline::load(source, threads, cli.compute_policy()),
+        |pipeline| {
+            let mut callback = cli.preview_dir.as_ref().map(|dir| {
+                move |step: tessera::Step, i: usize, image: image::RgbaImage| {
+                    let name = image_filename(out, &format!("-step-{:03}-{i:03}", step.index))?;
+                    write_output_atomically(
+                        &dir.join(name),
+                        &encode_image_png(&image.into())?,
+                        cli.overwrite,
+                    )
+                }
+            });
+            let preview = callback.as_mut().map(|f| f as &mut tessera::Preview<'_>);
+            Ok(pipeline
+                .generate_batch(&vec![prompt; count], &options, preview)?
+                .into_iter()
+                .map(Into::into)
+                .collect())
+        },
+    )
 }
 
 pub fn run_z_image_cli(
@@ -784,20 +841,21 @@ pub fn run_z_image_cli(
         seed,
         out,
     } = options;
-    run_diffusion_cli::<ZImagePipeline>(
+    let options = ZImageOptions {
+        steps,
+        resolution,
+        seed,
+    };
+    run_diffusion_cli(
         "Z-Image",
-        diffusion,
-        text,
-        vae,
-        prompt,
-        &ZImageOptions {
-            steps,
-            resolution,
-            seed,
-        },
-        &out,
+        std::slice::from_ref(&out),
         true,
-        n_threads,
+        || <ZImagePipeline as DiffusionPipeline>::load(diffusion, text, vae, n_threads),
+        |pipeline| {
+            Ok(vec![into_rgb_image(DiffusionPipeline::generate_rgb(
+                &pipeline, prompt, &options,
+            )?)?])
+        },
     )
 }
 
@@ -951,21 +1009,22 @@ pub fn run_ernie_image_cli(
     n_threads: usize,
 ) -> Result<(), String> {
     use crate::models::diffusion::ernie_image::{ErnieImageOptions, ErnieImagePipeline};
-    run_diffusion_cli::<ErnieImagePipeline>(
+    let options = ErnieImageOptions {
+        steps,
+        resolution,
+        seed,
+        cfg_scale,
+    };
+    run_diffusion_cli(
         "ERNIE-Image",
-        diffusion,
-        text,
-        vae,
-        prompt,
-        &ErnieImageOptions {
-            steps,
-            resolution,
-            seed,
-            cfg_scale,
-        },
-        &out,
+        std::slice::from_ref(&out),
         true,
-        n_threads,
+        || <ErnieImagePipeline as DiffusionPipeline>::load(diffusion, text, vae, n_threads),
+        |pipeline| {
+            Ok(vec![into_rgb_image(DiffusionPipeline::generate_rgb(
+                &pipeline, prompt, &options,
+            )?)?])
+        },
     )
 }
 
@@ -1397,7 +1456,7 @@ pub fn run_qwen_image_2_1(
     Ok(())
 }
 
-pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb, overwrite: bool) -> Result<(), String> {
+fn validate_rgb(rgb: &ZImageRgb) -> Result<(), String> {
     let expected = usize::try_from(rgb.width)
         .ok()
         .and_then(|width| {
@@ -1413,16 +1472,37 @@ pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb, overwrite: bool) -> Re
             rgb.bytes.len()
         ));
     }
+    Ok(())
+}
+
+pub(super) fn into_rgb_image(rgb: ZImageRgb) -> Result<image::DynamicImage, String> {
+    validate_rgb(&rgb)?;
+    image::RgbImage::from_raw(rgb.width, rgb.height, rgb.bytes)
+        .map(image::DynamicImage::ImageRgb8)
+        .ok_or_else(|| "invalid RGB image dimensions".into())
+}
+
+fn encode_png(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    color: image::ColorType,
+) -> Result<Vec<u8>, String> {
     let mut encoded = Vec::new();
     image::codecs::png::PngEncoder::new(&mut encoded)
-        .write_image(
-            &rgb.bytes,
-            rgb.width,
-            rgb.height,
-            image::ColorType::Rgb8.into(),
-        )
+        .write_image(bytes, width, height, color.into())
         .map_err(|error| format!("Encode PNG: {error}"))?;
-    write_output_atomically(path, &encoded, overwrite)
+    Ok(encoded)
+}
+
+pub(super) fn encode_image_png(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    encode_png(img.as_bytes(), img.width(), img.height(), img.color())
+}
+
+pub fn write_png_atomically(path: &Path, rgb: &ZImageRgb, overwrite: bool) -> Result<(), String> {
+    validate_rgb(rgb)?;
+    let bytes = encode_png(&rgb.bytes, rgb.width, rgb.height, image::ColorType::Rgb8)?;
+    write_output_atomically(path, &bytes, overwrite)
 }
 
 pub fn write_output_atomically(path: &Path, bytes: &[u8], overwrite: bool) -> Result<(), String> {
