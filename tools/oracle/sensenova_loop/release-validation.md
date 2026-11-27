@@ -10,7 +10,7 @@ The counts retain the historical pre-correction snapshot; the corrected shared
 GPU path has not completed full-model acceptance. The [Q4_0 image follow-up](#q4_0-image-review-follow-up-2026-11-22)
 uses a healthy replacement GPU and retains the remaining numerical failures.
 
-**Historical GPU blocker on port 33162:** real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes failed with `device lost`. The replacement host on port 34695 executes Vulkan successfully; this does not erase the old host's failure record. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
+**Historical GPU blocker on the continuation host:** real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes failed with `device lost`. The replacement host executes Vulkan successfully; this does not erase the old host's failure record. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
 
 ## Contract and assets
 
@@ -29,7 +29,7 @@ uses a healthy replacement GPU and retains the remaining numerical failures.
   Only the 202 text projections use the selected storage format.
   Preview and release decoder/projector config identities must match.
 
-Numeric/regression/performance host: `j-oxuoqo5tstkquvgqhepkaa5cm6`, SSH port 31667, remote repository
+Numeric/regression/performance host (identifier redacted), remote repository
 `/workspace/rust-model-inference-sensenova-loop-9b`. x86_64, 16-CPU quota,
 55 GiB cgroup RAM, gfx1100 / RADV NAVI31 with approximately 48 GiB VRAM.
 Rust 1.94.1, PyTorch 2.9.1 ROCm 7.2 and transformers 5.12.0.
@@ -39,11 +39,11 @@ against the manifest. No source checkpoint or full-model GGUF was stored on Mac.
 Dependencies remain in repository `.venv` / `target`; no system package,
 shell configuration, GPU reset or unrelated task was changed.
 
-Earlier ports 35167 and 36085 became unavailable, followed by port 31667 during
+Earlier hosts became unavailable, followed by the numeric host during
 the final interface checks. The retained snapshot had 14/27 complete groups.
-The continuation host is `j-5fyejyon53kz4ytgmxuf5ne2m5`, SSH port 33162. It completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to port 31667. No throughput comparison combines the two hosts.
+The continuation host (identifier redacted) completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to the numeric host. No throughput comparison combines the two hosts.
 
-All timing tables below come from port 31667.
+All timing tables below come from the numeric host.
 
 | Text storage | Bytes | SHA256 |
 | --- | ---: | --- |
@@ -331,7 +331,7 @@ are retained in `embedding_diagnostic`.
 
 All 54/54 native numeric runs
 are recorded; 14/27
-format/backend interface groups are complete. The continuation host is `j-5fyejyon53kz4ytgmxuf5ne2m5`, SSH port 33162. It completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to port 31667. No throughput comparison combines the two hosts.
+format/backend interface groups are complete. The continuation host (identifier redacted) completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to the numeric host. No throughput comparison combines the two hosts.
 
 The interface count is checked
 separately because a failed numeric gate can mark a matrix row failed before
@@ -388,7 +388,7 @@ Review fixes:
     JEV stdout directly as JSON and compare it with HTTP responses.
     This changes the diagnostic channel without changing arithmetic. Retry
     completion is `False`; an unavailable
-    result remains unverified. The final four-log change compiled on port 33162, and CPU CLI JSON parses without filtering. The GPU probe aborts with `device lost` before completing the JSON regression; this remains unverified. See `continuation` and `validation_blockers`.
+    result remains unverified. The final four-log change compiled on the continuation host, and CPU CLI JSON parses without filtering. The GPU probe aborts with `device lost` before completing the JSON regression; this remains unverified. See `continuation` and `validation_blockers`.
 14. Align shared mapped-memory flush/invalidate ranges to `nonCoherentAtomSize`,
     bounded by the allocation, and map the full allocation so aligned tail ranges
     remain mapped. Validation of a tiny F32 operator exposed six offset/size
@@ -451,7 +451,7 @@ non-overlapping map above.
 Cross-model edits are confined to shared coefficient application, optional
 trunk coefficient/norm inputs, tracing lock lifetime and template/JEV wiring.
 Before the mapped-range correction, Qwen3.5-0.8B Q8_0 real CPU/GPU regression
-on port 31667 is bitwise unchanged: CPU compares
+on the numeric host is bitwise unchanged: CPU compares
 17,959,424 F32 words and 22 IDs; GPU compares 5,214,720 words and eight IDs.
 The GPU trace selects complete logits to avoid the baseline's tracing deadlock.
 The shared quantizer fixes affect new exports; broader old-model K-quant quality
@@ -572,7 +572,7 @@ Q4_0 device accumulation on AVX2/FMA hosts. [Machine-readable evidence](q4-image
 records commands, backend submissions, original gates, interface checks and
 first-layer diagnostics. The historical 108-row matrix above is not overwritten.
 
-Host: `j-jpyh7yskfqdrt34pavbzlaa6nq`, SSH `36.150.116.206:34695`, RADV NAVI31,
+Host: replacement host (identifier redacted), RADV NAVI31,
 approximately 48 GiB VRAM, 55 GiB cgroup RAM. A standalone Vulkan integer-write
 probe returns 123; the model runs have no device-loss error. Source files and
 F32/Q4_0/projector exports match the pinned release hashes above. All weights

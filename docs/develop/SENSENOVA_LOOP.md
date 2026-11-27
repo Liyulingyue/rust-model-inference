@@ -12,9 +12,9 @@ combinations across nine text storage formats, three backends, text/image
 generation and JEV. Implementation, CLI, HTTP and numeric verification are
 separate. The last collected snapshot has
 14/27 complete
-interface groups. **GPU continuation blocked:** SSH to `36.150.116.206:33162` works, but real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes fail with `device lost`. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
+interface groups. **GPU continuation blocked:** SSH to the continuation host works, but real Qwen GPU inference and tiny F32/Q8 Vulkan operator probes fail with `device lost`. The retained interface snapshot is incomplete. See `continuation` and `validation_blockers` for raw errors and baseline probes. The 108-row aggregate does not mean the interface matrix is complete.
 
-The continuation host is `j-5fyejyon53kz4ytgmxuf5ne2m5`, SSH port 33162. It completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to port 31667. No throughput comparison combines the two hosts.
+The continuation host (identifier redacted) completed 0 additional interface groups. All 25 pinned source files and 7 re-exported text files plus projector were checked against the original sizes/SHA256. The final CLI/server build passed. Per-group host provenance is recorded in JSON and CSV; numeric, regression and timing evidence below remains attributed to the numeric host. No throughput comparison combines the two hosts.
 
 F32 text passes all 570 official state/logit gates on each backend,
 with exact tokenizer and greedy IDs. Auto/Vulkan execute device submissions.
@@ -46,7 +46,7 @@ Same-host F32 text process times include loading and tracing, using 16 threads:
 | native | vulkan | 170.249 | 30,156,988 |
 | official PyTorch (recorded placement) | ROCm decoder; CPU input/head | 28.442 | 29,193,116 |
 
-These observations come from `j-oxuoqo5tstkquvgqhepkaa5cm6`, SSH port 31667,
+These observations come from the numeric host (identifier redacted),
 with gfx1100/RADV NAVI31. Earlier disconnected hosts are not mixed into this
 table. Native constructs three sessions and captures device state; official
 PyTorch loads once. Native text uploads 95,278,067,264 bytes and reads back
@@ -61,7 +61,7 @@ CPU/GPU logits remain bitwise unchanged against the same-host baseline; the full
 library retains the same 25 existing failures. Broader K-quant quality,
 long-context and arbitrary image resizing remain unvalidated.
 
-Continuation on port 33162 also exposed a shared mapped-memory range contract
+The continuation host also exposed a shared mapped-memory range contract
 defect. Flush/invalidate ranges now cover complete non-coherent atoms within
 the fully mapped allocation. The boundary/overflow test passes; the same
 validation-layer probe improves from six errors to zero but still reports

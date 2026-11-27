@@ -20,7 +20,7 @@ See [release-validation.md](release-validation.md), the per-combination
 [coverage matrix](release-matrix.csv), and [timings](performance.json).
 [validation.md](validation.md) retains historical Preview evidence.
 
-The port-33162 continuation rebuilt the CLI/server and fixed mapped-memory atom
+The continuation-host session rebuilt the CLI/server and fixed mapped-memory atom
 alignment found by the Vulkan validation layer. Its tiny F32 probe improves from
 six API errors to zero but still reports `device lost`; unmodified-baseline Qwen
 fails as well. The retained interface snapshot remains 14/27 complete groups.

@@ -2,8 +2,8 @@
   "date": "2026-11-22",
   "source_head": "2c1ce45009e35487b6bcf50cf83cd59276424692",
   "host": {
-    "ssh_port": 34695,
-    "hostname": "j-jpyh7yskfqdrt34pavbzlaa6nq",
+    "ssh_port": "redacted",
+    "hostname": "replacement-host",
     "gpu": "RADV NAVI31",
     "weights_remote_only": true
   },

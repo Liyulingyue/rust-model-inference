@@ -2,7 +2,7 @@
   "date": "2026-11-19 Asia/Shanghai",
   "base": "44527e5ad",
   "revision": "3fa2faf34a8ed0dba63d320e2312e2b900a7e8be",
-  "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
+  "hostname": "numeric-host",
   "matrix": {
     "passed": 30,
     "failed": 78,
@@ -8141,8 +8141,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_1-auto/results.json"
       },
       "cli_exit_codes": {
@@ -8664,8 +8664,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-bf16-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -9187,8 +9187,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f32-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -9710,8 +9710,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_k-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -10233,8 +10233,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_0-vulkan/results.json"
       },
       "cli_exit_codes": {
@@ -10762,8 +10762,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q5_k-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -11285,8 +11285,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f16-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -11808,8 +11808,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_1-vulkan/results.json"
       },
       "cli_exit_codes": {
@@ -12337,8 +12337,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_0-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -12860,8 +12860,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-bf16-vulkan/results.json"
       },
       "cli_exit_codes": {
@@ -13389,8 +13389,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f32-auto/results.json"
       },
       "cli_exit_codes": {
@@ -13912,8 +13912,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f16-auto/results.json"
       },
       "cli_exit_codes": {
@@ -14435,8 +14435,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q8_0-auto/results.json"
       },
       "cli_exit_codes": {
@@ -14958,8 +14958,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_0-auto/results.json"
       },
       "cli_exit_codes": {
@@ -15444,8 +15444,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_k-auto/results.json"
       },
       "cli_exit_codes": {
@@ -15631,8 +15631,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q6_k-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -16146,8 +16146,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f32-vulkan/results.json"
       },
       "cli_exit_codes": {
@@ -16642,8 +16642,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-bf16-auto/results.json"
       },
       "cli_exit_codes": {
@@ -17165,8 +17165,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q8_0-vulkan/results.json"
       },
       "cli_exit_codes": {
@@ -17694,8 +17694,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q4_1-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -18180,8 +18180,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q5_k-auto/results.json"
       },
       "cli_exit_codes": {
@@ -18334,8 +18334,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f16-vulkan/results.json"
       },
       "cli_exit_codes": {
@@ -18863,8 +18863,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": null,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-q8_0-cpu/results.json"
       },
       "cli_exit_codes": {
@@ -19386,8 +19386,8 @@
       "comparison_provenance": "live checks plus per-operation comparison of saved CLI stdout and HTTP responses",
       "custom_template_changed_image_scores": true,
       "provenance": {
-        "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-        "ssh_endpoint": "36.150.116.206:31667",
+        "hostname": "numeric-host",
+        "ssh_endpoint": "numeric-host",
         "remote_evidence": "target/release-validation/interfaces-f32-auto-custom/results.json"
       },
       "cli_exit_codes": {
@@ -27018,8 +27018,8 @@
   "jev_stdout_recheck": null,
   "qwen_json_stdout_recheck": null,
   "continuation": {
-    "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
-    "ssh_endpoint": "36.150.116.206:33162",
+    "hostname": "continuation-host",
+    "ssh_endpoint": "continuation-host",
     "remote_repo": "/workspace/rust-model-inference-sensenova-loop-9b",
     "collected_at": "2026-11-19T02:21:34.614614+00:00",
     "matrix-progress": [
@@ -27031,7 +27031,7 @@
         ],
         "exit_code": 0,
         "elapsed_s": 3001.593461765995,
-        "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+        "hostname": "continuation-host",
         "source_head": "873545726b3a729643c7fc8582968730958b271d"
       }
     ],
@@ -27333,7 +27333,7 @@
       "base": "44527e5ad2ca979518a0f13c2b70dc2c0b78fddc",
       "exit_code": 1,
       "elapsed_s": 4.929078343993751,
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "hostname": "continuation-host",
       "free_vram_bytes_before_probe": 39175565312,
       "stdout": "",
       "stderr": "compute requested=Vulkan backend=partial mode=jev note=no complete device path for this mode; any offloadable parts run on the device\n[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\nJEV: arch = \"qwen35\"\ncompute pool: 16 threads (Qwen3.5)\n\n--- JEV question (2 candidates) ---\nQ: What color?\n  A: blue\n  B: red\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nInference error: Qwen3.5 forward_logits failed: Unsupported shape: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n",
@@ -27403,7 +27403,7 @@
         "prefill_ms": 1067
       },
       "backend": "cpu",
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5"
+      "hostname": "continuation-host"
     },
     "mapped-range-postfix": {
       "command": [
@@ -27430,7 +27430,7 @@
       "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2"
     },
     "postfix-real-model-probes": {
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "hostname": "continuation-host",
       "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
       "probes": {
         "qwen-cpu": {
@@ -27588,7 +27588,7 @@
       "output": "[GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31 (LLVM 20.1.2)) (int8 dot product: supported, shader f16: supported)\n[GPU] Warming up Vulkan pipeline (driver JIT)...\n[GPU] Warmup done in 4.3s\n[GPU] Q8_0 matmul: packed int8 dot product\nradv/amdgpu: The CS has been cancelled because the context is lost. This context is guilty of a hard recovery.\nVulkan row operator check failed: f32: Vulkan init failed: The logical device has been lost. See <https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#devsandqueues-lost-device>\n"
     },
     "queue-recovery": {
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "hostname": "continuation-host",
       "source_parent": "873545726b3a729643c7fc8582968730958b271d",
       "source_sha256": "ce12a5c1c80b6f4aeb9fbbae4d707f12bad128fcdf169df6b98d0c9b401b80d6",
       "runs": [
@@ -27636,7 +27636,7 @@
       ]
     },
     "independent-vulkan-probe": {
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "hostname": "continuation-host",
       "source_sha256": "4e63af6aaaff6845cee6939c1a20cc3f06fb3a46dcf7f766c931d56f309f7cb4",
       "build_command": [
         "/usr/local/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
@@ -27856,7 +27856,7 @@
       "note": "Read-only DRM fdinfo snapshot; no other process was changed."
     },
     "restored-source-real-model-probes": {
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "hostname": "continuation-host",
       "source_sha256": "f9300f7a1cd6b3836e808f5c7b5d95ce0dead76b5860ea0df2d904e4ba6898d2",
       "binary_sha256": "4150686b014e021a970478943558dd6884ad2f554fde74a7dbb4375163b6f1e9",
       "probes": {
@@ -28056,12 +28056,12 @@
   },
   "host_roles": {
     "numeric_regression_performance": {
-      "hostname": "j-oxuoqo5tstkquvgqhepkaa5cm6",
-      "ssh_endpoint": "36.150.116.206:31667"
+      "hostname": "numeric-host",
+      "ssh_endpoint": "numeric-host"
     },
     "interface_continuation": {
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
-      "ssh_endpoint": "36.150.116.206:33162"
+      "hostname": "continuation-host",
+      "ssh_endpoint": "continuation-host"
     }
   },
   "evidence_scope": {
@@ -28088,11 +28088,11 @@
   "validation_blockers": [
     {
       "observed_at": "2026-11-19T02:20:24.223783+00:00",
-      "endpoint": "36.150.116.206:33162",
+      "endpoint": "continuation-host",
       "ssh_reachable": true,
       "kind": "vulkan_device_lost",
       "error": "Current and unmodified-baseline Vulkan models fail. Independent constant-write/fill probes also fail under system Mesa 25.2.8 and private Mesa 24.0.5; the latter reports GPU hung/ERROR_DEVICE_LOST. Mapped-range errors are fixed (6 to 0), but model GPU execution remains blocked.",
-      "hostname": "j-5fyejyon53kz4ytgmxuf5ne2m5",
+      "hostname": "continuation-host",
       "last_collected_numeric_runs": 54,
       "last_collected_complete_interface_groups": 14,
       "interface_groups_expected": 27,
@@ -28102,7 +28102,7 @@
         "Post-cache-maintenance-correction full-model GPU regression"
       ],
       "passed": [
-        "Final CLI/server release-fast build on port 33162",
+        "Final CLI/server release-fast build on the continuation host",
         "Mapped range boundary/overflow test on Mac",
         "Same active validation-layer probe: 6 API errors before fix, 0 after fix",
         "Qwen CPU JSON parse and exact probabilities before/after cache-maintenance fix",
@@ -28110,10 +28110,10 @@
         "Final shared Vulkan module tests on Mac: 9 passed, 20 hardware tests ignored",
         "ROCm 4096-element mul/add/readback still passes after all Vulkan controls"
       ],
-      "details": "target/sensenova-33162-interfaces.json; continuation in release-results.json",
+      "details": "target/sensenova-continuation-interfaces.json; continuation in release-results.json",
       "previous_connection_blocker": {
         "observed_at": "2026-11-18T23:58:41.193903+00:00",
-        "endpoint": "36.150.116.206:31667",
+        "endpoint": "numeric-host",
         "error": "TCP connects but closes before the SSH banner; four repeated SSH/SCP probes fail before authentication",
         "last_collected_numeric_runs": 54,
         "last_collected_complete_interface_groups": 14,

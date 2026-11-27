@@ -1,8 +1,8 @@
 {
   "date": "2026-11-22",
   "host": {
-    "ssh_port": 34695,
-    "hostname": "j-jpyh7yskfqdrt34pavbzlaa6nq",
+    "ssh_port": "redacted",
+    "hostname": "replacement-host",
     "gpu": "RADV NAVI31"
   },
   "upstream_commit": "7858cb7d783deb13776fb55ef87a22940bec4241",
