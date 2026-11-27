@@ -1,0 +1,28 @@
+{
+  "date": "2026-11-21",
+  "host": "AMD Radeon Graphics gfx1100 / RADV NAVI31, 48 GiB VRAM",
+  "gguf_sha256": {
+    "original": "4134dabd42e7f906559bc2d42b380eaa55663eeeb3e42556eca4a371533aa5e4",
+    "q8_0": "eb72ed5dc4fbbcb4a5d5063ec9b78320bc56ccd2644cb839ec195ccc0ede6598"
+  },
+  "oracle": {
+    "original_cpu": {"passed": 144, "failed": 0, "elapsed_seconds": 18.54},
+    "q8_0_cpu": {"passed": 144, "failed": 0, "elapsed_seconds": 13.60},
+    "original_auto": {"submissions": 1273, "passed": 143, "failed": 1, "failed_checkpoint": "idol.denoiser.joint.23.out", "relative_rmse": 0.00668105},
+    "original_vulkan": {"submissions": 1273, "passed": 143, "failed": 1, "failed_checkpoint": "idol.denoiser.joint.23.out", "relative_rmse": 0.00668105}
+  },
+  "cli_vulkan": {
+    "steps": 1,
+    "cfg": 0,
+    "num_gaussians": 32768,
+    "seed": 42,
+    "elapsed_seconds": 294.143,
+    "stage_seconds": {"preprocess": 0.088, "conditioning": 165.782, "sampling": 106.276, "decode": 22.0},
+    "device_submissions": 32913,
+    "output_bytes": 2228639,
+    "output_sha256": "b493c80536e9265dc71c7085b908b4bfa7a17dccdbfac45c8d9d8ff80e79944b",
+    "exit_code": 0
+  },
+  "server_health": {"status": 200, "body": "ok"},
+  "status": "Experimental: original and q8_0 CPU verified, original AMD device generation completed, GPU oracle retains one predeclared tolerance failure"
+}

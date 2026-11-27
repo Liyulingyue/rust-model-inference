@@ -1,0 +1,83 @@
+[
+  {
+    "repo": "speridlabs/idol",
+    "directory": "idol",
+    "revision": "f8111d14",
+    "files": [
+      {
+        "Path": "config.json",
+        "Size": 1335,
+        "Sha256": "ddd89dcc6dcf4a5ac8d951b8c59afa1eceafe377615c5912c59f4e1f5ae35b32"
+      },
+      {
+        "Path": "README.md",
+        "Size": 7274,
+        "Sha256": "a19708af986ed793bd8ac054fc1b1f8f9938b9002f5ece82baa11cd68c6b2f7a"
+      },
+      {
+        "Path": "denoiser.safetensors",
+        "Size": 1482258308,
+        "Sha256": "ded2cacf671bf3978ebc62729087abdbd318ef4752e6805b4c9fc8ffa51fe716"
+      },
+      {
+        "Path": "decoder.safetensors",
+        "Size": 203171696,
+        "Sha256": "9da4d7676bfcadb1c3fdfbff796e6257dadf82d26ec05be7717c79b2b13a1c4e"
+      },
+      {
+        "Path": "decoder_gs.safetensors",
+        "Size": 949083036,
+        "Sha256": "3087eb8ee5763206a53e4078acf2a1bf382dab5147d407ec13a2cf39c04cc544"
+      },
+      {
+        "Path": "birefnet.safetensors",
+        "Size": 444466856,
+        "Sha256": "44bbc97b041f879975d0d6d538b8e66a25eb04d1f49aab40697544cdd97eaa8e"
+      },
+      {
+        "Path": "assets/gallery/avocado.webp",
+        "Size": 758042,
+        "Sha256": "b7dd1f8863bbca337bd71635ca8f5499cade479aa71faec5a136f13798a9d0ee"
+      }
+    ]
+  },
+  {
+    "repo": "facebook/dinov3-vith16plus-pretrain-lvd1689m",
+    "directory": "dinov3-vith16plus",
+    "revision": "98b7096b",
+    "files": [
+      {
+        "Path": "config.json",
+        "Size": 744,
+        "Sha256": "35770e98e425c9383534bcbfa7f3b7a3cb1d943f6d26a37d7d19fea0735eab57"
+      },
+      {
+        "Path": "preprocessor_config.json",
+        "Size": 585,
+        "Sha256": "960c41d1f3a7778b936365769a2d90550b318a6c0a53a0296957adacfe5e0dd7"
+      },
+      {
+        "Path": "model.safetensors",
+        "Size": 3362432800,
+        "Sha256": "3e1d4d18b9bfa9f28fad8e9de6a783f1313532d3460efa4cd0b12521d81d1a4d"
+      }
+    ]
+  },
+  {
+    "repo": "black-forest-labs/FLUX.2-dev",
+    "directory": "FLUX.2-dev",
+    "revision": "d1515b98",
+    "files": [
+      {
+        "Path": "vae/config.json",
+        "Size": 770,
+        "Sha256": "7948580b2d53da578d49b9fed61b45d94a4c037ded5057ebd3adb4040bb5aef5"
+      },
+      {
+        "Path": "vae/diffusion_pytorch_model.safetensors",
+        "Size": 336213556,
+        "Sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+      }
+    ]
+  }
+]

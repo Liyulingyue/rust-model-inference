@@ -1,0 +1,196 @@
+{
+  "date": "2026-11-11",
+  "host": "macOS / Apple M3 Max / MoltenVK",
+  "pre_merge_head": "72b669e16ea5ebe7317ce76f5ed724f08cc745bc",
+  "upstream_main": "d16dc16d96126351b10c13c8458f968c5c57b2e7",
+  "default_lib": {
+    "baseline": {
+      "name": "baseline-lib",
+      "exit_code": 101,
+      "summary": [
+        "test result: FAILED. 1543 passed; 13 failed; 96 ignored; 0 measured; 0 filtered out; finished in 22.47s"
+      ],
+      "failures": [
+        "app::media::tests::stereo_uploads_are_refused",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+      ]
+    },
+    "merged": {
+      "name": "merged-lib",
+      "exit_code": 101,
+      "summary": [
+        "test result: FAILED. 1587 passed; 13 failed; 99 ignored; 0 measured; 0 filtered out; finished in 22.47s"
+      ],
+      "failures": [
+        "app::media::tests::stereo_uploads_are_refused",
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+        "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+        "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+        "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+        "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+      ]
+    },
+    "failure_names_unchanged": true
+  },
+  "idol_vulkan": {
+    "baseline": {
+      "name": "baseline-idol-vulkan",
+      "exit_code": 101,
+      "summary": [
+        "test result: FAILED. 31 passed; 2 failed; 3 ignored; 0 measured; 1874 filtered out; finished in 0.29s"
+      ],
+      "failures": [
+        "models::idol::gpu::tests::a_stale_device_attention_is_not_used",
+        "models::idol::gpu::tests::device_attention_agrees_with_the_cpu_kernel_on_the_idol_shapes"
+      ]
+    },
+    "merged": {
+      "summary": "31 passed; 2 failed; 3 ignored",
+      "failures": [
+        "models::idol::gpu::tests::a_stale_device_attention_is_not_used",
+        "models::idol::gpu::tests::device_attention_agrees_with_the_cpu_kernel_on_the_idol_shapes"
+      ],
+      "error": "ShaderCompileFailed(\"Initialization of an object has failed\") at AttentionRuntime::new",
+      "failure_names_and_initialization_error_unchanged": true
+    }
+  },
+  "focused": [
+    {
+      "filter": "idol",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 1931 filtered out; finished in 0.02s"
+      ]
+    },
+    {
+      "filter": "app::geometry::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1957 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "filter": "app::cli::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 1913 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "filter": "app::server::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 110 passed; 0 failed; 0 ignored; 0 measured; 1852 filtered out; finished in 0.32s"
+      ]
+    },
+    {
+      "filter": "app::decision::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1958 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "filter": "format::safetensors::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 1957 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "filter": "compute::tests::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1952 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "filter": "batched_linear_layout_",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1960 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "filter": "ops::nn::tests::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 1949 filtered out; finished in 0.10s"
+      ]
+    },
+    {
+      "filter": "prompt::",
+      "exit_code": 0,
+      "result": [
+        "test result: ok. 77 passed; 0 failed; 1 ignored; 0 measured; 1884 filtered out; finished in 0.01s"
+      ]
+    }
+  ],
+  "bin_targets_unchanged": [
+    {
+      "name": "codec_test",
+      "path": "src/bin/codec_test.rs"
+    },
+    {
+      "name": "dump_dims",
+      "path": "src/bin/dump_dims.rs"
+    },
+    {
+      "name": "dump_emb",
+      "path": "src/bin/dump_emb.rs"
+    },
+    {
+      "name": "dump_meta",
+      "path": "src/bin/dump_meta.rs"
+    },
+    {
+      "name": "dump_tensors",
+      "path": "src/bin/dump_tensors.rs"
+    },
+    {
+      "name": "ggufrs",
+      "path": "src/bin/ggufrs.rs"
+    },
+    {
+      "name": "micro-bench",
+      "path": "src/bin/micro_bench.rs"
+    },
+    {
+      "name": "rust-model-inference",
+      "path": "src/main.rs"
+    },
+    {
+      "name": "rust-model-server",
+      "path": "src/bin/server.rs"
+    }
+  ],
+  "checks": {
+    "vulkan_main_and_server_check": "passed",
+    "shader_manifest_entries": 160,
+    "all_shader_hashes_match": true
+  },
+  "not_rerun": [
+    "released-weight oracle",
+    "physical Linux GPU inference",
+    "full-resolution generation",
+    "CLI/HTTP generated outputs"
+  ]
+}

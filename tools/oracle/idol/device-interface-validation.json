@@ -1,0 +1,64 @@
+{
+  "command": [
+    "target/native/release/rust-model-server",
+    "--image-to-3d",
+    "--model",
+    "models/idol",
+    "--components",
+    "models",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "18089",
+    "--compute",
+    "auto",
+    "--threads",
+    "16"
+  ],
+  "health": 200,
+  "invalid-options": 400,
+  "unknown-options": 400,
+  "missing-image": 400,
+  "text-jev": 404,
+  "image-jev": 404,
+  "chat": 404,
+  "startup_seconds": 12.504133474081755,
+  "busy": 429,
+  "success": {
+    "status": 200,
+    "seconds": 358.1542097227648,
+    "bytes": 2228639,
+    "sha256": "4b99da1324b993b99ae6e2c216e8df5431e1b51e3a862239d88fc98ef898c020",
+    "camera": {
+      "yaw": 1.3465303613525677,
+      "pitch": 0.40102222463576737,
+      "radius": 3.712423946850864,
+      "fov": 28.57334917740828
+    }
+  },
+  "seconds": 373.44242166914046,
+  "date": "2026-11-03",
+  "host": "Ubuntu 22.04.5 / Xeon Gold 6138 / RTX 5090 32 GiB; NVIDIA 570.153.02",
+  "backend": "Vulkan",
+  "options": {
+    "steps": 1,
+    "cfg_strength": 0,
+    "num_gaussians": 32768,
+    "seed": 42,
+    "mode": "synthetic"
+  },
+  "input": "artifacts/idol/avocado-input.png",
+  "input_sha256": "773a01e6d0fefa64e3a601d62bb1ef118d874f603b0aa87403613733cbc07b27",
+  "gaussians": 32768,
+  "properties": 17,
+  "all_finite": true,
+  "device_submissions": 33042,
+  "test_exit_code": 0,
+  "test_server_port_closed": true,
+  "notes": [
+    "Auto uses the native Vulkan backend, confirmed by startup log and actual device submissions.",
+    "Server was terminated by the test harness after the response; natural device-process shutdown is not established by this check.",
+    "Shared host with regression tests overlapping; HTTP request timing is an interface smoke result, not an isolated benchmark.",
+    "These one-step/CFG0 settings differ from the five-step CLI preview; no full-size CPU/GPU or CLI/HTTP bitwise parity is claimed."
+  ]
+}

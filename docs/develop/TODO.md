@@ -14,6 +14,22 @@ NEON on aarch64; dev box 无 AVX-512，但 F32/BF16/F16 的 zmm matmul 已按运
 
 ## High Priority
 
+- [ ] **Idol 设备路径的投影 CPU 复核把校验成本全压在 CPU 上** —
+      2026-11-27 实测：一步 / 32768 高斯 / seed 42，设备路径比无复核的旧 head
+      **慢 47%**（148.8 s → 218.5 s），全部落在 conditioning（73.6 s → 138.4 s）。
+      复核的算术量只有设备 matmul 的 **6.44%**，却发起了 **5.10 亿次 `dot_f32`
+      调用**（每次投影 17,247 次）—— 开销在调用次数，不在算术。覆盖也是反的：
+      **97%** 的投影次数花在 conditioning 的卷积上（`n_out ≤ 64` 时整个卷积在
+      设备上算两遍），决定最终高斯的大投影只查 0.03–2%；而复核在 GB10 14 次 +
+      AMD 1,273 次提交里**一次都没判定过**，可复现性的改善却与它同时出现
+      ⇒ **它不是验证，是掩码**（把一个竞态盖住，不是修好）。
+      **在 GPU 云实例 / 弱 CPU 主机上，这条路径会让 GPU 饿着等 CPU，甚至比纯
+      CPU 路径更慢**；同一份代码在两类机器上的差距比慢本身更糟。
+      终局是**CPU 零参与**：输出/输入哨兵 + 有限性检查（O(1)，零 CPU 算术）
+      能覆盖 CPU 复核能覆盖的全部设备故障；根因（`BatchedLinearRuntime::matmul_rows`
+      的 staging 复用与 host 写/读排序，代码注释写着"only ordered by luck"）
+      在共享算子上，与 PR #233 同一处，**不属 #195 范围**。
+      详见 [TODO-079](#todo-079-idol-设备路径的投影-cpu-复核把校验成本全压在-cpu-上)。
 - [ ] **YuE2 的 AR/NAR 设备开销与融合（批提交 / 避免 host 往返）** —
       2026-11-12 实测：VAE 已上设备（77.0 s → 25.6 s，3.0x，输出差 ≤1 个 PCM16 档位），
       整链 277.9 s 对 CPU 315.6 s（-12%）。但 AR/NAR 仍慢：ABC 74.8 s、semantic 113.6 s、
@@ -4973,3 +4989,140 @@ CPU 与设备的 PSNR 维持 ≥ 40 dB ✓✓。
 `src/app/diffusion.rs`（`run_longcat_image_edit` / `run_qwen_image_2_1`）、
 `src/models/diffusion/longcat/`、`src/models/diffusion/qwen_image_2_1/`、
 [SUPPORTED_MODELS.md](SUPPORTED_MODELS.md)（两行的 HTTP 状态）。
+
+### TODO-079: Idol 设备路径的投影 CPU 复核把校验成本全压在 CPU 上
+
+**状态**：📌 **未修**（2026-11-27 实测发现）。设备路径的**可复现性**已经拿到，
+但代价是**每个投影都在 CPU 上再算一遍**；在 CPU 弱的机器上（GPU 云实例、瘦主机、
+ARM 板子）这条路径会让 GPU 提交完在等 CPU。
+
+**问题**：Idol 的设备路径在每次成功的设备投影之后，跑一次
+`projection_matches_cpu`（`src/models/idol/gpu.rs`），把采样到的输出列用
+`crate::ops::dot_f32` 在 CPU 上重算并比对。采样上限是
+`PROJECTION_CHECK_SAMPLES = 2048` 个 block，每个 block 8 列，外加 4 个整行。
+
+**实测代价**（NVIDIA GB10，aarch64；一步 / 32768 高斯 / seed 42 / avocado 样图；
+29,551 次设备 matmul 由 `RMI_GPU_TRACE_MATMUL=1` 抓出）：
+
+| | 数字 |
+| --- | --- |
+| 有复核（当前 head） | **218.5 s** |
+| 无复核（`03b2fc00`） | **148.8 s**（2 次实测 2:30.17 / 2:27.46） |
+| 差 | **+47%** |
+| 差的落点 | conditioning **73.6 s → 138.4 s（1.88×）**；sampling / decode 基本没变 |
+| 复核的算术量 | 设备 matmul 的 **6.44%** |
+| 复核的调用次数 | **5.10 亿次 `dot_f32`**（每次投影 17,247 次） |
+
+⇒ **开销不在算术，在调用次数**：`dot_f32` 被逐列调用（每次投影 16,896 次），
+最贵的一档是 `rows=256, n_in=27, n_out=128`（4096 次）—— 对 **27 个元素**做
+16,896 次调用。
+
+**覆盖是反的**：
+
+| | 投影次数占比 | 复核覆盖的输出比例 | 复核 / 投影算术量 |
+| --- | --- | --- | --- |
+| conditioning 卷积（`rows=256`） | **97%** | 50% / 26% / 14% / **100%** | 14%–**102%** |
+| denoiser / decoder 大投影 | 3% | **0.03%–2%** | 0.1%–2.8% |
+
+⇒ 复核在**便宜且不影响最终几何**的层上查得很细（`n_out ≤ 64` 时
+`total_blocks = 256 × ceil(n_out/8) ≤ 2048`，采样数 = 全部 ⇒ 整个卷积在设备上
+算两遍），在**决定最终高斯**的层上几乎不查。
+
+**它一次都没判定过**：GB10 上 14 次设备运行、AMD RADV 上 1,273 次提交，
+`[GPU] Idol projection failed CPU verification` 出现 **0 次**。
+
+**但可复现性确实变好了**（同一台机器、同一个二进制、同一个 seed 与图像）：
+
+| head | 运行次数 | 不同的 PLY SHA256 |
+| --- | --- | --- |
+| `03b2fc00`（无复核） | 8 | **6 个** |
+| `f2f86447`（有复核） | 14 | **1 个**（13/14 逐位相同） |
+
+⇒ **收益不可能来自「比较」**（它一次都没判定过），只能来自「跑过一遍」的副作用：
+额外的主机侧回读 / 同步，或单纯的时序延迟。**这一点必须先测清楚**，
+否则「保留 2048 个 block」是没有依据的。
+
+⇒ 更准确的说法：**它不是验证，是掩码。** 一个始终判定不出东西的检查不可能在
+验证正确性；它能做的是把某个竞态**掩盖**掉 —— 竞态没被修，只是不再发作。
+**掩码不是修复**：竞态还在原处，换台机器、换个驱动、换个负载就可能回来
+（AMD RADV 上确实记录过发散）。所以「删掉复核」现在还不能做，而「保留 2048
+个 block」也没有依据 —— 两头都不该是终点。
+
+**为什么这条不能就这么算了**：设备路径的成本模型不该由**主机 CPU**决定。
+GPU 云实例上 CPU 往往又少又弱，复核全落在 CPU 上 ⇒ GPU 提交完在等 CPU，
+「上设备」的意义被抵掉一大半；反过来在 CPU 强的机器上，这 47% 又被算成
+「设备的开销」，让人以为设备比 CPU 慢。同一份代码在两类机器上的差距，
+比慢本身更糟。弱 CPU 主机上这条路径甚至会**比纯 CPU 路径更慢**。
+
+**能走到「CPU 零参与」吗**：能，而且不需要 CPU 参考。复核真正能覆盖的设备
+故障只有三类，三类都能用 **O(1) 的哨兵**覆盖，一次 CPU 算术都不用：
+
+| 设备故障 | 现在的 CPU 复核 | O(1) 哨兵 |
+| --- | --- | --- |
+| 输出 NaN / Inf | 要算一遍才知道 | 有限性检查（本就有） |
+| 回读拿到上一次的陈旧数据 | 能测出 | **输出哨兵**：投影前把单调递增的调用号写进输出缓冲区头部，回读后比对；不是本次的号就是陈旧 |
+| GPU 读到了被覆写的输入 | 能测出 | **输入哨兵**：同一个号写进激活缓冲区；读到别的调用的号就是覆写 |
+| 设备算出了**数值上**的错（着色器 bug） | 能测出 | 测不出 —— 但这属于 Oracle 的活，不属于生产路径 |
+
+⇒ 也就是说：**CPU 复核实际能覆盖的故障类别，哨兵全都覆盖，而算术成本归零。**
+终点不是「少查一点」，是**不查数值、只查缓冲区**。
+
+**根因在共享层**（`src/vulkan/ops.rs`），代码自己写着：
+
+```
+// src/vulkan/ops.rs:1955
+// The activation copy has to land before the command buffer starts
+// recording. The barrier that begin_commands places is the one that
+// orders host writes against the dispatches that read them, and a
+// write that lands after it is only ordered by luck: the tiled
+// kernel reads the activation region within microseconds of the copy.
+let host_writes_early = self.ops.staging.is_none();
+```
+
+`write_f32`（`src/vulkan/ops.rs:4208`）直接在 mapped staging 上
+`copy_nonoverlapping`，而 staging 是复用的 ⇒ 上一次提交可能还在读。
+`BatchedLinearRuntime::matmul_rows` 没有可复现性测试也没有 CPU 复核，
+与 PR #233 同一个根因（见 TODO-044 / TODO-077）。
+
+**该做什么**（三件事，顺序不能换）：
+
+1. **先测清楚收益的来源**。四个变体各跑 8 次设备路径，比 PLY SHA256：
+   A 现状（2048 block + 回读）、B 只比 8 个元素 + 回读、C 只回读不比较、
+   D 旧 head（无复核）。
+   - B 或 C 也稳定 ⇒ 收益是**同步**不是比较 ⇒ 把采样数降到 O(1)，
+     47% 立刻拿回而稳定性不变；
+   - B 不稳定而 A 稳定 ⇒ 比较本身在抓东西 ⇒ 需要说明它抓到了什么
+     （本机 14 次 + AMD 1,273 次都没看到）。
+2. **把「哨兵」和「全量对拍」分开**。生产路径（CLI / HTTP）只保留 O(1) 的
+   哨兵：有限性检查 + 输入/输出哨兵（见上表）；
+   **全量 CPU 对拍属于 oracle / CI，不属于生产推理路径**。
+   若走「比少量元素」这条过渡路线，数量取 8–16 个（与 attention 的
+   `attention_matches_cpu_sampled` 同量级），覆盖也要反过来：
+   真正决定高斯的大投影该查得比 conditioning 的卷积多。
+3. **根因在共享设备归约，不在 Idol**。Idol 这条路是在本地打补丁；
+   `src/vulkan/ops.rs::BatchedLinearRuntime::matmul_rows` 没有可复现性测试也没有
+   CPU 复核（与 PR #233 同一个根因，见 TODO-044 / TODO-077）。共享层修好之前，
+   「设备路径可复现」只是权宜。
+
+**范围**：第 2 条的哨兵与第 3 条的屏障/复用修正**都落在 `src/vulkan/ops.rs`
+这个共享算子上**，改它要追全部调用方，且与 PR #233 是同一处工程
+⇒ **不属于 #195（模型适配）的范围**，应作为共享算子的工作单独立项；
+#195 这边要做的是**别把全量 CPU 对拍留在生产路径上**，并在共享层修好后把它删掉。
+
+**验收**：
+
+- 设备路径在 CPU 弱的机器上（GPU 云实例 / 瘦主机）相对 CPU 路径仍有
+  **≥ 2×** 的优势，且这个比值不再由主机 CPU 强弱主导；
+- 复核成本降到设备路径墙钟的 **≤ 5%**（现在 47%），且**生产路径上的 CPU
+  算术为零** —— 哨兵方案落地后，设备路径不因校验在 CPU 上算任何东西；
+- 上面第 1 条的四个变体各跑 8 次**逐位相同**（B/C 与 A 同等稳定），
+  或给出「比较本身在抓什么」的证据；
+- 设备路径连跑 8 次逐位相同这条门槛**不因降采样而放宽**；
+- 共享层的竞态修好之前，本条目**不得**被标成完成 —— 掩码不等于修复。
+
+**关联**：`src/models/idol/gpu.rs`（`Projection::linear`、
+`projection_matches_cpu`、`PROJECTION_CHECK_SAMPLES`）、
+`src/models/idol/denoiser.rs`、`src/models/idol/background.rs`、
+`src/models/idol/conditioning_vae.rs`、
+`src/vulkan/ops.rs`（`BatchedLinearRuntime::matmul_rows`）、
+[SUPPORTED_MODELS.md](SUPPORTED_MODELS.md)（Idol 行）。
