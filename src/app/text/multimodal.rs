@@ -373,7 +373,7 @@ pub fn run_qwen3_family_multimodal(
         &jinja_media,
         prompt,
         jinja_system,
-        false,
+        Some(false),
     )? {
         let mut embeddings = model.embed_tokens(&jinja_ids)?;
         let deepstack_embeddings = inject_qwen_media_embeddings(
@@ -1206,7 +1206,7 @@ pub fn run_qwen35_family_multimodal_logits(
         &jinja_media,
         prompt,
         system_prompt,
-        false,
+        Some(false),
     )? {
         Some(ids) => ids,
         None => {
@@ -1305,6 +1305,7 @@ pub fn run_multimodal(
         max_context,
         repetition_penalty,
         None,
+        None,
         0,
         None,
         0,
@@ -1343,6 +1344,7 @@ pub fn run_multimodal_with_video(
         prefill_batch_size,
         max_context,
         repetition_penalty,
+        None,
         0,
         None,
         0,
@@ -1372,6 +1374,7 @@ pub fn run_multimodal_with_video_and_mtp(
     prefill_batch_size: usize,
     max_context: usize,
     repetition_penalty: f32,
+    thinking: Option<bool>,
     mtp_draft: usize,
     dspark_model: Option<&Path>,
     ngram_draft: usize,
@@ -1393,6 +1396,7 @@ pub fn run_multimodal_with_video_and_mtp(
         prefill_batch_size,
         max_context,
         repetition_penalty,
+        thinking,
         Some(owned_source),
         mtp_draft,
         dspark_model,
@@ -1432,6 +1436,7 @@ pub(super) fn run_multimodal_with_video_ref(
     prefill_batch_size: usize,
     max_context: usize,
     _repetition_penalty: f32,
+    thinking: Option<bool>,
     model_source: Option<Arc<dyn TensorSource>>,
     mtp_draft: usize,
     dspark_model: Option<&Path>,
@@ -1747,7 +1752,7 @@ pub(super) fn run_multimodal_with_video_ref(
                 &media,
                 prompt,
                 None,
-                true,
+                Some(true),
             )?
             .ok_or_else(|| MINICPMV47_JINJA_MSG.to_string())?;
             // `mtmd_tokenizer` injects `<image_id>N</image_id>` ahead of every
@@ -1777,7 +1782,7 @@ pub(super) fn run_multimodal_with_video_ref(
                 &[crate::prompt::jinja::MediaPart::image(n_vis_tokens)],
                 prompt,
                 None,
-                false,
+                Some(false),
             )?
             .ok_or("SenseNova image generation requires --jinja")?
         }
@@ -1787,7 +1792,7 @@ pub(super) fn run_multimodal_with_video_ref(
                 jinja,
                 &|k| llm_source.metadata(k).cloned(),
                 prompt,
-                false,
+                Some(false),
             )? {
                 Some(ids) => ids,
                 None => {
@@ -1799,10 +1804,59 @@ pub(super) fn run_multimodal_with_video_ref(
             }
         }
         _ => {
-            let mut ids = Vec::new();
-            append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
-            append_qwen_assistant_prefix(&mut ids, &tokenizer, false)?;
-            ids
+            // The HTTP `build_prompt` path picks its renderer the same way:
+            // the checkpoint's own chat template when Jinja2 is on, the
+            // hand-written ChatML builder otherwise. Keeping the same rule
+            // here is what makes `--thinking` mean the same thing on both
+            // front-ends -- with the template it is the template's
+            // `enable_thinking` branch, with the builder it is the builder's
+            // think block.
+            let rendered = if jinja.enabled() {
+                let template = jinja.resolve(&|k| llm_source.metadata(k).cloned())?;
+                // The template takes the attachment as a structured content
+                // part, the way the OpenAI-shaped messages do.
+                let content = match image_token_id {
+                    Some(_) => serde_json::json!([
+                        { "type": "image" },
+                        { "type": "text", "text": prompt },
+                    ]),
+                    None => serde_json::Value::String(prompt.to_string()),
+                };
+                let messages = [crate::prompt::jinja::ChatMessage {
+                    role: "user".into(),
+                    content,
+                }];
+                crate::prompt::jinja::conversation_tokens_with(
+                    &tokenizer,
+                    template.as_ref(),
+                    &messages,
+                    true,
+                    thinking,
+                )?
+            } else {
+                None
+            };
+            match rendered {
+                Some(ids) => match image_token_id {
+                    // The template emits one placeholder per attachment; the
+                    // projector produced `n_vis_tokens` rows, so the span is
+                    // widened the same way the HTTP path widens it.
+                    Some(pad) => crate::prompt::jinja::expand_vision_placeholders(
+                        &ids,
+                        pad,
+                        &[n_vis_tokens],
+                    )?,
+                    None => ids,
+                },
+                None => {
+                    // No template to render: keep the hand-written ChatML
+                    // prompt, with the same default the HTTP fallback uses.
+                    let mut ids = Vec::new();
+                    append_qwen_message_tokens(&mut ids, &tokenizer, "user", &content_tokens)?;
+                    append_qwen_assistant_prefix(&mut ids, &tokenizer, thinking.unwrap_or(false))?;
+                    ids
+                }
+            }
         }
     };
     let image_grids: Vec<crate::models::qwen35::vision::VisionGrid> =
@@ -2386,6 +2440,7 @@ mod tests {
             1,
             64,
             1.0,
+            None,
             None,
             0,
             None,

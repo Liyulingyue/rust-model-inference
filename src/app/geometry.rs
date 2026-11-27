@@ -59,7 +59,7 @@ pub fn validate_options(o: &CliOptions) -> Result<(), String> {
         || o.chat_template.is_some()
         || o.chat_template_file.is_some()
         || o.jinja
-        || o.thinking
+        || o.thinking.unwrap_or(false)
         || o.dump_logits
         || o.bench
         || o.profile

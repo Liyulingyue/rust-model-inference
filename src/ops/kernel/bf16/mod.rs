@@ -14,6 +14,8 @@ use super::Kernel;
 pub mod avx2;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2_q8;
+#[cfg(target_arch = "x86_64")]
+pub mod avx512;
 #[cfg(target_arch = "aarch64")]
 pub mod neon;
 #[cfg(target_arch = "aarch64")]
@@ -35,7 +37,14 @@ impl<'a> BF16Kernel<'a> {
     }
 
     /// Use the scalar llama.cpp BF16 activation and accumulation contract.
-    pub(crate) fn with_bf16_input(weight: &'a [u8]) -> Self {
+    ///
+    /// A model whose weights are BF16 can need either contract: the default
+    /// one keeps the activations in F32, this one pins them to BF16 the way
+    /// llama.cpp does. The trunks that need it (qwen35, qwen3, dflash,
+    /// ERNIE-Image) swap the kernel in right after the weight is loaded, so
+    /// the constructor is public: the contract is a property of the model,
+    /// and a caller outside this crate has to be able to ask for it.
+    pub fn with_bf16_input(weight: &'a [u8]) -> Self {
         Self {
             weight,
             bf16_input: true,
@@ -76,6 +85,23 @@ impl<'a> BF16Kernel<'a> {
         }
         #[cfg(target_arch = "x86_64")]
         {
+            if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() {
+                let (start, end) = Self::row_range(n_out, ith, nth);
+                if end > start {
+                    let my_out = &mut output[start..end];
+                    unsafe {
+                        avx512::matmul_bf16_vs_f32_avx512(
+                            self.weight,
+                            input,
+                            my_out,
+                            n_in,
+                            start,
+                            end,
+                        );
+                        return;
+                    }
+                }
+            }
             if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
                 let (start, end) = Self::row_range(n_out, ith, nth);
                 if end > start {
@@ -201,6 +227,12 @@ pub fn matmul_bf16_vs_f32_range(
     let out = &mut output[row_start..row_end];
     #[cfg(target_arch = "x86_64")]
     {
+        if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() {
+            unsafe {
+                avx512::matmul_bf16_vs_f32_avx512(weight, input, out, n_in, row_start, row_end);
+            }
+            return;
+        }
         if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
             unsafe {
                 avx2::matmul_bf16_vs_f32_avx2(weight, input, out, n_in, row_start, row_end);
@@ -283,6 +315,12 @@ impl<'a> Kernel for BF16Kernel<'a> {
         let n_tokens = input.len() / n_in;
         debug_assert_eq!(input.len(), n_tokens * n_in);
         debug_assert_eq!(output.len(), n_tokens * n_out);
+        // Token-tiled path when available: identical per-(row, token) values,
+        // weight rows reused from L1/L2 instead of re-streamed per token.
+        if n_tokens >= 2 && self.supports_token_tiled_batching(n_in) {
+            self.forward_batched_rows(input, output, n_in, n_out, n_tokens, 0, n_out);
+            return;
+        }
         for token in 0..n_tokens {
             self.forward(
                 &input[token * n_in..(token + 1) * n_in],
@@ -291,6 +329,98 @@ impl<'a> Kernel for BF16Kernel<'a> {
                 n_out,
             );
         }
+    }
+
+    fn supports_token_tiled_batching(&self, n_in: usize) -> bool {
+        if self.bf16_input {
+            return false;
+        }
+        if self.bf16_input {
+            return false;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() && n_in % 16 == 0 {
+                return true;
+            }
+            if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+                return true;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if crate::ops::has_neon() {
+            return true;
+        }
+        false
+    }
+
+    /// Token-tiled batching for the standard f32-input path: the AVX-512
+    /// (zmm) kernel when `n_in % 16 == 0`, otherwise the AVX2 kernel. The
+    /// bf16-input rounding contract (`use_scalar_reference`) keeps the
+    /// per-token path.
+    fn forward_batched_rows(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        n_in: usize,
+        n_out: usize,
+        n_tokens: usize,
+        row_start: usize,
+        row_end: usize,
+    ) -> bool {
+        if self.bf16_input {
+            return false;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if n_in % 16 == 0 && crate::ops::has_avx512_fma() && crate::ops::has_avx512bw() {
+                unsafe {
+                    avx512::matmul_bf16_vs_f32_avx512_tiled(
+                        self.weight,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
+            if n_in % 8 == 0 && crate::ops::has_avx2_fma() {
+                unsafe {
+                    avx2::matmul_bf16_vs_f32_avx2_tiled(
+                        self.weight,
+                        input,
+                        output,
+                        n_in,
+                        n_out,
+                        n_tokens,
+                        row_start,
+                        row_end,
+                    );
+                }
+                return true;
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if crate::ops::has_neon() {
+            unsafe {
+                neon::matmul_bf16_vs_f32_neon_batched(
+                    self.weight,
+                    input,
+                    output,
+                    n_in,
+                    n_out,
+                    n_tokens,
+                    row_start,
+                    row_end,
+                );
+            }
+            return true;
+        }
+        false
     }
 
     fn embedding_lookup(&self, token_id: u32, n_embd: usize, out: &mut [f32]) {
@@ -355,5 +485,87 @@ mod tests {
         kernel.forward_prequantized(&input_q8, &input_scales, &mut output, 3, 1, 0, 1);
         assert!(output[0].is_finite());
         assert!(output[0] > 0.0);
+    }
+
+    #[test]
+    fn bf16_kernel_batched_rows_respects_row_range() {
+        // Mirrors the shared dispatcher (src/ops/kernel/mod.rs): each pool
+        // worker calls forward_batched_rows with a DISJOINT row range over a
+        // full-size output buffer. A kernel that writes rows outside
+        // [row_start, row_end) races with the worker that owns them
+        // (docs/develop/PARALLEL_MATMUL_SAFETY.md §4).
+        let n_tokens = 4;
+        let n_in = 13;
+        let n_out = 3;
+        let weight = bf16_bytes(
+            &(0..n_in * n_out)
+                .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
+                .collect::<Vec<_>>(),
+        );
+        let input: Vec<f32> = (0..n_tokens * n_in)
+            .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+            .collect();
+        let kernel = BF16Kernel::new(&weight);
+        let mut output = vec![0.0f32; n_tokens * n_out];
+        let mut expected = vec![0.0f32; n_tokens * n_out];
+        for token in 0..n_tokens {
+            kernel.forward(
+                &input[token * n_in..(token + 1) * n_in],
+                &mut expected[token * n_out..(token + 1) * n_out],
+                n_in,
+                n_out,
+            );
+        }
+
+        let handled = kernel.forward_batched_rows(&input, &mut output, n_in, n_out, n_tokens, 0, 2);
+        assert!(handled, "kernel must opt in to the tiled path");
+
+        for token in 0..n_tokens {
+            // Rows inside [0, 2) carry the correct values…
+            assert_eq!(
+                output[token * n_out..token * n_out + 2],
+                expected[token * n_out..token * n_out + 2],
+                "token {token}: in-range rows are wrong"
+            );
+            // …and rows outside [0, 2) belong to another worker: untouched.
+            assert_eq!(
+                output[token * n_out + 2],
+                0.0,
+                "row 2 outside [0,2) was written by a [0,2) range call"
+            );
+        }
+    }
+
+    #[test]
+    fn bf16_kernel_batched_matches_single_rows() {
+        // n_tokens 2..9 covers the tail groups of the 4-token tiling
+        // (group_len < 4) alongside the full groups.
+        for &n_tokens in &[2usize, 3, 4, 5, 6, 7, 8, 9] {
+            let n_in = 13;
+            let n_out = 3;
+            let weight = bf16_bytes(
+                &(0..n_in * n_out)
+                    .map(|index| (((index * 17 + 11) % 101) as f32 - 50.0) * 0.013)
+                    .collect::<Vec<_>>(),
+            );
+            let input: Vec<f32> = (0..n_tokens * n_in)
+                .map(|index| (((index * 29 + 7) % 73) as f32 - 36.0) * 0.017)
+                .collect();
+            let kernel = BF16Kernel::new(&weight);
+            let mut actual = vec![0.0f32; n_tokens * n_out];
+            let mut expected = vec![0.0f32; n_tokens * n_out];
+
+            kernel.forward_batched(&input, &mut actual, n_in, n_out);
+            for token in 0..n_tokens {
+                kernel.forward(
+                    &input[token * n_in..(token + 1) * n_in],
+                    &mut expected[token * n_out..(token + 1) * n_out],
+                    n_in,
+                    n_out,
+                );
+            }
+
+            assert_eq!(actual, expected, "n_tokens={n_tokens}");
+        }
     }
 }

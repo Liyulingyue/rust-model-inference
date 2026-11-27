@@ -103,7 +103,7 @@ fn qwen3_jinja_matches_hardcoded_builder() {
             &jinja,
             &[ChatMessage::text("user", PROMPT)],
             true,
-            thinking,
+            Some(thinking),
         )
         .expect("jinja render");
         let hard_ids = build_qwen_chat_prompt(
@@ -148,8 +148,14 @@ fn lfm25_jinja_renders_and_tokenizes() {
         panic!("LFM2.5 GGUF must ship tokenizer.chat_template");
     };
 
-    let ids = render_tokens(t, &jinja, &[ChatMessage::text("user", PROMPT)], true, true)
-        .expect("jinja render");
+    let ids = render_tokens(
+        t,
+        &jinja,
+        &[ChatMessage::text("user", PROMPT)],
+        true,
+        Some(true),
+    )
+    .expect("jinja render");
     let text = decode(t, &ids);
 
     eprintln!(
@@ -212,8 +218,14 @@ fn lfm25_jinja_known_divergence_from_hardcoded_builder() {
         panic!("LFM2.5 GGUF must ship tokenizer.chat_template");
     };
 
-    let jinja_ids = render_tokens(t, &jinja, &[ChatMessage::text("user", PROMPT)], true, true)
-        .expect("jinja render");
+    let jinja_ids = render_tokens(
+        t,
+        &jinja,
+        &[ChatMessage::text("user", PROMPT)],
+        true,
+        Some(true),
+    )
+    .expect("jinja render");
     let hard_ids = rust_model_inference::prompt::build_lfm25_chat_prompt_with_thinking(
         t,
         &[rust_model_inference::prompt::Lfm2Message {

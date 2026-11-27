@@ -756,7 +756,7 @@ fn holo4_contract_and_tokenizer_match_llama_cpp() {
                     "user", text,
                 )],
                 true,
-                false,
+                Some(false),
                 &special,
             )
             .unwrap();

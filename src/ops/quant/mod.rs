@@ -1073,9 +1073,13 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
         for ib32 in 0..8usize {
             let ls1: i64 = 2 * ((sc[ib32] & 0x0f) as i64) + 1;
             let ls2: i64 = 2 * ((sc[ib32] >> 4) as i64) + 1;
-            for inner in 0..2usize {
-                let q = u16::from_le_bytes([qs_bytes[qs_idx], qs_bytes[qs_idx + 1]]);
-                qs_idx += 2;
+            // Each 32-value group holds FOUR u16 lanes (4 grid rows); the
+            // lo/hi nibbles of `sc[ib32]` scale rows 0-1 / 2-3 respectively.
+            let mut sumi1: i64 = 0;
+            let mut sumi2: i64 = 0;
+            for l in 0..4usize {
+                let q =
+                    u16::from_le_bytes([qs_bytes[qs_idx + 2 * l], qs_bytes[qs_idx + 2 * l + 1]]);
                 let grid_idx = (q & 0x1ff) as usize;
                 let signs_idx = (q >> 9) as usize;
                 let grid_bytes = grid[grid_idx].to_le_bytes();
@@ -1086,8 +1090,14 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
                     sumi += (grid_bytes[j] as i8 as i64) * (q8[q8_idx + j] as i64) * sign;
                 }
                 q8_idx += 8;
-                bsum += sumi * if inner == 0 { ls1 } else { ls2 };
+                if l < 2 {
+                    sumi1 += sumi;
+                } else {
+                    sumi2 += sumi;
+                }
             }
+            qs_idx += 8;
+            bsum += sumi1 * ls1 + sumi2 * ls2;
         }
         sumf += (d as f64) * (bsum as f64);
     }
@@ -1095,6 +1105,10 @@ pub fn vec_dot_iq2_xs_q8k_scalar(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq2_xs_q8k(iq2xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(iq2xs_data, q8k) };
+    }
     vec_dot_iq2_xs_q8k_scalar(iq2xs_data, q8k)
 }
 
@@ -1202,6 +1216,10 @@ pub fn vec_dot_iq3_s_q8k_scalar(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq3_s_q8k(iq3s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(iq3s_data, q8k) };
+    }
     vec_dot_iq3_s_q8k_scalar(iq3s_data, q8k)
 }
 
@@ -1293,14 +1311,26 @@ pub fn vec_dot_iq4_xs_q8k(iq4xs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq2_xxs_q8k(iq2xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(iq2xxs_data, q8k) };
+    }
     vec_dot_iq2_xxs_q8k_scalar(iq2xxs_data, q8k)
 }
 
 pub fn vec_dot_iq2_s_q8k(iq2s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(iq2s_data, q8k) };
+    }
     vec_dot_iq2_s_q8k_scalar(iq2s_data, q8k)
 }
 
 pub fn vec_dot_iq3_xxs_q8k(iq3xxs_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(iq3xxs_data, q8k) };
+    }
     vec_dot_iq3_xxs_q8k_scalar(iq3xxs_data, q8k)
 }
 
@@ -1736,6 +1766,10 @@ pub fn vec_dot_iq1_m_q8k_scalar(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq1_m_q8k(iq1m_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(iq1m_data, q8k) };
+    }
     vec_dot_iq1_m_q8k_scalar(iq1m_data, q8k)
 }
 
@@ -1813,6 +1847,10 @@ pub fn vec_dot_iq1_s_q8k_scalar(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
 }
 
 pub fn vec_dot_iq1_s_q8k(iq1s_data: &[u8], q8k: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::ops::has_avx2_fma() {
+        return unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(iq1s_data, q8k) };
+    }
     vec_dot_iq1_s_q8k_scalar(iq1s_data, q8k)
 }
 
@@ -3318,6 +3356,448 @@ mod avx2_kq_parity {
         let s = vec_dot_q3k_q8k_scalar(block, &q8k);
         let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(block, &q8k) };
         assert!((s - avx2).abs() < 1.0, "scalar={}, avx2={}", s, avx2);
+    }
+
+    /// xorshift64* PRNG: deterministic, no external dependency; full-width
+    /// bytes so parity covers every bit pattern, not just hand-picked ones.
+    fn prng_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn q2k_avx2_matches_scalar_random_superblocks() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        // d/dmin kept around 1e-2 so the f32 dot stays in a range where the
+        // scalar (8 addends) and AVX2 (single FMA) reduction orders agree
+        // far inside the 1e-3 relative bound.
+        let weight = prng_bytes(0x2026_1121_0002_2E0_u64 ^ 0x5eed, nb * BLOCK_Q2K_SIZE);
+        let mut blocks = weight;
+        for b in 0..nb {
+            let off = b * BLOCK_Q2K_SIZE;
+            let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * ((b % 7) as f32)).to_le_bytes();
+            blocks[off + 80] = d_bits[0];
+            blocks[off + 81] = d_bits[1];
+            blocks[off + 82] = d_bits[0];
+            blocks[off + 83] = d_bits[1];
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let scalar = vec_dot_q2k_q8k_scalar(&blocks, &q8k);
+        let avx2 = unsafe { vec_dot_q2k_q8k_avx2_direct(&blocks, &q8k) };
+        let diff = (scalar - avx2).abs();
+        let rel = diff / scalar.abs().max(1.0);
+        eprintln!(
+            "q2k random {} blocks: scalar={} avx2={} abs_diff={} rel={}",
+            nb, scalar, avx2, diff, rel
+        );
+        assert!(rel < 1e-3, "q2k random parity: rel={rel} diff={diff}");
+    }
+
+    #[test]
+    fn q3k_avx2_matches_scalar_random_superblocks() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        let weight = prng_bytes(0x2026_1121_0003_3E0_u64 ^ 0x5eed, nb * BLOCK_Q3K_SIZE);
+        let mut blocks = weight;
+        for b in 0..nb {
+            let off = b * BLOCK_Q3K_SIZE;
+            let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * ((b % 5) as f32)).to_le_bytes();
+            blocks[off + 108] = d_bits[0];
+            blocks[off + 109] = d_bits[1];
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 41 + 7) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let scalar = vec_dot_q3k_q8k_scalar(&blocks, &q8k);
+        let avx2 = unsafe { vec_dot_q3k_q8k_avx2_direct(&blocks, &q8k) };
+        let diff = (scalar - avx2).abs();
+        let rel = diff / scalar.abs().max(1.0);
+        eprintln!(
+            "q3k random {} blocks: scalar={} avx2={} abs_diff={} rel={}",
+            nb, scalar, avx2, diff, rel
+        );
+        assert!(rel < 1e-3, "q3k random parity: rel={rel} diff={diff}");
+    }
+
+    /// Shared harness for the IQ2/IQ3/IQ1 AVX2 ports: random super-blocks
+    /// (every bit pattern decodes — grid and sign lookups are bounded table
+    /// reads) against the scalar reference. Both paths compute the exact
+    /// integer dot per super-block, so only the float accumulation order
+    /// differs (f64 scalar vs f32 FMA), far inside the 1e-3 relative bound.
+    fn iq_avx2_parity_random(
+        label: &str,
+        block_size: usize,
+        seed: u64,
+        fix_scale: fn(&mut [u8], usize),
+        avx2: unsafe fn(&[u8], &[BlockQ8K]) -> f32,
+        scalar: fn(&[u8], &[BlockQ8K]) -> f32,
+    ) {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let nb = 64usize;
+        let mut blocks = prng_bytes(seed, nb * block_size);
+        for b in 0..nb {
+            fix_scale(&mut blocks, b * block_size);
+        }
+        let input: Vec<f32> = (0..nb * 256)
+            .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+            .collect();
+        let q8k = quantize_row_q8_k(&input);
+
+        let s = scalar(&blocks, &q8k);
+        let a = unsafe { avx2(&blocks, &q8k) };
+        let diff = (s - a).abs();
+        let rel = diff / s.abs().max(1.0);
+        eprintln!("{label} random {nb} blocks: scalar={s} avx2={a} abs={diff} rel={rel}");
+        assert!(rel < 1e-3, "{label} random parity: rel={rel} diff={diff}");
+    }
+
+    fn set_f16_scale_at(blocks: &mut [u8], off: usize) {
+        let d_bits = crate::ops::f32_to_f16(0.01 + 0.001 * (((off / 2) % 7) as f32)).to_le_bytes();
+        blocks[off] = d_bits[0];
+        blocks[off + 1] = d_bits[1];
+    }
+
+    /// IQ1_M has no d field; its super-scale is assembled from 4-bit nibbles
+    /// across `scales` (offset 48), so pin those bytes to f16(1.0) = 0x3C00
+    /// to keep the random payload away from Inf/NaN scales.
+    fn set_iq1m_scale(blocks: &mut [u8], off: usize) {
+        let sc: [u8; 8] = [0x33, 0x33, 0x33, 0x03, 0x33, 0xC3, 0x33, 0x33];
+        blocks[off + 48..off + 56].copy_from_slice(&sc);
+    }
+
+    /// Bit-exact oracle check against the pinned llama.cpp build: the same
+    /// random super-blocks are pushed through llama.cpp's own kernel via the
+    /// `oracle_vecdot_harness` tool (built from the pinned checkout; set
+    /// `RMI_LLAMA_ORACLE` to its path). The AVX2 port must reproduce the
+    /// oracle's f32 bits exactly — same integer dots, same FMA accumulation
+    /// order. The scalar path is allowed a small float-order delta only.
+    #[test]
+    #[ignore = "requires the pinned llama.cpp build; run with RMI_LLAMA_ORACLE=<harness path>"]
+    fn iq_avx2_matches_llama_cpp_oracle_bitwise() {
+        let harness = match std::env::var("RMI_LLAMA_ORACLE") {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let cases: [(
+            &str,
+            u32,
+            usize,
+            fn(&mut [u8], usize),
+            fn(&[u8], &[BlockQ8K]) -> f32,
+            unsafe fn(&[u8], &[BlockQ8K]) -> f32,
+        ); 7] = [
+            (
+                "iq2_xxs",
+                0,
+                BLOCK_IQ2_XXS_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq2_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "iq2_xs",
+                1,
+                BLOCK_IQ2_XS_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq2_xs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(b, q) },
+            ),
+            (
+                "iq2_s",
+                2,
+                BLOCK_IQ2_S_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq2_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(b, q) },
+            ),
+            (
+                "iq3_xxs",
+                3,
+                BLOCK_IQ3_XXS_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq3_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "iq3_s",
+                4,
+                BLOCK_IQ3_S_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq3_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(b, q) },
+            ),
+            (
+                "iq1_s",
+                5,
+                BLOCK_IQ1_S_SIZE,
+                set_f16_scale_at,
+                vec_dot_iq1_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(b, q) },
+            ),
+            (
+                "iq1_m",
+                6,
+                BLOCK_IQ1_M_SIZE,
+                set_iq1m_scale,
+                vec_dot_iq1_m_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(b, q) },
+            ),
+        ];
+        let nb = 64usize;
+        let mut seeds: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for (label, kind, block_size, fix_scale, scalar, avx2) in cases {
+            let seed = 0x2026_1121_10C2_0000 ^ (kind as u64 + 1);
+            seeds.insert(label, seed);
+            let mut blocks = prng_bytes(seed, nb * block_size);
+            for b in 0..nb {
+                fix_scale(&mut blocks, b * block_size);
+            }
+            let input: Vec<f32> = (0..nb * 256)
+                .map(|i| (((i * 37 + 11) % 251) as f32 - 125.0) * 0.7)
+                .collect();
+            let q8k = quantize_row_q8_k(&input);
+
+            let mut payload = Vec::with_capacity(8 + blocks.len() + nb * 292);
+            payload.extend_from_slice(&kind.to_le_bytes());
+            payload.extend_from_slice(&(nb as u32).to_le_bytes());
+            payload.extend_from_slice(&blocks);
+            for block in &q8k {
+                payload.extend_from_slice(&block.d.to_le_bytes());
+                payload.extend_from_slice(&block.qs.iter().map(|v| *v as u8).collect::<Vec<u8>>());
+                for b in &block.bsums {
+                    payload.extend_from_slice(&b.to_le_bytes());
+                }
+            }
+
+            use std::io::Write;
+            let mut child = std::process::Command::new(&harness)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn oracle harness");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&payload)
+                .expect("write payload");
+            let out = child.wait_with_output().expect("wait harness");
+            assert!(out.status.success(), "{label}: harness failed");
+            let oracle_bits_raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let oracle_bits = u32::from_str_radix(&oracle_bits_raw, 16).expect("parse oracle bits");
+            let oracle = f32::from_bits(oracle_bits);
+
+            let a = unsafe { avx2(&blocks, &q8k) };
+            let s = scalar(&blocks, &q8k);
+            eprintln!(
+                "{label}: oracle={} ({:08x}) avx2={} ({:08x}) scalar={} ({:08x})",
+                oracle,
+                oracle_bits,
+                a,
+                a.to_bits(),
+                s,
+                s.to_bits()
+            );
+            assert_eq!(
+                a.to_bits(),
+                oracle_bits,
+                "{label}: AVX2 must match llama.cpp oracle bit-for-bit"
+            );
+            let diff = (s - oracle).abs();
+            let rel = diff / oracle.abs().max(1.0);
+            assert!(rel < 1e-3, "{label}: scalar vs oracle rel={rel}");
+        }
+        let _ = &seeds;
+    }
+
+    #[test]
+    fn iq2_xxs_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq2_xxs",
+            BLOCK_IQ2_XXS_SIZE,
+            0x2026_1121_10C2_0001,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(b, q) },
+            vec_dot_iq2_xxs_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq2_xs_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq2_xs",
+            BLOCK_IQ2_XS_SIZE,
+            0x2026_1121_10C2_0002,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(b, q) },
+            vec_dot_iq2_xs_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq2_s_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq2_s",
+            BLOCK_IQ2_S_SIZE,
+            0x2026_1121_10C2_0003,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(b, q) },
+            vec_dot_iq2_s_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq3_xxs_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq3_xxs",
+            BLOCK_IQ3_XXS_SIZE,
+            0x2026_1121_10C2_0004,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(b, q) },
+            vec_dot_iq3_xxs_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq3_s_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq3_s",
+            BLOCK_IQ3_S_SIZE,
+            0x2026_1121_10C2_0005,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(b, q) },
+            vec_dot_iq3_s_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq1_m_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq1_m",
+            BLOCK_IQ1_M_SIZE,
+            0x2026_1121_10C2_0006,
+            set_iq1m_scale,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(b, q) },
+            vec_dot_iq1_m_q8k_scalar,
+        );
+    }
+
+    #[test]
+    fn iq1_s_avx2_matches_scalar_random_superblocks() {
+        iq_avx2_parity_random(
+            "iq1_s",
+            BLOCK_IQ1_S_SIZE,
+            0x2026_1121_10C2_0007,
+            set_f16_scale_at,
+            |b, q| unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(b, q) },
+            vec_dot_iq1_s_q8k_scalar,
+        );
+    }
+
+    /// Real-model parity: the whole first attention projection row of each
+    /// locally available IQ quant, quantized activation vs both kernels.
+    #[test]
+    fn iq_avx2_matches_scalar_on_real_model_rows() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        use crate::format::ggufrs::open_model_source;
+        use crate::format::ggufrs::ComponentRole;
+
+        let cases: [(
+            &str,
+            usize,
+            fn(&[u8], &[BlockQ8K]) -> f32,
+            unsafe fn(&[u8], &[BlockQ8K]) -> f32,
+        ); 7] = [
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ2_XXS.gguf",
+                BLOCK_IQ2_XXS_SIZE,
+                vec_dot_iq2_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ2_XS.gguf",
+                BLOCK_IQ2_XS_SIZE,
+                vec_dot_iq2_xs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_xs_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ2_S.gguf",
+                BLOCK_IQ2_S_SIZE,
+                vec_dot_iq2_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq2_s_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ3_XXS.gguf",
+                BLOCK_IQ3_XXS_SIZE,
+                vec_dot_iq3_xxs_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_xxs_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-IQ3_S.gguf",
+                BLOCK_IQ3_S_SIZE,
+                vec_dot_iq3_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq3_s_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_M.gguf",
+                BLOCK_IQ1_M_SIZE,
+                vec_dot_iq1_m_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_m_q8k_avx2(b, q) },
+            ),
+            (
+                "models/Qwen3-0.6B-GGUF/Qwen3-0.6B-UD-IQ1_S.gguf",
+                BLOCK_IQ1_S_SIZE,
+                vec_dot_iq1_s_q8k_scalar,
+                |b, q| unsafe { self::avx2_k::vec_dot_iq1_s_q8k_avx2(b, q) },
+            ),
+        ];
+        for (path, block_size, scalar, avx2) in cases {
+            if !std::path::Path::new(path).exists() {
+                eprintln!("skip {path} (not present)");
+                continue;
+            }
+            let loader =
+                open_model_source(std::path::Path::new(path), ComponentRole::Llm).expect("open");
+            let bytes = loader.tensor_slice("blk.0.attn_q.weight").expect("slice");
+            let n_in = 1024usize;
+            let blocks_per_row = n_in / 256;
+            let row = &bytes[..blocks_per_row * block_size];
+            let input: Vec<f32> = (0..n_in)
+                .map(|i| (((i * 29 + 5) % 241) as f32 - 120.0) * 0.05)
+                .collect();
+            let q8k = quantize_row_q8_k(&input);
+            let s = scalar(row, &q8k);
+            let a = unsafe { avx2(row, &q8k) };
+            let diff = (s - a).abs();
+            let rel = diff / s.abs().max(1.0);
+            eprintln!("{path} row: scalar={s} avx2={a} abs={diff} rel={rel}");
+            assert!(rel < 1e-3, "{path} real-row parity: rel={rel} diff={diff}");
+        }
     }
 }
 

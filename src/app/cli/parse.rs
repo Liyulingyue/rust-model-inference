@@ -429,8 +429,8 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
                 i += 1;
             }
             "--bench" => options.bench = true,
-            "--thinking" => options.thinking = true,
-            "--no-thinking" => options.thinking = false,
+            "--thinking" => options.thinking = Some(true),
+            "--no-thinking" => options.thinking = Some(false),
             "--profile" => options.profile = true,
             "--gpu" => options.gpu = true,
             "--compute" => {
@@ -763,53 +763,14 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
         .map(|index| args[*index].clone())
         .collect();
     if options.enhance {
-        for &index in &parsed_flags {
-            let mut index = index;
-            match args[index].as_str() {
-                "--model" | "--audio" | "--out" => {
-                    let flag = &args[index];
-                    required_path_value(args, &mut index, flag)?;
-                }
-                "--threads" => {
-                    required_usize_value(args, &mut index, "--threads")?;
-                }
-                "--enhance" | "--compute" | "--gpu" | "--overwrite" | "--serve" => {}
-                flag => return Err(format!("--enhance cannot be combined with {flag}")),
-            }
-        }
+        apply_mode_flags(Mode::Enhance, args, &parsed_flags)?;
     }
     if options.decision_request.is_some() {
         crate::app::decision::validate_options(&options)?;
-        for mut index in parsed_flags.iter().copied() {
-            match args[index].as_str() {
-                "--model" => {
-                    required_path_value(args, &mut index, "--model")?;
-                }
-                "--threads" | "--max-context" => {
-                    let flag = args[index].clone();
-                    required_usize_value(args, &mut index, &flag)?;
-                }
-                _ => {}
-            }
-        }
+        apply_mode_flags(Mode::Decision, args, &parsed_flags)?;
     }
     if options.system_one_request.is_some() {
-        for mut index in parsed_flags {
-            match args[index].as_str() {
-                "--model" => {
-                    required_path_value(args, &mut index, "--model")?;
-                }
-                "--threads" => {
-                    required_usize_value(args, &mut index, "--threads")?;
-                }
-                "--adapter" | "--system-one-request" | "--compute" | "--gpu" => {}
-                flag => {
-                    return Err(format!(
-                        "--system-one-request cannot be combined with {flag}"
-                    ));
-                }
-            }
-        }
+        apply_mode_flags(Mode::SystemOne, args, &parsed_flags)?;
     }
     if options.gpu && options.compute.is_some() {
         return Err("--gpu and --compute cannot be combined".into());
@@ -819,6 +780,179 @@ pub fn parse_cli_options(args: &[String]) -> Result<CliOptions, String> {
     }
     options.serve = args.iter().any(|arg| arg == "--serve");
     Ok(options)
+}
+
+/// A CLI mode that declares which flags it accepts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Mode {
+    /// `--enhance`: the RE-UPE audio enhancement mode.
+    Enhance,
+    /// `--decision-request`: the THX-02 decision mode.
+    Decision,
+    /// `--system-one-request`: the Vela3 / System One mode.
+    SystemOne,
+}
+
+impl Mode {
+    /// How the mode is named in the error message.
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Enhance => "--enhance",
+            Mode::Decision => "--decision-request",
+            Mode::SystemOne => "--system-one-request",
+        }
+    }
+
+    /// Whether the mode rejects the flags it does not list.
+    ///
+    /// The decision mode has never had a whitelist: it takes any flag and
+    /// only checks the values of the ones it knows.
+    fn rejects_unlisted(self) -> bool {
+        match self {
+            Mode::Enhance | Mode::SystemOne => true,
+            Mode::Decision => false,
+        }
+    }
+}
+
+/// The value a flag carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Value {
+    /// The flag stands alone.
+    None,
+    /// The flag is followed by a path.
+    Path,
+    /// The flag is followed by a number.
+    Number,
+}
+
+/// A flag, the value it carries, and the modes that accept it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FlagRule {
+    /// The flag as it appears on the command line.
+    pub(crate) name: &'static str,
+    /// The value the flag carries.
+    pub(crate) value: Value,
+    /// The modes that accept the flag.
+    pub(crate) modes: &'static [Mode],
+}
+
+/// The flags the modes accept, and the modes that accept each of them.
+///
+/// The mode check used to be three inline `match` blocks, one per mode, and
+/// each spelled out the flags its mode took. A flag that more than one mode
+/// took had to be listed in every one of them, so a new mode meant editing
+/// the other lists as well: the `| "--gpu"` in the system-one list looked
+/// like a special case, but it was another copy of the same list.
+///
+/// Listing each flag once, with the modes that accept it, is the fix: a
+/// shared flag is one entry, and a mode that takes it is one more mode in
+/// that entry.
+pub(crate) const FLAG_RULES: &[FlagRule] = &[
+    FlagRule {
+        name: "--model",
+        value: Value::Path,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--threads",
+        value: Value::Number,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--compute",
+        value: Value::None,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--gpu",
+        value: Value::None,
+        modes: &[Mode::Enhance, Mode::Decision, Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--audio",
+        value: Value::Path,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--out",
+        value: Value::Path,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--enhance",
+        value: Value::None,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--overwrite",
+        value: Value::None,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--serve",
+        value: Value::None,
+        modes: &[Mode::Enhance],
+    },
+    FlagRule {
+        name: "--adapter",
+        value: Value::None,
+        modes: &[Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--system-one-request",
+        value: Value::None,
+        modes: &[Mode::SystemOne],
+    },
+    FlagRule {
+        name: "--decision-request",
+        value: Value::None,
+        modes: &[Mode::Decision],
+    },
+    FlagRule {
+        name: "--decision-thinker",
+        value: Value::Path,
+        modes: &[Mode::Decision],
+    },
+    FlagRule {
+        name: "--max-context",
+        value: Value::Number,
+        modes: &[Mode::Decision],
+    },
+];
+
+/// Apply `mode`'s flag rules to the flags that were parsed.
+fn apply_mode_flags(mode: Mode, args: &[String], parsed_flags: &[usize]) -> Result<(), String> {
+    for &index in parsed_flags {
+        let mut index = index;
+        let flag = args[index].as_str();
+        match FLAG_RULES.iter().find(|rule| rule.name == flag) {
+            Some(rule) if rule.modes.contains(&mode) => match rule.value {
+                Value::None => {}
+                Value::Path => {
+                    required_path_value(args, &mut index, flag)?;
+                }
+                Value::Number => {
+                    required_usize_value(args, &mut index, flag)?;
+                }
+            },
+            // The decision mode has no whitelist: any flag is accepted.
+            _ if !mode.rejects_unlisted() => {}
+            _ => return Err(format!("{} cannot be combined with {flag}", mode.name())),
+        }
+    }
+    Ok(())
+}
+
+/// Whether `mode` accepts `flag`.
+///
+/// The shared flags live in [`FLAG_RULES`]; this is the one lookup every
+/// mode check goes through.
+pub(crate) fn flag_is_allowed_for(flag: &str, mode: Mode) -> bool {
+    FLAG_RULES
+        .iter()
+        .find(|rule| rule.name == flag)
+        .is_some_and(|rule| rule.modes.contains(&mode))
 }
 
 fn required_string_value(args: &[String], index: &mut usize, flag: &str) -> Result<String, String> {

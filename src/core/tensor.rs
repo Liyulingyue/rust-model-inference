@@ -651,26 +651,54 @@ pub fn load_f32_matrix<S: TensorSource + ?Sized>(
     {
         return Err(format!("Unsupported matrix {name}: {:?}", info.ggml_type));
     }
-    let elements = n_in
-        .checked_mul(n_out)
-        .ok_or_else(|| format!("Tensor element count overflow: {name}"))?;
-    let expected = match info.ggml_type {
-        GGMLType::F32 => elements.checked_mul(4),
-        GGMLType::F16 | GGMLType::BF16 => elements.checked_mul(2),
-        GGMLType::Q8_0 => Some(elements / 32 * 34),
-        _ => None,
-    }
-    .ok_or_else(|| format!("Tensor byte size overflow: {name}"))?;
     let bytes = source
         .tensor_slice(name)
         .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    decode_f32_matrix(info.ggml_type, bytes, n_in, n_out)
+        .map_err(|error| format!("Invalid tensor {name}: {error}"))
+}
+
+/// Decode borrowed matrix bytes into F32, using the format the header declares.
+///
+/// This is the decode half of [`load_f32_matrix`], for callers that already
+/// hold the bytes — the vision towers borrow them straight from the mapped
+/// file, so they never get the name back — but still need the format that
+/// the header declared.
+///
+/// The format cannot be guessed from the byte length: F16 and BF16 are both
+/// two bytes per element, and a BF16 `1.0` read as F16 comes back as `1.875`.
+/// The block-quantized layout is accepted too, because the vision towers
+/// ship Q8_0 matrices as well.
+pub fn decode_f32_matrix(
+    ggml_type: GGMLType,
+    bytes: &[u8],
+    n_in: usize,
+    n_out: usize,
+) -> Result<Vec<f32>, String> {
+    let elements = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| "Tensor element count overflow".to_string())?;
+    let expected = match ggml_type {
+        GGMLType::F32 => elements.checked_mul(4),
+        GGMLType::F16 | GGMLType::BF16 => elements.checked_mul(2),
+        GGMLType::Q8_0 => {
+            if n_in % 32 != 0 {
+                return Err(format!(
+                    "Q8_0 matrix needs a multiple of 32 columns, got {n_in}"
+                ));
+            }
+            Some(elements / 32 * 34)
+        }
+        other => return Err(format!("Unsupported matrix format {other:?}")),
+    }
+    .ok_or_else(|| "Tensor byte size overflow".to_string())?;
     if bytes.len() != expected {
         return Err(format!(
-            "Invalid tensor {name}: byte length {}; expected {expected}",
+            "byte length {} differs from expected {expected}",
             bytes.len()
         ));
     }
-    Ok(match info.ggml_type {
+    Ok(match ggml_type {
         GGMLType::F32 => bytes
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -685,6 +713,99 @@ pub fn load_f32_matrix<S: TensorSource + ?Sized>(
             .collect(),
         _ => crate::ops::quant::dequant_q80_weight(bytes, n_in, n_out),
     })
+}
+
+/// Load a matrix weight, using the format the tensor declares.
+///
+/// This is the one entry point for turning a GGUF tensor into a
+/// [`Weight`]: the format comes from the header, the accepted formats from
+/// `allowed`, and the shape from the caller.
+///
+/// `allowed` is the caller's own list of formats its model can execute.
+/// `None` means "every format a [`QuantizedTensor`] can hold" — which is
+/// every format [`QuantizedTensor::supports`] accepts, and nothing else. A
+/// GGML file may still declare a format no kernel can hold (the integer and
+/// double types, `Q8_1`, `Q8_K`); those are reported as an error, never
+/// handed to a kernel.
+///
+/// The shape is passed in rather than derived from the tensor's dimensions
+/// because the repository has two conventions that are both correct: GGUF's
+/// own (the first dimension is the row length) and the dots vocoder's
+/// (everything but the last dimension is the input width, which is how its
+/// convolution weights are stored). Forcing one of them on the other would
+/// silently reshape those weights.
+///
+/// The byte length is checked against the declared format, so a truncated or
+/// mismatched tensor is an error rather than a kernel reading past its data.
+///
+/// [`Weight`]: crate::ops::kernel::Weight
+/// [`QuantizedTensor`]: crate::ops::kernel::QuantizedTensor
+/// [`QuantizedTensor::supports`]: crate::ops::kernel::QuantizedTensor::supports
+pub fn load_weight_any<'a, S: TensorSource + ?Sized>(
+    source: &'a S,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    allowed: Option<&[GGMLType]>,
+) -> Result<crate::ops::kernel::Weight<'a>, String> {
+    let info = source
+        .tensor_info(name)
+        .ok_or_else(|| format!("Missing tensor: {name}"))?;
+    if let Some(allowed) = allowed {
+        if !allowed.contains(&info.ggml_type) {
+            return Err(format!(
+                "Unsupported matrix {name}: {:?}, expected one of {allowed:?}",
+                info.ggml_type
+            ));
+        }
+    }
+    // A format no kernel can hold is reported here. Without this check the
+    // type reaches `QuantizedTensor::from_bytes`, which panics on it — a
+    // panic on the path that reads a user's model file.
+    if !crate::ops::kernel::QuantizedTensor::supports(info.ggml_type) {
+        return Err(format!(
+            "Unsupported matrix {name}: {:?} has no weight kernel",
+            info.ggml_type
+        ));
+    }
+    let bytes = source
+        .tensor_slice(name)
+        .ok_or_else(|| format!("Missing tensor data: {name}"))?;
+    // The block-quantized formats lay their blocks along the row, so the
+    // row length has to be a whole number of blocks.
+    let (block_elements, block_bytes) = info.ggml_type.type_traits();
+    if n_in % block_elements != 0 {
+        return Err(format!(
+            "Unsupported matrix {name}: {:?} needs a row of a multiple of {block_elements} elements",
+            info.ggml_type
+        ));
+    }
+    let expected = n_in
+        .checked_mul(n_out)
+        .and_then(|elements| elements.checked_div(block_elements))
+        .and_then(|blocks| blocks.checked_mul(block_bytes))
+        .ok_or_else(|| format!("Tensor byte size overflow: {name}"))?;
+    if bytes.len() != expected {
+        return Err(format!(
+            "Invalid tensor data length for {name}: {}; expected {expected}",
+            bytes.len()
+        ));
+    }
+    // F32 keeps the borrowed bytes and the matrix shape. The block-quantized
+    // formats keep their bytes too, but their tensor does not carry the
+    // shape, so it is set below.
+    let mut weight =
+        if info.ggml_type == GGMLType::F32 {
+            crate::ops::kernel::Weight::from_f32_bytes(bytes, n_in, n_out)
+                .ok_or_else(|| format!("Invalid F32 matrix {name}"))?
+        } else {
+            crate::ops::kernel::Weight::from_quantized(
+                crate::ops::kernel::QuantizedTensor::from_bytes(bytes, info.ggml_type, n_in, n_out),
+            )
+        };
+    weight.n_in = n_in;
+    weight.n_out = n_out;
+    Ok(weight)
 }
 
 /// Tensor types `load_f32_tensor` will expand to F32 on load.
@@ -763,12 +884,237 @@ mod tests {
         Source { info, bytes }
     }
 
+    /// `Weight` is not `Debug`, so `unwrap_err` is not available.
+    fn expect_error<T>(result: Result<T, String>) -> String {
+        match result {
+            Ok(_) => panic!("expected an error"),
+            Err(error) => error,
+        }
+    }
+
+    /// A source that hands out one tensor with a declared format and a
+    /// payload the test chooses.
+    struct Matrix {
+        info: TensorInfo,
+        bytes: Vec<u8>,
+    }
+
+    impl TensorSource for Matrix {
+        fn metadata(&self, _key: &str) -> Option<&MetaValue> {
+            None
+        }
+
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.info.name).then_some(&self.info)
+        }
+
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.info.name).then_some(self.bytes.as_slice())
+        }
+    }
+
+    fn matrix(ggml_type: GGMLType, dims: &[u64], bytes: Vec<u8>) -> Matrix {
+        Matrix {
+            info: TensorInfo {
+                name: "weight".into(),
+                dims: dims.to_vec(),
+                ggml_type,
+                offset: 0,
+            },
+            bytes,
+        }
+    }
+
+    /// The weight loader is the one place that knows how to turn a GGUF
+    /// tensor into a `Weight`, so the format has to come from the header:
+    /// BF16 and F16 are both two bytes per element and cannot be told apart
+    /// by length.
+    #[test]
+    fn load_weight_any_follows_the_declared_format() {
+        let one = 1.0f32.to_le_bytes();
+        let source = matrix(GGMLType::BF16, &[1, 1], vec![one[2], one[3]]);
+        let weight = load_weight_any(&source, "weight", 1, 1, None).unwrap();
+        assert_eq!(weight.ggml_type, GGMLType::BF16);
+        assert_eq!(weight.n_in, 1);
+        assert_eq!(weight.n_out, 1);
+        // The BF16 kernel is the one that was selected, so the payload stays
+        // BF16: read as F16 it would be 1.875 instead of 1.0.
+        assert_eq!(weight.kernel.bf16_bytes().unwrap(), &[one[2], one[3]]);
+
+        let source = matrix(GGMLType::F16, &[1, 1], vec![one[2], one[3]]);
+        let weight = load_weight_any(&source, "weight", 1, 1, None).unwrap();
+        assert_eq!(weight.ggml_type, GGMLType::F16);
+        assert!(weight.kernel.bf16_bytes().is_none());
+        assert_eq!(weight.kernel.weight_bytes().unwrap(), &[one[2], one[3]]);
+    }
+
+    /// F32 weights keep the borrowed bytes: the loader must not copy them.
+    #[test]
+    fn load_weight_any_borrows_the_f32_payload() {
+        let bytes = [1.0f32, -2.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let source = matrix(GGMLType::F32, &[2, 1], bytes);
+        let weight = load_weight_any(&source, "weight", 2, 1, None).unwrap();
+        assert_eq!(weight.n_in, 2);
+        assert_eq!(weight.n_out, 1);
+        assert_eq!(weight.kernel.f32_slice().unwrap(), [1.0, -2.0]);
+        assert_eq!(
+            weight.kernel.weight_bytes().unwrap().as_ptr(),
+            source.bytes.as_ptr()
+        );
+    }
+
+    #[test]
+    fn load_weight_any_rejects_a_format_outside_the_whitelist() {
+        let source = matrix(GGMLType::BF16, &[1, 1], vec![0u8; 2]);
+        let error = expect_error(load_weight_any(
+            &source,
+            "weight",
+            1,
+            1,
+            Some(&[GGMLType::F32]),
+        ));
+        assert!(error.contains("Unsupported matrix weight"), "{error}");
+    }
+
+    #[test]
+    fn load_weight_any_rejects_a_payload_that_does_not_match_the_format() {
+        let source = matrix(GGMLType::BF16, &[2, 1], vec![0u8; 2]);
+        let error = expect_error(load_weight_any(&source, "weight", 2, 1, None));
+        assert!(error.contains("expected 4"), "{error}");
+    }
+
+    /// A block-quantized row has to be a whole number of blocks.
+    #[test]
+    fn load_weight_any_rejects_a_row_that_is_not_block_aligned() {
+        let source = matrix(GGMLType::Q8_0, &[33, 1], vec![0u8; 34 * 2]);
+        let error = expect_error(load_weight_any(&source, "weight", 33, 1, None));
+        assert!(error.contains("multiple of 32"), "{error}");
+    }
+
+    /// The format filter and the kernel builder have to agree: `supports`
+    /// must be true exactly for the formats `from_bytes` accepts. A loader
+    /// that filters on `supports` and then calls `from_bytes` panics on
+    /// every type the two lists disagree about.
+    #[test]
+    fn the_supported_formats_are_exactly_the_ones_the_kernel_builder_accepts() {
+        for value in 0..=64 {
+            let Some(ggml_type) = GGMLType::from_i32(value) else {
+                continue;
+            };
+            let data = vec![0u8; 64 * 4];
+            let supported = crate::ops::kernel::QuantizedTensor::supports(ggml_type);
+            let built = std::panic::catch_unwind(|| {
+                crate::ops::kernel::QuantizedTensor::from_bytes(&data, ggml_type, 8, 8)
+            });
+            assert_eq!(
+                supported,
+                built.is_ok(),
+                "{ggml_type:?}: supports() says {supported}, but the kernel builder {}",
+                if built.is_ok() {
+                    "accepts it"
+                } else {
+                    "panics on it"
+                }
+            );
+        }
+    }
+
+    /// A GGUF file may declare a format no kernel can hold — the integer and
+    /// double types, `Q8_1`, `Q8_K`. The loader has to report that, not hand
+    /// it to the kernel builder, which panics on it. A panic on the path
+    /// that reads a user's model file is never the right answer.
+    #[test]
+    fn load_weight_any_reports_a_format_that_has_no_kernel() {
+        for ggml_type in [
+            GGMLType::I8,
+            GGMLType::I16,
+            GGMLType::I32,
+            GGMLType::I64,
+            GGMLType::F64,
+            GGMLType::Q8_1,
+            GGMLType::Q8K,
+        ] {
+            let (block_elements, block_bytes) = ggml_type.type_traits();
+            let n_in = block_elements;
+            let n_out = 4;
+            let bytes = vec![0u8; n_in * n_out / block_elements * block_bytes];
+            let source = matrix(ggml_type, &[n_in as u64, n_out as u64], bytes);
+
+            // `None` means "every format a kernel can hold" — and this one
+            // has no kernel.
+            let error = expect_error(load_weight_any(&source, "weight", n_in, n_out, None));
+            assert!(error.contains("no weight kernel"), "{ggml_type:?}: {error}");
+
+            // Naming it in the whitelist does not make it loadable either.
+            let error = expect_error(load_weight_any(
+                &source,
+                "weight",
+                n_in,
+                n_out,
+                Some(&[ggml_type]),
+            ));
+            assert!(error.contains("no weight kernel"), "{ggml_type:?}: {error}");
+        }
+    }
+
     #[test]
     fn typed_tensor_bytes_returns_the_payload_after_checking_it() {
         let source = source(GGMLType::F32, &[4]);
         assert_eq!(
             typed_tensor_bytes(&source, "weight", &[4], GGMLType::F32).map(|b| b.len()),
             Ok(16)
+        );
+    }
+
+    /// The format has to come from the header. BF16 and F16 are both two
+    /// bytes per element, so a byte length cannot tell them apart — and the
+    /// two readings differ: `1.0` in BF16 read as F16 comes back as `1.875`.
+    #[test]
+    fn decode_f32_matrix_follows_the_declared_format() {
+        let bf16_one = 1.0f32.to_le_bytes();
+        let bf16_bytes = [bf16_one[2], bf16_one[3]];
+        assert_eq!(
+            decode_f32_matrix(GGMLType::BF16, &bf16_bytes, 1, 1).unwrap(),
+            vec![1.0]
+        );
+        // The same bytes read as F16 are a different number, which is exactly
+        // why the length cannot be used to pick the format.
+        assert_eq!(
+            decode_f32_matrix(GGMLType::F16, &bf16_bytes, 1, 1).unwrap(),
+            vec![1.875]
+        );
+
+        let f32_bytes = 1.0f32.to_le_bytes();
+        assert_eq!(
+            decode_f32_matrix(GGMLType::F32, &f32_bytes, 1, 1).unwrap(),
+            vec![1.0]
+        );
+    }
+
+    #[test]
+    fn decode_f32_matrix_rejects_a_format_it_cannot_expand() {
+        let error = decode_f32_matrix(GGMLType::Q4_0, &[0u8; 18], 1, 1).unwrap_err();
+        assert!(error.contains("Unsupported matrix format"), "{error}");
+    }
+
+    #[test]
+    fn decode_f32_matrix_rejects_a_length_that_does_not_match_the_format() {
+        // Two BF16 values are four bytes; six bytes cannot be read as them.
+        let error = decode_f32_matrix(GGMLType::BF16, &[0u8; 6], 2, 1).unwrap_err();
+        assert!(error.contains("byte length 6"), "{error}");
+    }
+
+    #[test]
+    fn optional_f32_values_follows_the_declared_format() {
+        let bf16_one = 1.0f32.to_le_bytes();
+        let mut source = source(GGMLType::BF16, &[1]);
+        source.bytes = vec![bf16_one[2], bf16_one[3]];
+        assert_eq!(
+            optional_f32_values(&source, "weight").unwrap(),
+            Some(vec![1.0])
         );
     }
 

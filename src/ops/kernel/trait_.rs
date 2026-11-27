@@ -182,6 +182,36 @@ pub trait Kernel: Send + Sync {
         );
     }
 
+    /// Capability query for [`Kernel::forward_batched_rows`]: true when the
+    /// kernel has a token-tiled batched path for this input width. Checked
+    /// for the whole projection group before any output is written; a group
+    /// with any false member keeps the per-token loop.
+    fn supports_token_tiled_batching(&self, _n_in: usize) -> bool {
+        false
+    }
+
+    /// Opt in to token-tiled batched matmul over f32 activations: the kernel
+    /// processes all `n_tokens` rows for its weight-row range
+    /// `[row_start, row_end)` in ONE call, reusing each weight row across
+    /// tokens (L2 panel blocking) instead of re-streaming the weight matrix
+    /// once per token. `input` is token-major `n_tokens × n_in`; `output` is
+    /// `n_tokens × n_out`. The per-(row, token) values must be bit-identical
+    /// to the per-token path — only the loop order changes. Returns false
+    /// when the kernel has no tiled path; the caller keeps its per-token
+    /// loop.
+    fn forward_batched_rows(
+        &self,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_in: usize,
+        _n_out: usize,
+        _n_tokens: usize,
+        _row_start: usize,
+        _row_end: usize,
+    ) -> bool {
+        false
+    }
+
     /// Batched matmul: `input[n_tokens * n_in] → output[n_tokens * n_out]`.
     /// Default impl quantizes the whole batch up front then loops over tokens.
     fn forward_batched(&self, input: &[f32], output: &mut [f32], n_in: usize, n_out: usize) {

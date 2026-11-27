@@ -542,7 +542,7 @@
     }
   },
   "occamy_reverification_2026_11_05": {
-    "host": "aarch64 (NVIDIA GB10 box), CPU, 8 inference threads, release-fast",
+    "host": "aarch64 (aarch64 box), CPU, 8 inference threads, release-fast",
     "branch": "Occamy-1.0 (from main)",
     "weights": "models/Occamy-1.0-GGUF/occamy-1.0-Q8_0.gguf sha256 9bd6eceae8434098c8c7ebec33e4ca0d0bd3f004c2bddf37d16cd906448fdbdd, mmproj-occamy-1.0-F16.gguf sha256 8f827a1e495f23e987686a7f55c26064270502a5b6ee954a828f1aec0b2fd400; both match the hashes above",
     "text": {
@@ -657,10 +657,10 @@
       "http_chat_image": "' blue' with 23 prompt tokens",
       "http_jev_score": "choice A with probability 0.9999444",
       "http_jev_image": "choice A ('blue') with probability 0.9999787",
-      "server": "rust-model-server --model ... --mmproj ... --compute auto; the Vulkan device is picked up (NVIDIA GB10)"
+      "server": "rust-model-server --model ... --mmproj ... --compute auto; the Vulkan device is picked up (aarch64 Vulkan box)"
     },
     "performance": {
-      "host": "aarch64 + NVIDIA GB10, 8 threads, release-fast, Q8_0",
+      "host": "aarch64 host + aarch64 Vulkan box, 8 threads, release-fast, Q8_0",
       "text_32_tokens": {
         "cpu": {
           "prefill_s": 1.088281,
@@ -765,7 +765,7 @@
     }
   },
   "embeddinggemma2_reverification_2026_11_06": {
-    "host": "aarch64 (NVIDIA GB10 box), release-fast",
+    "host": "aarch64 (aarch64 box), release-fast",
     "weights": "reproduced byte-identically with the repository converter: models/EmbeddingGemma-2/model.safetensors (google/embeddinggemma-2 on ModelScope) -> models/embeddinggemma-2-GGUF/embeddinggemma-2-F16.gguf, 1381933504 bytes, sha256 02a3e8d7d28993e54edba085031f331cb4f9e39ebea1a32aa8887c666a03419c",
     "tests": {
       "embeddinggemma_2_text_oracle": "1 passed (13.12 s) against the HF transformers reference",

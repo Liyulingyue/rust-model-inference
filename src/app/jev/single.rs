@@ -91,18 +91,20 @@ fn run_jev_decision_data_with_image(
         // Qwen1.5 use a different newline format and are not in scope; if a
         // user opens such a GGUF with `--jev`, the dispatch will still reach
         // this branch and the special-token lookup will fail loudly.
-        "qwen2" | "qwen3" | "qwen3vl" | "qwen3vlmoe" | "mage_vl" => qwen3::run_jev_decision_qwen3(
-            source.clone(),
-            context,
-            &prepared,
-            n_threads_arg,
-            prefill_batch_size,
-            false,
-            mmproj_path,
-            image_path,
-            jinja.clone(),
-            max_context,
-        ),
+        "qwen2" | "qwen3" | "qwen3moe" | "minimind2moe" | "qwen3vl" | "qwen3vlmoe" | "mage_vl" => {
+            qwen3::run_jev_decision_qwen3(
+                source.clone(),
+                context,
+                &prepared,
+                n_threads_arg,
+                prefill_batch_size,
+                false,
+                mmproj_path,
+                image_path,
+                jinja.clone(),
+                max_context,
+            )
+        }
         // `qwen35moe` shares `qwen35::run_jev_decision_qwen35`: the MoE tower is
         // a `Qwen35Model` with `moe` set, so `run_forward_logits_qwen35_with_batch`
         // and the `minicpmv4_7` projector path are identical. Only the arch
@@ -547,7 +549,7 @@ pub(crate) fn build_jev_prompt(
             template,
             Some(system),
             &payload,
-            false,
+            Some(false),
         )?;
         return Ok((ids, payload));
     }

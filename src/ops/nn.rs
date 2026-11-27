@@ -1411,6 +1411,12 @@ pub fn conv3d_with_options(
         output_shape,
         spec,
     ) {
+        // Trust the device unless verification was requested. The check costs
+        // about as much as the convolution itself, so it is opt-in like the
+        // linear `RMI_GPU_CPU_CHECK` path; see `conv_cpu_check_enabled`.
+        if !conv_cpu_check_enabled() {
+            return Ok((output, output_shape));
+        }
         // The device has been seen to return a convolution that disagrees
         // with the CPU kernel, so the result is checked before it is used.
         // A retry of the same call usually returns the right numbers.
@@ -1484,6 +1490,25 @@ pub fn conv3d_with_options(
         spec,
     );
     Ok((output, output_shape))
+}
+
+/// Whether a device convolution must be cross-checked against the CPU kernel.
+///
+/// The check is opt-in, matching `RMI_GPU_CPU_CHECK` on the linear path:
+/// `RMI_GPU_CPU_CHECK=1` turns it on for both projections and convolutions, and
+/// the strict `--compute vulkan` policy turns it on for convolutions. The
+/// default `--gpu`/Auto policy trusts the device, because the check costs about
+/// as much as the convolution it verifies.
+///
+/// Callers that run the device kernel directly through
+/// `ops::kernel::vulkan::try_conv3d` must consult this predicate themselves to
+/// stay under the same switch. `models/yue2/vae.rs` is the only such caller: its
+/// CPU kernel is pinned to a different reference, so it verifies against its own
+/// CPU path and documents the acceptance criterion there.
+#[cfg(feature = "vulkan")]
+pub(crate) fn conv_cpu_check_enabled() -> bool {
+    std::env::var_os("RMI_GPU_CPU_CHECK").is_some()
+        || crate::compute::ComputePolicy::legacy() == crate::compute::ComputePolicy::Vulkan
 }
 
 /// How many elements of a convolution output are checked against the CPU

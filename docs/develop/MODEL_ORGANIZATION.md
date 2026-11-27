@@ -444,3 +444,12 @@ for _n in 0..(QK_K / 128) {
 6. **Step 6.6**（Z-1、Z-5）：`qwen35/vision/mod.rs` 与 `qwen3/vision/mod.rs` 按职责拆分。风险：中（多 import 站点）。
 
 每步均按 §7 验收标准执行（`cargo build --lib` 零 error、`cargo test --lib` 不退化、至少 1 个真实模型推理冒烟通过、§8 已完成清单追加本次 step）。
+
+### 9.6 长期方向：架构数增长的系统性解
+
+§9.1–9.5 都是「单目录级」的存量偏差修复；但 `src/models/` 的架构数本身仍在
+线性增长（2026-09-22 时 10 个，2026-11-19 已 57 个条目 / 22 万行）。目录规范
+只治「每个模型放哪儿」，不治「每接入一个新架构就要手写 ~1500 行 forward」。
+半步图组装器（layer_template）、组件级组装、按需编译（feature gate）三个
+方向的论证见 [`ARCHITECTURE_EVOLUTION.md`](ARCHITECTURE_EVOLUTION.md)——
+本规范管形态，该文档管演进。

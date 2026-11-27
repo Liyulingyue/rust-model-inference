@@ -113,6 +113,29 @@ pub(super) fn forward_moe_token(
             *value += probability * *expert_value;
         }
     }
+    let shared_ffn = config.moe.map(|value| value.shared_expert_ffn).unwrap_or(0);
+    if shared_ffn != 0 {
+        let mut shared_gate = vec![0.0; shared_ffn];
+        let mut shared_up = vec![0.0; shared_ffn];
+        layer
+            .w_gate
+            .kernel
+            .forward(input, &mut shared_gate, input.len(), shared_ffn);
+        layer
+            .w_up
+            .kernel
+            .forward(input, &mut shared_up, input.len(), shared_ffn);
+        for (gate_value, up_value) in shared_gate.iter_mut().zip(&shared_up) {
+            *gate_value = silu(*gate_value) * *up_value;
+        }
+        layer
+            .w_down
+            .kernel
+            .forward(&shared_gate, &mut down_buf, shared_ffn, output.len());
+        for (value, shared_value) in output.iter_mut().zip(&down_buf) {
+            *value += *shared_value;
+        }
+    }
     Ok(())
 }
 
@@ -809,7 +832,7 @@ pub fn run_shared_inference(
         n_threads_arg,
         available_threads,
     )));
-    let thinking = thinking || source.metadata("wevisone_vl.source_revision").is_some();
+    let thinking = thinking || crate::models::qwen3::is_wevisone(source.as_ref());
     let model = Qwen3Model::from_source(source, Arc::clone(&tokenizer), pool)?;
     let input_tokens = build_qwen_chat_prompt(
         &tokenizer,

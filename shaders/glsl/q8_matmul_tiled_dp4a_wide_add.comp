@@ -15,7 +15,7 @@ int dotPacked4x8EXT(int a, int b, spirv_literal uint format);
 // The kernel this replaces gives one workgroup per (token, output column) pair
 // and splits k across the 64 lanes, so every weight byte is loaded, multiplied
 // and discarded for a single token: weight reuse is 1, and the measured result
-// was 108 GOP/s on GB10 against roughly 5900 GOP/s for the same shape in
+// was 108 GOP/s on the aarch64 box against roughly 5900 GOP/s for the same shape in
 // PyTorch. Here a lane owns an output column for the whole k walk and keeps one
 // accumulator per token in the tile, so each weight load feeds TOKENS dots and
 // the cross-lane tree reduction disappears entirely.

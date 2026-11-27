@@ -463,7 +463,7 @@ pub fn validate_options(options: &CliOptions) -> Result<(), String> {
         || options.jinja
         || options.chat_template.is_some()
         || options.chat_template_file.is_some()
-        || options.thinking
+        || options.thinking.unwrap_or(false)
         || options.bench
         || options.profile
         || options.jev

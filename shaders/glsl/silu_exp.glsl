@@ -6,7 +6,7 @@ float exp_approx(float x) {
     // (1 + exp(-x)) and then recovers the residual with `fma(-den, act, gate)`
     // followed by `fma(residual, 1/den, act)`, so it needs 1/den to stay a
     // *normal* float. At 88.376 that reciprocal is 4.16e-39, below the normal
-    // floor of 1.18e-38, and the correction degenerates: measured on GB10,
+    // floor of 1.18e-38, and the correction degenerates: measured on the aarch64 box,
     // every activation at or below -88 came back NaN from the whole Z-Image
     // FFN, 16 009 509 of 37 324 800 values non-finite, and the render aborted
     // with "Non-finite Z-Image predicted flow". At 80 the reciprocal is

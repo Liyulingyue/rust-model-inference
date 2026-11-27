@@ -510,7 +510,7 @@ pub(crate) unsafe fn vec_dot_q6k_q8k_neon_bits(q6k_data: &[u8], q8k: &[BlockQ8K]
 /// `vdotq_s32` with four consecutive elements per lane instead of the
 /// scalar reference's `{l, l + 8}` pairing. The real sum is identical; only
 /// the intermediate integer grouping differs. This is the production kernel
-/// because it runs ~40 % faster (32 vs 23 GINTOP/s on GB10). The Vulkan
+/// because it runs ~40 % faster (32 vs 23 GINTOP/s on the aarch64 box). The Vulkan
 /// self-check tolerates the regrouping because Q6_K's GPU kernel uses the
 /// same `vdotq_s32` instruction, and both sit well inside the 3e-3 tolerance
 /// that k-quant formats allow.

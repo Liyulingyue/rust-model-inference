@@ -41,6 +41,10 @@ pub fn run_astronex_cli(
     {
         return Err("Astronex image-to-video requires --image".into());
     }
+    // ffmpeg writes the video. Check it here, before the sampling and the
+    // VAE decode, so a machine without it fails at the start of the run
+    // rather than after the whole pipeline.
+    crate::models::diffusion::dreamx::media::require_ffmpeg()?;
     let image = options
         .image
         .as_deref()
@@ -469,7 +473,7 @@ pub fn run_mage_flow_cli(
         (options.dump_logits, "--dump-logits"),
         (options.bench, "--bench"),
         (options.profile, "--profile"),
-        (options.thinking, "--thinking"),
+        (options.thinking.unwrap_or(false), "--thinking"),
         (options.language.is_some(), "--language"),
         (options.lyrics.is_some(), "--lyrics"),
         (options.max_tokens.is_some(), "--max-tokens"),
@@ -1503,6 +1507,13 @@ pub fn run_dreamx_cli(
         overwrite: options.overwrite,
         allow_memory_overcommit: options.allow_memory_overcommit,
     };
+    // ffmpeg writes the video and muxes the audio. Check it here, before
+    // the model load and the denoise, so a machine without it fails at the
+    // start of the run rather than after the whole pipeline. A dry run
+    // writes nothing, so it does not need it.
+    if !options.dry_run {
+        crate::models::diffusion::dreamx::media::require_ffmpeg()?;
+    }
     let pipeline = DreamXPipeline::load(main, mmproj, n_threads)?;
     let estimate = pipeline.estimate(&request)?;
     print_estimate(&estimate, request.options.refine);

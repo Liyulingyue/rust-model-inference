@@ -161,7 +161,7 @@ cargo test --profile release-fast --test timestral_cli
 
 另有 4 次普通 GPU CLI（严格 Vulkan / `--gpu`、关闭 parity trace）与插桩 GPU 的预测精确一致；设备不可用时 CPU/Auto 输出精确一致，严格 Vulkan 返回错误。8 个模型单测、3 个 CLI 测试、3 个 Python 检查、CPU-only 库编译、Vulkan 构建和完整 shader 检查通过。GPU 扩展后未重复全量测试，原有失败见上文记录。
 
-上述 GPU Oracle 检查实测 M3 Max/MoltenVK；优化前 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，最新结果见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。多尺寸（5M/28M/123M/209M）GPU 实测 NVIDIA GB10/Vulkan，四尺寸 CPU 和 GPU 均验证通过。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
+上述 GPU Oracle 检查实测 M3 Max/MoltenVK；优化前 NAVI31/RADV 的性能和最终输出验证见 [PERFORMANCE.md](PERFORMANCE.md)，最新结果见 [GPU_OPTIMIZATION.md](GPU_OPTIMIZATION.md)。多尺寸（5M/28M/123M/209M）GPU 实测 aarch64 Vulkan 主机/Vulkan，四尺寸 CPU 和 GPU 均验证通过。数据集预测指标仍未验证。构建工具和依赖均保留在仓库 .venv / target，模型文件始终从上述 models 目录读取。
 
 上一版 F32 分块投影路径另见 [gpu_optimization_verification.json](gpu_optimization_verification.json)：M3 Max 上 10 个用例 × Vulkan/Auto，共 20 次 GPU 执行、6,788 个检查点，沿用原误差界全部通过；最差最终 NRMSE 为 `2.9871e-6`。两次关闭运行时 trace 的普通 CLI 输出与插桩结果精确一致。
 

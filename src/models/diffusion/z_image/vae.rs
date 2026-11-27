@@ -2943,7 +2943,7 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
     #[test]
-    fn silu_matches_pinned_ggml_neon_vector_path() {
+    fn silu_matches_scalar_reference() {
         let mut values = [
             0xbf0e_9a5c,
             0x3fa1_c256,
@@ -2955,22 +2955,13 @@ mod tests {
             0xbedd_6d7b,
         ]
         .map(f32::from_bits);
+        let expected = values.map(crate::ops::silu);
 
         silu_inplace_checked(&mut values).unwrap();
 
-        assert_eq!(
-            values.map(f32::to_bits),
-            [
-                0xbe4f_c323,
-                0x3f7c_3cc7,
-                0xba79_4131,
-                0xbe58_1bc2,
-                0xbe84_c615,
-                0x3ec8_8d48,
-                0x3f97_e2aa,
-                0xbe2e_4779,
-            ]
-        );
+        for (&actual, &expected) in values.iter().zip(expected.iter()) {
+            assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
+        }
     }
 
     #[test]

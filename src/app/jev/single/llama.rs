@@ -99,7 +99,7 @@ impl JevScorer for LlamaJevScorer {
                 template,
                 Some(system),
                 &payload,
-                false,
+                Some(false),
             )?;
             return Ok((labels, ids));
         }

@@ -197,7 +197,7 @@ pub fn validate_components(
     decoder: Option<&dyn TensorSource>,
 ) -> Result<(), String> {
     let revision = |s: &dyn TensorSource| {
-        s.metadata("wevisone_vl.source_revision")
+        s.metadata(crate::models::qwen3::WEVISONE_SOURCE_REVISION_KEY)
             .and_then(|v| v.to_string_val())
             .map(str::to_owned)
     };

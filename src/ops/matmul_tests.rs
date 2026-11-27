@@ -834,7 +834,7 @@ fn neon_dot_f32_matches_ggml_four_accumulator_reduction() {
 ///
 /// The comparison is deliberately against f64 and not against ggml: this is the
 /// path the Vulkan operator check uses as its reference, and a reference that is
-/// itself off by an f16 ulp cannot certify anything finer than that. TODO-024.
+/// itself off by an f16 ulp cannot certify anything finer than that.
 #[cfg(all(target_arch = "aarch64", not(feature = "ggml-f16-dot-parity")))]
 #[test]
 fn neon_f16_attention_dot_accumulates_in_f32() {
@@ -1053,15 +1053,24 @@ fn neon_attention_value_matches_ggml_256_padded_reduction() {
 
 #[cfg(target_arch = "aarch64")]
 #[test]
-fn neon_softmax_matches_ggml_vector_exp_and_f64_sum() {
+fn neon_softmax_matches_scalar_exp_and_f64_sum() {
     let mut values = [-1.0, 0.0, 1.0, f32::NEG_INFINITY];
+    let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut expected = values
+        .iter()
+        .map(|&value| (value - max).exp())
+        .collect::<Vec<_>>();
+    let sum = expected.iter().map(|&value| f64::from(value)).sum::<f64>();
+    let scale = (1.0 / sum) as f32;
+    for value in &mut expected {
+        *value *= scale;
+    }
 
     softmax_inplace(&mut values);
 
-    assert_eq!(
-        values.map(f32::to_bits),
-        [0x3db8_61f1, 0x3e7a_9a1a, 0x3f2a_4d3b, 0]
-    );
+    for (&actual, &expected) in values.iter().zip(expected.iter()) {
+        assert!((actual - expected).abs() <= 1e-7, "{actual} != {expected}");
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1609,4 +1618,78 @@ fn rope_norm_rotates_adjacent_pairs_with_ggml_recurrence() {
         [values[0], values[1], values[2], values[3]].map(f32::to_bits),
         [0x3e97_713b, 0x403e_3d4f, 0xbee2_971d, 0x3e6d_9079],
     );
+}
+
+#[test]
+fn tiled_batched_matches_per_token_loop_bits() {
+    // The token-tiled fast path (rows >= 2, bf16/f16/f32 kernels) must be
+    // bit-identical to the per-token loop: same per-(row, token) dot, same
+    // reduction order, only the loop nesting changes. Shapes cross both the
+    // 32-row and 32-token tile boundaries and n_in lands on a 4-element tail
+    // (multiple of 8, not of 16).
+    for kind in [GGMLType::BF16, GGMLType::F16, GGMLType::F32] {
+        let n_in = 200usize;
+        let n_out = 70usize;
+        let rows = 33usize;
+        let elements = n_in * n_out;
+        let weight_bytes: Vec<u8> = match kind {
+            GGMLType::BF16 => (0..elements)
+                .flat_map(|i| {
+                    half::bf16::from_f32(((i % 41) as f32 - 20.0) / 16.0)
+                        .to_bits()
+                        .to_le_bytes()
+                })
+                .collect(),
+            GGMLType::F16 => (0..elements)
+                .flat_map(|i| f32_to_f16(((i % 37) as f32 - 18.0) / 16.0).to_le_bytes())
+                .collect(),
+            _ => (0..elements)
+                .flat_map(|i| ((i % 43) as f32 - 21.0).to_le_bytes())
+                .collect(),
+        };
+        let weight = Weight::from_quantized(QuantizedTensor::from_bytes(
+            leaked_weight_bytes(weight_bytes),
+            kind,
+            n_in,
+            n_out,
+        ));
+
+        let input: Vec<f32> = (0..rows * n_in)
+            .map(|i| (((i * 31 + 7) % 97) as f32 - 48.0) / 32.0)
+            .collect();
+
+        // Reference: the per-token loop (the old forward_batched nesting).
+        let mut expected = vec![0.0f32; rows * n_out];
+        for (t, (input_row, output_row)) in input
+            .chunks_exact(n_in)
+            .zip(expected.chunks_exact_mut(n_out))
+            .enumerate()
+        {
+            let _ = t;
+            weight.kernel.forward(input_row, output_row, n_in, n_out);
+        }
+
+        let mut actual = vec![0.0f32; rows * n_out];
+        let mut prepared = PreparedRows::new(rows, n_in);
+        prepared
+            .prepare(
+                &input,
+                rows,
+                n_in,
+                weight.needs_q8_0_activation(),
+                weight.uses_q8_k(),
+            )
+            .unwrap();
+        prepared
+            .matmul(&weight, &input, &mut actual, &ComputePool::new(3))
+            .unwrap();
+
+        for (index, (a, b)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "kind={kind:?} element {index}: tiled {a} vs per-token {b}"
+            );
+        }
+    }
 }

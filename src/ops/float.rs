@@ -65,6 +65,12 @@ static HAS_AVX2_FMA: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
 static HAS_F16C: AtomicBool = AtomicBool::new(false);
 #[cfg(target_arch = "x86_64")]
+static HAS_AVXVNNI: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX512_FMA: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX512_BW: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "x86_64")]
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "vulkan")]
@@ -84,6 +90,7 @@ extern "C" fn shutdown_vulkan() {
     let cleanup = || {
         crate::ops::kernel::vulkan::release_shared_runtimes()?;
         crate::vulkan::matmul_q4k::release_shared_runtime()?;
+        crate::vulkan::matmul_iq::release_shared_runtime()?;
         if let Some(Ok(context)) = VULKAN_CONTEXT.get() {
             context.shutdown()?;
         }
@@ -114,7 +121,7 @@ pub fn get_vulkan_context() -> Option<&'static VulkanContext> {
 
 /// Start the device initialization in the background.
 ///
-/// Bringing the Vulkan device up costs about 300 ms on the GB10 box -- the
+/// Bringing the Vulkan device up costs about 300 ms on the aarch64 box -- the
 /// driver loads its compiler and enumerates the device -- and a session
 /// that opens a 12 GB checkpoint has that time to spare. The context is
 /// shared, so whoever needs it first waits for the same initialization.
@@ -246,8 +253,14 @@ fn init_cpu_features() {
     }
     let avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
     let f16c = is_x86_feature_detected!("f16c");
+    let avxvnni = is_x86_feature_detected!("avxvnni");
+    let avx512_fma = is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("fma");
+    let avx512bw = is_x86_feature_detected!("avx512bw");
     HAS_AVX2_FMA.store(avx2_fma, Ordering::Relaxed);
     HAS_F16C.store(f16c, Ordering::Relaxed);
+    HAS_AVXVNNI.store(avxvnni, Ordering::Relaxed);
+    HAS_AVX512_FMA.store(avx512_fma, Ordering::Relaxed);
+    HAS_AVX512_BW.store(avx512bw, Ordering::Relaxed);
     INIT_DONE.store(true, Ordering::Relaxed);
 }
 
@@ -281,6 +294,71 @@ pub fn has_f16c() -> bool {
 #[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
 pub const fn has_f16c() -> bool {
+    false
+}
+
+/// AVX-VNNI (`vpdpbusd`, CPUID `avx_vnni`): one-instruction int8 dot.
+/// Used by the `q8_0::avxvnni` reference kernel and its tests; the
+/// production Q8_0 dispatch deliberately stays on AVX2 (see TODO-AVX-VNNI
+/// in docs/develop/TODO.md).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn has_avxvnni() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVXVNNI.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avxvnni() -> bool {
+    false
+}
+
+/// AVX-512F zmm FMA (`vfmadd231ps` on `__m512`): gates the zmm
+/// packed-weight matmul kernels (`f32/avx512.rs`, `bf16/avx512.rs`,
+/// `f16/avx512.rs`). Needs AVX-512F plus FMA so the shared skeleton can keep
+/// using the FMA encoding family. See the SIMD table in
+/// `docs/develop/TODO.md`.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn has_avx512_fma() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVX512_FMA.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avx512_fma() -> bool {
+    false
+}
+
+/// AVX-512BW (byte/word granularity zmm ops). The BF16 zmm kernel needs it
+/// for `_mm512_cvtepu16_epi32` (`vpmovzxwd` with a zmm destination).
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub fn has_avx512bw() -> bool {
+    if scalar_mode() {
+        return false;
+    }
+    if !INIT_DONE.load(Ordering::Relaxed) {
+        init_cpu_features();
+    }
+    HAS_AVX512_BW.load(Ordering::Relaxed)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+pub const fn has_avx512bw() -> bool {
     false
 }
 

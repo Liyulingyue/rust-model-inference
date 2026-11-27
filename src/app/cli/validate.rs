@@ -79,7 +79,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.max_tokens.is_some()
             || options.top_k.is_some()
             || options.top_p.is_some()
-            || options.thinking
+            || options.thinking.unwrap_or(false)
             || options.dump_logits
             || options.bench
             || options.jinja
@@ -197,7 +197,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.bench
             || options.profile
             || options.dump_logits
-            || options.thinking
+            || options.thinking.unwrap_or(false)
             || options.jinja
             || options.chat_template.is_some()
             || options.chat_template_file.is_some()
@@ -239,7 +239,7 @@ pub fn validate_cli_options(options: &CliOptions) -> Result<(), String> {
             || options.top_p.is_some()
             || options.bench
             || options.dump_logits
-            || options.thinking
+            || options.thinking.unwrap_or(false)
             || options.jinja
             || options.chat_template.is_some()
             || options.chat_template_file.is_some()

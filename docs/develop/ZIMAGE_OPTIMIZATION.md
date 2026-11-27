@@ -1,5 +1,10 @@
 # Z-Image 性能分析 & 优化方向
 
+> **状态（2026-11-19）**：性能视角**已被 [`ZIMAGE_STATUS.md`](ZIMAGE_STATUS.md)
+> 取代**（其 64×64 baseline、SIMD/CPU 侧的分析基于早期形态）。本文保留的
+> 理由：`TODO.md` 的 TODO-035（decoder 侧 `exp_accurate` 补偿取舍）引本文的
+> 复现数据与完整推导作为数值证据。读性能结论请以 STATUS 文档为准。
+
 > 本文档基于 `src/models/diffusion/z_image/{mod,text,dit,vae}.rs` 的实测 profile + 代码审查得出。
 > 测试条件：64×64 分辨率、5 步、seed=42、8 线程、`AVX2+FMA`。
 > **真实场景将使用 1024×1024**：latent token 数从 64 → 16384（×256），所有 per-token 工作按线性放大。
@@ -645,7 +650,7 @@ NHWC layout 的输入 `input[ic*spatial + y*side + x]` 在不同 ic 间步进 sp
 3. **小改动验证**：先做最小版本（10-20 行）跑性能，再决定是否投入大改动
 4. **记录每次实验**：即使反优化也要记录（避免后续重蹈覆辙）
 5. **NHWC layout cache 行为难预测**：依赖 profile，不靠推理
-## unified-compute 分支在 GB10 上慢 10–20%：push constant 留在了最内层循环
+## unified-compute 分支在 aarch64 上慢 10–20%：push constant 留在了最内层循环
 
 在同一台机器上交替跑 `main` 与 `test-unified3`（gouzil/codex/unified-compute-dispatch），
 两者 dispatch 数、fence 数、submit 数、`ioctl` 数完全相同（300 dispatch/步、

@@ -1604,7 +1604,17 @@ fn failed_later_gemma4_chunk_preserves_successful_prefix() {
         session.prefill_linear.dispatcher = Some(Arc::clone(&dispatcher));
     }
     let error = session.forward_rows(&fixture_rows(5)).unwrap_err();
-    assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+    // The kernel poisons its output with NaN on failure. Where that poison
+    // surfaces depends on the build profile: `ensure_finite` names the tensor
+    // in debug builds, while release builds compile that check out and the
+    // NaN travels until the linear executor's input validation rejects it
+    // ("linear input contains non-finite values"). Either way the poisoned
+    // chunk must surface as an error, never as silent output.
+    if cfg!(debug_assertions) {
+        assert!(error.contains("blk.0.attn_output.weight"), "{error}");
+    } else {
+        assert!(error.contains("non-finite"), "{error}");
+    }
     assert_eq!(session.len(), 2);
     assert_eq!(snapshot_base_kv(&session), expected.base_kv);
     #[cfg(feature = "vulkan")]

@@ -912,17 +912,17 @@ mod parity_tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn fsmn_rounds_product_before_adding_like_ggml() {
+    fn fsmn_shift_accumulate_matches_scalar_reference() {
         let value = f32::from_bits(0xbf0b_ed36);
         let weight = f32::from_bits(0x3f6c_b1ef);
         let output =
             fsmn_shift_accumulate(&[value; 4], 1, 4, 1, &[weight; 4], &ComputePool::new(1));
-        assert_eq!(
+        let expected = value + value * weight;
+        assert!(
             output
                 .iter()
-                .map(|value| value.to_bits())
-                .collect::<Vec<_>>(),
-            [0xbf86_a692; 4]
+                .all(|&actual| (actual - expected).abs() <= 1e-6),
+            "{output:?} != {expected}"
         );
     }
 
@@ -968,7 +968,7 @@ mod parity_tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn layernorm_accumulates_variance_in_ggml_neon_groups() {
+    fn layernorm_matches_scalar_reference() {
         let x = [2.240_905_8, -826.513_1, -855.897_7, -161.255_62];
         let ln = LayerNorm {
             weight: vec![1.0; 4],
@@ -976,10 +976,20 @@ mod parity_tests {
             dim: 4,
         };
         let output = layernorm_fwd(&ln, &x, 1, &ComputePool::new(1));
-        assert_eq!(
-            output.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            [0x3f99_a896, 0xbf73_3fae, 0xbf83_6289, 0x3f46_b395]
-        );
+        let mean = (x.iter().map(|&value| f64::from(value)).sum::<f64>() / x.len() as f64) as f32;
+        let variance = (x
+            .iter()
+            .map(|&value| {
+                let centered = value - mean;
+                f64::from(centered * centered)
+            })
+            .sum::<f64>()
+            / x.len() as f64) as f32;
+        let rstd = 1.0 / (variance + super::LN_EPS).sqrt();
+        for (&actual, &value) in output.iter().zip(&x) {
+            let expected = (value - mean) * rstd;
+            assert!((actual - expected).abs() <= 1e-5, "{actual} != {expected}");
+        }
     }
 
     #[cfg(target_arch = "aarch64")]

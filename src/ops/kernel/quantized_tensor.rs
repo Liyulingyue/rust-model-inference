@@ -383,9 +383,57 @@ mod noop {
 }
 
 impl<'a> QuantizedTensor<'a> {
+    /// Whether a GGML type can be turned into a kernel by this loader.
+    ///
+    /// The answer is exactly the set [`from_bytes`] accepts. A loader that
+    /// filters formats has to ask this first: the formats it cannot hold
+    /// (the integer and double types, `Q8_1`, `Q8_K`) are still valid GGML
+    /// types, and handing them to [`from_bytes`] panics rather than
+    /// failing.
+    ///
+    /// [`from_bytes`]: QuantizedTensor::from_bytes
+    pub fn supports(ggml_type: GGMLType) -> bool {
+        matches!(
+            ggml_type,
+            GGMLType::F32
+                | GGMLType::F16
+                | GGMLType::BF16
+                | GGMLType::Q4_0
+                | GGMLType::Q4_1
+                | GGMLType::Q5_0
+                | GGMLType::Q5_1
+                | GGMLType::Q8_0
+                | GGMLType::Q2K
+                | GGMLType::Q3K
+                | GGMLType::Q4K
+                | GGMLType::Q5K
+                | GGMLType::Q6K
+                | GGMLType::IQ1_S
+                | GGMLType::IQ1_M
+                | GGMLType::IQ2_XXS
+                | GGMLType::IQ2_XS
+                | GGMLType::IQ2_S
+                | GGMLType::IQ3_XXS
+                | GGMLType::IQ3_S
+                | GGMLType::IQ4_NL
+                | GGMLType::IQ4_XS
+                | GGMLType::I2_S
+                | GGMLType::Q1_0
+        )
+    }
+
     /// Build a `QuantizedTensor` from raw GGUF bytes. This is the bridge
     /// from the GGUF loader to the `Kernel` trait and replaces the previous
     /// `ProcessedWeight::from_bytes` API.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a type [`supports`] rejects. Callers that read the format
+    /// out of a file must check [`supports`] first and report the type they
+    /// cannot load.
+    ///
+    /// [`from_bytes`]: QuantizedTensor::from_bytes
+    /// [`supports`]: QuantizedTensor::supports
     pub fn from_bytes(data: &'a [u8], ggml_type: GGMLType, n_in: usize, n_out: usize) -> Self {
         match ggml_type {
             GGMLType::F32 => {

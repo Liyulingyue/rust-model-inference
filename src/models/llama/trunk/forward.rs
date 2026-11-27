@@ -550,7 +550,7 @@ pub fn run_inference(
             jinja,
             &|k| source.metadata(k).cloned(),
             prompt,
-            thinking,
+            Some(thinking),
         )? {
             return run_inference_tokens(
                 source,

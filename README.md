@@ -163,7 +163,7 @@ cargo run --release --features vulkan --bin rust-model-inference -- \
 
 当前范围是原生 Rust、512×512 的 Z-Image Turbo 文生图；暂不支持 Z-Image Base 或 img2img。
 加 `--gpu` 并以 `--features vulkan` 构建可把 DiT 投影与 F16 VAE 卷积搬上实验性 Vulkan 后端；
-RADV 已成图，CPU/GPU 像素有差异，验证范围见 [实机记录](docs/develop/VULKAN_RADV_VALIDATION_2026-10-07.md)。
+RADV 已成图，CPU/GPU 像素有差异，验证范围见 [实机记录](docs/develop/VULKAN_RADV_VALIDATIONS.md)。
 漏掉 `--features vulkan` 时仍走 CPU。
 详见 [Z-Image 用法](docs/usage/z-image.md)。
 
@@ -452,15 +452,16 @@ cargo run --release --bin rust-model-server -- \
 |------|------|------|------|
 | `/health` | GET | any | liveness probe |
 | `/v1/models` | GET | any | 模型列表 |
-| `/v1/chat/completions` | POST | text | OpenAI Chat Completions，支持 SSE 与 function tools |
-| `/v1/responses` | POST | text | OpenAI Responses，支持 SSE、function tools 与 `previous_response_id` |
+| `/v1/chat/completions` | POST | text, image | OpenAI Chat Completions，支持 SSE、function tools 与图片输入（见 [docs/usage/http-images.md](docs/usage/http-images.md)） |
+| `/v1/responses` | POST | text, image | OpenAI Responses，支持 SSE、function tools、`previous_response_id` 与图片输入（见 [docs/usage/http-images.md](docs/usage/http-images.md)） |
 | `/v1/responses/{id}` | GET/DELETE | text | 读取或删除本进程保存的 Response |
-| `/v1/messages` | POST | text | Anthropic Messages，支持 SSE 与 client tools |
+| `/v1/messages` | POST | text, image | Anthropic Messages，支持 SSE、client tools 与图片输入（见 [docs/usage/http-images.md](docs/usage/http-images.md)） |
 | `/v1/messages/count_tokens` | POST | text | Anthropic 输入 token 计数 |
 | `/v1/embeddings` | POST | embedding | OpenAI Embeddings（字符串或字符串数组） |
 | `/v1/audio/transcriptions` | POST | asr | OpenAI Audio Transcriptions（multipart：`file`、`language`、`prompt`） |
 | `/v1/audio/transcriptions_json` | POST | asr | 同上，但用 JSON 体，`input` 字段为 base64 WAV |
 | `/v1/audio/speech` | POST | tts | OpenAI Audio Speech：`input` 是文本，`voice` 接受 `file://path` 或 `data:audio/wav;base64,...` 形式的参考音频 |
+| `/v1/videos/generations` | POST | video | 文生视频（FastFrames-L）：`prompt` + 几何参数，返回 `video/mp4`；同一进程一次只跑一个生成任务（忙时 429）。见 [docs/develop/FASTFRAMES_L.md](docs/develop/FASTFRAMES_L.md) |
 
 ### 示例
 

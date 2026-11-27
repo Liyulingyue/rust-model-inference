@@ -3,7 +3,7 @@
 //!
 //! The DiT is memory-bandwidth bound, so "the GPU is faster at matmul" is not
 //! the question -- the question is whether it is faster *than the 20-core CPU
-//! on this GB10 box*, which already streams 6.7 GB of Q8_0 weights per step.
+//! on the aarch64 box*, which already streams 6.7 GB of Q8_0 weights per step.
 //! This prints the speedup for the exact tensor shapes one DiT step performs,
 //! so we can decide whether a day of DiT work buys anything.
 use rust_model_inference::ops::float::enable_gpu;
