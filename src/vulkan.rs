@@ -738,11 +738,26 @@ impl VulkanContext {
         let result = unsafe { self.matmul_q8_0(&weight, &input, &scales, &mut out, n_in, n_out) };
         self.release_cached_weight(&weight);
         result?;
-        // Zero inputs accepted a silently dropped dispatch on a broken cloud driver.
-        if out.iter().any(|&value| value != n_in as f32) {
-            return Err(VulkanError::InitFailed(
-                "Vulkan warmup did not compute the expected nonzero result".into(),
-            ));
+        // Zero inputs accepted a silently dropped dispatch on a broken cloud
+        // driver, so the warmup uses ones and expects the sum. The comparison
+        // is a tolerance and not an equality: the device reduces in its own
+        // order, and a device that is off by a rounding step is healthy,
+        // while a dispatch that was dropped (zero) or only partly ran (a
+        // fraction of the sum) is not. This check runs in the shared
+        // initialization of every Vulkan backend, so a healthy device that
+        // differs in the last bit must not take the whole machine's GPU off.
+        let expected = n_in as f32;
+        let limit = expected.abs() * 1.0e-3 + 1.0e-3;
+        if let Some(worst) = out
+            .iter()
+            .map(|value| (value - expected).abs())
+            .filter(|difference| *difference > limit)
+            .next()
+        {
+            return Err(VulkanError::InitFailed(format!(
+                "Vulkan warmup did not compute the expected result: expected {expected}, \
+                 off by {worst}"
+            )));
         }
         Ok(())
     }
