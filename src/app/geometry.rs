@@ -118,6 +118,24 @@ pub fn validate_options(o: &CliOptions) -> Result<(), String> {
         || o.rerank_documents_file.is_some()
         || o.rerank_instruction.is_some()
         || o.rerank_max_tokens.is_some()
+        // Speculative decoding, TTS voices and embedding output are the
+        // text front's axes; none of them reaches an image-to-3D graph.
+        // The text validation below rejects the combinations that are wrong
+        // on their own (a n-gram budget under the lookup size, an MTP head
+        // next to a DSpark sidecar), and this table has to reject the flags
+        // themselves, so that the same binary does not accept a flag in one
+        // mode and ignore it in the other.
+        || o.mtp_draft.is_some()
+        || o.ngram_draft.is_some()
+        || o.ngram_lookup.is_some()
+        || o.dspark_model.is_some()
+        || o.voice.is_some()
+        || o.speed.is_some()
+        || o.pronunciations.is_some()
+        || o.allow_memory_overcommit
+        || o.auk_sway.is_some()
+        || o.auk_flash
+        || o.embedding_output != crate::app::cli::EmbeddingOutput::default()
     {
         return Err("Idol image-to-3D cannot be combined with other task modes or generation flags; use --steps, --cfg, --seed, --geometry-mode and --num-gaussians".into());
     }
@@ -231,6 +249,62 @@ mod tests {
         o.compute = Some(crate::compute::ComputePolicy::Vulkan);
         assert_eq!(validate_options(&o).is_ok(), cfg!(feature = "vulkan"));
     }
+    #[test]
+    fn text_generation_flags_are_rejected_instead_of_ignored() {
+        let mut o = CliOptions {
+            image_to_3d: true,
+            model: "idol".into(),
+            image: Some("a.png".into()),
+            out: Some("a.ply".into()),
+            ..CliOptions::default()
+        };
+        assert!(validate_options(&o).is_ok());
+
+        // Speculative decoding, TTS voices and embedding output are the text
+        // front's axes. The same binary must not accept them in the
+        // image-to-3D mode and then ignore them.
+        o.ngram_draft = Some(4);
+        assert!(validate_options(&o).is_err());
+        o.ngram_draft = None;
+        o.ngram_lookup = Some(8);
+        assert!(validate_options(&o).is_err());
+        o.ngram_lookup = None;
+        // The text validation rejects this pair on its own — a n-gram budget
+        // under the lookup size drafts nothing — so the Idol table has to
+        // reject it too instead of accepting it silently.
+        o.ngram_draft = Some(4);
+        o.ngram_lookup = Some(8);
+        assert!(validate_options(&o).is_err());
+        o.ngram_draft = None;
+        o.ngram_lookup = None;
+        o.mtp_draft = Some(2);
+        assert!(validate_options(&o).is_err());
+        o.mtp_draft = None;
+        o.dspark_model = Some("sidecar.gguf".into());
+        assert!(validate_options(&o).is_err());
+        o.dspark_model = None;
+        o.voice = Some("alice".into());
+        assert!(validate_options(&o).is_err());
+        o.voice = None;
+        o.speed = Some(1.0);
+        assert!(validate_options(&o).is_err());
+        o.speed = None;
+        o.pronunciations = Some("silence".into());
+        assert!(validate_options(&o).is_err());
+        o.pronunciations = None;
+        o.allow_memory_overcommit = true;
+        assert!(validate_options(&o).is_err());
+        o.allow_memory_overcommit = false;
+        o.auk_sway = Some(0.5);
+        assert!(validate_options(&o).is_err());
+        o.auk_sway = None;
+        o.auk_flash = true;
+        assert!(validate_options(&o).is_err());
+        o.auk_flash = false;
+        o.embedding_output = crate::app::cli::EmbeddingOutput::Raw;
+        assert!(validate_options(&o).is_err());
+    }
+
     #[test]
     fn ply_format_has_exact_binary_payload() {
         let bytes = ply_bytes(&[[0.; 17]]).unwrap();
