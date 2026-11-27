@@ -107,6 +107,7 @@ impl ComputePolicy {
                 | "sensenova_loop"
                 | "arktts"
                 | "arktts_codec"
+                | "aion_instruct"
         )
     }
 
@@ -286,6 +287,7 @@ mod tests {
             "nemotron_h_moe",
             "arktts",
             "arktts_codec",
+            "aion_instruct",
         ] {
             assert!(ComputePolicy::Vulkan.validate_text_arch(arch).is_ok());
             assert!(ComputePolicy::has_complete_device_path(arch));
