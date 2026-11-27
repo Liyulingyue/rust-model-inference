@@ -2499,6 +2499,21 @@ grouped-vs-scalar-oracle 的重结合差（生产 GPU mode 8 与生产 CPU AVX2 
 预存问题、与本次无关。其余遗留（attention_values/timestral 的 exp_accurate、
 silu 尾部 exp_reference）不变。
 
+TODO-036 收口前的两条待办（2026-11-27 记）：
+
+1. **aarch64 GPU 盒未验证，且有结构性风险**：`rms_norm.comp` 转录的是
+   x86 AVX2 kernel 的 f64 求和顺序；aarch64 的 CPU 生产归约是
+   `sum_sq_f32_neon`（16 元素批的 f64 FMA 累加，注释声称与标量顺序
+   逐位一致）。若 NEON 顺序 ≠ AVX2 顺序，两架构的 CPU 参考本身就是
+   不同的求和——同宽 2560 的 ULP 漂移会在那台机器（test-unified3，
+   原报告 4B 失败的盒子）重现。需要在其上跑一次 4B Q8_0 合同确认；
+   若失败，修法是把两侧 CPU 归约统一成同一种顺序（或 shader 按
+   架构特化，前者更可取）。
+2. **perf 未复测**：归约换回 lane 0 串行（64-lane 树曾是 perf 优化，
+   但破坏位对齐）。每行约 320 个 double 加法，理论相对层内 matmul
+   可忽略，但 4B 的 generation t/s 前后对比没有实测。顺带可复核
+   0.6B 的数字没回退。
+
 ### TODO-037: `--threads` 等于核数时 CPU 吞吐塌 29 倍
 
 Qwen3-0.6B Q8_0，20 核 aarch64，greedy，64 token：
