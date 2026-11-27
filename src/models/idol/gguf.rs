@@ -72,6 +72,10 @@ fn validate(source: &dyn TensorSource, tensors: &[TensorInfo]) -> Result<(), Str
         present.insert(role);
         match info.ggml_type {
             GGMLType::F32 | GGMLType::F16 | GGMLType::BF16 => (),
+            // The converter carries the integer tensors of the released
+            // weights into the bundle — BiRefNet's `relative_position_index`
+            // and the VAE's `bn.num_batches_tracked`. The graph reads
+            // neither, so they are accepted here and never decoded.
             GGMLType::I64 if matches!(role, "background" | "vae") => (),
             GGMLType::Q8_0
             | GGMLType::Q4_0
