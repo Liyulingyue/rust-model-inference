@@ -8210,7 +8210,12 @@ fn matmul_rows_push(
         push[14] = q8_dot_mode();
     }
     if format == GpuWeightFormat::Q4_0 && crate::ops::has_avx2_fma() {
-        // Combining scales before FMA preserves small results when large blocks cancel.
+        // Mode 8 couples the GPU reduction to the host CPU kernel contract, not
+        // to a device capability: the AVX2/FMA kernel combines the weight and
+        // activation scales before the FMA (preserving small results when large
+        // blocks cancel), while the scalar and NEON kernels keep the separate
+        // multiply/add contract (mode 1). If a non-x86 CPU kernel ever adopts
+        // the fused-scale contract, this host sniff must change with it.
         push[14] = 8;
     }
     push[2] = as_u32(n_in, "matmul width")?;
