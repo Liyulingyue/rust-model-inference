@@ -195,8 +195,17 @@ impl Model {
         };
         #[cfg(not(feature = "vulkan"))]
         let compute = ComputePolicy::Cpu;
-        eprintln!("compute requested={requested:?} backend={} arch=idol scope=projection_attention_convolution",
-            if compute == ComputePolicy::Cpu { "Cpu" } else { "Vulkan" });
+        // The device path is partial. A projection only reaches the device
+        // when it clears the shape gate in `ops::kernel::vulkan`, and the
+        // small ones do not: the denoiser's `cam`, `time_in`, `time_out` and
+        // `ada` are single rows, far below the gate. The line therefore
+        // reports `partial` and names the offloaded parts instead of
+        // claiming that the whole scope runs on the device.
+        eprintln!(
+            "compute requested={requested:?} backend={} arch=idol offload=projection_attention_convolution \
+             note=no complete device graph; projections below the device shape gate stay on the CPU",
+            if compute == ComputePolicy::Cpu { "Cpu" } else { "partial" }
+        );
         if root.is_file() {
             return gguf::Bundle::open(root)?.load(compute);
         }

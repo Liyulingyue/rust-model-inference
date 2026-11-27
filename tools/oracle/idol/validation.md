@@ -234,3 +234,28 @@ The same current head was rerun on `root@36.150.116.206:35186`, an AMD gfx1100 /
 The original GGUF SHA256 remained `4134dabd42e7f906559bc2d42b380eaa55663eeeb3e42556eca4a371533aa5e4`. Native CPU Oracle passed 144/144 checkpoints in 18.54 s. The q8_0 GGUF SHA256 remained `eb72ed5dc4fbbcb4a5d5063ec9b78320bc56ccd2644cb839ec195ccc0ede6598`, and its CPU Oracle passed 144/144 in 13.60 s.
 
 Auto and strict Vulkan each submitted 1,273 device jobs and reproduced the same single `idol.denoiser.joint.23.out` tolerance failure with relative RMSE `0.00668105`. The new projection verification did not add a failure or silently fall back. A real strict-Vulkan CLI run with one step, CFG 0, seed 42 and 32,768 Gaussians exited 0 in 294.143 s. It submitted 32,913 device jobs and wrote a 2,228,639-byte finite PLY with SHA256 `b493c80536e9265dc71c7085b908b4bfa7a17dccdbfac45c8d9d8ff80e79944b`. The standalone GGUF server loaded successfully and `/health` returned `200 ok`. Detailed numbers are in [gguf-performance-20261121.json](gguf-performance-20261121.json).
+
+## Review follow-up — process isolation, flag coverage and shared warmup, 2026-11-27
+
+The five review findings that the 2026-11-20 follow-up did not cover are fixed here. Nothing in this round changes a number: the device and the CPU path both produce the PLY they produced before it.
+
+**A numerical disagreement no longer takes the whole process's device down.** `attention_on_device` called `mark_gpu_broken` when the device attention disagreed with the CPU kernel after three retries. `GPU_BROKEN` is a process-wide flag, so one such attention closed every later GPU path and failed every later Idol request until the process restarted. A result that disagrees with the CPU kernel is a numerical difference, not a device fault: the shared path repairs the same way (`ops::nn::Linear::forward_verified` recomputes the value on the CPU and leaves the device usable). The Idol path does the same now — it logs the disagreement and recomputes that projection or attention on the CPU — and only a real device fault (a non-finite device result, a `VulkanError`) sets `GPU_BROKEN`. A run that refuses a CPU fallback (strict Vulkan) is told that the numbers could not be trusted instead of being handed CPU numbers silently.
+
+`RMI_GPU_ATTENTION_OFF` now reaches Idol. The switch only exists in `ops::kernel::vulkan`, and Idol dispatches its own attention, so the escape hatch never applied to it and `--compute cpu` was the only way to take the attention off the device. Measured: the head before this round returns the same PLY `6a0b52fc…` with and without the variable set; the head after it returns `d2e09719…` with the variable set, twice in a row, and `6a0b52fc…` without it.
+
+**Eleven text-front flags are rejected in the image-to-3D mode instead of ignored.** `--voice`, `--speed`, `--pronunciations`, `--mtp-draft`, `--ngram-draft`, `--ngram-lookup`, `--dspark-model`, `--allow-memory-overcommit`, `--auk-sway`, `--auk-flash` and `--embedding-output` were accepted and then dropped, so the same binary accepted a flag in one mode and ignored it in the other. `--ngram-draft 4 --ngram-lookup 8` is rejected by the text validation on its own, because a n-gram budget under the lookup size drafts nothing; the image-to-3D table now rejects the flags themselves. A regression covers all eleven.
+
+**The shared Vulkan warmup compares with a tolerance instead of an equality.** `warmup()` feeds ones and expects the sum, and the comparison was `value != n_in as f32`, which is exact. The warmup runs in the initialization every Vulkan backend shares, so a device that differs in the last bit took the whole machine's GPU off. The comparison is now a relative tolerance of `1e-3`, which still catches a dispatch that was dropped (zero) or only partly ran (a fraction of the sum) and lets a healthy device through.
+
+**The bundle validator and the tensor decoder agree about integer tensors.** The bundle accepts `I64` for the `background` and `vae` roles because the converter carries the released weights' integer tensors into it — BiRefNet's `relative_position_index` and the VAE's `bn.num_batches_tracked`. The decoder had no `I64` branch, so a read of one of them failed with the generic "unsupported type" message. The decoder names the case now, and the validator says why those tensors are in the bundle.
+
+**The runtime line no longer claims that the whole scope runs on the device.** A projection only reaches the device when it clears the shape gate in `ops::kernel::vulkan`, and the denoiser's `cam`, `time_in`, `time_out` and `ada` are single rows, far below it. The line reads `backend=partial` and names the offloaded parts.
+
+Measured on this round (NVIDIA GB10, aarch64; `--steps 1 --cfg 0 --num-gaussians 32768 --seed 42`, avocado gallery image):
+
+| | PLY SHA256 |
+| --- | --- |
+| device path | `6a0b52fc09cd31c7…` — bit-identical to the head before this round |
+| CPU path | `27d71fabcf0756989…` — bit-identical to the head before this round |
+
+`cargo check --locked --features vulkan` and `cargo check --locked` both pass, `cargo fmt --check` is clean, and `cargo test --locked --features vulkan --lib` gives 1879 passed / 22 failed / 268 ignored. The 22 failures are the same set as main's at this commit — aarch64 NEON bit-parity cases, none of them Idol.
