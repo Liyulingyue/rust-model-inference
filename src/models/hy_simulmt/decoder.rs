@@ -25,10 +25,38 @@ impl<'model> HySession<'model> {
         format: KvFormat,
         compute: ComputePolicy,
     ) -> Result<Self, String> {
+        let mut compute = compute;
         compute.check_build()?;
+        // Offloading only the linear projections is *slower* than the CPU on
+        // the machine this was measured on (AMD MI300X VF / RADV, 128-core
+        // EPYC 9334, 16 threads, 64 decode steps, best of three):
+        //   30B-A3B Q4_K_M  5.60 s -> 8.66 s
+        //   1.8B Q8_0       2.47 s -> 5.42 s (F16 KV)
+        // A decode step is a thin batch-1 matmul per projection — ~9 expert
+        // GEMMs per layer across 47 layers — and every layer still pays a host
+        // round trip for the operators that stay on the CPU. So `auto` declines
+        // the device the same way the llama trunk does, and the device path is
+        // opt-in through `--compute vulkan`.
+        if compute == ComputePolicy::Auto {
+            eprintln!(
+                "compute requested=Auto scope=hy_v3_decoder backend=Cpu \
+                 reason=no_validated_performance_bucket"
+            );
+            compute = ComputePolicy::Cpu;
+        }
         if compute == ComputePolicy::Vulkan {
-            return Err(
-                "Hy-SimulMT uses hybrid linear offload; choose --compute auto or cpu".into(),
+            // `hy_v3` has device kernels for its linear projections only: the
+            // attention loop, KV write/read, RoPE, RMSNorm, the SiLU·mul and
+            // the MoE routing/accumulation all stay on the CPU. Strict Vulkan
+            // therefore means "every projection must be device-resident, and
+            // fail if one is not" — which is exactly what `LinearExecutor`
+            // enforces — not "the whole graph runs on the device". Say so once
+            // instead of rejecting the mode, matching the `vela3` partial-path
+            // wording.
+            eprintln!(
+                "compute requested=Vulkan backend=partial scope=hy_v3_decoder \
+                 offload=linear note=no complete device graph; attention/KV/RoPE/\
+                 RMSNorm/SiLU/MoE-routing stay on CPU"
             );
         }
         let c = &model.config;
@@ -107,6 +135,20 @@ impl<'model> HySession<'model> {
 
     pub fn position(&self) -> usize {
         self.kv.seq_len
+    }
+
+    /// Rewind the session to an empty sequence so the next [`Self::forward`]
+    /// starts at position 0.
+    ///
+    /// Only `seq_len` is rewound. The K/V bytes are deliberately *not* cleared:
+    /// [`Self::attention`] reads positions `0..visible`, and every slot below
+    /// the new `seq_len` is overwritten before it can be read again, so zeroing
+    /// a multi-gigabyte cache per request would buy nothing. Callers that reuse
+    /// one session across requests (the text runtime) must call this first,
+    /// otherwise RoPE positions and the attention window carry over from the
+    /// previous request.
+    pub fn reset(&mut self) {
+        self.kv.seq_len = 0;
     }
 
     pub fn forward(

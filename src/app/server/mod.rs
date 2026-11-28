@@ -1873,8 +1873,14 @@ fn build_text(options: &CliOptions) -> Result<(TextBackend, Option<WeVisOneExtra
     // instead of every request. That is deliberate: it only happens when the
     // user explicitly asked for a template, and a config error should surface
     // at startup rather than on the first request.
+    // `hy_v3` (Hy-MT3-30B-A3B) always renders its own template: the GGUF ships
+    // an 11 KB one whose first token is `<｜hy_begin▁of▁sentence｜>`, and the
+    // hand-written Hy-MT renderer emits a control token at position 0 with no
+    // BOS, which puts the model out of distribution (both llama.cpp and this
+    // repository degenerate there — see `tools/oracle/hy_mt3/validation.md`).
+    // `mage_vl` is here for the same reason: no hand-written renderer matches.
     let chat_template = std::sync::Arc::new(crate::prompt::jinja::Options {
-        jinja: options.jinja || arch == "mage_vl",
+        jinja: options.jinja || arch == "mage_vl" || arch == "hy_v3",
         file: options.chat_template_file.clone(),
     });
     let compiled_chat_template =
@@ -1963,6 +1969,11 @@ fn build_asr(options: &CliOptions) -> Result<AsrBackend, String> {
 }
 
 fn is_hy_simulmt_gguf(path: &std::path::Path) -> bool {
+    // `hy_v3` is shared by Hy-SimulMT (audio, bundles the `hyv3_speech` tower)
+    // and Hy-MT3-30B-A3B (text only). Selecting the audio backend on the bare
+    // architecture string would route a text checkpoint into a path that then
+    // fails on the missing tower — or, with a tower present, would ignore the
+    // audio it was trained on. The projector type is the discriminator.
     crate::format::ggufrs::open_model_source(path, ComponentRole::Llm)
         .ok()
         .is_some_and(|source| {
@@ -1970,6 +1981,7 @@ fn is_hy_simulmt_gguf(path: &std::path::Path) -> bool {
                 .metadata("general.architecture")
                 .and_then(MetaValue::to_string_val)
                 == Some("hy_v3")
+                && crate::models::hy_simulmt::has_speech_tower(source.as_ref())
         })
 }
 
@@ -2530,17 +2542,26 @@ mod server_mode_tests {
         }
     }
 
-    fn hy_arch_gguf(name: &str) -> PathBuf {
+    /// Minimal `hy_v3` GGUF. `speech` adds the `clip.projector_type` key that
+    /// marks a checkpoint as the bundled Hy-SimulMT audio model; without it the
+    /// file is a text-only Hy-MT3 checkpoint and must not reach the audio
+    /// backend.
+    fn hy_arch_gguf(name: &str, speech: bool) -> PathBuf {
         let mut bytes = b"GGUF".to_vec();
         bytes.extend(3u32.to_le_bytes());
         bytes.extend(0u64.to_le_bytes());
-        bytes.extend(1u64.to_le_bytes());
-        let key = "general.architecture";
-        bytes.extend((key.len() as u64).to_le_bytes());
-        bytes.extend(key.bytes());
-        bytes.extend(8u32.to_le_bytes());
-        bytes.extend(5u64.to_le_bytes());
-        bytes.extend(b"hy_v3");
+        bytes.extend(if speech { 2u64 } else { 1u64 }.to_le_bytes());
+        let mut string_kv = |bytes: &mut Vec<u8>, key: &str, value: &str| {
+            bytes.extend((key.len() as u64).to_le_bytes());
+            bytes.extend(key.bytes());
+            bytes.extend(8u32.to_le_bytes()); // GGUF_TYPE_STRING
+            bytes.extend((value.len() as u64).to_le_bytes());
+            bytes.extend(value.bytes());
+        };
+        string_kv(&mut bytes, "general.architecture", "hy_v3");
+        if speech {
+            string_kv(&mut bytes, "clip.projector_type", "hyv3_speech");
+        }
         bytes.resize(bytes.len().div_ceil(32) * 32, 0);
         let path =
             std::env::temp_dir().join(format!("rmi-hy-server-{name}-{}.gguf", std::process::id()));
@@ -2550,7 +2571,7 @@ mod server_mode_tests {
 
     #[test]
     fn hy_audio_auto_selects_the_bundled_backend_before_qwen_asr() {
-        let path = hy_arch_gguf("auto");
+        let path = hy_arch_gguf("auto", true);
         let options = CliOptions {
             model: path.clone(),
             audio: Some("unused.wav".into()),
@@ -2567,9 +2588,23 @@ mod server_mode_tests {
         assert!(error.contains("omit --mmproj"), "{error}");
     }
 
+    /// A text-only `hy_v3` checkpoint (Hy-MT3-30B-A3B) must not be mistaken for
+    /// the bundled Hy-SimulMT audio model: same `general.architecture`, no
+    /// `hyv3_speech` tower. `--audio` on such a file has to reach the text
+    /// backend's own error, not the audio path.
+    #[test]
+    fn hy_text_only_gguf_is_not_routed_to_the_audio_backend() {
+        let text_only = hy_arch_gguf("text-only", false);
+        let speech = hy_arch_gguf("speech", true);
+        assert!(!super::is_hy_simulmt_gguf(&text_only));
+        assert!(super::is_hy_simulmt_gguf(&speech));
+        std::fs::remove_file(text_only).unwrap();
+        std::fs::remove_file(speech).unwrap();
+    }
+
     #[test]
     fn hy_audio_rejects_full_device_vulkan_before_loading() {
-        let path = hy_arch_gguf("vulkan");
+        let path = hy_arch_gguf("vulkan", true);
         let options = CliOptions {
             audio: Some("unused.wav".into()),
             compute: Some(crate::compute::ComputePolicy::Vulkan),
@@ -2579,7 +2614,7 @@ mod server_mode_tests {
         std::fs::remove_file(path).unwrap();
         let error = result.err().expect("unsupported compute mode");
         let expected = if cfg!(feature = "vulkan") {
-            "Hy-SimulMT uses hybrid linear offload"
+            "Hy-SimulMT audio path has no Vulkan kernels"
         } else {
             "--features vulkan"
         };

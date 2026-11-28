@@ -99,7 +99,28 @@ pub fn run_inference(
     };
 
     if arch == "hy_v3" {
-        return Err("Hy-SimulMT requires --audio with a mono 16 kHz PCM16 WAV; use --language for the target language".into());
+        // `hy_v3` backs two products: Hy-SimulMT (bundles the `hyv3_speech`
+        // audio tower, needs `--audio`) and Hy-MT3-30B-A3B (plain text). The
+        // tower's `clip.projector_type` is the only reliable discriminator —
+        // the architecture string is identical — so a speech checkpoint keeps
+        // the old guidance instead of silently generating text without the
+        // audio conditioning it was trained on.
+        if crate::models::hy_simulmt::has_speech_tower(source.as_ref()) {
+            return Err("Hy-SimulMT requires --audio with a mono 16 kHz PCM16 WAV; use --language for the target language".into());
+        }
+        return run_hy_v3_text_inference(
+            source,
+            prompt,
+            max_tokens,
+            temperature,
+            n_threads_arg,
+            bench,
+            kv_format,
+            prefill_batch_size,
+            max_context,
+            repetition_penalty,
+            jinja,
+        );
     }
     if arch == "hunyuan-dense" {
         crate::app::text::run_hunyuan_inference(
@@ -404,6 +425,110 @@ pub fn run_interactive_qwen35(
         )?;
         println!();
     }
+    Ok(())
+}
+
+/// Text-only `hy_v3` CLI entry (Hy-MT3-30B-A3B).
+///
+/// Hy-SimulMT lives on the same GGUF architecture; callers must reject that
+/// checkpoint before reaching here (see the `has_speech_tower` gate in
+/// [`run_inference`]).
+#[allow(clippy::too_many_arguments)]
+fn run_hy_v3_text_inference(
+    source: Arc<dyn TensorSource>,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f32,
+    n_threads_arg: usize,
+    bench: bool,
+    kv_format: KvFormat,
+    prefill_batch_size: usize,
+    max_context: usize,
+    repetition_penalty: f32,
+    jinja: &crate::prompt::jinja::Options,
+) -> Result<(), String> {
+    use crate::ops::generation_runtime::{GenerationRequest, StdoutSink, TextRuntime};
+    let tokenizer = std::sync::Arc::new(
+        crate::core::tokenizer::BPETokenizer::from_gguf_metadata(|k| source.metadata(k).cloned())
+            .map_err(|error| format!("Failed to initialize tokenizer: {error}"))?,
+    );
+    // Same prompt policy as the `hunyuan-dense` siblings: the GGUF template
+    // wins when `--jinja` is given, otherwise the Hy-MT family builder picks
+    // the control-token (v1) or raw-passthrough (v2) form from the vocab.
+    let input_tokens = if bench {
+        tokenizer.encode(
+            prompt,
+            crate::core::tokenizer::EncodeOptions {
+                add_special: true,
+                parse_special: true,
+            },
+        )
+    } else {
+        match crate::prompt::jinja::single_turn_tokens(
+            tokenizer.as_ref(),
+            jinja,
+            &|k| source.metadata(k).cloned(),
+            prompt,
+            Some(false),
+        )? {
+            Some(ids) => ids,
+            None => crate::prompt::build_hunyuan_chat_prompt(
+                tokenizer.as_ref(),
+                &[crate::prompt::HunyuanMessage {
+                    role: "user",
+                    content: prompt,
+                }],
+                true,
+            )?,
+        }
+    };
+    // The Hy-MT3 GGUF template opens with `<｜hy_begin▁of▁sentence｜>`, and the
+    // 30B-A3B needs it: a control token at position 0 with no BOS in front puts
+    // the model out of distribution, and *both* llama.cpp and this repository
+    // degenerate into repeated punctuation there (see
+    // `tools/oracle/hy_mt3/validation.md` §3). `--jinja` renders the template
+    // and already emits it, so only the hand-written builder needs the prefix.
+    let mut input_tokens = input_tokens;
+    if let Some(bos) = tokenizer.special_token_id("hy_begin") {
+        if input_tokens.first() != Some(&bos) {
+            input_tokens.insert(0, bos);
+        }
+    }
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4);
+    let pool = std::sync::Arc::new(crate::core::thread_pool::ComputePool::new(
+        crate::app::cli::resolve_thread_count(n_threads_arg, available),
+    ));
+    // Build through the same registry the server uses instead of constructing
+    // the adapter here: one construction path means the CLI cannot drift from
+    // HTTP, and `build_text_runtime` stays the single place a new arch is
+    // wired into both front-ends.
+    let mut runtime = super::build_text_runtime(
+        "hy_v3",
+        super::RuntimeOptions {
+            compute: crate::compute::ComputePolicy::legacy(),
+            threads: 0,
+            kv_format,
+            max_context,
+            prefill_batch_size,
+            source,
+            pool,
+            tokenizer,
+            mmproj: None,
+            mtp_draft: 0,
+            // Hy-MT3's GGUFs ship no `nextn.*` tensors, so there is nothing to
+            // draft from: keep the plain one-token-at-a-time decode.
+            dspark_model: None,
+            ngram_draft: 0,
+            ngram_lookup: crate::core::ngram::NGRAM_SIMPLE_SIZE_N,
+        },
+    )?;
+    let mut request = GenerationRequest::new(input_tokens, max_tokens);
+    request.sampling.temperature = temperature;
+    request.sampling.repetition_penalty = repetition_penalty;
+    runtime.generate(&request, &mut StdoutSink)?;
+    println!();
     Ok(())
 }
 

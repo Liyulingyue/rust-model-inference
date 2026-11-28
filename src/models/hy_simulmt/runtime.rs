@@ -42,7 +42,8 @@ impl HySimulMt {
         compute.check_build()?;
         if compute == ComputePolicy::Vulkan {
             return Err(
-                "Hy-SimulMT uses hybrid linear offload; choose --compute auto or cpu".into(),
+                "the Hy-SimulMT audio path has no Vulkan kernels; choose --compute auto or cpu"
+                    .into(),
             );
         }
         if source

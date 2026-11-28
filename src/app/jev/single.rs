@@ -240,6 +240,15 @@ fn run_jev_decision_data_with_image(
             false,
             jinja.clone(),
         ),
+        // `hy_v3` has no JEV entry point: `HyV3TextRuntime` exposes
+        // `generate()` only, so there are no logits to score options with.
+        // (Note it is *not* because the model lacks a decision head —
+        // `hunyuan-dense` is JEV-scored from ordinary LM logits.) Rejecting
+        // explicitly beats "not yet supported", which would imply a JEV path
+        // is planned for it.
+        "hy_v3" => Err("--jev is not implemented for architecture \"hy_v3\": \
+             the hy_v3 text runtime exposes generate() only and has no logits entry point"
+            .into()),
         other => Err(format!(
             "--jev is not yet supported for architecture {:?}; \
              currently supported: qwen3 / qwen3vl / qwen35 / \

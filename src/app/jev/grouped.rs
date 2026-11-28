@@ -726,6 +726,18 @@ pub fn run_jev_grouped_decision_data(
             false,
             jinja.clone(),
         )?,
+        // `hy_v3` has no JEV entry point: the text runtime (`HyV3TextRuntime`)
+        // exposes `generate()` only, so there are no logits to score options
+        // with. This arm lives in the outer dispatch — the per-arch
+        // `build_jev_token_ids_for_arch` match never sees `hy_v3` because the
+        // outer match rejects it first.
+        "hy_v3" => {
+            return Err(
+                "--jev grouped is not implemented for architecture \"hy_v3\": \
+                 the hy_v3 text runtime exposes generate() only and has no logits entry point"
+                    .into(),
+            );
+        }
         other => {
             return Err(format!(
                 "--jev grouped is not yet supported for architecture {:?}; \

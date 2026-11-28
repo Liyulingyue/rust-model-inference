@@ -323,6 +323,11 @@ pub fn build_text_runtime(
         Box::new(crate::models::nemotron_h::trunk::NemotronTextRuntime::new(
             options,
         )?)
+    } else if arch == "hy_v3" {
+        // Hy-MT3-30B-A3B. The audio product on the same arch (Hy-SimulMT) is
+        // gated inside the adapter: it needs `--audio` and never reaches the
+        // text runtime.
+        Box::new(crate::models::hy_simulmt::HyV3TextRuntime::new(options)?)
     } else {
         return Err(format!("No TextRuntime adapter for architecture {arch}"));
     };

@@ -26,8 +26,14 @@ impl Default for EncodeOptions {
 enum PreTokenizer {
     Qwen2,
     Qwen35,
-    HunyuanDense,
+    /// Hunyuan-MT / Hy-MT (GGUF `tokenizer.ggml.pre = "hunyuan"`). One regex
+    /// pass, the "original from tokenizer.json" form:
+    /// `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ...`
+    /// Note the digit rule is `\p{N}` — **one digit per piece**, unlike
+    /// [`PreTokenizer::HunyuanDense`], which runs `\p{N}{1,3}` as a separate
+    /// first pass.
     Hunyuan,
+    HunyuanDense,
     Lfm2,
     LlamaBpe,
     Gemma4,
@@ -2198,7 +2204,7 @@ fn scan_qwen_ranges(text: &str, pre: PreTokenizer) -> Vec<Range<usize>> {
                 while pos - start < 3 && values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }
-            } else if pre != PreTokenizer::Mellum2 {
+            } else if !matches!(pre, PreTokenizer::Mellum2 | PreTokenizer::Hunyuan) {
                 while values.get(pos).copied().is_some_and(is_number) {
                     pos += 1;
                 }
@@ -2501,6 +2507,37 @@ mod tests {
     }
 
     #[test]
+    /// `tokenizer.ggml.pre = "hunyuan"` (Hunyuan-MT / Hy-MT2-7B / Hy-MT3-7B)
+    /// runs ONE regex pass, whose digit rule is `\p{N}`: every digit is its
+    /// own piece. `HunyuanDense` (1.8B / 30B) instead runs `\p{N}{1,3}` as a
+    /// separate first pass, so the two pre-tokenizers must not share the digit
+    /// branch. Both regexes were read from the official `tokenizer.json`
+    /// (`pre_tokenizer.pretokenizers[0].pattern`):
+    ///   hunyuan        -> (?i:'s|'t|...)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|...
+    ///   hunyuan-dense  -> \p{N}{1,3} then [一-龥぀-ゟ゠-ヿ]+ then the rest
+    /// A digit run kept as one piece can never be re-split by BPE, so this
+    /// changes real token IDs for any prompt containing a multi-digit number.
+    #[test]
+    fn hy_scanner_isolates_each_digit_but_hy_dense_chunks_them() {
+        assert_eq!(
+            scan_qwen_words("6124c78e", PreTokenizer::Hunyuan),
+            ["6", "1", "2", "4", "c", "7", "8", "e"]
+        );
+        assert_eq!(
+            scan_qwen_words("价格是12345元", PreTokenizer::Hunyuan),
+            ["价格是", "1", "2", "3", "4", "5", "元"]
+        );
+        // The dense sibling keeps the 1-3 digit chunks.
+        assert_eq!(
+            scan_qwen_words("6124c78e", PreTokenizer::HunyuanDense),
+            ["612", "4", "c", "78", "e"]
+        );
+        assert_eq!(
+            scan_qwen_words("价格是12345元", PreTokenizer::HunyuanDense),
+            ["价格是", "123", "45", "元"]
+        );
+    }
+
     fn hy_dense_scanner_isolates_numbers_han_and_combining_marks() {
         assert_eq!(
             scan_qwen_words("6124c78e", PreTokenizer::HunyuanDense),
