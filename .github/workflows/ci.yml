@@ -34,6 +34,7 @@ jobs:
       - run: cargo test --locked --lib ops::softmax::tests::softmax_approx_avx2_
       - run: 'cargo test --locked --lib ops::math::exp::tests::'
       - run: 'cargo test --locked --lib ops::kernel::q8_0::'
+      - run: 'cargo test --locked --lib ops::kernel::q4_0::'
       - run: cargo test --locked --lib raw_hidden_
       - run: 'cargo test --locked --lib models::vela3::'
       - run: 'cargo test --locked --lib models::qwen3::tests::'
@@ -103,6 +104,7 @@ jobs:
       - run: cargo check --locked --all-targets
       - run: cargo check --locked --all-targets --features vulkan,parity-trace
       - run: 'cargo test --locked --features vulkan --lib compute::tests::'
+      - run: 'cargo test --locked --features vulkan --lib vulkan::tests::'
       - run: cargo test --locked --features vulkan --lib woof
       - run: cargo test --locked --features vulkan --lib legacy_auto_requires_gpu_opt_in_before_initializing
       - run: cargo test --locked --features vulkan --lib batched_linear_layout_

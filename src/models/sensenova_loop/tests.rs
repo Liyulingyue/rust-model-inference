@@ -1,5 +1,58 @@
 use super::*;
 
+#[test]
+fn bf16_projection_keeps_f32_inputs_and_family_reference_is_unchanged() {
+    use crate::core::tensor::{MetaValue, TensorInfo};
+    struct Source(TensorInfo, Vec<u8>);
+    impl TensorSource for Source {
+        fn metadata(&self, _: &str) -> Option<&MetaValue> {
+            None
+        }
+        fn tensor_info(&self, name: &str) -> Option<&TensorInfo> {
+            (name == self.0.name).then_some(&self.0)
+        }
+        fn tensor_slice(&self, name: &str) -> Option<&[u8]> {
+            (name == self.0.name).then_some(self.1.as_slice())
+        }
+    }
+    let source = Source(
+        TensorInfo {
+            name: "projection".into(),
+            dims: vec![32, 1],
+            ggml_type: GGMLType::BF16,
+            offset: 0,
+        },
+        0x3f80u16.to_le_bytes().repeat(32),
+    );
+    let native = load_projection(&source, "projection").unwrap();
+    let family = load_weight(&source, "projection").unwrap();
+    assert!(!native.kernel.rounds_bf16_input());
+    assert!(family.kernel.rounds_bf16_input());
+    let input = [1.00390625; 32];
+    for (weight, expected) in [(native, 32.125), (family, 32.0)] {
+        let mut output = [0.0];
+        weight
+            .kernel
+            .forward_prepared(&input, &[], &[], None, &mut output, 32, 1, 0, 1);
+        assert_eq!(output, [expected]);
+    }
+}
+
+#[test]
+fn gdn_adds_epsilon_inside_the_square_root() {
+    for magnitude in [0.0f32, 1e-4, 1.0] {
+        let mut head: Vec<_> = (0..128)
+            .map(|i| if i % 2 == 0 { magnitude } else { -magnitude })
+            .collect();
+        let sum = head.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
+        let expected = f64::from(magnitude) / (sum + 1e-6).sqrt();
+        gdn_l2_norm(&mut head, 1e-6);
+        for value in head {
+            assert!((f64::from(value.abs()) - expected).abs() < 1e-7);
+        }
+    }
+}
+
 fn contract() -> serde_json::Value {
     serde_json::json!({"text_config":{"num_hidden_layers":8,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"]},"loop_settings":{"start":2,"end":6,"eval_count":2,"counts":[2]},"mhc":{"start":2,"end":6,"streams":2,"iterations":20,"fixed_identity":false,"pre_scale":1.0}})
 }
@@ -181,6 +234,7 @@ mod gpu_tests {
             settings,
             routers,
             plan: vec![0, 1, 0, 1],
+            rope: None,
         }
     }
 
@@ -221,6 +275,15 @@ mod gpu_tests {
 
     #[test]
     fn full_graph_shader_prefill_decode_cache_and_reset_allows_software_icd() {
+        check_shader_graph(false);
+    }
+
+    #[test]
+    fn release_yarn_shader_prefill_decode_cache_and_reset() {
+        check_shader_graph(true);
+    }
+
+    fn check_shader_graph(yarn: bool) {
         crate::ops::enable_gpu();
         let Some(context) = crate::ops::get_vulkan_context() else {
             eprintln!("skip SenseNova shader graph: no Vulkan device");
@@ -233,7 +296,15 @@ mod gpu_tests {
         // Direct construction permits software ICDs for shader semantics only.
         // Production ComputePolicy continues to require a physical device.
         let mut cpu_model = tiny_loop_model();
-        let gpu_model = tiny_loop_model();
+        let mut gpu_model = tiny_loop_model();
+        if yarn {
+            let rope = rope::YarnRope {
+                inv_freq: vec![0.37, 0.19],
+                attention_factor: 1.0693147,
+            };
+            cpu_model.rope = Some(rope.clone());
+            gpu_model.rope = Some(rope);
+        }
         let cfg = gpu_model.trunk.config.clone();
         let capacity = 8;
         let mut cpu = HybridSession::new_with_compute(
@@ -253,6 +324,7 @@ mod gpu_tests {
                 plan: &gpu_model.plan,
                 settings: &gpu_model.settings,
                 routers: &gpu_model.routers,
+                rope: gpu_model.rope.as_ref(),
             }),
         )
         .unwrap()
@@ -309,6 +381,48 @@ mod gpu_tests {
                 assert_ne!(conv[1], conv[3]);
             }
         }
+    }
+
+    #[cfg(feature = "parity-trace")]
+    #[test]
+    #[ignore = "process-global trace environment; run alone with an external timeout"]
+    fn traced_graph_releases_the_staging_submission_lock() {
+        crate::ops::enable_gpu();
+        let Some(context) = crate::ops::get_vulkan_context() else {
+            return;
+        };
+        if !context.supports_shader_float16() {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "rmi-loop-trace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let manifest = directory.join("trace.jsonl");
+        std::env::set_var("RMI_PARITY_TRACE", &manifest);
+        check_shader_graph(true);
+        let model = crate::models::qwen35::trunk::tests::tiny_dense_session_model();
+        let mut gpu = Qwen35VulkanSession::try_new_rows(&model, 8, 1, context)
+            .unwrap()
+            .unwrap();
+        gpu.forward_chunk(&[0.1, -0.2, 0.3, -0.4], 0, &[[0; 4]], 1)
+            .unwrap();
+        std::env::remove_var("RMI_PARITY_TRACE");
+        let records = std::fs::read_to_string(manifest).unwrap();
+        assert!(records.contains("loop.visit.3") && records.contains("l_out-0"));
+        assert_eq!(
+            records
+                .lines()
+                .filter(|line| line.contains("\"l_out-0\""))
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

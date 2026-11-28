@@ -325,6 +325,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         pool,
                         edge0,
                         false,
+                        None,
                         trace_layer(il),
                     )?
                 }
@@ -339,6 +340,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                         pool,
                         edge0,
                         false,
+                        None,
                     )?
                 }
             } else {
@@ -616,6 +618,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
             mrope_positions,
             base_position,
             interleaved_mrope,
+            None,
             #[cfg(feature = "parity-trace")]
             trace_layer,
         )
@@ -643,6 +646,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         mrope_positions: &[[usize; 4]],
         base_position: Option<usize>,
         interleaved_mrope: bool,
+        rope_coefficients: Option<&[f32]>,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Vec<f32> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -779,8 +783,20 @@ impl<'a> super::weights::HybridTrunk<'a> {
             .unwrap_or_else(|| kv_cache_pos(kv_cache, cache_slot, k_dim, cache_layers));
         let sections = cfg.rope_dimension_sections;
         let use_mrope = sections[0] > 0 && sections[1] > 0;
-        let apply_mrope = |head: &mut [f32], positions| {
-            if interleaved_mrope {
+        if let Some(coefficients) = rope_coefficients {
+            assert_eq!(coefficients.len(), n_tokens * cfg.rope_dimension_count);
+        }
+        let apply_mrope = |head: &mut [f32], positions, token: usize| {
+            if let Some(coefficients) = rope_coefficients {
+                let dim = cfg.rope_dimension_count;
+                let row = &coefficients[token * dim..(token + 1) * dim];
+                crate::ops::rope::neox::rope_neox_apply_coefficients(
+                    head,
+                    dim,
+                    &row[..dim / 2],
+                    &row[dim / 2..],
+                );
+            } else if interleaved_mrope {
                 rope_mrope_interleaved(
                     head,
                     positions,
@@ -803,10 +819,11 @@ impl<'a> super::weights::HybridTrunk<'a> {
             let positions = mrope_positions[t];
             for h in 0..n_head {
                 let q_off = t * q_dim + h * n_embd_head * 2;
-                if use_mrope {
+                if use_mrope || rope_coefficients.is_some() {
                     apply_mrope(
                         &mut scratch.q_buf[q_off..q_off + cfg.rope_dimension_count],
                         positions,
+                        t,
                     );
                 } else {
                     rope_neox_inplace(
@@ -819,10 +836,11 @@ impl<'a> super::weights::HybridTrunk<'a> {
             }
             for h in 0..n_head_kv {
                 let k_off = t * k_dim + h * n_embd_head;
-                if use_mrope {
+                if use_mrope || rope_coefficients.is_some() {
                     apply_mrope(
                         &mut scratch.k_buf[k_off..k_off + cfg.rope_dimension_count],
                         positions,
+                        t,
                     );
                 } else {
                     rope_neox_inplace(
@@ -1051,6 +1069,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 pool,
                 false,
                 false,
+                None,
                 false,
             )?;
             #[cfg(not(feature = "parity-trace"))]
@@ -1063,6 +1082,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
                 pool,
                 false,
                 false,
+                None,
             )?;
         }
         Ok(())
@@ -1078,6 +1098,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         pool: &ComputePool,
         edge0: bool,
         repeat_interleave: bool,
+        normalize_qk: Option<fn(&mut [f32], f32)>,
         #[cfg(feature = "parity-trace")] trace_layer: bool,
     ) -> Result<Vec<f32>, String> {
         let profile = std::env::var("PROFILE_QWEN35").is_ok();
@@ -1093,6 +1114,7 @@ impl<'a> super::weights::HybridTrunk<'a> {
         let conv_dim = cfg.conv_dim();
         let d_conv = cfg.ssm_d_conv;
         let eps = cfg.norm_eps;
+        let normalize_qk = normalize_qk.unwrap_or(gdn_l2_norm);
 
         let layer = &self.layers[il];
         let wqkv = layer.wqkv.as_ref().unwrap();
@@ -1293,8 +1315,8 @@ impl<'a> super::weights::HybridTrunk<'a> {
                     normalize_recurrent_qk(q, eps, 1.0 / head_k_dim as f32);
                     normalize_recurrent_qk(k, eps, 1.0 / (head_k_dim as f32).sqrt());
                 } else {
-                    gdn_l2_norm(q, eps);
-                    gdn_l2_norm(k, eps);
+                    normalize_qk(q, eps);
+                    normalize_qk(k, eps);
                 }
             }
         }

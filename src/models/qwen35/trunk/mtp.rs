@@ -109,6 +109,7 @@ pub(crate) fn forward_mtp(
         &[mrope_position],
         Some(position),
         false,
+        None,
         #[cfg(feature = "parity-trace")]
         false,
     );

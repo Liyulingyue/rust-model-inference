@@ -606,6 +606,26 @@ mod tests {
                 .unwrap(),
             ProjectorFamily::Qwen3VlMerger
         );
+        for hash in [
+            crate::models::sensenova_loop::SOURCE_CONFIG_SHA256,
+            crate::models::sensenova_loop::RELEASE_CONFIG_SHA256,
+        ] {
+            let decoder = Stub::with(
+                vec![(
+                    "sensenova_loop.source_config_sha256",
+                    MetaValue::String(hash.into()),
+                )],
+                &[],
+            );
+            assert_eq!(
+                crate::models::sensenova_loop::validate_components(
+                    decoder.as_ref(),
+                    matching.as_ref()
+                )
+                .is_ok(),
+                hash == crate::models::sensenova_loop::SOURCE_CONFIG_SHA256
+            );
+        }
         assert!(validate_mmproj_capabilities(
             "sensenova_loop",
             matching.as_ref(),

@@ -512,6 +512,17 @@ impl<'a> HybridTrunk<'a> {
         config: Qwen35Config,
         edge0: bool,
     ) -> Result<Self, String> {
+        Self::load_trunk_with(source, config, edge0, |source, name| {
+            load_weight(source, name)
+        })
+    }
+
+    pub(crate) fn load_trunk_with(
+        source: &'a dyn TensorSource,
+        config: Qwen35Config,
+        edge0: bool,
+        load_weight: impl Fn(&'a dyn TensorSource, &str) -> Option<Weight<'a>>,
+    ) -> Result<Self, String> {
         let token_info = source
             .tensor_info("token_embd.weight")
             .ok_or("Missing token_embd.weight")?;

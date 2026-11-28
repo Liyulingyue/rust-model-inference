@@ -42,9 +42,9 @@ pub use jev::{
     image_supported_arch, jev_payload_json, jev_system_prompt, load_gliner2_source, parse_schema,
     prepare_jev_grouped_questions, prepare_jev_questions, run_clm_decision, run_clm_scoring,
     run_gliner2_decision, run_gliner2_scoring, run_jev_decision, run_jev_decision_data,
-    run_jev_grouped_decision, run_jev_grouped_decision_data, schema_from_label_sets,
-    schema_from_questions, JevGroupInput, JevGroupedQuestionInput, JevInputs, JevMode,
-    JevQuestionInput, JevResult, LabelSet,
+    run_jev_grouped_decision, run_jev_grouped_decision_data, run_jev_grouped_image_decision,
+    schema_from_label_sets, schema_from_questions, JevGroupInput, JevGroupedQuestionInput,
+    JevInputs, JevMode, JevQuestionInput, JevResult, LabelSet,
 };
 pub use jev::{
     extract_long_document, parse_boundary_schema, run_gliner2_boundary,

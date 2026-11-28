@@ -1,4 +1,13 @@
-# SenseNova Loop validation
+# SenseNova Loop Preview historical validation
+
+This records the earlier Preview runs. Current release/precision coverage is in
+[release-validation.md](release-validation.md); unsupported-format statements below
+describe the implementation at the recorded date.
+
+The release work corrected SenseNova's GDN normalization to add epsilon inside
+the squared norm on both CPU and Vulkan. That correction also applies to
+Preview; the historical full-model Preview runs below predate it and have not
+been repeated. Release evidence does not certify the updated Preview checkpoint.
 
 Validation date: 2026-11-03 (Asia/Shanghai). Base: `afed6d48b`.
 The original adaptation at `5937066` was an experimental F32 CPU

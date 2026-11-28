@@ -1,0 +1,567 @@
+{
+  "date": "2026-11-22",
+  "host": {
+    "ssh_port": "redacted",
+    "hostname": "replacement-host",
+    "gpu": "RADV NAVI31"
+  },
+  "upstream_commit": "7858cb7d783deb13776fb55ef87a22940bec4241",
+  "previous_device_only_commit": "a4a5ed71ad581f9a5ac123dc9af15e6b694117e6",
+  "source_verification": {
+    "files_checked": 865,
+    "mismatches": [],
+    "manifest_sha256": "c6efc1430235557571fdbf5596a32d5525a5bc99b984900a47f5e5c414dcb5c2",
+    "temporary_diagnostic_absent": true
+  },
+  "default_library_regression": {
+    "upstream-default-lib": {
+      "summary": "test result: FAILED. 1654 passed; 14 failed; 120 ignored; 0 measured; 0 filtered out; finished in 10.01s",
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+      ]
+    },
+    "merged-default-lib": {
+      "summary": "test result: FAILED. 1661 passed; 14 failed; 120 ignored; 0 measured; 0 filtered out; finished in 10.00s",
+      "failures": [
+        "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+        "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+        "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+        "models::clm::tests::matches_reference_golden_vectors",
+        "models::clm::tests::rejects_wrong_embedding_width",
+        "models::dots::vocoder::tests::q8_lstm_matches_independent_gate_order_bias_and_recurrent_state",
+        "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+        "models::gemma4::trunk::tests::per_layer_bf16_projection_uses_the_repository_bf16_kernel",
+        "models::qwen_drive::tests::planner_scalar_fixture_matches_every_f32_word",
+        "models::yue2::tests::nar_noise_matches_torch_2_10_cpu_bits_across_tail_boundaries",
+        "ops::dot::tests::dot_bf16_f32_is_bitwise_stable_against_ascending_reference",
+        "ops::math::exp::avx2_tests::avx2_exp_stays_finite_above_the_clamp",
+        "ops::matmul::neon_tests::rope_neox_inplace_matches_pinned_ggml_recurrence_and_fused_rotation",
+        "ops::rope::tests::vision_rope_matches_ggml_libc_trig_bits"
+      ]
+    },
+    "introduced_failures": [],
+    "removed_failures": [],
+    "zero_weight_regression": {
+      "before": [
+        "thread 'ops::kernel::q4_0::avx2::tests::decoded_zero_weights_stay_zero_with_asymmetric_q8_input' (75106) panicked at src/ops/kernel/q4_0/avx2.rs:281:13:",
+        "row=0: zero weights produced 0.0078125",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1794 filtered out; finished in 0.00s"
+      ],
+      "after": "decoded_zero_weights_stay_zero_with_asymmetric_q8_input ... ok"
+    }
+  },
+  "model": {
+    "upstream": "7858cb7d7",
+    "previous_review_commit": "a4a5ed71ad581f9a5ac123dc9af15e6b694117e6",
+    "runs": {
+      "cpu": {
+        "command": [
+          "target/release-fast/examples/sensenova_loop_check",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "target/q4-image-review/oracle-q4-image/fixtures.json",
+          "target/q4-image-review/integration-cpu",
+          "cpu",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+        ],
+        "runner_exit_code": 0,
+        "generated": [
+          10025,
+          13,
+          248046
+        ],
+        "checks": 172,
+        "failed": 132,
+        "same_input_prefix_checks": 58,
+        "same_input_prefix_failed": 18,
+        "submissions": [],
+        "backend_lines": [
+          "compute requested=Cpu scope=hybrid_decoder backend=Cpu rows=64",
+          "compute requested=Cpu scope=hybrid_decoder backend=Cpu rows=20"
+        ],
+        "worst_same_prefix": {
+          "case": 0,
+          "step": 0,
+          "name": "loop.visit.55",
+          "same_input_prefix": true,
+          "max_abs": 23.069114685058594,
+          "rmse": 0.40498759375659554,
+          "relative_rmse": 0.12212868877902568,
+          "cosine": 0.9925289409279335,
+          "pass": false
+        },
+        "reference_acceptance_pass": false,
+        "greedy_exact_to_reference": false
+      },
+      "vulkan": {
+        "command": [
+          "target/release-fast/examples/sensenova_loop_check",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "target/q4-image-review/oracle-q4-image/fixtures.json",
+          "target/q4-image-review/integration-vulkan",
+          "vulkan",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+        ],
+        "runner_exit_code": 0,
+        "generated": [
+          10025,
+          13,
+          248046
+        ],
+        "checks": 172,
+        "failed": 133,
+        "same_input_prefix_checks": 58,
+        "same_input_prefix_failed": 19,
+        "submissions": [
+          15146
+        ],
+        "backend_lines": [
+          "compute requested=Vulkan scope=resident_hybrid_decoder backend=Vulkan rows=1"
+        ],
+        "worst_same_prefix": {
+          "case": 0,
+          "step": 0,
+          "name": "loop.visit.55",
+          "same_input_prefix": true,
+          "max_abs": 10.077279090881348,
+          "rmse": 0.3132307906544798,
+          "relative_rmse": 0.09445836449706331,
+          "cosine": 0.9955385695420718,
+          "pass": false
+        },
+        "cpu_derived_diagnostic": {
+          "independent_oracle": false,
+          "same_input_prefix_checks": 172,
+          "same_input_prefix_failed": 43,
+          "worst": {
+            "step": 0,
+            "name": "loop.visit.55",
+            "max_abs": 20.479835510253906,
+            "rmse": 0.4154969983750578,
+            "relative_rmse": 0.12555848122322127,
+            "cosine": 0.992135514567877,
+            "pass": false
+          }
+        },
+        "reference_acceptance_pass": false,
+        "greedy_exact_to_reference": false,
+        "generated_ids_equal_to_cpu": true
+      },
+      "auto": {
+        "command": [
+          "target/release-fast/examples/sensenova_loop_check",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "target/q4-image-review/oracle-q4-image/fixtures.json",
+          "target/q4-image-review/integration-auto",
+          "auto",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+        ],
+        "runner_exit_code": 0,
+        "generated": [
+          10025,
+          13,
+          248046
+        ],
+        "checks": 172,
+        "failed": 133,
+        "same_input_prefix_checks": 58,
+        "same_input_prefix_failed": 19,
+        "submissions": [
+          15146
+        ],
+        "backend_lines": [
+          "compute requested=Auto scope=resident_hybrid_decoder backend=Vulkan rows=1"
+        ],
+        "worst_same_prefix": {
+          "case": 0,
+          "step": 0,
+          "name": "loop.visit.55",
+          "same_input_prefix": true,
+          "max_abs": 10.077279090881348,
+          "rmse": 0.3132307906544798,
+          "relative_rmse": 0.09445836449706331,
+          "cosine": 0.9955385695420718,
+          "pass": false
+        },
+        "cpu_derived_diagnostic": {
+          "independent_oracle": false,
+          "same_input_prefix_checks": 172,
+          "same_input_prefix_failed": 43,
+          "worst": {
+            "step": 0,
+            "name": "loop.visit.55",
+            "max_abs": 20.479835510253906,
+            "rmse": 0.4154969983750578,
+            "relative_rmse": 0.12555848122322127,
+            "cosine": 0.992135514567877,
+            "pass": false
+          }
+        },
+        "reference_acceptance_pass": false,
+        "greedy_exact_to_reference": false,
+        "generated_ids_equal_to_cpu": true
+      }
+    },
+    "binary_sha256": "2f49d1a41d67ccd6b4fdeff55aecb031f4dbd876820524a901d00e664f732e9e"
+  },
+  "focused_tests": {
+    "q4": {
+      "summary": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2086 filtered out; finished in 0.12s"
+      ]
+    },
+    "q4-scalar": {
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2087 filtered out; finished in 0.08s"
+      ]
+    },
+    "qwen": {
+      "summary": [
+        "test result: ok. 111 passed; 0 failed; 25 ignored; 0 measured; 1952 filtered out; finished in 0.03s"
+      ]
+    },
+    "loop": {
+      "summary": [
+        "test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 2074 filtered out; finished in 0.09s"
+      ]
+    },
+    "tools": {
+      "summary": [
+        "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 2069 filtered out; finished in 0.01s"
+      ]
+    }
+  },
+  "interfaces": {
+    "cpu": {
+      "completed": true,
+      "cli_commands": {
+        "text": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--prompt",
+          "Hello!",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "image": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png",
+          "--prompt",
+          "What color is this image?",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red"
+        ],
+        "image-jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png"
+        ]
+      },
+      "cli_exits": {
+        "text": 0,
+        "image": 0,
+        "jev": 0,
+        "image-jev": 0
+      },
+      "http_status": {
+        "text": 200,
+        "text-stream": 200,
+        "image": 200,
+        "image-stream": 200,
+        "jev": 200,
+        "image-jev": 200
+      },
+      "cli_http_comparisons": {
+        "jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "image-jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "text": {
+          "cli": "Hello! How are you doing today?",
+          "http": "Hello! How are you doing today?",
+          "pass": true
+        },
+        "image": {
+          "cli": "Blue.",
+          "http": "Blue.",
+          "pass": true
+        }
+      },
+      "thinking": "CLI/server --no-thinking; HTTP enable_thinking=false"
+    },
+    "vulkan": {
+      "completed": true,
+      "cli_commands": {
+        "text": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--prompt",
+          "Hello!",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "image": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png",
+          "--prompt",
+          "What color is this image?",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red"
+        ],
+        "image-jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--no-thinking",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png"
+        ]
+      },
+      "cli_exits": {
+        "text": 0,
+        "image": 0,
+        "jev": 0,
+        "image-jev": 0
+      },
+      "http_status": {
+        "text": 200,
+        "text-stream": 200,
+        "image": 200,
+        "image-stream": 200,
+        "jev": 200,
+        "image-jev": 200
+      },
+      "cli_http_comparisons": {
+        "jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "image-jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "text": {
+          "cli": "Hello! How are you doing today?",
+          "http": "Hello! How are you doing today?",
+          "pass": true
+        },
+        "image": {
+          "cli": "Blue.",
+          "http": "Blue.",
+          "pass": true
+        }
+      },
+      "thinking": "CLI/server --no-thinking; HTTP enable_thinking=false"
+    }
+  },
+  "build": {
+    "profile": "release-fast",
+    "features": [
+      "vulkan",
+      "parity-trace"
+    ],
+    "rustflags": "-C target-cpu=native",
+    "exit_code": 0,
+    "targets": [
+      "sensenova_loop_check",
+      "rust-model-inference",
+      "rust-model-server"
+    ]
+  },
+  "reference": {
+    "checkpoint": "SenseNova/SenseNova-Loop-9B",
+    "revision": "3fa2faf34a8ed0dba63d320e2312e2b900a7e8be",
+    "implementation": "Pinned official eager F32, independent same-GGUF weight decoding and NumPy activation QDQ; host inputs; ROCm",
+    "expected_generated_ids": [
+      760,
+      2099,
+      369
+    ],
+    "prompt_tokens": 84,
+    "decode_steps": 3,
+    "lossy_gates_unchanged": true,
+    "weights_remote_only": true
+  },
+  "limitations": [
+    "Independent Q4_0 image reference acceptance remains failed",
+    "CPU-derived backend diagnostic remains failed and is not an independent oracle",
+    "Other-model real-weight Q4_0 regression, NVIDIA, corrected Preview and controlled release throughput not run",
+    "Historical first-layer diagnostic belongs only to the a4a5ed7 device-only snapshot",
+    "Other precision and interface combinations not rerun on the integrated snapshot"
+  ]
+}

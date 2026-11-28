@@ -1081,6 +1081,7 @@ pub fn run_qwen35_family_multimodal_logits(
         .and_then(|v| v.to_string_val())
         .unwrap_or_default();
     if arch == crate::models::sensenova_loop::ARCH {
+        crate::models::sensenova_loop::validate_components(llm_source, mmproj.as_ref())?;
         crate::app::media::validate_mmproj_capabilities(
             arch,
             mmproj.as_ref(),
@@ -1555,6 +1556,9 @@ pub(super) fn run_multimodal_with_video_ref(
                 }
             })?;
 
+        if arch == crate::models::sensenova_loop::ARCH {
+            crate::models::sensenova_loop::validate_components(llm_source, mmproj_source.as_ref())?;
+        }
         if arch == "qwen3vl" {
             let mut encoder = VisionEncoder3vl::from_source(
                 mmproj_source.as_ref(),

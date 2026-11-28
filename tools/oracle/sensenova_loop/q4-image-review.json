@@ -1,0 +1,926 @@
+{
+  "date": "2026-11-22",
+  "source_head": "2c1ce45009e35487b6bcf50cf83cd59276424692",
+  "host": {
+    "ssh_port": "redacted",
+    "hostname": "replacement-host",
+    "gpu": "RADV NAVI31",
+    "weights_remote_only": true
+  },
+  "runs": {
+    "before": {
+      "phase": "before",
+      "runs": {
+        "cpu": {
+          "command": [
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/baseline-check",
+            "models/SenseNova-Loop-9B-Q4_0.gguf",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/oracle-q4-image/fixtures.json",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/before-cpu",
+            "cpu",
+            "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+          ],
+          "exit_code": 0,
+          "submissions": [],
+          "generated": [
+            760,
+            2099,
+            369
+          ],
+          "official": {
+            "checks": 172,
+            "failed": 67,
+            "same_input_prefix_checks": 172,
+            "same_input_prefix_failed": 67,
+            "generated_exact": true,
+            "pass": false,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 10.245941162109375,
+              "rmse": 0.3362474720530005,
+              "relative_rmse": 0.10139931074475352,
+              "cosine": 0.9948548905914898,
+              "pass": false
+            }
+          }
+        },
+        "vulkan": {
+          "command": [
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/baseline-check",
+            "models/SenseNova-Loop-9B-Q4_0.gguf",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/oracle-q4-image/fixtures.json",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/before-vulkan",
+            "vulkan",
+            "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+          ],
+          "exit_code": 0,
+          "submissions": [
+            15146
+          ],
+          "generated": [
+            10025,
+            13,
+            248046
+          ],
+          "official": {
+            "checks": 172,
+            "failed": 132,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 18,
+            "generated_exact": false,
+            "pass": false,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 9.582992553710938,
+              "rmse": 0.2652835225105124,
+              "relative_rmse": 0.07999931172795928,
+              "cosine": 0.9967981812288023,
+              "pass": false
+            }
+          },
+          "cpu_diagnostic_lossy": {
+            "independent_oracle": false,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 15,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 11.449859619140625,
+              "rmse": 0.327717207083601,
+              "relative_rmse": 0.09891532219747029,
+              "cosine": 0.995109094949363,
+              "pass": false
+            }
+          }
+        },
+        "auto": {
+          "command": [
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/baseline-check",
+            "models/SenseNova-Loop-9B-Q4_0.gguf",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/oracle-q4-image/fixtures.json",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/before-auto",
+            "auto",
+            "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+          ],
+          "exit_code": 0,
+          "submissions": [
+            15146
+          ],
+          "generated": [
+            10025,
+            13,
+            248046
+          ],
+          "official": {
+            "checks": 172,
+            "failed": 132,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 18,
+            "generated_exact": false,
+            "pass": false,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 9.582992553710938,
+              "rmse": 0.2652835225105124,
+              "relative_rmse": 0.07999931172795928,
+              "cosine": 0.9967981812288023,
+              "pass": false
+            }
+          },
+          "cpu_diagnostic_lossy": {
+            "independent_oracle": false,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 15,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 11.449859619140625,
+              "rmse": 0.327717207083601,
+              "relative_rmse": 0.09891532219747029,
+              "cosine": 0.995109094949363,
+              "pass": false
+            }
+          }
+        }
+      }
+    },
+    "after": {
+      "phase": "after",
+      "runs": {
+        "cpu": {
+          "command": [
+            "/workspace/rmi-q4-image-2c1ce450/target/release-fast/examples/sensenova_loop_check",
+            "models/SenseNova-Loop-9B-Q4_0.gguf",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/oracle-q4-image/fixtures.json",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/after-cpu",
+            "cpu",
+            "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+          ],
+          "exit_code": 0,
+          "submissions": [],
+          "generated": [
+            760,
+            2099,
+            369
+          ],
+          "official": {
+            "checks": 172,
+            "failed": 67,
+            "same_input_prefix_checks": 172,
+            "same_input_prefix_failed": 67,
+            "generated_exact": true,
+            "pass": false,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 10.245941162109375,
+              "rmse": 0.3362474720530005,
+              "relative_rmse": 0.10139931074475352,
+              "cosine": 0.9948548905914758,
+              "pass": false
+            }
+          }
+        },
+        "vulkan": {
+          "command": [
+            "/workspace/rmi-q4-image-2c1ce450/target/release-fast/examples/sensenova_loop_check",
+            "models/SenseNova-Loop-9B-Q4_0.gguf",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/oracle-q4-image/fixtures.json",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/after-vulkan",
+            "vulkan",
+            "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+          ],
+          "exit_code": 0,
+          "submissions": [
+            15146
+          ],
+          "generated": [
+            10025,
+            13,
+            248046
+          ],
+          "official": {
+            "checks": 172,
+            "failed": 133,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 19,
+            "generated_exact": false,
+            "pass": false,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 10.077279090881348,
+              "rmse": 0.3132307906544798,
+              "relative_rmse": 0.09445836449706331,
+              "cosine": 0.9955385695420634,
+              "pass": false
+            }
+          },
+          "cpu_diagnostic_lossy": {
+            "independent_oracle": false,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 19,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 16.234756469726562,
+              "rmse": 0.3651388646205474,
+              "relative_rmse": 0.11021035105900386,
+              "cosine": 0.9939322932965149,
+              "pass": false
+            }
+          }
+        },
+        "auto": {
+          "command": [
+            "/workspace/rmi-q4-image-2c1ce450/target/release-fast/examples/sensenova_loop_check",
+            "models/SenseNova-Loop-9B-Q4_0.gguf",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/oracle-q4-image/fixtures.json",
+            "/workspace/rmi-q4-image-2c1ce450/target/q4-image-review/after-auto",
+            "auto",
+            "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+          ],
+          "exit_code": 0,
+          "submissions": [
+            15146
+          ],
+          "generated": [
+            10025,
+            13,
+            248046
+          ],
+          "official": {
+            "checks": 172,
+            "failed": 133,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 19,
+            "generated_exact": false,
+            "pass": false,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 10.077279090881348,
+              "rmse": 0.3132307906544798,
+              "relative_rmse": 0.09445836449706331,
+              "cosine": 0.9955385695420634,
+              "pass": false
+            }
+          },
+          "cpu_diagnostic_lossy": {
+            "independent_oracle": false,
+            "same_input_prefix_checks": 58,
+            "same_input_prefix_failed": 19,
+            "worst": {
+              "case": 0,
+              "step": 0,
+              "name": "loop.visit.55",
+              "same_input_prefix": true,
+              "max_abs": 16.234756469726562,
+              "rmse": 0.3651388646205474,
+              "relative_rmse": 0.11021035105900386,
+              "cosine": 0.9939322932965149,
+              "pass": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "first_layer_diagnostic": {
+    "diag.input_norm": {
+      "shape": [
+        84,
+        4096
+      ],
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "worst": [
+        0,
+        0,
+        -0.6002860069274902,
+        -0.6002860069274902
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 0
+    },
+    "diag.qkv": {
+      "shape": [
+        84,
+        8192
+      ],
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "worst": [
+        0,
+        0,
+        -0.34372738003730774,
+        -0.34372738003730774
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 0
+    },
+    "diag.z": {
+      "shape": [
+        84,
+        4096
+      ],
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "worst": [
+        0,
+        0,
+        2.6507787704467773,
+        2.6507787704467773
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 0
+    },
+    "diag.beta_raw": {
+      "shape": [
+        84,
+        32
+      ],
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "worst": [
+        0,
+        0,
+        -3.234950542449951,
+        -3.234950542449951
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 0
+    },
+    "diag.alpha_raw": {
+      "shape": [
+        84,
+        32
+      ],
+      "max_abs": 0.0,
+      "rms": 0.0,
+      "worst": [
+        0,
+        0,
+        10.453575134277344,
+        10.453575134277344
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 0
+    },
+    "q_conv_predelta-0": {
+      "shape": [
+        84,
+        2048
+      ],
+      "max_abs": 1.7881393432617188e-07,
+      "rms": 4.209007744551776e-09,
+      "worst": [
+        21,
+        1373,
+        0.9576185345649719,
+        0.9576187133789062
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 32495
+    },
+    "k_conv_predelta-0": {
+      "shape": [
+        84,
+        2048
+      ],
+      "max_abs": 1.1920928955078125e-07,
+      "rms": 3.998587382108676e-09,
+      "worst": [
+        0,
+        514,
+        0.551490306854248,
+        0.5514904260635376
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 30410
+    },
+    "final_output-0": {
+      "shape": [
+        84,
+        4096
+      ],
+      "max_abs": 1.9073486328125e-06,
+      "rms": 4.7468898244508955e-09,
+      "worst": [
+        3,
+        926,
+        26.543306350708008,
+        26.543304443359375
+      ],
+      "rows_over_1e-4": [],
+      "unequal": 161783
+    },
+    "loop.visit.0": {
+      "shape": [
+        84,
+        4096
+      ],
+      "max_abs": 0.0009043589234352112,
+      "rms": 2.2686787853456376e-05,
+      "worst": [
+        16,
+        874,
+        -0.10221631079912186,
+        -0.10312066972255707
+      ],
+      "rows_over_1e-4": [
+        16
+      ],
+      "unequal": 11788
+    }
+  },
+  "quantization_boundary_diagnostic": {
+    "diagnostic": "Independent NumPy Q8_0 encoding of captured first-layer GDN outputs; actual GPU codes not read back yet",
+    "code_changes": 2,
+    "scale_changes": 1,
+    "changes": [
+      {
+        "row": 16,
+        "block": 27,
+        "index": 19,
+        "cpu_value": -0.05384184420108795,
+        "gpu_value": -0.053841833025217056,
+        "cpu_scaled": -124.5000228881836,
+        "gpu_scaled": -124.5,
+        "cpu_code": -125,
+        "gpu_code": -124
+      },
+      {
+        "row": 49,
+        "block": 123,
+        "index": 21,
+        "cpu_value": 1.3595083601103397e-06,
+        "gpu_value": 1.3595083601103397e-06,
+        "cpu_scaled": 1.5000014305114746,
+        "gpu_scaled": 1.4999985694885254,
+        "cpu_code": 2,
+        "gpu_code": 1
+      }
+    ]
+  },
+  "interfaces": {
+    "cpu": {
+      "completed": true,
+      "cli_commands": {
+        "text": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--prompt",
+          "Hello!",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "image": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png",
+          "--prompt",
+          "What color is this image?",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red"
+        ],
+        "image-jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "cpu",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png"
+        ]
+      },
+      "cli_exits": {
+        "text": 0,
+        "image": 0,
+        "jev": 0,
+        "image-jev": 0
+      },
+      "http_status": {
+        "text": 200,
+        "text-stream": 200,
+        "image": 200,
+        "image-stream": 200,
+        "jev": 200,
+        "image-jev": 200
+      },
+      "comparisons": {
+        "jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "image-jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "text": {
+          "cli": "Hello! How are you doing today?",
+          "http": "Hello! How are you doing today?",
+          "pass": true
+        },
+        "image": {
+          "cli": "The image is blue.",
+          "http": "The image is blue.",
+          "pass": true
+        }
+      }
+    },
+    "vulkan": {
+      "completed": true,
+      "cli_commands": {
+        "text": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--prompt",
+          "Hello!",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "image": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png",
+          "--prompt",
+          "What color is this image?",
+          "--temperature",
+          "0",
+          "--max-tokens",
+          "8"
+        ],
+        "jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red"
+        ],
+        "image-jev": [
+          "target/release-fast/rust-model-inference",
+          "--model",
+          "models/SenseNova-Loop-9B-Q4_0.gguf",
+          "--compute",
+          "vulkan",
+          "--threads",
+          "16",
+          "--max-context",
+          "512",
+          "--kv-cache",
+          "f32",
+          "--jinja",
+          "--jev-output",
+          "json",
+          "--jev",
+          "--jev-context",
+          "The image is blue.",
+          "--jev-question",
+          "What color?",
+          "--jev-option",
+          "blue",
+          "--jev-option",
+          "red",
+          "--mmproj",
+          "models/mmproj-SenseNova-Loop-9B-F32.gguf",
+          "--image",
+          "target/q4-image-review/blue.png"
+        ]
+      },
+      "cli_exits": {
+        "text": 0,
+        "image": 0,
+        "jev": 0,
+        "image-jev": 0
+      },
+      "http_status": {
+        "text": 200,
+        "text-stream": 200,
+        "image": 200,
+        "image-stream": 200,
+        "jev": 200,
+        "image-jev": 200
+      },
+      "comparisons": {
+        "jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "image-jev": {
+          "max_abs": 0.0,
+          "pass": true
+        },
+        "text": {
+          "cli": "Hello! How are you doing today?",
+          "http": "Hello! How are you doing today?",
+          "pass": true
+        },
+        "image": {
+          "cli": "Blue.",
+          "http": "Blue.",
+          "pass": true
+        }
+      }
+    }
+  },
+  "cpu_unchanged": {
+    "unchanged_cpu_arrays": 5023,
+    "total_arrays": 5023,
+    "mismatches": [],
+    "vision_unchanged": true
+  },
+  "test_summaries": {
+    "cancellation-after": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2001 filtered out; finished in 0.23s"
+    ],
+    "q4-gpu-tests": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2000 filtered out; finished in 0.21s"
+    ],
+    "q4-scalar-gpu-tests": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2001 filtered out; finished in 0.09s"
+    ],
+    "qwen35-tests": [
+      "test result: ok. 111 passed; 0 failed; 24 ignored; 0 measured; 1867 filtered out; finished in 0.09s"
+    ],
+    "sensenova-tests": [
+      "test result: ok. 13 passed; 0 failed; 1 ignored; 0 measured; 1988 filtered out; finished in 0.11s"
+    ]
+  },
+  "cancellation_before": {
+    "command": [
+      "/workspace/rmi-q4-image-2c1ce450/target/release-fast/deps/rust_model_inference-9a8869ff19f19c81",
+      "vulkan_q4_0_preserves_cancellation_with_cpu_fma",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "exit_code": 101
+  },
+  "scope": "Q4_0 AVX2-host accumulation correction; full-model numeric acceptance remains failed. First-layer instrumentation is temporary and absent from production sources. Subsequent main integration and CPU lane correction are a separate snapshot.",
+  "cancellation_regression": {
+    "before": [
+      "test vulkan::ops::tests::vulkan_q4_0_preserves_cancellation_with_cpu_fma ... FAILED",
+      "    vulkan::ops::tests::vulkan_q4_0_preserves_cancellation_with_cpu_fma",
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2001 filtered out; finished in 1.16s",
+      "thread 'vulkan::ops::tests::vulkan_q4_0_preserves_cancellation_with_cpu_fma' (21507) panicked at src/vulkan/ops.rs:11782:21:",
+      "rows=1 row=0 tiled=false: 0.5625 != 0.56762695"
+    ],
+    "after": [
+      "test vulkan::ops::tests::vulkan_q4_0_preserves_cancellation_with_cpu_fma ... [GPU] Vulkan device: AMD Radeon Graphics (RADV NAVI31) (int8 dot product: supported, shader f16: supported)",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2001 filtered out; finished in 0.23s"
+    ],
+    "after_command": [
+      "target/rust/bin/cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--lib",
+      "vulkan_q4_0_preserves_cancellation_with_cpu_fma",
+      "--",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ]
+  },
+  "mac_default_library": {
+    "baseline": {
+      "passed": 1617,
+      "failed": 13,
+      "ignored": 117
+    },
+    "fixed": {
+      "passed": 1617,
+      "failed": 13,
+      "ignored": 117
+    },
+    "introduced_failures": [],
+    "removed_failures": [],
+    "failure_names": [
+      "app::media::tests::stereo_uploads_are_refused",
+      "models::breeze::tests::main_matrices_require_original_dtype_exact_shape_and_length",
+      "models::breeze::tests::main_source_preserves_original_bf16_and_legacy_codec_f32",
+      "models::breeze::tests::main_source_rejects_non_bf16_heads_eoi_and_norms",
+      "models::clm::tests::matches_reference_golden_vectors",
+      "models::clm::tests::rejects_wrong_embedding_width",
+      "models::diffusion::z_image::text::tests::qwen_attention_softmax_matches_the_pinned_ggml_neon_reduction",
+      "models::diffusion::z_image::text::tests::silu_mul_inplace_matches_pinned_ggml_neon_activation",
+      "models::diffusion::z_image::vae::tests::silu_matches_pinned_ggml_neon_vector_path",
+      "models::funasr::encoder::parity_tests::fsmn_rounds_product_before_adding_like_ggml",
+      "models::funasr::encoder::parity_tests::layernorm_accumulates_variance_in_ggml_neon_groups",
+      "models::gemma4::trunk::tests::failed_later_gemma4_chunk_preserves_successful_prefix",
+      "ops::matmul::neon_tests::neon_softmax_matches_ggml_vector_exp_and_f64_sum"
+    ]
+  },
+  "final_production_rerun": {
+    "command": [
+      "target/release-fast/examples/sensenova_loop_check",
+      "models/SenseNova-Loop-9B-Q4_0.gguf",
+      "target/q4-image-review/oracle-q4-image/fixtures.json",
+      "target/q4-image-review/final-vulkan",
+      "vulkan",
+      "models/mmproj-SenseNova-Loop-9B-F32.gguf"
+    ],
+    "runner_exit_code": 0,
+    "generated": [
+      10025,
+      13,
+      248046
+    ],
+    "official": {
+      "checks": 172,
+      "failed": 133,
+      "same_input_prefix_checks": 58,
+      "same_input_prefix_failed": 19,
+      "pass": false
+    },
+    "submissions": [
+      15146
+    ],
+    "binary_sha256": "e7cc59e00b23105419587c0312e62ae75ab98b5d3d0c831f9234819bf4053b7c",
+    "source_verification": {
+      "files_checked": 839,
+      "mismatches": [],
+      "manifest_sha256": "63e4d06de5d9933362dfe5a65aca7a22daf14283d42bf2b1732532dfd59765fb",
+      "temporary_diagnostic_restored": true
+    },
+    "comparator_exit_code": 1,
+    "build": {
+      "exit_code": 0,
+      "profile": "release-fast",
+      "features": [
+        "vulkan",
+        "parity-trace"
+      ],
+      "targets": [
+        "sensenova_loop_check",
+        "rust-model-inference",
+        "rust-model-server"
+      ]
+    }
+  },
+  "final_hardware_regression": {
+    "command": [
+      "target/rust/bin/cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "--profile",
+      "release-fast",
+      "--features",
+      "vulkan,parity-trace",
+      "--lib",
+      "vulkan_q4_0",
+      "--",
+      "--ignored",
+      "--test-threads=1"
+    ],
+    "exit_code": 0,
+    "output": [
+      "test vulkan::ops::tests::vulkan_q4_0_preserves_cancellation_with_cpu_fma ... ok",
+      "test vulkan::ops::tests::vulkan_q4_0_tiled_matches_the_per_row_kernel ... ok",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2000 filtered out; finished in 0.11s"
+    ]
+  },
+  "snapshot_commit": "a4a5ed71ad581f9a5ac123dc9af15e6b694117e6"
+}

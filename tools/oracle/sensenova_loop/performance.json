@@ -1,0 +1,2412 @@
+{
+  "date": "2026-11-19",
+  "base": "44527e5ad",
+  "model": "SenseNova/SenseNova-Loop-9B",
+  "revision": "3fa2faf34a8ed0dba63d320e2312e2b900a7e8be",
+  "host": "numeric-host",
+  "hostname": "numeric-host",
+  "threads": 16,
+  "profile": "release-fast; parity-trace,vulkan",
+  "workload": "English 8-step, Chinese 1-step, Unicode 1-step; F32 compute/KV; image is a separate 3-step fixture",
+  "measurement": "Process wall including model load and trace capture; shared-host observations, not controlled throughput",
+  "runs": [
+    {
+      "name": "oracle-f32-rocm",
+      "storage": "F32",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 71.40099669247866,
+      "peak_rss_kib": 19448616,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f32-cpu",
+      "storage": "F32",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 73.0167306996882,
+      "peak_rss_kib": 31372416,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f32-auto",
+      "storage": "F32",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 179.7426016703248,
+      "peak_rss_kib": 30820660,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f32-vulkan",
+      "storage": "F32",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 170.24917589314282,
+      "peak_rss_kib": 30156988,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-f32-image-rocm",
+      "storage": "F32",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 67.38605701737106,
+      "peak_rss_kib": 19439640,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f32-image-cpu",
+      "storage": "F32",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 164.07625327445567,
+      "peak_rss_kib": 31449336,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f32-image-auto",
+      "storage": "F32",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 157.20372067391872,
+      "peak_rss_kib": 24388284,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f32-image-vulkan",
+      "storage": "F32",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 160.6866783555597,
+      "peak_rss_kib": 25521444,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-f16-rocm",
+      "storage": "F16",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 101.57197074405849,
+      "peak_rss_kib": 29231404,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f16-cpu",
+      "storage": "F16",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 33.11534386873245,
+      "peak_rss_kib": 15964224,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f16-auto",
+      "storage": "F16",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 113.8015004247427,
+      "peak_rss_kib": 16036144,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f16-vulkan",
+      "storage": "F16",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 114.70683395117521,
+      "peak_rss_kib": 16036144,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-f16-image-rocm",
+      "storage": "F16",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 130.88713665865362,
+      "peak_rss_kib": 29243108,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f16-image-cpu",
+      "storage": "F16",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 58.11067863740027,
+      "peak_rss_kib": 16073876,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f16-image-auto",
+      "storage": "F16",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 166.06107381545007,
+      "peak_rss_kib": 16073432,
+      "exit_code": 0
+    },
+    {
+      "name": "native-f16-image-vulkan",
+      "storage": "F16",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 163.9980344697833,
+      "peak_rss_kib": 16072976,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-bf16-rocm",
+      "storage": "BF16",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 73.96082338131964,
+      "peak_rss_kib": 29259096,
+      "exit_code": 0
+    },
+    {
+      "name": "native-bf16-cpu",
+      "storage": "BF16",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 34.64320862106979,
+      "peak_rss_kib": 15964692,
+      "exit_code": 0
+    },
+    {
+      "name": "native-bf16-auto",
+      "storage": "BF16",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 85.21066076867282,
+      "peak_rss_kib": 16036636,
+      "exit_code": 0
+    },
+    {
+      "name": "native-bf16-vulkan",
+      "storage": "BF16",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 85.03059985488653,
+      "peak_rss_kib": 16036012,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-bf16-image-rocm",
+      "storage": "BF16",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 98.34690439514816,
+      "peak_rss_kib": 29266444,
+      "exit_code": 0
+    },
+    {
+      "name": "native-bf16-image-cpu",
+      "storage": "BF16",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 55.38763288035989,
+      "peak_rss_kib": 16071632,
+      "exit_code": 0
+    },
+    {
+      "name": "native-bf16-image-auto",
+      "storage": "BF16",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 116.68283578008413,
+      "peak_rss_kib": 16072092,
+      "exit_code": 0
+    },
+    {
+      "name": "native-bf16-image-vulkan",
+      "storage": "BF16",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 116.93323506973684,
+      "peak_rss_kib": 16074460,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q8_0-rocm",
+      "storage": "Q8_0",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 86.36570133082569,
+      "peak_rss_kib": 28879568,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q8_0-cpu",
+      "storage": "Q8_0",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 28.177613012492657,
+      "peak_rss_kib": 8712712,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q8_0-auto",
+      "storage": "Q8_0",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 73.47321333177388,
+      "peak_rss_kib": 8775808,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q8_0-vulkan",
+      "storage": "Q8_0",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 72.74950608052313,
+      "peak_rss_kib": 8778464,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q8_0-image-rocm",
+      "storage": "Q8_0",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 112.06375827640295,
+      "peak_rss_kib": 29195792,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q8_0-image-cpu",
+      "storage": "Q8_0",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 51.467819303274155,
+      "peak_rss_kib": 8812184,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q8_0-image-auto",
+      "storage": "Q8_0",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 108.40508543327451,
+      "peak_rss_kib": 8815696,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q8_0-image-vulkan",
+      "storage": "Q8_0",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 107.04778332449496,
+      "peak_rss_kib": 8813832,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_0-rocm",
+      "storage": "Q4_0",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 78.87550256215036,
+      "peak_rss_kib": 29062308,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_0-cpu",
+      "storage": "Q4_0",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 28.79774848371744,
+      "peak_rss_kib": 4832668,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_0-auto",
+      "storage": "Q4_0",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 70.05113466829062,
+      "peak_rss_kib": 4908388,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_0-vulkan",
+      "storage": "Q4_0",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 71.54248914122581,
+      "peak_rss_kib": 4906800,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_0-image-rocm",
+      "storage": "Q4_0",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 114.44616742618382,
+      "peak_rss_kib": 29183776,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_0-image-cpu",
+      "storage": "Q4_0",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 52.82317606173456,
+      "peak_rss_kib": 4943868,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_0-image-auto",
+      "storage": "Q4_0",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 112.66773109696805,
+      "peak_rss_kib": 4942804,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_0-image-vulkan",
+      "storage": "Q4_0",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 111.99528935365379,
+      "peak_rss_kib": 4943140,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_1-rocm",
+      "storage": "Q4_1",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 118.156385011971,
+      "peak_rss_kib": 29192248,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_1-cpu",
+      "storage": "Q4_1",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 28.53388747945428,
+      "peak_rss_kib": 5316672,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_1-auto",
+      "storage": "Q4_1",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 72.38107059523463,
+      "peak_rss_kib": 5389344,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_1-vulkan",
+      "storage": "Q4_1",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 73.38219364359975,
+      "peak_rss_kib": 5392404,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_1-image-rocm",
+      "storage": "Q4_1",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 126.90691940486431,
+      "peak_rss_kib": 29198540,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_1-image-cpu",
+      "storage": "Q4_1",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 53.973887000232935,
+      "peak_rss_kib": 5424760,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_1-image-auto",
+      "storage": "Q4_1",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 114.7864127214998,
+      "peak_rss_kib": 5426524,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_1-image-vulkan",
+      "storage": "Q4_1",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 117.48138649947941,
+      "peak_rss_kib": 5425780,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_k-rocm",
+      "storage": "Q4_K",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 95.15840498171747,
+      "peak_rss_kib": 29183992,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-cpu",
+      "storage": "Q4_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 28.797276532277465,
+      "peak_rss_kib": 4831756,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-auto",
+      "storage": "Q4_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 77.1748407613486,
+      "peak_rss_kib": 4903220,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-vulkan",
+      "storage": "Q4_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 80.90962931327522,
+      "peak_rss_kib": 4904108,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q4_k-image-rocm",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 120.96862637624145,
+      "peak_rss_kib": 29194068,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-image-cpu",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 67.12887856177986,
+      "peak_rss_kib": 4937404,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-image-auto",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 126.24410424008965,
+      "peak_rss_kib": 4941876,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q4_k-image-vulkan",
+      "storage": "Q4_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 131.93886646814644,
+      "peak_rss_kib": 4940716,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q5_k-rocm",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 97.3644456434995,
+      "peak_rss_kib": 29113940,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-cpu",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 28.888692814856768,
+      "peak_rss_kib": 5805580,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-auto",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 80.99568095616996,
+      "peak_rss_kib": 5870424,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-vulkan",
+      "storage": "Q5_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 80.7360638063401,
+      "peak_rss_kib": 5872212,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q5_k-image-rocm",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 127.8733226954937,
+      "peak_rss_kib": 29192880,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-image-cpu",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 62.63962696120143,
+      "peak_rss_kib": 5905360,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-image-auto",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 132.94813294894993,
+      "peak_rss_kib": 5906820,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q5_k-image-vulkan",
+      "storage": "Q5_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 133.3146090004593,
+      "peak_rss_kib": 5909680,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q6_k-rocm",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 89.8868016730994,
+      "peak_rss_kib": 29077188,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-cpu",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 27.952725369483232,
+      "peak_rss_kib": 6827532,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-auto",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 91.20176467299461,
+      "peak_rss_kib": 6891824,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-vulkan",
+      "storage": "Q6_K",
+      "fixture": "text",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 89.9532757923007,
+      "peak_rss_kib": 6893596,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-q6_k-image-rocm",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "official PyTorch",
+      "backend": "ROCm",
+      "elapsed_s": 121.2433126848191,
+      "peak_rss_kib": 29159064,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-image-cpu",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "cpu",
+      "elapsed_s": 65.16754861548543,
+      "peak_rss_kib": 6940656,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-image-auto",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "auto -> Vulkan",
+      "elapsed_s": 140.80403277650476,
+      "peak_rss_kib": 6935964,
+      "exit_code": 0
+    },
+    {
+      "name": "native-q6_k-image-vulkan",
+      "storage": "Q6_K",
+      "fixture": "image",
+      "implementation": "native",
+      "backend": "vulkan",
+      "elapsed_s": 142.3572161961347,
+      "peak_rss_kib": 6937012,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-f32-host-inputs-rocm",
+      "storage": "F32",
+      "fixture": "text",
+      "implementation": "official PyTorch (recorded placement)",
+      "backend": "ROCm decoder; CPU input/head",
+      "elapsed_s": 28.442285178229213,
+      "peak_rss_kib": 29193116,
+      "exit_code": 0
+    },
+    {
+      "name": "oracle-f32-image-host-inputs-rocm",
+      "storage": "F32",
+      "fixture": "image",
+      "implementation": "official PyTorch (recorded placement)",
+      "backend": "ROCm decoder; CPU input/head",
+      "elapsed_s": 63.77903903275728,
+      "peak_rss_kib": 29201432,
+      "exit_code": 0
+    }
+  ],
+  "conversion_runs": [
+    {
+      "format": "F32",
+      "bytes": 35838774432,
+      "sha256": "f90fd3400b3e04a4ffba3b0577dcb0df39bbb9709450663080e6df8ed98ed6cd",
+      "elapsed_s": 5.308538675308228e-07,
+      "process_peak_rss_kib": 75776
+    },
+    {
+      "format": "F16",
+      "bytes": 17945873600,
+      "sha256": "c48ffd5deed96ef5a63b41efa6f320b72d7a115c904875cc3a729cfc19731762",
+      "elapsed_s": 73.32852080464363,
+      "process_peak_rss_kib": 189168
+    },
+    {
+      "format": "BF16",
+      "bytes": 17945873600,
+      "sha256": "c02e743afe65f9d09ccb46506333c38b1ea8fd9b78802aff786ce6df0299129a",
+      "elapsed_s": 149.93598683923483,
+      "process_peak_rss_kib": 259948
+    },
+    {
+      "format": "Q8_0",
+      "bytes": 9558576320,
+      "sha256": "f358fc13a395fbb30553ce1f5a7e29aa2dda442744d949f36f282e8ba98f422f",
+      "elapsed_s": 102.17856897599995,
+      "process_peak_rss_kib": 259948
+    },
+    {
+      "format": "Q4_0",
+      "bytes": 5085351104,
+      "sha256": "c86aa59de1fdd0ad8c20eb2bb24ad9fe0a43701608e57296199ba0b25d72c721",
+      "elapsed_s": 123.36023117788136,
+      "process_peak_rss_kib": 259948
+    },
+    {
+      "format": "Q4_1",
+      "bytes": 5644504256,
+      "sha256": "603f629d3ca15a874e8226537f4ce40b3031e9421d09495f82549c1059b987b3",
+      "elapsed_s": 118.03183583542705,
+      "process_peak_rss_kib": 259948
+    },
+    {
+      "format": "Q4_K",
+      "bytes": 5085351104,
+      "sha256": "ece489d129d4150349599b08f98cbbfd31346a028f7ea0063188458d35823ba1",
+      "elapsed_s": 3009.2848480716348,
+      "process_peak_rss_kib": 203208,
+      "parallel_workers": 6,
+      "independent_block_self_check": "byte identical to serial encoder"
+    },
+    {
+      "format": "Q5_K",
+      "bytes": 6203657408,
+      "sha256": "e5e7c374a271dcd89c7096d0652d74ff45f27a49a9a81cac697f5627f1c31613",
+      "elapsed_s": 1612.0754905119538,
+      "process_peak_rss_kib": 203208,
+      "parallel_workers": 6,
+      "independent_block_self_check": "byte identical to serial encoder"
+    },
+    {
+      "format": "Q6_K",
+      "bytes": 7391857856,
+      "sha256": "144f8be287eec370c2afb314d201787af7166d0eb2c0a29528d4e05ba675997d",
+      "elapsed_s": 724.5919512119144,
+      "process_peak_rss_kib": 203208,
+      "parallel_workers": 6,
+      "independent_block_self_check": "byte identical to serial encoder"
+    }
+  ],
+  "backend_runs": {
+    "native-q6_k-summary": [
+      {
+        "format": "Q6_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q6_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 19639676480,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 6889816784,
+          "peak_allocation_bytes": 7724172000
+        }
+      },
+      {
+        "format": "Q6_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 19639676480,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 6889816784,
+          "peak_allocation_bytes": 7724172000
+        }
+      }
+    ],
+    "native-bf16-summary": [
+      {
+        "format": "BF16",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "BF16",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          10309
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 10309,
+          "static_uploads": 1570,
+          "static_upload_bytes": 47702076992,
+          "host_write_bytes": 931876,
+          "host_read_bytes": 7221903712,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 16243950288,
+          "peak_allocation_bytes": 18278187744
+        }
+      },
+      {
+        "format": "BF16",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          10309
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 10309,
+          "static_uploads": 1570,
+          "static_upload_bytes": 47702076992,
+          "host_write_bytes": 931876,
+          "host_read_bytes": 7221903712,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 16243950288,
+          "peak_allocation_bytes": 18278187744
+        }
+      }
+    ],
+    "native-q4_k-image-summary": [
+      {
+        "format": "Q4_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4502278720,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 4956703952,
+          "peak_allocation_bytes": 5528833248
+        }
+      },
+      {
+        "format": "Q4_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4502278720,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 4956703952,
+          "peak_allocation_bytes": 5528833248
+        }
+      }
+    ],
+    "native-q4_k-summary": [
+      {
+        "format": "Q4_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 13506833984,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 4845535952,
+          "peak_allocation_bytes": 5417665248
+        }
+      },
+      {
+        "format": "Q4_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 13506833984,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 4845535952,
+          "peak_allocation_bytes": 5417665248
+        }
+      }
+    ],
+    "native-f32-image-summary": [
+      {
+        "format": "F32",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "F32",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          13855
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 13855,
+          "static_uploads": 524,
+          "static_upload_bytes": 31759356480,
+          "host_write_bytes": 1431076,
+          "host_read_bytes": 11090780632,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 32213781712,
+          "peak_allocation_bytes": 36282256608
+        }
+      },
+      {
+        "format": "F32",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          13855
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 13855,
+          "static_uploads": 524,
+          "static_upload_bytes": 31759356480,
+          "host_write_bytes": 1431076,
+          "host_read_bytes": 11090780632,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 32213781712,
+          "peak_allocation_bytes": 36282256608
+        }
+      }
+    ],
+    "native-q4_0-summary": [
+      {
+        "format": "Q4_0",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_0",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 13506833984,
+          "host_write_bytes": 932388,
+          "host_read_bytes": 7221903856,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 4845535952,
+          "peak_allocation_bytes": 5417665248
+        }
+      },
+      {
+        "format": "Q4_0",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 13506833984,
+          "host_write_bytes": 932388,
+          "host_read_bytes": 7221903856,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 4845535952,
+          "peak_allocation_bytes": 5417665248
+        }
+      }
+    ],
+    "native-q4_1-summary": [
+      {
+        "format": "Q4_1",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_1",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 14993583680,
+          "host_write_bytes": 932388,
+          "host_read_bytes": 7221903856,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 5341119184,
+          "peak_allocation_bytes": 5976818400
+        }
+      },
+      {
+        "format": "Q4_1",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 14993583680,
+          "host_write_bytes": 932388,
+          "host_read_bytes": 7221903856,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 5341119184,
+          "peak_allocation_bytes": 5976818400
+        }
+      }
+    ],
+    "native-q8_0-summary": [
+      {
+        "format": "Q8_0",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q8_0",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 25400831552,
+          "host_write_bytes": 932388,
+          "host_read_bytes": 7221903856,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 8810201808,
+          "peak_allocation_bytes": 9890890464
+        }
+      },
+      {
+        "format": "Q8_0",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 25400831552,
+          "host_write_bytes": 932388,
+          "host_read_bytes": 7221903856,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 8810201808,
+          "peak_allocation_bytes": 9890890464
+        }
+      }
+    ],
+    "native-f16-summary": [
+      {
+        "format": "F16",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "F16",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          10309
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 10309,
+          "static_uploads": 1570,
+          "static_upload_bytes": 47702076992,
+          "host_write_bytes": 931876,
+          "host_read_bytes": 7221903712,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 16243950288,
+          "peak_allocation_bytes": 18278187744
+        }
+      },
+      {
+        "format": "F16",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          10309
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 10309,
+          "static_uploads": 1570,
+          "static_upload_bytes": 47702076992,
+          "host_write_bytes": 931876,
+          "host_read_bytes": 7221903712,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 16243950288,
+          "peak_allocation_bytes": 18278187744
+        }
+      }
+    ],
+    "native-f16-image-summary": [
+      {
+        "format": "F16",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "F16",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          13941
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 13941,
+          "static_uploads": 524,
+          "static_upload_bytes": 15900693056,
+          "host_write_bytes": 1431076,
+          "host_read_bytes": 11090780632,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 16355118288,
+          "peak_allocation_bytes": 18389355744
+        }
+      },
+      {
+        "format": "F16",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          13941
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 13941,
+          "static_uploads": 524,
+          "static_upload_bytes": 15900693056,
+          "host_write_bytes": 1431076,
+          "host_read_bytes": 11090780632,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 16355118288,
+          "peak_allocation_bytes": 18389355744
+        }
+      }
+    ],
+    "native-q4_1-image-summary": [
+      {
+        "format": "Q4_1",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_1",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4997861952,
+          "host_write_bytes": 1431588,
+          "host_read_bytes": 11090780776,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 5452287184,
+          "peak_allocation_bytes": 6087986400
+        }
+      },
+      {
+        "format": "Q4_1",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4997861952,
+          "host_write_bytes": 1431588,
+          "host_read_bytes": 11090780776,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 5452287184,
+          "peak_allocation_bytes": 6087986400
+        }
+      }
+    ],
+    "native-bf16-image-summary": [
+      {
+        "format": "BF16",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "BF16",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          13941
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 13941,
+          "static_uploads": 524,
+          "static_upload_bytes": 15900693056,
+          "host_write_bytes": 1431076,
+          "host_read_bytes": 11090780632,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 16355118288,
+          "peak_allocation_bytes": 18389355744
+        }
+      },
+      {
+        "format": "BF16",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          13941
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 13941,
+          "static_uploads": 524,
+          "static_upload_bytes": 15900693056,
+          "host_write_bytes": 1431076,
+          "host_read_bytes": 11090780632,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 16355118288,
+          "peak_allocation_bytes": 18389355744
+        }
+      }
+    ],
+    "native-q4_0-image-summary": [
+      {
+        "format": "Q4_0",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q4_0",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4502278720,
+          "host_write_bytes": 1431588,
+          "host_read_bytes": 11090780776,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 4956703952,
+          "peak_allocation_bytes": 5528833248
+        }
+      },
+      {
+        "format": "Q4_0",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 4502278720,
+          "host_write_bytes": 1431588,
+          "host_read_bytes": 11090780776,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 4956703952,
+          "peak_allocation_bytes": 5528833248
+        }
+      }
+    ],
+    "native-f32-summary": [
+      {
+        "format": "F32",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "F32",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          10253
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 10253,
+          "static_uploads": 1570,
+          "static_upload_bytes": 95278067264,
+          "host_write_bytes": 931876,
+          "host_read_bytes": 7221903712,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 32102613712,
+          "peak_allocation_bytes": 36171088608
+        }
+      },
+      {
+        "format": "F32",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          10253
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 10253,
+          "static_uploads": 1570,
+          "static_upload_bytes": 95278067264,
+          "host_write_bytes": 931876,
+          "host_read_bytes": 7221903712,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 32102613712,
+          "peak_allocation_bytes": 36171088608
+        }
+      }
+    ],
+    "native-q5_k-summary": [
+      {
+        "format": "Q5_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q5_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 16480333376,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 5836702416,
+          "peak_allocation_bytes": 6535971552
+        }
+      },
+      {
+        "format": "Q5_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          11094
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 11094,
+          "static_uploads": 1570,
+          "static_upload_bytes": 16480333376,
+          "host_write_bytes": 997412,
+          "host_read_bytes": 7221920352,
+          "transfer_submissions": 5436,
+          "live_allocation_bytes": 5836702416,
+          "peak_allocation_bytes": 6535971552
+        }
+      }
+    ],
+    "native-q5_k-image-summary": [
+      {
+        "format": "Q5_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q5_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 5493445184,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 5947870416,
+          "peak_allocation_bytes": 6647139552
+        }
+      },
+      {
+        "format": "Q5_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 5493445184,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 5947870416,
+          "peak_allocation_bytes": 6647139552
+        }
+      }
+    ],
+    "native-q6_k-image-summary": [
+      {
+        "format": "Q6_K",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q6_K",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 6546559552,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 7000984784,
+          "peak_allocation_bytes": 7835340000
+        }
+      },
+      {
+        "format": "Q6_K",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 6546559552,
+          "host_write_bytes": 1496612,
+          "host_read_bytes": 11090797272,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 7000984784,
+          "peak_allocation_bytes": 7835340000
+        }
+      }
+    ],
+    "native-q8_0-image-summary": [
+      {
+        "format": "Q8_0",
+        "backend": "cpu",
+        "exit_code": 0,
+        "submissions": [],
+        "backend_verified": true,
+        "counters": {}
+      },
+      {
+        "format": "Q8_0",
+        "backend": "auto",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 8466944576,
+          "host_write_bytes": 1431588,
+          "host_read_bytes": 11090780776,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 8921369808,
+          "peak_allocation_bytes": 10002058464
+        }
+      },
+      {
+        "format": "Q8_0",
+        "backend": "vulkan",
+        "exit_code": 0,
+        "submissions": [
+          15146
+        ],
+        "backend_verified": true,
+        "counters": {
+          "submissions": 15146,
+          "static_uploads": 524,
+          "static_upload_bytes": 8466944576,
+          "host_write_bytes": 1431588,
+          "host_read_bytes": 11090780776,
+          "transfer_submissions": 6458,
+          "live_allocation_bytes": 8921369808,
+          "peak_allocation_bytes": 10002058464
+        }
+      }
+    ]
+  },
+  "reference_execution": {
+    "oracle-f32-image-nativevision-recurrent-diagnostic": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0
+    },
+    "oracle-f32-image-nativevision-fixed-diagnostic": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0
+    },
+    "oracle-q4_0-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          2
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_0-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
+    },
+    "oracle-q5_k-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          13
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q5_k-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
+    },
+    "oracle-q4_0-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          2
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_0-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-q8_0-cpu-diagnostic": {
+      "decoder_device": "cpu",
+      "host_inputs": false,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": "cpu",
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          8
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q8_0-cpu-diagnostic/precision-reference.json"
+      }
+    },
+    "oracle-f16-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-q6_k-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          14
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q6_k-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
+    },
+    "oracle-q8_0-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          8
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q8_0-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-q4_k-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          12
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_k-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-bf16-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-f16-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "cuda_peak_allocated_bytes": 27956813312
+    },
+    "oracle-q6_k-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          14
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q6_k-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-bf16-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "cuda_peak_allocated_bytes": 27956813312
+    },
+    "oracle-q4_k-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          12
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_k-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
+    },
+    "oracle-q8_0-image-recurrent-diagnostic": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          8
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q8_0-image-recurrent-diagnostic/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27935810048
+    },
+    "oracle-q8_0-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          8
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q8_0-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 27961073152
+    },
+    "oracle-f32-image-host-inputs-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "cuda_peak_allocated_bytes": 27956813312
+    },
+    "oracle-f32-host-inputs-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-q4_1-image-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          3
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_1-image-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28047659520
+    },
+    "oracle-q5_k-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          13
+        ],
+        "activation_types": [
+          "q8_k"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q5_k-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28017263616
+    },
+    "oracle-q8_0-recurrent-diagnostic": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          8
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q8_0-recurrent-diagnostic/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28004247552
+    },
+    "oracle-q4_1-rocm": {
+      "decoder_device": "cuda",
+      "host_inputs": true,
+      "embedding_devices": [
+        "cpu"
+      ],
+      "vision_devices": [
+        "cpu"
+      ],
+      "output_head_devices": [
+        "cpu"
+      ],
+      "device_map": {
+        "model.visual": "cpu",
+        "model.language_model.embed_tokens": "cpu",
+        "model.language_model.layers": "cuda",
+        "model.language_model.norm": "cuda",
+        "model.language_model.rotary_emb": "cuda",
+        "lm_head": "cpu"
+      },
+      "dtype": "float32",
+      "attention": "eager",
+      "threads": 16,
+      "seed": 0,
+      "activation_quantization": {
+        "linear_projections": 201,
+        "weight_types": [
+          3
+        ],
+        "activation_types": [
+          "q8_0"
+        ],
+        "module_mapping_evidence": "target/release-validation/oracle-q4_1-rocm/precision-reference.json"
+      },
+      "cuda_peak_allocated_bytes": 28126851072
+    }
+  },
+  "limits": [
+    "Vision is computed on CPU in the native pipeline.",
+    "Native runner builds a session for each fixture; the official reference loads once.",
+    "The three native F32 text cases cumulatively upload 95,278,067,264 bytes and read back 7,221,903,712 bytes of traced state.",
+    "Other tasks share this host. Timings are observations, not controlled comparisons; earlier runs also overlapped this task's exports.",
+    "Low-precision references use independently decoded GGUF projections and official F32 arithmetic; new --host-inputs keeps vision, embedding lookup and output projection on CPU to fit available VRAM. Earlier F32 references predate CPU-head placement.",
+    "No release-build tok/s, long-context quality or broad task-quality benchmark is claimed.",
+    "Q4_K/Q5_K/Q6_K native CPU, Auto and Vulkan numeric runs execute concurrently; these process observations cannot rank backend latency."
+  ]
+}

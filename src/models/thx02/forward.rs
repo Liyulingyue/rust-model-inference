@@ -139,6 +139,7 @@ impl Session {
                     pool,
                     false,
                     false,
+                    None,
                     #[cfg(feature = "parity-trace")]
                     false,
                 )?

@@ -44,6 +44,7 @@ pub unsafe fn matmul_q4_0_vs_q8_0_avx2(
     let row_stride = blocks_per_row * 18;
     let m0f128 = _mm_set1_epi8(0x0F);
     let ones = _mm256_set1_epi16(1);
+    let byte_ones = _mm256_set1_epi8(1);
 
     let w_ptr = weight.as_ptr();
     let iq_ptr = input_q8.as_ptr();
@@ -66,12 +67,7 @@ pub unsafe fn matmul_q4_0_vs_q8_0_avx2(
             // The Q8 input block and its per-lane partial sums (exact i32;
             // lane k sums input elements 4k..4k+3) are shared by all 4 rows.
             let qy = _mm256_loadu_si256(iq_ptr.add(b * 32) as *const __m256i);
-            let y_lo16 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(qy));
-            let y_hi16 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(qy, 1));
-            let y_lane = _mm256_add_epi32(
-                _mm256_madd_epi16(ones, y_lo16),
-                _mm256_madd_epi16(ones, y_hi16),
-            );
+            let y_lane = _mm256_madd_epi16(ones, _mm256_maddubs_epi16(byte_ones, qy));
             let y8 = _mm256_slli_epi32(y_lane, 3);
 
             let bd = *sc_ptr.add(b);
@@ -133,12 +129,7 @@ pub unsafe fn matmul_q4_0_vs_q8_0_avx2(
         let mut acc = _mm256_setzero_ps();
         for b in 0..blocks_per_row {
             let qy = _mm256_loadu_si256(iq_ptr.add(b * 32) as *const __m256i);
-            let y_lo16 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(qy));
-            let y_hi16 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(qy, 1));
-            let y_lane = _mm256_add_epi32(
-                _mm256_madd_epi16(ones, y_lo16),
-                _mm256_madd_epi16(ones, y_hi16),
-            );
+            let y_lane = _mm256_madd_epi16(ones, _mm256_maddubs_epi16(byte_ones, qy));
             let off = row_off + b * 18;
             let d_b = f16_to_f32(std::ptr::read_unaligned(w_ptr.add(off) as *const u16));
             let dot = q4_0_row_block_dot(
@@ -257,6 +248,32 @@ mod tests {
             max_scalar,
             rel
         );
+    }
+
+    #[test]
+    fn decoded_zero_weights_stay_zero_with_asymmetric_q8_input() {
+        if !crate::ops::has_avx2_fma() {
+            return;
+        }
+        let input: Vec<u8> = [
+            89i8, -29, 67, 100, -20, -117, -61, 120, 3, -3, -24, 108, 73, 85, -50, 120, -5, -36,
+            22, 101, 105, -72, 2, -92, -55, -92, 66, -103, 31, 77, -63, 125,
+        ]
+        .into_iter()
+        .map(|v| v as u8)
+        .collect();
+        let weight = build_block(38.75, 8, 8).repeat(7);
+        // Five selected rows cover the four-row tile and its trailing-row path.
+        let mut output = [f32::NAN; 5];
+        unsafe {
+            matmul_q4_0_vs_q8_0_avx2(&weight, &input, &[1.2412109375], &mut output, 32, 1, 6);
+        }
+        for (row, actual) in output.into_iter().enumerate() {
+            assert!(
+                actual.abs() < 1e-6,
+                "row={row}: zero weights produced {actual}"
+            );
+        }
     }
 
     #[test]

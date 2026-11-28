@@ -6883,6 +6883,7 @@ impl<'a> Qwen3Ops<'a> {
         head_dim: usize,
         eps: f32,
         rows: usize,
+        add_norm_epsilon: bool,
     ) -> Result<(), VulkanError> {
         let expected_key = k_heads
             .checked_mul(head_dim)
@@ -6964,7 +6965,7 @@ impl<'a> Qwen3Ops<'a> {
             commands.dispatch(x, y, 1);
             commands.barrier();
         }
-        push[14] = 1;
+        push[14] = if add_norm_epsilon { 2 } else { 1 };
         let (x, y) = super::dispatch_grid(k_heads.max(v_heads), &self.context.limits)?;
         unsafe {
             commands.bind(
@@ -8233,6 +8234,15 @@ fn matmul_rows_push(
     }
     if format == GpuWeightFormat::Q8_0 {
         push[14] = q8_dot_mode();
+    }
+    if format == GpuWeightFormat::Q4_0 && crate::ops::has_avx2_fma() {
+        // Mode 8 couples the GPU reduction to the host CPU kernel contract, not
+        // to a device capability: the AVX2/FMA kernel combines the weight and
+        // activation scales before the FMA (preserving small results when large
+        // blocks cancel), while the scalar and NEON kernels keep the separate
+        // multiply/add contract (mode 1). If a non-x86 CPU kernel ever adopts
+        // the fused-scale contract, this host sniff must change with it.
+        push[14] = 8;
     }
     push[2] = as_u32(n_in, "matmul width")?;
     push[3] = as_u32(blocks, "matmul blocks")?;
@@ -10389,61 +10399,75 @@ fn check_qwen35_conv_exact(context: &VulkanContext) -> Result<(), String> {
             }
         }
         crate::ops::silu_approx_inplace(values);
-        for offset in [0, DIM] {
-            let head = &mut values[offset..offset + DIM];
-            crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
-        }
     }
     let layout = ArenaLayout::build_rows(CONV, CONV * TAPS, 1, 1, DIM, 1, 1, ROWS, ROWS, 0)
         .map_err(|error| error.to_string())?;
     let buffer = unsafe { context.upload_static(bytemuck::cast_slice(&weight)) }
         .map_err(|error| error.to_string())?;
     let run = (|| -> Result<(), VulkanError> {
-        let mut ops = Qwen3Ops::new(context, layout, 2)?;
-        let binding = ops.bind_buffers(&[buffer])?;
-        ops.write_f32(layout.normed, &qkv)?;
-        ops.write_f32(layout.up, &initial)?;
-        let commands = TokenCommands::begin(context)?;
-        ops.record_qwen35_recurrent_conv(
-            &commands,
-            binding,
-            layout.normed,
-            layout.q,
-            layout.k,
-            layout.v,
-            layout.up,
-            0,
-            1,
-            CONV,
-            DIM,
-            DIM,
-            TAPS,
-            1,
-            1,
-            DIM,
-            1e-6,
-            ROWS,
-        )?;
-        commands.submit_and_wait()?;
-        for (region, offset) in [(layout.q, 0), (layout.k, DIM), (layout.v, DIM * 2)] {
-            let actual = ops.read_f32(region, ROWS * DIM)?;
-            for row in 0..ROWS {
-                for column in 0..DIM {
-                    let gpu = actual[row * DIM + column];
-                    let cpu = expected[row * CONV + offset + column];
-                    if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
-                        return Err(VulkanError::UnsupportedShape(format!("conv mismatch offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
+        for add_norm_epsilon in [false, true] {
+            let mut expected = expected.clone();
+            for row in expected.chunks_exact_mut(CONV) {
+                for offset in [0, DIM] {
+                    let head = &mut row[offset..offset + DIM];
+                    if add_norm_epsilon {
+                        let sum = head.iter().map(|&v| f64::from(v * v)).sum::<f64>();
+                        let scale = ((sum as f32) + 1e-6).sqrt().recip();
+                        for value in head {
+                            *value *= scale;
+                        }
+                    } else {
+                        crate::models::qwen35::trunk::util::l2_norm(head, 1e-6);
                     }
                 }
             }
+            let mut ops = Qwen3Ops::new(context, layout, 2)?;
+            let binding = ops.bind_buffers(&[buffer])?;
+            ops.write_f32(layout.normed, &qkv)?;
+            ops.write_f32(layout.up, &initial)?;
+            let commands = TokenCommands::begin(context)?;
+            ops.record_qwen35_recurrent_conv(
+                &commands,
+                binding,
+                layout.normed,
+                layout.q,
+                layout.k,
+                layout.v,
+                layout.up,
+                0,
+                1,
+                CONV,
+                DIM,
+                DIM,
+                TAPS,
+                1,
+                1,
+                DIM,
+                1e-6,
+                ROWS,
+                add_norm_epsilon,
+            )?;
+            commands.submit_and_wait()?;
+            for (region, offset) in [(layout.q, 0), (layout.k, DIM), (layout.v, DIM * 2)] {
+                let actual = ops.read_f32(region, ROWS * DIM)?;
+                for row in 0..ROWS {
+                    for column in 0..DIM {
+                        let gpu = actual[row * DIM + column];
+                        let cpu = expected[row * CONV + offset + column];
+                        if !gpu.is_finite() || (gpu - cpu).abs() > 2e-6 {
+                            return Err(VulkanError::UnsupportedShape(format!("conv mismatch add_norm_epsilon={add_norm_epsilon} offset={offset} row={row} column={column}: gpu={:#010x} cpu={:#010x}", gpu.to_bits(), cpu.to_bits())));
+                        }
+                    }
+                }
+            }
+            let actual_state = ops.read_f32(layout.up, initial.len())?;
+            assert_eq!(actual_state, state);
         }
-        let actual_state = ops.read_f32(layout.up, initial.len())?;
-        assert_eq!(actual_state, state);
         Ok(())
     })();
     let cleanup = unsafe { context.destroy_completed_buffers(&[buffer]) };
     run.and(cleanup).map_err(|error| error.to_string())?;
-    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true");
+    println!("operator=qwen35_conv max_abs_bound=2e-6 tiny_q=true rows={ROWS} taps={TAPS} nonzero_prefix=true both_norm_formulas=true");
     Ok(())
 }
 
@@ -10649,7 +10673,7 @@ fn check_quantize_q8_k_exact(context: &VulkanContext) -> Result<(), String> {
             expected[index].d.to_bits(),
         ));
     }
-    println!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
+    eprintln!("operator=quantize_q8_k bytes_exact=true max_scale_ulps={max_scale_ulps}");
     Ok(())
 }
 
@@ -10736,7 +10760,7 @@ fn check_quantize_tie_even(context: &VulkanContext) -> Result<(), String> {
             expected_scales[index].to_bits()
         ));
     }
-    println!(
+    eprintln!(
         "operator=quantize_tie_even exact=true scales_exact=true blocks={}",
         COUNT / 32
     );
@@ -10870,7 +10894,7 @@ fn check_attention_value_reduction(context: &VulkanContext) -> Result<(), String
             expected.to_bits()
         ));
     }
-    println!("operator=attention_value_reduction exact=true");
+    eprintln!("operator=attention_value_reduction exact=true");
     Ok(())
 }
 
@@ -11151,7 +11175,7 @@ fn check_close(
             first_bad = Some((index, gpu, cpu, absolute, relative));
         }
     }
-    println!(
+    eprintln!(
         "operator={name} max_abs={max_absolute:.3e} max_rel={max_relative:.3e} first_bad={:?}",
         first_bad.map(|value| value.0)
     );
@@ -12006,9 +12030,8 @@ mod tests {
     /// row) pair and multiplies the four-bit values one at a time; the
     /// tiled one reads it once per (output column, k-block) and uses the
     /// packed dot product. The arithmetic is the same, so the results have
-    /// to be the same: the integer sum of the 32 products is exact, and
-    /// the float part keeps the per-row kernel's order, (sum * weight
-    /// scale) * activation scale, added per block.
+    /// to be the same: the integer sum is exact, and both kernels use the
+    /// selected per-block scale and accumulation order, including FMA.
     #[test]
     #[ignore = "requires a Vulkan device"]
     fn vulkan_q4_0_tiled_matches_the_per_row_kernel() {
@@ -12084,6 +12107,85 @@ mod tests {
             }
             unsafe { ops.context.destroy_completed_buffers(&[buffer]) }.unwrap();
         }
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan device with integer dot products and an AVX2/FMA host"]
+    fn vulkan_q4_0_preserves_cancellation_with_combined_scales() {
+        use super::*;
+
+        assert!(crate::ops::has_avx2_fma());
+        let context = VulkanContext::new().unwrap();
+        let weight: Vec<_> = (0..2)
+            .flat_map(|_| {
+                crate::ops::f32_to_f16(38.75)
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain([0x99; 16])
+            })
+            .collect();
+        let buffer = unsafe { context.upload_static(&weight) }.unwrap();
+        // Exact decoded-weight/Q8-input result: 179642.578125 - 179642.010498046875.
+        const EXPECTED: f32 = 0.567626953125;
+        for rows in [1, 3, 33, 84] {
+            let layout = BatchedLinearLayout::new(rows, 64, 1).unwrap();
+            let mut ops = Qwen3Ops::new_with_size(&context, layout.size, 2).unwrap();
+            assert!(ops.q8_tiled, "fixture must exercise the tiled Q4 kernel");
+            let bindings = ops
+                .bind_weight_buffers(&[buffer], &[GpuWeightFormat::Q4_0])
+                .unwrap();
+            let input: Vec<_> = (0..rows)
+                .flat_map(|row| {
+                    let factor = [1.0, 0.5, 2.0][row % 3];
+                    let mut values = [0.0; 64];
+                    values[..20].fill(127.0 * 1.796875 * factor);
+                    values[20] = 40.0 * 1.796875 * factor;
+                    values[32..61].fill(-127.0 * 1.2412109375 * factor);
+                    values[61] = -52.0 * 1.2412109375 * factor;
+                    values
+                })
+                .collect();
+            for tiled in [false, true] {
+                ops.write_f32(layout.input, &input).unwrap();
+                ops.write_f32(layout.output, &vec![f32::NAN; rows]).unwrap();
+                let commands = TokenCommands::begin(&context).unwrap();
+                let record = if tiled {
+                    Qwen3Ops::record_weight_matmul_tiled_rows
+                } else {
+                    Qwen3Ops::record_weight_matmul_ordinary_rows
+                };
+                record(
+                    &ops,
+                    &commands,
+                    bindings,
+                    layout.input,
+                    layout.q8,
+                    layout.scales,
+                    layout.sums,
+                    layout.q8,
+                    layout.scales,
+                    &[(layout.output, 1, 4)],
+                    64,
+                    rows,
+                    64,
+                )
+                .unwrap();
+                commands.submit_and_wait().unwrap();
+                for (row, &actual) in ops
+                    .read_f32(layout.output, rows)
+                    .unwrap()
+                    .iter()
+                    .enumerate()
+                {
+                    let expected = EXPECTED * [1.0, 0.5, 2.0][row % 3];
+                    assert!(
+                        (actual - expected).abs() < 1e-4,
+                        "rows={rows} row={row} tiled={tiled}: {actual} != {expected}"
+                    );
+                }
+            }
+        }
+        unsafe { context.destroy_completed_buffers(&[buffer]) }.unwrap();
     }
 
     #[test]
